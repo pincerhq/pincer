@@ -1,0 +1,4 @@
+services:
+  pincer:
+    build: .
+    env_file: .env

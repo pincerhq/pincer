@@ -1,0 +1,40 @@
+[project]
+name = "pincer"
+version = "0.1.0"
+description = "Your personal AI agent. Text it on WhatsApp. It does stuff."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+keywords = ["ai", "agent", "whatsapp", "telegram", "discord", "llm", "assistant"]
+
+dependencies = [
+    "anthropic>=0.40.0",
+    "openai>=1.50.0",
+    "httpx>=0.27.0",
+    "aiogram>=3.13.0",
+    "aiosqlite>=0.20.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "typer>=0.12.0",
+    "rich>=13.9.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
+    "jinja2>=3.1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "ruff>=0.4.0"]
+whatsapp = ["neonize>=0.3.14"]
+discord = ["discord.py>=2.4.0"]
+browser = ["playwright>=1.48.0"]
+all = ["pincer[whatsapp,discord,browser]"]
+
+[project.scripts]
+pincer = "pincer.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pincer"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
