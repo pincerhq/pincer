@@ -63,18 +63,30 @@ except (ImportError, NameError):
 '''
 
 
-async def python_exec(code: str, timeout: int = 30) -> str:
+def _get_output_dir() -> Path:
+    """Return the persistent workspace output directory for generated files."""
+    output_dir = Path.home() / ".pincer" / "workspace" / "exec_output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+async def python_exec(code: str = "", timeout: int = 30) -> str:
     """
     Execute Python code in an isolated subprocess and return the output.
 
     code: The Python code to execute
     timeout: Execution timeout in seconds (default 30, max 120)
     """
+    if not code or not code.strip():
+        return "Error: No code provided."
+
     timeout = min(max(timeout, 1), MAX_TIMEOUT)
 
+    output_dir = _get_output_dir()
+    existing_files = set(output_dir.iterdir())
+
     with tempfile.TemporaryDirectory(prefix="pincer_exec_") as tmpdir:
-        plot_dir = os.path.join(tmpdir, "plots")
-        os.makedirs(plot_dir, exist_ok=True)
+        plot_dir = str(output_dir)
 
         full_code = _MATPLOTLIB_WRAPPER + code + _MATPLOTLIB_FOOTER
         script_path = os.path.join(tmpdir, "script.py")
@@ -83,7 +95,6 @@ async def python_exec(code: str, timeout: int = 30) -> str:
 
         env = os.environ.copy()
         env["_PINCER_PLOT_DIR"] = plot_dir
-        # Minimal isolation: restrict some dangerous env vars
         env.pop("AWS_ACCESS_KEY_ID", None)
         env.pop("AWS_SECRET_ACCESS_KEY", None)
 
@@ -92,7 +103,7 @@ async def python_exec(code: str, timeout: int = 30) -> str:
                 sys.executable, script_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=tmpdir,
+                cwd=str(output_dir),
                 env=env,
             )
 
@@ -117,16 +128,11 @@ async def python_exec(code: str, timeout: int = 30) -> str:
         if stderr.strip():
             output_parts.append(f"[stderr]\n{stderr.strip()}")
 
-        # Check for generated plot files
-        plot_files = list(Path(plot_dir).glob("*.png"))
-        if plot_files:
-            # Copy plots to workspace for persistence
-            workspace = Path.home() / ".pincer" / "workspace"
-            workspace.mkdir(parents=True, exist_ok=True)
-            for pf in plot_files:
-                dest = workspace / pf.name
-                dest.write_bytes(pf.read_bytes())
-                output_parts.append(f"[Plot saved to: {dest}]")
+        # Report all newly created files in the output directory
+        new_files = sorted(set(output_dir.iterdir()) - existing_files)
+        for nf in new_files:
+            if nf.is_file():
+                output_parts.append(f"[File saved: {nf}]")
 
         if proc.returncode != 0 and not stderr.strip():
             output_parts.append(f"[Process exited with code {proc.returncode}]")

@@ -51,7 +51,7 @@ class Settings(BaseSettings):
         default="claude-sonnet-4-5-20250929",
         description="Default model identifier",
     )
-    max_tokens: int = Field(default=4096, ge=1, le=128000)
+    max_tokens: int = Field(default=8192, ge=1, le=128000)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
 
     # ── Channels ─────────────────────────────────────────
@@ -69,7 +69,10 @@ class Settings(BaseSettings):
             "You are concise, friendly, and proactive. "
             "You have access to tools and use them when they help answer the user's question. "
             "When uncertain, say so honestly. "
-            "Always respond in the same language the user writes in."
+            "Always respond in the same language the user writes in.\n\n"
+            "IMPORTANT: When you have image or GIF URLs, you MUST use the send_image tool "
+            "to display them visually in the chat. NEVER paste image/GIF URLs as plain text. "
+            "Call send_image for each image URL so the user sees the actual picture inline."
         ),
         description="System prompt (the agent's personality / soul)",
     )

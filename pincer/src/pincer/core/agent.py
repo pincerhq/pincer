@@ -40,6 +40,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MAX_CONSECUTIVE_ERRORS = 3
+
 
 class StreamEventType(StrEnum):
     TEXT = "text"
@@ -149,6 +151,7 @@ class Agent:
         tool_calls_count = 0
         final_text = ""
         last_response: LLMResponse | None = None
+        consecutive_errors = 0
 
         # ── ReAct Loop ───────────────────────────────────
         for _iteration in range(self._settings.max_tool_iterations):
@@ -201,6 +204,7 @@ class Agent:
                 await self._sessions.add_message(session, assistant_msg)
 
                 # Execute each tool
+                iteration_had_error = False
                 for tool_call in response.tool_calls:
                     tool_calls_count += 1
                     result = await self._execute_tool(tool_call, user_id, channel)
@@ -211,6 +215,22 @@ class Agent:
                         tool_call_id=result.tool_call_id,
                     )
                     await self._sessions.add_message(session, result_msg)
+
+                    if result.is_error:
+                        iteration_had_error = True
+
+                if iteration_had_error:
+                    consecutive_errors += 1
+                    if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                        logger.warning("Circuit breaker: %d consecutive tool errors", consecutive_errors)
+                        final_text = (
+                            response.content
+                            if response.content
+                            else "I'm having repeated tool failures. Let me respond with what I have."
+                        )
+                        break
+                else:
+                    consecutive_errors = 0
 
                 # Continue loop — LLM will see tool results
                 continue
@@ -279,6 +299,8 @@ class Agent:
 
         system_prompt = await self._build_system_prompt(user_id, text)
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
+        consecutive_errors = 0
+        circuit_broken = False
 
         # Tool-call iterations (non-streaming)
         for _iteration in range(self._settings.max_tool_iterations):
@@ -309,6 +331,7 @@ class Agent:
             )
             await self._sessions.add_message(session, assistant_msg)
 
+            iteration_had_error = False
             for tool_call in response.tool_calls:
                 yield StreamChunk(
                     StreamEventType.TOOL_START, f"Using {tool_call.name}..."
@@ -321,11 +344,34 @@ class Agent:
                 )
                 await self._sessions.add_message(session, result_msg)
                 yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name)
+                if result.is_error:
+                    iteration_had_error = True
+
+            if iteration_had_error:
+                consecutive_errors += 1
+                if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                    logger.warning("Circuit breaker: %d consecutive tool errors", consecutive_errors)
+                    circuit_broken = True
+                    break
+            else:
+                consecutive_errors = 0
         else:
             yield StreamChunk(
                 StreamEventType.DONE,
                 response.content if response.content else "Max iterations reached.",
             )
+            return
+
+        if circuit_broken:
+            fallback = (
+                response.content
+                if response.content
+                else "I'm having repeated tool failures. Let me respond with what I have."
+            )
+            if fallback:
+                final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=fallback)
+                await self._sessions.add_message(session, final_msg)
+            yield StreamChunk(StreamEventType.DONE, fallback)
             return
 
         # Stream the final response

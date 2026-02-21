@@ -137,34 +137,142 @@ class TelegramChannel(BaseChannel):
                     parse_mode=None,
                 )
 
+    async def send_file(
+        self, user_id: str, file_path: str, caption: str = ""
+    ) -> None:
+        """Send a file as a Telegram document."""
+        assert self._bot is not None
+        from aiogram.types import FSInputFile
+
+        try:
+            doc = FSInputFile(file_path)
+            await self._bot.send_document(
+                chat_id=int(user_id),
+                document=doc,
+                caption=caption or None,
+            )
+        except Exception:
+            logger.exception("Failed to send file %s", file_path)
+            await self.send(user_id, f"Failed to send file: {file_path}")
+
+    async def _download_image(self, url: str) -> bytes:
+        """Download image bytes with a browser-like User-Agent."""
+        import aiohttp
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        }
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status} fetching {url}")
+                ct = resp.content_type or ""
+                if not ct.startswith("image/") and "octet-stream" not in ct:
+                    raise RuntimeError(f"Not an image (content-type: {ct})")
+                return await resp.read()
+
+    async def send_photo(
+        self, user_id: str, url: str, caption: str = ""
+    ) -> None:
+        """Send a photo from a URL inline in the chat.
+
+        Tries three strategies in order:
+        1. Pass the raw URL string to Telegram (works for publicly accessible images)
+        2. Download with browser headers and send as BufferedInputFile
+        Raises on failure so the caller can report the error to the LLM.
+        """
+        assert self._bot is not None
+        from aiogram.types import BufferedInputFile
+
+        chat_id = int(user_id)
+
+        # Fast path: let Telegram fetch the URL directly
+        try:
+            await self._bot.send_photo(chat_id=chat_id, photo=url, caption=caption or None)
+            return
+        except Exception:
+            logger.debug("Telegram couldn't fetch URL directly, downloading ourselves: %s", url)
+
+        # Slow path: download ourselves with browser headers
+        data = await self._download_image(url)
+        ext = url.rsplit(".", 1)[-1].lower() if "." in url else "jpg"
+        if ext not in ("jpg", "jpeg", "png", "webp", "gif"):
+            ext = "jpg"
+        photo = BufferedInputFile(data, filename=f"image.{ext}")
+        await self._bot.send_photo(chat_id=chat_id, photo=photo, caption=caption or None)
+
+    async def send_animation(
+        self, user_id: str, url: str, caption: str = ""
+    ) -> None:
+        """Send a GIF/animation from a URL inline in the chat.
+
+        Same strategy as send_photo: try raw URL, then download + BufferedInputFile.
+        Raises on failure so the caller can report the error to the LLM.
+        """
+        assert self._bot is not None
+        from aiogram.types import BufferedInputFile
+
+        chat_id = int(user_id)
+
+        try:
+            await self._bot.send_animation(chat_id=chat_id, animation=url, caption=caption or None)
+            return
+        except Exception:
+            logger.debug("Telegram couldn't fetch animation URL directly, downloading: %s", url)
+
+        data = await self._download_image(url)
+        animation = BufferedInputFile(data, filename="animation.gif")
+        await self._bot.send_animation(chat_id=chat_id, animation=animation, caption=caption or None)
+
     async def send_streaming(
         self, user_id: str, chunks: AsyncIterator[str]
     ) -> None:
-        """Send a streaming response, editing the message as chunks arrive."""
+        """Send a streaming response, editing the message as chunks arrive.
+
+        When the response exceeds Telegram's 4096-char limit, the original
+        message keeps the first portion and additional messages are sent for
+        the remainder.
+        """
         assert self._bot is not None
         chat_id = int(user_id)
 
         msg = await self._bot.send_message(chat_id=chat_id, text="...", parse_mode=None)
         buffer = ""
         last_edit = time.monotonic()
-        edit_interval = 1.5  # Telegram rate-limits edits to ~30/min per chat
+        edit_interval = 1.5
+        safe_limit = MAX_TELEGRAM_MESSAGE_LENGTH - 200
 
         async for chunk in chunks:
             buffer += chunk
             now = time.monotonic()
             if now - last_edit >= edit_interval and len(buffer) > 3:
+                display = buffer[:safe_limit] if len(buffer) > safe_limit else buffer
                 with contextlib.suppress(Exception):
-                    await msg.edit_text(buffer, parse_mode=None)
+                    await msg.edit_text(display, parse_mode=None)
                 last_edit = now
 
-        # Final edit with full text + markdown
-        if buffer:
-            for text_chunk in split_message(buffer):
-                try:
-                    await msg.edit_text(text_chunk)
-                except Exception:
-                    with contextlib.suppress(Exception):
-                        await msg.edit_text(text_chunk, parse_mode=None)
+        if not buffer:
+            return
+
+        parts = split_message(buffer)
+        # First part: edit the original streaming message
+        try:
+            await msg.edit_text(parts[0])
+        except Exception:
+            with contextlib.suppress(Exception):
+                await msg.edit_text(parts[0], parse_mode=None)
+
+        # Remaining parts: send as new messages so nothing is lost
+        for part in parts[1:]:
+            try:
+                await self._bot.send_message(chat_id=chat_id, text=part)
+            except Exception:
+                with contextlib.suppress(Exception):
+                    await self._bot.send_message(chat_id=chat_id, text=part, parse_mode=None)
 
     def _is_allowed(self, user_id: int) -> bool:
         if not self._allowed_users:

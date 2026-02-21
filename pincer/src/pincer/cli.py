@@ -18,7 +18,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 if TYPE_CHECKING:
-    from pincer.channels.base import IncomingMessage
+    from pincer.channels.base import BaseChannel, IncomingMessage
 
 app = typer.Typer(
     name="pincer",
@@ -218,7 +218,9 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         description=(
             "Execute Python code in an isolated subprocess and return the output. "
             "Use for calculations, data analysis, generating charts, or running scripts. "
-            "Common libraries available: pandas, numpy, matplotlib."
+            "Common libraries available: pandas, numpy, matplotlib, fpdf2. "
+            "Generated files are saved to ~/.pincer/workspace/exec_output/ — "
+            "use send_file to deliver them to the user."
         ),
         handler=python_exec,
         parameters={
@@ -235,6 +237,115 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
                 },
             },
             "required": ["code"],
+        },
+    )
+
+    # send_file tool — channels dict is populated after channel startup below
+    channel_map: dict[str, BaseChannel] = {}
+
+    async def send_file(path: str, caption: str = "", context: dict | None = None) -> str:
+        """Send a file to the user via their messaging channel.
+
+        path: Absolute path to the file to send
+        caption: Optional caption/description for the file
+        """
+        from pathlib import Path as _P
+
+        file_path = _P(path)
+        if not file_path.is_file():
+            return f"Error: File not found: {path}"
+
+        ctx = context or {}
+        user_id = ctx.get("user_id", "")
+        ch_name = ctx.get("channel", "")
+        channel = channel_map.get(ch_name)
+        if not channel or not user_id:
+            return f"Error: No active channel to send file (channel={ch_name})"
+
+        await channel.send_file(user_id, str(file_path), caption)
+        return f"File sent: {file_path.name}"
+
+    tools.register(
+        name="send_file",
+        description=(
+            "Send a file to the user as a document attachment (PDF, image, CSV, etc.). "
+            "Use after python_exec generates a file, or to deliver any workspace file."
+        ),
+        handler=send_file,
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path to the file to send",
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "Optional caption for the file",
+                    "default": "",
+                },
+            },
+            "required": ["path"],
+        },
+    )
+
+    async def send_image(url: str, caption: str = "", context: dict | None = None) -> str:
+        """Send an image or GIF to the user from a URL.
+
+        url: Direct URL to the image or GIF
+        caption: Optional caption/description
+        """
+        ctx = context or {}
+        user_id = ctx.get("user_id", "")
+        ch_name = ctx.get("channel", "")
+        channel = channel_map.get(ch_name)
+        if not channel or not user_id:
+            return f"Error: No active channel to send image (channel={ch_name})"
+
+        lower = url.lower()
+        is_gif = (
+            lower.endswith(".gif")
+            or "giphy.com" in lower
+            or "/gif" in lower
+            or "tenor.com" in lower
+        )
+        try:
+            if is_gif:
+                await channel.send_animation(user_id, url, caption)
+            else:
+                await channel.send_photo(user_id, url, caption)
+            return "Image sent to user."
+        except Exception as e:
+            logging.getLogger(__name__).warning("send_image failed for %s: %s", url, e)
+            return (
+                f"Error: Failed to send image from {url} ({e}). "
+                "The URL may be broken or hotlink-protected. Try a different image URL."
+            )
+
+    tools.register(
+        name="send_image",
+        description=(
+            "Display an image or GIF inline in the chat. "
+            "You MUST call this tool for EVERY image/GIF URL you want the user to see. "
+            "Do NOT paste image URLs as plain text — they won't render. "
+            "Instead, call send_image(url=...) so the picture appears visually. "
+            "Works with direct image URLs (.jpg, .png, .gif, .webp) and GIF services (Giphy, Tenor)."
+        ),
+        handler=send_image,
+        parameters={
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Direct URL to the image or GIF",
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "Optional caption for the image",
+                    "default": "",
+                },
+            },
+            "required": ["url"],
         },
     )
 
@@ -368,7 +479,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         return response.text + cost_str
 
     # Start channels
-    channels = []
+    channels: list[BaseChannel] = []
     if settings.telegram_bot_token.get_secret_value():
         from pincer.channels.telegram import TelegramChannel
 
@@ -376,6 +487,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         tg.set_stream_agent(agent)
         await tg.start(on_message)
         channels.append(tg)
+        channel_map[tg.name] = tg
         console.print("[green]Telegram connected (streaming enabled)[/green]")
 
     if not channels:

@@ -34,7 +34,8 @@ tavily = ["tavily-python>=0.5.0"]
 browser = ["playwright>=1.40.0"]
 memory = ["sqlite-vec>=0.1.0"]
 pdf = ["pymupdf>=1.24.0"]
-all = ["pincer-agent[search,tavily,browser,memory,pdf]"]
+pdfgen = ["fpdf2>=2.7.0"]
+all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
