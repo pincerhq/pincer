@@ -7,6 +7,7 @@ Fallback: DuckDuckGo via duckduckgo_search library (no API key)
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from pincer.config import get_settings
@@ -60,15 +61,18 @@ async def _search_tavily(query: str, num_results: int, api_key: str) -> str:
         return await _search_duckduckgo(query, num_results)
 
 
+def _sync_ddg_search(query: str, num_results: int) -> list[dict[str, str]]:
+    """Run DuckDuckGo search synchronously (called via asyncio.to_thread)."""
+    from duckduckgo_search import DDGS
+
+    with DDGS() as ddgs:
+        return list(ddgs.text(query, max_results=num_results))
+
+
 async def _search_duckduckgo(query: str, num_results: int) -> str:
     """Search using DuckDuckGo (no API key needed)."""
     try:
-        from duckduckgo_search import AsyncDDGS
-
-        async with AsyncDDGS() as ddgs:
-            results = []
-            async for r in ddgs.atext(query, max_results=num_results):
-                results.append(r)
+        results = await asyncio.to_thread(_sync_ddg_search, query, num_results)
 
         if not results:
             return "No results found."
