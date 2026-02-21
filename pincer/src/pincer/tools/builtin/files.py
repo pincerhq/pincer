@@ -18,11 +18,13 @@ def _sandbox_path(path_str: str) -> Path:
     if path_str.startswith("~"):
         path_str = path_str.replace("~", str(workspace), 1)
 
-    target = Path(path_str).resolve()
+    raw = Path(path_str)
 
-    # If path is relative, resolve against workspace
-    if not target.is_absolute():
+    # Resolve relative paths against workspace (not CWD)
+    if not raw.is_absolute():
         target = (workspace / path_str).resolve()
+    else:
+        target = raw.resolve()
 
     # Security: must be within workspace
     if not str(target).startswith(str(workspace.resolve())):

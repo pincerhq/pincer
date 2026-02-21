@@ -57,6 +57,9 @@ class Summarizer:
 
         # Take the older half of non-system messages for summarization
         split_point = len(non_system) // 2
+        # Never split in the middle of a tool_use/tool_result pair
+        while split_point < len(non_system) and non_system[split_point].role == MessageRole.TOOL_RESULT:
+            split_point += 1
         to_summarize = non_system[:split_point]
         to_keep = non_system[split_point:]
 

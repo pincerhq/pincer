@@ -293,6 +293,49 @@ class TelegramChannel(BaseChannel):
             for chunk in split_message(response):
                 await message.answer(chunk)
 
+        @router.message(F.document)
+        async def handle_document(message: Message) -> None:
+            if not message.from_user or not self._is_allowed(message.from_user.id):
+                return
+            assert self._bot is not None and self._handler is not None
+
+            doc = message.document
+            if not doc:
+                return
+
+            await self._bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+
+            file = await self._bot.get_file(doc.file_id)
+            assert file.file_path is not None
+            data = io.BytesIO()
+            await self._bot.download_file(file.file_path, data)
+            raw_bytes = data.getvalue()
+
+            filename = doc.file_name or "unknown"
+            mime = doc.mime_type or "application/octet-stream"
+
+            image_mimes = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+            if mime in image_mimes:
+                incoming = IncomingMessage(
+                    user_id=str(message.from_user.id),
+                    channel="telegram",
+                    text=message.caption or "What's in this image?",
+                    images=[(raw_bytes, mime)],
+                    raw=message,
+                )
+            else:
+                incoming = IncomingMessage(
+                    user_id=str(message.from_user.id),
+                    channel="telegram",
+                    text=message.caption or "",
+                    files=[(raw_bytes, mime, filename)],
+                    raw=message,
+                )
+
+            response = await self._handler(incoming)
+            for chunk in split_message(response):
+                await message.answer(chunk)
+
         @router.message(F.text)
         async def handle_text(message: Message) -> None:
             if not message.from_user or not self._is_allowed(message.from_user.id):

@@ -284,6 +284,79 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
             if not text or text.startswith("["):
                 return text or "[Could not transcribe voice note]"
 
+        # Handle file attachments — decode text files, save all to workspace
+        if incoming.has_files:
+            text_extensions = {
+                ".txt", ".py", ".js", ".ts", ".json", ".csv", ".md",
+                ".log", ".xml", ".html", ".css", ".yaml", ".yml",
+                ".toml", ".ini", ".cfg", ".sh", ".bash", ".sql",
+                ".rs", ".go", ".java", ".c", ".cpp", ".h", ".rb",
+                ".php", ".swift", ".kt", ".env", ".gitignore",
+            }
+            uploads_dir = settings.data_dir / "workspace" / "uploads"
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+
+            file_parts: list[str] = []
+            for raw_bytes, mime, filename in incoming.files:
+                save_path = uploads_dir / filename
+                save_path.write_bytes(raw_bytes)
+                abs_path = str(save_path)
+
+                ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+                is_text = (
+                    mime.startswith("text/")
+                    or mime in ("application/json", "application/xml", "application/x-yaml")
+                    or ext in text_extensions
+                )
+                if is_text:
+                    try:
+                        content = raw_bytes.decode("utf-8", errors="replace")
+                        max_chars = 30_000
+                        if len(content) > max_chars:
+                            content = content[:max_chars] + f"\n... [truncated, {len(raw_bytes)} bytes total]"
+                        file_parts.append(f"[File: {filename}]\n```\n{content}\n```")
+                    except Exception:
+                        file_parts.append(
+                            f"[File: {filename}] saved to {abs_path} "
+                            f"(binary, {len(raw_bytes)} bytes, {mime})"
+                        )
+                elif ext == ".pdf":
+                    try:
+                        import pymupdf
+
+                        doc = pymupdf.open(stream=raw_bytes, filetype="pdf")
+                        pages = [page.get_text() for page in doc]
+                        doc.close()
+                        content = "\n\n".join(pages)
+                        max_chars = 30_000
+                        if len(content) > max_chars:
+                            content = content[:max_chars] + f"\n... [truncated, {len(pages)} pages total]"
+                        file_parts.append(
+                            f"[File: {filename} — {len(pages)} pages, saved to {abs_path}]\n"
+                            f"```\n{content}\n```"
+                        )
+                    except ImportError:
+                        file_parts.append(
+                            f"[File: {filename}] saved to {abs_path} "
+                            f"({len(raw_bytes)} bytes, {mime}). "
+                            f"PDF text extraction unavailable (install pymupdf)."
+                        )
+                    except Exception as exc:
+                        file_parts.append(
+                            f"[File: {filename}] saved to {abs_path} "
+                            f"({len(raw_bytes)} bytes, {mime}). "
+                            f"PDF extraction failed: {exc}"
+                        )
+                else:
+                    file_parts.append(
+                        f"[File: {filename}] saved to {abs_path} "
+                        f"({len(raw_bytes)} bytes, {mime}). "
+                        f"Use shell_exec to process it with the absolute path above."
+                    )
+
+            file_context = "\n\n".join(file_parts)
+            text = f"{file_context}\n\n{text}" if text else file_context
+
         response = await agent.handle_message(
             user_id=incoming.user_id,
             channel=incoming.channel,

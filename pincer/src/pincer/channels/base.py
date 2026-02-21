@@ -16,6 +16,7 @@ class IncomingMessage:
     channel: str
     text: str = ""
     images: list[tuple[bytes, str]] = field(default_factory=list)  # (raw_bytes, media_type)
+    files: list[tuple[bytes, str, str]] = field(default_factory=list)  # (raw_bytes, mime_type, filename)
     voice_data: bytes | None = None
     voice_mime: str = ""
     reply_to_message_id: str | None = None
@@ -24,6 +25,10 @@ class IncomingMessage:
     @property
     def has_voice(self) -> bool:
         return self.voice_data is not None
+
+    @property
+    def has_files(self) -> bool:
+        return len(self.files) > 0
 
 
 # Type for the callback the channel calls when a message arrives

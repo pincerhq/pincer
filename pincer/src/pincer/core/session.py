@@ -121,7 +121,11 @@ class SessionManager:
         if len(session.messages) > self._max_messages:
             system_msgs = [m for m in session.messages if m.role == MessageRole.SYSTEM]
             other_msgs = [m for m in session.messages if m.role != MessageRole.SYSTEM]
-            trimmed = other_msgs[-(self._max_messages - len(system_msgs)) :]
+            start = len(other_msgs) - (self._max_messages - len(system_msgs))
+            # Never start on a tool_result — it would be orphaned without its tool_use
+            while start < len(other_msgs) and other_msgs[start].role == MessageRole.TOOL_RESULT:
+                start += 1
+            trimmed = other_msgs[start:]
             session.messages = system_msgs + trimmed
             logger.debug(
                 "Session %s trimmed to %d messages",

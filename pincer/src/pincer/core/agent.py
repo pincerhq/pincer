@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from pincer.exceptions import BudgetExceededError, ToolNotFoundError
+from pincer.exceptions import BudgetExceededError, LLMError, ToolNotFoundError
 from pincer.llm.base import (
     BaseLLMProvider,
     ImageContent,
@@ -64,6 +64,23 @@ class AgentResponse:
     cost_usd: float = 0.0
     tool_calls_made: int = 0
     model: str = ""
+
+
+def _strip_orphaned_tool_results(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """Remove tool_result messages that have no preceding tool_use."""
+    clean: list[LLMMessage] = []
+    for i, msg in enumerate(messages):
+        if msg.role == MessageRole.TOOL_RESULT:
+            has_matching_use = any(
+                prev.role == MessageRole.ASSISTANT
+                and any(tc.id == msg.tool_call_id for tc in prev.tool_calls)
+                for prev in clean
+            )
+            if not has_matching_use:
+                logger.warning("Stripping orphaned tool_result %s", msg.tool_call_id)
+                continue
+        clean.append(msg)
+    return clean
 
 
 class Agent:
@@ -149,6 +166,13 @@ class Agent:
                     "I'll be back tomorrow, or you can increase the limit."
                 )
                 break
+            except LLMError as e:
+                if "tool_use_id" in str(e) and "tool_result" in str(e):
+                    logger.warning("Orphaned tool_result detected, sanitizing session")
+                    session.messages = _strip_orphaned_tool_results(session.messages)
+                    await self._sessions._persist(session)  # noqa: SLF001
+                    continue
+                raise
 
             # Track cost
             try:
@@ -267,6 +291,13 @@ class Agent:
             except BudgetExceededError:
                 yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
                 return
+            except LLMError as e:
+                if "tool_use_id" in str(e) and "tool_result" in str(e):
+                    logger.warning("Orphaned tool_result detected, sanitizing session")
+                    session.messages = _strip_orphaned_tool_results(session.messages)
+                    await self._sessions._persist(session)  # noqa: SLF001
+                    continue
+                raise
 
             if not response.has_tool_calls:
                 break
