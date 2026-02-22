@@ -840,3 +840,63 @@ async def _pair_whatsapp() -> None:
         await wa.stop()
     except Exception as e:
         console.print(f"[red]Pairing failed: {e}[/red]")
+
+
+@app.command(name="auth-google")
+def auth_google() -> None:
+    """Run Google Calendar OAuth consent flow (one-time setup)."""
+    from pathlib import Path
+
+    from pincer.config import get_settings
+    from pincer.tools.builtin.calendar_tool import SCOPES
+
+    settings = get_settings()
+    credentials_path = Path(settings.data_dir) / "google_credentials.json"
+    token_path = Path(settings.data_dir) / "google_token.json"
+
+    console.print("[bold]Google Calendar — OAuth Setup[/bold]\n")
+
+    if not credentials_path.exists():
+        console.print(f"[red]Missing: {credentials_path}[/red]")
+        console.print(
+            "\nDownload the OAuth client JSON from:\n"
+            "  Google Cloud Console -> APIs & Services -> Credentials\n"
+            "  -> OAuth 2.0 Client IDs -> Download JSON\n"
+            f"\nSave it as: {credentials_path}"
+        )
+        raise typer.Exit(1)
+
+    if token_path.exists():
+        console.print(f"[yellow]Token already exists: {token_path}[/yellow]")
+        if not typer.confirm("Overwrite existing token?"):
+            raise typer.Exit(0)
+
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow
+    except ImportError:
+        console.print(
+            "[red]google-auth-oauthlib is not installed.[/red]\n"
+            "Run:  uv pip install google-auth-oauthlib"
+        )
+        raise typer.Exit(1)
+
+    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
+
+    console.print("Opening browser for Google consent...\n")
+    try:
+        creds = flow.run_local_server(port=0)
+    except Exception:
+        console.print(
+            "[yellow]Browser not available. Trying manual flow...[/yellow]\n"
+            "Open the URL below in any browser, then paste the code back here.\n"
+        )
+        creds = flow.run_local_server(port=8080, open_browser=False)
+
+    with open(token_path, "w") as f:
+        f.write(creds.to_json())
+
+    console.print(f"\n[green]Google Calendar authorized![/green]")
+    console.print(f"  Token saved to: {token_path}")
+    console.print(f"  Refresh token:  {'Yes' if creds.refresh_token else 'No'}")
+    console.print(f"  Expires:        {creds.expiry}")
+    console.print("\nYou can now use calendar tools in Pincer.")

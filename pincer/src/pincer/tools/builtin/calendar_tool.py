@@ -21,38 +21,57 @@ SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 
 def _get_credentials():  # type: ignore[no-untyped-def]
-    """Get or refresh Google OAuth2 credentials."""
+    """Get or refresh Google OAuth2 credentials.
+
+    Never attempts the interactive browser consent flow — that belongs
+    in the ``pincer auth-google`` CLI command.  This function only loads
+    an existing token and refreshes it if possible.
+    """
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
 
     settings = get_settings()
-    creds = None
     token_path = settings.data_dir / "google_token.json"
     credentials_path = settings.data_dir / "google_credentials.json"
 
-    if token_path.exists():
-        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    if not credentials_path.exists():
+        raise FileNotFoundError(
+            "SETUP REQUIRED: Google OAuth client credentials not found at "
+            f"{credentials_path}. Download the JSON from Google Cloud Console "
+            "-> APIs & Services -> Credentials -> OAuth 2.0 Client IDs, "
+            "then save it as data/google_credentials.json."
+        )
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+    if not token_path.exists():
+        raise FileNotFoundError(
+            "SETUP REQUIRED: No Google token found. Run the one-time OAuth "
+            "consent flow first:  pincer auth-google"
+        )
+
+    creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+
+    if creds and creds.valid:
+        return creds
+
+    if creds and creds.expired and creds.refresh_token:
+        try:
             creds.refresh(Request())
-        else:
-            if not credentials_path.exists():
-                raise FileNotFoundError(
-                    f"Google OAuth credentials not found at {credentials_path}. "
-                    "Download from Google Cloud Console -> APIs & Services -> "
-                    "Credentials -> OAuth 2.0 Client IDs -> Download JSON."
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(
-                str(credentials_path), SCOPES,
-            )
-            creds = flow.run_local_server(port=0)
+            with open(token_path, "w") as f:
+                f.write(creds.to_json())
+            logger.info("Google OAuth token refreshed successfully")
+            return creds
+        except Exception as e:
+            raise FileNotFoundError(
+                f"Google token refresh failed: {e}. "
+                "Delete data/google_token.json and re-authorize with: "
+                "pincer auth-google"
+            ) from e
 
-        with open(token_path, "w") as f:
-            f.write(creds.to_json())
-
-    return creds
+    raise FileNotFoundError(
+        "Google token exists but is invalid (no refresh token). "
+        "Delete data/google_token.json and re-authorize with: "
+        "pincer auth-google"
+    )
 
 
 def _get_service():  # type: ignore[no-untyped-def]
