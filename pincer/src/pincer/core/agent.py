@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_ERRORS = 3
+_MAX_SANITIZE_ATTEMPTS = 2
 
 
 class StreamEventType(StrEnum):
@@ -68,10 +69,38 @@ class AgentResponse:
     model: str = ""
 
 
-def _strip_orphaned_tool_results(messages: list[LLMMessage]) -> list[LLMMessage]:
-    """Remove tool_result messages that have no preceding tool_use."""
+def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
+    """Remove orphaned tool_use and tool_result messages.
+
+    Handles both directions:
+    - tool_result without a preceding assistant tool_use
+    - assistant tool_use without following tool_result(s)
+    """
+    all_result_ids: set[str] = set()
+    for msg in messages:
+        if msg.role == MessageRole.TOOL_RESULT and msg.tool_call_id:
+            all_result_ids.add(msg.tool_call_id)
+
     clean: list[LLMMessage] = []
-    for i, msg in enumerate(messages):
+    for msg in messages:
+        if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
+            orphaned_calls = [
+                tc for tc in msg.tool_calls if tc.id not in all_result_ids
+            ]
+            if orphaned_calls:
+                orphan_ids = [tc.id for tc in orphaned_calls]
+                logger.warning("Stripping orphaned tool_use(s): %s", orphan_ids)
+                surviving = [tc for tc in msg.tool_calls if tc.id in all_result_ids]
+                if surviving:
+                    clean.append(LLMMessage(
+                        role=msg.role,
+                        content=msg.content,
+                        tool_calls=surviving,
+                    ))
+                elif msg.content:
+                    clean.append(LLMMessage(role=msg.role, content=msg.content))
+                continue
+
         if msg.role == MessageRole.TOOL_RESULT:
             has_matching_use = any(
                 prev.role == MessageRole.ASSISTANT
@@ -81,6 +110,7 @@ def _strip_orphaned_tool_results(messages: list[LLMMessage]) -> list[LLMMessage]
             if not has_matching_use:
                 logger.warning("Stripping orphaned tool_result %s", msg.tool_call_id)
                 continue
+
         clean.append(msg)
     return clean
 
@@ -152,9 +182,17 @@ class Agent:
         final_text = ""
         last_response: LLMResponse | None = None
         consecutive_errors = 0
+        sanitize_attempts = 0
 
         # ── ReAct Loop ───────────────────────────────────
         for _iteration in range(self._settings.max_tool_iterations):
+            # Proactive sanitization: fix orphaned pairs before they reach the API
+            clean = _sanitize_tool_pairs(session.messages)
+            if len(clean) != len(session.messages):
+                logger.info("Proactive sanitization removed %d orphaned messages", len(session.messages) - len(clean))
+                session.messages = clean
+                await self._sessions._persist(session)  # noqa: SLF001
+
             try:
                 response: LLMResponse = await self._llm.complete(
                     messages=session.messages,
@@ -170,9 +208,16 @@ class Agent:
                 )
                 break
             except LLMError as e:
-                if "tool_use_id" in str(e) and "tool_result" in str(e):
-                    logger.warning("Orphaned tool_result detected, sanitizing session")
-                    session.messages = _strip_orphaned_tool_results(session.messages)
+                if "tool_use" in str(e) and "tool_result" in str(e):
+                    sanitize_attempts += 1
+                    if sanitize_attempts > _MAX_SANITIZE_ATTEMPTS:
+                        logger.warning("Sanitization failed after %d attempts, clearing session", sanitize_attempts - 1)
+                        session.messages = [m for m in session.messages if m.role == MessageRole.SYSTEM]
+                        await self._sessions._persist(session)  # noqa: SLF001
+                        final_text = "I had a session error and cleared my context. Please resend your message."
+                        break
+                    logger.warning("Orphaned tool pair detected, sanitizing session (attempt %d)", sanitize_attempts)
+                    session.messages = _sanitize_tool_pairs(session.messages)
                     await self._sessions._persist(session)  # noqa: SLF001
                     continue
                 raise
@@ -301,11 +346,20 @@ class Agent:
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
         consecutive_errors = 0
         circuit_broken = False
+        sanitize_attempts = 0
+        response: LLMResponse | None = None
 
         # Tool-call iterations (non-streaming)
         for _iteration in range(self._settings.max_tool_iterations):
+            # Proactive sanitization: fix orphaned pairs before they reach the API
+            clean = _sanitize_tool_pairs(session.messages)
+            if len(clean) != len(session.messages):
+                logger.info("Proactive sanitization removed %d orphaned messages", len(session.messages) - len(clean))
+                session.messages = clean
+                await self._sessions._persist(session)  # noqa: SLF001
+
             try:
-                response: LLMResponse = await self._llm.complete(
+                response = await self._llm.complete(
                     messages=session.messages,
                     tools=tool_schemas,
                     system=system_prompt,
@@ -314,9 +368,16 @@ class Agent:
                 yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
                 return
             except LLMError as e:
-                if "tool_use_id" in str(e) and "tool_result" in str(e):
-                    logger.warning("Orphaned tool_result detected, sanitizing session")
-                    session.messages = _strip_orphaned_tool_results(session.messages)
+                if "tool_use" in str(e) and "tool_result" in str(e):
+                    sanitize_attempts += 1
+                    if sanitize_attempts > _MAX_SANITIZE_ATTEMPTS:
+                        logger.warning("Sanitization failed after %d attempts, clearing session", sanitize_attempts - 1)
+                        session.messages = [m for m in session.messages if m.role == MessageRole.SYSTEM]
+                        await self._sessions._persist(session)  # noqa: SLF001
+                        yield StreamChunk(StreamEventType.DONE, "I had a session error and cleared my context. Please resend your message.")
+                        return
+                    logger.warning("Orphaned tool pair detected, sanitizing session (attempt %d)", sanitize_attempts)
+                    session.messages = _sanitize_tool_pairs(session.messages)
                     await self._sessions._persist(session)  # noqa: SLF001
                     continue
                 raise
@@ -356,16 +417,18 @@ class Agent:
             else:
                 consecutive_errors = 0
         else:
-            yield StreamChunk(
-                StreamEventType.DONE,
-                response.content if response.content else "Max iterations reached.",
+            fallback_content = (
+                response.content
+                if response and response.content
+                else "Max iterations reached."
             )
+            yield StreamChunk(StreamEventType.DONE, fallback_content)
             return
 
         if circuit_broken:
             fallback = (
                 response.content
-                if response.content
+                if response and response.content
                 else "I'm having repeated tool failures. Let me respond with what I have."
             )
             if fallback:

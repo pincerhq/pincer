@@ -78,3 +78,28 @@ def tool_registry() -> ToolRegistry:
         },
     )
     return registry
+
+
+# ── Sprint 3 fixtures ────────────────────────────
+
+@pytest_asyncio.fixture
+async def identity_resolver(tmp_path: Path):
+    from pincer.core.identity import IdentityResolver
+
+    db_path = tmp_path / "identity.db"
+    resolver = IdentityResolver(db_path, identity_map_config="")
+    await resolver.ensure_table()
+    return resolver
+
+
+@pytest_asyncio.fixture
+async def channel_router(tmp_path: Path):
+    from unittest.mock import AsyncMock as _AM
+
+    from pincer.channels.router import ChannelRouter
+    from pincer.core.identity import IdentityResolver
+
+    db_path = tmp_path / "router.db"
+    identity = IdentityResolver(db_path, identity_map_config="")
+    await identity.ensure_table()
+    return ChannelRouter(identity)

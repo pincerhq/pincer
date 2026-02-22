@@ -187,7 +187,111 @@ class AnthropicProvider(BaseLLMProvider):
             else:
                 result.append({"role": msg.role.value, "content": msg.content})
 
-        return result
+        return self._validate_api_messages(result)
+
+    @staticmethod
+    def _validate_api_messages(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Enforce Anthropic constraints on the converted message list.
+
+        Rules:
+        1. Every assistant message containing tool_use blocks must be
+           immediately followed by user message(s) with matching tool_result
+           blocks for ALL tool_use IDs.
+        2. Consecutive same-role messages are merged (Anthropic rejects them).
+        3. The first non-system message must be role=user.
+        """
+        if not messages:
+            return messages
+
+        # Pass 1: collect tool_use IDs that have matching tool_result
+        result_ids: set[str] = set()
+        for msg in messages:
+            if msg["role"] == "user" and isinstance(msg.get("content"), list):
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        result_ids.add(block["tool_use_id"])
+
+        # Pass 2: strip assistant tool_use messages whose IDs lack results
+        cleaned: list[dict[str, Any]] = []
+        for msg in messages:
+            if msg["role"] == "assistant" and isinstance(msg.get("content"), list):
+                blocks = msg["content"]
+                has_tool_use = any(
+                    isinstance(b, dict) and b.get("type") == "tool_use"
+                    for b in blocks
+                )
+                if has_tool_use:
+                    surviving = [
+                        b for b in blocks
+                        if not (
+                            isinstance(b, dict)
+                            and b.get("type") == "tool_use"
+                            and b.get("id") not in result_ids
+                        )
+                    ]
+                    if not surviving:
+                        logger.debug("Dropping assistant message: all tool_use blocks orphaned")
+                        continue
+                    if len(surviving) != len(blocks):
+                        logger.debug(
+                            "Stripped %d orphaned tool_use blocks from assistant message",
+                            len(blocks) - len(surviving),
+                        )
+                    msg = {**msg, "content": surviving}
+
+            # Strip orphaned tool_result (no matching tool_use)
+            if msg["role"] == "user" and isinstance(msg.get("content"), list):
+                blocks = msg["content"]
+                has_tool_result = any(
+                    isinstance(b, dict) and b.get("type") == "tool_result"
+                    for b in blocks
+                )
+                if has_tool_result:
+                    use_ids: set[str] = set()
+                    for prev in cleaned:
+                        if prev["role"] == "assistant" and isinstance(prev.get("content"), list):
+                            for b in prev["content"]:
+                                if isinstance(b, dict) and b.get("type") == "tool_use":
+                                    use_ids.add(b["id"])
+                    surviving = [
+                        b for b in blocks
+                        if not (
+                            isinstance(b, dict)
+                            and b.get("type") == "tool_result"
+                            and b.get("tool_use_id") not in use_ids
+                        )
+                    ]
+                    if not surviving:
+                        continue
+                    msg = {**msg, "content": surviving}
+
+            cleaned.append(msg)
+
+        # Pass 3: merge consecutive same-role messages
+        merged: list[dict[str, Any]] = []
+        for msg in cleaned:
+            if merged and merged[-1]["role"] == msg["role"]:
+                prev = merged[-1]
+                prev_content = prev["content"]
+                cur_content = msg["content"]
+                if isinstance(prev_content, str) and isinstance(cur_content, str):
+                    merged[-1] = {**prev, "content": prev_content + "\n" + cur_content}
+                elif isinstance(prev_content, list) and isinstance(cur_content, list):
+                    merged[-1] = {**prev, "content": prev_content + cur_content}
+                elif isinstance(prev_content, str) and isinstance(cur_content, list):
+                    merged[-1] = {**prev, "content": [{"type": "text", "text": prev_content}] + cur_content}
+                elif isinstance(prev_content, list) and isinstance(cur_content, str):
+                    merged[-1] = {**prev, "content": prev_content + [{"type": "text", "text": cur_content}]}
+            else:
+                merged.append(msg)
+
+        # Pass 4: ensure first message is role=user
+        if merged and merged[0]["role"] != "user":
+            merged.insert(0, {"role": "user", "content": "(continuing conversation)"})
+
+        return merged
 
     def _parse_response(self, response: Message) -> LLMResponse:
         """Parse Anthropic Message into unified LLMResponse."""

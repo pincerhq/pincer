@@ -38,6 +38,7 @@ class Session:
     metadata: dict[str, str] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    pincer_user_id: str = ""
 
 
 class SessionManager:
@@ -76,9 +77,19 @@ class SessionManager:
             self._db = None
         self._cache.clear()
 
-    async def get_or_create(self, user_id: str, channel: str) -> Session:
-        """Get existing session or create a new one."""
-        key = _session_key(user_id, channel)
+    async def get_or_create(
+        self, user_id: str, channel: str, pincer_user_id: str = "",
+    ) -> Session:
+        """Get existing session or create a new one.
+
+        If pincer_user_id is provided, it's used as the session key prefix
+        for cross-channel continuity; otherwise falls back to channel:user_id.
+        """
+        key = (
+            _session_key(pincer_user_id, "unified")
+            if pincer_user_id
+            else _session_key(user_id, channel)
+        )
 
         if key in self._cache:
             return self._cache[key]
@@ -86,28 +97,42 @@ class SessionManager:
         assert self._db is not None
         async with self._db.execute(
             "SELECT session_id, messages, metadata, created_at, updated_at "
-            "FROM sessions WHERE user_id = ? AND channel = ? "
+            "FROM sessions WHERE session_id = ? "
             "ORDER BY updated_at DESC LIMIT 1",
-            (user_id, channel),
+            (key,),
         ) as cursor:
             row = await cursor.fetchone()
+
+        if not row:
+            # Fallback: try the old channel:user_id key for backward compat
+            fallback_key = _session_key(user_id, channel)
+            if fallback_key != key:
+                async with self._db.execute(
+                    "SELECT session_id, messages, metadata, created_at, updated_at "
+                    "FROM sessions WHERE user_id = ? AND channel = ? "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (user_id, channel),
+                ) as cursor:
+                    row = await cursor.fetchone()
 
         if row:
             messages = [LLMMessage.from_dict(m) for m in json.loads(row[1])]
             session = Session(
-                session_id=row[0],
+                session_id=key,
                 user_id=user_id,
                 channel=channel,
                 messages=messages,
                 metadata=json.loads(row[2]),
                 created_at=row[3],
                 updated_at=row[4],
+                pincer_user_id=pincer_user_id,
             )
         else:
             session = Session(
                 session_id=key,
                 user_id=user_id,
                 channel=channel,
+                pincer_user_id=pincer_user_id,
             )
 
         self._cache[key] = session
@@ -125,6 +150,9 @@ class SessionManager:
             # Never start on a tool_result — it would be orphaned without its tool_use
             while start < len(other_msgs) and other_msgs[start].role == MessageRole.TOOL_RESULT:
                 start += 1
+            # Never leave an orphaned tool_use right before the trim boundary
+            if start > 0 and other_msgs[start - 1].role == MessageRole.ASSISTANT and other_msgs[start - 1].tool_calls:
+                start -= 1
             trimmed = other_msgs[start:]
             session.messages = system_msgs + trimmed
             logger.debug(

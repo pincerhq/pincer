@@ -46,3 +46,11 @@ class ChannelError(PincerError):
 
 class ShellBlockedError(ToolError):
     """A shell command was blocked by safety rules."""
+
+
+class ChannelNotConnectedError(ChannelError):
+    """Raised when attempting to use a channel that isn't connected."""
+
+
+class ScheduleError(PincerError):
+    """Raised for scheduler-related errors."""
