@@ -201,6 +201,90 @@ class IdentityResolver:
         )
         await db.commit()
 
+    async def seed_from_config(self) -> None:
+        """Pre-create identity rows from PINCER_IDENTITY_MAP so the router
+        can resolve users immediately on startup (before any inbound message).
+
+        Format: "telegram:12345=whatsapp:491234567890,telegram:67890=whatsapp:491111111111"
+        """
+        if not self._identity_map_config:
+            return
+
+        async with self._get_db() as db:
+            db.row_factory = aiosqlite.Row
+            for mapping in self._identity_map_config.split(","):
+                mapping = mapping.strip()
+                if "=" not in mapping:
+                    continue
+
+                parts = mapping.split("=")
+                if len(parts) != 2:
+                    continue
+
+                try:
+                    left_channel, left_id = parts[0].strip().split(":", 1)
+                    right_channel, right_id = parts[1].strip().split(":", 1)
+                except ValueError:
+                    continue
+
+                telegram_id: int | None = None
+                whatsapp_phone: str | None = None
+
+                for ch, cid in ((left_channel, left_id), (right_channel, right_id)):
+                    if ch == "telegram":
+                        try:
+                            telegram_id = int(cid)
+                        except ValueError:
+                            pass
+                    elif ch == "whatsapp":
+                        whatsapp_phone = cid.lstrip("+")
+
+                if telegram_id is None and whatsapp_phone is None:
+                    continue
+
+                pincer_user_id = self._generate_user_id(
+                    ChannelType(left_channel), left_id,
+                )
+
+                cursor = await db.execute(
+                    "SELECT pincer_user_id, telegram_user_id, whatsapp_phone "
+                    "FROM identity_map WHERE pincer_user_id = ?",
+                    (pincer_user_id,),
+                )
+                existing = await cursor.fetchone()
+
+                if existing:
+                    needs_update = False
+                    if telegram_id and not existing["telegram_user_id"]:
+                        await db.execute(
+                            "UPDATE identity_map SET telegram_user_id = ?, "
+                            "updated_at = datetime('now') WHERE pincer_user_id = ?",
+                            (telegram_id, pincer_user_id),
+                        )
+                        needs_update = True
+                    if whatsapp_phone and not existing["whatsapp_phone"]:
+                        await db.execute(
+                            "UPDATE identity_map SET whatsapp_phone = ?, "
+                            "updated_at = datetime('now') WHERE pincer_user_id = ?",
+                            (whatsapp_phone, pincer_user_id),
+                        )
+                        needs_update = True
+                    if needs_update:
+                        logger.info("Identity updated from config: %s", pincer_user_id)
+                else:
+                    await db.execute(
+                        """INSERT INTO identity_map
+                           (pincer_user_id, telegram_user_id, whatsapp_phone,
+                            preferred_channel)
+                           VALUES (?, ?, ?, ?)""",
+                        (pincer_user_id, telegram_id, whatsapp_phone, left_channel),
+                    )
+                    logger.info(
+                        "Identity seeded from config: %s (tg=%s, wa=%s)",
+                        pincer_user_id, telegram_id, whatsapp_phone,
+                    )
+            await db.commit()
+
     async def get_preferred_channel(self, pincer_user_id: str) -> tuple[ChannelType, str]:
         """
         Get user's preferred channel for proactive messages.

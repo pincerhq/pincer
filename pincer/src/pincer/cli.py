@@ -656,6 +656,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
 
     identity = IdentityResolver(settings.db_path, settings.identity_map)
     await identity.ensure_table()
+    await identity.seed_from_config()
 
     # Start channels
     channels: list[BaseChannel] = []

@@ -15,6 +15,8 @@ from typing import Any
 
 from pincer.config import get_settings
 
+logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
+
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]

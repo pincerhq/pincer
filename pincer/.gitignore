@@ -28,3 +28,6 @@ htmlcov/
 # Google OAuth secrets
 data/google_credentials.json
 data/google_token.json
+
+# Neonize WhatsApp session databases
+pincer-wa*

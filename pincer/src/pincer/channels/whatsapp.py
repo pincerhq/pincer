@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import time
+import threading
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -22,18 +24,20 @@ try:
         ConnectedEv,
         MessageEv,
         PairStatusEv,
-        QREvent,
+        QREv,
+        event_global_loop,
     )
     from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
         Message as WAMessage,
     )
-    from neonize.utils import build_jid, log as neonize_log
+    from neonize.utils import build_jid, Jid2String, log as neonize_log
 
     HAS_NEONIZE = True
 except ImportError:
     HAS_NEONIZE = False
     NewAClient = None  # type: ignore[assignment,misc]
     neonize_log = None  # type: ignore[assignment]
+    event_global_loop = None  # type: ignore[assignment]
 
 from pincer.channels.base import (
     BaseChannel,
@@ -80,20 +84,54 @@ class WhatsAppChannel(BaseChannel):
 
     # ── Lifecycle ────────────────────────────────
 
+    _loop_started = False
+
     async def start(self, handler: MessageHandler) -> None:
         self._handler = handler
-        db_path = str(self._settings.data_dir / "whatsapp.db")
-        self._client = NewAClient(name="pincer-wa", database=db_path)
 
-        self._client.event(self._on_qr)
-        self._client.event(self._on_connected)
-        self._client.event(self._on_pair_status)
-        self._client.event(self._on_message)
+        # Neonize dispatches all event callbacks via
+        # asyncio.run_coroutine_threadsafe(..., event_global_loop) but never
+        # starts that loop.  We run it in a daemon thread so callbacks fire.
+        if not WhatsAppChannel._loop_started and event_global_loop is not None:
+            if not event_global_loop.is_running():
+                threading.Thread(
+                    target=event_global_loop.run_forever,
+                    daemon=True,
+                ).start()
+                WhatsAppChannel._loop_started = True
+                logger.debug("Started neonize event_global_loop in daemon thread")
+
+        self._client = NewAClient(name="pincer-wa")
+
+        self._client.event.qr(self._on_qr)
+
+        self._client.event(ConnectedEv)(self._on_connected)
+        self._client.event(PairStatusEv)(self._on_pair_status)
+        self._client.event(MessageEv)(self._on_message)
 
         neonize_log.setLevel(logging.WARNING)
+        for _name in ("whatsmeow", "whatsmeow.Client", "Whatsmeow", "Whatsmeow.Database"):
+            logging.getLogger(_name).setLevel(logging.CRITICAL)
+
+        # Wrap neonize's Event.execute so exceptions from the Go callback
+        # thread become visible instead of being silently swallowed.
+        original_execute = self._client.event.execute
+
+        def _safe_execute(uuid: int, binary: int, size: int, code: int) -> None:
+            try:
+                original_execute(uuid, binary, size, code)
+            except Exception:
+                logger.exception("neonize Event.execute error (code=%d)", code)
+
+        self._client.event.execute = _safe_execute  # type: ignore[assignment]
 
         logger.info("Connecting to WhatsApp...")
         await self._client.connect()
+
+        # connect() schedules the Go backend coroutine on event_global_loop via
+        # create_task(), but that call from the main thread doesn't wake the
+        # daemon loop's I/O selector.  Poke it so it picks up the queued task.
+        event_global_loop.call_soon_threadsafe(lambda: None)
 
         try:
             await asyncio.wait_for(self._connected.wait(), timeout=120)
@@ -101,6 +139,12 @@ class WhatsAppChannel(BaseChannel):
             raise RuntimeError(
                 "WhatsApp connection timed out. Did you scan the QR code?"
             ) from None
+
+        logger.info(
+            "event_global_loop healthy: running=%s, closed=%s",
+            event_global_loop.is_running(),
+            event_global_loop.is_closed(),
+        )
 
     async def stop(self) -> None:
         if self._client:
@@ -117,12 +161,13 @@ class WhatsAppChannel(BaseChannel):
             raise ChannelNotConnectedError("WhatsApp client not connected")
 
         jid = build_jid(user_id.split("@")[0])
-        await self._client.send_message(jid, text=text)
+        await self._client.send_message(jid, text)
         logger.debug("WhatsApp message sent to %s (%d chars)", user_id, len(text))
 
     # ── Event Handlers ───────────────────────────
 
-    async def _on_qr(self, _client: NewAClient, event: QREvent) -> None:
+    async def _on_qr(self, _client: NewAClient, qr_data: bytes) -> None:
+        """Handle QR code event. qr_data is the raw QR payload bytes."""
         import qrcode
 
         qr = qrcode.QRCode(
@@ -131,7 +176,7 @@ class WhatsAppChannel(BaseChannel):
             box_size=1,
             border=1,
         )
-        qr.add_data(event.qr)
+        qr.add_data(qr_data)
         qr.make(fit=True)
 
         f = io.StringIO()
@@ -148,60 +193,104 @@ class WhatsAppChannel(BaseChannel):
         )
 
     async def _on_connected(self, client: NewAClient, _event: ConnectedEv) -> None:
-        self._own_jid = str(client.get_me().user)
+        me = await client.get_me()
+        self._own_jid = me.JID.User
         self._connected.set()
-        logger.info("WhatsApp connected as %s", self._own_jid)
+        logger.info(
+            "WhatsApp connected — own_jid=%r  full_jid=%s",
+            self._own_jid,
+            Jid2String(me.JID),
+        )
 
     async def _on_pair_status(self, _client: NewAClient, event: PairStatusEv) -> None:
-        logger.info("WhatsApp paired: %s", event.id)
+        logger.info("WhatsApp paired: %s", Jid2String(event.ID))
+
+    # Skip messages older than this (seconds) — filters history-sync flood
+    _MAX_MESSAGE_AGE = 120
 
     async def _on_message(self, client: NewAClient, event: MessageEv) -> None:
         """Route incoming WhatsApp messages to the handler callback."""
         try:
-            msg = event.message
-            info = event.info
+            msg = event.Message
+            info = event.Info
+            source = info.MessageSource
 
-            sender_jid = str(info.message_source.sender)
-            chat_jid = str(info.message_source.chat)
-            is_group = info.message_source.is_group
-            is_from_me = info.message_source.is_from_me
+            sender_jid = Jid2String(source.Sender)
+            chat_jid = Jid2String(source.Chat)
+            is_group = source.IsGroup
+            is_from_me = source.IsFromMe
+            sender_phone = source.Sender.User
+            chat_user = source.Chat.User
 
-            sender_phone = sender_jid.split("@")[0]
+            logger.info(
+                "WA event: sender=%s chat=%s chat_user=%r own_jid=%r "
+                "from_me=%s group=%s ts=%s",
+                sender_phone,
+                chat_jid,
+                chat_user,
+                self._own_jid,
+                is_from_me,
+                is_group,
+                info.Timestamp,
+            )
+
+            # Filter out old history-sync messages
+            msg_ts = info.Timestamp.seconds if hasattr(info.Timestamp, "seconds") else int(info.Timestamp)
+            now = int(time.time())
+            age = now - msg_ts
+            if age > self._MAX_MESSAGE_AGE:
+                logger.debug("WA skip old message (age=%ds, limit=%ds)", age, self._MAX_MESSAGE_AGE)
+                return
 
             is_self_chat = (
                 not is_group
-                and chat_jid.split("@")[0] == self._own_jid
+                and chat_user == self._own_jid
                 and is_from_me
             )
 
             if is_self_chat:
-                pass  # Process as agent command
+                logger.debug("WA routing: self-chat")
             elif is_group:
                 if not self._is_mentioned_in_group(msg, client):
+                    logger.debug("WA skip: group message without mention")
                     return
+                logger.debug("WA routing: group mention")
             elif not is_from_me:
                 if self._dm_allowlist and sender_phone not in self._dm_allowlist:
-                    logger.debug("WhatsApp DM blocked: %s (not in allowlist)", sender_phone)
+                    logger.debug("WA skip: DM from %s not in allowlist %s", sender_phone, self._dm_allowlist)
                     return
+                logger.debug("WA routing: DM from %s", sender_phone)
             elif is_from_me and not is_self_chat:
-                return  # Our own reply in non-self-chat
+                logger.debug(
+                    "WA skip: outgoing non-self msg (chat_user=%r != own_jid=%r)",
+                    chat_user,
+                    self._own_jid,
+                )
+                return
 
             incoming = await self._extract_message(client, event, sender_phone, chat_jid)
             if incoming is None:
+                logger.warning("WA skip: unsupported message type from %s", sender_phone)
                 return
 
             logger.info(
-                "WhatsApp message from %s (media=%s, self_chat=%s)",
+                "WhatsApp message from %s (media=%s, self_chat=%s, text=%.60r)",
                 sender_phone,
                 incoming.media_type or "text",
                 is_self_chat,
+                incoming.text,
             )
 
             if self._handler:
                 response = await self._handler(incoming)
                 if response:
-                    reply_jid = build_jid(chat_jid.split("@")[0])
-                    await client.send_message(reply_jid, text=response)
+                    reply_jid = build_jid(chat_user, source.Chat.Server)
+                    await client.send_message(reply_jid, response)
+                    logger.debug("WA reply sent to %s (%d chars)", chat_jid, len(response))
+                else:
+                    logger.debug("WA handler returned empty response")
+            else:
+                logger.warning("WA no handler registered")
 
         except Exception:
             logger.exception("WhatsApp message handler error")
@@ -215,8 +304,8 @@ class WhatsAppChannel(BaseChannel):
         sender_phone: str,
         chat_jid: str,
     ) -> IncomingMessage | None:
-        msg = event.message
-        msg_id = str(event.info.id)
+        msg = event.Message
+        msg_id = event.Info.ID
 
         if msg.conversation:
             return IncomingMessage(
@@ -227,29 +316,29 @@ class WhatsAppChannel(BaseChannel):
                 reply_to_message_id=msg_id,
             )
 
-        if msg.extended_text_message:
+        if msg.extendedTextMessage and msg.extendedTextMessage.text:
             return IncomingMessage(
                 user_id=sender_phone,
                 channel="whatsapp",
-                text=msg.extended_text_message.text or "",
+                text=msg.extendedTextMessage.text,
                 channel_type=ChannelType.WHATSAPP,
                 reply_to_message_id=msg_id,
             )
 
-        if msg.image_message:
+        if msg.imageMessage and msg.imageMessage.mimetype:
             image_data = await client.download_any(msg)
             return IncomingMessage(
                 user_id=sender_phone,
                 channel="whatsapp",
-                text=msg.image_message.caption or "[Image received]",
-                images=[(image_data, msg.image_message.mimetype or "image/jpeg")],
+                text=msg.imageMessage.caption or "[Image received]",
+                images=[(image_data, msg.imageMessage.mimetype or "image/jpeg")],
                 channel_type=ChannelType.WHATSAPP,
                 media_type="image",
                 media_data=image_data,
-                media_mimetype=msg.image_message.mimetype or "image/jpeg",
+                media_mimetype=msg.imageMessage.mimetype or "image/jpeg",
             )
 
-        if msg.audio_message:
+        if msg.audioMessage and msg.audioMessage.mimetype:
             audio_data = await client.download_any(msg)
             transcription = await self._transcribe_audio(audio_data)
             return IncomingMessage(
@@ -257,18 +346,18 @@ class WhatsAppChannel(BaseChannel):
                 channel="whatsapp",
                 text=transcription or "[Voice note - transcription failed]",
                 voice_data=audio_data,
-                voice_mime=msg.audio_message.mimetype or "audio/ogg",
+                voice_mime=msg.audioMessage.mimetype or "audio/ogg",
                 channel_type=ChannelType.WHATSAPP,
                 media_type="audio",
                 media_data=audio_data,
-                media_mimetype=msg.audio_message.mimetype or "audio/ogg",
+                media_mimetype=msg.audioMessage.mimetype or "audio/ogg",
                 is_voice_note=True,
             )
 
-        if msg.document_message:
+        if msg.documentMessage and msg.documentMessage.mimetype:
             doc_data = await client.download_any(msg)
-            filename = msg.document_message.file_name or "document"
-            mime = msg.document_message.mimetype or "application/octet-stream"
+            filename = msg.documentMessage.fileName or "document"
+            mime = msg.documentMessage.mimetype or "application/octet-stream"
             return IncomingMessage(
                 user_id=sender_phone,
                 channel="whatsapp",
@@ -305,16 +394,16 @@ class WhatsAppChannel(BaseChannel):
     def _is_mentioned_in_group(self, msg: WAMessage, client: NewAClient) -> bool:
         own_jid = self._own_jid
 
-        if msg.extended_text_message and msg.extended_text_message.context_info:
-            ctx = msg.extended_text_message.context_info
-            if ctx.mentioned_jid:
-                for jid in ctx.mentioned_jid:
+        if msg.extendedTextMessage and msg.extendedTextMessage.contextInfo:
+            ctx = msg.extendedTextMessage.contextInfo
+            if ctx.mentionedJID:
+                for jid in ctx.mentionedJID:
                     if own_jid and own_jid in str(jid):
                         return True
 
         text = msg.conversation or ""
-        if msg.extended_text_message:
-            text = msg.extended_text_message.text or ""
+        if msg.extendedTextMessage:
+            text = msg.extendedTextMessage.text or ""
 
         if own_jid and own_jid in text:
             return True
