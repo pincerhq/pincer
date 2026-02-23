@@ -234,19 +234,21 @@ class WhatsAppChannel(BaseChannel):
                 info.Timestamp,
             )
 
-            # Filter out old history-sync messages
+            # Filter out old history-sync messages.
+            # Neonize may report timestamps in seconds or milliseconds.
             msg_ts = info.Timestamp.seconds if hasattr(info.Timestamp, "seconds") else int(info.Timestamp)
+            if msg_ts > 1_000_000_000_000:
+                msg_ts = msg_ts // 1000
             now = int(time.time())
             age = now - msg_ts
             if age > self._MAX_MESSAGE_AGE:
                 logger.debug("WA skip old message (age=%ds, limit=%ds)", age, self._MAX_MESSAGE_AGE)
                 return
 
-            is_self_chat = (
-                not is_group
-                and chat_user == self._own_jid
-                and is_from_me
-            )
+            # Self-chat: any non-group message flagged is_from_me.
+            # WhatsApp may use a LID (Linked Identity) instead of the phone
+            # number as chat_user, so we cannot rely on chat_user == own_jid.
+            is_self_chat = not is_group and is_from_me
 
             if is_self_chat:
                 logger.debug("WA routing: self-chat")
@@ -260,13 +262,6 @@ class WhatsAppChannel(BaseChannel):
                     logger.debug("WA skip: DM from %s not in allowlist %s", sender_phone, self._dm_allowlist)
                     return
                 logger.debug("WA routing: DM from %s", sender_phone)
-            elif is_from_me and not is_self_chat:
-                logger.debug(
-                    "WA skip: outgoing non-self msg (chat_user=%r != own_jid=%r)",
-                    chat_user,
-                    self._own_jid,
-                )
-                return
 
             incoming = await self._extract_message(client, event, sender_phone, chat_jid)
             if incoming is None:
