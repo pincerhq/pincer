@@ -60,6 +60,13 @@ class Summarizer:
         # Never split in the middle of a tool_use/tool_result pair
         while split_point < len(non_system) and non_system[split_point].role == MessageRole.TOOL_RESULT:
             split_point += 1
+        # Never leave an orphaned tool_use at the end of the summarized portion
+        if (
+            split_point > 0
+            and non_system[split_point - 1].role == MessageRole.ASSISTANT
+            and non_system[split_point - 1].tool_calls
+        ):
+            split_point -= 1
         to_summarize = non_system[:split_point]
         to_keep = non_system[split_point:]
 

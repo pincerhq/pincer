@@ -240,6 +240,179 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         },
     )
 
+    # Email tools (Sprint 3)
+    if settings.email_imap_host and settings.email_username:
+        from pincer.tools.builtin.email_tool import email_check, email_search, email_send
+
+        tools.register(
+            name="email_check",
+            description=(
+                "Check for unread emails. Returns sender, subject, and date for each. "
+                "Use when the user asks about their email, inbox, or unread messages."
+            ),
+            handler=email_check,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max unread emails to return (default: 10)",
+                        "default": 10,
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "IMAP folder (default: INBOX)",
+                        "default": "INBOX",
+                    },
+                },
+                "required": [],
+            },
+        )
+        tools.register(
+            name="email_send",
+            description=(
+                "Send an email. Requires recipient, subject, body. "
+                "Use when the user asks to send, write, or compose an email."
+            ),
+            handler=email_send,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "to": {"type": "string", "description": "Recipient email address"},
+                    "subject": {"type": "string", "description": "Email subject line"},
+                    "body": {"type": "string", "description": "Email body (plain text)"},
+                    "cc": {
+                        "type": "string",
+                        "description": "CC recipients (comma-separated)",
+                        "default": "",
+                    },
+                },
+                "required": ["to", "subject", "body"],
+            },
+        )
+        tools.register(
+            name="email_search",
+            description=(
+                "Search emails by keyword, sender, or date range. "
+                "Use when the user asks to find a specific email or topic."
+            ),
+            handler=email_search,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search keyword"},
+                    "sender": {
+                        "type": "string",
+                        "description": "Filter by sender email",
+                        "default": "",
+                    },
+                    "days_back": {
+                        "type": "integer",
+                        "description": "Days to search back (default: 30)",
+                        "default": 30,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default: 10)",
+                        "default": 10,
+                    },
+                },
+                "required": ["query"],
+            },
+        )
+        console.print("[green]Email tools enabled[/green]")
+
+    # Google Calendar tools (Sprint 3)
+    try:
+        from pincer.tools.builtin.calendar_tool import (
+            calendar_create,
+            calendar_today,
+            calendar_week,
+        )
+
+        tools.register(
+            name="calendar_today",
+            description=(
+                "Get today's calendar events. Use when user asks about "
+                "their schedule, meetings, or agenda today."
+            ),
+            handler=calendar_today,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "calendar_id": {
+                        "type": "string",
+                        "description": "Calendar ID (default: primary)",
+                        "default": "primary",
+                    },
+                },
+                "required": [],
+            },
+        )
+        tools.register(
+            name="calendar_week",
+            description=(
+                "Get this week's calendar events. Use when user asks about "
+                "their week or upcoming schedule."
+            ),
+            handler=calendar_week,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "calendar_id": {
+                        "type": "string",
+                        "description": "Calendar ID (default: primary)",
+                        "default": "primary",
+                    },
+                },
+                "required": [],
+            },
+        )
+        tools.register(
+            name="calendar_create",
+            description=(
+                "Create a new Google Calendar event. Use when user asks to "
+                "schedule, add, or book a meeting or event."
+            ),
+            handler=calendar_create,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Event title"},
+                    "start_time": {
+                        "type": "string",
+                        "description": "Start time in ISO 8601, e.g. '2026-02-22T14:00:00+01:00'",
+                    },
+                    "duration_minutes": {
+                        "type": "integer",
+                        "description": "Duration in minutes (default: 60)",
+                        "default": 60,
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Event description",
+                        "default": "",
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Event location",
+                        "default": "",
+                    },
+                    "calendar_id": {
+                        "type": "string",
+                        "description": "Calendar ID (default: primary)",
+                        "default": "primary",
+                    },
+                },
+                "required": ["title", "start_time"],
+            },
+        )
+        console.print("[green]Calendar tools enabled[/green]")
+    except ImportError:
+        logging.getLogger(__name__).debug(
+            "Google Calendar dependencies not installed, calendar tools disabled"
+        )
+
     # send_file tool — channels dict is populated after channel startup below
     channel_map: dict[str, BaseChannel] = {}
 
@@ -478,17 +651,49 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         cost_str = f"\n\n`${response.cost_usd:.4f}`" if response.cost_usd > 0 else ""
         return response.text + cost_str
 
+    # Sprint 3: Identity resolver
+    from pincer.core.identity import IdentityResolver
+
+    identity = IdentityResolver(settings.db_path, settings.identity_map)
+    await identity.ensure_table()
+    await identity.seed_from_config()
+
     # Start channels
     channels: list[BaseChannel] = []
+    tg = None
     if settings.telegram_bot_token.get_secret_value():
         from pincer.channels.telegram import TelegramChannel
 
         tg = TelegramChannel(settings)
         tg.set_stream_agent(agent)
+        tg.set_identity_resolver(identity)
         await tg.start(on_message)
         channels.append(tg)
         channel_map[tg.name] = tg
         console.print("[green]Telegram connected (streaming enabled)[/green]")
+
+    # Sprint 3: Channel router for proactive delivery
+    from pincer.channels.base import ChannelType
+    from pincer.channels.router import ChannelRouter
+
+    router = ChannelRouter(identity)
+    if tg:
+        router.register(ChannelType.TELEGRAM, tg)
+
+    # Sprint 3: WhatsApp channel (optional)
+    wa = None
+    if settings.whatsapp_enabled:
+        try:
+            from pincer.channels.whatsapp import WhatsAppChannel
+
+            wa = WhatsAppChannel(settings)
+            await wa.start(on_message)
+            channels.append(wa)
+            channel_map[wa.name] = wa
+            router.register(ChannelType.WHATSAPP, wa)
+            console.print("[green]WhatsApp connected[/green]")
+        except Exception as e:
+            console.print(f"[yellow]WhatsApp failed: {e}[/yellow]")
 
     if not channels:
         console.print(
@@ -496,8 +701,45 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         )
         return
 
+    # Sprint 3: Scheduler + Proactive Agent
+    from pincer.scheduler import CronScheduler, EventTriggerManager, ProactiveAgent
+
+    proactive = ProactiveAgent(settings.db_path)
+    await proactive.ensure_table()
+
+    scheduler = CronScheduler(settings.db_path, router)
+    scheduler.register_action("briefing", proactive.generate_briefing)
+    scheduler.register_action("custom", proactive.run_custom_action)
+    await scheduler.start()
+
+    # Sprint 3: Event triggers
+    triggers = EventTriggerManager(settings.db_path, router)
+    await triggers.start()
+
+    # Auto-create default morning briefing if configured
+    if settings.default_user_id and settings.briefing_time:
+        try:
+            hour, minute = settings.briefing_time.split(":")
+            existing = await scheduler.list_schedules(settings.default_user_id)
+            if not any(s["name"] == "morning_briefing" for s in existing):
+                await scheduler.add(
+                    name="morning_briefing",
+                    cron_expr=f"{minute} {hour} * * *",
+                    action={"type": "briefing"},
+                    pincer_user_id=settings.default_user_id,
+                    tz=settings.briefing_timezone,
+                )
+                console.print(
+                    f"[green]Morning briefing scheduled at {settings.briefing_time} "
+                    f"({settings.briefing_timezone})[/green]"
+                )
+        except Exception as e:
+            console.print(f"[yellow]Briefing schedule error: {e}[/yellow]")
+
+    active = [ch.name for ch in channels]
     console.print(
-        f"\n[bold green]{settings.agent_name} is running![/bold green] Press Ctrl+C to stop.\n"
+        f"\n[bold green]{settings.agent_name} is running![/bold green] "
+        f"Channels: {', '.join(active)}. Press Ctrl+C to stop.\n"
     )
 
     try:
@@ -506,6 +748,9 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
     except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[yellow]Shutting down...[/yellow]")
     finally:
+        await triggers.stop()
+        await scheduler.stop()
+        await proactive.close()
         for ch in channels:
             await ch.stop()
         try:
@@ -566,3 +811,93 @@ async def _show_cost() -> None:
     await tracker.close()
     console.print(f"Today:  ${today:.4f} / ${s.daily_budget_usd:.2f}")
     console.print(f"Total:  ${summary.total_usd:.4f} ({summary.total_calls} calls)")
+
+
+@app.command(name="pair-whatsapp")
+def pair_whatsapp() -> None:
+    """Pair WhatsApp via QR code (run once to link your device)."""
+    asyncio.run(_pair_whatsapp())
+
+
+async def _pair_whatsapp() -> None:
+    from pincer.config import get_settings
+
+    settings = get_settings()
+    console.print("[bold]WhatsApp Pairing[/bold]\n")
+    console.print("This will display a QR code. Scan it with:")
+    console.print("  WhatsApp -> Settings -> Linked Devices -> Link a Device\n")
+
+    try:
+        from pincer.channels.whatsapp import WhatsAppChannel
+
+        wa = WhatsAppChannel(settings)
+
+        async def noop_handler(msg):  # type: ignore[no-untyped-def]
+            return "Pairing mode — send messages after running `pincer run`."
+
+        await wa.start(noop_handler)
+        console.print("\n[green]WhatsApp paired successfully![/green]")
+        console.print("Session saved. Run `pincer run` with PINCER_WHATSAPP_ENABLED=true.")
+        await wa.stop()
+    except Exception as e:
+        console.print(f"[red]Pairing failed: {e}[/red]")
+
+
+@app.command(name="auth-google")
+def auth_google() -> None:
+    """Run Google Calendar OAuth consent flow (one-time setup)."""
+    from pathlib import Path
+
+    from pincer.config import get_settings
+    from pincer.tools.builtin.calendar_tool import SCOPES
+
+    settings = get_settings()
+    credentials_path = Path(settings.data_dir) / "google_credentials.json"
+    token_path = Path(settings.data_dir) / "google_token.json"
+
+    console.print("[bold]Google Calendar — OAuth Setup[/bold]\n")
+
+    if not credentials_path.exists():
+        console.print(f"[red]Missing: {credentials_path}[/red]")
+        console.print(
+            "\nDownload the OAuth client JSON from:\n"
+            "  Google Cloud Console -> APIs & Services -> Credentials\n"
+            "  -> OAuth 2.0 Client IDs -> Download JSON\n"
+            f"\nSave it as: {credentials_path}"
+        )
+        raise typer.Exit(1)
+
+    if token_path.exists():
+        console.print(f"[yellow]Token already exists: {token_path}[/yellow]")
+        if not typer.confirm("Overwrite existing token?"):
+            raise typer.Exit(0)
+
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow
+    except ImportError:
+        console.print(
+            "[red]google-auth-oauthlib is not installed.[/red]\n"
+            "Run:  uv pip install google-auth-oauthlib"
+        )
+        raise typer.Exit(1)
+
+    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
+
+    console.print("Opening browser for Google consent...\n")
+    try:
+        creds = flow.run_local_server(port=0)
+    except Exception:
+        console.print(
+            "[yellow]Browser not available. Trying manual flow...[/yellow]\n"
+            "Open the URL below in any browser, then paste the code back here.\n"
+        )
+        creds = flow.run_local_server(port=8080, open_browser=False)
+
+    with open(token_path, "w") as f:
+        f.write(creds.to_json())
+
+    console.print(f"\n[green]Google Calendar authorized![/green]")
+    console.print(f"  Token saved to: {token_path}")
+    console.print(f"  Refresh token:  {'Yes' if creds.refresh_token else 'No'}")
+    console.print(f"  Expires:        {creds.expiry}")
+    console.print("\nYou can now use calendar tools in Pincer.")

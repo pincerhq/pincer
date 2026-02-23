@@ -5,7 +5,17 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
+
+
+class ChannelType(StrEnum):
+    """Supported communication channels."""
+
+    TELEGRAM = "telegram"
+    WHATSAPP = "whatsapp"
+    DISCORD = "discord"
+    WEB = "web"
 
 
 @dataclass
@@ -16,11 +26,22 @@ class IncomingMessage:
     channel: str
     text: str = ""
     images: list[tuple[bytes, str]] = field(default_factory=list)  # (raw_bytes, media_type)
-    files: list[tuple[bytes, str, str]] = field(default_factory=list)  # (raw_bytes, mime_type, filename)
+    files: list[tuple[bytes, str, str]] = field(default_factory=list)  # (raw_bytes, mime, filename)
     voice_data: bytes | None = None
     voice_mime: str = ""
     reply_to_message_id: str | None = None
-    raw: Any = None  # Original platform message object
+    raw: Any = None
+
+    # Sprint 3: cross-channel identity
+    pincer_user_id: str = ""
+    channel_type: ChannelType = ChannelType.TELEGRAM
+
+    # Sprint 3: generic media fields (used by WhatsApp)
+    media_type: str | None = None  # "image", "audio", "document", None
+    media_data: bytes | None = None
+    media_mimetype: str | None = None
+    media_filename: str | None = None
+    is_voice_note: bool = False
 
     @property
     def has_voice(self) -> bool:
@@ -37,6 +58,8 @@ MessageHandler = Callable[[IncomingMessage], Awaitable[str]]
 
 class BaseChannel(ABC):
     """Abstract messaging channel."""
+
+    channel_type: ChannelType = ChannelType.TELEGRAM
 
     @property
     @abstractmethod

@@ -126,6 +126,49 @@ class Settings(BaseSettings):
         default=20, ge=5, description="Summarize conversation after N messages"
     )
 
+    # ── WhatsApp (Sprint 3) ──────────────────────────────
+    whatsapp_enabled: bool = Field(default=False, description="Enable WhatsApp channel")
+    whatsapp_dm_allowlist: str = Field(
+        default="",
+        description="Comma-separated phone numbers allowed to DM (empty = allow all)",
+    )
+    whatsapp_group_trigger: str = Field(
+        default="pincer",
+        description="Trigger word for group chat mentions",
+    )
+
+    # ── Cross-Channel Identity (Sprint 3) ────────────────
+    identity_map: str = Field(
+        default="",
+        description="Cross-channel identity mapping, e.g. telegram:12345=whatsapp:491234567890",
+    )
+    default_user_id: str = Field(
+        default="",
+        description="Default pincer_user_id for proactive messages",
+    )
+
+    # ── Email (Sprint 3) ─────────────────────────────────
+    email_imap_host: str = Field(default="", description="IMAP server host")
+    email_imap_port: int = Field(default=993, description="IMAP server port")
+    email_smtp_host: str = Field(default="", description="SMTP server host")
+    email_smtp_port: int = Field(default=587, description="SMTP port (587=STARTTLS, 465=TLS)")
+    email_username: str = Field(default="", description="Email account username")
+    email_password: SecretStr = Field(default=SecretStr(""), description="Email account password")
+    email_from: str = Field(default="", description="Override sender address")
+
+    # ── Proactive Agent (Sprint 3) ───────────────────────
+    openweathermap_api_key: SecretStr = Field(
+        default=SecretStr(""), description="OpenWeatherMap API key"
+    )
+    newsapi_key: SecretStr = Field(default=SecretStr(""), description="NewsAPI key")
+    briefing_time: str = Field(default="07:00", description="Morning briefing time HH:MM")
+    briefing_timezone: str = Field(default="Europe/Berlin", description="Briefing timezone")
+    timezone: str = Field(default="Europe/Berlin", description="Default timezone")
+
+    # ── Webhooks (Sprint 3) ──────────────────────────────
+    webhook_port: int = Field(default=8765, description="Webhook listener port")
+    webhook_secret: SecretStr = Field(default=SecretStr(""), description="Webhook HMAC secret")
+
     @field_validator("telegram_allowed_users", mode="before")
     @classmethod
     def parse_allowed_users(cls, v: str | list[int]) -> list[int]:
