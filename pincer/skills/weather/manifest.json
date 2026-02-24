@@ -1,0 +1,35 @@
+{
+  "name": "weather",
+  "version": "0.1.0",
+  "description": "Get weather forecasts",
+  "author": "pincer",
+  "permissions": ["network:api.openweathermap.org"],
+  "env_required": ["OPENWEATHER_API_KEY"],
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get current weather for a city",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string", "description": "City name"},
+          "units": {"type": "string", "description": "Units: metric or imperial", "default": "metric"}
+        },
+        "required": ["city"]
+      }
+    },
+    {
+      "name": "get_forecast",
+      "description": "Get multi-day weather forecast for a city",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "city": {"type": "string", "description": "City name"},
+          "units": {"type": "string", "description": "Units: metric or imperial", "default": "metric"},
+          "days": {"type": "integer", "description": "Number of forecast days", "default": 3}
+        },
+        "required": ["city"]
+      }
+    }
+  ]
+}

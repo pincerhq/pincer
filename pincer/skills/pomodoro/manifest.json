@@ -1,0 +1,35 @@
+{
+  "name": "pomodoro",
+  "version": "0.1.0",
+  "description": "Pomodoro timer tracking",
+  "author": "pincer",
+  "permissions": [],
+  "env_required": [],
+  "tools": [
+    {
+      "name": "start_pomodoro",
+      "description": "Start a new pomodoro session",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string", "description": "User identifier"},
+          "task": {"type": "string", "description": "Task name", "default": "Focus session"},
+          "duration_min": {"type": "integer", "description": "Duration in minutes", "default": 25}
+        },
+        "required": ["user_id"]
+      }
+    },
+    {
+      "name": "pomodoro_stats",
+      "description": "Get pomodoro statistics for a user",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string", "description": "User identifier"},
+          "period": {"type": "string", "description": "Period: today, week, or month", "default": "today"}
+        },
+        "required": ["user_id"]
+      }
+    }
+  ]
+}

@@ -56,6 +56,7 @@ class Settings(BaseSettings):
 
     # ── Channels ─────────────────────────────────────────
     telegram_bot_token: SecretStr = Field(default=SecretStr(""), description="Telegram bot token")
+    discord_bot_token: SecretStr = Field(default=SecretStr(""), description="Discord bot token")
     telegram_allowed_users: list[int] = Field(
         default_factory=list,
         description="Telegram user IDs allowed to use the bot (empty = allow all)",

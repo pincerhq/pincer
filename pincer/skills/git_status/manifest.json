@@ -1,0 +1,33 @@
+{
+  "name": "git_status",
+  "version": "0.1.0",
+  "description": "Check git repository status",
+  "author": "pincer",
+  "permissions": [],
+  "env_required": [],
+  "tools": [
+    {
+      "name": "repo_status",
+      "description": "Get git repository status (branch, modified, untracked, staged)",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Path to git repository", "default": "."}
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "recent_commits",
+      "description": "Get recent git commits",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Path to git repository", "default": "."},
+          "count": {"type": "integer", "description": "Number of commits to return", "default": 5}
+        },
+        "required": []
+      }
+    }
+  ]
+}

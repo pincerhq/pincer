@@ -1,0 +1,26 @@
+{
+  "name": "youtube_summary",
+  "version": "0.1.0",
+  "description": "Get YouTube video transcripts",
+  "author": "pincer",
+  "permissions": [
+    "network:www.youtube.com",
+    "network:youtube.com",
+    "network:youtubei.googleapis.com"
+  ],
+  "env_required": [],
+  "tools": [
+    {
+      "name": "get_transcript",
+      "description": "Get transcript/captions for a YouTube video",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {"type": "string", "description": "YouTube video URL"},
+          "language": {"type": "string", "description": "Preferred language code", "default": "en"}
+        },
+        "required": ["url"]
+      }
+    }
+  ]
+}

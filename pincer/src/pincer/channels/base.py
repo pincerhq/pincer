@@ -15,6 +15,7 @@ class ChannelType(StrEnum):
     TELEGRAM = "telegram"
     WHATSAPP = "whatsapp"
     DISCORD = "discord"
+    CLI = "cli"
     WEB = "web"
 
 

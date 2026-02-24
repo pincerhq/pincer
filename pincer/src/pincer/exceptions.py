@@ -54,3 +54,7 @@ class ChannelNotConnectedError(ChannelError):
 
 class ScheduleError(PincerError):
     """Raised for scheduler-related errors."""
+
+
+class SkillLoadError(ToolError):
+    """A skill failed to load (manifest, import, or validation error)."""

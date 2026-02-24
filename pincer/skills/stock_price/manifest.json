@@ -1,0 +1,36 @@
+{
+  "name": "stock_price",
+  "version": "0.1.0",
+  "description": "Get stock and crypto prices",
+  "author": "pincer",
+  "permissions": [
+    "network:query1.finance.yahoo.com",
+    "network:api.coingecko.com"
+  ],
+  "env_required": [],
+  "tools": [
+    {
+      "name": "get_stock_price",
+      "description": "Get current stock price from Yahoo Finance",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "ticker": {"type": "string", "description": "Stock ticker symbol (e.g. AAPL, MSFT)"}
+        },
+        "required": ["ticker"]
+      }
+    },
+    {
+      "name": "get_crypto_price",
+      "description": "Get current cryptocurrency price from CoinGecko",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "coin": {"type": "string", "description": "Coin ID (e.g. bitcoin, ethereum)", "default": "bitcoin"},
+          "currency": {"type": "string", "description": "Target currency", "default": "usd"}
+        },
+        "required": []
+      }
+    }
+  ]
+}

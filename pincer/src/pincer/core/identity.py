@@ -46,6 +46,7 @@ class IdentityResolver:
                     pincer_user_id TEXT NOT NULL UNIQUE,
                     telegram_user_id INTEGER,
                     whatsapp_phone TEXT,
+                    discord_user_id TEXT,
                     display_name TEXT,
                     preferred_channel TEXT DEFAULT 'telegram',
                     created_at TEXT DEFAULT (datetime('now')),
@@ -59,6 +60,18 @@ class IdentityResolver:
             await db.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_whatsapp
                 ON identity_map(whatsapp_phone) WHERE whatsapp_phone IS NOT NULL
+            """)
+            # Add discord_user_id if missing (Sprint 4 migration for existing DBs)
+            try:
+                await db.execute(
+                    "ALTER TABLE identity_map ADD COLUMN discord_user_id TEXT"
+                )
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+            await db.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_discord
+                ON identity_map(discord_user_id) WHERE discord_user_id IS NOT NULL
             """)
             await db.commit()
 
@@ -105,6 +118,11 @@ class IdentityResolver:
             cursor = await db.execute(
                 "SELECT pincer_user_id FROM identity_map WHERE whatsapp_phone = ?",
                 (phone,),
+            )
+        elif channel == ChannelType.DISCORD:
+            cursor = await db.execute(
+                "SELECT pincer_user_id FROM identity_map WHERE discord_user_id = ?",
+                (str(channel_user_id),),
             )
         else:
             return None
@@ -170,12 +188,15 @@ class IdentityResolver:
         whatsapp_phone = (
             str(channel_user_id).lstrip("+") if channel == ChannelType.WHATSAPP else None
         )
+        discord_id = str(channel_user_id) if channel == ChannelType.DISCORD else None
 
         await db.execute(
             """INSERT INTO identity_map
-               (pincer_user_id, telegram_user_id, whatsapp_phone, display_name, preferred_channel)
-               VALUES (?, ?, ?, ?, ?)""",
-            (pincer_user_id, telegram_id, whatsapp_phone, display_name, channel.value),
+               (pincer_user_id, telegram_user_id, whatsapp_phone, discord_user_id,
+                display_name, preferred_channel)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (pincer_user_id, telegram_id, whatsapp_phone, discord_id,
+             display_name, channel.value),
         )
         await db.commit()
         logger.info("Identity created: %s (%s)", pincer_user_id, channel.value)
@@ -191,6 +212,8 @@ class IdentityResolver:
             col, val = "telegram_user_id", int(channel_user_id)
         elif channel == ChannelType.WHATSAPP:
             col, val = "whatsapp_phone", str(channel_user_id).lstrip("+")
+        elif channel == ChannelType.DISCORD:
+            col, val = "discord_user_id", str(channel_user_id)
         else:
             return
 
@@ -229,6 +252,7 @@ class IdentityResolver:
 
                 telegram_id: int | None = None
                 whatsapp_phone: str | None = None
+                discord_id: str | None = None
 
                 for ch, cid in ((left_channel, left_id), (right_channel, right_id)):
                     if ch == "telegram":
@@ -238,8 +262,10 @@ class IdentityResolver:
                             pass
                     elif ch == "whatsapp":
                         whatsapp_phone = cid.lstrip("+")
+                    elif ch == "discord":
+                        discord_id = cid
 
-                if telegram_id is None and whatsapp_phone is None:
+                if telegram_id is None and whatsapp_phone is None and discord_id is None:
                     continue
 
                 pincer_user_id = self._generate_user_id(
@@ -247,7 +273,7 @@ class IdentityResolver:
                 )
 
                 cursor = await db.execute(
-                    "SELECT pincer_user_id, telegram_user_id, whatsapp_phone "
+                    "SELECT pincer_user_id, telegram_user_id, whatsapp_phone, discord_user_id "
                     "FROM identity_map WHERE pincer_user_id = ?",
                     (pincer_user_id,),
                 )
@@ -269,19 +295,27 @@ class IdentityResolver:
                             (whatsapp_phone, pincer_user_id),
                         )
                         needs_update = True
+                    if discord_id and not existing["discord_user_id"]:
+                        await db.execute(
+                            "UPDATE identity_map SET discord_user_id = ?, "
+                            "updated_at = datetime('now') WHERE pincer_user_id = ?",
+                            (discord_id, pincer_user_id),
+                        )
+                        needs_update = True
                     if needs_update:
                         logger.info("Identity updated from config: %s", pincer_user_id)
                 else:
                     await db.execute(
                         """INSERT INTO identity_map
                            (pincer_user_id, telegram_user_id, whatsapp_phone,
-                            preferred_channel)
-                           VALUES (?, ?, ?, ?)""",
-                        (pincer_user_id, telegram_id, whatsapp_phone, left_channel),
+                            discord_user_id, preferred_channel)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (pincer_user_id, telegram_id, whatsapp_phone,
+                         discord_id, left_channel),
                     )
                     logger.info(
-                        "Identity seeded from config: %s (tg=%s, wa=%s)",
-                        pincer_user_id, telegram_id, whatsapp_phone,
+                        "Identity seeded from config: %s (tg=%s, wa=%s, dc=%s)",
+                        pincer_user_id, telegram_id, whatsapp_phone, discord_id,
                     )
             await db.commit()
 
@@ -293,7 +327,7 @@ class IdentityResolver:
         async with self._get_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT telegram_user_id, whatsapp_phone, preferred_channel "
+                "SELECT telegram_user_id, whatsapp_phone, discord_user_id, preferred_channel "
                 "FROM identity_map WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             )
@@ -301,13 +335,17 @@ class IdentityResolver:
             if not row:
                 raise ValueError(f"Unknown user: {pincer_user_id}")
 
-            telegram_id, whatsapp_phone, preferred = row
+            telegram_id, whatsapp_phone, discord_id, preferred = row
 
+            if preferred == "discord" and discord_id:
+                return ChannelType.DISCORD, discord_id
             if preferred == "whatsapp" and whatsapp_phone:
                 return ChannelType.WHATSAPP, whatsapp_phone
             if preferred == "telegram" and telegram_id:
                 return ChannelType.TELEGRAM, str(telegram_id)
 
+            if discord_id:
+                return ChannelType.DISCORD, discord_id
             if whatsapp_phone:
                 return ChannelType.WHATSAPP, whatsapp_phone
             if telegram_id:
@@ -320,7 +358,7 @@ class IdentityResolver:
         async with self._get_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT telegram_user_id, whatsapp_phone FROM identity_map "
+                "SELECT telegram_user_id, whatsapp_phone, discord_user_id FROM identity_map "
                 "WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             )
@@ -329,11 +367,13 @@ class IdentityResolver:
                 return {}
 
             channels: dict[ChannelType, str] = {}
-            telegram_id, whatsapp_phone = row
+            telegram_id, whatsapp_phone, discord_id = row
             if telegram_id:
                 channels[ChannelType.TELEGRAM] = str(telegram_id)
             if whatsapp_phone:
                 channels[ChannelType.WHATSAPP] = whatsapp_phone
+            if discord_id:
+                channels[ChannelType.DISCORD] = discord_id
             return channels
 
     @staticmethod

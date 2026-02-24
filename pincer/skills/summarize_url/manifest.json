@@ -1,0 +1,22 @@
+{
+  "name": "summarize_url",
+  "version": "0.1.0",
+  "description": "Fetch and clean web page text for summarization",
+  "author": "pincer",
+  "permissions": ["network:*"],
+  "env_required": [],
+  "tools": [
+    {
+      "name": "summarize_url",
+      "description": "Fetch URL, strip HTML, and return clean text for the agent to summarize",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {"type": "string", "description": "URL to fetch (http or https only)"},
+          "max_length": {"type": "integer", "description": "Max characters to return", "default": 5000}
+        },
+        "required": ["url"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "name": "expense_tracker",
+  "version": "0.1.0",
+  "description": "Track personal expenses",
+  "author": "pincer",
+  "permissions": [],
+  "env_required": [],
+  "tools": [
+    {
+      "name": "log_expense",
+      "description": "Log a new expense for a user",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "amount": {"type": "number", "description": "Expense amount"},
+          "user_id": {"type": "string", "description": "User identifier"},
+          "currency": {"type": "string", "description": "Currency code", "default": "USD"},
+          "category": {"type": "string", "description": "Expense category", "default": "general"},
+          "description": {"type": "string", "description": "Optional description", "default": ""}
+        },
+        "required": ["amount", "user_id"]
+      }
+    },
+    {
+      "name": "expense_report",
+      "description": "Get expense report for a user over a period",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string", "description": "User identifier"},
+          "period": {"type": "string", "description": "Report period: month, week, or today", "default": "month"}
+        },
+        "required": ["user_id"]
+      }
+    }
+  ]
+}
