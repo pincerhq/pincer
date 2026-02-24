@@ -1,0 +1,46 @@
+{
+  "name": "news",
+  "version": "0.1.0",
+  "description": "Get news headlines and search articles",
+  "author": "pincer",
+  "permissions": ["network:newsapi.org", "network:*"],
+  "env_required": [],
+  "tools": [
+    {
+      "name": "get_headlines",
+      "description": "Get top news headlines by category and country",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "category": {"type": "string", "description": "Category: general, business, entertainment, health, science, sports, technology", "default": "general"},
+          "country": {"type": "string", "description": "2-letter country code", "default": "us"},
+          "count": {"type": "integer", "description": "Number of articles", "default": 5}
+        }
+      }
+    },
+    {
+      "name": "search_news",
+      "description": "Search news articles by query",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string", "description": "Search query"},
+          "count": {"type": "integer", "description": "Number of articles", "default": 5}
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "read_rss",
+      "description": "Parse RSS or Atom feed from URL",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "url": {"type": "string", "description": "RSS or Atom feed URL"},
+          "count": {"type": "integer", "description": "Number of items to return", "default": 5}
+        },
+        "required": ["url"]
+      }
+    }
+  ]
+}

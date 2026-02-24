@@ -28,6 +28,8 @@ dependencies = [
     "structlog>=24.4.0",
     # Sprint 3: WhatsApp + Proactive Agent
     "neonize>=0.3.14",
+    # Sprint 4: Discord
+    "discord.py>=2.3,<3.0",
     "qrcode[pil]>=8.0",
     "croniter>=5.0",
     "aiosmtplib>=5.1",
@@ -45,7 +47,8 @@ browser = ["playwright>=1.40.0"]
 memory = ["sqlite-vec>=0.1.0"]
 pdf = ["pymupdf>=1.24.0"]
 pdfgen = ["fpdf2>=2.7.0"]
-all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen]"]
+skills = ["youtube-transcript-api", "feedparser"]
+all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

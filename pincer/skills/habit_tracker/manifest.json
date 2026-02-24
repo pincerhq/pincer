@@ -1,0 +1,46 @@
+{
+  "name": "habit_tracker",
+  "version": "0.1.0",
+  "description": "Track daily habits",
+  "author": "pincer",
+  "permissions": [],
+  "env_required": [],
+  "tools": [
+    {
+      "name": "add_habit",
+      "description": "Add a new habit for a user",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string", "description": "User identifier"},
+          "habit_name": {"type": "string", "description": "Name of the habit"}
+        },
+        "required": ["user_id", "habit_name"]
+      }
+    },
+    {
+      "name": "checkin",
+      "description": "Record a habit check-in for today",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string", "description": "User identifier"},
+          "habit_name": {"type": "string", "description": "Name of the habit"},
+          "note": {"type": "string", "description": "Optional note", "default": ""}
+        },
+        "required": ["user_id", "habit_name"]
+      }
+    },
+    {
+      "name": "habit_status",
+      "description": "Get status of all habits for a user",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string", "description": "User identifier"}
+        },
+        "required": ["user_id"]
+      }
+    }
+  ]
+}

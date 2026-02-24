@@ -51,6 +51,10 @@ class ToolRegistry:
     def has_tools(self) -> bool:
         return len(self._tools) > 0
 
+    def list_tools(self) -> list[str]:
+        """Return names of all registered tools."""
+        return list(self._tools.keys())
+
     def register(
         self,
         name: str,

@@ -522,6 +522,52 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         },
     )
 
+    # Sprint 4: Load skills and register their tools
+    from pathlib import Path as _SkillPath
+
+    from pincer.tools.skills.loader import SkillLoader
+    from pincer.tools.skills.scanner import SkillScanner
+
+    skill_scanner = SkillScanner()
+    skill_loader = SkillLoader(
+        bundled_dir=_SkillPath("skills"),
+        scanner=None,  # bundled skills are trusted, skip scanning
+    )
+    loaded_skills = await skill_loader.discover_and_load()
+
+    def _wrap_skill_fn(sync_fn):
+        """Create an async handler wrapping a synchronous skill function."""
+        import functools
+        import inspect
+        import json as _json
+
+        async def handler(**kwargs):
+            kwargs.pop("context", None)
+            if inspect.iscoroutinefunction(sync_fn):
+                result = await sync_fn(**kwargs)
+            else:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, functools.partial(sync_fn, **kwargs))
+            return _json.dumps(result) if isinstance(result, dict) else str(result)
+
+        return handler
+
+    all_fns = skill_loader.get_all_tool_functions()
+    for schema in skill_loader.get_all_tool_schemas():
+        fn_key = schema["name"].replace("__", ".", 1)
+        fn = all_fns.get(fn_key)
+        if fn:
+            tools.register(
+                name=schema["name"],
+                description=schema["description"],
+                handler=_wrap_skill_fn(fn),
+                parameters=schema["input_schema"],
+            )
+
+    if loaded_skills:
+        skill_names = [s.manifest.name for s in loaded_skills.values()]
+        console.print(f"[green]Skills loaded: {', '.join(skill_names)}[/green]")
+
     # Create agent
     agent = Agent(
         settings=settings,
@@ -694,6 +740,25 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
             console.print("[green]WhatsApp connected[/green]")
         except Exception as e:
             console.print(f"[yellow]WhatsApp failed: {e}[/yellow]")
+
+    # Sprint 4: Discord channel (optional)
+    dc = None
+    if settings.discord_bot_token.get_secret_value():
+        try:
+            from pincer.channels.discord_channel import DiscordChannel
+
+            dc = DiscordChannel(settings)
+            dc.set_identity_resolver(identity)
+            dc.set_agent(agent)
+            await dc.start(on_message)
+            channels.append(dc)
+            channel_map[dc.name] = dc
+            router.register(ChannelType.DISCORD, dc)
+            console.print("[green]Discord connected[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Discord failed: {e}[/yellow]")
+    else:
+        console.print("[dim]Discord skipped (no PINCER_DISCORD_BOT_TOKEN)[/dim]")
 
     if not channels:
         console.print(
@@ -901,3 +966,501 @@ def auth_google() -> None:
     console.print(f"  Refresh token:  {'Yes' if creds.refresh_token else 'No'}")
     console.print(f"  Expires:        {creds.expiry}")
     console.print("\nYou can now use calendar tools in Pincer.")
+
+
+# ═══════════════════════════════════════════════
+# Sprint 4: New commands
+# ═══════════════════════════════════════════════
+
+
+@app.command(name="init")
+def init() -> None:
+    """Interactive setup wizard — zero to running in 5 minutes."""
+    from pathlib import Path as _P
+
+    from rich.panel import Panel
+    from rich.prompt import Confirm, Prompt
+
+    console.print(Panel("[bold]Pincer Setup Wizard[/bold]", expand=False))
+
+    env_lines: list[str] = []
+
+    # Step 1: LLM Provider
+    console.print("\n[bold]Step 1: LLM Provider[/bold]")
+    provider = Prompt.ask(
+        "Choose provider",
+        choices=["anthropic", "openai", "both"],
+        default="anthropic",
+    )
+    if provider in ("anthropic", "both"):
+        key = Prompt.ask("Anthropic API key", password=True)
+        env_lines.append(f"PINCER_ANTHROPIC_API_KEY={key}")
+        if provider == "anthropic":
+            env_lines.append("PINCER_DEFAULT_PROVIDER=anthropic")
+            env_lines.append("PINCER_DEFAULT_MODEL=claude-sonnet-4-5-20250929")
+    if provider in ("openai", "both"):
+        key = Prompt.ask("OpenAI API key", password=True)
+        env_lines.append(f"PINCER_OPENAI_API_KEY={key}")
+        if provider == "openai":
+            env_lines.append("PINCER_DEFAULT_PROVIDER=openai")
+            env_lines.append("PINCER_DEFAULT_MODEL=gpt-4o")
+
+    # Step 2: Channels
+    console.print("\n[bold]Step 2: Channels[/bold]")
+    if Confirm.ask("Enable Telegram?", default=False):
+        token = Prompt.ask("Telegram bot token", password=True)
+        env_lines.append(f"PINCER_TELEGRAM_BOT_TOKEN={token}")
+        allowed = Prompt.ask("Allowed user IDs (comma-separated, empty = all)", default="")
+        if allowed:
+            env_lines.append(f"PINCER_TELEGRAM_ALLOWED_USERS={allowed}")
+
+    if Confirm.ask("Enable Discord?", default=False):
+        token = Prompt.ask("Discord bot token", password=True)
+        env_lines.append(f"PINCER_DISCORD_BOT_TOKEN={token}")
+
+    if Confirm.ask("Enable WhatsApp?", default=False):
+        env_lines.append("PINCER_WHATSAPP_ENABLED=true")
+        console.print("  Run [bold]pincer pair-whatsapp[/bold] to pair after setup.")
+
+    # Step 3: Preferences
+    console.print("\n[bold]Step 3: Preferences[/bold]")
+    tz = Prompt.ask("Timezone", default="Europe/Berlin")
+    env_lines.append(f"PINCER_TIMEZONE={tz}")
+    budget = Prompt.ask("Daily budget (USD)", default="5.00")
+    env_lines.append(f"PINCER_DAILY_BUDGET_USD={budget}")
+
+    # Step 4: Optional Integrations
+    console.print("\n[bold]Step 4: Optional Integrations[/bold]")
+    if Confirm.ask("Configure email?", default=False):
+        env_lines.append(f"PINCER_EMAIL_IMAP_HOST={Prompt.ask('IMAP host', default='imap.gmail.com')}")
+        env_lines.append(f"PINCER_EMAIL_SMTP_HOST={Prompt.ask('SMTP host', default='smtp.gmail.com')}")
+        env_lines.append(f"PINCER_EMAIL_USERNAME={Prompt.ask('Email username')}")
+        env_lines.append(f"PINCER_EMAIL_PASSWORD={Prompt.ask('Email password', password=True)}")
+
+    if Confirm.ask("Add OpenWeatherMap key?", default=False):
+        key = Prompt.ask("OpenWeatherMap API key", password=True)
+        env_lines.append(f"PINCER_OPENWEATHERMAP_API_KEY={key}")
+
+    if Confirm.ask("Add NewsAPI key?", default=False):
+        key = Prompt.ask("NewsAPI key", password=True)
+        env_lines.append(f"PINCER_NEWSAPI_KEY={key}")
+
+    # Write .env
+    env_path = _P(".env")
+    if env_path.exists():
+        if not Confirm.ask(f"\n{env_path} already exists. Overwrite?", default=False):
+            console.print("[yellow]Aborted.[/yellow]")
+            raise typer.Exit(0)
+
+    env_path.write_text("\n".join(env_lines) + "\n")
+
+    console.print(Panel(
+        "[green]Setup complete![/green]\n\n"
+        "Next steps:\n"
+        "  1. [bold]pincer run[/bold]   — start the agent\n"
+        "  2. [bold]pincer doctor[/bold] — verify configuration\n"
+        "  3. [bold]pincer chat[/bold]  — test in the terminal",
+        title="Done",
+        expand=False,
+    ))
+
+
+@app.command()
+def doctor() -> None:
+    """Health check — verify configuration and connections."""
+    import sys as _sys
+    import time as _time
+
+    from rich.table import Table
+
+    # Config checks
+    table = Table(title="Configuration", show_header=True)
+    table.add_column("Check", style="bold")
+    table.add_column("Status")
+    table.add_column("Details")
+
+    from pathlib import Path as _P
+    env_exists = _P(".env").exists()
+    table.add_row(".env file", "\u2705" if env_exists else "\u26a0\ufe0f", "Found" if env_exists else "Not found")
+
+    try:
+        from pincer.config import get_settings
+        s = get_settings()
+
+        anthropic_set = s.anthropic_api_key.get_secret_value() != ""
+        openai_set = s.openai_api_key.get_secret_value() != ""
+        tg_set = s.telegram_bot_token.get_secret_value() != ""
+        dc_set = s.discord_bot_token.get_secret_value() != ""
+
+        table.add_row(
+            "Anthropic API key",
+            "\u2705" if anthropic_set else "\u2b55",
+            f"...{s.anthropic_api_key.get_secret_value()[-4:]}" if anthropic_set else "Not set",
+        )
+        table.add_row(
+            "OpenAI API key",
+            "\u2705" if openai_set else "\u2b55",
+            f"...{s.openai_api_key.get_secret_value()[-4:]}" if openai_set else "Not set",
+        )
+        table.add_row("Telegram", "\u2705" if tg_set else "\u2b55", "Configured" if tg_set else "Not set")
+        table.add_row("Discord", "\u2705" if dc_set else "\u2b55", "Configured" if dc_set else "Not set")
+        table.add_row("WhatsApp", "\u2705" if s.whatsapp_enabled else "\u2b55", "Enabled" if s.whatsapp_enabled else "Disabled")
+        table.add_row("Database", "\u2705" if s.db_path.parent.exists() else "\u274c", str(s.db_path))
+        table.add_row("Python", "\u2705", f"{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}")
+
+        # Skills check
+        try:
+            from pincer.tools.skills.loader import SkillLoader
+            loader = SkillLoader(bundled_dir=_P("skills"))
+            skill_dirs = loader._discover_skill_dirs()
+            table.add_row("Skills", "\u2705" if skill_dirs else "\u2b55", f"{len(skill_dirs)} discovered")
+        except Exception:
+            table.add_row("Skills", "\u26a0\ufe0f", "Could not scan")
+
+    except Exception as e:
+        table.add_row("Config", "\u274c", str(e))
+
+    console.print(table)
+
+    # Connection tests
+    console.print("\n[bold]Connection Tests[/bold]")
+    try:
+        s = get_settings()  # type: ignore[used-before-def]
+        if s.anthropic_api_key.get_secret_value():
+            with console.status("Testing Anthropic..."):
+                try:
+                    import httpx
+                    start = _time.monotonic()
+                    r = httpx.get(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={"x-api-key": s.anthropic_api_key.get_secret_value(), "anthropic-version": "2023-06-01"},
+                        timeout=10,
+                    )
+                    latency = (_time.monotonic() - start) * 1000
+                    console.print(f"  Anthropic: \u2705 reachable ({latency:.0f}ms)")
+                except Exception as e:
+                    console.print(f"  Anthropic: \u274c {e}")
+
+        if s.openai_api_key.get_secret_value():
+            with console.status("Testing OpenAI..."):
+                try:
+                    import httpx
+                    start = _time.monotonic()
+                    r = httpx.get(
+                        "https://api.openai.com/v1/models",
+                        headers={"Authorization": f"Bearer {s.openai_api_key.get_secret_value()}"},
+                        timeout=10,
+                    )
+                    latency = (_time.monotonic() - start) * 1000
+                    console.print(f"  OpenAI: \u2705 reachable ({latency:.0f}ms)")
+                except Exception as e:
+                    console.print(f"  OpenAI: \u274c {e}")
+    except Exception:
+        console.print("  [yellow]Skipped — config not loaded[/yellow]")
+
+    # Security audit
+    console.print("\n[bold]Security Audit[/bold]")
+    try:
+        from pincer.tools.sandbox import SandboxConfig
+        console.print("  Sandbox: \u2705 available")
+    except Exception:
+        console.print("  Sandbox: \u274c not available")
+    try:
+        from pincer.tools.skills.scanner import SkillScanner
+        console.print("  Scanner: \u2705 available")
+    except Exception:
+        console.print("  Scanner: \u274c not available")
+
+    console.print()
+
+
+@app.command()
+def chat() -> None:
+    """Interactive CLI chat — test the agent without messaging apps."""
+    asyncio.run(_chat_loop())
+
+
+async def _chat_loop() -> None:
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+
+    from pincer.config import get_settings
+
+    try:
+        settings = get_settings()
+    except Exception as e:
+        console.print(f"[red]Configuration error:[/red] {e}")
+        return
+
+    _setup_logging("WARNING")
+
+    console.print(Panel(
+        f"[bold]{settings.agent_name} CLI Chat[/bold]\n"
+        "Type your message and press Enter. Commands: /quit, /clear, /cost",
+        expand=False,
+    ))
+
+    from pincer.channels.base import IncomingMessage
+
+    # Reuse the same agent setup as `run` but minimal
+    from pincer.core.agent import Agent
+    from pincer.core.session import SessionManager
+    from pincer.llm.cost_tracker import CostTracker
+    from pincer.memory.store import MemoryStore
+    from pincer.memory.summarizer import Summarizer
+    from pincer.tools.builtin.files import file_list, file_read, file_write
+    from pincer.tools.builtin.web_search import web_search
+    from pincer.tools.registry import ToolRegistry
+
+    session_mgr = SessionManager(settings.db_path, settings.max_session_messages)
+    await session_mgr.initialize()
+    cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
+    await cost_tracker.initialize()
+
+    if settings.default_provider.value == "anthropic":
+        from pincer.llm.anthropic_provider import AnthropicProvider
+        llm = AnthropicProvider(settings)
+    else:
+        from pincer.llm.openai_provider import OpenAIProvider
+        llm = OpenAIProvider(settings)
+
+    memory_store: MemoryStore | None = None
+    summarizer: Summarizer | None = None
+    if settings.memory_enabled:
+        memory_store = MemoryStore(settings.db_path)
+        await memory_store.initialize()
+        summarizer = Summarizer(
+            llm=llm, memory_store=memory_store,
+            session_manager=session_mgr,
+            summary_model=settings.summary_model,
+            threshold=settings.summary_threshold,
+        )
+
+    tools = ToolRegistry()
+    tools.register(name="web_search", description="Search the web", handler=web_search,
+                   parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]})
+    tools.register(name="file_read", description="Read a file", handler=file_read)
+    tools.register(name="file_write", description="Write a file", handler=file_write)
+    tools.register(name="file_list", description="List files", handler=file_list)
+
+    agent = Agent(
+        settings=settings, llm=llm, session_manager=session_mgr,
+        cost_tracker=cost_tracker, tool_registry=tools,
+        memory_store=memory_store, summarizer=summarizer,
+    )
+
+    user_id = "cli_user"
+    channel = "cli"
+
+    try:
+        while True:
+            try:
+                text = console.input("[bold cyan]You:[/bold cyan] ")
+            except (EOFError, KeyboardInterrupt):
+                break
+
+            text = text.strip()
+            if not text:
+                continue
+            if text.lower() in ("/quit", "exit", "quit"):
+                break
+            if text == "/clear":
+                session = await session_mgr.get_or_create(user_id, channel)
+                await session_mgr.clear(session)
+                console.print("[dim]Conversation cleared.[/dim]")
+                continue
+            if text == "/cost":
+                today = await cost_tracker.get_today_spend()
+                console.print(f"[dim]Today: ${today:.4f}[/dim]")
+                continue
+
+            with console.status(f"[bold green]{settings.agent_name} is thinking...[/bold green]"):
+                response = await agent.handle_message(
+                    user_id=user_id, channel=channel, text=text,
+                )
+
+            console.print(f"\n[bold green]{settings.agent_name}:[/bold green]")
+            try:
+                console.print(Markdown(response.text))
+            except Exception:
+                console.print(response.text)
+            if response.cost_usd > 0:
+                console.print(f"[dim]${response.cost_usd:.4f}[/dim]")
+            console.print()
+    finally:
+        await llm.close()
+        await session_mgr.close()
+        await cost_tracker.close()
+        if memory_store:
+            await memory_store.close()
+        console.print("[dim]Goodbye.[/dim]")
+
+
+# ── Skills subcommands ────────────────────────
+
+skills_app = typer.Typer(name="skills", help="Manage skills and plugins")
+app.add_typer(skills_app, name="skills")
+
+
+@skills_app.command(name="list")
+def skills_list() -> None:
+    """List installed skills."""
+    from pathlib import Path as _P
+
+    from rich.table import Table
+
+    from pincer.tools.skills.loader import SkillLoader
+
+    loader = SkillLoader(bundled_dir=_P("skills"))
+    dirs = loader._discover_skill_dirs()
+
+    table = Table(title="Installed Skills")
+    table.add_column("Name", style="bold")
+    table.add_column("Version")
+    table.add_column("Tools")
+    table.add_column("Author")
+    table.add_column("Source")
+
+    import json
+
+    for d in dirs:
+        try:
+            m = json.loads((d / "manifest.json").read_text())
+            tool_names = [t["name"] for t in m.get("tools", [])]
+            source = "bundled" if "skills" in str(d) and ".pincer" not in str(d) else "user"
+            table.add_row(
+                m.get("name", d.name),
+                m.get("version", "?"),
+                str(len(tool_names)),
+                m.get("author", "unknown"),
+                source,
+            )
+        except Exception as e:
+            table.add_row(d.name, "?", "?", "?", f"error: {e}")
+
+    console.print(table)
+
+
+@skills_app.command(name="install")
+def skills_install(source: str = typer.Argument(help="Path to skill directory")) -> None:
+    """Install a skill (scan first, block if unsafe)."""
+    import json
+    import shutil
+    from pathlib import Path as _P
+
+    from pincer.tools.skills.scanner import SkillScanner
+
+    source_path = _P(source)
+    if not source_path.is_dir():
+        console.print(f"[red]Not a directory: {source}[/red]")
+        raise typer.Exit(1)
+    if not (source_path / "manifest.json").is_file() or not (source_path / "skill.py").is_file():
+        console.print("[red]Invalid skill: needs manifest.json and skill.py[/red]")
+        raise typer.Exit(1)
+
+    scanner = SkillScanner()
+    result = scanner.scan_directory(str(source_path))
+    console.print(result.summary())
+
+    if not result.passed:
+        console.print(f"\n[red]Skill blocked (score {result.score}/100, min 50)[/red]")
+        raise typer.Exit(1)
+
+    manifest = json.loads((source_path / "manifest.json").read_text())
+    name = manifest.get("name", source_path.name)
+    dest = _P.home() / ".pincer" / "skills" / name
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source_path, dest, dirs_exist_ok=True)
+    console.print(f"\n[green]Skill '{name}' installed to {dest}[/green]")
+
+
+@skills_app.command(name="create")
+def skills_create(name: str = typer.Argument(help="Name for the new skill")) -> None:
+    """Scaffold a new skill directory."""
+    import json
+    from pathlib import Path as _P
+
+    skill_dir = _P("skills") / name
+    if skill_dir.exists():
+        console.print(f"[red]Directory already exists: {skill_dir}[/red]")
+        raise typer.Exit(1)
+
+    skill_dir.mkdir(parents=True)
+
+    manifest = {
+        "name": name,
+        "version": "0.1.0",
+        "description": f"{name} skill",
+        "author": "you",
+        "permissions": [],
+        "env_required": [],
+        "tools": [
+            {
+                "name": f"{name}_action",
+                "description": f"Main action for {name}",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "string", "description": "Input value"},
+                    },
+                    "required": ["input"],
+                },
+            }
+        ],
+    }
+    (skill_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+
+    skill_py = f'''"""Skill: {name}"""
+
+
+def {name}_action(input: str) -> dict:
+    """Main action for {name}."""
+    return {{"result": f"Processed: {{input}}"}}
+'''
+    (skill_dir / "skill.py").write_text(skill_py)
+    console.print(f"[green]Created skill scaffold at {skill_dir}/[/green]")
+    console.print(f"  manifest.json — edit metadata and tool definitions")
+    console.print(f"  skill.py      — implement your tool functions")
+
+
+@skills_app.command(name="scan")
+def skills_scan(path: str = typer.Argument(help="Path to skill directory")) -> None:
+    """Run security scanner on a skill."""
+    from pathlib import Path as _P
+
+    from rich.table import Table
+
+    from pincer.tools.skills.scanner import SkillScanner
+
+    skill_path = _P(path)
+    if not skill_path.is_dir():
+        console.print(f"[red]Not a directory: {path}[/red]")
+        raise typer.Exit(1)
+
+    scanner = SkillScanner()
+    result = scanner.scan_directory(str(skill_path))
+
+    console.print(f"\n[bold]Scan: {result.skill_name}[/bold]")
+    console.print(f"Score: {result.score}/100 — {'[green]PASS[/green]' if result.passed else '[red]FAIL[/red]'}")
+
+    if result.findings:
+        table = Table(title="Findings")
+        table.add_column("Sev", width=8)
+        table.add_column("Line", width=6)
+        table.add_column("Category")
+        table.add_column("Description")
+        table.add_column("Penalty", justify="right")
+
+        for f in result.findings:
+            sev_color = {"critical": "red", "warning": "yellow", "info": "blue"}.get(f.severity, "white")
+            table.add_row(
+                f"[{sev_color}]{f.severity}[/{sev_color}]",
+                str(f.line),
+                f.category,
+                f.description,
+                f"-{f.penalty}",
+            )
+        console.print(table)
+
+    if result.error:
+        console.print(f"[red]Error: {result.error}[/red]")
