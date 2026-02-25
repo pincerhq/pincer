@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
 from typing import TYPE_CHECKING
 
 import typer
@@ -829,6 +831,8 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         if memory_store:
             await memory_store.close()
         console.print("[green]Shutdown complete[/green]")
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        os._exit(0)
 
 
 @app.command()

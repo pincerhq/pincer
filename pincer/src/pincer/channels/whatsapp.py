@@ -152,6 +152,9 @@ class WhatsAppChannel(BaseChannel):
                 await self._client.disconnect()
             except Exception as e:
                 logger.warning("WhatsApp disconnect error: %s", e)
+        if event_global_loop is not None and event_global_loop.is_running():
+            event_global_loop.call_soon_threadsafe(event_global_loop.stop)
+            await asyncio.sleep(0.2)
         logger.info("WhatsApp channel stopped")
 
     async def send(self, user_id: str, text: str, **kwargs: Any) -> None:

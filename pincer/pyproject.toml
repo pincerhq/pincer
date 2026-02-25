@@ -28,8 +28,8 @@ dependencies = [
     "structlog>=24.4.0",
     # Sprint 3: WhatsApp + Proactive Agent
     "neonize>=0.3.14",
-    # Sprint 4: Discord
-    "discord.py>=2.3,<3.0",
+    # Sprint 4: Discord (PyNaCl required for voice)
+    "discord.py[voice]>=2.3,<3.0",
     "qrcode[pil]>=8.0",
     "croniter>=5.0",
     "aiosmtplib>=5.1",
