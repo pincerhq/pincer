@@ -87,6 +87,11 @@ class ToolRegistry:
             })
         return schemas
 
+    def requires_approval(self, name: str) -> bool:
+        """Check whether a tool requires user approval before execution."""
+        tool = self._tools.get(name)
+        return tool.require_approval if tool else False
+
     async def execute(
         self,
         name: str,

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ from typing import Any
 import aiosqlite
 
 from pincer.config import get_settings
+
+_UID_RE = re.compile(r"UID:\s*(\d+)")
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +36,7 @@ class EventTriggerManager:
         self._router = router
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
+        self._seen_email_uids: set[str] | None = None
 
     async def ensure_table(self) -> None:
         async with aiosqlite.connect(self._db_path) as db:
@@ -112,22 +116,40 @@ class EventTriggerManager:
         from pincer.tools.builtin.email_tool import email_check
 
         settings = get_settings()
-        result = await email_check(limit=5)
-        if not isinstance(result, str) or "Error" in result or "No unread" in result:
-            return
-
-        # Parse the formatted string for message IDs - this is a simple approach
-        # In production, a structured return would be preferable
         user_id = settings.default_user_id
         if not user_id:
             return
 
-        trigger_key = f"email_batch_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
-        if await self._is_processed("new_email", trigger_key):
+        result = await email_check(limit=10)
+        if not isinstance(result, str) or "Error" in result or "No unread" in result:
             return
 
-        notification = f"New email notification:\n{result}"
+        current_uids = set(_UID_RE.findall(result))
+        if not current_uids:
+            return
+
+        if self._seen_email_uids is None:
+            self._seen_email_uids = current_uids
+            logger.debug("Email trigger: learned %d existing UIDs", len(current_uids))
+            return
+
+        new_uids = current_uids - self._seen_email_uids
+        self._seen_email_uids = current_uids
+
+        if not new_uids:
+            return
+
+        new_lines = []
+        for line_block in result.split("- UID: "):
+            for uid in new_uids:
+                if line_block.startswith(uid):
+                    new_lines.append(f"- UID: {line_block.strip()}")
+                    break
+
+        notification = f"You have {len(new_uids)} new email(s):\n" + "\n".join(new_lines)
         await self._router.send_to_user(user_id, notification)
+
+        trigger_key = f"email_uids_{'_'.join(sorted(new_uids))}"
         await self._mark_processed("new_email", trigger_key, user_id, "notified")
 
     # ── Calendar reminder trigger ────────────────

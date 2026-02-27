@@ -13,9 +13,10 @@ Flow:
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pincer.exceptions import BudgetExceededError, LLMError, ToolNotFoundError
 from pincer.llm.base import (
@@ -27,6 +28,9 @@ from pincer.llm.base import (
     ToolCall,
     ToolResult,
 )
+
+# Signature: (tool_name, arguments) -> approved?
+ApprovalCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -127,6 +131,7 @@ class Agent:
         tool_registry: ToolRegistry,
         memory_store: MemoryStore | None = None,
         summarizer: Summarizer | None = None,
+        approval_callback: ApprovalCallback | None = None,
     ) -> None:
         self._settings = settings
         self._llm = llm
@@ -135,6 +140,7 @@ class Agent:
         self._tools = tool_registry
         self._memory = memory_store
         self._summarizer = summarizer
+        self._approval_callback = approval_callback
 
     async def handle_message(
         self,
@@ -484,8 +490,35 @@ class Agent:
         user_id: str,
         channel: str,
     ) -> ToolResult:
-        """Execute a single tool call, catching errors."""
+        """Execute a single tool call, catching errors.
+
+        If the tool requires approval and a callback is configured, the user
+        is prompted first.  Without a callback the tool still runs (backward
+        compat with shell_require_approval) but a warning is logged.
+        """
         logger.info("Tool call: %s(%s)", tool_call.name, tool_call.arguments)
+
+        if self._tools.requires_approval(tool_call.name):
+            if self._approval_callback:
+                try:
+                    approved = await self._approval_callback(
+                        tool_call.name, tool_call.arguments,
+                    )
+                except Exception:
+                    logger.exception("Approval callback failed for '%s'", tool_call.name)
+                    approved = False
+                if not approved:
+                    return ToolResult(
+                        tool_call_id=tool_call.id,
+                        content=f"Action '{tool_call.name}' was declined by the user.",
+                        is_error=True,
+                    )
+            else:
+                logger.warning(
+                    "Tool '%s' requires approval but no callback is configured; auto-approving.",
+                    tool_call.name,
+                )
+
         try:
             result_text = await self._tools.execute(
                 tool_call.name,
