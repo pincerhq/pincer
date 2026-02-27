@@ -10,7 +10,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
@@ -163,3 +163,126 @@ class CostTracker:
                     total_output_tokens=int(row[3]),
                 )
             return CostSummary(0.0, 0, 0, 0)
+
+    # ── Sprint 5: Extended query methods for API ─────────
+
+    async def get_daily_costs(self, date_str: str) -> dict[str, Any]:
+        """Get costs for a specific date (YYYY-MM-DD)."""
+        assert self._db is not None
+        day_start = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
+        day_end = day_start + 86400
+
+        async with self._db.execute(
+            "SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM cost_log "
+            "WHERE timestamp >= ? AND timestamp < ?",
+            (day_start, day_end),
+        ) as cursor:
+            row = await cursor.fetchone()
+            total = float(row[0]) if row else 0.0
+            count = int(row[1]) if row else 0
+
+        by_model: dict[str, float] = {}
+        async with self._db.execute(
+            "SELECT model, COALESCE(SUM(cost_usd),0) FROM cost_log "
+            "WHERE timestamp >= ? AND timestamp < ? GROUP BY model",
+            (day_start, day_end),
+        ) as cursor:
+            async for row in cursor:
+                by_model[row[0]] = round(float(row[1]), 6)
+
+        by_tool: dict[str, float] = {}
+        return {
+            "total": round(total, 6),
+            "request_count": count,
+            "by_model": by_model,
+            "by_tool": by_tool,
+        }
+
+    async def get_daily_history(
+        self, start: str, end: str
+    ) -> list[dict[str, Any]]:
+        """Get daily spend history between two dates (YYYY-MM-DD)."""
+        assert self._db is not None
+        start_ts = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
+        end_ts = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=UTC).timestamp() + 86400
+
+        async with self._db.execute(
+            "SELECT date(timestamp, 'unixepoch') as day, "
+            "COALESCE(SUM(cost_usd),0), COUNT(*) FROM cost_log "
+            "WHERE timestamp >= ? AND timestamp < ? GROUP BY day ORDER BY day",
+            (start_ts, end_ts),
+        ) as cursor:
+            return [
+                {"date": row[0], "total": round(float(row[1]), 6), "requests": int(row[2])}
+                async for row in cursor
+            ]
+
+    async def get_costs_by_model(
+        self, start: str, end: str
+    ) -> list[dict[str, Any]]:
+        """Get cost breakdown by model between two dates."""
+        assert self._db is not None
+        start_ts = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
+        end_ts = datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=UTC).timestamp() + 86400
+
+        async with self._db.execute(
+            "SELECT model, COALESCE(SUM(cost_usd),0), COUNT(*), "
+            "COALESCE(SUM(input_tokens+output_tokens),0) FROM cost_log "
+            "WHERE timestamp >= ? AND timestamp < ? "
+            "GROUP BY model ORDER BY SUM(cost_usd) DESC",
+            (start_ts, end_ts),
+        ) as cursor:
+            return [
+                {
+                    "model": row[0],
+                    "total": round(float(row[1]), 6),
+                    "requests": int(row[2]),
+                    "tokens": int(row[3]),
+                }
+                async for row in cursor
+            ]
+
+    async def get_costs_by_tool(
+        self, start: str, end: str
+    ) -> list[dict[str, Any]]:
+        """Placeholder for per-tool cost breakdown (requires tool tracking)."""
+        return []
+
+    async def get_budget_status(self) -> dict[str, Any]:
+        """Get current budget status."""
+        today_spent = await self.get_today_spend()
+        return {
+            "daily_limit": self._daily_budget,
+            "spent_pct": round(
+                (today_spent / self._daily_budget) * 100, 1
+            )
+            if self._daily_budget > 0
+            else 0,
+            "remaining": round(
+                max(0, self._daily_budget - today_spent), 4
+            ),
+            "is_downgraded": (
+                today_spent / self._daily_budget >= 0.7
+                if self._daily_budget > 0
+                else False
+            ),
+        }
+
+
+_cost_tracker: CostTracker | None = None
+
+
+async def get_cost_tracker(
+    db_path: "Path | None" = None, daily_budget: float = 5.0
+) -> CostTracker:
+    """Singleton accessor for the cost tracker."""
+    global _cost_tracker
+    if _cost_tracker is None:
+        if db_path is None:
+            from pincer.config import get_settings
+            s = get_settings()
+            db_path = s.db_path
+            daily_budget = s.daily_budget_usd
+        _cost_tracker = CostTracker(db_path, daily_budget)
+        await _cost_tracker.initialize()
+    return _cost_tracker

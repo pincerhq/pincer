@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: pincer
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: PINCER_ANTHROPIC_API_KEY
+        sync: false
+      - key: PINCER_TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: PINCER_DASHBOARD_TOKEN
+        generateValue: true
+    disk:
+      name: pincer-data
+      mountPath: /app/data
+      sizeGB: 1

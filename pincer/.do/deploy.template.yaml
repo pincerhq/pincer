@@ -1,0 +1,30 @@
+spec:
+  name: pincer
+  services:
+    - name: pincer
+      dockerfile_path: Dockerfile
+      github:
+        branch: main
+        deploy_on_push: true
+        repo: pincerhq/pincer
+      http_port: 8080
+      instance_count: 1
+      instance_size_slug: apps-s-1vcpu-1gb
+      health_check:
+        http_path: /api/health
+      envs:
+        - key: PINCER_LLM_PROVIDER
+          scope: RUN_TIME
+          value: anthropic
+        - key: PINCER_ANTHROPIC_API_KEY
+          scope: RUN_TIME
+          type: SECRET
+          value: ""
+        - key: PINCER_TELEGRAM_BOT_TOKEN
+          scope: RUN_TIME
+          type: SECRET
+          value: ""
+        - key: PINCER_DASHBOARD_TOKEN
+          scope: RUN_TIME
+          type: SECRET
+          value: ""

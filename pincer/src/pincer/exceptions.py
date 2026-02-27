@@ -58,3 +58,12 @@ class ScheduleError(PincerError):
 
 class SkillLoadError(ToolError):
     """A skill failed to load (manifest, import, or validation error)."""
+
+
+class RateLimitExceeded(PincerError):
+    """User or global rate limit exceeded."""
+
+    def __init__(self, message: str, wait_seconds: float = 0.0):
+        self.message = message
+        self.wait_seconds = wait_seconds
+        super().__init__(message)

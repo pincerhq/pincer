@@ -35,7 +35,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="PINCER_",
-        env_file=".env",
+        env_file=("../.env", ".env"),
         env_file_encoding="utf-8",
         env_ignore_empty=True,
         case_sensitive=False,
@@ -52,7 +52,7 @@ class Settings(BaseSettings):
         description="Default model identifier",
     )
     max_tokens: int = Field(default=8192, ge=1, le=128000)
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    temperature: float = Field(default=0.5, ge=0.0, le=2.0)
 
     # ── Channels ─────────────────────────────────────────
     telegram_bot_token: SecretStr = Field(default=SecretStr(""), description="Telegram bot token")
@@ -170,6 +170,19 @@ class Settings(BaseSettings):
     webhook_port: int = Field(default=8765, description="Webhook listener port")
     webhook_secret: SecretStr = Field(default=SecretStr(""), description="Webhook HMAC secret")
 
+    # ── Dashboard / API (Sprint 5) ───────────────────────
+    dashboard_token: SecretStr = Field(
+        default=SecretStr(""), description="Bearer token for API auth"
+    )
+    dashboard_host: str = Field(default="127.0.0.1", description="API server bind host")
+    dashboard_port: int = Field(default=8080, ge=1, le=65535, description="API server port")
+
+    # ── Security (Sprint 5) ──────────────────────────────
+    audit_disabled: bool = Field(default=False, description="Disable audit logging")
+    rate_messages_per_min: int = Field(default=30, ge=1, description="Per-user message rate limit")
+    rate_tools_per_min: int = Field(default=20, ge=1, description="Per-user tool call rate limit")
+    max_concurrent_llm: int = Field(default=5, ge=1, description="Max concurrent LLM requests")
+
     @field_validator("telegram_allowed_users", mode="before")
     @classmethod
     def parse_allowed_users(cls, v: str | list[int]) -> list[int]:
@@ -219,5 +232,25 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Singleton settings accessor. Cached after first call."""
     settings = Settings()  # type: ignore[call-arg]
+    settings.ensure_dirs()
+    return settings
+
+
+class _RelaxedSettings(Settings):
+    """Settings subclass that skips API key validation for read-only CLI commands."""
+
+    @model_validator(mode="after")
+    def validate_api_keys(self) -> _RelaxedSettings:  # type: ignore[override]
+        return self
+
+
+@lru_cache(maxsize=1)
+def get_settings_relaxed() -> Settings:
+    """Settings accessor that does not require LLM API keys.
+
+    Use for read-only CLI commands (memory stats, schedule list, audit, etc.)
+    that only need paths and storage config.
+    """
+    settings = _RelaxedSettings()  # type: ignore[call-arg]
     settings.ensure_dirs()
     return settings

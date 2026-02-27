@@ -28,8 +28,8 @@ dependencies = [
     "structlog>=24.4.0",
     # Sprint 3: WhatsApp + Proactive Agent
     "neonize>=0.3.14",
-    # Sprint 4: Discord
-    "discord.py>=2.3,<3.0",
+    # Sprint 4: Discord (PyNaCl required for voice)
+    "discord.py[voice]>=2.3,<3.0",
     "qrcode[pil]>=8.0",
     "croniter>=5.0",
     "aiosmtplib>=5.1",
@@ -38,6 +38,9 @@ dependencies = [
     "google-auth-oauthlib>=1.2",
     "google-auth-httplib2>=0.2",
     "aiogoogle>=5.13",
+    # Sprint 5: API Server
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
 ]
 
 [project.optional-dependencies]
@@ -55,6 +58,7 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
+    "httpx>=0.27.0",
 ]
 
 [project.scripts]

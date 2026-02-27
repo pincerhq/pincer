@@ -1,4 +1,41 @@
 services:
   pincer:
-    build: .
-    env_file: .env
+    build:
+      context: .
+      target: runtime
+    container_name: pincer
+    env_file:
+      - path: .env
+        required: false
+      - path: ../.env
+        required: false
+    environment:
+      - PINCER_DATA_DIR=/app/data
+      - PINCER_DASHBOARD_HOST=0.0.0.0
+      - PINCER_DASHBOARD_PORT=8080
+    volumes:
+      - pincer-data:/app/data
+      - ./skills:/app/skills:ro
+    ports:
+      - "${PINCER_PORT:-8080}:8080"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pincer-data:
+    name: pincer-data

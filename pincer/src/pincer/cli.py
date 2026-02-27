@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import signal
 from typing import TYPE_CHECKING
 
 import typer
@@ -64,6 +66,8 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
     from pincer.llm.cost_tracker import CostTracker
     from pincer.memory.store import MemoryStore
     from pincer.memory.summarizer import Summarizer
+    from pincer.security.audit import AuditAction, AuditEntry, get_audit_logger
+    from pincer.security.rate_limiter import get_rate_limiter
     from pincer.tools.builtin.files import file_list, file_read, file_write
     from pincer.tools.builtin.shell import shell_exec
     from pincer.tools.builtin.web_search import web_search
@@ -75,6 +79,20 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
 
     cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
     await cost_tracker.initialize()
+
+    # Sprint 5: Security components
+    audit_logger = None
+    if not settings.audit_disabled:
+        audit_db = settings.data_dir / "audit.db"
+        audit_logger = await get_audit_logger(audit_db)
+        console.print("[green]Audit logging enabled[/green]")
+
+    rate_limiter = get_rate_limiter(
+        messages_per_minute=settings.rate_messages_per_min,
+        tool_calls_per_minute=settings.rate_tools_per_min,
+        max_concurrent_llm=settings.max_concurrent_llm,
+        max_daily_spend_usd=settings.daily_budget_usd,
+    )
 
     # Initialize memory system
     memory_store: MemoryStore | None = None
@@ -581,6 +599,8 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
 
     # Message handler bridge
     async def on_message(incoming: IncomingMessage) -> str:
+        from pincer.exceptions import RateLimitExceeded
+
         # Special commands
         if incoming.text == "/clear":
             session = await session_mgr.get_or_create(incoming.user_id, incoming.channel)
@@ -599,6 +619,28 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
                 f"{summary.total_output_tokens:,} out\n"
                 f"Budget: ${settings.daily_budget_usd:.2f}/day"
             )
+
+        # Sprint 5: Rate limit check
+        try:
+            await rate_limiter.check_message(incoming.user_id)
+        except RateLimitExceeded as e:
+            if audit_logger:
+                await audit_logger.log(AuditEntry(
+                    user_id=incoming.user_id,
+                    action=AuditAction.RATE_LIMIT_HIT,
+                    channel=incoming.channel,
+                    input_summary=e.message,
+                ))
+            return e.message
+
+        # Sprint 5: Audit incoming message
+        if audit_logger:
+            await audit_logger.log(AuditEntry(
+                user_id=incoming.user_id,
+                action=AuditAction.MESSAGE_RECEIVED,
+                channel=incoming.channel,
+                input_summary=(incoming.text or "")[:500],
+            ))
 
         # Handle voice notes via Whisper transcription
         text = incoming.text
@@ -801,6 +843,28 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         except Exception as e:
             console.print(f"[yellow]Briefing schedule error: {e}[/yellow]")
 
+    # Sprint 5: Start API server
+    api_server = None
+    try:
+        import uvicorn
+        from pincer.api.server import create_app
+
+        api_app = create_app()
+        api_config = uvicorn.Config(
+            api_app,
+            host=settings.dashboard_host,
+            port=settings.dashboard_port,
+            log_level="warning",
+        )
+        api_server = uvicorn.Server(api_config)
+        asyncio.create_task(api_server.serve())
+        console.print(
+            f"[green]API server started on "
+            f"http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
+        )
+    except Exception as e:
+        console.print(f"[yellow]API server failed to start: {e}[/yellow]")
+
     active = [ch.name for ch in channels]
     console.print(
         f"\n[bold green]{settings.agent_name} is running![/bold green] "
@@ -813,6 +877,8 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
     except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[yellow]Shutting down...[/yellow]")
     finally:
+        if api_server:
+            api_server.should_exit = True
         await triggers.stop()
         await scheduler.stop()
         await proactive.close()
@@ -828,7 +894,11 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         await cost_tracker.close()
         if memory_store:
             await memory_store.close()
+        if audit_logger:
+            await audit_logger.shutdown()
         console.print("[green]Shutdown complete[/green]")
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        os._exit(0)
 
 
 @app.command()
@@ -859,23 +929,86 @@ def config() -> None:
 
 
 @app.command()
-def cost() -> None:
-    """Show today's API cost."""
-    asyncio.run(_show_cost())
+def cost(
+    days: int = typer.Option(0, "--days", help="Show spending for last N days"),
+    by_model: bool = typer.Option(False, "--by-model", help="Breakdown by LLM model"),
+    by_tool: bool = typer.Option(False, "--by-tool", help="Breakdown by tool"),
+    export: str = typer.Option("", "--export", help="Export cost data to JSON file"),
+) -> None:
+    """Show API costs and spending breakdown."""
+    asyncio.run(_show_cost(days=days, by_model=by_model, by_tool=by_tool, export=export))
 
 
-async def _show_cost() -> None:
-    from pincer.config import get_settings
+async def _show_cost(
+    days: int = 0, by_model: bool = False, by_tool: bool = False, export: str = ""
+) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
     from pincer.llm.cost_tracker import CostTracker
 
-    s = get_settings()
+    s = get_settings_relaxed()
     tracker = CostTracker(s.db_path, s.daily_budget_usd)
     await tracker.initialize()
+
     today = await tracker.get_today_spend()
     summary = await tracker.get_summary()
+
+    console.print(f"[bold]Pincer Cost Report[/bold]\n")
+    console.print(f"  Today:   ${today:.4f} / ${s.daily_budget_usd:.2f}")
+    console.print(f"  Total:   ${summary.total_usd:.4f} ({summary.total_calls} calls)")
+    console.print(f"  Tokens:  {summary.total_input_tokens:,} in / {summary.total_output_tokens:,} out")
+
+    if days > 0:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=days)
+        history = await tracker.get_daily_history(
+            start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d")
+        )
+        if history:
+            console.print(f"\n[bold]Last {days} days:[/bold]")
+            table = Table()
+            table.add_column("Date")
+            table.add_column("Cost", justify="right")
+            table.add_column("Requests", justify="right")
+            for entry in history:
+                table.add_row(entry["date"], f"${entry['total']:.4f}", str(entry["requests"]))
+            console.print(table)
+
+    if by_model:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=max(days, 7))
+        models = await tracker.get_costs_by_model(
+            start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d")
+        )
+        if models:
+            console.print(f"\n[bold]By Model:[/bold]")
+            table = Table()
+            table.add_column("Model")
+            table.add_column("Cost", justify="right")
+            table.add_column("Requests", justify="right")
+            table.add_column("Tokens", justify="right")
+            for m in models:
+                table.add_row(m["model"], f"${m['total']:.4f}", str(m["requests"]), f"{m['tokens']:,}")
+            console.print(table)
+
+    if export:
+        import json as _json
+        from pathlib import Path as _P
+
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=max(days, 30))
+        history = await tracker.get_daily_history(
+            start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d")
+        )
+        _P(export).write_text(_json.dumps({"history": history, "summary": {
+            "total_usd": summary.total_usd, "total_calls": summary.total_calls,
+        }}, indent=2))
+        console.print(f"\n[green]Exported to {export}[/green]")
+
     await tracker.close()
-    console.print(f"Today:  ${today:.4f} / ${s.daily_budget_usd:.2f}")
-    console.print(f"Total:  ${summary.total_usd:.4f} ({summary.total_calls} calls)")
 
 
 @app.command(name="pair-whatsapp")
@@ -1066,112 +1199,64 @@ def init() -> None:
 
 
 @app.command()
-def doctor() -> None:
-    """Health check — verify configuration and connections."""
-    import sys as _sys
-    import time as _time
+def doctor(
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """Run 25+ security checks with traffic-light report."""
+    import json as _json
+    from pathlib import Path as _P
+
+    from pincer.security.doctor import CheckStatus, SecurityDoctor
+
+    doc = SecurityDoctor(
+        data_dir=_P("data"),
+        config_dir=_P("."),
+    )
+    report = doc.run_all()
+
+    if output_json:
+        console.print(_json.dumps(report.to_dict(), indent=2))
+        return
 
     from rich.table import Table
 
-    # Config checks
-    table = Table(title="Configuration", show_header=True)
+    status_icons = {
+        CheckStatus.PASS: "[green]\u2705[/green]",
+        CheckStatus.WARNING: "[yellow]\u26a0\ufe0f[/yellow]",
+        CheckStatus.CRITICAL: "[red]\u274c[/red]",
+        CheckStatus.SKIPPED: "[dim]\u2796[/dim]",
+    }
+
+    console.print(
+        f"\n[bold]Pincer Security Doctor[/bold]  "
+        f"Score: [{'green' if report.score >= 80 else 'yellow' if report.score >= 60 else 'red'}]"
+        f"{report.score}/100[/]\n"
+    )
+
+    current_category = ""
+    table = Table(show_header=True)
+    table.add_column("", width=4)
     table.add_column("Check", style="bold")
-    table.add_column("Status")
-    table.add_column("Details")
+    table.add_column("Message")
+    table.add_column("Fix", style="dim")
 
-    from pathlib import Path as _P
-    env_exists = _P(".env").exists()
-    table.add_row(".env file", "\u2705" if env_exists else "\u26a0\ufe0f", "Found" if env_exists else "Not found")
-
-    try:
-        from pincer.config import get_settings
-        s = get_settings()
-
-        anthropic_set = s.anthropic_api_key.get_secret_value() != ""
-        openai_set = s.openai_api_key.get_secret_value() != ""
-        tg_set = s.telegram_bot_token.get_secret_value() != ""
-        dc_set = s.discord_bot_token.get_secret_value() != ""
-
+    for check in report.checks:
+        if check.category != current_category:
+            current_category = check.category
+            table.add_row("", f"[bold underline]{current_category.upper()}[/bold underline]", "", "")
         table.add_row(
-            "Anthropic API key",
-            "\u2705" if anthropic_set else "\u2b55",
-            f"...{s.anthropic_api_key.get_secret_value()[-4:]}" if anthropic_set else "Not set",
+            status_icons.get(check.status, ""),
+            check.name,
+            check.message,
+            check.fix_hint,
         )
-        table.add_row(
-            "OpenAI API key",
-            "\u2705" if openai_set else "\u2b55",
-            f"...{s.openai_api_key.get_secret_value()[-4:]}" if openai_set else "Not set",
-        )
-        table.add_row("Telegram", "\u2705" if tg_set else "\u2b55", "Configured" if tg_set else "Not set")
-        table.add_row("Discord", "\u2705" if dc_set else "\u2b55", "Configured" if dc_set else "Not set")
-        table.add_row("WhatsApp", "\u2705" if s.whatsapp_enabled else "\u2b55", "Enabled" if s.whatsapp_enabled else "Disabled")
-        table.add_row("Database", "\u2705" if s.db_path.parent.exists() else "\u274c", str(s.db_path))
-        table.add_row("Python", "\u2705", f"{_sys.version_info.major}.{_sys.version_info.minor}.{_sys.version_info.micro}")
-
-        # Skills check
-        try:
-            from pincer.tools.skills.loader import SkillLoader
-            loader = SkillLoader(bundled_dir=_P("skills"))
-            skill_dirs = loader._discover_skill_dirs()
-            table.add_row("Skills", "\u2705" if skill_dirs else "\u2b55", f"{len(skill_dirs)} discovered")
-        except Exception:
-            table.add_row("Skills", "\u26a0\ufe0f", "Could not scan")
-
-    except Exception as e:
-        table.add_row("Config", "\u274c", str(e))
 
     console.print(table)
-
-    # Connection tests
-    console.print("\n[bold]Connection Tests[/bold]")
-    try:
-        s = get_settings()  # type: ignore[used-before-def]
-        if s.anthropic_api_key.get_secret_value():
-            with console.status("Testing Anthropic..."):
-                try:
-                    import httpx
-                    start = _time.monotonic()
-                    r = httpx.get(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={"x-api-key": s.anthropic_api_key.get_secret_value(), "anthropic-version": "2023-06-01"},
-                        timeout=10,
-                    )
-                    latency = (_time.monotonic() - start) * 1000
-                    console.print(f"  Anthropic: \u2705 reachable ({latency:.0f}ms)")
-                except Exception as e:
-                    console.print(f"  Anthropic: \u274c {e}")
-
-        if s.openai_api_key.get_secret_value():
-            with console.status("Testing OpenAI..."):
-                try:
-                    import httpx
-                    start = _time.monotonic()
-                    r = httpx.get(
-                        "https://api.openai.com/v1/models",
-                        headers={"Authorization": f"Bearer {s.openai_api_key.get_secret_value()}"},
-                        timeout=10,
-                    )
-                    latency = (_time.monotonic() - start) * 1000
-                    console.print(f"  OpenAI: \u2705 reachable ({latency:.0f}ms)")
-                except Exception as e:
-                    console.print(f"  OpenAI: \u274c {e}")
-    except Exception:
-        console.print("  [yellow]Skipped — config not loaded[/yellow]")
-
-    # Security audit
-    console.print("\n[bold]Security Audit[/bold]")
-    try:
-        from pincer.tools.sandbox import SandboxConfig
-        console.print("  Sandbox: \u2705 available")
-    except Exception:
-        console.print("  Sandbox: \u274c not available")
-    try:
-        from pincer.tools.skills.scanner import SkillScanner
-        console.print("  Scanner: \u2705 available")
-    except Exception:
-        console.print("  Scanner: \u274c not available")
-
-    console.print()
+    console.print(
+        f"\n  [green]{report.passed} passed[/green]  "
+        f"[yellow]{report.warnings} warnings[/yellow]  "
+        f"[red]{report.critical} critical[/red]\n"
+    )
 
 
 @app.command()
@@ -1464,3 +1549,305 @@ def skills_scan(path: str = typer.Argument(help="Path to skill directory")) -> N
 
     if result.error:
         console.print(f"[red]Error: {result.error}[/red]")
+
+
+@skills_app.command(name="remove")
+def skills_remove(name: str = typer.Argument(help="Skill name to uninstall")) -> None:
+    """Uninstall a user skill."""
+    import shutil
+    from pathlib import Path as _P
+
+    dest = _P.home() / ".pincer" / "skills" / name
+    if not dest.exists():
+        console.print(f"[red]Skill not found: {name}[/red]")
+        raise typer.Exit(1)
+    shutil.rmtree(dest)
+    console.print(f"[green]Skill '{name}' removed[/green]")
+
+
+@skills_app.command(name="info")
+def skills_info(name: str = typer.Argument(help="Skill name")) -> None:
+    """Show skill details."""
+    import json
+    from pathlib import Path as _P
+
+    for base in [_P("skills"), _P.home() / ".pincer" / "skills"]:
+        skill_dir = base / name
+        manifest_path = skill_dir / "manifest.json"
+        if manifest_path.exists():
+            m = json.loads(manifest_path.read_text())
+            console.print(f"[bold]{m.get('name', name)}[/bold] v{m.get('version', '?')}")
+            console.print(f"  Description: {m.get('description', '')}")
+            console.print(f"  Author:      {m.get('author', 'unknown')}")
+            console.print(f"  Permissions: {', '.join(m.get('permissions', [])) or 'none'}")
+            console.print(f"  Env:         {', '.join(m.get('env_required', [])) or 'none'}")
+            tools = m.get("tools", [])
+            console.print(f"  Tools:       {len(tools)}")
+            for t in tools:
+                console.print(f"    - {t['name']}: {t.get('description', '')}")
+            return
+    console.print(f"[red]Skill not found: {name}[/red]")
+
+
+# ── Audit subcommands ─────────────────────────
+
+audit_app = typer.Typer(name="audit", help="View and export audit logs")
+app.add_typer(audit_app, name="audit")
+
+
+@audit_app.callback(invoke_without_command=True)
+def audit_default(
+    ctx: typer.Context,
+    limit: int = typer.Option(50, "--limit", help="Number of entries"),
+    action: str = typer.Option("", "--action", help="Filter by action type"),
+    user: str = typer.Option("", "--user", help="Filter by user ID"),
+    since: str = typer.Option("", "--since", help="Filter from date (ISO)"),
+    export: str = typer.Option("", "--export", help="Export to JSON file"),
+) -> None:
+    """View audit log entries."""
+    if ctx.invoked_subcommand is not None:
+        return
+    asyncio.run(_show_audit(limit=limit, action=action, user=user, since=since, export=export))
+
+
+async def _show_audit(
+    limit: int = 50,
+    action: str = "",
+    user: str = "",
+    since: str = "",
+    export: str = "",
+) -> None:
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
+    from pincer.security.audit import AuditAction, AuditLogger
+
+    s = get_settings_relaxed()
+    audit_db = s.data_dir / "audit.db"
+    logger = AuditLogger(db_path=audit_db)
+    await logger.initialize()
+
+    if export:
+        count = await logger.export_json(
+            export,
+            user_id=user or None,
+            since=since or None,
+        )
+        console.print(f"[green]Exported {count} entries to {export}[/green]")
+        await logger.shutdown()
+        return
+
+    action_filter = None
+    if action:
+        try:
+            action_filter = AuditAction(action)
+        except ValueError:
+            console.print(f"[red]Invalid action: {action}[/red]")
+            console.print(f"Valid actions: {', '.join(a.value for a in AuditAction)}")
+            await logger.shutdown()
+            return
+
+    results = await logger.query(
+        user_id=user or None,
+        action=action_filter,
+        since=since or None,
+        limit=limit,
+    )
+
+    if not results:
+        console.print("[dim]No audit entries found.[/dim]")
+        await logger.shutdown()
+        return
+
+    table = Table(title=f"Audit Log (last {len(results)})")
+    table.add_column("Time", width=20)
+    table.add_column("User", width=12)
+    table.add_column("Action", width=16)
+    table.add_column("Tool", width=15)
+    table.add_column("Summary")
+    table.add_column("Cost", justify="right", width=10)
+
+    for row in results:
+        ts = (row.get("timestamp") or "")[:19]
+        cost_str = f"${row.get('cost_usd', 0):.4f}" if row.get("cost_usd") else ""
+        summary = (row.get("input_summary") or "")[:60]
+        table.add_row(
+            ts,
+            str(row.get("user_id", ""))[:12],
+            str(row.get("action", "")),
+            str(row.get("tool", "") or ""),
+            summary,
+            cost_str,
+        )
+
+    console.print(table)
+
+    stats = await logger.get_stats()
+    console.print(
+        f"\n  Total: {stats['total_entries']} entries  "
+        f"Cost: ${stats['total_cost_usd']:.4f}  "
+        f"Failed: {stats['failed_actions']}"
+    )
+    await logger.shutdown()
+
+
+# ── Memory subcommands ────────────────────────
+
+memory_app = typer.Typer(name="memory", help="Manage conversation memory")
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command(name="search")
+def memory_search(query: str = typer.Argument(help="Search query")) -> None:
+    """Search conversation memory."""
+    asyncio.run(_memory_search(query))
+
+
+async def _memory_search(query: str) -> None:
+    from pincer.config import get_settings_relaxed
+    from pincer.memory.store import MemoryStore
+
+    s = get_settings_relaxed()
+    store = MemoryStore(s.db_path)
+    await store.initialize()
+    results = await store.search_text(query, limit=10)
+    if not results:
+        console.print("[dim]No memories found.[/dim]")
+    else:
+        for i, mem in enumerate(results, 1):
+            console.print(f"  {i}. [{mem.category}] {mem.content[:200]}")
+    await store.close()
+
+
+@memory_app.command(name="stats")
+def memory_stats() -> None:
+    """Show memory usage statistics."""
+    asyncio.run(_memory_stats())
+
+
+async def _memory_stats() -> None:
+    from pincer.config import get_settings_relaxed
+    from pincer.memory.store import MemoryStore
+
+    s = get_settings_relaxed()
+    store = MemoryStore(s.db_path)
+    await store.initialize()
+
+    async with store._db.execute("SELECT COUNT(*) FROM memories") as cur:  # type: ignore[union-attr]
+        row = await cur.fetchone()
+        total = row[0] if row else 0
+    async with store._db.execute("SELECT COUNT(DISTINCT user_id) FROM memories") as cur:  # type: ignore[union-attr]
+        row = await cur.fetchone()
+        users = row[0] if row else 0
+    async with store._db.execute(  # type: ignore[union-attr]
+        "SELECT category, COUNT(*) FROM memories GROUP BY category"
+    ) as cur:
+        categories = {r[0]: r[1] async for r in cur}
+
+    console.print(f"[bold]Memory Stats[/bold]")
+    console.print(f"  Total memories: {total}")
+    console.print(f"  Users:          {users}")
+    for cat, count in categories.items():
+        console.print(f"  {cat}: {count}")
+    await store.close()
+
+
+@memory_app.command(name="clear")
+def memory_clear(
+    user_id: str = typer.Option(..., "--user", help="User ID to clear"),
+) -> None:
+    """Clear memory for a user."""
+    asyncio.run(_memory_clear(user_id))
+
+
+async def _memory_clear(user_id: str) -> None:
+    from pincer.config import get_settings_relaxed
+    from pincer.memory.store import MemoryStore
+
+    s = get_settings_relaxed()
+    store = MemoryStore(s.db_path)
+    await store.initialize()
+    await store._db.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))  # type: ignore[union-attr]
+    await store._db.commit()  # type: ignore[union-attr]
+    console.print(f"[green]Cleared memories for {user_id}[/green]")
+    await store.close()
+
+
+@memory_app.command(name="export")
+def memory_export(
+    user_id: str = typer.Option(..., "--user", help="User ID to export"),
+    output: str = typer.Option("memories.json", "--output", help="Output file"),
+) -> None:
+    """Export user memories to JSON."""
+    asyncio.run(_memory_export(user_id, output))
+
+
+async def _memory_export(user_id: str, output: str) -> None:
+    import json as _json
+
+    from pincer.config import get_settings_relaxed
+    from pincer.memory.store import MemoryStore
+
+    s = get_settings_relaxed()
+    store = MemoryStore(s.db_path)
+    await store.initialize()
+
+    async with store._db.execute(  # type: ignore[union-attr]
+        "SELECT content, category, created_at FROM memories WHERE user_id = ? ORDER BY created_at",
+        (user_id,),
+    ) as cur:
+        records = [
+            {"content": r[0], "category": r[1], "created_at": r[2]}
+            async for r in cur
+        ]
+
+    from pathlib import Path as _P
+    _P(output).write_text(_json.dumps(records, indent=2))
+    console.print(f"[green]Exported {len(records)} memories to {output}[/green]")
+    await store.close()
+
+
+# ── Schedule subcommands ──────────────────────
+
+schedule_app = typer.Typer(name="schedule", help="Manage scheduled tasks")
+app.add_typer(schedule_app, name="schedule")
+
+
+@schedule_app.command(name="list")
+def schedule_list() -> None:
+    """List all scheduled tasks."""
+    asyncio.run(_schedule_list())
+
+
+async def _schedule_list() -> None:
+    import aiosqlite as _aiosqlite
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
+
+    s = get_settings_relaxed()
+    async with _aiosqlite.connect(str(s.db_path)) as db:
+        try:
+            async with db.execute(
+                "SELECT name, cron_expr, pincer_user_id, timezone, enabled "
+                "FROM schedules ORDER BY name"
+            ) as cur:
+                rows = [(r[0], r[1], r[2], r[3], r[4]) async for r in cur]
+        except Exception:
+            console.print("[dim]No scheduled tasks (table not created yet).[/dim]")
+            return
+
+    if not rows:
+        console.print("[dim]No scheduled tasks.[/dim]")
+        return
+
+    table = Table(title="Scheduled Tasks")
+    table.add_column("Name")
+    table.add_column("Cron")
+    table.add_column("User")
+    table.add_column("Timezone")
+    table.add_column("Enabled")
+
+    for name, cron, user, tz, enabled in rows:
+        table.add_row(name, cron, user or "", tz or "", "yes" if enabled else "no")
+    console.print(table)
