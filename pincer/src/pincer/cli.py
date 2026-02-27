@@ -260,13 +260,25 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
 
     # Email tools (Sprint 3)
     if settings.email_imap_host and settings.email_username:
-        from pincer.tools.builtin.email_tool import email_check, email_search, email_send
+        from pincer.tools.builtin.email_tool import (
+            email_check,
+            email_empty_folder,
+            email_list_folders,
+            email_mark,
+            email_move,
+            email_read,
+            email_search,
+            email_send,
+            email_trash,
+        )
 
         tools.register(
             name="email_check",
             description=(
-                "Check for unread emails. Returns sender, subject, and date for each. "
-                "Use when the user asks about their email, inbox, or unread messages."
+                "Check emails in a folder. By default shows unread (UNSEEN) emails. "
+                "Set status='ALL' to list all emails regardless of read status — "
+                "use this when checking Spam, Trash, or counting total emails in a folder. "
+                "Returns UID, sender, subject, and date for each."
             ),
             handler=email_check,
             parameters={
@@ -274,13 +286,18 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
                 "properties": {
                     "limit": {
                         "type": "integer",
-                        "description": "Max unread emails to return (default: 10)",
+                        "description": "Max emails to return (default: 10)",
                         "default": 10,
                     },
                     "folder": {
                         "type": "string",
                         "description": "IMAP folder (default: INBOX)",
                         "default": "INBOX",
+                    },
+                    "status": {
+                        "type": "string",
+                        "description": "Filter: UNSEEN (default, unread only), ALL (all emails), SEEN (read only)",
+                        "default": "UNSEEN",
                     },
                 },
                 "required": [],
@@ -311,8 +328,9 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         tools.register(
             name="email_search",
             description=(
-                "Search emails by keyword, sender, or date range. "
-                "Use when the user asks to find a specific email or topic."
+                "Search emails by keyword, sender, or date range. Returns UIDs for each match. "
+                "Use when the user asks to find a specific email or topic. "
+                "Can search in any folder, not just INBOX."
             ),
             handler=email_search,
             parameters={
@@ -334,9 +352,150 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
                         "description": "Max results (default: 10)",
                         "default": 10,
                     },
+                    "folder": {
+                        "type": "string",
+                        "description": "IMAP folder to search in (default: INBOX)",
+                        "default": "INBOX",
+                    },
                 },
                 "required": ["query"],
             },
+        )
+        tools.register(
+            name="email_read",
+            description=(
+                "Read the full content of an email by its UID. "
+                "Use after email_check or email_search to read a specific email's body. "
+                "Returns headers and the plain-text body."
+            ),
+            handler=email_read,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "uid": {"type": "string", "description": "Email UID (from email_check or email_search)"},
+                    "folder": {
+                        "type": "string",
+                        "description": "IMAP folder the email is in (default: INBOX)",
+                        "default": "INBOX",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Max body characters to return (default: 4000)",
+                        "default": 4000,
+                    },
+                },
+                "required": ["uid"],
+            },
+        )
+        tools.register(
+            name="email_list_folders",
+            description=(
+                "List all available IMAP/email folders. "
+                "Use to discover folder names before moving emails or emptying spam/trash."
+            ),
+            handler=email_list_folders,
+            parameters={"type": "object", "properties": {}, "required": []},
+        )
+        tools.register(
+            name="email_mark",
+            description=(
+                "Mark one or more emails as read, unread, flagged, or unflagged. "
+                "Use for email triage — e.g. marking emails as read after reviewing them."
+            ),
+            handler=email_mark,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "uids": {
+                        "type": "string",
+                        "description": "Comma-separated email UIDs to mark",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["read", "unread", "flag", "unflag"],
+                        "description": "Action to perform: read, unread, flag, or unflag",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "IMAP folder (default: INBOX)",
+                        "default": "INBOX",
+                    },
+                },
+                "required": ["uids", "action"],
+            },
+        )
+        tools.register(
+            name="email_move",
+            description=(
+                "Move one or more emails to a different folder. "
+                "Use for triage — e.g. archiving emails or moving to a label/folder. "
+                "Use email_list_folders first to discover available folder names."
+            ),
+            handler=email_move,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "uids": {
+                        "type": "string",
+                        "description": "Comma-separated email UIDs to move",
+                    },
+                    "destination": {
+                        "type": "string",
+                        "description": "Target folder name (use email_list_folders to discover names)",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Source IMAP folder (default: INBOX)",
+                        "default": "INBOX",
+                    },
+                },
+                "required": ["uids", "destination"],
+            },
+            require_approval=True,
+        )
+        tools.register(
+            name="email_trash",
+            description=(
+                "Move one or more emails to the Trash folder. "
+                "Auto-discovers the correct trash folder name for the email provider."
+            ),
+            handler=email_trash,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "uids": {
+                        "type": "string",
+                        "description": "Comma-separated email UIDs to trash",
+                    },
+                    "folder": {
+                        "type": "string",
+                        "description": "Source IMAP folder (default: INBOX)",
+                        "default": "INBOX",
+                    },
+                },
+                "required": ["uids"],
+            },
+            require_approval=True,
+        )
+        tools.register(
+            name="email_empty_folder",
+            description=(
+                "Permanently delete ALL messages in a folder (e.g. Spam, Trash). "
+                "Cannot empty INBOX. Use email_list_folders to find the correct folder name. "
+                "This is a destructive action and cannot be undone."
+            ),
+            handler=email_empty_folder,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "folder": {
+                        "type": "string",
+                        "description": "Folder to empty (e.g. '[Gmail]/Spam', '[Gmail]/Trash')",
+                    },
+                },
+                "required": ["folder"],
+            },
+            require_approval=True,
         )
         console.print("[green]Email tools enabled[/green]")
 
