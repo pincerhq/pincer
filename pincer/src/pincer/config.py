@@ -129,9 +129,13 @@ class Settings(BaseSettings):
 
     # ── WhatsApp (Sprint 3) ──────────────────────────────
     whatsapp_enabled: bool = Field(default=False, description="Enable WhatsApp channel")
+    whatsapp_self_chat_only: bool = Field(
+        default=True,
+        description="When True, only self-chat and group mentions get a reply; DMs from others ignored.",
+    )
     whatsapp_dm_allowlist: str = Field(
         default="",
-        description="Comma-separated phone numbers allowed to DM (empty = allow all)",
+        description="Comma-separated phone numbers allowed to DM; empty = self-chat and group mentions only.",
     )
     whatsapp_group_trigger: str = Field(
         default="pincer",

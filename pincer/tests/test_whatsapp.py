@@ -63,6 +63,7 @@ from pincer.channels.whatsapp import WhatsAppChannel  # noqa: E402
 def wa_channel():
     settings = MagicMock()
     settings.whatsapp_dm_allowlist = "+491234567890,+491111111111"
+    settings.whatsapp_self_chat_only = False
     settings.whatsapp_group_trigger = "pincer"
     settings.data_dir = "/tmp/test"
     settings.openai_api_key.get_secret_value.return_value = "test-key"
@@ -84,6 +85,7 @@ class TestWhatsAppChannel:
     def test_empty_allowlist(self):
         settings = MagicMock()
         settings.whatsapp_dm_allowlist = ""
+        settings.whatsapp_self_chat_only = True
         settings.whatsapp_group_trigger = "pincer"
         settings.data_dir = "/tmp/test"
         ch = WhatsAppChannel(settings)
@@ -93,26 +95,26 @@ class TestWhatsAppChannel:
         wa_channel._own_jid = "491234567890"
         msg = MagicMock()
         msg.conversation = "hey @pincer what's up?"
-        msg.extendedTextMessage = None
+        msg.HasField = MagicMock(return_value=False)
         assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
 
     def test_mention_by_jid(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         msg = MagicMock()
         msg.conversation = "hey 491234567890 what's up?"
-        msg.extendedTextMessage = None
+        msg.HasField = MagicMock(return_value=False)
         assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
 
     def test_no_mention(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         msg = MagicMock()
         msg.conversation = "hey everyone, lunch?"
-        msg.extendedTextMessage = None
+        msg.HasField = MagicMock(return_value=False)
         assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
 
     def test_trigger_case_insensitive(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         msg = MagicMock()
         msg.conversation = "Hey PINCER, do this"
-        msg.extendedTextMessage = None
+        msg.HasField = MagicMock(return_value=False)
         assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True

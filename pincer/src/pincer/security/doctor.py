@@ -345,9 +345,8 @@ class SecurityDoctor:
         if os.environ.get("PINCER_WHATSAPP_ENABLED", "").lower() == "true":
             return CheckResult(
                 "whatsapp_dm_policy",
-                CheckStatus.WARNING,
-                "WhatsApp enabled without DM allowlist",
-                fix_hint="Set PINCER_WHATSAPP_DM_ALLOWLIST",
+                CheckStatus.PASS,
+                "WhatsApp in self-chat-only mode (no DM allowlist)",
                 category="access",
             )
         return CheckResult(
