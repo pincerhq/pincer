@@ -29,8 +29,8 @@ from pincer.llm.base import (
     ToolResult,
 )
 
-# Signature: (tool_name, arguments) -> approved?
-ApprovalCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
+# Signature: (tool_name, arguments, user_id, channel) -> approved?
+ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool]]
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -502,7 +502,7 @@ class Agent:
             if self._approval_callback:
                 try:
                     approved = await self._approval_callback(
-                        tool_call.name, tool_call.arguments,
+                        tool_call.name, tool_call.arguments, user_id, channel,
                     )
                 except Exception:
                     logger.exception("Approval callback failed for '%s'", tool_call.name)

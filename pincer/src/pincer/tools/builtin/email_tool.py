@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 # Regex for parsing IMAP LIST response lines:  (\Flags) "delimiter" "FolderName"
 _LIST_RE = re.compile(rb'\(([^)]*)\)\s+"(.)"\s+"?([^"]*)"?')
+# Literal size in LIST response, e.g. {12} (may have leading/trailing space)
+_LIST_LITERAL_RE = re.compile(rb'^\s*\{(\d+)\}\s*$')
 
 _TRASH_ATTRS = {"\\trash"}
 _SPAM_ATTRS = {"\\junk"}
@@ -78,16 +80,41 @@ def _extract_text_body(raw_data: bytes, max_chars: int = 2000) -> str:
 
 
 def _parse_list_response(data: list[Any]) -> list[tuple[list[str], str]]:
-    """Parse IMAP LIST response lines into (attributes, folder_name) pairs."""
+    """Parse IMAP LIST response lines into (attributes, folder_name) pairs.
+    Handles quoted folder names and LITERAL+ (line ending with {n}, next element bytearray).
+    """
     results: list[tuple[list[str], str]] = []
-    for item in data:
-        if not isinstance(item, bytes) or not item.strip():
-            continue
-        m = _LIST_RE.match(item)
-        if m:
-            attrs = m.group(1).decode(errors="replace").split()
-            raw_name = m.group(3).decode(errors="replace").strip('"')
-            results.append((attrs, raw_name))
+    pending_attrs: list[str] | None = None
+    i = 0
+    while i < len(data):
+        item = data[i]
+        raw = bytes(item) if isinstance(item, bytearray) else item if isinstance(item, bytes) else None
+        if raw is not None and raw.strip():
+            m = _LIST_RE.match(raw)
+            if m:
+                attrs = m.group(1).decode(errors="replace").split()
+                raw_name = m.group(3).decode(errors="replace").strip('"')
+                name_is_literal_size = bool(
+                    raw_name and _LIST_LITERAL_RE.match(raw_name.strip().encode())
+                )
+                if raw_name and not name_is_literal_size:
+                    results.append((attrs, raw_name))
+                    pending_attrs = None
+                else:
+                    pending_attrs = attrs
+                i += 1
+                continue
+            if pending_attrs is not None:
+                name = raw.decode(errors="replace").strip('"')
+                results.append((pending_attrs, name))
+                pending_attrs = None
+                i += 1
+                continue
+        if isinstance(item, bytearray) and pending_attrs is None:
+            name = bytes(item).decode(errors="replace").strip('"')
+            if name:
+                results.append(([], name))
+        i += 1
     return results
 
 
@@ -125,6 +152,27 @@ def _extract_fetch_literal(lines: list[Any]) -> bytes | None:
     return None
 
 
+def _quote_mailbox(folder: str) -> str:
+    """Return mailbox string suitable for IMAP SELECT/COPY (quoted when needed per RFC 3501)."""
+    if not folder:
+        return '""'
+    need_quote = any(c in folder for c in " /[]\\")
+    if not need_quote:
+        return folder
+    escaped = folder.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _parse_search_uids(data: list[Any]) -> list[str]:
+    """Extract UID list from SEARCH response lines; only numeric tokens (robust to * SEARCH prefix)."""
+    if not data:
+        return []
+    first = data[0]
+    raw = first if isinstance(first, bytes) else bytes(first) if isinstance(first, bytearray) else b""
+    tokens = raw.decode(errors="replace").split()
+    return [t for t in tokens if t.isdigit()]
+
+
 # ── Tool: email_check ────────────────────────────
 
 async def email_check(limit: int = 10, folder: str = "INBOX", status: str = "UNSEEN") -> str:
@@ -132,14 +180,14 @@ async def email_check(limit: int = 10, folder: str = "INBOX", status: str = "UNS
     client = None
     try:
         client = await _get_imap_client()
-        await client.select(folder)
+        await client.select(_quote_mailbox(folder))
 
         criteria = status.upper()
         search_status, data = await client.uid_search(criteria)
         if search_status != "OK":
             return f"IMAP search failed: {search_status}"
 
-        uids = data[0].decode().split()
+        uids = _parse_search_uids(data)
         if not uids:
             if criteria == "UNSEEN":
                 return f"No unread emails in {folder}."
@@ -225,7 +273,7 @@ async def email_search(
     client = None
     try:
         client = await _get_imap_client()
-        await client.select(folder)
+        await client.select(_quote_mailbox(folder))
 
         since_date = (
             datetime.now(timezone.utc) - timedelta(days=days_back)
@@ -239,7 +287,7 @@ async def email_search(
         if status != "OK":
             return f"IMAP search failed: {status}"
 
-        uids = data[0].decode().split()
+        uids = _parse_search_uids(data)
         if not uids:
             return f"No emails matching '{query}'."
 
@@ -282,7 +330,7 @@ async def email_read(uid: str, folder: str = "INBOX", max_chars: int = 4000) -> 
     client = None
     try:
         client = await _get_imap_client()
-        await client.select(folder)
+        await client.select(_quote_mailbox(folder))
 
         fetch_status, fetch_data = await client.uid("fetch", uid, "(BODY.PEEK[])")
         if fetch_status != "OK":
@@ -366,7 +414,7 @@ async def email_mark(uids: str, action: str, folder: str = "INBOX") -> str:
     client = None
     try:
         client = await _get_imap_client()
-        await client.select(folder)
+        await client.select(_quote_mailbox(folder))
 
         cmd, flags = _MARK_ACTIONS[action]
         uid_list = [u.strip() for u in uids.split(",")]
@@ -397,12 +445,12 @@ async def email_move(uids: str, destination: str, folder: str = "INBOX") -> str:
     client = None
     try:
         client = await _get_imap_client()
-        await client.select(folder)
+        await client.select(_quote_mailbox(folder))
 
         uid_list = [u.strip() for u in uids.split(",")]
         moved = 0
         for uid_val in uid_list:
-            status, _ = await client.uid("copy", uid_val, f'"{destination}"')
+            status, _ = await client.uid("copy", uid_val, _quote_mailbox(destination))
             if status == "OK":
                 await client.uid("store", uid_val, "+FLAGS", "(\\Deleted)")
                 moved += 1
@@ -435,12 +483,12 @@ async def email_trash(uids: str, folder: str = "INBOX") -> str:
         if not trash_folder:
             return "Could not find Trash folder. Use email_list_folders to check available folders."
 
-        await client.select(folder)
+        await client.select(_quote_mailbox(folder))
 
         uid_list = [u.strip() for u in uids.split(",")]
         trashed = 0
         for uid_val in uid_list:
-            status, _ = await client.uid("copy", uid_val, f'"{trash_folder}"')
+            status, _ = await client.uid("copy", uid_val, _quote_mailbox(trash_folder))
             if status == "OK":
                 await client.uid("store", uid_val, "+FLAGS", "(\\Deleted)")
                 trashed += 1
@@ -472,24 +520,36 @@ async def email_empty_folder(folder: str) -> str:
     try:
         client = await _get_imap_client()
 
-        status, _ = await client.select(folder)
+        status, _ = await client.select(_quote_mailbox(folder))
         if status != "OK":
+            logger.warning("email_empty_folder: SELECT '%s' failed: %s", folder, status)
             return f"Could not select folder '{folder}'. Check folder name with email_list_folders."
 
         status, data = await client.uid_search("ALL")
         if status != "OK":
+            logger.warning("email_empty_folder: SEARCH in '%s' failed: %s", folder, status)
             return f"Failed to search folder '{folder}': {status}"
 
-        uids = data[0].decode().split()
+        uids = _parse_search_uids(data)
         if not uids:
             return f"Folder '{folder}' is already empty."
 
         count = len(uids)
-        uid_set = ",".join(uids)
-        await client.uid("store", uid_set, "+FLAGS", "(\\Deleted)")
-        await client.expunge()
+        logger.info("email_empty_folder: marking %d message(s) in '%s' as deleted", count, folder)
 
-        return f"Emptied folder '{folder}': {count} message(s) permanently deleted."
+        deleted = 0
+        for uid_val in uids:
+            st, _ = await client.uid("store", uid_val, "+FLAGS", "(\\Deleted)")
+            if st == "OK":
+                deleted += 1
+
+        if deleted:
+            await client.expunge()
+            logger.info("email_empty_folder: expunged %d/%d in '%s'", deleted, count, folder)
+        else:
+            logger.warning("email_empty_folder: STORE failed for all %d UIDs in '%s'", count, folder)
+
+        return f"Emptied folder '{folder}': deleted {deleted}/{count} message(s)."
 
     except Exception as e:
         logger.error("email_empty_folder error: %s", e, exc_info=True)
