@@ -81,7 +81,7 @@ class TestEmailCheck:
             from pincer.tools.builtin.email_tool import email_check
             result = await email_check(folder="[Gmail]/Spam", status="ALL")
             mock_client.uid_search.assert_called_once_with("ALL")
-            mock_client.select.assert_called_once_with("[Gmail]/Spam")
+            mock_client.select.assert_called_once_with('"[Gmail]/Spam"')
             assert "Total: 3 email(s)" in result
             assert "[Gmail]/Spam" in result
 
@@ -201,7 +201,7 @@ class TestEmailSearch:
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_search
             result = await email_search("prize", folder="[Gmail]/Spam")
-            mock_client.select.assert_called_once_with("[Gmail]/Spam")
+            mock_client.select.assert_called_once_with('"[Gmail]/Spam"')
             assert "UID: 777" in result
             assert "spammer@example.com" in result
 
@@ -536,12 +536,13 @@ class TestEmailEmptyFolder:
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_empty_folder
             result = await email_empty_folder("[Gmail]/Spam")
-            assert "3 message(s)" in result
-            assert "permanently deleted" in result
+            assert "3/3 message(s)" in result
+            assert "deleted" in result
 
             store_ops = [op for op in operations if op[0] == "store"]
-            assert len(store_ops) == 1
-            assert "\\Deleted" in store_ops[0][1][2]
+            assert len(store_ops) == 3
+            for op in store_ops:
+                assert "\\Deleted" in op[1][2]
 
     async def test_empty_already_empty(self):
         mock_client = _make_imap_client()
@@ -607,6 +608,66 @@ class TestParseListResponse:
         from pincer.tools.builtin.email_tool import _parse_list_response
         result = _parse_list_response(["not bytes", 42, None])  # type: ignore[list-item]
         assert result == []
+
+    def test_parse_list_literal_folder_name(self):
+        """LIST response with folder name as LITERAL+ (line ending {n}, next element bytearray)."""
+        from pincer.tools.builtin.email_tool import _parse_list_response
+        data = [
+            b'(\\HasNoChildren) "/" "INBOX"',
+            b'(\\HasNoChildren \\Junk) "/" {12}',
+            bytearray(b'[Gmail]/Spam'),
+        ]
+        parsed = _parse_list_response(data)
+        assert len(parsed) == 2
+        assert parsed[0][1] == "INBOX"
+        assert parsed[1][1] == "[Gmail]/Spam"
+        assert "\\Junk" in parsed[1][0]
+
+    def test_parse_list_standalone_bytearray(self):
+        """Standalone bytearray (no LIST line) treated as folder name with empty attrs."""
+        from pincer.tools.builtin.email_tool import _parse_list_response
+        data = [bytearray(b"Spam")]
+        parsed = _parse_list_response(data)
+        assert len(parsed) == 1
+        assert parsed[0] == ([], "Spam")
+
+
+# ── _parse_search_uids ──────────────────────────
+
+
+class TestParseSearchUids:
+    def test_numeric_tokens_only(self):
+        from pincer.tools.builtin.email_tool import _parse_search_uids
+        # Full * SEARCH line (robust parsing)
+        result = _parse_search_uids([b"* SEARCH 1 2 3 4 5"])
+        assert result == ["1", "2", "3", "4", "5"]
+
+    def test_uid_only_line(self):
+        from pincer.tools.builtin.email_tool import _parse_search_uids
+        result = _parse_search_uids([b"100 200 300"])
+        assert result == ["100", "200", "300"]
+
+    def test_empty_data(self):
+        from pincer.tools.builtin.email_tool import _parse_search_uids
+        assert _parse_search_uids([]) == []
+
+    def test_bytearray_first_line(self):
+        from pincer.tools.builtin.email_tool import _parse_search_uids
+        result = _parse_search_uids([bytearray(b"7 8 9")])
+        assert result == ["7", "8", "9"]
+
+
+# ── _quote_mailbox ────────────────────────────────
+
+
+class TestQuoteMailbox:
+    def test_simple_folder_unquoted(self):
+        from pincer.tools.builtin.email_tool import _quote_mailbox
+        assert _quote_mailbox("INBOX") == "INBOX"
+
+    def test_folder_with_special_chars_quoted(self):
+        from pincer.tools.builtin.email_tool import _quote_mailbox
+        assert _quote_mailbox("[Gmail]/Spam") == '"[Gmail]/Spam"'
 
 
 # ── _find_folder_by_attr ─────────────────────────

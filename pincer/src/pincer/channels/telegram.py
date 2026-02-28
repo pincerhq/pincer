@@ -22,6 +22,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
 from aiogram.filters import Command, CommandStart
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
 
@@ -84,6 +85,7 @@ class TelegramChannel(BaseChannel):
         self._allowed_users = set(settings.telegram_allowed_users)
         self._polling_task: asyncio.Task[None] | None = None
         self._identity: IdentityResolver | None = None
+        self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
 
     def set_identity_resolver(self, identity: IdentityResolver) -> None:
         """Set the identity resolver for cross-channel user mapping."""
@@ -92,6 +94,44 @@ class TelegramChannel(BaseChannel):
     def set_stream_agent(self, agent: Any) -> None:
         """Set the Agent instance for streaming support."""
         self._stream_agent = agent
+
+    async def request_approval(
+        self, user_id: str, tool_name: str, arguments: dict[str, Any],
+    ) -> bool:
+        """Send an inline-keyboard approval prompt and block until the user responds."""
+        assert self._bot is not None
+
+        args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
+        if len(args_preview) > 200:
+            args_preview = args_preview[:200] + "…"
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Approve", callback_data=f"tool_approve:{user_id}"),
+            InlineKeyboardButton(text="Deny", callback_data=f"tool_deny:{user_id}"),
+        ]])
+
+        await self._bot.send_message(
+            chat_id=int(user_id),
+            text=(
+                f"*Approval required*\n\n"
+                f"Tool: `{tool_name}`\n"
+                f"Args: `{args_preview}`\n\n"
+                f"Allow this action?"
+            ),
+            reply_markup=keyboard,
+        )
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[bool] = loop.create_future()
+        self._pending_approvals[user_id] = future
+
+        try:
+            return await asyncio.wait_for(future, timeout=120)
+        except asyncio.TimeoutError:
+            logger.info("Approval timed out for user %s, tool %s", user_id, tool_name)
+            return False
+        finally:
+            self._pending_approvals.pop(user_id, None)
 
     @property
     def name(self) -> str:
@@ -300,6 +340,24 @@ class TelegramChannel(BaseChannel):
 
     def _register_handlers(self, router: Router) -> None:
         """Register all message handlers on the router."""
+
+        @router.callback_query(F.data.startswith("tool_approve:") | F.data.startswith("tool_deny:"))
+        async def handle_tool_approval(callback: CallbackQuery) -> None:
+            data = callback.data or ""
+            action, _, uid = data.partition(":")
+            future = self._pending_approvals.get(uid)
+            approved = action == "tool_approve"
+
+            if future and not future.done():
+                future.set_result(approved)
+
+            label = "Approved" if approved else "Denied"
+            await callback.answer(label)
+            if callback.message:
+                with contextlib.suppress(Exception):
+                    await callback.message.edit_text(
+                        f"{callback.message.text}\n\n— *{label}*",
+                    )
 
         @router.message(CommandStart())
         async def cmd_start(message: Message) -> None:

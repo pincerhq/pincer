@@ -1,0 +1,48 @@
+{
+  "history": [
+    {
+      "date": "2026-02-20",
+      "total": 0.053265,
+      "requests": 9
+    },
+    {
+      "date": "2026-02-21",
+      "total": 2.598855,
+      "requests": 53
+    },
+    {
+      "date": "2026-02-22",
+      "total": 0.077208,
+      "requests": 3
+    },
+    {
+      "date": "2026-02-23",
+      "total": 2.066577,
+      "requests": 72
+    },
+    {
+      "date": "2026-02-24",
+      "total": 1.131024,
+      "requests": 46
+    },
+    {
+      "date": "2026-02-25",
+      "total": 0.181425,
+      "requests": 12
+    },
+    {
+      "date": "2026-02-27",
+      "total": 0.068472,
+      "requests": 3
+    },
+    {
+      "date": "2026-02-28",
+      "total": 0.006147,
+      "requests": 1
+    }
+  ],
+  "summary": {
+    "total_usd": 6.182973,
+    "total_calls": 199
+  }
+}

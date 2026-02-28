@@ -456,7 +456,8 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         tools.register(
             name="email_trash",
             description=(
-                "Move one or more emails to the Trash folder. "
+                "Delete specific emails by moving them to Trash. "
+                "Pass one or more comma-separated UIDs. "
                 "Auto-discovers the correct trash folder name for the email provider."
             ),
             handler=email_trash,
@@ -480,9 +481,9 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         tools.register(
             name="email_empty_folder",
             description=(
-                "Permanently delete ALL messages in a folder (e.g. Spam, Trash). "
-                "Cannot empty INBOX. Use email_list_folders to find the correct folder name. "
-                "This is a destructive action and cannot be undone."
+                "Delete all emails in a folder such as Spam or Trash. "
+                "Common folder names: '[Gmail]/Spam', '[Gmail]/Trash'. "
+                "Cannot empty INBOX. Use email_list_folders if unsure about folder names."
             ),
             handler=email_empty_folder,
             parameters={
@@ -917,6 +918,19 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         await tg.start(on_message)
         channels.append(tg)
         channel_map[tg.name] = tg
+
+        async def _approval_via_telegram(
+            tool_name: str, arguments: dict, user_id: str, channel: str,
+        ) -> bool:
+            if channel == "telegram":
+                return await tg.request_approval(user_id, tool_name, arguments)
+            logger.warning(
+                "No approval UI for channel %s; auto-approving %s", channel, tool_name,
+            )
+            return True
+
+        agent._approval_callback = _approval_via_telegram
+
         console.print("[green]Telegram connected (streaming enabled)[/green]")
 
     # Sprint 3: Channel router for proactive delivery
