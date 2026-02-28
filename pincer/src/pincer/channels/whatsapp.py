@@ -16,6 +16,7 @@ import io
 import logging
 import time
 import threading
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -67,6 +68,8 @@ class WhatsAppChannel(BaseChannel):
         self._client: NewAClient | None = None
         self._handler: MessageHandler | None = None
         self._own_jid: str | None = None
+        self._own_jid_full: str | None = None
+        self._own_lid: str | None = None
         self._connected = asyncio.Event()
 
         self._dm_allowlist: set[str] = set()
@@ -77,6 +80,11 @@ class WhatsAppChannel(BaseChannel):
                 if phone.strip()
             }
             logger.info("WhatsApp allowlist: %d numbers", len(self._dm_allowlist))
+
+        # Echo prevention: skip processing messages Pincer just sent.
+        self._recent_sent_ids: set[str] = set()
+        self._recent_sent_ids_order: deque[str] = deque()
+        self._max_recent_sent_ids = 100
 
     @property
     def name(self) -> str:
@@ -198,11 +206,12 @@ class WhatsAppChannel(BaseChannel):
     async def _on_connected(self, client: NewAClient, _event: ConnectedEv) -> None:
         me = await client.get_me()
         self._own_jid = me.JID.User
+        self._own_jid_full = Jid2String(me.JID)
         self._connected.set()
         logger.info(
             "WhatsApp connected — own_jid=%r  full_jid=%s",
             self._own_jid,
-            Jid2String(me.JID),
+            self._own_jid_full,
         )
 
     async def _on_pair_status(self, _client: NewAClient, event: PairStatusEv) -> None:
@@ -211,11 +220,35 @@ class WhatsAppChannel(BaseChannel):
     # Skip messages older than this (seconds) — filters history-sync flood
     _MAX_MESSAGE_AGE = 120
 
+    def _is_self_chat(self, chat_user: str) -> bool:
+        """Return True when the chat is with the owner (self-chat).
+
+        Compares against the phone-based JID, the full JID string, and
+        the owner's LID (Linked Identity) if it has been learned.
+        """
+        if not self._own_jid:
+            return False
+        if chat_user == self._own_jid:
+            return True
+        if self._own_jid_full and chat_user in self._own_jid_full:
+            return True
+        if self._own_lid and chat_user == self._own_lid:
+            return True
+        return False
+
     async def _on_message(self, client: NewAClient, event: MessageEv) -> None:
         """Route incoming WhatsApp messages to the handler callback."""
         try:
-            msg = event.Message
             info = event.Info
+            msg_id = info.ID
+
+            # Echo prevention: skip messages Pincer itself just sent.
+            if msg_id and str(msg_id) in self._recent_sent_ids:
+                self._recent_sent_ids.discard(str(msg_id))
+                logger.debug("WA skip: echo of our own message %s", msg_id)
+                return
+
+            msg = event.Message
             source = info.MessageSource
 
             sender_jid = Jid2String(source.Sender)
@@ -224,18 +257,31 @@ class WhatsAppChannel(BaseChannel):
             is_from_me = source.IsFromMe
             sender_phone = source.Sender.User
             chat_user = source.Chat.User
+            chat_server = source.Chat.Server
 
+            # Learn the owner's LID from outgoing messages.  For
+            # is_from_me messages the sender is always the owner; if the
+            # sender JID uses the "lid" server, its User part is the
+            # owner's LID which we store for self-chat detection.
+            if is_from_me and not self._own_lid:
+                sender_server = source.Sender.Server
+                if sender_server == "lid":
+                    self._own_lid = sender_phone
+                    logger.info("WA learned owner LID from sender: %s", self._own_lid)
+
+            msg_type = getattr(info, "Type", None) or "unknown"
             logger.info(
-                "WA event: sender=%s chat=%s chat_user=%r own_jid=%r "
-                "from_me=%s group=%s ts=%s",
-                sender_phone,
-                chat_jid,
-                chat_user,
-                self._own_jid,
+                "[WA] msg in | from_me=%s group=%s chat=%s type=%s",
                 is_from_me,
                 is_group,
-                info.Timestamp,
+                chat_jid,
+                msg_type,
             )
+
+            # Rule 1: Ignore status broadcasts.
+            if "status@broadcast" in chat_jid:
+                logger.debug("WA skip: status broadcast")
+                return
 
             # Filter out old history-sync messages.
             # Neonize may report timestamps in seconds or milliseconds.
@@ -245,30 +291,53 @@ class WhatsAppChannel(BaseChannel):
             now = int(time.time())
             age = now - msg_ts
             if age > self._MAX_MESSAGE_AGE:
-                logger.debug("WA skip old message (age=%ds, limit=%ds)", age, self._MAX_MESSAGE_AGE)
+                logger.info("WA skip old message (age=%ds, limit=%ds)", age, self._MAX_MESSAGE_AGE)
                 return
 
-            # Self-chat: any non-group message flagged is_from_me.
-            # WhatsApp may use a LID (Linked Identity) instead of the phone
-            # number as chat_user, so we cannot rely on chat_user == own_jid.
-            is_self_chat = not is_group and is_from_me
-
+            # Rule 2: Self-chat — owner messages themselves → process.
+            is_self_chat = not is_group and is_from_me and self._is_self_chat(chat_user)
             if is_self_chat:
-                logger.debug("WA routing: self-chat")
-            elif is_group:
-                if not self._is_mentioned_in_group(msg, client):
-                    logger.debug("WA skip: group message without mention")
+                logger.info("WA routing: self-chat (chat_user=%s own_jid=%s)", chat_user, self._own_jid)
+            else:
+                # Rule 3: Outgoing to others → always ignore.
+                if is_from_me:
+                    logger.debug("WA skip: outgoing message to %s → ignoring", chat_jid)
                     return
-                logger.debug("WA routing: group mention")
-            elif not is_from_me:
-                if self._dm_allowlist and sender_phone not in self._dm_allowlist:
-                    logger.debug("WA skip: DM from %s not in allowlist %s", sender_phone, self._dm_allowlist)
-                    return
-                logger.debug("WA routing: DM from %s", sender_phone)
+                # Rule 4: Group — only process if @mentioned or trigger.
+                if is_group:
+                    if not self._is_mentioned_in_group(msg, client):
+                        logger.debug("WA skip: group message without mention")
+                        return
+                    logger.info("WA routing: group mention")
+                else:
+                    # Rule 5: Incoming DM — only process if allowlisted (and not self-chat-only).
+                    if self._settings.whatsapp_self_chat_only:
+                        logger.info("WA skip: incoming DM from %s (self-chat-only mode)", sender_phone)
+                        return
+                    if sender_phone not in self._dm_allowlist:
+                        logger.info("WA skip: DM from %s not in allowlist", sender_phone)
+                        return
+                    logger.info("WA routing: DM from %s", sender_phone)
 
-            incoming = await self._extract_message(client, event, sender_phone, chat_jid)
+            # Defensive unwrap: the Go library should unwrap these, but
+            # if for any reason the raw wrapper arrives, extract the inner
+            # message so content checks find the actual text/media.
+            msg = self._unwrap_message(msg)
+
+            if not self._has_supported_content(msg):
+                set_fields = self._message_set_fields(msg)
+                logger.info(
+                    "WA skip: no supported content; set fields: %s",
+                    set_fields or "(none)",
+                )
+                return
+
+            incoming = await self._extract_message(client, event, sender_phone, chat_jid, msg)
             if incoming is None:
-                logger.warning("WA skip: unsupported message type from %s", sender_phone)
+                logger.warning(
+                    "WA skip: unsupported message type from %s (check debug for message type)",
+                    sender_phone,
+                )
                 return
 
             logger.info(
@@ -283,7 +352,15 @@ class WhatsAppChannel(BaseChannel):
                 response = await self._handler(incoming)
                 if response:
                     reply_jid = build_jid(chat_user, source.Chat.Server)
-                    await client.send_message(reply_jid, response)
+                    result = await client.send_message(reply_jid, response)
+                    sent_id = getattr(result, "ID", None) if result is not None else None
+                    if sent_id is not None:
+                        sid = str(sent_id)
+                        while len(self._recent_sent_ids_order) >= self._max_recent_sent_ids:
+                            old = self._recent_sent_ids_order.popleft()
+                            self._recent_sent_ids.discard(old)
+                        self._recent_sent_ids_order.append(sid)
+                        self._recent_sent_ids.add(sid)
                     logger.debug("WA reply sent to %s (%d chars)", chat_jid, len(response))
                 else:
                     logger.debug("WA handler returned empty response")
@@ -295,14 +372,77 @@ class WhatsAppChannel(BaseChannel):
 
     # ── Message Extraction ───────────────────────
 
+    @staticmethod
+    def _unwrap_message(msg: WAMessage) -> WAMessage:
+        """Unwrap wrapper protobuf types to reach the actual content.
+
+        Whatsmeow normally unwraps these before delivery, but as a safety
+        net we handle them here in case the raw wrapper leaks through.
+        """
+        _WRAPPER_FIELDS = (
+            "deviceSentMessage",
+            "ephemeralMessage",
+            "viewOnceMessage",
+            "viewOnceMessageV2",
+            "viewOnceMessageV2Extension",
+            "documentWithCaptionMessage",
+            "editedMessage",
+        )
+        for field in _WRAPPER_FIELDS:
+            if msg.HasField(field):
+                wrapper = getattr(msg, field)
+                if wrapper.HasField("message"):
+                    inner = wrapper.message
+                    logger.info("WA unwrapped %s", field)
+                    return WhatsAppChannel._unwrap_message(inner)
+        return msg
+
+    def _has_supported_content(self, msg: WAMessage) -> bool:
+        """Return True if the message has at least one content type we handle."""
+        if msg.conversation:
+            return True
+        if msg.HasField("extendedTextMessage"):
+            return True
+        if msg.HasField("imageMessage") and msg.imageMessage.mimetype:
+            return True
+        if msg.HasField("audioMessage") and msg.audioMessage.mimetype:
+            return True
+        if msg.HasField("documentMessage") and msg.documentMessage.mimetype:
+            return True
+        return False
+
+    @staticmethod
+    def _message_set_fields(msg: WAMessage) -> list[str]:
+        """Return list of Message field names that are actually set. For debug logging."""
+        string_fields = ("conversation",)
+        message_fields = (
+            "extendedTextMessage",
+            "imageMessage",
+            "audioMessage",
+            "documentMessage",
+            "protocolMessage",
+            "senderKeyDistributionMessage",
+            "reactionMessage",
+            "stickerMessage",
+            "viewOnceMessage",
+            "messageHistoryBundle",
+            "messageHistoryNotice",
+            "deviceSentMessage",
+        )
+        result = [f for f in string_fields if getattr(msg, f, "")]
+        result.extend(f for f in message_fields if msg.HasField(f))
+        return result
+
     async def _extract_message(
         self,
         client: NewAClient,
         event: MessageEv,
         sender_phone: str,
         chat_jid: str,
+        msg: WAMessage | None = None,
     ) -> IncomingMessage | None:
-        msg = event.Message
+        if msg is None:
+            msg = event.Message
         msg_id = event.Info.ID
 
         if msg.conversation:
@@ -314,16 +454,17 @@ class WhatsAppChannel(BaseChannel):
                 reply_to_message_id=msg_id,
             )
 
-        if msg.extendedTextMessage and msg.extendedTextMessage.text:
+        if msg.HasField("extendedTextMessage"):
+            text = getattr(msg.extendedTextMessage, "text", None) or ""
             return IncomingMessage(
                 user_id=sender_phone,
                 channel="whatsapp",
-                text=msg.extendedTextMessage.text,
+                text=text,
                 channel_type=ChannelType.WHATSAPP,
                 reply_to_message_id=msg_id,
             )
 
-        if msg.imageMessage and msg.imageMessage.mimetype:
+        if msg.HasField("imageMessage") and msg.imageMessage.mimetype:
             image_data = await client.download_any(msg)
             return IncomingMessage(
                 user_id=sender_phone,
@@ -336,7 +477,7 @@ class WhatsAppChannel(BaseChannel):
                 media_mimetype=msg.imageMessage.mimetype or "image/jpeg",
             )
 
-        if msg.audioMessage and msg.audioMessage.mimetype:
+        if msg.HasField("audioMessage") and msg.audioMessage.mimetype:
             audio_data = await client.download_any(msg)
             transcription = await self._transcribe_audio(audio_data)
             return IncomingMessage(
@@ -352,7 +493,7 @@ class WhatsAppChannel(BaseChannel):
                 is_voice_note=True,
             )
 
-        if msg.documentMessage and msg.documentMessage.mimetype:
+        if msg.HasField("documentMessage") and msg.documentMessage.mimetype:
             doc_data = await client.download_any(msg)
             filename = msg.documentMessage.fileName or "document"
             mime = msg.documentMessage.mimetype or "application/octet-stream"
@@ -368,7 +509,12 @@ class WhatsAppChannel(BaseChannel):
                 media_filename=filename,
             )
 
-        logger.debug("Unsupported WhatsApp message type from %s", sender_phone)
+        set_fields = self._message_set_fields(msg)
+        logger.debug(
+            "WA extract skipped: no supported content (set fields: %s) from %s",
+            set_fields or "(none)",
+            sender_phone,
+        )
         return None
 
     async def _transcribe_audio(self, audio_data: bytes) -> str | None:
@@ -392,7 +538,7 @@ class WhatsAppChannel(BaseChannel):
     def _is_mentioned_in_group(self, msg: WAMessage, client: NewAClient) -> bool:
         own_jid = self._own_jid
 
-        if msg.extendedTextMessage and msg.extendedTextMessage.contextInfo:
+        if msg.HasField("extendedTextMessage") and msg.extendedTextMessage.HasField("contextInfo"):
             ctx = msg.extendedTextMessage.contextInfo
             if ctx.mentionedJID:
                 for jid in ctx.mentionedJID:
@@ -400,7 +546,7 @@ class WhatsAppChannel(BaseChannel):
                         return True
 
         text = msg.conversation or ""
-        if msg.extendedTextMessage:
+        if msg.HasField("extendedTextMessage"):
             text = msg.extendedTextMessage.text or ""
 
         if own_jid and own_jid in text:
