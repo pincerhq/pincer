@@ -159,14 +159,21 @@ class TelegramChannel(BaseChannel):
         )
 
     async def stop(self) -> None:
-        if self._dp:
-            await self._dp.stop_polling()
-        if self._bot:
-            await self._bot.session.close()
+        # Polling runs in a background task; cancel it first so the dispatcher
+        # stops. Only then call stop_polling() if needed (it may raise
+        # "Polling is not started" if the task already exited).
         if self._polling_task:
             self._polling_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._polling_task
+        if self._dp:
+            try:
+                await self._dp.stop_polling()
+            except RuntimeError as e:
+                if "Polling is not started" not in str(e):
+                    raise
+        if self._bot:
+            await self._bot.session.close()
         logger.info("Telegram channel stopped")
 
     async def send(self, user_id: str, text: str, **kwargs: Any) -> None:
