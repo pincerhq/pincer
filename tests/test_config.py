@@ -7,14 +7,15 @@ import pytest
 from pincer.config import LLMProvider, Settings
 
 
-def test_settings_load_from_env(tmp_path: Path) -> None:
+def test_settings_load_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_MAX_TOKENS", "8192")
     s = Settings(
         anthropic_api_key="sk-test",  # type: ignore[arg-type]
         data_dir=tmp_path,
     )
     assert s.default_provider == LLMProvider.ANTHROPIC
     assert s.anthropic_api_key.get_secret_value() == "sk-test"
-    assert s.max_tokens == 4096
+    assert s.max_tokens == 8192
 
 
 def test_settings_fallback_to_openai(tmp_path: Path) -> None:
