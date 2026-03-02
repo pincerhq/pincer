@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pincer.tools.sandbox import SandboxConfig, SandboxResult, execute
+from pincer.tools.sandbox import SandboxConfig, execute
 
 SAFE_SKILL = '''
 def add(a, b):

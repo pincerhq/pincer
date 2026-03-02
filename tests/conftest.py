@@ -94,7 +94,6 @@ async def identity_resolver(tmp_path: Path):
 
 @pytest_asyncio.fixture
 async def channel_router(tmp_path: Path):
-    from unittest.mock import AsyncMock as _AM
 
     from pincer.channels.router import ChannelRouter
     from pincer.core.identity import IdentityResolver

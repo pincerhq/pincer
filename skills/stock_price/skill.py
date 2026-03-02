@@ -5,7 +5,10 @@ import urllib.request
 
 
 def get_stock_price(ticker: str) -> dict:
-    """Get stock price from Yahoo Finance. Returns ticker, price, previous_close, change, change_percent, currency, name."""
+    """Get stock price from Yahoo Finance.
+
+    Returns ticker, price, previous_close, change, change_percent, currency, name.
+    """
     if not ticker or not str(ticker).strip():
         return {"error": "ticker cannot be empty"}
 

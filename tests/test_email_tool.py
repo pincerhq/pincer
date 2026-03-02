@@ -676,7 +676,11 @@ class TestQuoteMailbox:
 @pytest.mark.asyncio
 class TestFindFolderByAttr:
     async def test_find_by_attribute(self):
-        from pincer.tools.builtin.email_tool import _find_folder_by_attr, _TRASH_ATTRS, _TRASH_FALLBACKS
+        from pincer.tools.builtin.email_tool import (
+            _TRASH_ATTRS,
+            _TRASH_FALLBACKS,
+            _find_folder_by_attr,
+        )
         mock_client = AsyncMock()
         mock_client.list = AsyncMock(return_value=("OK", [
             b'(\\HasNoChildren) "/" "INBOX"',
@@ -686,7 +690,11 @@ class TestFindFolderByAttr:
         assert result == "[Gmail]/Trash"
 
     async def test_fallback_by_name(self):
-        from pincer.tools.builtin.email_tool import _find_folder_by_attr, _TRASH_ATTRS, _TRASH_FALLBACKS
+        from pincer.tools.builtin.email_tool import (
+            _TRASH_ATTRS,
+            _TRASH_FALLBACKS,
+            _find_folder_by_attr,
+        )
         mock_client = AsyncMock()
         mock_client.list = AsyncMock(return_value=("OK", [
             b'(\\HasNoChildren) "/" "INBOX"',
@@ -696,7 +704,11 @@ class TestFindFolderByAttr:
         assert result == "Trash"
 
     async def test_no_match_returns_first_fallback(self):
-        from pincer.tools.builtin.email_tool import _find_folder_by_attr, _TRASH_ATTRS, _TRASH_FALLBACKS
+        from pincer.tools.builtin.email_tool import (
+            _TRASH_ATTRS,
+            _TRASH_FALLBACKS,
+            _find_folder_by_attr,
+        )
         mock_client = AsyncMock()
         mock_client.list = AsyncMock(return_value=("OK", [
             b'(\\HasNoChildren) "/" "INBOX"',

@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 MODEL_COST_TIERS = [
     {"model": "claude-sonnet-4-5-20250929", "cost_per_1k": 0.009, "tier": "premium"},
@@ -28,7 +30,7 @@ class ConversationBudget:
     spent_usd: float = 0.0
     limit_usd: float = 1.0
     started_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
 
 

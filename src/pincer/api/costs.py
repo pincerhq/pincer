@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/costs", tags=["costs"])
 @router.get("/today")
 async def get_today_costs() -> dict[str, Any]:
     tracker = await get_cost_tracker()
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     costs = await tracker.get_daily_costs(today)
     budget = await tracker.get_budget_status()
     return {
@@ -38,7 +38,7 @@ async def get_cost_history(
     days: int = Query(default=30, ge=1, le=365),
 ) -> dict[str, Any]:
     tracker = await get_cost_tracker()
-    end = datetime.now(timezone.utc)
+    end = datetime.now(UTC)
     start = end - timedelta(days=days)
     history = await tracker.get_daily_history(
         start=start.strftime("%Y-%m-%d"),
@@ -69,7 +69,7 @@ async def get_costs_by_tool(
     days: int = Query(default=7, ge=1, le=90),
 ) -> dict[str, Any]:
     tracker = await get_cost_tracker()
-    end = datetime.now(timezone.utc)
+    end = datetime.now(UTC)
     start = end - timedelta(days=days)
     breakdown = await tracker.get_costs_by_tool(
         start=start.strftime("%Y-%m-%d"),
@@ -94,7 +94,7 @@ async def get_costs_by_model(
     days: int = Query(default=7, ge=1, le=90),
 ) -> dict[str, Any]:
     tracker = await get_cost_tracker()
-    end = datetime.now(timezone.utc)
+    end = datetime.now(UTC)
     start = end - timedelta(days=days)
     breakdown = await tracker.get_costs_by_model(
         start=start.strftime("%Y-%m-%d"),

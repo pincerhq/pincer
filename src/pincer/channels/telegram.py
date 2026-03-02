@@ -127,7 +127,7 @@ class TelegramChannel(BaseChannel):
 
         try:
             return await asyncio.wait_for(future, timeout=120)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.info("Approval timed out for user %s, tool %s", user_id, tool_name)
             return False
         finally:
@@ -221,14 +221,15 @@ class TelegramChannel(BaseChannel):
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
         }
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    raise RuntimeError(f"HTTP {resp.status} fetching {url}")
-                ct = resp.content_type or ""
-                if not ct.startswith("image/") and "octet-stream" not in ct:
-                    raise RuntimeError(f"Not an image (content-type: {ct})")
-                return await resp.read()
+        async with aiohttp.ClientSession(headers=headers) as session, session.get(
+            url, timeout=aiohttp.ClientTimeout(total=15)
+        ) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"HTTP {resp.status} fetching {url}")
+            ct = resp.content_type or ""
+            if not ct.startswith("image/") and "octet-stream" not in ct:
+                raise RuntimeError(f"Not an image (content-type: {ct})")
+            return await resp.read()
 
     async def send_photo(
         self, user_id: str, url: str, caption: str = ""

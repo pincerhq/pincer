@@ -380,7 +380,10 @@ class Agent:
                         logger.warning("Sanitization failed after %d attempts, clearing session", sanitize_attempts - 1)
                         session.messages = [m for m in session.messages if m.role == MessageRole.SYSTEM]
                         await self._sessions._persist(session)  # noqa: SLF001
-                        yield StreamChunk(StreamEventType.DONE, "I had a session error and cleared my context. Please resend your message.")
+                        yield StreamChunk(
+                            StreamEventType.DONE,
+                            "I had a session error and cleared my context. Please resend your message.",
+                        )
                         return
                     logger.warning("Orphaned tool pair detected, sanitizing session (attempt %d)", sanitize_attempts)
                     session.messages = _sanitize_tool_pairs(session.messages)

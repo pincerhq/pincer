@@ -1,5 +1,6 @@
 """YouTube summary skill: get video transcripts."""
 
+import contextlib
 import json
 import re
 import urllib.error
@@ -145,10 +146,8 @@ def get_transcript(url: str, language: str = "en") -> dict:
 
         transcript_list = None
         if hasattr(YouTubeTranscriptApi, "get_transcript"):
-            try:
+            with contextlib.suppress(Exception):
                 transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-            except Exception:
-                pass
         if transcript_list is None:
             try:
                 api = YouTubeTranscriptApi()
@@ -160,10 +159,7 @@ def get_transcript(url: str, language: str = "en") -> dict:
         if transcript_list:
             parts = []
             for item in transcript_list:
-                if isinstance(item, dict):
-                    txt = item.get("text", "")
-                else:
-                    txt = getattr(item, "text", "") or str(item)
+                txt = item.get("text", "") if isinstance(item, dict) else getattr(item, "text", "") or str(item)
                 if txt:
                     parts.append(txt)
             transcript = " ".join(parts)

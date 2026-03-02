@@ -15,13 +15,15 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
 from pincer.config import get_settings
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _UID_RE = re.compile(r"UID:\s*(\d+)")
 
@@ -178,7 +180,7 @@ class EventTriggerManager:
             # The calendar_today returns formatted text; we look for events
             # starting within the next 10-15 minutes by checking current time
             # against the schedule (simplified approach)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             trigger_key = f"cal_reminder_{now.strftime('%Y%m%d%H')}"
             if await self._is_processed("calendar_reminder", trigger_key):
                 return

@@ -14,8 +14,8 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-import time
 import threading
+import time
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
@@ -25,13 +25,10 @@ try:
         ConnectedEv,
         MessageEv,
         PairStatusEv,
-        QREv,
         event_global_loop,
     )
-    from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
-        Message as WAMessage,
-    )
-    from neonize.utils import build_jid, Jid2String, log as neonize_log
+    from neonize.utils import Jid2String, build_jid
+    from neonize.utils import log as neonize_log
 
     HAS_NEONIZE = True
 except ImportError:
@@ -48,6 +45,10 @@ from pincer.channels.base import (
 )
 
 if TYPE_CHECKING:
+    from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
+        Message as WAMessage,
+    )
+
     from pincer.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -100,14 +101,17 @@ class WhatsAppChannel(BaseChannel):
         # Neonize dispatches all event callbacks via
         # asyncio.run_coroutine_threadsafe(..., event_global_loop) but never
         # starts that loop.  We run it in a daemon thread so callbacks fire.
-        if not WhatsAppChannel._loop_started and event_global_loop is not None:
-            if not event_global_loop.is_running():
-                threading.Thread(
-                    target=event_global_loop.run_forever,
-                    daemon=True,
-                ).start()
-                WhatsAppChannel._loop_started = True
-                logger.debug("Started neonize event_global_loop in daemon thread")
+        if (
+            not WhatsAppChannel._loop_started
+            and event_global_loop is not None
+            and not event_global_loop.is_running()
+        ):
+            threading.Thread(
+                target=event_global_loop.run_forever,
+                daemon=True,
+            ).start()
+            WhatsAppChannel._loop_started = True
+            logger.debug("Started neonize event_global_loop in daemon thread")
 
         self._client = NewAClient(name="pincer-wa")
 
@@ -143,7 +147,7 @@ class WhatsAppChannel(BaseChannel):
 
         try:
             await asyncio.wait_for(self._connected.wait(), timeout=120)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise RuntimeError(
                 "WhatsApp connection timed out. Did you scan the QR code?"
             ) from None
@@ -232,9 +236,7 @@ class WhatsAppChannel(BaseChannel):
             return True
         if self._own_jid_full and chat_user in self._own_jid_full:
             return True
-        if self._own_lid and chat_user == self._own_lid:
-            return True
-        return False
+        return bool(self._own_lid and chat_user == self._own_lid)
 
     async def _on_message(self, client: NewAClient, event: MessageEv) -> None:
         """Route incoming WhatsApp messages to the handler callback."""
@@ -251,13 +253,12 @@ class WhatsAppChannel(BaseChannel):
             msg = event.Message
             source = info.MessageSource
 
-            sender_jid = Jid2String(source.Sender)
+            Jid2String(source.Sender)
             chat_jid = Jid2String(source.Chat)
             is_group = source.IsGroup
             is_from_me = source.IsFromMe
             sender_phone = source.Sender.User
             chat_user = source.Chat.User
-            chat_server = source.Chat.Server
 
             # Learn the owner's LID from outgoing messages.  For
             # is_from_me messages the sender is always the owner; if the
@@ -379,7 +380,7 @@ class WhatsAppChannel(BaseChannel):
         Whatsmeow normally unwraps these before delivery, but as a safety
         net we handle them here in case the raw wrapper leaks through.
         """
-        _WRAPPER_FIELDS = (
+        _wrapper_fields = (
             "deviceSentMessage",
             "ephemeralMessage",
             "viewOnceMessage",
@@ -388,7 +389,7 @@ class WhatsAppChannel(BaseChannel):
             "documentWithCaptionMessage",
             "editedMessage",
         )
-        for field in _WRAPPER_FIELDS:
+        for field in _wrapper_fields:
             if msg.HasField(field):
                 wrapper = getattr(msg, field)
                 if wrapper.HasField("message"):
@@ -407,9 +408,7 @@ class WhatsAppChannel(BaseChannel):
             return True
         if msg.HasField("audioMessage") and msg.audioMessage.mimetype:
             return True
-        if msg.HasField("documentMessage") and msg.documentMessage.mimetype:
-            return True
-        return False
+        return bool(msg.HasField("documentMessage") and msg.documentMessage.mimetype)
 
     @staticmethod
     def _message_set_fields(msg: WAMessage) -> list[str]:
@@ -553,7 +552,4 @@ class WhatsAppChannel(BaseChannel):
             return True
 
         trigger = self._settings.whatsapp_group_trigger
-        if trigger and trigger.lower() in text.lower():
-            return True
-
-        return False
+        return bool(trigger and trigger.lower() in text.lower())

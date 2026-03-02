@@ -11,9 +11,9 @@ Config mapping (in .env):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiosqlite
@@ -21,7 +21,7 @@ import aiosqlite
 from pincer.channels.base import ChannelType
 
 if TYPE_CHECKING:
-    pass
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -256,10 +256,8 @@ class IdentityResolver:
 
                 for ch, cid in ((left_channel, left_id), (right_channel, right_id)):
                     if ch == "telegram":
-                        try:
+                        with contextlib.suppress(ValueError):
                             telegram_id = int(cid)
-                        except ValueError:
-                            pass
                     elif ch == "whatsapp":
                         whatsapp_phone = cid.lstrip("+")
                     elif ch == "discord":

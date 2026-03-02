@@ -3,8 +3,6 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from pincer.tools.skills.loader import SkillManifest
 from pincer.tools.skills.scanner import SkillScanner
 

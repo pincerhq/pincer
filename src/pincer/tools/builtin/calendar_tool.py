@@ -10,7 +10,7 @@ Tools are registered in cli.py via tools.register().
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pincer.config import get_settings
@@ -110,7 +110,7 @@ async def calendar_today(calendar_id: str = "primary") -> str:
     """Get today's calendar events. Returns formatted string."""
     try:
         service = _get_service()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
         end_of_day = start_of_day + timedelta(days=1)
 
@@ -149,7 +149,7 @@ async def calendar_week(calendar_id: str = "primary") -> str:
     """Get this week's calendar events. Returns formatted string."""
     try:
         service = _get_service()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         end = now + timedelta(days=7)
 
         result = (

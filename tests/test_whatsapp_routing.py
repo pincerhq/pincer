@@ -53,7 +53,6 @@ if "pincer.channels.whatsapp" in sys.modules:
 
 from pincer.channels.whatsapp import WhatsAppChannel  # noqa: E402
 
-
 OWNER_PHONE = "491622549781"
 OTHER_PHONE = "4917612345678"
 
@@ -157,7 +156,8 @@ class TestWhatsAppRouting:
             is_group=False,
             chat_jid=f"{OWNER_PHONE}@s.whatsapp.net",
         )
-        with patch("pincer.channels.whatsapp.Jid2String", side_effect=[f"{OWNER_PHONE}@s.whatsapp.net", f"{OWNER_PHONE}@s.whatsapp.net"]):
+        jid_effect = [f"{OWNER_PHONE}@s.whatsapp.net", f"{OWNER_PHONE}@s.whatsapp.net"]
+        with patch("pincer.channels.whatsapp.Jid2String", side_effect=jid_effect):
             await ch._on_message(MagicMock(), event)
         ch._handler.assert_called_once()
         ch._extract_message.assert_called_once()
@@ -179,7 +179,8 @@ class TestWhatsAppRouting:
             chat_server="lid",
             sender_server="lid",
         )
-        with patch("pincer.channels.whatsapp.Jid2String", side_effect=[f"{lid_user}@lid", f"{lid_user}@lid"]):
+        jid_effect = [f"{lid_user}@lid", f"{lid_user}@lid"]
+        with patch("pincer.channels.whatsapp.Jid2String", side_effect=jid_effect):
             await ch._on_message(MagicMock(), event)
         ch._handler.assert_called_once()
         ch._extract_message.assert_called_once()
@@ -204,7 +205,8 @@ class TestWhatsAppRouting:
             chat_server="lid",
             sender_server="lid",
         )
-        with patch("pincer.channels.whatsapp.Jid2String", side_effect=[f"{other_lid}@lid", f"{owner_lid}@lid"]):
+        jid_effect = [f"{other_lid}@lid", f"{owner_lid}@lid"]
+        with patch("pincer.channels.whatsapp.Jid2String", side_effect=jid_effect):
             await ch._on_message(MagicMock(), event)
         ch._handler.assert_not_called()
         ch._extract_message.assert_not_called()
@@ -219,7 +221,8 @@ class TestWhatsAppRouting:
             is_group=False,
             chat_jid=f"{OTHER_PHONE}@s.whatsapp.net",
         )
-        with patch("pincer.channels.whatsapp.Jid2String", side_effect=[f"{OTHER_PHONE}@s.whatsapp.net", f"{OTHER_PHONE}@s.whatsapp.net"]):
+        jid_effect = [f"{OTHER_PHONE}@s.whatsapp.net", f"{OTHER_PHONE}@s.whatsapp.net"]
+        with patch("pincer.channels.whatsapp.Jid2String", side_effect=jid_effect):
             await ch._on_message(MagicMock(), event)
         ch._handler.assert_not_called()
         ch._extract_message.assert_not_called()
@@ -345,7 +348,8 @@ class TestWhatsAppRouting:
             msg_id="echo-msg-id",
             chat_jid=f"{OWNER_PHONE}@s.whatsapp.net",
         )
-        with patch("pincer.channels.whatsapp.Jid2String", side_effect=[f"{OWNER_PHONE}@s.whatsapp.net", f"{OWNER_PHONE}@s.whatsapp.net"]):
+        jid_effect = [f"{OWNER_PHONE}@s.whatsapp.net", f"{OWNER_PHONE}@s.whatsapp.net"]
+        with patch("pincer.channels.whatsapp.Jid2String", side_effect=jid_effect):
             await ch._on_message(MagicMock(), event)
         ch._handler.assert_not_called()
         ch._extract_message.assert_not_called()

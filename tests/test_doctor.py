@@ -1,7 +1,6 @@
 """Tests for the security doctor."""
 
 import os
-import stat
 
 import pytest
 

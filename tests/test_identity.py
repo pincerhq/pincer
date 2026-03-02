@@ -2,7 +2,6 @@
 
 import pytest
 import pytest_asyncio
-import aiosqlite
 
 from pincer.channels.base import ChannelType
 from pincer.core.identity import IdentityResolver

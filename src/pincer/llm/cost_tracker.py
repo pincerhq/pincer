@@ -273,7 +273,7 @@ _cost_tracker: CostTracker | None = None
 
 
 async def get_cost_tracker(
-    db_path: "Path | None" = None, daily_budget: float = 5.0
+    db_path: Path | None = None, daily_budget: float = 5.0
 ) -> CostTracker:
     """Singleton accessor for the cost tracker."""
     global _cost_tracker

@@ -59,7 +59,7 @@ async def test_track_error_handling(audit_logger):
             user_id="u1",
             action=AuditAction.TOOL_CALL,
             tool="bad_tool",
-        ) as entry:
+        ):
             raise ValueError("test error")
 
     await audit_logger._flush_pending()

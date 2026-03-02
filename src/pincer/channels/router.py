@@ -14,10 +14,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from pincer.channels.base import ChannelType
-
 if TYPE_CHECKING:
-    from pincer.channels.base import BaseChannel
+    from pincer.channels.base import BaseChannel, ChannelType
     from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
