@@ -226,6 +226,17 @@ class Settings(BaseSettings):
     def log_dir(self) -> Path:
         return self.data_dir / "logs"
 
+    def google_oauth_dir(self) -> Path:
+        """Directory for Google OAuth credentials and token.
+
+        Prefers project-relative data/ (when running from repo root) if
+        google_credentials.json exists there; otherwise uses data_dir (e.g. ~/.pincer).
+        """
+        cwd_data = Path.cwd() / "data"
+        if (cwd_data / "google_credentials.json").exists():
+            return cwd_data
+        return self.data_dir
+
     def ensure_dirs(self) -> None:
         """Create data directories if they don't exist."""
         self.data_dir.mkdir(parents=True, exist_ok=True)

@@ -33,15 +33,16 @@ def _get_credentials():  # type: ignore[no-untyped-def]
     from google.oauth2.credentials import Credentials
 
     settings = get_settings()
-    token_path = settings.data_dir / "google_token.json"
-    credentials_path = settings.data_dir / "google_credentials.json"
+    oauth_dir = settings.google_oauth_dir()
+    token_path = oauth_dir / "google_token.json"
+    credentials_path = oauth_dir / "google_credentials.json"
 
     if not credentials_path.exists():
         raise FileNotFoundError(
             "SETUP REQUIRED: Google OAuth client credentials not found at "
             f"{credentials_path}. Download the JSON from Google Cloud Console "
             "-> APIs & Services -> Credentials -> OAuth 2.0 Client IDs, "
-            "then save it as data/google_credentials.json."
+            f"then save it as {credentials_path} or in ~/.pincer/"
         )
 
     if not token_path.exists():
@@ -65,14 +66,12 @@ def _get_credentials():  # type: ignore[no-untyped-def]
         except Exception as e:
             raise FileNotFoundError(
                 f"Google token refresh failed: {e}. "
-                "Delete data/google_token.json and re-authorize with: "
-                "pincer auth-google"
+                f"Delete {token_path} and re-authorize with: pincer auth-google"
             ) from e
 
     raise FileNotFoundError(
         "Google token exists but is invalid (no refresh token). "
-        "Delete data/google_token.json and re-authorize with: "
-        "pincer auth-google"
+        f"Delete {token_path} and re-authorize with: pincer auth-google"
     )
 
 
