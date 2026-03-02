@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from pincer.api.costs import router as costs_router
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 DASHBOARD_TOKEN = os.environ.get("PINCER_DASHBOARD_TOKEN", "")
 

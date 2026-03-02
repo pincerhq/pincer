@@ -97,7 +97,7 @@ def _text(elem: ET.Element | None, tag: str, default: str = "") -> str:
     if child is not None and child.text:
         return (child.text or "").strip()
     ns = {"atom": "http://www.w3.org/2005/Atom"}
-    for prefix, uri in ns.items():
+    for _prefix, uri in ns.items():
         child = elem.find(f"{{{uri}}}{tag}")
         if child is not None and child.text:
             return (child.text or "").strip()

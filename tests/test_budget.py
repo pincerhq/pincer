@@ -80,7 +80,7 @@ async def test_warning_notification():
     )
     await enforcer.record_cost("u1", 8.50)
     assert len(notifications) == 1
-    assert "u1" == notifications[0][0]
+    assert notifications[0][0] == "u1"
     assert "85%" in notifications[0][1]
 
 

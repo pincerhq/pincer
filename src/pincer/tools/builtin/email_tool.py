@@ -9,11 +9,12 @@ Tools are registered in cli.py via tools.register().
 
 from __future__ import annotations
 
+import contextlib
 import email
 import email.policy
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from typing import Any
 
@@ -223,10 +224,8 @@ async def email_check(limit: int = 10, folder: str = "INBOX", status: str = "UNS
         return f"Error checking email: {e}"
     finally:
         if client:
-            try:
+            with contextlib.suppress(Exception):
                 await client.logout()
-            except Exception:
-                pass
 
 
 # ── Tool: email_send ─────────────────────────────
@@ -276,7 +275,7 @@ async def email_search(
         await client.select(_quote_mailbox(folder))
 
         since_date = (
-            datetime.now(timezone.utc) - timedelta(days=days_back)
+            datetime.now(UTC) - timedelta(days=days_back)
         ).strftime("%d-%b-%Y")
         search_parts = [f"SINCE {since_date}"]
         if sender:
@@ -317,10 +316,8 @@ async def email_search(
         return f"Error searching email: {e}"
     finally:
         if client:
-            try:
+            with contextlib.suppress(Exception):
                 await client.logout()
-            except Exception:
-                pass
 
 
 # ── Tool: email_read ─────────────────────────────
@@ -357,10 +354,8 @@ async def email_read(uid: str, folder: str = "INBOX", max_chars: int = 4000) -> 
         return f"Error reading email: {e}"
     finally:
         if client:
-            try:
+            with contextlib.suppress(Exception):
                 await client.logout()
-            except Exception:
-                pass
 
 
 # ── Tool: email_list_folders ─────────────────────
@@ -390,10 +385,8 @@ async def email_list_folders() -> str:
         return f"Error listing folders: {e}"
     finally:
         if client:
-            try:
+            with contextlib.suppress(Exception):
                 await client.logout()
-            except Exception:
-                pass
 
 
 # ── Tool: email_mark ─────────────────────────────
@@ -432,10 +425,8 @@ async def email_mark(uids: str, action: str, folder: str = "INBOX") -> str:
         return f"Error marking emails: {e}"
     finally:
         if client:
-            try:
+            with contextlib.suppress(Exception):
                 await client.logout()
-            except Exception:
-                pass
 
 
 # ── Tool: email_move ─────────────────────────────
@@ -465,10 +456,8 @@ async def email_move(uids: str, destination: str, folder: str = "INBOX") -> str:
         return f"Error moving emails: {e}"
     finally:
         if client:
-            try:
+            with contextlib.suppress(Exception):
                 await client.logout()
-            except Exception:
-                pass
 
 
 # ── Tool: email_trash ────────────────────────────
@@ -503,10 +492,8 @@ async def email_trash(uids: str, folder: str = "INBOX") -> str:
         return f"Error trashing emails: {e}"
     finally:
         if client:
-            try:
+            with contextlib.suppress(Exception):
                 await client.logout()
-            except Exception:
-                pass
 
 
 # ── Tool: email_empty_folder ─────────────────────
@@ -556,7 +543,5 @@ async def email_empty_folder(folder: str) -> str:
         return f"Error emptying folder: {e}"
     finally:
         if client:
-            try:
+            with contextlib.suppress(Exception):
                 await client.logout()
-            except Exception:
-                pass

@@ -21,10 +21,7 @@ def _sandbox_path(path_str: str) -> Path:
     raw = Path(path_str)
 
     # Resolve relative paths against workspace (not CWD)
-    if not raw.is_absolute():
-        target = (workspace / path_str).resolve()
-    else:
-        target = raw.resolve()
+    target = (workspace / path_str).resolve() if not raw.is_absolute() else raw.resolve()
 
     # Security: must be within workspace
     if not str(target).startswith(str(workspace.resolve())):

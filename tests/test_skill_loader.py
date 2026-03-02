@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from pincer.exceptions import SkillLoadError
-from pincer.tools.skills.loader import LoadedSkill, SkillLoader, SkillManifest
+from pincer.tools.skills.loader import SkillLoader, SkillManifest
 from pincer.tools.skills.scanner import SkillScanner
 
 

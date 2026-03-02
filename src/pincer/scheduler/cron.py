@@ -11,17 +11,21 @@ Persistent cron-based task scheduler.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable, Coroutine
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import aiosqlite
 from croniter import croniter
 
 from pincer.channels.base import ChannelType
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+    from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +66,7 @@ class Schedule:
         base = from_time or datetime.now(tzinfo)
         if base.tzinfo is None:
             base = base.replace(tzinfo=tzinfo)
-        return croniter(self.cron_expr, base).get_next(datetime).astimezone(timezone.utc)
+        return croniter(self.cron_expr, base).get_next(datetime).astimezone(UTC)
 
 
 class CronScheduler:
@@ -124,7 +128,7 @@ class CronScheduler:
             raise ValueError(f"Invalid cron expression: {cron_expr}")
 
         next_run = croniter(cron_expr, datetime.now(ZoneInfo(tz))).get_next(datetime)
-        next_run_utc = next_run.astimezone(timezone.utc).isoformat()
+        next_run_utc = next_run.astimezone(UTC).isoformat()
 
         async with aiosqlite.connect(self._db_path) as db:
             cursor = await db.execute(
@@ -175,10 +179,8 @@ class CronScheduler:
         self._running = False
         if self._task:
             self._task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._task
-            except asyncio.CancelledError:
-                pass
         logger.info("Scheduler stopped")
 
     async def _loop(self) -> None:
@@ -190,7 +192,7 @@ class CronScheduler:
             await asyncio.sleep(self._check_interval)
 
     async def _check_and_fire(self) -> None:
-        now_utc = datetime.now(timezone.utc).isoformat()
+        now_utc = datetime.now(UTC).isoformat()
 
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row

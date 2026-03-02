@@ -1,6 +1,5 @@
 """Integration tests for Sprint 2 features: memory, browser, python_exec, voice, streaming."""
 
-import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,9 +8,8 @@ import pytest_asyncio
 
 from pincer.core.agent import Agent, AgentResponse, StreamChunk, StreamEventType
 from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, ToolCall
-from pincer.memory.store import Memory, MemoryStore
+from pincer.memory.store import MemoryStore
 from pincer.memory.summarizer import Summarizer
-
 
 # ── Memory Store Tests ────────────────────────────────────────
 
@@ -146,7 +144,7 @@ async def test_summarizer_triggers_on_threshold(
     # Summary should be stored as a memory
     results = await memory_store.search_text("Summary", user_id="user1")
     assert len(results) >= 1
-    assert any("conversation_summary" == m.category for m in results)
+    assert any(m.category == "conversation_summary" for m in results)
 
 
 @pytest.mark.asyncio
@@ -240,11 +238,11 @@ async def test_transcribe_voice_success() -> None:
     mock_transcription = MagicMock()
     mock_transcription.text = "Hello, this is a test transcription"
 
-    with patch("openai.AsyncOpenAI") as MockClient:
+    with patch("openai.AsyncOpenAI") as mock_client:
         instance = AsyncMock()
         instance.audio.transcriptions.create = AsyncMock(return_value=mock_transcription)
         instance.close = AsyncMock()
-        MockClient.return_value = instance
+        mock_client.return_value = instance
 
         result = await transcribe_voice(b"audio data", "audio/ogg", api_key="test-key")
         assert result == "Hello, this is a test transcription"
@@ -374,7 +372,6 @@ async def test_agent_with_memory(
 async def test_browse_returns_error_without_playwright() -> None:
     with patch.dict("sys.modules", {"playwright": None, "playwright.async_api": None}):
         # Force reimport to pick up the patched modules
-        import importlib
         from pincer.tools.builtin import browser
         # Reset the global browser state
         browser._browser = None

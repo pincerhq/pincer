@@ -14,12 +14,12 @@ import stat
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 
-class CheckStatus(str, Enum):
+class CheckStatus(StrEnum):
     PASS = "pass"
     WARNING = "warning"
     CRITICAL = "critical"

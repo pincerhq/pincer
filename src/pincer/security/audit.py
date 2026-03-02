@@ -10,17 +10,20 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
+from contextlib import asynccontextmanager, suppress
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
-class AuditAction(str, Enum):
+
+class AuditAction(StrEnum):
     TOOL_CALL = "tool_call"
     LLM_REQUEST = "llm_request"
     LLM_RESPONSE = "llm_response"
@@ -52,7 +55,7 @@ class AuditEntry:
     session_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+        default_factory=lambda: datetime.now(UTC).isoformat()
     )
 
 
@@ -105,10 +108,8 @@ class AuditLogger:
         self._running = False
         if self._flush_task:
             self._flush_task.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._flush_task
-            except asyncio.CancelledError:
-                pass
         await self._flush_pending()
         if self._db:
             await self._db.close()
@@ -181,7 +182,7 @@ class AuditLogger:
         async with self._db.execute(sql, params) as cursor:
             columns = [desc[0] for desc in cursor.description]
             rows = await cursor.fetchall()
-            return [dict(zip(columns, row)) for row in rows]
+            return [dict(zip(columns, row, strict=False)) for row in rows]
 
     async def export_json(
         self,
@@ -220,7 +221,7 @@ class AuditLogger:
                 async for row in cursor:
                     if not first:
                         f.write(",\n")
-                    record = dict(zip(columns, row))
+                    record = dict(zip(columns, row, strict=False))
                     if record.get("metadata_json"):
                         try:
                             record["metadata"] = json.loads(

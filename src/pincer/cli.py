@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import signal
+from datetime import UTC
 from typing import TYPE_CHECKING
 
 import typer
@@ -22,6 +23,7 @@ from rich.logging import RichHandler
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
 
+logger = logging.getLogger(__name__)
 app = typer.Typer(
     name="pincer",
     help="Pincer — Your personal AI agent",
@@ -706,7 +708,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
     from pincer.tools.skills.loader import SkillLoader
     from pincer.tools.skills.scanner import SkillScanner
 
-    skill_scanner = SkillScanner()
+    SkillScanner()
     skill_loader = SkillLoader(
         bundled_dir=_SkillPath("skills"),
         scanner=None,  # bundled skills are trusted, skip scanning
@@ -1020,6 +1022,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
     api_server = None
     try:
         import uvicorn
+
         from pincer.api.server import create_app
 
         api_app = create_app()
@@ -1115,7 +1118,7 @@ def cost(
 async def _show_cost(
     days: int = 0, by_model: bool = False, by_tool: bool = False, export: str = ""
 ) -> None:
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from rich.table import Table
 
@@ -1129,13 +1132,13 @@ async def _show_cost(
     today = await tracker.get_today_spend()
     summary = await tracker.get_summary()
 
-    console.print(f"[bold]Pincer Cost Report[/bold]\n")
+    console.print("[bold]Pincer Cost Report[/bold]\n")
     console.print(f"  Today:   ${today:.4f} / ${s.daily_budget_usd:.2f}")
     console.print(f"  Total:   ${summary.total_usd:.4f} ({summary.total_calls} calls)")
     console.print(f"  Tokens:  {summary.total_input_tokens:,} in / {summary.total_output_tokens:,} out")
 
     if days > 0:
-        end = datetime.now(timezone.utc)
+        end = datetime.now(UTC)
         start = end - timedelta(days=days)
         history = await tracker.get_daily_history(
             start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d")
@@ -1151,13 +1154,13 @@ async def _show_cost(
             console.print(table)
 
     if by_model:
-        end = datetime.now(timezone.utc)
+        end = datetime.now(UTC)
         start = end - timedelta(days=max(days, 7))
         models = await tracker.get_costs_by_model(
             start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d")
         )
         if models:
-            console.print(f"\n[bold]By Model:[/bold]")
+            console.print("\n[bold]By Model:[/bold]")
             table = Table()
             table.add_column("Model")
             table.add_column("Cost", justify="right")
@@ -1171,7 +1174,7 @@ async def _show_cost(
         import json as _json
         from pathlib import Path as _P
 
-        end = datetime.now(timezone.utc)
+        end = datetime.now(UTC)
         start = end - timedelta(days=max(days, 30))
         history = await tracker.get_daily_history(
             start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d")
@@ -1217,14 +1220,14 @@ async def _pair_whatsapp() -> None:
 @app.command(name="auth-google")
 def auth_google() -> None:
     """Run Google Calendar OAuth consent flow (one-time setup)."""
-    from pathlib import Path
 
     from pincer.config import get_settings
     from pincer.tools.builtin.calendar_tool import SCOPES
 
     settings = get_settings()
-    credentials_path = Path(settings.data_dir) / "google_credentials.json"
-    token_path = Path(settings.data_dir) / "google_token.json"
+    oauth_dir = settings.google_oauth_dir()
+    credentials_path = oauth_dir / "google_credentials.json"
+    token_path = oauth_dir / "google_token.json"
 
     console.print("[bold]Google Calendar — OAuth Setup[/bold]\n")
 
@@ -1250,7 +1253,7 @@ def auth_google() -> None:
             "[red]google-auth-oauthlib is not installed.[/red]\n"
             "Run:  uv pip install google-auth-oauthlib"
         )
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
 
@@ -1267,7 +1270,7 @@ def auth_google() -> None:
     with open(token_path, "w") as f:
         f.write(creds.to_json())
 
-    console.print(f"\n[green]Google Calendar authorized![/green]")
+    console.print("\n[green]Google Calendar authorized![/green]")
     console.print(f"  Token saved to: {token_path}")
     console.print(f"  Refresh token:  {'Yes' if creds.refresh_token else 'No'}")
     console.print(f"  Expires:        {creds.expiry}")
@@ -1353,10 +1356,9 @@ def init() -> None:
 
     # Write .env
     env_path = _P(".env")
-    if env_path.exists():
-        if not Confirm.ask(f"\n{env_path} already exists. Overwrite?", default=False):
-            console.print("[yellow]Aborted.[/yellow]")
-            raise typer.Exit(0)
+    if env_path.exists() and not Confirm.ask(f"\n{env_path} already exists. Overwrite?", default=False):
+        console.print("[yellow]Aborted.[/yellow]")
+        raise typer.Exit(0)
 
     env_path.write_text("\n".join(env_lines) + "\n")
 
@@ -1458,7 +1460,6 @@ async def _chat_loop() -> None:
         expand=False,
     ))
 
-    from pincer.channels.base import IncomingMessage
 
     # Reuse the same agent setup as `run` but minimal
     from pincer.core.agent import Agent
@@ -1677,8 +1678,8 @@ def {name}_action(input: str) -> dict:
 '''
     (skill_dir / "skill.py").write_text(skill_py)
     console.print(f"[green]Created skill scaffold at {skill_dir}/[/green]")
-    console.print(f"  manifest.json — edit metadata and tool definitions")
-    console.print(f"  skill.py      — implement your tool functions")
+    console.print("  manifest.json — edit metadata and tool definitions")
+    console.print("  skill.py      — implement your tool functions")
 
 
 @skills_app.command(name="scan")
@@ -1917,7 +1918,7 @@ async def _memory_stats() -> None:
     ) as cur:
         categories = {r[0]: r[1] async for r in cur}
 
-    console.print(f"[bold]Memory Stats[/bold]")
+    console.print("[bold]Memory Stats[/bold]")
     console.print(f"  Total memories: {total}")
     console.print(f"  Users:          {users}")
     for cat, count in categories.items():
