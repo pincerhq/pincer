@@ -13,6 +13,7 @@ services:
       - PINCER_DATA_DIR=/app/data
       - PINCER_DASHBOARD_HOST=0.0.0.0
       - PINCER_DASHBOARD_PORT=8080
+      - PINCER_DASHBOARD_DIST=/app/dashboard/dist
     volumes:
       - pincer-data:/app/data
       - ./skills:/app/skills:ro
