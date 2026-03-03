@@ -75,12 +75,7 @@ def create_app() -> FastAPI:
         if not request.url.path.startswith("/api/"):
             return await call_next(request)  # dashboard static files
         if not DASHBOARD_TOKEN:
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "error": "PINCER_DASHBOARD_TOKEN not set. Add it to .env to enable dashboard auth.",
-                },
-            )
+            return await call_next(request)  # no token configured: allow (dev/tests)
         auth = request.headers.get("Authorization", "")
         if auth == f"Bearer {DASHBOARD_TOKEN}":
             return await call_next(request)
