@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import suppress
 from typing import Any
 
 from fastapi import APIRouter, Query
@@ -16,10 +17,8 @@ def _row_to_entry(row: dict[str, Any]) -> dict[str, Any]:
     """Map DB row to frontend AuditEntry shape."""
     metadata = {}
     if row.get("metadata_json"):
-        try:
+        with suppress(json.JSONDecodeError, TypeError):
             metadata = json.loads(row["metadata_json"])
-        except (json.JSONDecodeError, TypeError):
-            pass
     return {
         "id": str(row.get("id", "")),
         "timestamp": row.get("timestamp", ""),
@@ -47,10 +46,8 @@ async def get_audit(
     """List audit log entries with optional filters."""
     audit_action = None
     if action:
-        try:
+        with suppress(ValueError):
             audit_action = AuditAction(action)
-        except ValueError:
-            pass
     logger = await get_audit_logger()
     rows = await logger.query(
         user_id=user,
