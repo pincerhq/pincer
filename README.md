@@ -6,15 +6,18 @@
 
 **Your personal AI agent. Text it. It does stuff.**
 
-[![PyPI](https://img.shields.io/pypi/v/pincer-agent?color=FF6B35&style=flat-square)](https://pypi.org/project/pincer-agent/)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
-[![CI](https://img.shields.io/github/actions/workflow/status/pincerhq/pincer/ci.yml?style=flat-square&label=CI)](https://github.com/pincerhq/pincer/actions)
-[![codecov](https://img.shields.io/codecov/c/github/pincerhq/pincer?style=flat-square&color=22C55E)](https://codecov.io/gh/pincerhq/pincer)
-[![License: MIT](https://img.shields.io/badge/license-MIT-22C55E?style=flat-square)](LICENSE)
-[![Discord](https://img.shields.io/discord/1475920441792266477?color=5865F2&style=flat-square&logo=discord&logoColor=white&label=Discord)](https://discord.gg/eM9Y6utd)
-[![Stars](https://img.shields.io/github/stars/pincerhq/pincer?style=flat-square&color=FFA500)](https://github.com/pincerhq/pincer/stargazers)
-[![Downloads](https://img.shields.io/pypi/dm/pincer-agent?style=flat-square&color=blue)](https://pypi.org/project/pincer-agent/)
+<div align="center">
 
+[![PyPI](https://img.shields.io/pypi/v/pincer-agent?color=FF6B35&style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/pincer-agent/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![CI](https://img.shields.io/github/actions/workflow/status/pincerhq/pincer/ci.yml?style=for-the-badge&label=CI&logo=github&logoColor=white)](https://github.com/pincerhq/pincer/actions)
+[![codecov](https://img.shields.io/codecov/c/github/pincerhq/pincer?style=for-the-badge&color=22C55E&logo=codecov&logoColor=white)](https://codecov.io/gh/pincerhq/pincer)
+[![License: MIT](https://img.shields.io/badge/license-MIT-22C55E?style=for-the-badge)](LICENSE)
+[![Discord](https://img.shields.io/discord/1475920441792266477?color=5865F2&style=for-the-badge&logo=discord&logoColor=white&label=Discord)](https://discord.gg/eM9Y6utd)
+[![Stars](https://img.shields.io/github/stars/pincerhq/pincer?style=for-the-badge&color=FFA500&logo=github&logoColor=white)](https://github.com/pincerhq/pincer/stargazers)
+[![Downloads](https://img.shields.io/pypi/dm/pincer-agent?style=for-the-badge&color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/pincer-agent/)
+
+</div>
 <!-- Replace with actual recording: gifski, ScreenToGif, or terminalizer -->
 ![Pincer demo — agent checking email and scheduling a meeting via WhatsApp](docs/assets/demo.gif)
 
