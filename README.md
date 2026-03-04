@@ -13,15 +13,15 @@
 <br>
 [![License: MIT](https://img.shields.io/badge/license-MIT-22C55E?style=for-the-badge)](LICENSE)
 [![Discord](https://img.shields.io/discord/1475920441792266477?color=5865F2&style=for-the-badge&logo=discord&logoColor=white&label=Discord)](https://discord.gg/eM9Y6utd)
-[![Stars](https://img.shields.io/github/stars/pincerhq/pincer?style=for-the-badge&color=FFA500&logo=github&logoColor=white)](https://github.com/pincerhq/pincer/stargazers)
-[![Downloads](https://img.shields.io/pepy/dt/pincer-agent?style=for-the-badge&color=blue&logo=python&logoColor=white)](https://pepy.tech/project/pincer-agent)
-
+[![Stars](https://img.shields.io/github/stars/pincerhq/pincer?style=for-the-badge&logo=github&logoColor=white&color=6e5494)](https://github.com/pincerhq/pincer/stargazers)
+[![Downloads](https://img.shields.io/pepy/dt/pincer-agent?style=for-the-badge&logo=python&logoColor=white&color=238636)](https://pepy.tech/project/pincer-agent)
 ![Pincer demo — agent checking email and scheduling a meeting via WhatsApp](docs/assets/demo.gif)
 
 </div>
 
 ```bash
 pip install pincer-agent && pincer init
+```
 
 <div align="center">
 
@@ -76,7 +76,7 @@ So I built it. Pincer is the agent I wanted. If you want the same thing, it's yo
 
 > **Fair comparison note:** OpenClaw is a respected project that proved personal AI agents are what people want. It optimizes for plugin ecosystem breadth and community size. Pincer optimizes for auditability, cost control, and sandboxed security. Different goals, different trade-offs. Versions compared: Pincer 0.7.x vs OpenClaw as of Feb 2026.
 
-|  | **Pincer** | **OpenClaw** | **LangChain agents** | **Custom bot** |
+|  | **Pincer** | **OpenClaw** | **LangChain agents** | **Custom bot** |
 |---|:---:|:---:|:---:|:---:|
 | **Codebase** | 7,800 LOC | 200K+ LOC | Framework + glue | Yours |
 | **Language** | Python | TypeScript | Python | Any |
@@ -100,16 +100,16 @@ You need three things: **Python 3.11+**, **an LLM API key** (Anthropic, OpenAI, 
 
 ```bash
 pip install pincer-agent
-pincer init                  # 5-min interactive wizard
-pincer run                   # done — message your bot on Telegram
+pincer init                  # 5-min interactive wizard
+pincer run                   # done — message your bot on Telegram
 ```
 
 ### Option 2: Docker
 
 ```bash
-git clone https://github.com/pincerhq/pincer.git && cd pincer
-cp .env.example .env         # edit with your API keys
-docker compose up -d         # dashboard on localhost:8080
+git clone [https://github.com/pincerhq/pincer.git](https://github.com/pincerhq/pincer.git) && cd pincer
+cp .env.example .env         # edit with your API keys
+docker compose up -d         # dashboard on localhost:8080
 ```
 
 ### Option 3: One-click cloud
@@ -121,10 +121,10 @@ docker compose up -d         # dashboard on localhost:8080
 ### Minimal .env
 
 ```bash
-PINCER_LLM_API_KEY=sk-ant-...          # Anthropic, OpenAI, or DeepSeek
-PINCER_TELEGRAM_TOKEN=7000000:AAx...   # From @BotFather
-PINCER_ALLOWED_USERS=123456789         # Your Telegram user ID
-PINCER_BUDGET_DAILY=5.00               # Hard daily spending limit in USD
+PINCER_LLM_API_KEY=sk-ant-...          # Anthropic, OpenAI, or DeepSeek
+PINCER_TELEGRAM_TOKEN=7000000:AAx...   # From @BotFather
+PINCER_ALLOWED_USERS=123456789         # Your Telegram user ID
+PINCER_BUDGET_DAILY=5.00               # Hard daily spending limit in USD
 ```
 
 Twelve env vars total. No JSON. No YAML. **[Full config reference →](docs/configuration.md)**
@@ -185,14 +185,14 @@ from pincer import Agent
 
 agent = Agent()
 result = agent.ask("Summarize ~/data/sales.csv and plot monthly trends")
-result.display()  # renders inline in Jupyter
+result.display()  # renders inline in Jupyter
 ```
 
 ```python
 async with Agent() as agent:
-    result = await agent.run("What meetings do I have tomorrow?")
-    print(result.text)
-    print(f"Cost: ${result.cost:.4f}")
+    result = await agent.run("What meetings do I have tomorrow?")
+    print(result.text)
+    print(f"Cost: ${result.cost:.4f}")
 ```
 
 </details>
@@ -204,9 +204,9 @@ async with Agent() as agent:
 Skills extend the agent. Each skill = a Python file + YAML manifest, loaded dynamically on startup.
 
 ```bash
-pincer skills list                     # what's installed
+pincer skills list                     # what's installed
 pincer skills install github:user/repo # install (scanned first)
-pincer skills scan ./untrusted-skill   # security scan before install
+pincer skills scan ./untrusted-skill   # security scan before install
 ```
 
 10 bundled skills ship with Pincer: `weather`, `news`, `translate`, `summarize_url`, `youtube_summary`, `expense_tracker`, `habit_tracker`, `pomodoro`, `stock_price`, `git_status`.
@@ -220,10 +220,10 @@ from pincer.tools import tool
 
 @tool(name="get_weather", description="Get current weather for a city")
 async def get_weather(city: str) -> str:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"https://wttr.in/{city}?format=j1")
-        data = resp.json()
-        return f"{city}: {data['current_condition'][0]['temp_C']}°C"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"[https://wttr.in/](https://wttr.in/){city}?format=j1")
+        data = resp.json()
+        return f"{city}: {data['current_condition'][0]['temp_C']}°C"
 ```
 
 ```yaml
@@ -278,14 +278,14 @@ One command audits your setup — 25+ checks covering config, keys, permissions,
 
 ```
 $ pincer doctor
-  🦀 Pincer Doctor v0.7.0
-  ✅ API key valid (claude-sonnet-4-5-20250929)
-  ✅ Telegram connected (@my_pincer_bot)
-  ✅ Daily budget: $5.00
-  ✅ 10 skills installed, all scored ≥ 80
-  ⚠️  Discord DM policy is "open" — consider "pairing"
-  ✅ No exposed ports beyond localhost
-  22 passed · 1 warning · 0 critical
+  🦀 Pincer Doctor v0.7.0
+  ✅ API key valid (claude-sonnet-4-5-20250929)
+  ✅ Telegram connected (@my_pincer_bot)
+  ✅ Daily budget: $5.00
+  ✅ 10 skills installed, all scored ≥ 80
+  ⚠️  Discord DM policy is "open" — consider "pairing"
+  ✅ No exposed ports beyond localhost
+  22 passed · 1 warning · 0 critical
 ```
 
 **[Full security model →](docs/security.md)** · Found a vulnerability? **[SECURITY.md](SECURITY.md)**
@@ -368,15 +368,15 @@ Pincer doesn't just respond — it reaches out.
 <summary><strong>💻 CLI Reference</strong></summary>
 
 ```bash
-pincer init                        # interactive setup wizard
-pincer run                         # start agent (all channels)
-pincer run --channel telegram      # single channel
-pincer chat                        # CLI chat for testing
-pincer doctor                      # security + config audit
-pincer cost                        # spending summary
-pincer skills list|install|scan    # manage skills
-pincer pair approve <ch> <code>    # approve a DM sender
-pincer google setup                # Google Calendar/Gmail OAuth
+pincer init                        # interactive setup wizard
+pincer run                         # start agent (all channels)
+pincer run --channel telegram      # single channel
+pincer chat                        # CLI chat for testing
+pincer doctor                      # security + config audit
+pincer cost                        # spending summary
+pincer skills list|install|scan    # manage skills
+pincer pair approve <ch> <code>    # approve a DM sender
+pincer google setup                # Google Calendar/Gmail OAuth
 ```
 
 **Chat commands** (any channel): `/status`, `/budget`, `/new`, `/compact`, `/model <name>`, `/tools`
@@ -389,22 +389,22 @@ pincer google setup                # Google Calendar/Gmail OAuth
 
 ```mermaid
 graph TD
-    WA[📱 WhatsApp] --> CR[Channel Router]
-    TG[📱 Telegram] --> CR
-    DC[🎮 Discord] --> CR
-    SL[💼 Slack] --> CR
-    EM[📧 Email] --> CR
-    VC[📞 Voice] --> CR
-    WB[🌐 Web UI] --> CR
+    WA[📱 WhatsApp] --> CR[Channel Router]
+    TG[📱 Telegram] --> CR
+    DC[🎮 Discord] --> CR
+    SL[💼 Slack] --> CR
+    EM[📧 Email] --> CR
+    VC[📞 Voice] --> CR
+    WB[🌐 Web UI] --> CR
 
-    CR --> AC[🧠 Agent Core · ReAct Loop · 190 LOC]
+    CR --> AC[🧠 Agent Core · ReAct Loop · 190 LOC]
 
-    AC --> TR[🔧 Tool Registry + Sandbox]
-    AC --> MM[🗃️ Memory · SQLite + FTS5 + Embeddings]
-    AC --> SS[👤 Sessions · Per-channel · Per-user]
+    AC --> TR[🔧 Tool Registry + Sandbox]
+    AC --> MM[🗃️ Memory · SQLite + FTS5 + Embeddings]
+    AC --> SS[👤 Sessions · Per-channel · Per-user]
 
-    TR --> BT[Built-in Tools · 11]
-    TR --> SK[Custom Skills · Sandboxed]
+    TR --> BT[Built-in Tools · 11]
+    TR --> SK[Custom Skills · Sandboxed]
 ```
 
 1. Message arrives → load session + relevant memories
@@ -421,17 +421,17 @@ No frameworks. No abstractions. `async/await` + the Anthropic SDK.
 ```
 pincer/ (7,800 LOC total)
 ├── src/pincer/
-│   ├── core/         agent.py (190 LOC), session.py, config.py, soul.py
-│   ├── llm/          anthropic, openai, ollama, router, cost_tracker
-│   ├── channels/     telegram, whatsapp, discord, slack, email, voice, web
-│   ├── memory/       store (SQLite+FTS5), embeddings, entities
-│   ├── tools/        registry, sandbox, approval, builtin/ (11 tools)
-│   ├── skills/       loader, scanner (AST), signer
-│   ├── voice/        engine, twiml_server, stt, tts, compliance
-│   ├── security/     firewall, audit, doctor (25+ checks)
-│   └── scheduler/    cron, proactive
-├── skills/           10 bundled
-├── tests/            pytest + pytest-asyncio
+│   ├── core/         agent.py (190 LOC), session.py, config.py, soul.py
+│   ├── llm/          anthropic, openai, ollama, router, cost_tracker
+│   ├── channels/     telegram, whatsapp, discord, slack, email, voice, web
+│   ├── memory/       store (SQLite+FTS5), embeddings, entities
+│   ├── tools/        registry, sandbox, approval, builtin/ (11 tools)
+│   ├── skills/       loader, scanner (AST), signer
+│   ├── voice/        engine, twiml_server, stt, tts, compliance
+│   ├── security/     firewall, audit, doctor (25+ checks)
+│   └── scheduler/    cron, proactive
+├── skills/           10 bundled
+├── tests/            pytest + pytest-asyncio
 └── docs/
 ```
 
@@ -478,7 +478,7 @@ We welcome contributions from everyone — first-timers, experienced engineers, 
 | **Core features** | MCP, encrypted memory, multi-agent | 🔴 Hard |
 
 ```bash
-git clone https://github.com/pincerhq/pincer.git
+git clone [https://github.com/pincerhq/pincer.git](https://github.com/pincerhq/pincer.git)
 cd pincer && uv sync && pytest
 ```
 
