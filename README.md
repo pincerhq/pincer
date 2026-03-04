@@ -13,9 +13,8 @@
 <br>
 [![License: MIT](https://img.shields.io/badge/license-MIT-22C55E?style=for-the-badge)](LICENSE)
 [![Discord](https://img.shields.io/discord/1475920441792266477?color=5865F2&style=for-the-badge&logo=discord&logoColor=white&label=Discord)](https://discord.gg/eM9Y6utd)
-[![Stars](https://img.shields.io/github/stars/pincerhq/pincer?style=for-the-badge&color=FFA500&logo=github&logoColor=white)](https://github.com/pincerhq/pincer/stargazers)
-[Downloads](https://img.shields.io/pepy/dt/pincer-agent?style=for-the-badge&color=blue&logo=python&logoColor=white)](https://pepy.tech/project/pincer-agent)
-
+[![Stars](https://img.shields.io/github/stars/pincerhq/pincer?style=for-the-badge&logo=github&logoColor=white&color=6e5494)](https://github.com/pincerhq/pincer/stargazers)
+[![Downloads](https://img.shields.io/pepy/dt/pincer-agent?style=for-the-badge&logo=python&logoColor=white&color=238636)](https://pepy.tech/project/pincer-agent)
 ![Pincer demo — agent checking email and scheduling a meeting via WhatsApp](docs/assets/demo.gif)
 
 </div>
