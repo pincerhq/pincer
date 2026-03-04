@@ -15,15 +15,14 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-22C55E?style=for-the-badge)](LICENSE)
 [![Discord](https://img.shields.io/discord/1475920441792266477?color=5865F2&style=for-the-badge&logo=discord&logoColor=white&label=Discord)](https://discord.gg/eM9Y6utd)
 [![Stars](https://img.shields.io/github/stars/pincerhq/pincer?style=for-the-badge&color=FFA500&logo=github&logoColor=white)](https://github.com/pincerhq/pincer/stargazers)
-[![Downloads](https://img.shields.io/pypi/dm/pincer-agent?style=for-the-badge&color=blue&logo=pypi&logoColor=white)](https://pypi.org/project/pincer-agent/)
+[![Downloads](https://static.pepy.tech/badge/pincer-agent)](https://pepy.tech/project/pincer-agent)
 
 </div>
-<!-- Replace with actual recording: gifski, ScreenToGif, or terminalizer -->
+
 ![Pincer demo — agent checking email and scheduling a meeting via WhatsApp](docs/assets/demo.gif)
 
 ```bash
 pip install pincer-agent && pincer init
-```
 
 [Website](https://pincer.sh) · [Docs](https://pincer.sh/docs) · [Quick Start](#-quick-start) · [Discord](https://discord.gg/pincer) · [Contributing](CONTRIBUTING.md)
 
