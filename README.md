@@ -11,7 +11,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/pincerhq/pincer/ci.yml?style=flat-square&label=CI)](https://github.com/pincerhq/pincer/actions)
 [![codecov](https://img.shields.io/codecov/c/github/pincerhq/pincer?style=flat-square&color=22C55E)](https://codecov.io/gh/pincerhq/pincer)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22C55E?style=flat-square)](LICENSE)
-[![Discord](https://img.shields.io/discord/XXXXXXXXXX?color=5865F2&style=flat-square&logo=discord&logoColor=white&label=Discord)](https://discord.gg/eM9Y6utd)
+[![Discord](https://img.shields.io/discord/1475920441792266477?color=5865F2&style=flat-square&logo=discord&logoColor=white&label=Discord)](https://discord.gg/eM9Y6utd)
 [![Stars](https://img.shields.io/github/stars/pincerhq/pincer?style=flat-square&color=FFA500)](https://github.com/pincerhq/pincer/stargazers)
 [![Downloads](https://img.shields.io/pypi/dm/pincer-agent?style=flat-square&color=blue)](https://pypi.org/project/pincer-agent/)
 
