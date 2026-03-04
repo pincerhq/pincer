@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Any
 
 import aiosqlite
@@ -18,7 +19,7 @@ def _ts_to_iso(ts: float | None) -> str:
     """Convert Unix timestamp to ISO string."""
     if ts is None:
         return ""
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    dt = datetime.fromtimestamp(ts, tz=UTC)
     return dt.isoformat()
 
 
@@ -73,10 +74,8 @@ async def list_conversations(
         async with db.execute(sql, params) as cursor:
             async for row in cursor:
                 msgs = []
-                try:
+                with suppress(json.JSONDecodeError, TypeError):
                     msgs = json.loads(row["messages_json"] or "[]")
-                except (json.JSONDecodeError, TypeError):
-                    pass
                 last_msg = ""
                 if msgs:
                     last = msgs[-1]
@@ -108,7 +107,7 @@ async def get_conversation(conv_id: str) -> dict[str, Any]:
         settings = get_settings_relaxed()
         db_path = settings.db_path
     except Exception:
-        raise HTTPException(status_code=503, detail="Database unavailable")
+        raise HTTPException(status_code=503, detail="Database unavailable") from None
 
     async with aiosqlite.connect(str(db_path)) as db:
         db.row_factory = aiosqlite.Row
@@ -123,10 +122,8 @@ async def get_conversation(conv_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     msgs = []
-    try:
+    with suppress(json.JSONDecodeError, TypeError):
         msgs = json.loads(row["messages_json"] or "[]")
-    except (json.JSONDecodeError, TypeError):
-        pass
 
     return {
         "id": row["id"],

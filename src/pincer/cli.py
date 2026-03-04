@@ -10,8 +10,8 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import os
 import signal
 import socket
 import sys
@@ -1076,10 +1076,8 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         if api_server:
             api_server.should_exit = True
             if api_task:
-                try:
+                with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(api_task, timeout=3.0)
-                except asyncio.TimeoutError:
-                    pass
         await triggers.stop()
         await scheduler.stop()
         await proactive.close()
