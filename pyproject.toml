@@ -1,7 +1,6 @@
 [project]
 name = "pincer-agent"
-authors = "Contributors"
-version = "0.7.1"
+version = "0.7.0"
 description = "Your personal AI agent. Text it on WhatsApp. It does stuff. 🦀"
 readme = "README.md"
 license = { text = "MIT" }
