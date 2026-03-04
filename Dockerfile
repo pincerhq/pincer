@@ -1,4 +1,18 @@
 # ============================================
+# Stage 0: Dashboard build
+# ============================================
+FROM node:20-slim AS dashboard-builder
+
+WORKDIR /app
+
+RUN corepack enable pnpm
+
+COPY dashboard/ ./
+
+RUN pnpm install
+RUN pnpm build
+
+# ============================================
 # Stage 1: Build
 # ============================================
 FROM python:3.12-slim-bookworm AS builder
@@ -36,6 +50,7 @@ COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
 COPY --from=builder /app/skills /app/skills
 COPY --from=builder /app/pyproject.toml /app/
+COPY --from=dashboard-builder /app/dist /app/dashboard/dist
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \

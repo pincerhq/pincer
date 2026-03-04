@@ -113,6 +113,7 @@ class AuditLogger:
         await self._flush_pending()
         if self._db:
             await self._db.close()
+            self._db = None
 
     async def log(self, entry: AuditEntry) -> None:
         """Queue an audit entry for batch writing (non-blocking)."""

@@ -10,9 +10,11 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-import os
 import signal
+import socket
+import sys
 from datetime import UTC
 from typing import TYPE_CHECKING
 
@@ -38,6 +40,13 @@ def _setup_logging(level: str) -> None:
         format="%(message)s",
         handlers=[RichHandler(console=console, show_path=False, markup=True)],
     )
+
+
+def _port_in_use(host: str, port: int) -> bool:
+    """Return True if something is already listening on the given host:port."""
+    check_host = "127.0.0.1" if host == "0.0.0.0" else host
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex((check_host, port)) == 0
 
 
 @app.command()
@@ -1020,26 +1029,37 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
 
     # Sprint 5: Start API server
     api_server = None
-    try:
-        import uvicorn
-
-        from pincer.api.server import create_app
-
-        api_app = create_app()
-        api_config = uvicorn.Config(
-            api_app,
-            host=settings.dashboard_host,
-            port=settings.dashboard_port,
-            log_level="warning",
-        )
-        api_server = uvicorn.Server(api_config)
-        asyncio.create_task(api_server.serve())
+    api_task = None
+    if _port_in_use(settings.dashboard_host, settings.dashboard_port):
         console.print(
-            f"[green]API server started on "
-            f"http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
+            f"[yellow]Port {settings.dashboard_port} is already in use. "
+            f"API server skipped.[/yellow]"
         )
-    except Exception as e:
-        console.print(f"[yellow]API server failed to start: {e}[/yellow]")
+        console.print(
+            f"  Options: Set PINCER_DASHBOARD_PORT=8081 in .env, "
+            f"or kill the process: lsof -i :{settings.dashboard_port}"
+        )
+    else:
+        try:
+            import uvicorn
+
+            from pincer.api.server import create_app
+
+            api_app = create_app()
+            api_config = uvicorn.Config(
+                api_app,
+                host=settings.dashboard_host,
+                port=settings.dashboard_port,
+                log_level="warning",
+            )
+            api_server = uvicorn.Server(api_config)
+            api_task = asyncio.create_task(api_server.serve())
+            console.print(
+                f"[green]API server started on "
+                f"http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
+            )
+        except Exception as e:
+            console.print(f"[yellow]API server failed to start: {e}[/yellow]")
 
     active = [ch.name for ch in channels]
     console.print(
@@ -1055,6 +1075,9 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
     finally:
         if api_server:
             api_server.should_exit = True
+            if api_task:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(api_task, timeout=3.0)
         await triggers.stop()
         await scheduler.stop()
         await proactive.close()
@@ -1074,7 +1097,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
             await audit_logger.shutdown()
         console.print("[green]Shutdown complete[/green]")
         signal.signal(signal.SIGINT, signal.SIG_IGN)
-        os._exit(0)
+        sys.exit(0)
 
 
 @app.command()
