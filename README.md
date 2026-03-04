@@ -22,7 +22,7 @@
 pip install pincer-agent && pincer init
 ```
 
-[Website](https://pincer.dev) · [Docs](https://docs.pincer.dev) · [Quick Start](#-quick-start) · [Discord](https://discord.gg/pincer) · [Contributing](CONTRIBUTING.md)
+[Website](https://pincer.sh) · [Docs](https://pincer.sh/docs) · [Quick Start](#-quick-start) · [Discord](https://discord.gg/pincer) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
