@@ -35,7 +35,7 @@ pip install pincer-agent && pincer init
 
 - **What:** An open-source AI agent that lives in WhatsApp, Telegram, Discord, Slack, and Email — and actually does things (reads email, manages calendar, browses the web, makes phone calls)
 - **For whom:** Developers and technical users who want a personal agent they can self-host, audit, and extend
-- **Why it exists:** Existing agents had [malicious plugins](https://docs.pincer.dev/security/why), surprise bills, and codebases too large to review
+- **Why it exists:** Existing agents had [malicious plugins](https://pincer.sh/docs/security), surprise bills, and codebases too large to review
 - **How it's different:** 7,800 lines of Python. 12 env vars. Skills sandboxed in subprocesses. Hard daily spending cap
 - **How it stays safe:** User allowlist, tool approval prompts, AST scanning, skill signing, structured audit log — and `pincer doctor` to verify it all
 
@@ -516,7 +516,7 @@ cd pincer && uv sync && pytest
 
 🦀 **Built with Python and vibe coding.**
 
-[pincer.dev](https://pincer.dev) · [GitHub](https://github.com/pincerhq/pincer) · [Discord](https://discord.gg/pincer) · [Twitter](https://twitter.com/pincerhq)
+[pincer.sh](https://pincer.sh) · [GitHub](https://github.com/pincerhq/pincer) · [Discord](https://discord.gg/pincer-agent) · [Twitter](https://x.com/@AgentPincer)
 
 If Pincer is useful to you, consider [giving it a ⭐](https://github.com/pincerhq/pincer) — it helps others discover the project.
 
