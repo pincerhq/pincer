@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
-
 from pincer.voice.state_machine import (
+    VALID_TRANSITIONS,
     CallPhase,
     CallStateMachine,
-    VALID_TRANSITIONS,
 )
 
 

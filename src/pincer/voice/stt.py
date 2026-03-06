@@ -8,6 +8,7 @@ Deepgram Nova-2 is the default for real-time telephony STT.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -161,17 +162,15 @@ class DeepgramSTTStream(STTStream):
                     self._transcript_queue.get(), timeout=0.1,
                 )
                 yield transcript
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
     async def close(self) -> None:
         self._closed = True
         if self._listen_task:
             self._listen_task.cancel()
-        try:
+        with contextlib.suppress(Exception):
             await self._ws.close()
-        except Exception:
-            pass
 
 
 class DeepgramSTT(STTProvider):

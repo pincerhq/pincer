@@ -14,7 +14,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse, Response
 
 if TYPE_CHECKING:

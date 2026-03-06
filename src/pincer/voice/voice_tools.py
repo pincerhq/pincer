@@ -50,9 +50,7 @@ def is_voice_compatible(tool_name: str) -> bool:
         return False
     if tool_name in VOICE_ALLOWED_TOOLS:
         return True
-    if "__" in tool_name:
-        return True
-    return False
+    return "__" in tool_name
 
 
 def filter_voice_tools(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any]]:

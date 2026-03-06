@@ -8,7 +8,6 @@ Target: <500ms from speech onset to TTS stop.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import struct
 import time

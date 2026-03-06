@@ -5,14 +5,12 @@ report generation, and integration with the audit system.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pathlib import Path
 
     import aiosqlite
 

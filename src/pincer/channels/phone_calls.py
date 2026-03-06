@@ -8,13 +8,14 @@ Voice sessions share memory with text channels via cross-channel identity.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
 
 if TYPE_CHECKING:
+    import asyncio
+
     from pincer.config import Settings
     from pincer.core.identity import IdentityResolver
     from pincer.voice.engine import CallState, VoiceEngine

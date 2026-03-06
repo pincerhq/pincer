@@ -136,6 +136,4 @@ def requires_confirmation(tool_name: str) -> bool:
         "email_check", "email_read", "email_search",
         "email_list_folders", "file_read", "file_list",
     }
-    if tool_name in no_confirm_tools:
-        return False
-    return True
+    return tool_name not in no_confirm_tools

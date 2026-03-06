@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from pincer.channels.base import ChannelType
-from pincer.channels.phone_calls import VoiceChannel
 from pincer.voice.compliance import ComplianceChecker, ConsentMode
 from pincer.voice.engine import CallDirection, ConversationRelayEngine
 from pincer.voice.pii_guard import mask_pii
@@ -91,7 +90,7 @@ class TestInboundWithAction:
         sm.transition(CallPhase.VERIFY, "action identified")
         assert sm.phase == CallPhase.VERIFY
 
-        gate = create_gate(
+        create_gate(
             "calendar_create",
             {"title": "Team standup"},
             "schedule a team standup for tomorrow at 10am",

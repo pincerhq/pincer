@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import struct
 
-import pytest
-
 from pincer.voice.audio import (
     mulaw8k_to_pcm16k,
     mulaw_to_pcm16,
@@ -30,7 +28,7 @@ class TestMulawConversion:
         decoded = mulaw_to_pcm16(mulaw)
         decoded_samples = struct.unpack(f"<{len(original_samples)}h", decoded)
 
-        for orig, dec in zip(original_samples, decoded_samples):
+        for orig, dec in zip(original_samples, decoded_samples, strict=False):
             if orig == 0:
                 assert abs(dec) < 200
             else:

@@ -108,9 +108,7 @@ def contains_pii(text: str) -> bool:
         return True
     if _ACCOUNT_PATTERN.search(text):
         return True
-    if _PIN_PATTERN.search(text):
-        return True
-    return False
+    return bool(_PIN_PATTERN.search(text))
 
 
 def sanitize_for_logs(text: str) -> str:

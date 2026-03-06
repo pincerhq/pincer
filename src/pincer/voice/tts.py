@@ -7,7 +7,7 @@ for barge-in handling.
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -138,10 +138,8 @@ class ElevenLabsTTS(TTSProvider):
         ws = self._ws
         self._ws = None
         if ws:
-            try:
+            with contextlib.suppress(Exception):
                 await ws.close()
-            except Exception:
-                pass
 
 
 def _split_sentences(text: str) -> list[str]:

@@ -10,11 +10,6 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from pincer.config import Settings
-    from pincer.voice.engine import VoiceEngine
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +110,6 @@ async def make_phone_call(
                     break
             host = host.rstrip("/")
             stream_url = f"wss://{host}/voice/stream/{{CallSid}}"
-            twiml_url = None
             twiml_str = (
                 '<?xml version="1.0" encoding="UTF-8"?>'
                 "<Response>"

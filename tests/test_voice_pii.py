@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from pincer.voice.pii_guard import (
     contains_pii,
     mask_dtmf_input,

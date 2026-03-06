@@ -117,6 +117,7 @@ class VoiceEngine(ABC):
     def get_call_state(self, call_sid: str) -> CallState | None:
         return self._active_calls.get(call_sid)
 
+    @abstractmethod
     async def close_media_stream(self, call_sid: str) -> None:
         """Override in MediaStreamEngine to close STT stream and consumer."""
 
@@ -253,6 +254,10 @@ class ConversationRelayEngine(VoiceEngine):
             logger.exception("DTMF failed for call %s", call_sid)
             raise
 
+    async def close_media_stream(self, call_sid: str) -> None:
+        """No-op for ConversationRelay; MediaStreamEngine overrides."""
+        pass
+
 
 class MediaStreamEngine(VoiceEngine):
     """Phase 2: Twilio Media Streams — raw mu-law audio via WebSocket.
@@ -318,9 +323,8 @@ class MediaStreamEngine(VoiceEngine):
         async def _consume_transcripts() -> None:
             try:
                 async for transcript in stt_stream.receive_transcripts():
-                    if transcript.is_final and transcript.text.strip():
-                        if self._on_speech_callback:
-                            await self._on_speech_callback(call_sid, transcript.text.strip())
+                    if transcript.is_final and transcript.text.strip() and self._on_speech_callback:
+                        await self._on_speech_callback(call_sid, transcript.text.strip())
             except asyncio.CancelledError:
                 pass
             except Exception:
@@ -425,6 +429,7 @@ class MediaStreamEngine(VoiceEngine):
             raise
 
     async def end_call(self, call_sid: str) -> None:
+        await self.close_media_stream(call_sid)
         try:
             from twilio.rest import Client
 

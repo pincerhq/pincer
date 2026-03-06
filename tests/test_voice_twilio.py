@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from pincer.voice.twiml_server import voice_router, init_voice_routes
+from pincer.voice.twiml_server import init_voice_routes, voice_router
 
 
 @pytest.fixture
