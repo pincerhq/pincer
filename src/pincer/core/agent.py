@@ -182,6 +182,10 @@ class Agent:
 
         # Get tool schemas
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
+        logger.debug(
+            "Tools available: %s",
+            [t.get("name") for t in (tool_schemas or [])],
+        )
 
         total_cost = 0.0
         tool_calls_count = 0
@@ -246,6 +250,10 @@ class Agent:
 
             # If the LLM wants to use tools
             if response.has_tool_calls:
+                logger.info(
+                    "LLM requested tools: %s",
+                    [tc.name for tc in response.tool_calls],
+                )
                 # Save the assistant's tool-call message
                 assistant_msg = LLMMessage(
                     role=MessageRole.ASSISTANT,
@@ -350,6 +358,10 @@ class Agent:
 
         system_prompt = await self._build_system_prompt(user_id, text)
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
+        logger.debug(
+            "Tools available: %s",
+            [t.get("name") for t in (tool_schemas or [])],
+        )
         consecutive_errors = 0
         circuit_broken = False
         sanitize_attempts = 0
@@ -394,6 +406,10 @@ class Agent:
             if not response.has_tool_calls:
                 break
 
+            logger.info(
+                "LLM requested tools: %s",
+                [tc.name for tc in response.tool_calls],
+            )
             assistant_msg = LLMMessage(
                 role=MessageRole.ASSISTANT,
                 content=response.content,
@@ -469,6 +485,14 @@ class Agent:
     async def _build_system_prompt(self, user_id: str, user_text: str) -> str:
         """Build system prompt, injecting relevant memories if available."""
         base_prompt = self._settings.system_prompt
+
+        # Phone-call guidance when make_phone_call tool is available
+        if "make_phone_call" in self._tools.list_tools():
+            base_prompt += (
+                "\n\nWhen the user asks you to call a phone number, you MUST use the "
+                "make_phone_call tool. Do not describe or simulate the call in your response — call the tool."
+            )
+
         if not self._memory:
             return base_prompt
 
@@ -528,6 +552,13 @@ class Agent:
                 tool_call.arguments,
                 context={"user_id": user_id, "channel": channel},
             )
+            if tool_call.name == "make_phone_call":
+                logger.info(
+                    "make_phone_call result: %s",
+                    (result_text[:200] + "..." if len(result_text) > 200 else result_text)
+                    if result_text
+                    else "(empty)",
+                )
             return ToolResult(
                 tool_call_id=tool_call.id,
                 content=result_text,

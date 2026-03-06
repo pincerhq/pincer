@@ -38,6 +38,11 @@ class AuditAction(StrEnum):
     MESSAGE_RECEIVED = "message_received"
     MESSAGE_SENT = "message_sent"
     ERROR = "error"
+    # Sprint 7: Voice calling events
+    VOICE_CALL_START = "voice_call_start"
+    VOICE_CALL_END = "voice_call_end"
+    VOICE_TOOL_CALL = "voice_tool_call"
+    VOICE_TRANSFER = "voice_transfer"
 
 
 @dataclass

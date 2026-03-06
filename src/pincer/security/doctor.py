@@ -119,6 +119,10 @@ class SecurityDoctor:
         # Deps (2 checks)
         report.checks.append(self._check_python_version())
         report.checks.append(self._check_dependencies_up_to_date())
+        # Voice (3 checks, Sprint 7)
+        report.checks.append(self._check_voice_twilio_credentials())
+        report.checks.append(self._check_voice_webhook_url())
+        report.checks.append(self._check_voice_recording_consent())
         # Runtime (4 checks)
         report.checks.append(self._check_not_running_as_root())
         report.checks.append(self._check_audit_logging_enabled())
@@ -650,6 +654,102 @@ class SecurityDoctor:
             CheckStatus.SKIPPED,
             "Could not check deps",
             category="deps",
+        )
+
+    # ── Voice (Sprint 7) ─────────────────────────────────
+
+    def _check_voice_twilio_credentials(self) -> CheckResult:
+        if os.environ.get("PINCER_VOICE_ENABLED", "").lower() != "true":
+            return CheckResult(
+                "voice_twilio_credentials",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        sid = os.environ.get("PINCER_TWILIO_ACCOUNT_SID", "")
+        token = os.environ.get("PINCER_TWILIO_AUTH_TOKEN", "")
+        if sid and token:
+            return CheckResult(
+                "voice_twilio_credentials",
+                CheckStatus.PASS,
+                "Twilio credentials configured",
+                category="voice",
+            )
+        missing = []
+        if not sid:
+            missing.append("PINCER_TWILIO_ACCOUNT_SID")
+        if not token:
+            missing.append("PINCER_TWILIO_AUTH_TOKEN")
+        return CheckResult(
+            "voice_twilio_credentials",
+            CheckStatus.CRITICAL,
+            f"Missing: {', '.join(missing)}",
+            fix_hint="Set Twilio credentials in .env",
+            category="voice",
+        )
+
+    def _check_voice_webhook_url(self) -> CheckResult:
+        if os.environ.get("PINCER_VOICE_ENABLED", "").lower() != "true":
+            return CheckResult(
+                "voice_webhook_url",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        url = os.environ.get("PINCER_VOICE_WEBHOOK_BASE_URL", "")
+        if url and url.startswith("https://"):
+            return CheckResult(
+                "voice_webhook_url",
+                CheckStatus.PASS,
+                f"Webhook URL: {url[:50]}...",
+                category="voice",
+            )
+        if url and not url.startswith("https://"):
+            return CheckResult(
+                "voice_webhook_url",
+                CheckStatus.WARNING,
+                "Webhook URL not using HTTPS",
+                fix_hint="Use https:// for production",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_webhook_url",
+            CheckStatus.WARNING,
+            "No webhook URL configured",
+            fix_hint="Set PINCER_VOICE_WEBHOOK_BASE_URL",
+            category="voice",
+        )
+
+    def _check_voice_recording_consent(self) -> CheckResult:
+        if os.environ.get("PINCER_VOICE_ENABLED", "").lower() != "true":
+            return CheckResult(
+                "voice_recording_consent",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        recording = os.environ.get("PINCER_VOICE_RECORDING_ENABLED", "").lower()
+        consent = os.environ.get("PINCER_VOICE_CONSENT_MODE", "one_party")
+        if recording == "true" and consent == "none":
+            return CheckResult(
+                "voice_recording_consent",
+                CheckStatus.CRITICAL,
+                "Recording enabled without consent mode!",
+                fix_hint="Set PINCER_VOICE_CONSENT_MODE=one_party or two_party",
+                category="voice",
+            )
+        if recording == "true":
+            return CheckResult(
+                "voice_recording_consent",
+                CheckStatus.PASS,
+                f"Recording enabled with {consent} consent",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_recording_consent",
+            CheckStatus.PASS,
+            "Recording disabled (transcription only)",
+            category="voice",
         )
 
     # ── Runtime ───────────────────────────────────────────

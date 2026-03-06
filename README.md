@@ -25,7 +25,7 @@ pip install pincer-agent && pincer init
 
 <div align="center">
 
-[Website](https://pincer.sh) · [Docs](https://pincer.sh/docs) · [Quick Start](#-quick-start) · [Discord](https://discord.gg/pincer) · [Contributing](CONTRIBUTING.md)
+[Website](https://pincer.sh) · [Docs](https://pincer.sh/docs) · [Quick Start](#-quick-start) · [Discord](https://discord.gg/pincer) · [Contributing](docs/Contributing.md)
 
 </div>
 
@@ -35,7 +35,7 @@ pip install pincer-agent && pincer init
 
 - **What:** An open-source AI agent that lives in WhatsApp, Telegram, Discord, Slack, and Email — and actually does things (reads email, manages calendar, browses the web, makes phone calls)
 - **For whom:** Developers and technical users who want a personal agent they can self-host, audit, and extend
-- **Why it exists:** Existing agents had [malicious plugins](https://docs.pincer.dev/security/why), surprise bills, and codebases too large to review
+- **Why it exists:** Existing agents had [malicious plugins](docs/Security.md), surprise bills, and codebases too large to review
 - **How it's different:** 7,800 lines of Python. 12 env vars. Skills sandboxed in subprocesses. Hard daily spending cap
 - **How it stays safe:** User allowlist, tool approval prompts, AST scanning, skill signing, structured audit log — and `pincer doctor` to verify it all
 
@@ -107,7 +107,7 @@ pincer run                   # done — message your bot on Telegram
 ### Option 2: Docker
 
 ```bash
-git clone [https://github.com/pincerhq/pincer.git](https://github.com/pincerhq/pincer.git) && cd pincer
+git clone https://github.com/pincerhq/pincer.git && cd pincer
 cp .env.example .env         # edit with your API keys
 docker compose up -d         # dashboard on localhost:8080
 ```
@@ -127,7 +127,7 @@ PINCER_ALLOWED_USERS=123456789         # Your Telegram user ID
 PINCER_BUDGET_DAILY=5.00               # Hard daily spending limit in USD
 ```
 
-Twelve env vars total. No JSON. No YAML. **[Full config reference →](docs/configuration.md)**
+Twelve env vars total. No JSON. No YAML. **[Full config reference →](docs/PROJECT_STRUCTURE.md)**
 
 ---
 
@@ -221,7 +221,7 @@ from pincer.tools import tool
 @tool(name="get_weather", description="Get current weather for a city")
 async def get_weather(city: str) -> str:
     async with httpx.AsyncClient() as client:
-        resp = await client.get(f"[https://wttr.in/](https://wttr.in/){city}?format=j1")
+        resp = await client.get(f"https://wttr.in/{city}?format=j1")
         data = resp.json()
         return f"{city}: {data['current_condition'][0]['temp_C']}°C"
 ```
@@ -235,7 +235,7 @@ permissions: [network]
 
 The manifest declares permissions. The sandbox enforces them. No declared permissions = no network, no filesystem, no nothing.
 
-**[Full skills guide →](docs/skills-guide.md)**
+**[Full skills guide →](docs/Skills guide.md)**
 
 </details>
 
@@ -288,7 +288,7 @@ $ pincer doctor
   22 passed · 1 warning · 0 critical
 ```
 
-**[Full security model →](docs/security.md)** · Found a vulnerability? **[SECURITY.md](SECURITY.md)**
+**[Full security model →](docs/Security.md)** · Found a vulnerability? **[Security Policy](docs/Security%20Policy.md)**
 
 ---
 
@@ -462,7 +462,7 @@ Full roadmap: [GitHub Discussions → Roadmap](https://github.com/pincerhq/pince
 
 Pincer is solo-maintained, open-source, and unfunded. That's a feature, not a weakness — no investor pressure means no forced pivots, no telemetry, no "free tier sunsets."
 
-The plan: grow the contributor community, move toward shared governance as trust is established (see [GOVERNANCE.md](GOVERNANCE.md)), and eventually explore a managed hosting option to fund ongoing maintenance. Nothing is promised beyond what's shipped today.
+The plan: grow the contributor community, move toward shared governance as trust is established (see [Governance](docs/Governance.md)), and eventually explore a managed hosting option to fund ongoing maintenance. Nothing is promised beyond what's shipped today.
 
 ---
 
@@ -472,17 +472,17 @@ We welcome contributions from everyone — first-timers, experienced engineers, 
 
 | What | How | Difficulty |
 |------|-----|:----------:|
-| **Build a skill** | [Skills guide](docs/skills-guide.md) — 50–150 lines | 🟢 Easy |
+| **Build a skill** | [Skills guide](docs/Skills guide.md) — 50–150 lines | 🟢 Easy |
 | **Improve docs** | Fix what confused you, translate, write a tutorial | 🟢 Easy |
 | **New channel** | Signal, iMessage, LINE, Matrix | 🟡 Medium |
 | **Core features** | MCP, encrypted memory, multi-agent | 🔴 Hard |
 
 ```bash
-git clone [https://github.com/pincerhq/pincer.git](https://github.com/pincerhq/pincer.git)
+git clone https://github.com/pincerhq/pincer.git
 cd pincer && uv sync && pytest
 ```
 
-[**Discord**](https://discord.gg/pincer) · [**GitHub Discussions**](https://github.com/pincerhq/pincer/discussions) · [**Contributing guide**](CONTRIBUTING.md) · [**Governance**](GOVERNANCE.md)
+[**Discord**](https://discord.gg/pincer) · [**GitHub Discussions**](https://github.com/pincerhq/pincer/discussions) · [**Contributing guide**](docs/Contributing.md) · [**Governance**](docs/Governance.md)
 
 ---
 
@@ -490,15 +490,16 @@ cd pincer && uv sync && pytest
 
 | Doc | What's in it |
 |-----|-------------|
-| **[Quick Start](docs/quickstart.md)** | Install to first message in 5 minutes |
-| **[Architecture](docs/architecture.md)** | How it works, with Mermaid diagrams |
-| **[Configuration](docs/configuration.md)** | Every env var, every option |
-| **[Skills Guide](docs/skills-guide.md)** | Build and publish custom skills |
-| **[Security Model](docs/security.md)** | Full threat model, 8 defense layers |
-| **[Deployment](docs/deployment.md)** | Docker, cloud, systemd, reverse proxy |
-| **[Voice Calling](docs/voice-calling.md)** | Twilio setup, STT/TTS, compliance |
-| **[API Reference](docs/api-reference.md)** | REST API for integrations |
-| **[Migrating from OpenClaw](docs/migrating-from-openclaw.md)** | Import your data in 30 min |
+| **[Quick Start](docs/Quickstart.md)** | Install to first message in 5 minutes |
+| **[Architecture](docs/PROJECT_STRUCTURE.md)** | How it works, with Mermaid diagrams |
+| **[Configuration](docs/PROJECT_STRUCTURE.md)** | Every env var, every option |
+| **[Skills Guide](docs/Skills guide.md)** | Build and publish custom skills |
+| **[Security Model](docs/Security.md)** | Full threat model, 8 defense layers |
+| **[Deployment](docs/Deployment.md)** | Docker, cloud, systemd, reverse proxy |
+| **[Voice Setup](docs/Voice-calling-setup.md)** | Quick setup for outbound phone calls |
+| **[Voice Calling](docs/Voice calling.md)** | Twilio setup, STT/TTS, compliance |
+| **[API Reference](docs/API reference.md)** | REST API for integrations |
+| **[Migrating from OpenClaw](docs/Migration from openclaw.md)** | Import your data in 30 min |
 
 ---
 
@@ -508,7 +509,7 @@ cd pincer && uv sync && pytest
 
 ---
 
-📜 **License:** MIT — [LICENSE](LICENSE) · 🔐 **Security:** [SECURITY.md](SECURITY.md) — do not open public issues for vulnerabilities
+📜 **License:** MIT — [LICENSE](LICENSE) · 🔐 **Security:** [Security Policy](docs/Security%20Policy.md) — do not open public issues for vulnerabilities
 
 ---
 

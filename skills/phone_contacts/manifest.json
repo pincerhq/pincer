@@ -1,0 +1,120 @@
+{
+  "name": "phone_contacts",
+  "version": "0.1.0",
+  "description": "Manage phone contacts for voice calling — add, search, list, update, and delete contacts with phone numbers and categories.",
+  "author": "pincer",
+  "permissions": [],
+  "env_required": [],
+  "tools": [
+    {
+      "name": "add_contact",
+      "description": "Add a new phone contact with name, number, and optional category/notes.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Contact name (e.g. 'Dr. Smith')"
+          },
+          "phone_number": {
+            "type": "string",
+            "description": "Phone number in E.164 format (e.g. +14155551234)"
+          },
+          "category": {
+            "type": "string",
+            "description": "Contact category: doctor, business, personal, etc.",
+            "default": ""
+          },
+          "notes": {
+            "type": "string",
+            "description": "Optional notes about this contact",
+            "default": ""
+          }
+        },
+        "required": ["name", "phone_number"]
+      }
+    },
+    {
+      "name": "search_contacts",
+      "description": "Search phone contacts by name, number, or category.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query (matches name, number, category, or notes)"
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "list_contacts",
+      "description": "List all phone contacts, optionally filtered by category.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "category": {
+            "type": "string",
+            "description": "Filter by category (empty = all)",
+            "default": ""
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max contacts to return (default 20)",
+            "default": 20
+          }
+        },
+        "required": []
+      }
+    },
+    {
+      "name": "update_contact",
+      "description": "Update an existing phone contact's details.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Current contact name to find"
+          },
+          "new_name": {
+            "type": "string",
+            "description": "New name (if changing)",
+            "default": ""
+          },
+          "new_phone_number": {
+            "type": "string",
+            "description": "New phone number (if changing)",
+            "default": ""
+          },
+          "new_category": {
+            "type": "string",
+            "description": "New category (if changing)",
+            "default": ""
+          },
+          "new_notes": {
+            "type": "string",
+            "description": "New notes (if changing)",
+            "default": ""
+          }
+        },
+        "required": ["name"]
+      }
+    },
+    {
+      "name": "delete_contact",
+      "description": "Delete a phone contact by name.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Contact name to delete"
+          }
+        },
+        "required": ["name"]
+      }
+    }
+  ]
+}

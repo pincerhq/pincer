@@ -181,6 +181,38 @@ class Settings(BaseSettings):
     dashboard_host: str = Field(default="127.0.0.1", description="API server bind host")
     dashboard_port: int = Field(default=8080, ge=1, le=65535, description="API server port")
 
+    # ── Voice Calling (Sprint 7) ─────────────────────────
+    voice_enabled: bool = Field(default=False, description="Enable voice calling channel")
+    twilio_account_sid: str = Field(default="", description="Twilio Account SID")
+    twilio_auth_token: SecretStr = Field(default=SecretStr(""), description="Twilio Auth Token")
+    twilio_phone_number: str = Field(default="", description="Twilio phone number (E.164)")
+    voice_engine: str = Field(
+        default="conversation_relay",
+        description="Voice engine: conversation_relay | media_streams",
+    )
+    voice_webhook_base_url: str = Field(default="", description="Public URL for Twilio webhooks")
+    deepgram_api_key: SecretStr = Field(default=SecretStr(""), description="Deepgram STT API key")
+    elevenlabs_api_key: SecretStr = Field(default=SecretStr(""), description="ElevenLabs TTS API key")
+    elevenlabs_voice_id: str = Field(default="", description="ElevenLabs voice ID")
+    voice_language: str = Field(default="en-US", description="Primary language for STT")
+    voice_max_call_duration: int = Field(default=600, ge=30, le=3600, description="Max call seconds")
+    voice_max_hold_time: int = Field(default=300, ge=30, le=600, description="Max IVR hold seconds")
+    voice_recording_enabled: bool = Field(default=False, description="Enable call recording")
+    voice_consent_mode: str = Field(
+        default="one_party",
+        description="Recording consent: one_party | two_party | none",
+    )
+    voice_outbound_enabled: bool = Field(default=False, description="Enable outbound calling")
+    voice_outbound_max_daily: int = Field(default=10, ge=1, le=100, description="Max outbound calls/day")
+    voice_allowed_callers: str = Field(
+        default="*",
+        description="Comma-separated E.164 numbers allowed to call (or * for all)",
+    )
+    voice_filler_phrases: str = Field(
+        default="",
+        description="Custom filler phrases JSON array (empty = built-in)",
+    )
+
     # ── Security (Sprint 5) ──────────────────────────────
     audit_disabled: bool = Field(default=False, description="Disable audit logging")
     rate_messages_per_min: int = Field(default=30, ge=1, description="Per-user message rate limit")
