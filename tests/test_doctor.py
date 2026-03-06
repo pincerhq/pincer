@@ -26,7 +26,7 @@ def doctor_env(tmp_path):
 def test_run_all_returns_report(doctor_env):
     report = doctor_env.run_all()
     assert isinstance(report, DoctorReport)
-    assert len(report.checks) == 25
+    assert len(report.checks) == 28
     assert 0 <= report.score <= 100
 
 
