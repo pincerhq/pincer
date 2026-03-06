@@ -967,6 +967,82 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         except Exception as e:
             console.print(f"[yellow]WhatsApp failed: {e}[/yellow]")
 
+    # Sprint 7: Voice channel (optional)
+    # Start when either inbound (voice_enabled) or outbound (voice_outbound_enabled) is enabled
+    vc = None
+    if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.twilio_account_sid:
+        try:
+            from pincer.channels.phone_calls import VoiceChannel
+            from pincer.voice.engine import get_voice_engine
+            from pincer.voice.outbound import make_phone_call
+            from pincer.voice.twiml_server import init_voice_routes
+
+            voice_engine = get_voice_engine(settings)
+            vc = VoiceChannel(settings)
+            vc.set_engine(voice_engine)
+            vc.set_identity_resolver(identity)
+            await vc.start(on_message)
+            channels.append(vc)
+            channel_map[vc.name] = vc
+            router.register(ChannelType.VOICE, vc)
+            init_voice_routes(voice_engine, settings)
+
+            if settings.voice_outbound_enabled:
+                tools.register(
+                    name="make_phone_call",
+                    description=(
+                        "Place a real phone call to a number. REQUIRED when the user asks you to call someone: "
+                        "you MUST call this tool with target_number (E.164) and purpose. "
+                        "Do NOT describe or simulate a call in text. Do NOT output XML or structured call blocks. "
+                        "Only this tool can place calls."
+                    ),
+                    handler=make_phone_call,
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "target_number": {
+                                "type": "string",
+                                "description": "Phone number in E.164 format (e.g. +14155551234)",
+                            },
+                            "purpose": {
+                                "type": "string",
+                                "description": "What the call is about",
+                            },
+                            "instructions": {
+                                "type": "string",
+                                "description": "Specific instructions for the agent during the call",
+                                "default": "",
+                            },
+                            "max_duration": {
+                                "type": "integer",
+                                "description": "Maximum call duration in seconds (default 300)",
+                                "default": 300,
+                            },
+                        },
+                        "required": ["target_number", "purpose"],
+                    },
+                    require_approval=True,
+                )
+
+            console.print(
+                f"[green]Voice calling enabled ({settings.voice_engine})[/green]"
+            )
+        except Exception as e:
+            console.print(f"[yellow]Voice setup failed: {e}[/yellow]")
+    else:
+        if settings.voice_enabled or settings.voice_outbound_enabled:
+            console.print("[yellow]Voice/outbound enabled but PINCER_TWILIO_ACCOUNT_SID not set[/yellow]")
+    if settings.voice_outbound_enabled and not settings.voice_webhook_base_url:
+        console.print(
+            "[yellow]Outbound calling enabled but PINCER_VOICE_WEBHOOK_BASE_URL not set — "
+            "calls will fail until configured.[/yellow]"
+        )
+    if settings.voice_enabled and not settings.voice_outbound_enabled:
+        console.print(
+            "[dim]Voice outbound disabled — set PINCER_VOICE_OUTBOUND_ENABLED=true "
+            "for 'Call X' from text.[/dim]"
+        )
+
     # Sprint 4: Discord channel (optional)
     dc = None
     if settings.discord_bot_token.get_secret_value():
@@ -1361,8 +1437,24 @@ def init() -> None:
     budget = Prompt.ask("Daily budget (USD)", default="5.00")
     env_lines.append(f"PINCER_DAILY_BUDGET_USD={budget}")
 
-    # Step 4: Optional Integrations
-    console.print("\n[bold]Step 4: Optional Integrations[/bold]")
+    # Step 4: Voice Calling
+    console.print("\n[bold]Step 4: Voice Calling[/bold]")
+    if Confirm.ask("Enable voice calling (Twilio)?", default=False):
+        env_lines.append("PINCER_VOICE_ENABLED=true")
+        sid = Prompt.ask("Twilio Account SID")
+        env_lines.append(f"PINCER_TWILIO_ACCOUNT_SID={sid}")
+        token = Prompt.ask("Twilio Auth Token", password=True)
+        env_lines.append(f"PINCER_TWILIO_AUTH_TOKEN={token}")
+        phone = Prompt.ask("Twilio phone number (E.164, e.g. +14155551234)")
+        env_lines.append(f"PINCER_TWILIO_PHONE_NUMBER={phone}")
+        webhook = Prompt.ask("Public webhook URL (https://...)", default="")
+        if webhook:
+            env_lines.append(f"PINCER_VOICE_WEBHOOK_BASE_URL={webhook}")
+        if Confirm.ask("Enable outbound calling?", default=False):
+            env_lines.append("PINCER_VOICE_OUTBOUND_ENABLED=true")
+
+    # Step 5: Optional Integrations
+    console.print("\n[bold]Step 5: Optional Integrations[/bold]")
     if Confirm.ask("Configure email?", default=False):
         env_lines.append(f"PINCER_EMAIL_IMAP_HOST={Prompt.ask('IMAP host', default='imap.gmail.com')}")
         env_lines.append(f"PINCER_EMAIL_SMTP_HOST={Prompt.ask('SMTP host', default='smtp.gmail.com')}")

@@ -69,6 +69,14 @@ class IdentityResolver:
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     raise
+            # Add phone_number if missing (Sprint 7 — voice calling)
+            try:
+                await db.execute(
+                    "ALTER TABLE identity_map ADD COLUMN phone_number TEXT"
+                )
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
             await db.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_discord
                 ON identity_map(discord_user_id) WHERE discord_user_id IS NOT NULL
@@ -123,6 +131,12 @@ class IdentityResolver:
             cursor = await db.execute(
                 "SELECT pincer_user_id FROM identity_map WHERE discord_user_id = ?",
                 (str(channel_user_id),),
+            )
+        elif channel == ChannelType.VOICE:
+            phone = str(channel_user_id).lstrip("+")
+            cursor = await db.execute(
+                "SELECT pincer_user_id FROM identity_map WHERE phone_number = ?",
+                (phone,),
             )
         else:
             return None
@@ -189,14 +203,17 @@ class IdentityResolver:
             str(channel_user_id).lstrip("+") if channel == ChannelType.WHATSAPP else None
         )
         discord_id = str(channel_user_id) if channel == ChannelType.DISCORD else None
+        phone_number = (
+            str(channel_user_id).lstrip("+") if channel == ChannelType.VOICE else None
+        )
 
         await db.execute(
             """INSERT INTO identity_map
                (pincer_user_id, telegram_user_id, whatsapp_phone, discord_user_id,
-                display_name, preferred_channel)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                phone_number, display_name, preferred_channel)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (pincer_user_id, telegram_id, whatsapp_phone, discord_id,
-             display_name, channel.value),
+             phone_number, display_name, channel.value),
         )
         await db.commit()
         logger.info("Identity created: %s (%s)", pincer_user_id, channel.value)
@@ -214,6 +231,8 @@ class IdentityResolver:
             col, val = "whatsapp_phone", str(channel_user_id).lstrip("+")
         elif channel == ChannelType.DISCORD:
             col, val = "discord_user_id", str(channel_user_id)
+        elif channel == ChannelType.VOICE:
+            col, val = "phone_number", str(channel_user_id).lstrip("+")
         else:
             return
 

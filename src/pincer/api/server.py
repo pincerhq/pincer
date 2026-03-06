@@ -86,6 +86,11 @@ def create_app() -> FastAPI:
     app.include_router(conversations_router)
     app.include_router(skills_router)
 
+    # Voice routes (Sprint 7) — mounted unconditionally; handlers check engine state
+    from pincer.voice.twiml_server import voice_router
+
+    app.include_router(voice_router)
+
     @app.get("/api/health")
     async def health() -> dict[str, str]:
         return {"status": "ok", "version": "0.5.0"}
@@ -94,12 +99,14 @@ def create_app() -> FastAPI:
     async def status() -> dict[str, object]:
         return {
             "agent_running": True,
-            "version": "0.5.0",
+            "version": "0.7.2",
             "channels": {
                 "telegram": bool(os.environ.get("PINCER_TELEGRAM_BOT_TOKEN")),
                 "whatsapp": os.environ.get("PINCER_WHATSAPP_ENABLED", "").lower()
                 == "true",
                 "discord": bool(os.environ.get("PINCER_DISCORD_BOT_TOKEN")),
+                "voice": os.environ.get("PINCER_VOICE_ENABLED", "").lower()
+                == "true",
             },
         }
 

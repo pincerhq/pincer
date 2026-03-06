@@ -1,95 +1,85 @@
 # Changelog
 
-All notable changes to Pincer are documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to Pincer. Format: [Version] — Date.
 
 ---
 
-## [0.7.0] — 2026-02-28
+## [0.7.2] — 2026-03-06
 
-### Added
-- 📞 **Voice calling** via Twilio — make and receive phone calls through your agent
-- Speech-to-text support (Deepgram, Whisper, Google)
-- Text-to-speech support (ElevenLabs, OpenAI, Google)
-- Call state machine with barge-in detection
-- Recording consent and PII masking for compliance
-- Outbound call approval flow (agent asks permission before dialing)
-- Call transcript storage and retrieval
-- Voice cost tracking integrated with existing budget system
+- Sprint 7: Voice Calling System — Twilio Voice + real-time AI agent integration
+- Twilio infrastructure: inbound/outbound call handling, TwiML server, WebSocket media streams
+- Dual engine architecture: ConversationRelay (Phase 1) and Media Streams (Phase 2)
+- Speech pipeline: Deepgram streaming STT, ElevenLabs streaming TTS, audio codec conversion
+- Barge-in controller: voice activity detection for interrupt handling (<500ms target)
+- Call state machine: 11+ deterministic phases (greeting, intent, verify, execute, confirm, etc.)
+- Voice-optimized system prompts for natural phone conversation
+- Outbound calling: agent places calls on user's behalf via text command
+- IVR navigation engine: DTMF tone generation, menu analysis, hold detection
+- Warm transfer: conference bridge to patch user in after agent navigates to the right person
+- Safety gates: mandatory verbal confirmation before all consequential actions
+- PII guard: credit card, SSN, account number masking in transcripts and logs
+- Recording compliance: jurisdiction-aware consent announcements (one-party/two-party)
+- Call transcript logger with post-call summary generation
+- Voice channel as first-class BaseChannel with cross-channel memory sharing
+- Phone contacts skill: CRUD tools for managing contact directory
+- Database migration 005: voice_calls, call_transcripts, call_actions, phone_contacts tables
+- Identity resolver: phone_number column for caller ID matching
+- Security doctor: 3 new voice-specific checks (Twilio credentials, webhook URL, recording consent)
+- Audit logger: 4 new voice event types (call_start, call_end, tool_call, transfer)
+- CLI integration: voice channel startup, outbound call tool registration, init wizard voice step
+- 20+ new environment variables for voice configuration
+- New `voice` optional dependency extra: twilio, websockets, deepgram-sdk, elevenlabs
+- New `docs/Voice-calling-setup.md` — focused setup guide for voice calling
+- README: fixed doc links to use actual docs folder paths; docs.pincer.dev → local docs
 
-## [0.6.0] — 2026-02-26
+## [0.7.1] — 2026-03-04
 
-### Added
-- 🚀 **Public launch release**
-- Hero demo recordings and GIF
-- "You Could've Built Pincer" blog post
-- Comprehensive documentation (quickstart, architecture, skills guide, security)
-- Migration guide from OpenClaw
-- Pre-configured deploy buttons (Railway, DigitalOcean, Render)
+- Feature work (PR #20), issue #17
 
-### Fixed
-- Various bug fixes from beta tester feedback
+## [0.7.0] — 2026-03-03
 
-## [0.5.0] — 2026-02-21
+- Dashboard
 
-### Added
-- 🔒 **Security layer** — user allowlist, tool approval, audit logging
-- Security Doctor — 25+ automated health checks via `pincer doctor`
-- Rate limiting (per-user and global)
-- 💰 **Cost controls** — daily/session/tool budgets with auto-model-downgrade
-- Cost dashboard API endpoints
-- 🐳 **Docker** — multi-stage Dockerfile, docker-compose.yml
-- One-click deploy templates (Railway, DigitalOcean, Render)
-- 🖥️ **Web dashboard** — FastAPI + HTMX, status overview, cost charts, skill management
+## [0.6.x] — 2026-03-02
 
-## [0.4.0] — 2026-02-14
+- Project documentation, README
 
-### Added
-- 🎮 **Discord channel** — full Discord bot integration
-- 🧩 **Skill system** — skill loader, sandbox, security scanner, skill signing
-- 10 bundled skills (weather, habit tracker, stock prices, etc.)
-- CLI: `pincer skills install/remove/list/scan/verify`
-- Skill YAML manifest format
+## [0.6.0] — 2026-03-01
 
-## [0.3.0] — 2026-02-07
+- Flattened repo structure (pincer/ → root)
 
-### Added
-- 💬 **WhatsApp channel** via neonize (multi-device protocol)
-- 📧 Email tools — Gmail read/send via OAuth
-- 📅 Calendar tools — Google Calendar read/create
-- ⏰ Scheduler — cron jobs, morning briefings, reminders
-- `pincer google setup` OAuth wizard
+## [0.5.x] — 2026-02-28
 
-## [0.2.0] — 2026-01-31
+- Project docs, README for Pincer AI agent
 
-### Added
-- 🧠 **Memory system** — SQLite + FTS5 full-text search
-- Entity extraction (people, places, projects)
-- Auto-summarization of old conversations
-- 🌐 Browser tool (Playwright)
-- 🐍 Python code execution tool
-- 🎤 Voice message transcription (Telegram)
-- Streaming LLM responses with typing indicators
+## [0.5.0] — 2026-02-27
 
-## [0.1.0] — 2026-01-24
+- Sprint 5: API server
 
-### Added
-- 🦀 **Initial release**
-- ReAct agent loop with tool use
-- LLM providers: Anthropic (Claude), OpenAI, Ollama, OpenRouter
-- Telegram channel (aiogram 3.x)
-- Core tools: web_search, shell_exec, file_read, file_write
-- CLI: `pincer init`, `pincer run`
-- Pydantic-based configuration from `.env`
-- Cost tracking with per-model pricing
+## [0.4.x] — 2026-02-25
 
----
+- Sprint 4: Discord voice (PyNaCl), neonize loop stop
 
-[0.7.0]: https://github.com/pincerhq/pincer/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/pincerhq/pincer/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/pincerhq/pincer/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/pincerhq/pincer/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/pincerhq/pincer/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/pincerhq/pincer/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/pincerhq/pincer/releases/tag/v0.1.0
+## [0.4.0] — 2026-02-24
+
+- Sprint 4: Discord channel, skills system, CLI polish
+
+## [0.3.x] — 2026-02-23
+
+- Sprint 3 completion, PROJECT_STRUCTURE docs
+
+## [0.3.0] — 2026-02-22
+
+- Sprint 3: WhatsApp channel, proactive agent, cross-channel identity
+
+## [0.2.x] — 2026-02-21
+
+- send_image tool, streaming truncation, agent reliability
+
+## [0.2.0] — 2026-02-20
+
+- Sprint 1+2: memory, browser, voice, streaming
+
+## [0.1.0] — 2026-02-17
+
+- Initial scaffold
