@@ -491,6 +491,8 @@ cd pincer && uv sync && pytest
 | Doc | What's in it |
 |-----|-------------|
 | **[Quick Start](docs/Quickstart.md)** | Install to first message in 5 minutes |
+| **[Development Guide](docs/DEVELOPMENT.md)** | Local setup, tests, dashboard, debugging, skills/channels/tools |
+| **[Contributing](docs/Contributing.md)** | PR guidelines, code style, ruff/mypy, CI |
 | **[Architecture](docs/PROJECT_STRUCTURE.md)** | How it works, with Mermaid diagrams |
 | **[Configuration](docs/PROJECT_STRUCTURE.md)** | Every env var, every option |
 | **[Skills Guide](docs/Skills guide.md)** | Build and publish custom skills |

@@ -62,9 +62,11 @@ You don't have to write code to be a contributor.
 
 ## Development Setup
 
+For a complete development guide including dashboard setup, debugging the agent loop, and adding skills/channels/tools, see **[DEVELOPMENT.md](DEVELOPMENT.md)**.
+
 ### Prerequisites
 
-- Python 3.11+ (3.12 recommended)
+- Python 3.12+ (required)
 - [uv](https://github.com/astral-sh/uv) (strongly recommended) or pip
 - Git
 - A Telegram bot token (fastest channel to test against)
@@ -122,7 +124,7 @@ The entire codebase is under 8,000 lines. You can read the whole thing in an aft
 
 ### 🟢 Easy — Great First Contributions
 
-**Build a skill.** Skills are self-contained Python modules, typically 50-150 lines. If you can write a Python function, you can write a skill. See the [Skills Guide](docs/skills-guide.md).
+**Build a skill.** Skills are self-contained Python modules, typically 50-150 lines. If you can write a Python function, you can write a skill. See the [Skills Guide](Skills%20guide.md).
 
 Skill ideas we'd love to have:
 
@@ -187,11 +189,35 @@ refactor/memory-store       # Refactoring
 We keep it simple:
 
 - **ruff** handles formatting and linting (runs in CI)
-- **100-character** line length
+- **120-character** line length (see `[tool.ruff]` in `pyproject.toml`)
 - **Type hints** on all public functions
 - **Docstrings** on all public classes and functions (Google style)
 - **async/await** preferred — the whole codebase is async
 - **Tests** for new functionality (pytest + pytest-asyncio)
+
+**Ruff and mypy settings** are in `pyproject.toml`:
+
+```toml
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
+extend-ignore = ["N814", "N818"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+```
+
+Run locally before pushing:
+
+```bash
+uv run ruff check src/ tests/
+uv run ruff format src/ tests/
+uv run mypy src/
+```
 
 ```python
 async def send_notification(
@@ -259,6 +285,19 @@ We don't review for:
 - [ ] Documentation updated (if behavior changed)
 - [ ] CHANGELOG.md updated (if user-facing)
 ```
+
+### CI Testing Matrix
+
+Every push and PR runs:
+
+| Step | Command | Purpose |
+|------|---------|---------|
+| Install | `uv sync --all-extras` | Resolve and install all dependencies |
+| Tests | `uv run pytest --cov=pincer --cov-report=xml` | Run full test suite with coverage |
+| Lint | `uv run ruff check .` | Enforce code style and catch common issues |
+| Coverage | Codecov upload | Track coverage over time |
+
+See [.github/workflows/ci.yml](../.github/workflows/ci.yml) for the full workflow. All steps must pass before merge.
 
 ---
 

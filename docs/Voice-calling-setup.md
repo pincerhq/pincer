@@ -64,6 +64,18 @@ ngrok http 8080
 
 **Important:** Use port **8080** (Pincer API server), not 3000. Copy the `https://` URL to `PINCER_VOICE_WEBHOOK_BASE_URL`. No trailing spaces.
 
+### Docker + ngrok
+
+When running with Docker Compose, ngrok starts automatically with the stack. Add `NGROK_AUTHTOKEN` to your `.env` (get a free token at [ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken)). The ngrok container tunnels to `pincer:8080` and starts after Pincer is healthy.
+
+After `docker compose up -d`, check the ngrok container logs for the public URL:
+
+```bash
+docker compose logs ngrok
+```
+
+Copy the `https://` URL to `PINCER_VOICE_WEBHOOK_BASE_URL` and restart Pincer if needed. On the free tier, the URL changes on each restart.
+
 ---
 
 ## 5. Twilio Trial Accounts
