@@ -4,6 +4,17 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ---
 
+## [0.7.3] — 2026-03-10
+
+- Signal channel: host-facing URL fix — use 127.0.0.1 instead of localhost for Safari compatibility (IPv6 resolution)
+- Signal: pre-flight check before opening browser — verify signal-api is reachable; print clear error + docker command if not
+- Signal: Docker build fix — set CI=true for pnpm to fix ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY
+- Signal: latest-dev image, MODE=normal, configurable SIGNAL_API_IMAGE for better linking with recent Signal apps
+- Signal: platform linux/amd64 for Apple Silicon (JVM ARM64 crash avoidance)
+- Signal: device name "Pincer" for QR code pairing
+- Security doctor: 3 new Signal checks (phone set, API local, allowlist); test updated for 31 checks
+- Ruff: SIM105 (contextlib.suppress), F401 (unused imports), I001 (import order) fixes in signal channel and tests
+
 ## [0.7.2] — 2026-03-06
 
 - Sprint 7: Voice Calling System — Twilio Voice + real-time AI agent integration
