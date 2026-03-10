@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -95,10 +96,8 @@ class SignalChannel(BaseChannel):
 
         # Typing indicator (best-effort)
         if not is_group:
-            try:
+            with contextlib.suppress(Exception):
                 await self._client.send_typing_indicator(recipient)
-            except Exception:
-                pass
 
         for chunk in _split_message(text):
             try:

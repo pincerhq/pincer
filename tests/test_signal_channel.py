@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pincer.channels.base import ChannelType, IncomingMessage
 from pincer.channels.signal import SignalChannel, _split_message
-
 
 # ── _split_message ────────────────────────────────────────────────────────────
 

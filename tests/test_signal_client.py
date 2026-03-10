@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from pincer.channels.signal_client import (
-    SignalAPIError,
-    SignalClient,
-    SignalMessage,
-)
-
+from pincer.channels.signal_client import SignalAPIError, SignalClient
 
 # ── _parse_message ────────────────────────────────────────────────────────────
 
