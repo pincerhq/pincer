@@ -18,6 +18,7 @@ class ChannelType(StrEnum):
     CLI = "cli"
     WEB = "web"
     VOICE = "voice"
+    SIGNAL = "signal"
 
 
 @dataclass

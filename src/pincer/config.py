@@ -181,6 +181,30 @@ class Settings(BaseSettings):
     dashboard_host: str = Field(default="127.0.0.1", description="API server bind host")
     dashboard_port: int = Field(default=8080, ge=1, le=65535, description="API server port")
 
+    # ── Signal Messenger (Sprint 7.5) ────────────────────
+    signal_enabled: bool = Field(default=False, description="Enable Signal channel")
+    signal_api_url: str = Field(
+        default="http://signal-api:8080", description="signal-cli-rest-api base URL"
+    )
+    signal_pair_url: str = Field(
+        default="http://127.0.0.1:8081",
+        description="URL for browser-based pairing (host-facing); use when signal-api is in Docker",
+    )
+    signal_phone_number: str = Field(default="", description="Registered Signal phone number (E.164)")
+    signal_allowlist: str = Field(
+        default="",
+        description="Comma-separated phone numbers allowed to DM; empty = allow all",
+    )
+    signal_group_reply: str = Field(
+        default="mention_only",
+        description="Group reply mode: mention_only | all | disabled",
+    )
+    signal_poll_interval: int = Field(default=2, ge=1, description="Poll interval in seconds")
+    signal_receive_mode: str = Field(
+        default="websocket",
+        description="Receive mode: websocket | poll",
+    )
+
     # ── Voice Calling (Sprint 7) ─────────────────────────
     voice_enabled: bool = Field(default=False, description="Enable voice calling channel")
     twilio_account_sid: str = Field(default="", description="Twilio Account SID")

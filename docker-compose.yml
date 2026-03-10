@@ -51,3 +51,7 @@ services:
 volumes:
   pincer-data:
     name: pincer-data
+
+networks:
+  pincer-net:
+    name: pincer-net
