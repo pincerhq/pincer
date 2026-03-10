@@ -1062,6 +1062,27 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
     else:
         console.print("[dim]Discord skipped (no PINCER_DISCORD_BOT_TOKEN)[/dim]")
 
+    # Sprint 7.5: Signal channel (optional)
+    sig = None
+    if settings.signal_enabled:
+        if settings.signal_phone_number:
+            try:
+                from pincer.channels.signal import SignalChannel
+
+                sig = SignalChannel(settings)
+                sig.set_identity_resolver(identity)
+                await sig.start(on_message)
+                channels.append(sig)
+                channel_map[sig.name] = sig
+                router.register(ChannelType.SIGNAL, sig)
+                console.print("[green]Signal connected[/green]")
+            except Exception as e:
+                console.print(f"[yellow]Signal failed: {e}[/yellow]")
+        else:
+            console.print(
+                "[yellow]Signal enabled but PINCER_SIGNAL_PHONE_NUMBER not set[/yellow]"
+            )
+
     if not channels:
         console.print(
             "[yellow]No channels configured. Set PINCER_TELEGRAM_BOT_TOKEN.[/yellow]"
@@ -1430,6 +1451,27 @@ def init() -> None:
         env_lines.append("PINCER_WHATSAPP_ENABLED=true")
         console.print("  Run [bold]pincer pair-whatsapp[/bold] to pair after setup.")
 
+    if Confirm.ask("Enable Signal?", default=False):
+        env_lines.append("PINCER_SIGNAL_ENABLED=true")
+        phone = Prompt.ask("Signal phone number (E.164, e.g. +491234567890)")
+        env_lines.append(f"PINCER_SIGNAL_PHONE_NUMBER={phone}")
+        allowlist = Prompt.ask("Allowed DM numbers (comma-separated, empty = allow all)", default="")
+        if allowlist:
+            env_lines.append(f"PINCER_SIGNAL_ALLOWLIST={allowlist}")
+        api_url = Prompt.ask(
+            "signal-cli-rest-api URL (for Docker: http://signal-api:8080)",
+            default="http://signal-api:8080",
+        )
+        env_lines.append(f"PINCER_SIGNAL_API_URL={api_url}")
+        console.print(
+            "  Start signal-api: [bold]docker compose -f docker-compose.yml "
+            "-f docker-compose.signal.yml up -d[/bold]"
+        )
+        console.print(
+            "  Then pair: [bold]pincer signal pair[/bold] "
+            "(opens 127.0.0.1:8081 in browser automatically)"
+        )
+
     # Step 3: Preferences
     console.print("\n[bold]Step 3: Preferences[/bold]")
     tz = Prompt.ask("Timezone", default="Europe/Berlin")
@@ -1668,6 +1710,112 @@ async def _chat_loop() -> None:
         if memory_store:
             await memory_store.close()
         console.print("[dim]Goodbye.[/dim]")
+
+
+# ── Signal subcommands ────────────────────────
+
+signal_app = typer.Typer(name="signal", help="Manage Signal messenger integration")
+app.add_typer(signal_app, name="signal")
+
+
+@signal_app.command(name="pair")
+def signal_pair() -> None:
+    """Open the Signal QR-code link in your browser to register/link a device."""
+    import urllib.error
+    import urllib.request
+    import webbrowser
+
+    from pincer.config import get_settings_relaxed
+
+    settings = get_settings_relaxed()
+    pair_url = settings.signal_pair_url.rstrip("/")
+    qr_url = f"{pair_url}/v1/qrcodelink?device_name=Pincer"
+
+    # Pre-flight: verify signal-api is reachable before opening browser
+    try:
+        req = urllib.request.Request(f"{pair_url}/v1/about", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as _:
+            pass
+    except (OSError, urllib.error.URLError) as e:
+        console.print("[bold red]Cannot reach signal-api[/bold red]")
+        console.print(f"  {pair_url} — {e}")
+        console.print(
+            "\n[dim]Start signal-api first (no build required):[/dim]\n"
+            "  [bold]docker compose -f docker-compose.yml -f docker-compose.signal.yml "
+            "up -d signal-api[/bold]\n"
+        )
+        raise typer.Exit(1) from e
+
+    console.print(f"[bold]Signal Pairing[/bold]\n\nOpening QR link: {qr_url}")
+    console.print(
+        "\nScan the QR code with Signal: Settings → Linked Devices → Link New Device"
+    )
+    webbrowser.open(qr_url)
+
+
+@signal_app.command(name="status")
+def signal_status() -> None:
+    """Check Signal API health and registered accounts."""
+    asyncio.run(_signal_status())
+
+
+async def _signal_status() -> None:
+    from pincer.channels.signal_client import SignalAPIError, SignalClient
+    from pincer.config import get_settings_relaxed
+
+    settings = get_settings_relaxed()
+    console.print("[bold]Signal Status[/bold]\n")
+    console.print(f"  API URL:    {settings.signal_api_url}")
+    console.print(f"  Phone:      {settings.signal_phone_number or '(not set)'}")
+    console.print(f"  Enabled:    {settings.signal_enabled}")
+
+    client = SignalClient(settings.signal_api_url, settings.signal_phone_number)
+    try:
+        await client.connect()
+        try:
+            health = await client.health()
+            console.print(f"  Health:     [green]OK[/green] {health}")
+        except SignalAPIError as e:
+            console.print(f"  Health:     [red]FAIL[/red] {e}")
+
+        accounts = await client.list_accounts()
+        if accounts:
+            console.print(f"  Accounts:   {', '.join(accounts)}")
+        else:
+            console.print("  Accounts:   (none registered yet — run `pincer signal pair`)")
+
+        about = await client.about()
+        console.print(f"  About:      {about}")
+    finally:
+        await client.disconnect()
+
+
+@signal_app.command(name="test")
+def signal_test(
+    recipient: str = typer.Argument(..., help="Recipient phone number (E.164)"),
+) -> None:
+    """Send a test message via Signal."""
+    asyncio.run(_signal_test(recipient))
+
+
+async def _signal_test(recipient: str) -> None:
+    from pincer.channels.signal_client import SignalAPIError, SignalClient
+    from pincer.config import get_settings_relaxed
+
+    settings = get_settings_relaxed()
+    if not settings.signal_phone_number:
+        console.print("[red]PINCER_SIGNAL_PHONE_NUMBER not set.[/red]")
+        raise typer.Exit(1)
+
+    client = SignalClient(settings.signal_api_url, settings.signal_phone_number)
+    try:
+        await client.connect()
+        await client.send_message(recipient, "Hello from Pincer! Signal channel is working.")
+        console.print(f"[green]Test message sent to {recipient}[/green]")
+    except SignalAPIError as e:
+        console.print(f"[red]Send failed: {e}[/red]")
+    finally:
+        await client.disconnect()
 
 
 # ── Skills subcommands ────────────────────────

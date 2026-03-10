@@ -107,6 +107,8 @@ def create_app() -> FastAPI:
                 "discord": bool(os.environ.get("PINCER_DISCORD_BOT_TOKEN")),
                 "voice": os.environ.get("PINCER_VOICE_ENABLED", "").lower()
                 == "true",
+                "signal": os.environ.get("PINCER_SIGNAL_ENABLED", "").lower()
+                == "true",
             },
         }
 

@@ -1,0 +1,37 @@
+services:
+  signal-api:
+    image: ${SIGNAL_API_IMAGE:-bbernhard/signal-cli-rest-api:latest-dev}
+    container_name: pincer-signal-api
+    platform: linux/amd64
+    environment:
+      - MODE=normal
+    volumes:
+      - signal-data:/home/.local/share/signal-cli
+    ports:
+      - "127.0.0.1:8081:8080"
+    networks:
+      - pincer-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  pincer:
+    depends_on:
+      signal-api:
+        condition: service_healthy
+    environment:
+      - PINCER_SIGNAL_API_URL=http://signal-api:8080
+    networks:
+      - pincer-net
+
+volumes:
+  signal-data:
+    name: pincer-signal-data
+
+networks:
+  pincer-net:
+    name: pincer-net

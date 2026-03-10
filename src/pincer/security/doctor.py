@@ -123,6 +123,10 @@ class SecurityDoctor:
         report.checks.append(self._check_voice_twilio_credentials())
         report.checks.append(self._check_voice_webhook_url())
         report.checks.append(self._check_voice_recording_consent())
+        # Signal (3 checks, Sprint 7.5)
+        report.checks.append(self._check_signal_phone_set())
+        report.checks.append(self._check_signal_api_local())
+        report.checks.append(self._check_signal_allowlist())
         # Runtime (4 checks)
         report.checks.append(self._check_not_running_as_root())
         report.checks.append(self._check_audit_logging_enabled())
@@ -750,6 +754,87 @@ class SecurityDoctor:
             CheckStatus.PASS,
             "Recording disabled (transcription only)",
             category="voice",
+        )
+
+    # ── Signal (Sprint 7.5) ───────────────────────────────
+
+    def _check_signal_phone_set(self) -> CheckResult:
+        if os.environ.get("PINCER_SIGNAL_ENABLED", "").lower() != "true":
+            return CheckResult(
+                "signal_phone_set",
+                CheckStatus.SKIPPED,
+                "Signal not enabled",
+                category="signal",
+            )
+        phone = os.environ.get("PINCER_SIGNAL_PHONE_NUMBER", "")
+        if phone:
+            return CheckResult(
+                "signal_phone_set",
+                CheckStatus.PASS,
+                f"Signal phone configured: {phone}",
+                category="signal",
+            )
+        return CheckResult(
+            "signal_phone_set",
+            CheckStatus.CRITICAL,
+            "Signal enabled but PINCER_SIGNAL_PHONE_NUMBER not set",
+            fix_hint="Set PINCER_SIGNAL_PHONE_NUMBER=+1234567890",
+            category="signal",
+        )
+
+    def _check_signal_api_local(self) -> CheckResult:
+        if os.environ.get("PINCER_SIGNAL_ENABLED", "").lower() != "true":
+            return CheckResult(
+                "signal_api_local",
+                CheckStatus.SKIPPED,
+                "Signal not enabled",
+                category="signal",
+            )
+        url = os.environ.get("PINCER_SIGNAL_API_URL", "http://signal-api:8080")
+        local_hosts = ("localhost", "127.0.0.1", "signal-api", "::1")
+        try:
+            from urllib.parse import urlparse
+
+            host = urlparse(url).hostname or ""
+            if host in local_hosts:
+                return CheckResult(
+                    "signal_api_local",
+                    CheckStatus.PASS,
+                    f"Signal API URL is local: {url}",
+                    category="signal",
+                )
+        except Exception:
+            pass
+        return CheckResult(
+            "signal_api_local",
+            CheckStatus.CRITICAL,
+            f"Signal API URL appears public: {url}",
+            fix_hint="Keep signal-api on localhost or internal Docker network only",
+            category="signal",
+        )
+
+    def _check_signal_allowlist(self) -> CheckResult:
+        if os.environ.get("PINCER_SIGNAL_ENABLED", "").lower() != "true":
+            return CheckResult(
+                "signal_allowlist",
+                CheckStatus.SKIPPED,
+                "Signal not enabled",
+                category="signal",
+            )
+        allowlist = os.environ.get("PINCER_SIGNAL_ALLOWLIST", "")
+        if allowlist.strip():
+            return CheckResult(
+                "signal_allowlist",
+                CheckStatus.PASS,
+                "Signal DM allowlist configured",
+                category="signal",
+            )
+        return CheckResult(
+            "signal_allowlist",
+            CheckStatus.WARNING,
+            "Signal DM allowlist is empty (any phone can DM)",
+            fix_hint="Set PINCER_SIGNAL_ALLOWLIST=+1234567890",
+            category="signal",
         )
 
     # ── Runtime ───────────────────────────────────────────

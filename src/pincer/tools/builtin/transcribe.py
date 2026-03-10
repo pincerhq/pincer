@@ -25,6 +25,7 @@ _MIME_TO_EXT: dict[str, str] = {
     "audio/m4a": "m4a",
     "audio/webm": "webm",
     "audio/flac": "flac",
+    "audio/aac": "aac",  # Signal voice notes
 }
 
 
