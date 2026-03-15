@@ -1,7 +1,7 @@
 # ============================================
 # Stage 0: Dashboard build
 # ============================================
-FROM node:20-slim AS dashboard-builder
+FROM node:22-slim AS dashboard-builder
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ RUN corepack enable pnpm
 COPY dashboard/ ./
 
 ENV CI=true
-RUN pnpm install
+RUN pnpm install --frozen-lockfile
 RUN pnpm build
 
 # ============================================
@@ -42,7 +42,7 @@ FROM python:3.12-slim-bookworm AS runtime
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl libmagic1 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -r pincer && useradd -r -g pincer -m pincer
