@@ -565,7 +565,11 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
             name="calendar_create",
             description=(
                 "Create a new Google Calendar event. Use when user asks to "
-                "schedule, add, or book a meeting or event."
+                "schedule, add, or book a meeting or event. "
+                "On success, the tool returns the event's direct URL (htmlLink). "
+                "You MUST include this URL in your final response so the user can open the event. "
+                "On failure, the tool returns an error message. Pass that exact message to the user; "
+                "do not claim success."
             ),
             handler=calendar_create,
             parameters={

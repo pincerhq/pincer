@@ -57,6 +57,10 @@
 - OAuth2 flow with automatic token refresh
 - Dedicated `pincer auth-google` CLI command for one-time consent
 - Actionable error messages for missing credentials
+- **Strict response validation:** Success only when API returns both `id` and `htmlLink`; otherwise returns error (no silent failure)
+- **IANA timezone handling:** Naive datetimes use `settings.timezone`; fixed offsets fall back to IANA; ZoneInfo preserved
+- **Success message:** Always includes `htmlLink` for user verification; includes `calendar_id` when non-primary
+- **Agent instructions:** System prompt and tool description require agent to include event link in final response and pass errors through
 
 ### Cron Scheduler (`scheduler/cron.py`)
 - SQLite-backed cron job persistence
