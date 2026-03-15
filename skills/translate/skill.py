@@ -11,11 +11,13 @@ def translate_text(text: str, target: str, source: str = "auto") -> dict:
         return {"error": "text and target are required"}
 
     url = "https://libretranslate.com/translate"
-    body = json.dumps({
-        "q": text,
-        "source": source,
-        "target": target,
-    }).encode("utf-8")
+    body = json.dumps(
+        {
+            "q": text,
+            "source": source,
+            "target": target,
+        }
+    ).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
@@ -47,9 +49,7 @@ def list_languages() -> dict:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
             languages = [
-                {"code": item.get("code", ""), "name": item.get("name", "")}
-                for item in data
-                if isinstance(item, dict)
+                {"code": item.get("code", ""), "name": item.get("name", "")} for item in data if isinstance(item, dict)
             ]
             return {"languages": languages}
     except urllib.error.HTTPError as e:

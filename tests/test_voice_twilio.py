@@ -127,7 +127,8 @@ class TestRelayWebhook:
         )
         assert response.status_code == 200
         mock_engine.on_speech_input.assert_called_once_with(
-            "CA123", "What's on my calendar?",
+            "CA123",
+            "What's on my calendar?",
         )
 
     def test_interrupt_event(self, client, mock_engine):

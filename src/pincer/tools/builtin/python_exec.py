@@ -23,7 +23,7 @@ MAX_OUTPUT_LENGTH = 8000
 MAX_TIMEOUT = 120
 
 # Wrapper injected before user code to capture matplotlib figures
-_MATPLOTLIB_WRAPPER = '''
+_MATPLOTLIB_WRAPPER = """
 import sys as _sys
 import os as _os
 
@@ -49,9 +49,9 @@ try:
 except ImportError:
     pass
 
-'''
+"""
 
-_MATPLOTLIB_FOOTER = '''
+_MATPLOTLIB_FOOTER = """
 
 # Auto-save any unsaved matplotlib figures
 try:
@@ -60,7 +60,7 @@ try:
         _patched_show()
 except (ImportError, NameError):
     pass
-'''
+"""
 
 
 def _get_output_dir() -> Path:
@@ -100,7 +100,8 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable, script_path,
+                sys.executable,
+                script_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(output_dir),
@@ -108,9 +109,7 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
             )
 
             try:
-                stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout
-                )
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except TimeoutError:
                 proc.kill()
                 await proc.wait()

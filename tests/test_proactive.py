@@ -20,10 +20,12 @@ async def proactive(tmp_path):
 class TestProactiveAgent:
     async def test_generate_briefing_default(self, proactive):
         """Briefing should generate even when external services are unavailable."""
-        with patch.object(proactive, "_weather", return_value="Weather: Clear, 20C\n"), \
-             patch.object(proactive, "_calendar", return_value="Calendar: No events\n"), \
-             patch.object(proactive, "_email", return_value="Email: No unread\n"), \
-             patch.object(proactive, "_news", return_value="News: No headlines\n"):
+        with (
+            patch.object(proactive, "_weather", return_value="Weather: Clear, 20C\n"),
+            patch.object(proactive, "_calendar", return_value="Calendar: No events\n"),
+            patch.object(proactive, "_email", return_value="Email: No unread\n"),
+            patch.object(proactive, "_news", return_value="News: No headlines\n"),
+        ):
             result = await proactive.generate_briefing("usr_test")
             assert "Good morning" in result
             assert "Weather" in result
@@ -40,7 +42,8 @@ class TestProactiveAgent:
     async def test_update_briefing_config(self, proactive):
         await proactive._get_briefing_config("usr_test")
         await proactive.update_briefing_config(
-            "usr_test", weather_location="London,UK",
+            "usr_test",
+            weather_location="London,UK",
         )
         config = await proactive._get_briefing_config("usr_test")
         assert config["weather_location"] == "London,UK"
@@ -48,7 +51,8 @@ class TestProactiveAgent:
     async def test_invalid_config_key_ignored(self, proactive):
         await proactive._get_briefing_config("usr_test")
         await proactive.update_briefing_config(
-            "usr_test", invalid_field="should_be_ignored",
+            "usr_test",
+            invalid_field="should_be_ignored",
         )
 
     async def test_custom_action(self, proactive):
@@ -60,7 +64,8 @@ class TestProactiveAgent:
 
     async def test_custom_action_no_prompt(self, proactive):
         result = await proactive.run_custom_action(
-            "usr_test", {"type": "custom"},
+            "usr_test",
+            {"type": "custom"},
         )
         assert "no prompt" in result.lower()
 

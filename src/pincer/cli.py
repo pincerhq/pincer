@@ -24,6 +24,7 @@ from rich.logging import RichHandler
 
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
+    from pincer.config import Settings
 
 logger = logging.getLogger(__name__)
 app = typer.Typer(
@@ -71,7 +72,7 @@ def run() -> None:
     asyncio.run(_run_agent(settings))
 
 
-async def _run_agent(settings: Settings) -> None:  # noqa: F821
+async def _run_agent(settings: Settings) -> None:
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
@@ -224,10 +225,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         )
         tools.register(
             name="screenshot",
-            description=(
-                "Take a screenshot of a web page. "
-                "Use when the user wants to see what a page looks like."
-            ),
+            description=("Take a screenshot of a web page. Use when the user wants to see what a page looks like."),
             handler=screenshot,
             parameters={
                 "type": "object",
@@ -526,8 +524,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         tools.register(
             name="calendar_today",
             description=(
-                "Get today's calendar events. Use when user asks about "
-                "their schedule, meetings, or agenda today."
+                "Get today's calendar events. Use when user asks about their schedule, meetings, or agenda today."
             ),
             handler=calendar_today,
             parameters={
@@ -544,10 +541,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         )
         tools.register(
             name="calendar_week",
-            description=(
-                "Get this week's calendar events. Use when user asks about "
-                "their week or upcoming schedule."
-            ),
+            description=("Get this week's calendar events. Use when user asks about their week or upcoming schedule."),
             handler=calendar_week,
             parameters={
                 "type": "object",
@@ -606,9 +600,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         )
         console.print("[green]Calendar tools enabled[/green]")
     except ImportError:
-        logging.getLogger(__name__).debug(
-            "Google Calendar dependencies not installed, calendar tools disabled"
-        )
+        logging.getLogger(__name__).debug("Google Calendar dependencies not installed, calendar tools disabled")
 
     # send_file tool — channels dict is populated after channel startup below
     channel_map: dict[str, BaseChannel] = {}
@@ -673,12 +665,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
             return f"Error: No active channel to send image (channel={ch_name})"
 
         lower = url.lower()
-        is_gif = (
-            lower.endswith(".gif")
-            or "giphy.com" in lower
-            or "/gif" in lower
-            or "tenor.com" in lower
-        )
+        is_gif = lower.endswith(".gif") or "giphy.com" in lower or "/gif" in lower or "tenor.com" in lower
         try:
             if is_gif:
                 await channel.send_animation(user_id, url, caption)
@@ -847,22 +834,26 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
             await rate_limiter.check_message(incoming.user_id)
         except RateLimitExceeded as e:
             if audit_logger:
-                await audit_logger.log(AuditEntry(
-                    user_id=incoming.user_id,
-                    action=AuditAction.RATE_LIMIT_HIT,
-                    channel=incoming.channel,
-                    input_summary=e.message,
-                ))
+                await audit_logger.log(
+                    AuditEntry(
+                        user_id=incoming.user_id,
+                        action=AuditAction.RATE_LIMIT_HIT,
+                        channel=incoming.channel,
+                        input_summary=e.message,
+                    )
+                )
             return e.message
 
         # Sprint 5: Audit incoming message
         if audit_logger:
-            await audit_logger.log(AuditEntry(
-                user_id=incoming.user_id,
-                action=AuditAction.MESSAGE_RECEIVED,
-                channel=incoming.channel,
-                input_summary=(incoming.text or "")[:500],
-            ))
+            await audit_logger.log(
+                AuditEntry(
+                    user_id=incoming.user_id,
+                    action=AuditAction.MESSAGE_RECEIVED,
+                    channel=incoming.channel,
+                    input_summary=(incoming.text or "")[:500],
+                )
+            )
 
         # Handle voice notes via Whisper transcription
         text = incoming.text
@@ -881,11 +872,37 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         # Handle file attachments — decode text files, save all to workspace
         if incoming.has_files:
             text_extensions = {
-                ".txt", ".py", ".js", ".ts", ".json", ".csv", ".md",
-                ".log", ".xml", ".html", ".css", ".yaml", ".yml",
-                ".toml", ".ini", ".cfg", ".sh", ".bash", ".sql",
-                ".rs", ".go", ".java", ".c", ".cpp", ".h", ".rb",
-                ".php", ".swift", ".kt", ".env", ".gitignore",
+                ".txt",
+                ".py",
+                ".js",
+                ".ts",
+                ".json",
+                ".csv",
+                ".md",
+                ".log",
+                ".xml",
+                ".html",
+                ".css",
+                ".yaml",
+                ".yml",
+                ".toml",
+                ".ini",
+                ".cfg",
+                ".sh",
+                ".bash",
+                ".sql",
+                ".rs",
+                ".go",
+                ".java",
+                ".c",
+                ".cpp",
+                ".h",
+                ".rb",
+                ".php",
+                ".swift",
+                ".kt",
+                ".env",
+                ".gitignore",
             }
             uploads_dir = settings.data_dir / "workspace" / "uploads"
             uploads_dir.mkdir(parents=True, exist_ok=True)
@@ -911,8 +928,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
                         file_parts.append(f"[File: {filename}]\n```\n{content}\n```")
                     except Exception:
                         file_parts.append(
-                            f"[File: {filename}] saved to {abs_path} "
-                            f"(binary, {len(raw_bytes)} bytes, {mime})"
+                            f"[File: {filename}] saved to {abs_path} (binary, {len(raw_bytes)} bytes, {mime})"
                         )
                 elif ext == ".pdf":
                     try:
@@ -926,8 +942,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
                         if len(content) > max_chars:
                             content = content[:max_chars] + f"\n... [truncated, {len(pages)} pages total]"
                         file_parts.append(
-                            f"[File: {filename} — {len(pages)} pages, saved to {abs_path}]\n"
-                            f"```\n{content}\n```"
+                            f"[File: {filename} — {len(pages)} pages, saved to {abs_path}]\n```\n{content}\n```"
                         )
                     except ImportError:
                         file_parts.append(
@@ -982,12 +997,17 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         channel_map[tg.name] = tg
 
         async def _approval_via_telegram(
-            tool_name: str, arguments: dict, user_id: str, channel: str,
+            tool_name: str,
+            arguments: dict,
+            user_id: str,
+            channel: str,
         ) -> bool:
             if channel == "telegram":
                 return await tg.request_approval(user_id, tool_name, arguments)
             logger.warning(
-                "No approval UI for channel %s; auto-approving %s", channel, tool_name,
+                "No approval UI for channel %s; auto-approving %s",
+                channel,
+                tool_name,
             )
             return True
 
@@ -1075,9 +1095,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
                     require_approval=True,
                 )
 
-            console.print(
-                f"[green]Voice calling enabled ({settings.voice_engine})[/green]"
-            )
+            console.print(f"[green]Voice calling enabled ({settings.voice_engine})[/green]")
         except Exception as e:
             console.print(f"[yellow]Voice setup failed: {e}[/yellow]")
     else:
@@ -1090,8 +1108,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         )
     if settings.voice_enabled and not settings.voice_outbound_enabled:
         console.print(
-            "[dim]Voice outbound disabled — set PINCER_VOICE_OUTBOUND_ENABLED=true "
-            "for 'Call X' from text.[/dim]"
+            "[dim]Voice outbound disabled — set PINCER_VOICE_OUTBOUND_ENABLED=true for 'Call X' from text.[/dim]"
         )
 
     # Sprint 4: Discord channel (optional)
@@ -1130,14 +1147,10 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
             except Exception as e:
                 console.print(f"[yellow]Signal failed: {e}[/yellow]")
         else:
-            console.print(
-                "[yellow]Signal enabled but PINCER_SIGNAL_PHONE_NUMBER not set[/yellow]"
-            )
+            console.print("[yellow]Signal enabled but PINCER_SIGNAL_PHONE_NUMBER not set[/yellow]")
 
     if not channels:
-        console.print(
-            "[yellow]No channels configured. Set PINCER_TELEGRAM_BOT_TOKEN.[/yellow]"
-        )
+        console.print("[yellow]No channels configured. Set PINCER_TELEGRAM_BOT_TOKEN.[/yellow]")
         return
 
     # Sprint 3: Scheduler + Proactive Agent
@@ -1179,10 +1192,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
     api_server = None
     api_task = None
     if _port_in_use(settings.dashboard_host, settings.dashboard_port):
-        console.print(
-            f"[yellow]Port {settings.dashboard_port} is already in use. "
-            f"API server skipped.[/yellow]"
-        )
+        console.print(f"[yellow]Port {settings.dashboard_port} is already in use. API server skipped.[/yellow]")
         console.print(
             f"  Options: Set PINCER_DASHBOARD_PORT=8081 in .env, "
             f"or kill the process: lsof -i :{settings.dashboard_port}"
@@ -1203,8 +1213,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
             api_server = uvicorn.Server(api_config)
             api_task = asyncio.create_task(api_server.serve())
             console.print(
-                f"[green]API server started on "
-                f"http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
+                f"[green]API server started on http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
             )
         except Exception as e:
             console.print(f"[yellow]API server failed to start: {e}[/yellow]")
@@ -1233,6 +1242,7 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
             await ch.stop()
         try:
             from pincer.tools.builtin.browser import close_browser
+
             await close_browser()
         except ImportError:
             pass
@@ -1258,15 +1268,9 @@ def config() -> None:
         console.print("[bold]Pincer Configuration[/bold]\n")
         console.print(f"  Provider:     {s.default_provider.value}")
         console.print(f"  Model:        {s.default_model}")
-        console.print(
-            f"  Anthropic:    {'set' if s.anthropic_api_key.get_secret_value() else 'not set'}"
-        )
-        console.print(
-            f"  OpenAI:       {'set' if s.openai_api_key.get_secret_value() else 'not set'}"
-        )
-        console.print(
-            f"  Telegram:     {'set' if s.telegram_bot_token.get_secret_value() else 'not set'}"
-        )
+        console.print(f"  Anthropic:    {'set' if s.anthropic_api_key.get_secret_value() else 'not set'}")
+        console.print(f"  OpenAI:       {'set' if s.openai_api_key.get_secret_value() else 'not set'}")
+        console.print(f"  Telegram:     {'set' if s.telegram_bot_token.get_secret_value() else 'not set'}")
         console.print(f"  Budget:       ${s.daily_budget_usd:.2f}/day")
         console.print(f"  Data dir:     {s.data_dir}")
         console.print(f"  Shell:        {'enabled' if s.shell_enabled else 'disabled'}")
@@ -1286,9 +1290,7 @@ def cost(
     asyncio.run(_show_cost(days=days, by_model=by_model, by_tool=by_tool, export=export))
 
 
-async def _show_cost(
-    days: int = 0, by_model: bool = False, by_tool: bool = False, export: str = ""
-) -> None:
+async def _show_cost(days: int = 0, by_model: bool = False, by_tool: bool = False, export: str = "") -> None:
     from datetime import datetime, timedelta
 
     from rich.table import Table
@@ -1311,9 +1313,7 @@ async def _show_cost(
     if days > 0:
         end = datetime.now(UTC)
         start = end - timedelta(days=days)
-        history = await tracker.get_daily_history(
-            start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d")
-        )
+        history = await tracker.get_daily_history(start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
         if history:
             console.print(f"\n[bold]Last {days} days:[/bold]")
             table = Table()
@@ -1327,9 +1327,7 @@ async def _show_cost(
     if by_model:
         end = datetime.now(UTC)
         start = end - timedelta(days=max(days, 7))
-        models = await tracker.get_costs_by_model(
-            start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d")
-        )
+        models = await tracker.get_costs_by_model(start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
         if models:
             console.print("\n[bold]By Model:[/bold]")
             table = Table()
@@ -1347,12 +1345,19 @@ async def _show_cost(
 
         end = datetime.now(UTC)
         start = end - timedelta(days=max(days, 30))
-        history = await tracker.get_daily_history(
-            start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d")
+        history = await tracker.get_daily_history(start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
+        _P(export).write_text(
+            _json.dumps(
+                {
+                    "history": history,
+                    "summary": {
+                        "total_usd": summary.total_usd,
+                        "total_calls": summary.total_calls,
+                    },
+                },
+                indent=2,
+            )
         )
-        _P(export).write_text(_json.dumps({"history": history, "summary": {
-            "total_usd": summary.total_usd, "total_calls": summary.total_calls,
-        }}, indent=2))
         console.print(f"\n[green]Exported to {export}[/green]")
 
     await tracker.close()
@@ -1420,10 +1425,7 @@ def auth_google() -> None:
     try:
         from google_auth_oauthlib.flow import InstalledAppFlow
     except ImportError:
-        console.print(
-            "[red]google-auth-oauthlib is not installed.[/red]\n"
-            "Run:  uv pip install google-auth-oauthlib"
-        )
+        console.print("[red]google-auth-oauthlib is not installed.[/red]\nRun:  uv pip install google-auth-oauthlib")
         raise typer.Exit(1) from None
 
     flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
@@ -1515,13 +1517,9 @@ def init() -> None:
         )
         env_lines.append(f"PINCER_SIGNAL_API_URL={api_url}")
         console.print(
-            "  Start signal-api: [bold]docker compose -f docker-compose.yml "
-            "-f docker-compose.signal.yml up -d[/bold]"
+            "  Start signal-api: [bold]docker compose -f docker-compose.yml -f docker-compose.signal.yml up -d[/bold]"
         )
-        console.print(
-            "  Then pair: [bold]pincer signal pair[/bold] "
-            "(opens 127.0.0.1:8081 in browser automatically)"
-        )
+        console.print("  Then pair: [bold]pincer signal pair[/bold] (opens 127.0.0.1:8081 in browser automatically)")
 
     # Step 3: Preferences
     console.print("\n[bold]Step 3: Preferences[/bold]")
@@ -1570,15 +1568,17 @@ def init() -> None:
 
     env_path.write_text("\n".join(env_lines) + "\n")
 
-    console.print(Panel(
-        "[green]Setup complete![/green]\n\n"
-        "Next steps:\n"
-        "  1. [bold]pincer run[/bold]   — start the agent\n"
-        "  2. [bold]pincer doctor[/bold] — verify configuration\n"
-        "  3. [bold]pincer chat[/bold]  — test in the terminal",
-        title="Done",
-        expand=False,
-    ))
+    console.print(
+        Panel(
+            "[green]Setup complete![/green]\n\n"
+            "Next steps:\n"
+            "  1. [bold]pincer run[/bold]   — start the agent\n"
+            "  2. [bold]pincer doctor[/bold] — verify configuration\n"
+            "  3. [bold]pincer chat[/bold]  — test in the terminal",
+            title="Done",
+            expand=False,
+        )
+    )
 
 
 @app.command()
@@ -1662,12 +1662,13 @@ async def _chat_loop() -> None:
 
     _setup_logging("WARNING")
 
-    console.print(Panel(
-        f"[bold]{settings.agent_name} CLI Chat[/bold]\n"
-        "Type your message and press Enter. Commands: /quit, /clear, /cost",
-        expand=False,
-    ))
-
+    console.print(
+        Panel(
+            f"[bold]{settings.agent_name} CLI Chat[/bold]\n"
+            "Type your message and press Enter. Commands: /quit, /clear, /cost",
+            expand=False,
+        )
+    )
 
     # Reuse the same agent setup as `run` but minimal
     from pincer.core.agent import Agent
@@ -1686,12 +1687,15 @@ async def _chat_loop() -> None:
 
     if settings.default_provider.value == "anthropic":
         from pincer.llm.anthropic_provider import AnthropicProvider
+
         llm = AnthropicProvider(settings)
     elif settings.default_provider.value == "grok":
         from pincer.llm.grok_provider import GrokProvider
+
         llm = GrokProvider(settings)
     else:
         from pincer.llm.openai_provider import OpenAIProvider
+
         llm = OpenAIProvider(settings)
 
     memory_store: MemoryStore | None = None
@@ -1700,23 +1704,32 @@ async def _chat_loop() -> None:
         memory_store = MemoryStore(settings.db_path)
         await memory_store.initialize()
         summarizer = Summarizer(
-            llm=llm, memory_store=memory_store,
+            llm=llm,
+            memory_store=memory_store,
             session_manager=session_mgr,
             summary_model=settings.summary_model,
             threshold=settings.summary_threshold,
         )
 
     tools = ToolRegistry()
-    tools.register(name="web_search", description="Search the web", handler=web_search,
-                   parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]})
+    tools.register(
+        name="web_search",
+        description="Search the web",
+        handler=web_search,
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    )
     tools.register(name="file_read", description="Read a file", handler=file_read)
     tools.register(name="file_write", description="Write a file", handler=file_write)
     tools.register(name="file_list", description="List files", handler=file_list)
 
     agent = Agent(
-        settings=settings, llm=llm, session_manager=session_mgr,
-        cost_tracker=cost_tracker, tool_registry=tools,
-        memory_store=memory_store, summarizer=summarizer,
+        settings=settings,
+        llm=llm,
+        session_manager=session_mgr,
+        cost_tracker=cost_tracker,
+        tool_registry=tools,
+        memory_store=memory_store,
+        summarizer=summarizer,
     )
 
     user_id = "cli_user"
@@ -1746,7 +1759,9 @@ async def _chat_loop() -> None:
 
             with console.status(f"[bold green]{settings.agent_name} is thinking...[/bold green]"):
                 response = await agent.handle_message(
-                    user_id=user_id, channel=channel, text=text,
+                    user_id=user_id,
+                    channel=channel,
+                    text=text,
                 )
 
             console.print(f"\n[bold green]{settings.agent_name}:[/bold green]")
@@ -1801,9 +1816,7 @@ def signal_pair() -> None:
         raise typer.Exit(1) from e
 
     console.print(f"[bold]Signal Pairing[/bold]\n\nOpening QR link: {qr_url}")
-    console.print(
-        "\nScan the QR code with Signal: Settings → Linked Devices → Link New Device"
-    )
+    console.print("\nScan the QR code with Signal: Settings → Linked Devices → Link New Device")
     webbrowser.open(qr_url)
 
 
@@ -2287,12 +2300,10 @@ async def _memory_export(user_id: str, output: str) -> None:
         "SELECT content, category, created_at FROM memories WHERE user_id = ? ORDER BY created_at",
         (user_id,),
     ) as cur:
-        records = [
-            {"content": r[0], "category": r[1], "created_at": r[2]}
-            async for r in cur
-        ]
+        records = [{"content": r[0], "category": r[1], "created_at": r[2]} async for r in cur]
 
     from pathlib import Path as _P
+
     _P(output).write_text(_json.dumps(records, indent=2))
     console.print(f"[green]Exported {len(records)} memories to {output}[/green]")
     await store.close()
@@ -2320,8 +2331,7 @@ async def _schedule_list() -> None:
     async with _aiosqlite.connect(str(s.db_path)) as db:
         try:
             async with db.execute(
-                "SELECT name, cron_expr, pincer_user_id, timezone, enabled "
-                "FROM schedules ORDER BY name"
+                "SELECT name, cron_expr, pincer_user_id, timezone, enabled FROM schedules ORDER BY name"
             ) as cur:
                 rows = [(r[0], r[1], r[2], r[3], r[4]) async for r in cur]
         except Exception:

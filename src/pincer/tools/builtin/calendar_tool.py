@@ -53,8 +53,7 @@ def _get_credentials():  # type: ignore[no-untyped-def]
 
     if not token_path.exists():
         raise FileNotFoundError(
-            "SETUP REQUIRED: No Google token found. Run the one-time OAuth "
-            "consent flow first:  pincer auth-google"
+            "SETUP REQUIRED: No Google token found. Run the one-time OAuth consent flow first:  pincer auth-google"
         )
 
     creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
@@ -71,8 +70,7 @@ def _get_credentials():  # type: ignore[no-untyped-def]
             return creds
         except Exception as e:
             raise FileNotFoundError(
-                f"Google token refresh failed: {e}. "
-                f"Delete {token_path} and re-authorize with: pincer auth-google"
+                f"Google token refresh failed: {e}. Delete {token_path} and re-authorize with: pincer auth-google"
             ) from e
 
     raise FileNotFoundError(
@@ -111,6 +109,7 @@ def _format_event(event: dict[str, Any]) -> str:
 
 
 # ── Tool: calendar_today ─────────────────────────
+
 
 async def calendar_today(calendar_id: str = "primary") -> str:
     """Get today's calendar events. Returns formatted string."""
@@ -151,6 +150,7 @@ async def calendar_today(calendar_id: str = "primary") -> str:
 
 # ── Tool: calendar_week ──────────────────────────
 
+
 async def calendar_week(calendar_id: str = "primary") -> str:
     """Get this week's calendar events. Returns formatted string."""
     try:
@@ -185,10 +185,7 @@ async def calendar_week(calendar_id: str = "primary") -> str:
                 day_label = date_str
             days.setdefault(day_label, []).append(_format_event(e))
 
-        lines = [
-            f"Week ahead ({now.strftime('%b %d')} - {end.strftime('%b %d')}) "
-            f"— {len(events)} event(s):\n"
-        ]
+        lines = [f"Week ahead ({now.strftime('%b %d')} - {end.strftime('%b %d')}) — {len(events)} event(s):\n"]
         for day, day_events in days.items():
             lines.append(f"\n{day}:")
             lines.extend(day_events)
@@ -202,6 +199,7 @@ async def calendar_week(calendar_id: str = "primary") -> str:
 
 
 # ── Tool: calendar_create ────────────────────────
+
 
 def _resolve_timezone(start_dt: datetime, settings_tz: str) -> str:
     """Resolve IANA timezone for Google Calendar API.
@@ -261,19 +259,12 @@ async def calendar_create(
         )
 
         # execute() blocks until full response; no fire-and-forget
-        created = (
-            service.events()
-            .insert(calendarId=calendar_id, body=event_body)
-            .execute()
-        )
+        created = service.events().insert(calendarId=calendar_id, body=event_body).execute()
 
         event_id = created.get("id", "")
         link = created.get("htmlLink", "")
         if not event_id or not link:
-            return (
-                "Error: Calendar API did not return event ID or link. "
-                "Creation may have failed."
-            )
+            return "Error: Calendar API did not return event ID or link. Creation may have failed."
 
         logger.info("Calendar event created: %s at %s", title, start_dt.isoformat())
 

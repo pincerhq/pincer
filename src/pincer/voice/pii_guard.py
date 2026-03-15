@@ -10,29 +10,19 @@ from __future__ import annotations
 import re
 
 # Credit card: 13-19 digits, optionally separated by spaces or dashes
-_CC_PATTERN = re.compile(
-    r"\b(\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{1,7})\b"
-)
+_CC_PATTERN = re.compile(r"\b(\d{4}[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{1,7})\b")
 
 # SSN: 3-2-4 digit pattern
-_SSN_PATTERN = re.compile(
-    r"\b(\d{3}[\s\-]?\d{2}[\s\-]?\d{4})\b"
-)
+_SSN_PATTERN = re.compile(r"\b(\d{3}[\s\-]?\d{2}[\s\-]?\d{4})\b")
 
 # Phone numbers (various formats)
-_PHONE_PATTERN = re.compile(
-    r"(?<!\d)(\+?1?[\s\-\.]?\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{4})(?!\d)"
-)
+_PHONE_PATTERN = re.compile(r"(?<!\d)(\+?1?[\s\-\.]?\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{4})(?!\d)")
 
 # Email addresses
-_EMAIL_PATTERN = re.compile(
-    r"\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b"
-)
+_EMAIL_PATTERN = re.compile(r"\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b")
 
 # Date of birth patterns
-_DOB_PATTERN = re.compile(
-    r"\b(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})\b"
-)
+_DOB_PATTERN = re.compile(r"\b(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})\b")
 
 # Account numbers (8+ digits)
 _ACCOUNT_PATTERN = re.compile(

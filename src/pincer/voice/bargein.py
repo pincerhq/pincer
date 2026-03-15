@@ -95,7 +95,9 @@ class BargeInController:
             if elapsed_ms >= self._speech_threshold_ms:
                 logger.info(
                     "Barge-in detected [%s]: energy=%.0f, duration=%.0fms",
-                    call_sid, energy, elapsed_ms,
+                    call_sid,
+                    energy,
+                    elapsed_ms,
                 )
 
                 await self._engine.interrupt_speech(call_sid)

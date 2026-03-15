@@ -169,22 +169,15 @@ class SkillLoader:
 
         manifest = SkillManifest.from_dict(data, str(skill_dir))
 
-        missing_env = [
-            var for var in manifest.env_required if not os.environ.get(var)
-        ]
+        missing_env = [var for var in manifest.env_required if not os.environ.get(var)]
         if missing_env:
-            raise SkillLoadError(
-                f"Missing required environment variables: {', '.join(missing_env)}"
-            )
+            raise SkillLoadError(f"Missing required environment variables: {', '.join(missing_env)}")
 
         if self._scanner is not None:
-            result = self._scanner.scan_file(
-                str(skill_py_path), manifest=manifest
-            )
+            result = self._scanner.scan_file(str(skill_py_path), manifest=manifest)
             if result.score < self._min_safety_score:
                 raise SkillLoadError(
-                    f"Safety scan failed (score={result.score}, "
-                    f"min={self._min_safety_score}): {result.summary()}"
+                    f"Safety scan failed (score={result.score}, min={self._min_safety_score}): {result.summary()}"
                 )
 
         module = self._import_module(manifest.name, skill_py_path)
@@ -202,13 +195,9 @@ class SkillLoader:
             tool_functions[tool_def["name"]] = fn
 
         if not tool_functions:
-            raise SkillLoadError(
-                f"No matching callable functions found in skill.py for skill '{manifest.name}'"
-            )
+            raise SkillLoadError(f"No matching callable functions found in skill.py for skill '{manifest.name}'")
 
-        file_hash = hashlib.sha256(
-            skill_py_path.read_bytes()
-        ).hexdigest()
+        file_hash = hashlib.sha256(skill_py_path.read_bytes()).hexdigest()
 
         return LoadedSkill(
             manifest=manifest,
@@ -290,13 +279,11 @@ class SkillLoader:
             for tool_def in skill.manifest.tools:
                 if tool_def["name"] not in skill.tool_functions:
                     continue
-                schemas.append({
-                    "name": f"{skill.manifest.name}__{tool_def['name']}",
-                    "description": (
-                        f"[Skill: {skill.manifest.name}] {tool_def['description']}"
-                    ),
-                    "input_schema": tool_def.get(
-                        "input_schema", {"type": "object", "properties": {}}
-                    ),
-                })
+                schemas.append(
+                    {
+                        "name": f"{skill.manifest.name}__{tool_def['name']}",
+                        "description": (f"[Skill: {skill.manifest.name}] {tool_def['description']}"),
+                        "input_schema": tool_def.get("input_schema", {"type": "object", "properties": {}}),
+                    }
+                )
         return schemas

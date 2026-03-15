@@ -101,12 +101,8 @@ class ScanResult:
         if self.error:
             lines.append(f"  Error: {self.error}")
         for f in self.findings:
-            icon = {"critical": "\U0001f534", "warning": "\U0001f7e1", "info": "\U0001f535"}.get(
-                f.severity, "?"
-            )
-            lines.append(
-                f"  {icon} L{f.line}: [{f.category}] {f.description} (-{f.penalty})"
-            )
+            icon = {"critical": "\U0001f534", "warning": "\U0001f7e1", "info": "\U0001f535"}.get(f.severity, "?")
+            lines.append(f"  {icon} L{f.line}: [{f.category}] {f.description} (-{f.penalty})")
         return "\n".join(lines)
 
 
@@ -129,11 +125,7 @@ def _resolve_call_name(node: ast.Call) -> str | None:
 
 def _is_string_literal_arg(node: ast.Call) -> bool:
     """Check if the first argument to a call is a string literal."""
-    return bool(
-        node.args
-        and isinstance(node.args[0], ast.Constant)
-        and isinstance(node.args[0].value, str)
-    )
+    return bool(node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str))
 
 
 class SkillScanner:
@@ -154,7 +146,9 @@ class SkillScanner:
                 source = f.read()
         except FileNotFoundError:
             return ScanResult(
-                skill_name=skill_name, score=0, passed=False,
+                skill_name=skill_name,
+                score=0,
+                passed=False,
                 error=f"File not found: {file_path}",
             )
 
@@ -162,7 +156,9 @@ class SkillScanner:
             tree = ast.parse(source, filename=file_path)
         except SyntaxError as e:
             return ScanResult(
-                skill_name=skill_name, score=0, passed=False,
+                skill_name=skill_name,
+                score=0,
+                passed=False,
                 error=f"Syntax error: {e}",
             )
 
@@ -188,11 +184,14 @@ class SkillScanner:
     def scan_directory(self, dir_path: str, manifest: SkillManifest | None = None) -> ScanResult:
         """Scan a skill directory (finds skill.py inside)."""
         from pathlib import Path
+
         skill_py = Path(dir_path) / "skill.py"
         if not skill_py.is_file():
             name = manifest.name if manifest else "unknown"
             return ScanResult(
-                skill_name=name, score=0, passed=False,
+                skill_name=name,
+                score=0,
+                passed=False,
                 error=f"No skill.py found in {dir_path}",
             )
 
@@ -226,13 +225,15 @@ class SkillScanner:
             if name in ("eval", "exec") and _is_string_literal_arg(node):
                 penalty += 10
                 extra = " with string literal argument"
-            findings.append(Finding(
-                severity=severity,
-                category="dangerous_call",
-                description=f"Call to {name}(){extra}",
-                line=getattr(node, "lineno", 0),
-                penalty=penalty,
-            ))
+            findings.append(
+                Finding(
+                    severity=severity,
+                    category="dangerous_call",
+                    description=f"Call to {name}(){extra}",
+                    line=getattr(node, "lineno", 0),
+                    penalty=penalty,
+                )
+            )
 
     def _check_imports(self, tree: ast.AST, findings: list[Finding]) -> None:
         for node in ast.walk(tree):
@@ -244,13 +245,15 @@ class SkillScanner:
                         entry = DANGEROUS_IMPORTS[alias.name]
                     if entry:
                         penalty, severity = entry
-                        findings.append(Finding(
-                            severity=severity,
-                            category="dangerous_import",
-                            description=f"Import of '{alias.name}'",
-                            line=getattr(node, "lineno", 0),
-                            penalty=penalty,
-                        ))
+                        findings.append(
+                            Finding(
+                                severity=severity,
+                                category="dangerous_import",
+                                description=f"Import of '{alias.name}'",
+                                line=getattr(node, "lineno", 0),
+                                penalty=penalty,
+                            )
+                        )
             elif isinstance(node, ast.ImportFrom) and node.module:
                 top = node.module.split(".")[0]
                 entry = DANGEROUS_IMPORTS.get(top)
@@ -258,17 +261,17 @@ class SkillScanner:
                     entry = DANGEROUS_IMPORTS[node.module]
                 if entry:
                     penalty, severity = entry
-                    findings.append(Finding(
-                        severity=severity,
-                        category="dangerous_import",
-                        description=f"Import from '{node.module}'",
-                        line=getattr(node, "lineno", 0),
-                        penalty=penalty,
-                    ))
+                    findings.append(
+                        Finding(
+                            severity=severity,
+                            category="dangerous_import",
+                            description=f"Import from '{node.module}'",
+                            line=getattr(node, "lineno", 0),
+                            penalty=penalty,
+                        )
+                    )
 
-    def _check_network(
-        self, source: str, manifest: SkillManifest | None, findings: list[Finding]
-    ) -> None:
+    def _check_network(self, source: str, manifest: SkillManifest | None, findings: list[Finding]) -> None:
         declared_domains: set[str] = set()
         if manifest:
             for perm in manifest.permissions:
@@ -284,29 +287,31 @@ class SkillScanner:
                 seen_domains.add(domain)
                 if self._domain_is_declared(domain, declared_domains):
                     continue
-                findings.append(Finding(
-                    severity="warning",
-                    category="network",
-                    description=f"Undeclared network access to '{domain}'",
-                    line=line_num,
-                    penalty=10,
-                ))
+                findings.append(
+                    Finding(
+                        severity="warning",
+                        category="network",
+                        description=f"Undeclared network access to '{domain}'",
+                        line=line_num,
+                        penalty=10,
+                    )
+                )
 
     def _check_filesystem(self, source: str, findings: list[Finding]) -> None:
         for line_num, line in enumerate(source.splitlines(), 1):
             for pattern, desc in FILESYSTEM_ESCAPE_PATTERNS:
                 if pattern.search(line):
-                    findings.append(Finding(
-                        severity="warning",
-                        category="filesystem",
-                        description=desc,
-                        line=line_num,
-                        penalty=10,
-                    ))
+                    findings.append(
+                        Finding(
+                            severity="warning",
+                            category="filesystem",
+                            description=desc,
+                            line=line_num,
+                            penalty=10,
+                        )
+                    )
 
-    def _check_env_access(
-        self, source: str, manifest: SkillManifest | None, findings: list[Finding]
-    ) -> None:
+    def _check_env_access(self, source: str, manifest: SkillManifest | None, findings: list[Finding]) -> None:
         declared_vars: set[str] = set()
         if manifest:
             declared_vars.update(manifest.env_required)
@@ -317,13 +322,15 @@ class SkillScanner:
                 for match in pat.finditer(line):
                     var_name = match.group(2)
                     if var_name not in declared_vars:
-                        findings.append(Finding(
-                            severity="warning",
-                            category="env",
-                            description=f"Undeclared env access: '{var_name}'",
-                            line=line_num,
-                            penalty=5,
-                        ))
+                        findings.append(
+                            Finding(
+                                severity="warning",
+                                category="env",
+                                description=f"Undeclared env access: '{var_name}'",
+                                line=line_num,
+                                penalty=5,
+                            )
+                        )
 
     @staticmethod
     def _domain_is_declared(domain: str, declared: set[str]) -> bool:

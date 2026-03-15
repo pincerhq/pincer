@@ -7,7 +7,7 @@ import pytest
 
 from pincer.tools.sandbox import SandboxConfig, execute
 
-SAFE_SKILL = '''
+SAFE_SKILL = """
 def add(a, b):
     return {"sum": a + b}
 
@@ -18,7 +18,7 @@ def infinite_loop():
 
 def raise_error():
     raise ValueError("intentional error")
-'''
+"""
 
 
 @pytest.fixture
@@ -62,11 +62,11 @@ async def test_env_isolation(skill_path: Path) -> None:
     """Verify HOME is set to sandbox temp dir, not real home."""
     real_home = os.environ.get("HOME", os.path.expanduser("~"))
 
-    get_home_skill = '''
+    get_home_skill = """
 def get_home():
     import os
     return {"home": os.environ.get("HOME", "")}
-'''
+"""
     path = skill_path.parent / "get_home_skill.py"
     path.write_text(get_home_skill, encoding="utf-8")
 
@@ -87,7 +87,7 @@ async def test_execution_time_tracked(skill_path: Path) -> None:
 
 async def test_network_blocking(skill_path: Path, tmp_path: Path) -> None:
     """Skill that tries socket.getaddrinfo, execute with allowed_domains, check blocked."""
-    network_skill = '''
+    network_skill = """
 def try_network():
     import socket
     try:
@@ -95,7 +95,7 @@ def try_network():
         return {"result": "connected"}
     except Exception as e:
         return {"error": str(e)}
-'''
+"""
     path = tmp_path / "network_skill.py"
     path.write_text(network_skill, encoding="utf-8")
 

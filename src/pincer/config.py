@@ -127,9 +127,7 @@ class Settings(BaseSettings):
         default="claude-haiku-4-5-20251001",
         description="Cheap model for conversation summarization",
     )
-    summary_threshold: int = Field(
-        default=20, ge=5, description="Summarize conversation after N messages"
-    )
+    summary_threshold: int = Field(default=20, ge=5, description="Summarize conversation after N messages")
 
     # ── WhatsApp (Sprint 3) ──────────────────────────────
     whatsapp_enabled: bool = Field(default=False, description="Enable WhatsApp channel")
@@ -166,9 +164,7 @@ class Settings(BaseSettings):
     email_from: str = Field(default="", description="Override sender address")
 
     # ── Proactive Agent (Sprint 3) ───────────────────────
-    openweathermap_api_key: SecretStr = Field(
-        default=SecretStr(""), description="OpenWeatherMap API key"
-    )
+    openweathermap_api_key: SecretStr = Field(default=SecretStr(""), description="OpenWeatherMap API key")
     newsapi_key: SecretStr = Field(default=SecretStr(""), description="NewsAPI key")
     briefing_time: str = Field(default="07:00", description="Morning briefing time HH:MM")
     briefing_timezone: str = Field(default="Europe/Berlin", description="Briefing timezone")
@@ -179,9 +175,7 @@ class Settings(BaseSettings):
     webhook_secret: SecretStr = Field(default=SecretStr(""), description="Webhook HMAC secret")
 
     # ── Dashboard / API (Sprint 5) ───────────────────────
-    dashboard_token: SecretStr = Field(
-        default=SecretStr(""), description="Bearer token for API auth"
-    )
+    dashboard_token: SecretStr = Field(default=SecretStr(""), description="Bearer token for API auth")
     dashboard_host: str = Field(default="127.0.0.1", description="API server bind host")
     dashboard_port: int = Field(default=8080, ge=1, le=65535, description="API server port")
 
@@ -193,21 +187,15 @@ class Settings(BaseSettings):
     fal_key: SecretStr = Field(default=SecretStr(""), description="fal.ai API key")
     fal_model: str = Field(default="fal-ai/nano-banana-2", description="fal.ai image model")
     gemini_api_key: SecretStr = Field(default=SecretStr(""), description="Google Gemini API key")
-    image_model_gemini: str = Field(
-        default="gemini-2.5-flash-image", description="Gemini image generation model"
-    )
+    image_model_gemini: str = Field(default="gemini-2.5-flash-image", description="Gemini image generation model")
     image_max_cost_per_request: float = Field(
         default=0.10, ge=0.0, description="Max cost per image generation request in USD"
     )
-    image_daily_limit: int = Field(
-        default=50, ge=0, description="Max image generations per day (0 = unlimited)"
-    )
+    image_daily_limit: int = Field(default=50, ge=0, description="Max image generations per day (0 = unlimited)")
 
     # ── Signal Messenger (Sprint 7.5) ────────────────────
     signal_enabled: bool = Field(default=False, description="Enable Signal channel")
-    signal_api_url: str = Field(
-        default="http://signal-api:8080", description="signal-cli-rest-api base URL"
-    )
+    signal_api_url: str = Field(default="http://signal-api:8080", description="signal-cli-rest-api base URL")
     signal_pair_url: str = Field(
         default="http://127.0.0.1:8081",
         description="URL for browser-based pairing (host-facing); use when signal-api is in Docker",

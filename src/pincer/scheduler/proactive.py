@@ -188,7 +188,9 @@ class ProactiveAgent:
             }
 
     async def update_briefing_config(
-        self, pincer_user_id: str, **kwargs: Any,
+        self,
+        pincer_user_id: str,
+        **kwargs: Any,
     ) -> None:
         valid = {"sections", "custom_sections", "weather_location", "news_topics"}
         updates = {k: v for k, v in kwargs.items() if k in valid}

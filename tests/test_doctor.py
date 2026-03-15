@@ -97,9 +97,7 @@ def test_no_hardcoded_secrets_critical(tmp_path):
     config_dir.mkdir()
     src_dir = config_dir / "src"
     src_dir.mkdir()
-    (src_dir / "bad.py").write_text(
-        'api_key = "sk-ant-abc123456789012345678901"\n'
-    )
+    (src_dir / "bad.py").write_text('api_key = "sk-ant-abc123456789012345678901"\n')
 
     doc = SecurityDoctor(config_dir=config_dir, data_dir=tmp_path)
     result = doc._check_no_hardcoded_secrets()
@@ -132,12 +130,8 @@ def test_dashboard_not_exposed_default():
 
 def test_report_score():
     report = DoctorReport()
-    report.checks.append(
-        SecurityDoctor()._check_python_version()
-    )
-    report.checks.append(
-        SecurityDoctor()._check_not_running_as_root()
-    )
+    report.checks.append(SecurityDoctor()._check_python_version())
+    report.checks.append(SecurityDoctor()._check_not_running_as_root())
     assert report.score == 100
     assert report.passed == 2
     assert report.critical == 0

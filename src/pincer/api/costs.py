@@ -108,9 +108,7 @@ async def get_costs_by_model(
                 "total_usd": e["total"],
                 "request_count": e["requests"],
                 "total_tokens": e["tokens"],
-                "avg_cost_per_request": round(
-                    e["total"] / max(e["requests"], 1), 6
-                ),
+                "avg_cost_per_request": round(e["total"] / max(e["requests"], 1), 6),
             }
             for e in breakdown
         ],

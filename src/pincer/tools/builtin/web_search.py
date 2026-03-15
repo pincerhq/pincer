@@ -85,9 +85,6 @@ async def _search_duckduckgo(query: str, num_results: int) -> str:
             parts.append(f"{i}. **{title}**\n   {body}\n   URL: {href}")
         return "\n\n".join(parts)
     except ImportError:
-        return (
-            "Error: No search provider available. "
-            "Install duckduckgo-search or set PINCER_TAVILY_API_KEY."
-        )
+        return "Error: No search provider available. Install duckduckgo-search or set PINCER_TAVILY_API_KEY."
     except Exception as e:
         return f"Search error: {e}"

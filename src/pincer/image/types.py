@@ -15,8 +15,8 @@ class ImageRequest:
 
 @dataclass
 class GeneratedImage:
-    url: str | None = None       # fal returns a URL
-    bytes: bytes | None = None   # Gemini returns raw bytes
+    url: str | None = None  # fal returns a URL
+    bytes: bytes | None = None  # Gemini returns raw bytes
     content_type: str = "image/png"
 
 

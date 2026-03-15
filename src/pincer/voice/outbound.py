@@ -85,10 +85,7 @@ async def make_phone_call(
 
     if not _check_daily_limit(user_id, settings.voice_outbound_max_daily):
         logger.info("make_phone_call aborted: daily limit reached for user %s", user_id)
-        return (
-            f"Error: Daily outbound call limit reached ({settings.voice_outbound_max_daily}). "
-            "Try again tomorrow."
-        )
+        return f"Error: Daily outbound call limit reached ({settings.voice_outbound_max_daily}). Try again tomorrow."
 
     try:
         from twilio.rest import Client
@@ -106,7 +103,7 @@ async def make_phone_call(
             host = base_url
             for prefix in ("https://", "http://"):
                 if host.startswith(prefix):
-                    host = host[len(prefix):]
+                    host = host[len(prefix) :]
                     break
             host = host.rstrip("/")
             stream_url = f"wss://{host}/voice/stream/{{CallSid}}"
@@ -141,7 +138,9 @@ async def make_phone_call(
 
         logger.info(
             "Outbound call placed: %s -> %s (purpose: %s)",
-            call.sid, validated, purpose,
+            call.sid,
+            validated,
+            purpose,
         )
 
         return (

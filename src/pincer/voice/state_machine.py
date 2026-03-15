@@ -58,38 +58,58 @@ VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
     CallPhase.RINGING: {CallPhase.GREETING, CallPhase.OUTBOUND_GREETING, CallPhase.FAILED},
     CallPhase.GREETING: {CallPhase.INTENT_CAPTURE, CallPhase.FAILED},
     CallPhase.INTENT_CAPTURE: {
-        CallPhase.VERIFY, CallPhase.EXECUTE, CallPhase.FREEFORM,
-        CallPhase.ENDING, CallPhase.ERROR_RECOVERY,
+        CallPhase.VERIFY,
+        CallPhase.EXECUTE,
+        CallPhase.FREEFORM,
+        CallPhase.ENDING,
+        CallPhase.ERROR_RECOVERY,
     },
     CallPhase.FREEFORM: {
-        CallPhase.INTENT_CAPTURE, CallPhase.ENDING,
-        CallPhase.VERIFY, CallPhase.ERROR_RECOVERY,
+        CallPhase.INTENT_CAPTURE,
+        CallPhase.ENDING,
+        CallPhase.VERIFY,
+        CallPhase.ERROR_RECOVERY,
     },
     CallPhase.VERIFY: {
-        CallPhase.EXECUTE, CallPhase.INTENT_CAPTURE,
-        CallPhase.ERROR_RECOVERY, CallPhase.ENDING,
+        CallPhase.EXECUTE,
+        CallPhase.INTENT_CAPTURE,
+        CallPhase.ERROR_RECOVERY,
+        CallPhase.ENDING,
     },
     CallPhase.EXECUTE: {
-        CallPhase.CONFIRM, CallPhase.ERROR_RECOVERY, CallPhase.ENDING,
+        CallPhase.CONFIRM,
+        CallPhase.ERROR_RECOVERY,
+        CallPhase.ENDING,
     },
     CallPhase.CONFIRM: {
-        CallPhase.INTENT_CAPTURE, CallPhase.ENDING, CallPhase.ERROR_RECOVERY,
+        CallPhase.INTENT_CAPTURE,
+        CallPhase.ENDING,
+        CallPhase.ERROR_RECOVERY,
     },
     CallPhase.ERROR_RECOVERY: {
-        CallPhase.INTENT_CAPTURE, CallPhase.ENDING, CallPhase.FAILED,
+        CallPhase.INTENT_CAPTURE,
+        CallPhase.ENDING,
+        CallPhase.FAILED,
     },
     CallPhase.ENDING: {CallPhase.COMPLETED},
     CallPhase.OUTBOUND_GREETING: {
-        CallPhase.IVR_NAVIGATION, CallPhase.INTENT_CAPTURE,
-        CallPhase.FREEFORM, CallPhase.FAILED,
+        CallPhase.IVR_NAVIGATION,
+        CallPhase.INTENT_CAPTURE,
+        CallPhase.FREEFORM,
+        CallPhase.FAILED,
     },
     CallPhase.IVR_NAVIGATION: {
-        CallPhase.ON_HOLD, CallPhase.INTENT_CAPTURE,
-        CallPhase.FREEFORM, CallPhase.FAILED, CallPhase.ERROR_RECOVERY,
+        CallPhase.ON_HOLD,
+        CallPhase.INTENT_CAPTURE,
+        CallPhase.FREEFORM,
+        CallPhase.FAILED,
+        CallPhase.ERROR_RECOVERY,
     },
     CallPhase.ON_HOLD: {
-        CallPhase.INTENT_CAPTURE, CallPhase.FREEFORM,
-        CallPhase.FAILED, CallPhase.ERROR_RECOVERY,
+        CallPhase.INTENT_CAPTURE,
+        CallPhase.FREEFORM,
+        CallPhase.FAILED,
+        CallPhase.ERROR_RECOVERY,
     },
     CallPhase.COMPLETED: set(),
     CallPhase.FAILED: set(),
@@ -187,7 +207,10 @@ class CallStateMachine:
         if to_phase not in VALID_TRANSITIONS.get(current, set()):
             logger.warning(
                 "Invalid transition [%s]: %s -> %s (reason: %s)",
-                self._state.call_sid, current, to_phase, reason,
+                self._state.call_sid,
+                current,
+                to_phase,
+                reason,
             )
             return False
 
@@ -205,7 +228,10 @@ class CallStateMachine:
 
         logger.info(
             "State transition [%s]: %s -> %s (%s)",
-            self._state.call_sid, current, to_phase, reason,
+            self._state.call_sid,
+            current,
+            to_phase,
+            reason,
         )
         return True
 
@@ -257,10 +283,7 @@ class CallStateMachine:
 
 
 _PHASE_INSTRUCTIONS: dict[CallPhase, str] = {
-    CallPhase.GREETING: (
-        "Greet the caller warmly and briefly. Ask how you can help. "
-        "Keep it to 1-2 sentences."
-    ),
+    CallPhase.GREETING: ("Greet the caller warmly and briefly. Ask how you can help. Keep it to 1-2 sentences."),
     CallPhase.INTENT_CAPTURE: (
         "Listen to what the caller wants. Ask clarifying questions if needed. "
         "Once you understand the intent, either take action (transition to VERIFY) "
@@ -275,12 +298,9 @@ _PHASE_INSTRUCTIONS: dict[CallPhase, str] = {
         "and ask for explicit yes/no confirmation."
     ),
     CallPhase.EXECUTE: (
-        "Execute the confirmed action. Keep the caller informed with filler phrases "
-        "while the action runs."
+        "Execute the confirmed action. Keep the caller informed with filler phrases while the action runs."
     ),
-    CallPhase.CONFIRM: (
-        "Report the result of the action to the caller. Ask if there's anything else."
-    ),
+    CallPhase.CONFIRM: ("Report the result of the action to the caller. Ask if there's anything else."),
     CallPhase.ERROR_RECOVERY: (
         "Something went wrong. Apologize briefly, explain what happened, "
         "and offer alternatives or ask if the caller wants to try again."
@@ -299,7 +319,6 @@ _PHASE_INSTRUCTIONS: dict[CallPhase, str] = {
         "and select the correct one by sending DTMF tones."
     ),
     CallPhase.ON_HOLD: (
-        "You are on hold. Wait patiently. If hold time exceeds the limit, "
-        "hang up and notify the user."
+        "You are on hold. Wait patiently. If hold time exceeds the limit, hang up and notify the user."
     ),
 }

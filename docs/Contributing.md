@@ -281,7 +281,9 @@ We don't review for:
 ```
 - [ ] Tests pass (pytest)
 - [ ] Linting passes (ruff check src/ tests/)
+- [ ] Formatting passes (ruff format --check .)
 - [ ] Type checking passes (mypy src/)
+- [ ] Security scan passes (bandit)
 - [ ] Documentation updated (if behavior changed)
 - [ ] CHANGELOG.md updated (if user-facing)
 ```
@@ -294,10 +296,23 @@ Every push and PR runs:
 |------|---------|---------|
 | Install | `uv sync --all-extras` | Resolve and install all dependencies |
 | Tests | `uv run pytest --cov=pincer --cov-report=xml` | Run full test suite with coverage |
+| Type check | `uv run mypy src/` | Enforce type correctness |
 | Lint | `uv run ruff check .` | Enforce code style and catch common issues |
+| Format | `uv run ruff format --check .` | Enforce formatting |
+| Security | `uv run bandit -r src/pincer -ll -s B101,B104,B310,B608` | Scan for security issues in sandbox/tools |
 | Coverage | Codecov upload | Track coverage over time |
 
 See [.github/workflows/ci.yml](../.github/workflows/ci.yml) for the full workflow. All steps must pass before merge.
+
+### Branch Protection
+
+For `main` and `dev` branches, configure branch protection in **GitHub → Settings → Branches → Add branch protection rule** (or edit existing):
+
+- Require a pull request before merging
+- Require status checks to pass (the `test` job must succeed)
+- Optionally: require branches to be up to date before merging
+
+See [GitHub's branch protection docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/managing-a-branch-protection-rule) for details.
 
 ---
 
