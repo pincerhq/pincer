@@ -4,8 +4,25 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ---
 
-## [0.7.3] — 2026-03-10
+## [0.7.3] — 2026-03-15
 
+### Image Generation (Sprint 8)
+- New `src/pincer/image/` module: `ImageProviderRouter`, `FalImageProvider`, `GeminiImageProvider`
+- Primary provider: fal.ai `fal-ai/nano-banana-2` ($0.003/image); fallback: Gemini `gemini-2.5-flash-image` ($0.004/image)
+- `generate_image` builtin tool registered in CLI when `PINCER_FAL_KEY` or `PINCER_GEMINI_API_KEY` is set
+- Automatic provider fallback: fal → gemini on failure or unavailability
+- New config fields: `image_provider`, `fal_key`, `fal_model`, `gemini_api_key`, `image_model_gemini`, `image_max_cost_per_request`, `image_daily_limit`
+- `CostTracker.add_image_cost()` and `get_image_count_today()` — image costs tracked separately and included in daily spend
+- New `image` optional dependency extra: `uv pip install "pincer-agent[image]"` (fal-client, google-genai)
+- 21 new tests for image generation (router, providers, tool, cost tracking)
+
+### Grok / xAI LLM Provider (Sprint 8)
+- New `GrokProvider` — xAI Grok via OpenAI-compatible API (`api.x.ai`); supports streaming, function calling, vision
+- New `_openai_common.py` — shared helpers for OpenAI-compatible providers (OpenAI, Grok)
+- `GROK` added to `LLMProvider` enum; set `PINCER_DEFAULT_PROVIDER=grok` + `PINCER_GROK_API_KEY`
+- Model mapping: claude-sonnet → grok-3, claude-haiku → grok-3-mini
+
+### Signal Channel (Sprint 7.5)
 - Signal channel: host-facing URL fix — use 127.0.0.1 instead of localhost for Safari compatibility (IPv6 resolution)
 - Signal: pre-flight check before opening browser — verify signal-api is reachable; print clear error + docker command if not
 - Signal: Docker build fix — set CI=true for pnpm to fix ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY

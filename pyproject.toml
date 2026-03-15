@@ -58,7 +58,11 @@ voice = [
     "deepgram-sdk>=3.0",
     "elevenlabs>=1.0",
 ]
-all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice]"]
+image = [
+    "fal-client>=0.13.0",
+    "google-genai>=1.0",
+]
+all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

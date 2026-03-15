@@ -114,6 +114,10 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         from pincer.llm.anthropic_provider import AnthropicProvider
 
         llm = AnthropicProvider(settings)
+    elif settings.default_provider.value == "grok":
+        from pincer.llm.grok_provider import GrokProvider
+
+        llm = GrokProvider(settings)
     else:
         from pincer.llm.openai_provider import OpenAIProvider
 
@@ -710,6 +714,49 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
             "required": ["url"],
         },
     )
+
+    # Sprint 8: Image generation builtin (optional — requires FAL_KEY or PINCER_GEMINI_API_KEY)
+    _fal_key = settings.fal_key.get_secret_value()
+    _gemini_key = settings.gemini_api_key.get_secret_value()
+    if _fal_key or _gemini_key:
+        from pincer.image.router import build_router_from_settings
+        from pincer.tools.builtin.image_gen import make_generate_image_handler
+
+        _image_router = build_router_from_settings()
+        tools.register(
+            name="generate_image",
+            description=(
+                "Generate image(s) from a text prompt and send them directly to the user. "
+                "Use for creating original images, illustrations, or artwork."
+            ),
+            handler=make_generate_image_handler(_image_router),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Detailed text description of the image to generate",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Optional caption displayed with the image",
+                        "default": "",
+                    },
+                    "aspect_ratio": {
+                        "type": "string",
+                        "description": "Image aspect ratio — 1:1 (default), 16:9, 9:16, 4:3, 3:4",
+                        "default": "1:1",
+                    },
+                    "num_images": {
+                        "type": "integer",
+                        "description": "Number of images to generate (default 1, max 4)",
+                        "default": 1,
+                    },
+                },
+                "required": ["prompt"],
+            },
+        )
+        console.print("[green]Image generation tool registered[/green]")
 
     # Sprint 4: Load skills and register their tools
     from pathlib import Path as _SkillPath
@@ -1636,6 +1683,9 @@ async def _chat_loop() -> None:
     if settings.default_provider.value == "anthropic":
         from pincer.llm.anthropic_provider import AnthropicProvider
         llm = AnthropicProvider(settings)
+    elif settings.default_provider.value == "grok":
+        from pincer.llm.grok_provider import GrokProvider
+        llm = GrokProvider(settings)
     else:
         from pincer.llm.openai_provider import OpenAIProvider
         llm = OpenAIProvider(settings)
