@@ -64,6 +64,40 @@ docker compose pull
 docker compose up -d
 ```
 
+### WhatsApp + Docker
+
+WhatsApp requires a one-time QR pairing before it can receive messages. Unlike Telegram (API token), WhatsApp uses the multi-device protocol and stores session data on disk.
+
+**To enable WhatsApp with Docker:**
+
+1. Set in `.env`:
+   ```env
+   PINCER_WHATSAPP_ENABLED=true
+   ```
+
+2. Rebuild and start (if building from source, the image includes `libmagic1` for neonize):
+   ```bash
+   docker compose build --no-cache
+   docker compose up -d
+   ```
+
+3. Pair WhatsApp (one-time, run interactively):
+   ```bash
+   docker compose run --rm -it pincer pincer pair-whatsapp
+   ```
+   A QR code appears in the terminal. Scan it with WhatsApp on your phone (Settings → Linked Devices → Link a Device).
+
+4. Restart the stack so it picks up the paired session:
+   ```bash
+   docker compose up -d
+   ```
+
+5. Test by sending a message to yourself (self-chat) or in a group where you @mention "pincer".
+
+**Troubleshooting:** If you see `WhatsApp failed: neonize is required for WhatsApp support. Install it with: pip install neonize (requires libmagic)`, the Docker image needs `libmagic1`. Rebuild with `docker compose build --no-cache` — the project Dockerfile already includes it.
+
+The container uses `working_dir: /app/data` so the WhatsApp session is stored in the persistent volume and survives restarts. If WhatsApp stops working after a restart, re-run `pair-whatsapp` to re-pair.
+
 ---
 
 ## Option 2: Docker (Manual)
@@ -173,6 +207,7 @@ echo "0 3 * * * cd /home/pincer/pincer && tar czf /backups/pincer-$(date +\%Y\%m
 Key files to back up:
 - `data/pincer.db` — conversations, memories, entities
 - `data/google_tokens.json` — OAuth tokens (re-auth needed if lost)
+- `data/` — WhatsApp session (neonize store); re-pair if lost
 - `.env` — your configuration
 - `skills/` — custom skills
 
