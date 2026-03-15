@@ -43,7 +43,9 @@ class TestConversationRelayEngine:
 
     async def test_call_start(self, engine):
         state = await engine.on_call_start(
-            "CA123", "+15551234567", CallDirection.INBOUND,
+            "CA123",
+            "+15551234567",
+            CallDirection.INBOUND,
         )
         assert state.call_sid == "CA123"
         assert state.direction == CallDirection.INBOUND
@@ -94,7 +96,9 @@ class TestMediaStreamEngine:
 
     async def test_call_start(self, engine):
         state = await engine.on_call_start(
-            "CA456", "+15559876543", CallDirection.OUTBOUND,
+            "CA456",
+            "+15559876543",
+            CallDirection.OUTBOUND,
         )
         assert state.call_sid == "CA456"
         assert state.direction == CallDirection.OUTBOUND

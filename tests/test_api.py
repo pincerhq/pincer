@@ -49,6 +49,7 @@ def test_auth_required_with_token():
     try:
         # Need to reimport to pick up new token
         from pincer.api import server
+
         old_token = server.DASHBOARD_TOKEN
         server.DASHBOARD_TOKEN = "test-secret-token-1234"
 

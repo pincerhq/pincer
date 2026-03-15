@@ -75,7 +75,8 @@ class Summarizer:
 
         logger.info(
             "Summarizing %d messages for session %s",
-            len(to_summarize), session.session_id,
+            len(to_summarize),
+            session.session_id,
         )
 
         summary_text = await self._generate_summary(to_summarize)
@@ -101,7 +102,8 @@ class Summarizer:
 
         logger.info(
             "Summarized session %s: %d -> %d messages",
-            session.session_id, len(to_summarize) + len(to_keep) + len(system_msgs),
+            session.session_id,
+            len(to_summarize) + len(to_keep) + len(system_msgs),
             len(session.messages),
         )
         return True

@@ -27,9 +27,7 @@ def _msg_to_frontend(msg: dict[str, Any]) -> dict[str, Any]:
     """Map stored message to frontend Message shape."""
     content = msg.get("content", "")
     if isinstance(content, list):
-        content = " ".join(
-            p.get("text", str(p)) for p in content if isinstance(p, dict)
-        )
+        content = " ".join(p.get("text", str(p)) for p in content if isinstance(p, dict))
     return {
         "role": msg.get("role", "user"),
         "content": str(content),
@@ -81,21 +79,19 @@ async def list_conversations(
                     last = msgs[-1]
                     content = last.get("content", "")
                     if isinstance(content, list):
-                        content = " ".join(
-                            p.get("text", str(p))
-                            for p in content
-                            if isinstance(p, dict)
-                        )
+                        content = " ".join(p.get("text", str(p)) for p in content if isinstance(p, dict))
                     last_msg = str(content)[:200]
-                conversations.append({
-                    "id": row["id"],
-                    "user_id": row["user_id"],
-                    "channel": row["channel"],
-                    "last_message": last_msg,
-                    "message_count": len(msgs),
-                    "created_at": _ts_to_iso(row["created_at"]),
-                    "updated_at": _ts_to_iso(row["updated_at"]),
-                })
+                conversations.append(
+                    {
+                        "id": row["id"],
+                        "user_id": row["user_id"],
+                        "channel": row["channel"],
+                        "last_message": last_msg,
+                        "message_count": len(msgs),
+                        "created_at": _ts_to_iso(row["created_at"]),
+                        "updated_at": _ts_to_iso(row["updated_at"]),
+                    }
+                )
 
     return {"conversations": conversations, "total": len(conversations)}
 
@@ -112,8 +108,7 @@ async def get_conversation(conv_id: str) -> dict[str, Any]:
     async with aiosqlite.connect(str(db_path)) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, user_id, channel, messages_json, created_at, updated_at "
-            "FROM conversations WHERE id = ?",
+            "SELECT id, user_id, channel, messages_json, created_at, updated_at FROM conversations WHERE id = ?",
             (conv_id,),
         ) as cursor:
             row = await cursor.fetchone()

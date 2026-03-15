@@ -90,17 +90,17 @@ def get_forecast(city: str, units: str = "metric", days: int = 3) -> dict:
                     if item.get("main", {}).get("temp") is not None
                 ]
                 descs = [
-                    item.get("weather", [{}])[0].get("description", "")
-                    for item in day_items
-                    if item.get("weather")
+                    item.get("weather", [{}])[0].get("description", "") for item in day_items if item.get("weather")
                 ]
                 most_common = max(set(descs), key=descs.count) if descs else ""
-                forecast_list.append({
-                    "date": date_part,
-                    "temp_min": min(temps) if temps else None,
-                    "temp_max": max(temps) if temps else None,
-                    "description": most_common,
-                })
+                forecast_list.append(
+                    {
+                        "date": date_part,
+                        "temp_min": min(temps) if temps else None,
+                        "temp_max": max(temps) if temps else None,
+                        "description": most_common,
+                    }
+                )
 
             return {
                 "city": geo["name"],

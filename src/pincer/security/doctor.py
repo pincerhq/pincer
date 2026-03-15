@@ -447,11 +447,7 @@ class SecurityDoctor:
         )
 
     def _check_tool_call_limits(self) -> CheckResult:
-        configured = sum(
-            1
-            for k in ["PINCER_RATE_TOOLS_PER_MIN", "PINCER_MAX_CONCURRENT_LLM"]
-            if os.environ.get(k)
-        )
+        configured = sum(1 for k in ["PINCER_RATE_TOOLS_PER_MIN", "PINCER_MAX_CONCURRENT_LLM"] if os.environ.get(k))
         if configured == 2:
             return CheckResult(
                 "tool_call_limits",
@@ -627,15 +623,9 @@ class SecurityDoctor:
                 timeout=30,
             )
             if result.returncode == 0:
-                outdated = (
-                    json.loads(result.stdout) if result.stdout.strip() else []
-                )
+                outdated = json.loads(result.stdout) if result.stdout.strip() else []
                 critical = {"anthropic", "openai", "httpx", "cryptography"}
-                crit_outdated = [
-                    p
-                    for p in outdated
-                    if p.get("name", "").lower() in critical
-                ]
+                crit_outdated = [p for p in outdated if p.get("name", "").lower() in critical]
                 if crit_outdated:
                     names = ", ".join(p["name"] for p in crit_outdated)
                     return CheckResult(

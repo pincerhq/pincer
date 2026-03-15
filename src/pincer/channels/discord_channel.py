@@ -53,14 +53,14 @@ def split_message(text: str, limit: int = MAX_DISCORD_MESSAGE_LENGTH) -> list[st
         split_at = remaining.rfind("\n", 0, limit)
         if split_at > 0:
             chunks.append(remaining[:split_at])
-            remaining = remaining[split_at + 1:]
+            remaining = remaining[split_at + 1 :]
             continue
 
         # Try splitting at space
         split_at = remaining.rfind(" ", 0, limit)
         if split_at > 0:
             chunks.append(remaining[:split_at])
-            remaining = remaining[split_at + 1:]
+            remaining = remaining[split_at + 1 :]
             continue
 
         # Hard cut
@@ -96,11 +96,13 @@ def make_embed(
     if fields:
         embed["fields"] = []
         for f in fields[:25]:
-            embed["fields"].append({
-                "name": f.get("name", "")[:256],
-                "value": f.get("value", "")[:1024],
-                "inline": f.get("inline", False),
-            })
+            embed["fields"].append(
+                {
+                    "name": f.get("name", "")[:256],
+                    "value": f.get("value", "")[:1024],
+                    "inline": f.get("inline", False),
+                }
+            )
     if footer:
         embed["footer"] = {"text": footer}
     return embed
@@ -123,10 +125,12 @@ def text_to_embed(text: str) -> dict[str, Any]:
         if stripped.startswith("## ") or stripped.startswith("### "):
             # Flush previous field
             if current_field_name:
-                fields.append({
-                    "name": current_field_name,
-                    "value": "\n".join(current_field_lines).strip() or "\u200b",
-                })
+                fields.append(
+                    {
+                        "name": current_field_name,
+                        "value": "\n".join(current_field_lines).strip() or "\u200b",
+                    }
+                )
                 current_field_lines = []
             heading = stripped.lstrip("#").strip()
             if not title and not fields and not description_lines:
@@ -148,10 +152,12 @@ def text_to_embed(text: str) -> dict[str, Any]:
             description_lines.append(line)
 
     if current_field_name:
-        fields.append({
-            "name": current_field_name,
-            "value": "\n".join(current_field_lines).strip() or "\u200b",
-        })
+        fields.append(
+            {
+                "name": current_field_name,
+                "value": "\n".join(current_field_lines).strip() or "\u200b",
+            }
+        )
 
     return make_embed(
         title=title,
@@ -348,6 +354,7 @@ class DiscordChannel(BaseChannel):
                 model_name = channel._settings.default_model
                 if channel._agent:
                     import contextlib
+
                     with contextlib.suppress(Exception):
                         tool_count = str(len(channel._agent._tools.list_tools()))
                     with contextlib.suppress(Exception):
@@ -410,6 +417,7 @@ class DiscordChannel(BaseChannel):
         if self._task and not self._task.done():
             self._task.cancel()
             import contextlib
+
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
         logger.info("Discord channel stopped")
@@ -497,9 +505,8 @@ class DiscordChannel(BaseChannel):
     async def _handle_thread(self, message: Any) -> None:
         """Handle a message in a thread."""
         thread = message.channel
-        is_ours = (
-            (hasattr(thread, "owner_id") and self._bot and thread.owner_id == self._bot.user.id)
-            or (hasattr(thread, "name") and thread.name.startswith("\U0001f916 "))
+        is_ours = (hasattr(thread, "owner_id") and self._bot and thread.owner_id == self._bot.user.id) or (
+            hasattr(thread, "name") and thread.name.startswith("\U0001f916 ")
         )
         is_mentioned = self._bot and self._bot.user and self._bot.user.mentioned_in(message)
 
@@ -578,9 +585,7 @@ class DiscordChannel(BaseChannel):
                 color=embed_data.get("color", 0x5865F2),
             )
             for f in embed_data.get("fields", []):
-                embed.add_field(
-                    name=f["name"], value=f["value"], inline=f.get("inline", False)
-                )
+                embed.add_field(name=f["name"], value=f["value"], inline=f.get("inline", False))
             footer = embed_data.get("footer")
             if footer:
                 embed.set_footer(text=footer["text"])
@@ -591,11 +596,6 @@ class DiscordChannel(BaseChannel):
 
     def _is_our_thread(self, thread: Any) -> bool:
         """Check if a thread was created by this bot."""
-        if (
-            hasattr(thread, "owner_id")
-            and self._bot
-            and self._bot.user
-            and thread.owner_id == self._bot.user.id
-        ):
+        if hasattr(thread, "owner_id") and self._bot and self._bot.user and thread.owner_id == self._bot.user.id:
             return True
         return hasattr(thread, "name") and thread.name.startswith("\U0001f916 ")

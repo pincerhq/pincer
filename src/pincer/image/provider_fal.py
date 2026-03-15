@@ -25,6 +25,7 @@ class FalImageProvider(BaseImageProvider):
             return False
         try:
             import fal_client  # noqa: F401
+
             return True
         except ImportError:
             return False

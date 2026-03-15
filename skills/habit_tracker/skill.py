@@ -144,12 +144,14 @@ def habit_status(user_id: str) -> dict:
                 "SELECT COUNT(*) FROM habit_checkins WHERE habit_id = ?",
                 (habit_id,),
             ).fetchone()[0]
-            result_habits.append({
-                "name": habit_name,
-                "checked_today": bool(checked),
-                "streak": streak,
-                "total_checkins": total,
-            })
+            result_habits.append(
+                {
+                    "name": habit_name,
+                    "checked_today": bool(checked),
+                    "streak": streak,
+                    "total_checkins": total,
+                }
+            )
         conn.close()
         return {"habits": result_habits}
     except Exception as e:

@@ -28,6 +28,7 @@ class TestCalendarToday:
         mock_service = _mock_events_list([])
         with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service):
             from pincer.tools.builtin.calendar_tool import calendar_today
+
             result = await calendar_today()
             assert "clear" in result.lower()
 
@@ -47,6 +48,7 @@ class TestCalendarToday:
         mock_service = _mock_events_list(events)
         with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service):
             from pincer.tools.builtin.calendar_tool import calendar_today
+
             result = await calendar_today()
             assert "Team Standup" in result
             assert "Lunch" in result
@@ -57,6 +59,7 @@ class TestCalendarToday:
         mock_service = _mock_events_list(events)
         with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service):
             from pincer.tools.builtin.calendar_tool import calendar_today
+
             result = await calendar_today()
             assert "Holiday" in result
             assert "All day" in result
@@ -67,6 +70,7 @@ class TestCalendarToday:
             side_effect=FileNotFoundError("Credentials not found"),
         ):
             from pincer.tools.builtin.calendar_tool import calendar_today
+
             result = await calendar_today()
             assert "not found" in result.lower()
 
@@ -77,6 +81,7 @@ class TestCalendarWeek:
         mock_service = _mock_events_list([])
         with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service):
             from pincer.tools.builtin.calendar_tool import calendar_week
+
             result = await calendar_week()
             assert "No events" in result
 
@@ -91,6 +96,7 @@ class TestCalendarWeek:
         mock_service = _mock_events_list(events)
         with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service):
             from pincer.tools.builtin.calendar_tool import calendar_week
+
             result = await calendar_week()
             assert "Monday Meeting" in result
 
@@ -106,10 +112,13 @@ class TestCalendarCreate:
             "htmlLink": "https://calendar.google.com/event/123",
         }
         mock_service = _mock_events_insert(created)
-        with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service), \
-             patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s:
+        with (
+            patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service),
+            patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s,
+        ):
             mock_s.return_value.timezone = "Europe/Berlin"
             from pincer.tools.builtin.calendar_tool import calendar_create
+
             result = await calendar_create("New Meeting", "2026-02-22T14:00:00+01:00")
             assert "created" in result.lower()
             assert "New Meeting" in result
@@ -119,10 +128,13 @@ class TestCalendarCreate:
         """API returns empty or partial response -> tool returns error, not success."""
         for created in ({}, {"summary": "x"}):
             mock_service = _mock_events_insert(created)
-            with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service), \
-                 patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s:
+            with (
+                patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service),
+                patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s,
+            ):
                 mock_s.return_value.timezone = "Europe/Berlin"
                 from pincer.tools.builtin.calendar_tool import calendar_create
+
                 result = await calendar_create("Test", "2026-02-22T14:00:00+01:00")
                 assert "Event created" not in result
                 assert "Error" in result or "did not return" in result
@@ -134,10 +146,13 @@ class TestCalendarCreate:
             "htmlLink": "https://calendar.google.com/event/xyz",
         }
         mock_service = _mock_events_insert(created)
-        with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service), \
-             patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s:
+        with (
+            patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service),
+            patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s,
+        ):
             mock_s.return_value.timezone = "Europe/Berlin"
             from pincer.tools.builtin.calendar_tool import calendar_create
+
             result = await calendar_create("Meeting", "2026-02-22T14:00:00+01:00")
             assert "https://calendar.google.com/event/xyz" in result
             assert "created" in result.lower()
@@ -146,10 +161,13 @@ class TestCalendarCreate:
         """Naive datetime -> event body uses settings.timezone (IANA)."""
         created = {"id": "x", "htmlLink": "https://example.com/event"}
         mock_service = _mock_events_insert(created)
-        with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service), \
-             patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s:
+        with (
+            patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service),
+            patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s,
+        ):
             mock_s.return_value.timezone = "Europe/Berlin"
             from pincer.tools.builtin.calendar_tool import calendar_create
+
             await calendar_create("Test", "2026-02-22T14:00:00")
             call_kwargs = mock_service.events.return_value.insert.call_args[1]
             body = call_kwargs["body"]
@@ -160,10 +178,13 @@ class TestCalendarCreate:
         """Fixed-offset datetime (e.g. +01:00) -> use settings.timezone for IANA."""
         created = {"id": "x", "htmlLink": "https://example.com/event"}
         mock_service = _mock_events_insert(created)
-        with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service), \
-             patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s:
+        with (
+            patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service),
+            patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s,
+        ):
             mock_s.return_value.timezone = "America/New_York"
             from pincer.tools.builtin.calendar_tool import calendar_create
+
             await calendar_create("Test", "2026-02-22T14:00:00+01:00")
             call_kwargs = mock_service.events.return_value.insert.call_args[1]
             body = call_kwargs["body"]
@@ -173,18 +194,20 @@ class TestCalendarCreate:
         """When calendar_id != primary, success message includes calendar_id."""
         created = {"id": "x", "htmlLink": "https://example.com/event"}
         mock_service = _mock_events_insert(created)
-        with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service), \
-             patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s:
+        with (
+            patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service),
+            patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s,
+        ):
             mock_s.return_value.timezone = "Europe/Berlin"
             from pincer.tools.builtin.calendar_tool import calendar_create
-            result = await calendar_create(
-                "Test", "2026-02-22T14:00:00+01:00", calendar_id="work@example.com"
-            )
+
+            result = await calendar_create("Test", "2026-02-22T14:00:00+01:00", calendar_id="work@example.com")
             assert "work@example.com" in result
             assert "Calendar:" in result
 
     async def test_invalid_date(self):
         with patch("pincer.tools.builtin.calendar_tool._get_service", return_value=MagicMock()):
             from pincer.tools.builtin.calendar_tool import calendar_create
+
             result = await calendar_create("Test", "not-a-date")
             assert "Invalid" in result or "Error" in result

@@ -102,13 +102,10 @@ def create_app() -> FastAPI:
             "version": "0.7.3",
             "channels": {
                 "telegram": bool(os.environ.get("PINCER_TELEGRAM_BOT_TOKEN")),
-                "whatsapp": os.environ.get("PINCER_WHATSAPP_ENABLED", "").lower()
-                == "true",
+                "whatsapp": os.environ.get("PINCER_WHATSAPP_ENABLED", "").lower() == "true",
                 "discord": bool(os.environ.get("PINCER_DISCORD_BOT_TOKEN")),
-                "voice": os.environ.get("PINCER_VOICE_ENABLED", "").lower()
-                == "true",
-                "signal": os.environ.get("PINCER_SIGNAL_ENABLED", "").lower()
-                == "true",
+                "voice": os.environ.get("PINCER_VOICE_ENABLED", "").lower() == "true",
+                "signal": os.environ.get("PINCER_SIGNAL_ENABLED", "").lower() == "true",
             },
         }
 
