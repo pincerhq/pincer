@@ -114,6 +114,10 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         from pincer.llm.anthropic_provider import AnthropicProvider
 
         llm = AnthropicProvider(settings)
+    elif settings.default_provider.value == "grok":
+        from pincer.llm.grok_provider import GrokProvider
+
+        llm = GrokProvider(settings)
     else:
         from pincer.llm.openai_provider import OpenAIProvider
 
@@ -711,6 +715,49 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         },
     )
 
+    # Sprint 8: Image generation builtin (optional — requires FAL_KEY or PINCER_GEMINI_API_KEY)
+    _fal_key = settings.fal_key.get_secret_value()
+    _gemini_key = settings.gemini_api_key.get_secret_value()
+    if _fal_key or _gemini_key:
+        from pincer.image.router import build_router_from_settings
+        from pincer.tools.builtin.image_gen import make_generate_image_handler
+
+        _image_router = build_router_from_settings()
+        tools.register(
+            name="generate_image",
+            description=(
+                "Generate image(s) from a text prompt and send them directly to the user. "
+                "Use for creating original images, illustrations, or artwork."
+            ),
+            handler=make_generate_image_handler(_image_router),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Detailed text description of the image to generate",
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Optional caption displayed with the image",
+                        "default": "",
+                    },
+                    "aspect_ratio": {
+                        "type": "string",
+                        "description": "Image aspect ratio — 1:1 (default), 16:9, 9:16, 4:3, 3:4",
+                        "default": "1:1",
+                    },
+                    "num_images": {
+                        "type": "integer",
+                        "description": "Number of images to generate (default 1, max 4)",
+                        "default": 1,
+                    },
+                },
+                "required": ["prompt"],
+            },
+        )
+        console.print("[green]Image generation tool registered[/green]")
+
     # Sprint 4: Load skills and register their tools
     from pathlib import Path as _SkillPath
 
@@ -967,6 +1014,82 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
         except Exception as e:
             console.print(f"[yellow]WhatsApp failed: {e}[/yellow]")
 
+    # Sprint 7: Voice channel (optional)
+    # Start when either inbound (voice_enabled) or outbound (voice_outbound_enabled) is enabled
+    vc = None
+    if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.twilio_account_sid:
+        try:
+            from pincer.channels.phone_calls import VoiceChannel
+            from pincer.voice.engine import get_voice_engine
+            from pincer.voice.outbound import make_phone_call
+            from pincer.voice.twiml_server import init_voice_routes
+
+            voice_engine = get_voice_engine(settings)
+            vc = VoiceChannel(settings)
+            vc.set_engine(voice_engine)
+            vc.set_identity_resolver(identity)
+            await vc.start(on_message)
+            channels.append(vc)
+            channel_map[vc.name] = vc
+            router.register(ChannelType.VOICE, vc)
+            init_voice_routes(voice_engine, settings)
+
+            if settings.voice_outbound_enabled:
+                tools.register(
+                    name="make_phone_call",
+                    description=(
+                        "Place a real phone call to a number. REQUIRED when the user asks you to call someone: "
+                        "you MUST call this tool with target_number (E.164) and purpose. "
+                        "Do NOT describe or simulate a call in text. Do NOT output XML or structured call blocks. "
+                        "Only this tool can place calls."
+                    ),
+                    handler=make_phone_call,
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "target_number": {
+                                "type": "string",
+                                "description": "Phone number in E.164 format (e.g. +14155551234)",
+                            },
+                            "purpose": {
+                                "type": "string",
+                                "description": "What the call is about",
+                            },
+                            "instructions": {
+                                "type": "string",
+                                "description": "Specific instructions for the agent during the call",
+                                "default": "",
+                            },
+                            "max_duration": {
+                                "type": "integer",
+                                "description": "Maximum call duration in seconds (default 300)",
+                                "default": 300,
+                            },
+                        },
+                        "required": ["target_number", "purpose"],
+                    },
+                    require_approval=True,
+                )
+
+            console.print(
+                f"[green]Voice calling enabled ({settings.voice_engine})[/green]"
+            )
+        except Exception as e:
+            console.print(f"[yellow]Voice setup failed: {e}[/yellow]")
+    else:
+        if settings.voice_enabled or settings.voice_outbound_enabled:
+            console.print("[yellow]Voice/outbound enabled but PINCER_TWILIO_ACCOUNT_SID not set[/yellow]")
+    if settings.voice_outbound_enabled and not settings.voice_webhook_base_url:
+        console.print(
+            "[yellow]Outbound calling enabled but PINCER_VOICE_WEBHOOK_BASE_URL not set — "
+            "calls will fail until configured.[/yellow]"
+        )
+    if settings.voice_enabled and not settings.voice_outbound_enabled:
+        console.print(
+            "[dim]Voice outbound disabled — set PINCER_VOICE_OUTBOUND_ENABLED=true "
+            "for 'Call X' from text.[/dim]"
+        )
+
     # Sprint 4: Discord channel (optional)
     dc = None
     if settings.discord_bot_token.get_secret_value():
@@ -985,6 +1108,27 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
             console.print(f"[yellow]Discord failed: {e}[/yellow]")
     else:
         console.print("[dim]Discord skipped (no PINCER_DISCORD_BOT_TOKEN)[/dim]")
+
+    # Sprint 7.5: Signal channel (optional)
+    sig = None
+    if settings.signal_enabled:
+        if settings.signal_phone_number:
+            try:
+                from pincer.channels.signal import SignalChannel
+
+                sig = SignalChannel(settings)
+                sig.set_identity_resolver(identity)
+                await sig.start(on_message)
+                channels.append(sig)
+                channel_map[sig.name] = sig
+                router.register(ChannelType.SIGNAL, sig)
+                console.print("[green]Signal connected[/green]")
+            except Exception as e:
+                console.print(f"[yellow]Signal failed: {e}[/yellow]")
+        else:
+            console.print(
+                "[yellow]Signal enabled but PINCER_SIGNAL_PHONE_NUMBER not set[/yellow]"
+            )
 
     if not channels:
         console.print(
@@ -1354,6 +1498,27 @@ def init() -> None:
         env_lines.append("PINCER_WHATSAPP_ENABLED=true")
         console.print("  Run [bold]pincer pair-whatsapp[/bold] to pair after setup.")
 
+    if Confirm.ask("Enable Signal?", default=False):
+        env_lines.append("PINCER_SIGNAL_ENABLED=true")
+        phone = Prompt.ask("Signal phone number (E.164, e.g. +491234567890)")
+        env_lines.append(f"PINCER_SIGNAL_PHONE_NUMBER={phone}")
+        allowlist = Prompt.ask("Allowed DM numbers (comma-separated, empty = allow all)", default="")
+        if allowlist:
+            env_lines.append(f"PINCER_SIGNAL_ALLOWLIST={allowlist}")
+        api_url = Prompt.ask(
+            "signal-cli-rest-api URL (for Docker: http://signal-api:8080)",
+            default="http://signal-api:8080",
+        )
+        env_lines.append(f"PINCER_SIGNAL_API_URL={api_url}")
+        console.print(
+            "  Start signal-api: [bold]docker compose -f docker-compose.yml "
+            "-f docker-compose.signal.yml up -d[/bold]"
+        )
+        console.print(
+            "  Then pair: [bold]pincer signal pair[/bold] "
+            "(opens 127.0.0.1:8081 in browser automatically)"
+        )
+
     # Step 3: Preferences
     console.print("\n[bold]Step 3: Preferences[/bold]")
     tz = Prompt.ask("Timezone", default="Europe/Berlin")
@@ -1361,8 +1526,24 @@ def init() -> None:
     budget = Prompt.ask("Daily budget (USD)", default="5.00")
     env_lines.append(f"PINCER_DAILY_BUDGET_USD={budget}")
 
-    # Step 4: Optional Integrations
-    console.print("\n[bold]Step 4: Optional Integrations[/bold]")
+    # Step 4: Voice Calling
+    console.print("\n[bold]Step 4: Voice Calling[/bold]")
+    if Confirm.ask("Enable voice calling (Twilio)?", default=False):
+        env_lines.append("PINCER_VOICE_ENABLED=true")
+        sid = Prompt.ask("Twilio Account SID")
+        env_lines.append(f"PINCER_TWILIO_ACCOUNT_SID={sid}")
+        token = Prompt.ask("Twilio Auth Token", password=True)
+        env_lines.append(f"PINCER_TWILIO_AUTH_TOKEN={token}")
+        phone = Prompt.ask("Twilio phone number (E.164, e.g. +14155551234)")
+        env_lines.append(f"PINCER_TWILIO_PHONE_NUMBER={phone}")
+        webhook = Prompt.ask("Public webhook URL (https://...)", default="")
+        if webhook:
+            env_lines.append(f"PINCER_VOICE_WEBHOOK_BASE_URL={webhook}")
+        if Confirm.ask("Enable outbound calling?", default=False):
+            env_lines.append("PINCER_VOICE_OUTBOUND_ENABLED=true")
+
+    # Step 5: Optional Integrations
+    console.print("\n[bold]Step 5: Optional Integrations[/bold]")
     if Confirm.ask("Configure email?", default=False):
         env_lines.append(f"PINCER_EMAIL_IMAP_HOST={Prompt.ask('IMAP host', default='imap.gmail.com')}")
         env_lines.append(f"PINCER_EMAIL_SMTP_HOST={Prompt.ask('SMTP host', default='smtp.gmail.com')}")
@@ -1502,6 +1683,9 @@ async def _chat_loop() -> None:
     if settings.default_provider.value == "anthropic":
         from pincer.llm.anthropic_provider import AnthropicProvider
         llm = AnthropicProvider(settings)
+    elif settings.default_provider.value == "grok":
+        from pincer.llm.grok_provider import GrokProvider
+        llm = GrokProvider(settings)
     else:
         from pincer.llm.openai_provider import OpenAIProvider
         llm = OpenAIProvider(settings)
@@ -1576,6 +1760,112 @@ async def _chat_loop() -> None:
         if memory_store:
             await memory_store.close()
         console.print("[dim]Goodbye.[/dim]")
+
+
+# ── Signal subcommands ────────────────────────
+
+signal_app = typer.Typer(name="signal", help="Manage Signal messenger integration")
+app.add_typer(signal_app, name="signal")
+
+
+@signal_app.command(name="pair")
+def signal_pair() -> None:
+    """Open the Signal QR-code link in your browser to register/link a device."""
+    import urllib.error
+    import urllib.request
+    import webbrowser
+
+    from pincer.config import get_settings_relaxed
+
+    settings = get_settings_relaxed()
+    pair_url = settings.signal_pair_url.rstrip("/")
+    qr_url = f"{pair_url}/v1/qrcodelink?device_name=Pincer"
+
+    # Pre-flight: verify signal-api is reachable before opening browser
+    try:
+        req = urllib.request.Request(f"{pair_url}/v1/about", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as _:
+            pass
+    except (OSError, urllib.error.URLError) as e:
+        console.print("[bold red]Cannot reach signal-api[/bold red]")
+        console.print(f"  {pair_url} — {e}")
+        console.print(
+            "\n[dim]Start signal-api first (no build required):[/dim]\n"
+            "  [bold]docker compose -f docker-compose.yml -f docker-compose.signal.yml "
+            "up -d signal-api[/bold]\n"
+        )
+        raise typer.Exit(1) from e
+
+    console.print(f"[bold]Signal Pairing[/bold]\n\nOpening QR link: {qr_url}")
+    console.print(
+        "\nScan the QR code with Signal: Settings → Linked Devices → Link New Device"
+    )
+    webbrowser.open(qr_url)
+
+
+@signal_app.command(name="status")
+def signal_status() -> None:
+    """Check Signal API health and registered accounts."""
+    asyncio.run(_signal_status())
+
+
+async def _signal_status() -> None:
+    from pincer.channels.signal_client import SignalAPIError, SignalClient
+    from pincer.config import get_settings_relaxed
+
+    settings = get_settings_relaxed()
+    console.print("[bold]Signal Status[/bold]\n")
+    console.print(f"  API URL:    {settings.signal_api_url}")
+    console.print(f"  Phone:      {settings.signal_phone_number or '(not set)'}")
+    console.print(f"  Enabled:    {settings.signal_enabled}")
+
+    client = SignalClient(settings.signal_api_url, settings.signal_phone_number)
+    try:
+        await client.connect()
+        try:
+            health = await client.health()
+            console.print(f"  Health:     [green]OK[/green] {health}")
+        except SignalAPIError as e:
+            console.print(f"  Health:     [red]FAIL[/red] {e}")
+
+        accounts = await client.list_accounts()
+        if accounts:
+            console.print(f"  Accounts:   {', '.join(accounts)}")
+        else:
+            console.print("  Accounts:   (none registered yet — run `pincer signal pair`)")
+
+        about = await client.about()
+        console.print(f"  About:      {about}")
+    finally:
+        await client.disconnect()
+
+
+@signal_app.command(name="test")
+def signal_test(
+    recipient: str = typer.Argument(..., help="Recipient phone number (E.164)"),
+) -> None:
+    """Send a test message via Signal."""
+    asyncio.run(_signal_test(recipient))
+
+
+async def _signal_test(recipient: str) -> None:
+    from pincer.channels.signal_client import SignalAPIError, SignalClient
+    from pincer.config import get_settings_relaxed
+
+    settings = get_settings_relaxed()
+    if not settings.signal_phone_number:
+        console.print("[red]PINCER_SIGNAL_PHONE_NUMBER not set.[/red]")
+        raise typer.Exit(1)
+
+    client = SignalClient(settings.signal_api_url, settings.signal_phone_number)
+    try:
+        await client.connect()
+        await client.send_message(recipient, "Hello from Pincer! Signal channel is working.")
+        console.print(f"[green]Test message sent to {recipient}[/green]")
+    except SignalAPIError as e:
+        console.print(f"[red]Send failed: {e}[/red]")
+    finally:
+        await client.disconnect()
 
 
 # ── Skills subcommands ────────────────────────

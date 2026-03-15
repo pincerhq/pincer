@@ -37,6 +37,21 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: pincer-ngrok
+    command: ["http", "pincer:8080"]
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    depends_on:
+      pincer:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   pincer-data:
     name: pincer-data
+
+networks:
+  pincer-net:
+    name: pincer-net

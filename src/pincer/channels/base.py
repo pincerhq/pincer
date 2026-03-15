@@ -17,6 +17,8 @@ class ChannelType(StrEnum):
     DISCORD = "discord"
     CLI = "cli"
     WEB = "web"
+    VOICE = "voice"
+    SIGNAL = "signal"
 
 
 @dataclass

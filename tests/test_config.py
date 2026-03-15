@@ -33,6 +33,7 @@ def test_settings_no_keys_raises(tmp_path: Path) -> None:
         Settings(
             anthropic_api_key="",  # type: ignore[arg-type]
             openai_api_key="",  # type: ignore[arg-type]
+            grok_api_key="",  # type: ignore[arg-type]
             data_dir=tmp_path,
         )
 

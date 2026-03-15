@@ -69,6 +69,22 @@ class IdentityResolver:
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     raise
+            # Add phone_number if missing (Sprint 7 — voice calling)
+            try:
+                await db.execute(
+                    "ALTER TABLE identity_map ADD COLUMN phone_number TEXT"
+                )
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
+            # Add signal_phone if missing (Sprint 7.5 — Signal channel)
+            try:
+                await db.execute(
+                    "ALTER TABLE identity_map ADD COLUMN signal_phone TEXT"
+                )
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
             await db.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_discord
                 ON identity_map(discord_user_id) WHERE discord_user_id IS NOT NULL
@@ -123,6 +139,18 @@ class IdentityResolver:
             cursor = await db.execute(
                 "SELECT pincer_user_id FROM identity_map WHERE discord_user_id = ?",
                 (str(channel_user_id),),
+            )
+        elif channel == ChannelType.VOICE:
+            phone = str(channel_user_id).lstrip("+")
+            cursor = await db.execute(
+                "SELECT pincer_user_id FROM identity_map WHERE phone_number = ?",
+                (phone,),
+            )
+        elif channel == ChannelType.SIGNAL:
+            phone = str(channel_user_id).lstrip("+")
+            cursor = await db.execute(
+                "SELECT pincer_user_id FROM identity_map WHERE signal_phone = ?",
+                (phone,),
             )
         else:
             return None
@@ -189,14 +217,20 @@ class IdentityResolver:
             str(channel_user_id).lstrip("+") if channel == ChannelType.WHATSAPP else None
         )
         discord_id = str(channel_user_id) if channel == ChannelType.DISCORD else None
+        phone_number = (
+            str(channel_user_id).lstrip("+") if channel == ChannelType.VOICE else None
+        )
+        signal_phone = (
+            str(channel_user_id).lstrip("+") if channel == ChannelType.SIGNAL else None
+        )
 
         await db.execute(
             """INSERT INTO identity_map
                (pincer_user_id, telegram_user_id, whatsapp_phone, discord_user_id,
-                display_name, preferred_channel)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                phone_number, signal_phone, display_name, preferred_channel)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (pincer_user_id, telegram_id, whatsapp_phone, discord_id,
-             display_name, channel.value),
+             phone_number, signal_phone, display_name, channel.value),
         )
         await db.commit()
         logger.info("Identity created: %s (%s)", pincer_user_id, channel.value)
@@ -214,6 +248,10 @@ class IdentityResolver:
             col, val = "whatsapp_phone", str(channel_user_id).lstrip("+")
         elif channel == ChannelType.DISCORD:
             col, val = "discord_user_id", str(channel_user_id)
+        elif channel == ChannelType.VOICE:
+            col, val = "phone_number", str(channel_user_id).lstrip("+")
+        elif channel == ChannelType.SIGNAL:
+            col, val = "signal_phone", str(channel_user_id).lstrip("+")
         else:
             return
 
@@ -253,6 +291,7 @@ class IdentityResolver:
                 telegram_id: int | None = None
                 whatsapp_phone: str | None = None
                 discord_id: str | None = None
+                signal_phone: str | None = None
 
                 for ch, cid in ((left_channel, left_id), (right_channel, right_id)):
                     if ch == "telegram":
@@ -262,8 +301,15 @@ class IdentityResolver:
                         whatsapp_phone = cid.lstrip("+")
                     elif ch == "discord":
                         discord_id = cid
+                    elif ch == "signal":
+                        signal_phone = cid.lstrip("+")
 
-                if telegram_id is None and whatsapp_phone is None and discord_id is None:
+                if (
+                    telegram_id is None
+                    and whatsapp_phone is None
+                    and discord_id is None
+                    and signal_phone is None
+                ):
                     continue
 
                 pincer_user_id = self._generate_user_id(
@@ -271,7 +317,8 @@ class IdentityResolver:
                 )
 
                 cursor = await db.execute(
-                    "SELECT pincer_user_id, telegram_user_id, whatsapp_phone, discord_user_id "
+                    "SELECT pincer_user_id, telegram_user_id, whatsapp_phone, "
+                    "discord_user_id, signal_phone "
                     "FROM identity_map WHERE pincer_user_id = ?",
                     (pincer_user_id,),
                 )
@@ -300,20 +347,27 @@ class IdentityResolver:
                             (discord_id, pincer_user_id),
                         )
                         needs_update = True
+                    if signal_phone and not existing["signal_phone"]:
+                        await db.execute(
+                            "UPDATE identity_map SET signal_phone = ?, "
+                            "updated_at = datetime('now') WHERE pincer_user_id = ?",
+                            (signal_phone, pincer_user_id),
+                        )
+                        needs_update = True
                     if needs_update:
                         logger.info("Identity updated from config: %s", pincer_user_id)
                 else:
                     await db.execute(
                         """INSERT INTO identity_map
                            (pincer_user_id, telegram_user_id, whatsapp_phone,
-                            discord_user_id, preferred_channel)
-                           VALUES (?, ?, ?, ?, ?)""",
+                            discord_user_id, signal_phone, preferred_channel)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
                         (pincer_user_id, telegram_id, whatsapp_phone,
-                         discord_id, left_channel),
+                         discord_id, signal_phone, left_channel),
                     )
                     logger.info(
-                        "Identity seeded from config: %s (tg=%s, wa=%s, dc=%s)",
-                        pincer_user_id, telegram_id, whatsapp_phone, discord_id,
+                        "Identity seeded from config: %s (tg=%s, wa=%s, dc=%s, sig=%s)",
+                        pincer_user_id, telegram_id, whatsapp_phone, discord_id, signal_phone,
                     )
             await db.commit()
 
@@ -325,7 +379,8 @@ class IdentityResolver:
         async with self._get_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT telegram_user_id, whatsapp_phone, discord_user_id, preferred_channel "
+                "SELECT telegram_user_id, whatsapp_phone, discord_user_id, "
+                "signal_phone, preferred_channel "
                 "FROM identity_map WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             )
@@ -333,8 +388,10 @@ class IdentityResolver:
             if not row:
                 raise ValueError(f"Unknown user: {pincer_user_id}")
 
-            telegram_id, whatsapp_phone, discord_id, preferred = row
+            telegram_id, whatsapp_phone, discord_id, signal_phone, preferred = row
 
+            if preferred == "signal" and signal_phone:
+                return ChannelType.SIGNAL, signal_phone
             if preferred == "discord" and discord_id:
                 return ChannelType.DISCORD, discord_id
             if preferred == "whatsapp" and whatsapp_phone:
@@ -342,6 +399,8 @@ class IdentityResolver:
             if preferred == "telegram" and telegram_id:
                 return ChannelType.TELEGRAM, str(telegram_id)
 
+            if signal_phone:
+                return ChannelType.SIGNAL, signal_phone
             if discord_id:
                 return ChannelType.DISCORD, discord_id
             if whatsapp_phone:
@@ -356,8 +415,8 @@ class IdentityResolver:
         async with self._get_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT telegram_user_id, whatsapp_phone, discord_user_id FROM identity_map "
-                "WHERE pincer_user_id = ?",
+                "SELECT telegram_user_id, whatsapp_phone, discord_user_id, signal_phone "
+                "FROM identity_map WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             )
             row = await cursor.fetchone()
@@ -365,13 +424,15 @@ class IdentityResolver:
                 return {}
 
             channels: dict[ChannelType, str] = {}
-            telegram_id, whatsapp_phone, discord_id = row
+            telegram_id, whatsapp_phone, discord_id, signal_phone = row
             if telegram_id:
                 channels[ChannelType.TELEGRAM] = str(telegram_id)
             if whatsapp_phone:
                 channels[ChannelType.WHATSAPP] = whatsapp_phone
             if discord_id:
                 channels[ChannelType.DISCORD] = discord_id
+            if signal_phone:
+                channels[ChannelType.SIGNAL] = signal_phone
             return channels
 
     @staticmethod

@@ -9,6 +9,7 @@ RUN corepack enable pnpm
 
 COPY dashboard/ ./
 
+ENV CI=true
 RUN pnpm install
 RUN pnpm build
 

@@ -1,6 +1,6 @@
 [project]
 name = "pincer-agent"
-version = "0.7.0"
+version = "0.7.3"
 description = "Your personal AI agent. Text it on WhatsApp. It does stuff. 🦀"
 readme = "README.md"
 license = { text = "MIT" }
@@ -41,6 +41,7 @@ dependencies = [
     # Sprint 5: API Server
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
@@ -51,7 +52,17 @@ memory = ["sqlite-vec>=0.1.0"]
 pdf = ["pymupdf>=1.24.0"]
 pdfgen = ["fpdf2>=2.7.0"]
 skills = ["youtube-transcript-api", "feedparser"]
-all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills]"]
+voice = [
+    "twilio>=9.0",
+    "websockets>=12.0",
+    "deepgram-sdk>=3.0",
+    "elevenlabs>=1.0",
+]
+image = [
+    "fal-client>=0.13.0",
+    "google-genai>=1.0",
+]
+all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

@@ -21,6 +21,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class LLMProvider(StrEnum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
+    GROK = "grok"
 
 
 class LogLevel(StrEnum):
@@ -46,6 +47,7 @@ class Settings(BaseSettings):
     default_provider: LLMProvider = LLMProvider.ANTHROPIC
     anthropic_api_key: SecretStr = Field(default=SecretStr(""), description="Anthropic API key")
     openai_api_key: SecretStr = Field(default=SecretStr(""), description="OpenAI API key")
+    grok_api_key: SecretStr = Field(default=SecretStr(""), description="xAI Grok API key")
 
     default_model: str = Field(
         default="claude-sonnet-4-5-20250929",
@@ -181,6 +183,80 @@ class Settings(BaseSettings):
     dashboard_host: str = Field(default="127.0.0.1", description="API server bind host")
     dashboard_port: int = Field(default=8080, ge=1, le=65535, description="API server port")
 
+    # ── Image Generation (Sprint 8) ──────────────────────
+    image_provider: str = Field(
+        default="auto",
+        description="Image provider: auto | fal | gemini",
+    )
+    fal_key: SecretStr = Field(default=SecretStr(""), description="fal.ai API key")
+    fal_model: str = Field(default="fal-ai/nano-banana-2", description="fal.ai image model")
+    gemini_api_key: SecretStr = Field(default=SecretStr(""), description="Google Gemini API key")
+    image_model_gemini: str = Field(
+        default="gemini-2.5-flash-image", description="Gemini image generation model"
+    )
+    image_max_cost_per_request: float = Field(
+        default=0.10, ge=0.0, description="Max cost per image generation request in USD"
+    )
+    image_daily_limit: int = Field(
+        default=50, ge=0, description="Max image generations per day (0 = unlimited)"
+    )
+
+    # ── Signal Messenger (Sprint 7.5) ────────────────────
+    signal_enabled: bool = Field(default=False, description="Enable Signal channel")
+    signal_api_url: str = Field(
+        default="http://signal-api:8080", description="signal-cli-rest-api base URL"
+    )
+    signal_pair_url: str = Field(
+        default="http://127.0.0.1:8081",
+        description="URL for browser-based pairing (host-facing); use when signal-api is in Docker",
+    )
+    signal_phone_number: str = Field(default="", description="Registered Signal phone number (E.164)")
+    signal_allowlist: str = Field(
+        default="",
+        description="Comma-separated phone numbers allowed to DM; empty = allow all",
+    )
+    signal_group_reply: str = Field(
+        default="mention_only",
+        description="Group reply mode: mention_only | all | disabled",
+    )
+    signal_poll_interval: int = Field(default=2, ge=1, description="Poll interval in seconds")
+    signal_receive_mode: str = Field(
+        default="websocket",
+        description="Receive mode: websocket | poll",
+    )
+
+    # ── Voice Calling (Sprint 7) ─────────────────────────
+    voice_enabled: bool = Field(default=False, description="Enable voice calling channel")
+    twilio_account_sid: str = Field(default="", description="Twilio Account SID")
+    twilio_auth_token: SecretStr = Field(default=SecretStr(""), description="Twilio Auth Token")
+    twilio_phone_number: str = Field(default="", description="Twilio phone number (E.164)")
+    voice_engine: str = Field(
+        default="conversation_relay",
+        description="Voice engine: conversation_relay | media_streams",
+    )
+    voice_webhook_base_url: str = Field(default="", description="Public URL for Twilio webhooks")
+    deepgram_api_key: SecretStr = Field(default=SecretStr(""), description="Deepgram STT API key")
+    elevenlabs_api_key: SecretStr = Field(default=SecretStr(""), description="ElevenLabs TTS API key")
+    elevenlabs_voice_id: str = Field(default="", description="ElevenLabs voice ID")
+    voice_language: str = Field(default="en-US", description="Primary language for STT")
+    voice_max_call_duration: int = Field(default=600, ge=30, le=3600, description="Max call seconds")
+    voice_max_hold_time: int = Field(default=300, ge=30, le=600, description="Max IVR hold seconds")
+    voice_recording_enabled: bool = Field(default=False, description="Enable call recording")
+    voice_consent_mode: str = Field(
+        default="one_party",
+        description="Recording consent: one_party | two_party | none",
+    )
+    voice_outbound_enabled: bool = Field(default=False, description="Enable outbound calling")
+    voice_outbound_max_daily: int = Field(default=10, ge=1, le=100, description="Max outbound calls/day")
+    voice_allowed_callers: str = Field(
+        default="*",
+        description="Comma-separated E.164 numbers allowed to call (or * for all)",
+    )
+    voice_filler_phrases: str = Field(
+        default="",
+        description="Custom filler phrases JSON array (empty = built-in)",
+    )
+
     # ── Security (Sprint 5) ──────────────────────────────
     audit_disabled: bool = Field(default=False, description="Disable audit logging")
     rate_messages_per_min: int = Field(default=30, ge=1, description="Per-user message rate limit")
@@ -201,21 +277,33 @@ class Settings(BaseSettings):
         """Ensure at least one LLM provider API key is set."""
         anthropic_set = self.anthropic_api_key.get_secret_value() != ""
         openai_set = self.openai_api_key.get_secret_value() != ""
-        if not anthropic_set and not openai_set:
+        grok_set = self.grok_api_key.get_secret_value() != ""
+        if not anthropic_set and not openai_set and not grok_set:
             raise ValueError(
                 "At least one LLM API key required. "
-                "Set PINCER_ANTHROPIC_API_KEY or PINCER_OPENAI_API_KEY."
+                "Set PINCER_ANTHROPIC_API_KEY, PINCER_OPENAI_API_KEY, or PINCER_GROK_API_KEY."
             )
         if self.default_provider == LLMProvider.ANTHROPIC and not anthropic_set:
             if openai_set:
                 object.__setattr__(self, "default_provider", LLMProvider.OPENAI)
+            elif grok_set:
+                object.__setattr__(self, "default_provider", LLMProvider.GROK)
             else:
                 raise ValueError("PINCER_ANTHROPIC_API_KEY required for Anthropic provider.")
         if self.default_provider == LLMProvider.OPENAI and not openai_set:
             if anthropic_set:
                 object.__setattr__(self, "default_provider", LLMProvider.ANTHROPIC)
+            elif grok_set:
+                object.__setattr__(self, "default_provider", LLMProvider.GROK)
             else:
                 raise ValueError("PINCER_OPENAI_API_KEY required for OpenAI provider.")
+        if self.default_provider == LLMProvider.GROK and not grok_set:
+            if anthropic_set:
+                object.__setattr__(self, "default_provider", LLMProvider.ANTHROPIC)
+            elif openai_set:
+                object.__setattr__(self, "default_provider", LLMProvider.OPENAI)
+            else:
+                raise ValueError("PINCER_GROK_API_KEY required for Grok provider.")
         return self
 
     @property

@@ -81,6 +81,18 @@ class CostTracker:
         await self._db.execute("""
             CREATE INDEX IF NOT EXISTS idx_cost_timestamp ON cost_log(timestamp)
         """)
+        await self._db.execute("""
+            CREATE TABLE IF NOT EXISTS image_cost_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                cost_usd REAL NOT NULL
+            )
+        """)
+        await self._db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_image_cost_timestamp ON image_cost_log(timestamp)
+        """)
         await self._db.commit()
 
     async def close(self) -> None:
@@ -124,8 +136,32 @@ class CostTracker:
         )
         return cost
 
+    async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:
+        """Record an image generation cost entry."""
+        assert self._db is not None
+        await self._db.execute(
+            "INSERT INTO image_cost_log (timestamp, provider, model, cost_usd) VALUES (?, ?, ?, ?)",
+            (time.time(), provider, model, cost_usd),
+        )
+        await self._db.commit()
+
+    async def get_image_count_today(self) -> int:
+        """Get the number of image generations today (UTC)."""
+        assert self._db is not None
+        today_start = (
+            datetime.now(UTC)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+        )
+        async with self._db.execute(
+            "SELECT COUNT(*) FROM image_cost_log WHERE timestamp >= ?",
+            (today_start,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
+
     async def get_today_spend(self) -> float:
-        """Get total spend for today (UTC)."""
+        """Get total spend for today (UTC), including LLM and image costs."""
         assert self._db is not None
         today_start = (
             datetime.now(UTC)
@@ -138,7 +174,16 @@ class CostTracker:
             (today_start,),
         ) as cursor:
             row = await cursor.fetchone()
-            return float(row[0]) if row else 0.0
+            llm_spend = float(row[0]) if row else 0.0
+
+        async with self._db.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM image_cost_log WHERE timestamp >= ?",
+            (today_start,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            image_spend = float(row[0]) if row else 0.0
+
+        return llm_spend + image_spend
 
     async def get_summary(self, since_timestamp: float | None = None) -> CostSummary:
         """Get aggregated cost summary."""
