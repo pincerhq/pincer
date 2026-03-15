@@ -92,9 +92,7 @@ def verbalize_tool_result(tool_name: str, result: str) -> str:
                     return f"Here's what I found: {first.get('title', '')}. {first.get('snippet', '')}"
             return result
         if isinstance(data, list):
-            return f"I found {len(data)} items. " + (
-                f"The first one is: {json.dumps(data[0])}" if data else ""
-            )
+            return f"I found {len(data)} items. " + (f"The first one is: {json.dumps(data[0])}" if data else "")
     except (json.JSONDecodeError, TypeError, IndexError):
         pass
 

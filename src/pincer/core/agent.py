@@ -88,27 +88,26 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
     clean: list[LLMMessage] = []
     for msg in messages:
         if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
-            orphaned_calls = [
-                tc for tc in msg.tool_calls if tc.id not in all_result_ids
-            ]
+            orphaned_calls = [tc for tc in msg.tool_calls if tc.id not in all_result_ids]
             if orphaned_calls:
                 orphan_ids = [tc.id for tc in orphaned_calls]
                 logger.warning("Stripping orphaned tool_use(s): %s", orphan_ids)
                 surviving = [tc for tc in msg.tool_calls if tc.id in all_result_ids]
                 if surviving:
-                    clean.append(LLMMessage(
-                        role=msg.role,
-                        content=msg.content,
-                        tool_calls=surviving,
-                    ))
+                    clean.append(
+                        LLMMessage(
+                            role=msg.role,
+                            content=msg.content,
+                            tool_calls=surviving,
+                        )
+                    )
                 elif msg.content:
                     clean.append(LLMMessage(role=msg.role, content=msg.content))
                 continue
 
         if msg.role == MessageRole.TOOL_RESULT:
             has_matching_use = any(
-                prev.role == MessageRole.ASSISTANT
-                and any(tc.id == msg.tool_call_id for tc in prev.tool_calls)
+                prev.role == MessageRole.ASSISTANT and any(tc.id == msg.tool_call_id for tc in prev.tool_calls)
                 for prev in clean
             )
             if not has_matching_use:
@@ -243,9 +242,7 @@ class Agent:
                 )
                 total_cost += cost
             except BudgetExceededError as e:
-                final_text = (
-                    f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
-                )
+                final_text = f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
                 break
 
             # If the LLM wants to use tools
@@ -349,7 +346,9 @@ class Agent:
                 img_contents.append(ImageContent.from_bytes(raw, media_type))
 
         user_msg = LLMMessage(
-            role=MessageRole.USER, content=text, images=img_contents,
+            role=MessageRole.USER,
+            content=text,
+            images=img_contents,
         )
         await self._sessions.add_message(session, user_msg)
 
@@ -419,9 +418,7 @@ class Agent:
 
             iteration_had_error = False
             for tool_call in response.tool_calls:
-                yield StreamChunk(
-                    StreamEventType.TOOL_START, f"Using {tool_call.name}..."
-                )
+                yield StreamChunk(StreamEventType.TOOL_START, f"Using {tool_call.name}...")
                 result = await self._execute_tool(tool_call, user_id, channel)
                 result_msg = LLMMessage(
                     role=MessageRole.TOOL_RESULT,
@@ -442,11 +439,7 @@ class Agent:
             else:
                 consecutive_errors = 0
         else:
-            fallback_content = (
-                response.content
-                if response and response.content
-                else "Max iterations reached."
-            )
+            fallback_content = response.content if response and response.content else "Max iterations reached."
             yield StreamChunk(StreamEventType.DONE, fallback_content)
             return
 
@@ -503,10 +496,7 @@ class Agent:
 
             memory_lines = [f"- {m.content}" for m in memories]
             memory_block = "\n".join(memory_lines)
-            return (
-                f"{base_prompt}\n\n"
-                f"[Relevant memories about this user]\n{memory_block}"
-            )
+            return f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}"
         except Exception:
             logger.debug("Failed to fetch memories for prompt", exc_info=True)
             return base_prompt
@@ -529,7 +519,10 @@ class Agent:
             if self._approval_callback:
                 try:
                     approved = await self._approval_callback(
-                        tool_call.name, tool_call.arguments, user_id, channel,
+                        tool_call.name,
+                        tool_call.arguments,
+                        user_id,
+                        channel,
                     )
                 except Exception:
                     logger.exception("Approval callback failed for '%s'", tool_call.name)

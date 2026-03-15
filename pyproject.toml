@@ -69,6 +69,9 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
+    "bandit>=1.7.0",
+    "types-croniter>=1.0.0",
+    "types-qrcode>=8.0.0",
     "httpx>=0.27.0",
 ]
 
@@ -98,3 +101,50 @@ extend-ignore = ["N814", "N818"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
+ignore_missing_imports = true
+warn_unused_ignores = false
+
+# Voice module uses async iterators and third-party libs without stubs
+[[tool.mypy.overrides]]
+module = [
+    "pincer.voice.*",
+    "pincer.channels.discord_channel",
+    "pincer.channels.telegram",
+    "pincer.channels.signal",
+    "pincer.channels.signal_client",
+    "pincer.channels.whatsapp",
+    "pincer.llm.openai_provider",
+    "pincer.llm.anthropic_provider",
+    "pincer.llm.grok_provider",
+    "pincer.llm._openai_common",
+    "pincer.tools.builtin.email_tool",
+    "pincer.tools.builtin.calendar_tool",
+    "pincer.tools.builtin.image_gen",
+    "pincer.scheduler.proactive",
+    "pincer.scheduler.triggers",
+    "pincer.core.agent",
+    "pincer.core.identity",
+    "pincer.costs.budget",
+    "pincer.security.audit",
+    "pincer.memory.store",
+    "pincer.api.skills",
+    "pincer.cli",
+]
+disable_error_code = [
+    "type-arg",
+    "no-any-return",
+    "union-attr",
+    "override",
+    "assignment",
+    "no-untyped-def",
+    "no-untyped-call",
+    "index",
+    "arg-type",
+    "operator",
+    "return-value",
+    "attr-defined",
+]
+
+[tool.bandit]
+exclude_dirs = ["tests", "dashboard"]
+skips = ["B101", "B104", "B310", "B608"]

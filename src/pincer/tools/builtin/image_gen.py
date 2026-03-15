@@ -79,9 +79,7 @@ def make_generate_image_handler(router: ImageProviderRouter):
                 if img.url:
                     await channel.send_photo(user_id, img.url, caption, **send_kwargs)
                 elif img.bytes:
-                    await channel.send_photo_from_bytes(
-                        user_id, img.bytes, img.content_type, caption, **send_kwargs
-                    )
+                    await channel.send_photo_from_bytes(user_id, img.bytes, img.content_type, caption, **send_kwargs)
                 sent += 1
             except Exception as e:
                 logger.warning("Failed to send image: %s", e)
@@ -96,12 +94,14 @@ def make_generate_image_handler(router: ImageProviderRouter):
         if sent == 0:
             return json.dumps({"error": "Failed to send any images to the user"})
 
-        return json.dumps({
-            "status": "success",
-            "provider": result.provider,
-            "model": result.model,
-            "images_sent": sent,
-            "cost_usd": round(result.cost_usd, 6),
-        })
+        return json.dumps(
+            {
+                "status": "success",
+                "provider": result.provider,
+                "model": result.model,
+                "images_sent": sent,
+                "cost_usd": round(result.cost_usd, 6),
+            }
+        )
 
     return generate_image

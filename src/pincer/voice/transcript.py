@@ -11,7 +11,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-
     import aiosqlite
 
 logger = logging.getLogger(__name__)
@@ -127,10 +126,7 @@ class TranscriptLogger:
                 confirmed_str = ""
                 if action.user_confirmed is not None:
                     confirmed_str = " (confirmed)" if action.user_confirmed else " (rejected)"
-                parts.append(
-                    f"  - {action.action_type}: {action.tool_name or 'N/A'}"
-                    f"{confirmed_str}"
-                )
+                parts.append(f"  - {action.action_type}: {action.tool_name or 'N/A'}{confirmed_str}")
                 if action.output_summary:
                     parts.append(f"    Result: {action.output_summary[:200]}")
             parts.append("")
@@ -183,5 +179,7 @@ class TranscriptLogger:
         await db.commit()
         logger.info(
             "Transcript saved for %s: %d entries, %d actions",
-            self._call_sid, len(self._entries), len(self._actions),
+            self._call_sid,
+            len(self._entries),
+            len(self._actions),
         )

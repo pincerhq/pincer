@@ -21,7 +21,11 @@ async def scheduler(tmp_path):
 class TestCronScheduler:
     async def test_add_schedule(self, scheduler):
         sid = await scheduler.add(
-            "test_job", "0 7 * * *", {"type": "briefing"}, "usr_test", "Europe/Berlin",
+            "test_job",
+            "0 7 * * *",
+            {"type": "briefing"},
+            "usr_test",
+            "Europe/Berlin",
         )
         assert sid is not None
         assert sid > 0

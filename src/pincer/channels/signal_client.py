@@ -107,9 +107,7 @@ class SignalClient:
                 return []
             return [self._parse_message(env) for env in data if self._is_data_message(env)]
 
-    async def send_message(
-        self, recipient: str, message: str, *, attachments: list[str] | None = None
-    ) -> None:
+    async def send_message(self, recipient: str, message: str, *, attachments: list[str] | None = None) -> None:
         """POST /v2/send — send a DM."""
         session = self._ensure_session()
         payload: dict[str, Any] = {
@@ -146,9 +144,7 @@ class SignalClient:
             "target_author": recipient,
             "timestamp": target_timestamp,
         }
-        async with session.put(
-            f"{self._base_url}/v1/reactions/{self._phone}", json=payload
-        ) as resp:
+        async with session.put(f"{self._base_url}/v1/reactions/{self._phone}", json=payload) as resp:
             if resp.status not in (200, 201, 204):
                 logger.debug("send_reaction status %s", resp.status)
 
@@ -156,9 +152,7 @@ class SignalClient:
         """PUT /v1/typing-indicator/{number}"""
         session = self._ensure_session()
         payload = {"recipient": recipient}
-        async with session.put(
-            f"{self._base_url}/v1/typing-indicator/{self._phone}", json=payload
-        ) as resp:
+        async with session.put(f"{self._base_url}/v1/typing-indicator/{self._phone}", json=payload) as resp:
             if resp.status not in (200, 201, 204):
                 logger.debug("send_typing_indicator status %s", resp.status)
 
@@ -174,9 +168,7 @@ class SignalClient:
     async def get_attachment(self, attachment_id: str) -> bytes:
         """GET /v1/attachments/{id} — download raw attachment bytes."""
         session = self._ensure_session()
-        async with session.get(
-            f"{self._base_url}/v1/attachments/{attachment_id}"
-        ) as resp:
+        async with session.get(f"{self._base_url}/v1/attachments/{attachment_id}") as resp:
             if resp.status != 200:
                 raise SignalAPIError(f"Attachment download failed: {resp.status}")
             return await resp.read()
@@ -195,10 +187,7 @@ class SignalClient:
         """
         import aiohttp
 
-        ws_url = (
-            self._base_url.replace("http://", "ws://")
-            .replace("https://", "wss://")
-        )
+        ws_url = self._base_url.replace("http://", "ws://").replace("https://", "wss://")
         ws_url = f"{ws_url}/v1/receive/{self._phone}"
         session = self._ensure_session()
         try:
@@ -252,11 +241,7 @@ class SignalClient:
         attachments: list[SignalAttachment] = []
         has_voice = False
         for att in raw_atts:
-            att_id = (
-                att.get("id")
-                or att.get("uploadTimestamp")
-                or str(att.get("size", ""))
-            )
+            att_id = att.get("id") or att.get("uploadTimestamp") or str(att.get("size", ""))
             content_type = att.get("contentType", "application/octet-stream")
             if content_type.startswith("audio/"):
                 has_voice = True

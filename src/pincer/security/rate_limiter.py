@@ -92,8 +92,7 @@ class RateLimiter:
         allowed, wait = await bucket.consume()
         if not allowed:
             raise RateLimitExceeded(
-                f"You're sending messages too fast! "
-                f"Please wait {wait:.0f}s before sending another message.",
+                f"You're sending messages too fast! Please wait {wait:.0f}s before sending another message.",
                 wait_seconds=wait,
             )
 
@@ -103,8 +102,7 @@ class RateLimiter:
         allowed, wait = await bucket.consume()
         if not allowed:
             raise RateLimitExceeded(
-                f"Too many tool calls! "
-                f"Please wait {wait:.0f}s before running another tool.",
+                f"Too many tool calls! Please wait {wait:.0f}s before running another tool.",
                 wait_seconds=wait,
             )
 
@@ -161,9 +159,7 @@ class RateLimiter:
             "concurrent_llm_available": self._llm_semaphore._value,
             "daily_spend_usd": round(daily_spend, 4),
             "daily_limit_usd": self._max_daily_spend_usd,
-            "daily_spend_pct": round(
-                (daily_spend / self._max_daily_spend_usd) * 100, 1
-            )
+            "daily_spend_pct": round((daily_spend / self._max_daily_spend_usd) * 100, 1)
             if self._max_daily_spend_usd > 0
             else 0,
         }

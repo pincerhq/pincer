@@ -96,7 +96,10 @@ class TelegramChannel(BaseChannel):
         self._stream_agent = agent
 
     async def request_approval(
-        self, user_id: str, tool_name: str, arguments: dict[str, Any],
+        self,
+        user_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
     ) -> bool:
         """Send an inline-keyboard approval prompt and block until the user responds."""
         assert self._bot is not None
@@ -105,19 +108,18 @@ class TelegramChannel(BaseChannel):
         if len(args_preview) > 200:
             args_preview = args_preview[:200] + "…"
 
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="Approve", callback_data=f"tool_approve:{user_id}"),
-            InlineKeyboardButton(text="Deny", callback_data=f"tool_deny:{user_id}"),
-        ]])
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="Approve", callback_data=f"tool_approve:{user_id}"),
+                    InlineKeyboardButton(text="Deny", callback_data=f"tool_deny:{user_id}"),
+                ]
+            ]
+        )
 
         await self._bot.send_message(
             chat_id=int(user_id),
-            text=(
-                f"*Approval required*\n\n"
-                f"Tool: `{tool_name}`\n"
-                f"Args: `{args_preview}`\n\n"
-                f"Allow this action?"
-            ),
+            text=(f"*Approval required*\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\nAllow this action?"),
             reply_markup=keyboard,
         )
 
@@ -154,9 +156,7 @@ class TelegramChannel(BaseChannel):
         self._dp.include_router(router)
 
         logger.info("Starting Telegram polling...")
-        self._polling_task = asyncio.create_task(
-            self._dp.start_polling(self._bot, handle_signals=False)
-        )
+        self._polling_task = asyncio.create_task(self._dp.start_polling(self._bot, handle_signals=False))
 
     async def stop(self) -> None:
         # Polling runs in a background task; cancel it first so the dispatcher
@@ -192,9 +192,7 @@ class TelegramChannel(BaseChannel):
                     parse_mode=None,
                 )
 
-    async def send_file(
-        self, user_id: str, file_path: str, caption: str = ""
-    ) -> None:
+    async def send_file(self, user_id: str, file_path: str, caption: str = "") -> None:
         """Send a file as a Telegram document."""
         assert self._bot is not None
         from aiogram.types import FSInputFile
@@ -221,9 +219,10 @@ class TelegramChannel(BaseChannel):
                 "Chrome/120.0.0.0 Safari/537.36"
             ),
         }
-        async with aiohttp.ClientSession(headers=headers) as session, session.get(
-            url, timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
+        async with (
+            aiohttp.ClientSession(headers=headers) as session,
+            session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp,
+        ):
             if resp.status != 200:
                 raise RuntimeError(f"HTTP {resp.status} fetching {url}")
             ct = resp.content_type or ""
@@ -231,9 +230,7 @@ class TelegramChannel(BaseChannel):
                 raise RuntimeError(f"Not an image (content-type: {ct})")
             return await resp.read()
 
-    async def send_photo(
-        self, user_id: str, url: str, caption: str = ""
-    ) -> None:
+    async def send_photo(self, user_id: str, url: str, caption: str = "") -> None:
         """Send a photo from a URL inline in the chat.
 
         Tries three strategies in order:
@@ -261,9 +258,7 @@ class TelegramChannel(BaseChannel):
         photo = BufferedInputFile(data, filename=f"image.{ext}")
         await self._bot.send_photo(chat_id=chat_id, photo=photo, caption=caption or None)
 
-    async def send_animation(
-        self, user_id: str, url: str, caption: str = ""
-    ) -> None:
+    async def send_animation(self, user_id: str, url: str, caption: str = "") -> None:
         """Send a GIF/animation from a URL inline in the chat.
 
         Same strategy as send_photo: try raw URL, then download + BufferedInputFile.
@@ -284,9 +279,7 @@ class TelegramChannel(BaseChannel):
         animation = BufferedInputFile(data, filename="animation.gif")
         await self._bot.send_animation(chat_id=chat_id, animation=animation, caption=caption or None)
 
-    async def send_streaming(
-        self, user_id: str, chunks: AsyncIterator[str]
-    ) -> None:
+    async def send_streaming(self, user_id: str, chunks: AsyncIterator[str]) -> None:
         """Send a streaming response, editing the message as chunks arrive.
 
         When the response exceeds Telegram's 4096-char limit, the original
@@ -340,7 +333,9 @@ class TelegramChannel(BaseChannel):
         if self._identity:
             try:
                 return await self._identity.resolve(
-                    ChannelType.TELEGRAM, tg_user_id, display_name=full_name or None,
+                    ChannelType.TELEGRAM,
+                    tg_user_id,
+                    display_name=full_name or None,
                 )
             except Exception:
                 logger.debug("Identity resolution failed for %s", tg_user_id, exc_info=True)
@@ -445,7 +440,8 @@ class TelegramChannel(BaseChannel):
             await self._bot.download_file(file.file_path, data)
 
             pincer_uid = await self._resolve_identity(
-                message.from_user.id, message.from_user.full_name,
+                message.from_user.id,
+                message.from_user.full_name,
             )
             incoming = IncomingMessage(
                 user_id=str(message.from_user.id),
@@ -480,7 +476,8 @@ class TelegramChannel(BaseChannel):
             await self._bot.download_file(file.file_path, data)
 
             pincer_uid = await self._resolve_identity(
-                message.from_user.id, message.from_user.full_name,
+                message.from_user.id,
+                message.from_user.full_name,
             )
             incoming = IncomingMessage(
                 user_id=str(message.from_user.id),
@@ -518,7 +515,8 @@ class TelegramChannel(BaseChannel):
             mime = doc.mime_type or "application/octet-stream"
 
             pincer_uid = await self._resolve_identity(
-                message.from_user.id, message.from_user.full_name,
+                message.from_user.id,
+                message.from_user.full_name,
             )
             image_mimes = {"image/jpeg", "image/png", "image/gif", "image/webp"}
             if mime in image_mimes:
@@ -577,7 +575,8 @@ class TelegramChannel(BaseChannel):
                 return
 
             pincer_uid = await self._resolve_identity(
-                message.from_user.id, message.from_user.full_name,
+                message.from_user.id,
+                message.from_user.full_name,
             )
             incoming = IncomingMessage(
                 user_id=user_id,

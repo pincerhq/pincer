@@ -43,7 +43,11 @@ async def test_sends_url_image():
     data = json.loads(output)
     assert data["status"] == "success"
     assert data["images_sent"] == 1
-    channel.send_photo.assert_called_once_with("user123", "https://cdn.fal.ai/img.jpg", "", )
+    channel.send_photo.assert_called_once_with(
+        "user123",
+        "https://cdn.fal.ai/img.jpg",
+        "",
+    )
 
 
 @pytest.mark.asyncio
@@ -110,6 +114,4 @@ async def test_discord_thread_routing():
     data = json.loads(output)
     assert data["status"] == "success"
     # Should pass thread_id kwarg
-    discord_channel.send_photo.assert_called_once_with(
-        "u1", "https://cdn.fal.ai/img.jpg", "", thread_id="111222333"
-    )
+    discord_channel.send_photo.assert_called_once_with("u1", "https://cdn.fal.ai/img.jpg", "", thread_id="111222333")

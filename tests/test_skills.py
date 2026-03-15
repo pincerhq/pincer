@@ -83,9 +83,7 @@ def test_manifest_name_matches_dir(skill_name: str) -> None:
     """manifest.name == directory name."""
     manifest_path = SKILLS_DIR / skill_name / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    assert manifest["name"] == skill_name, (
-        f"manifest.name '{manifest['name']}' should match dir '{skill_name}'"
-    )
+    assert manifest["name"] == skill_name, f"manifest.name '{manifest['name']}' should match dir '{skill_name}'"
 
 
 @pytest.mark.parametrize("skill_name", SKILL_NAMES)
@@ -108,9 +106,7 @@ def test_tool_functions_exist(skill_name: str) -> None:
     for tool in manifest.get("tools", []):
         tool_name = tool["name"]
         pattern = f"def {tool_name}("
-        assert pattern in source, (
-            f"{skill_name}: tool '{tool_name}' should have def {tool_name}( in skill.py"
-        )
+        assert pattern in source, f"{skill_name}: tool '{tool_name}' should have def {tool_name}( in skill.py"
 
 
 # ── Functional tests for specific skills ──

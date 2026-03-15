@@ -164,7 +164,8 @@ async def execute(
         env = _build_env(config, temp_dir)
 
         proc = await asyncio.create_subprocess_exec(
-            sys.executable, str(runner_path),
+            sys.executable,
+            str(runner_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -172,9 +173,7 @@ async def execute(
         )
 
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=config.timeout
-            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=config.timeout)
         except TimeoutError:
             proc.kill()
             await proc.wait()

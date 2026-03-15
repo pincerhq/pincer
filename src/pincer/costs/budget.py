@@ -29,9 +29,7 @@ class ConversationBudget:
     conversation_id: str
     spent_usd: float = 0.0
     limit_usd: float = 1.0
-    started_at: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
-    )
+    started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 @dataclass
@@ -112,14 +110,8 @@ class BudgetEnforcer:
 
             if conversation_id:
                 conv = self._conversations.get(conversation_id)
-                if (
-                    conv
-                    and conv.spent_usd + estimated_cost > conv.limit_usd
-                ):
-                    raise BudgetExhausted(
-                        f"Conversation budget reached: "
-                        f"${conv.spent_usd:.2f}/${conv.limit_usd:.2f}"
-                    )
+                if conv and conv.spent_usd + estimated_cost > conv.limit_usd:
+                    raise BudgetExhausted(f"Conversation budget reached: ${conv.spent_usd:.2f}/${conv.limit_usd:.2f}")
 
     async def record_cost(
         self,
@@ -130,9 +122,7 @@ class BudgetEnforcer:
         """Record a cost and return updated budget status."""
         async with self._lock:
             self._reset_if_new_day()
-            self._daily_spend[user_id] = (
-                self._daily_spend.get(user_id, 0.0) + cost_usd
-            )
+            self._daily_spend[user_id] = self._daily_spend.get(user_id, 0.0) + cost_usd
             daily = self._daily_spend[user_id]
 
             if conversation_id:
@@ -145,10 +135,7 @@ class BudgetEnforcer:
 
             pct = daily / self._daily_limit if self._daily_limit > 0 else 0
 
-            if (
-                pct >= self._warning_pct
-                and not self._warning_sent.get(user_id)
-            ):
+            if pct >= self._warning_pct and not self._warning_sent.get(user_id):
                 self._warning_sent[user_id] = True
                 if self.notify:
                     await self.notify(
@@ -161,28 +148,20 @@ class BudgetEnforcer:
             is_downgraded = pct >= self._downgrade_pct
             self._downgraded[user_id] = is_downgraded
 
-            conv = (
-                self._conversations.get(conversation_id)
-                if conversation_id
-                else None
-            )
+            conv = self._conversations.get(conversation_id) if conversation_id else None
             return BudgetStatus(
                 daily_spent=daily,
                 daily_limit=self._daily_limit,
                 daily_pct=pct,
                 conversation_spent=conv.spent_usd if conv else 0.0,
-                conversation_limit=(
-                    conv.limit_usd if conv else self._conversation_limit
-                ),
+                conversation_limit=(conv.limit_usd if conv else self._conversation_limit),
                 active_model="",
                 is_downgraded=is_downgraded,
                 warning_sent=self._warning_sent.get(user_id, False),
                 budget_exhausted=pct >= 1.0,
             )
 
-    async def get_model_for_budget(
-        self, user_id: str, preferred_model: str
-    ) -> str:
+    async def get_model_for_budget(self, user_id: str, preferred_model: str) -> str:
         """Return a cheaper model if user is near their budget limit."""
         async with self._lock:
             self._reset_if_new_day()
@@ -196,9 +175,7 @@ class BudgetEnforcer:
             if not current_tier:
                 return preferred_model
 
-            provider = (
-                "anthropic" if "claude" in preferred_model else "openai"
-            )
+            provider = "anthropic" if "claude" in preferred_model else "openai"
             alternatives = [
                 m
                 for m in MODEL_COST_TIERS
@@ -206,9 +183,7 @@ class BudgetEnforcer:
                 and m["cost_per_1k"] < current_tier["cost_per_1k"]
             ]
             if alternatives:
-                return min(alternatives, key=lambda m: m["cost_per_1k"])[
-                    "model"
-                ]
+                return min(alternatives, key=lambda m: m["cost_per_1k"])["model"]
             return preferred_model
 
     async def increase_budget(self, user_id: str, new_limit: float) -> str:
@@ -219,10 +194,7 @@ class BudgetEnforcer:
         self._daily_limit = new_limit
         self._warning_sent[user_id] = False
         self._downgraded[user_id] = False
-        return (
-            f"Daily budget increased from ${old:.2f} to ${new_limit:.2f}. "
-            f"Back to premium model."
-        )
+        return f"Daily budget increased from ${old:.2f} to ${new_limit:.2f}. Back to premium model."
 
     async def get_status(self, user_id: str) -> dict[str, Any]:
         async with self._lock:
@@ -231,11 +203,7 @@ class BudgetEnforcer:
             return {
                 "daily_spent_usd": round(daily, 4),
                 "daily_limit_usd": self._daily_limit,
-                "daily_pct": round(
-                    (daily / self._daily_limit) * 100, 1
-                )
-                if self._daily_limit > 0
-                else 0,
+                "daily_pct": round((daily / self._daily_limit) * 100, 1) if self._daily_limit > 0 else 0,
                 "is_downgraded": self._downgraded.get(user_id, False),
             }
 

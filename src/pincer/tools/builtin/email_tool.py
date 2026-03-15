@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Regex for parsing IMAP LIST response lines:  (\Flags) "delimiter" "FolderName"
 _LIST_RE = re.compile(rb'\(([^)]*)\)\s+"(.)"\s+"?([^"]*)"?')
 # Literal size in LIST response, e.g. {12} (may have leading/trailing space)
-_LIST_LITERAL_RE = re.compile(rb'^\s*\{(\d+)\}\s*$')
+_LIST_LITERAL_RE = re.compile(rb"^\s*\{(\d+)\}\s*$")
 
 _TRASH_ATTRS = {"\\trash"}
 _SPAM_ATTRS = {"\\junk"}
@@ -35,6 +35,7 @@ _SPAM_FALLBACKS = ["[Gmail]/Spam", "Spam", "Junk", "Junk Email", "Bulk Mail"]
 
 
 # ── IMAP Helpers ─────────────────────────────────
+
 
 async def _get_imap_client():  # type: ignore[no-untyped-def]
     """Create and authenticate an async IMAP client."""
@@ -95,9 +96,7 @@ def _parse_list_response(data: list[Any]) -> list[tuple[list[str], str]]:
             if m:
                 attrs = m.group(1).decode(errors="replace").split()
                 raw_name = m.group(3).decode(errors="replace").strip('"')
-                name_is_literal_size = bool(
-                    raw_name and _LIST_LITERAL_RE.match(raw_name.strip().encode())
-                )
+                name_is_literal_size = bool(raw_name and _LIST_LITERAL_RE.match(raw_name.strip().encode()))
                 if raw_name and not name_is_literal_size:
                     results.append((attrs, raw_name))
                     pending_attrs = None
@@ -120,11 +119,13 @@ def _parse_list_response(data: list[Any]) -> list[tuple[list[str], str]]:
 
 
 async def _find_folder_by_attr(
-    client: Any, target_attrs: set[str], fallbacks: list[str],
+    client: Any,
+    target_attrs: set[str],
+    fallbacks: list[str],
 ) -> str | None:
     """Find a special-use folder by IMAP attributes, falling back to common names."""
     try:
-        status, data = await client.list('""', '*')
+        status, data = await client.list('""', "*")
         if status != "OK":
             return fallbacks[0] if fallbacks else None
 
@@ -176,6 +177,7 @@ def _parse_search_uids(data: list[Any]) -> list[str]:
 
 # ── Tool: email_check ────────────────────────────
 
+
 async def email_check(limit: int = 10, folder: str = "INBOX", status: str = "UNSEEN") -> str:
     """Check emails in a folder. Returns a formatted summary string with UIDs."""
     client = None
@@ -203,19 +205,15 @@ async def email_check(limit: int = 10, folder: str = "INBOX", status: str = "UNS
 
         for uid in reversed(recent_uids):
             fetch_status, fetch_data = await client.uid(
-                "fetch", uid,
+                "fetch",
+                uid,
                 "(BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE MESSAGE-ID)])",
             )
             if fetch_status == "OK" and fetch_data:
                 raw = _extract_fetch_literal(fetch_data)
                 if raw:
                     h = _parse_email_headers(raw)
-                    lines.append(
-                        f"- UID: {uid}\n"
-                        f"  From: {h['from']}\n"
-                        f"  Subject: {h['subject']}\n"
-                        f"  Date: {h['date']}"
-                    )
+                    lines.append(f"- UID: {uid}\n  From: {h['from']}\n  Subject: {h['subject']}\n  Date: {h['date']}")
 
         return "\n".join(lines)
 
@@ -229,6 +227,7 @@ async def email_check(limit: int = 10, folder: str = "INBOX", status: str = "UNS
 
 
 # ── Tool: email_send ─────────────────────────────
+
 
 async def email_send(to: str, subject: str, body: str, cc: str = "") -> str:
     """Send an email via SMTP. Returns a status message."""
@@ -264,8 +263,12 @@ async def email_send(to: str, subject: str, body: str, cc: str = "") -> str:
 
 # ── Tool: email_search ───────────────────────────
 
+
 async def email_search(
-    query: str, sender: str = "", days_back: int = 30, limit: int = 10,
+    query: str,
+    sender: str = "",
+    days_back: int = 30,
+    limit: int = 10,
     folder: str = "INBOX",
 ) -> str:
     """Search emails by keyword/sender. Returns formatted results with UIDs."""
@@ -274,9 +277,7 @@ async def email_search(
         client = await _get_imap_client()
         await client.select(_quote_mailbox(folder))
 
-        since_date = (
-            datetime.now(UTC) - timedelta(days=days_back)
-        ).strftime("%d-%b-%Y")
+        since_date = (datetime.now(UTC) - timedelta(days=days_back)).strftime("%d-%b-%Y")
         search_parts = [f"SINCE {since_date}"]
         if sender:
             search_parts.append(f'FROM "{sender}"')
@@ -295,19 +296,15 @@ async def email_search(
 
         for uid in reversed(recent_uids):
             fetch_status, fetch_data = await client.uid(
-                "fetch", uid,
+                "fetch",
+                uid,
                 "(BODY.PEEK[HEADER.FIELDS (FROM TO SUBJECT DATE)])",
             )
             if fetch_status == "OK" and fetch_data:
                 raw = _extract_fetch_literal(fetch_data)
                 if raw:
                     h = _parse_email_headers(raw)
-                    lines.append(
-                        f"- UID: {uid}\n"
-                        f"  From: {h['from']}\n"
-                        f"  Subject: {h['subject']}\n"
-                        f"  Date: {h['date']}"
-                    )
+                    lines.append(f"- UID: {uid}\n  From: {h['from']}\n  Subject: {h['subject']}\n  Date: {h['date']}")
 
         return "\n".join(lines)
 
@@ -321,6 +318,7 @@ async def email_search(
 
 
 # ── Tool: email_read ─────────────────────────────
+
 
 async def email_read(uid: str, folder: str = "INBOX", max_chars: int = 4000) -> str:
     """Read the full content of an email by UID."""
@@ -360,12 +358,13 @@ async def email_read(uid: str, folder: str = "INBOX", max_chars: int = 4000) -> 
 
 # ── Tool: email_list_folders ─────────────────────
 
+
 async def email_list_folders() -> str:
     """List all available IMAP folders."""
     client = None
     try:
         client = await _get_imap_client()
-        status, data = await client.list('""', '*')
+        status, data = await client.list('""', "*")
         if status != "OK":
             return f"Failed to list folders: {status}"
 
@@ -431,6 +430,7 @@ async def email_mark(uids: str, action: str, folder: str = "INBOX") -> str:
 
 # ── Tool: email_move ─────────────────────────────
 
+
 async def email_move(uids: str, destination: str, folder: str = "INBOX") -> str:
     """Move one or more emails (comma-separated UIDs) to a destination folder."""
     client = None
@@ -461,6 +461,7 @@ async def email_move(uids: str, destination: str, folder: str = "INBOX") -> str:
 
 
 # ── Tool: email_trash ────────────────────────────
+
 
 async def email_trash(uids: str, folder: str = "INBOX") -> str:
     """Move one or more emails (comma-separated UIDs) to the Trash folder."""
@@ -497,6 +498,7 @@ async def email_trash(uids: str, folder: str = "INBOX") -> str:
 
 
 # ── Tool: email_empty_folder ─────────────────────
+
 
 async def email_empty_folder(folder: str) -> str:
     """Empty all messages from a folder (e.g., Spam, Trash). Cannot empty INBOX."""

@@ -85,27 +85,19 @@ class BaseChannel(ABC):
         """Send a message to a user."""
         ...
 
-    async def send_file(
-        self, user_id: str, file_path: str, caption: str = ""
-    ) -> None:
+    async def send_file(self, user_id: str, file_path: str, caption: str = "") -> None:
         """Send a file to a user. Default implementation sends a text link."""
         await self.send(user_id, f"[File: {file_path}] {caption}".strip())
 
-    async def send_photo(
-        self, user_id: str, url: str, caption: str = ""
-    ) -> None:
+    async def send_photo(self, user_id: str, url: str, caption: str = "") -> None:
         """Send a photo from a URL. Default implementation sends a text link."""
         await self.send(user_id, f"{caption}\n{url}".strip())
 
-    async def send_animation(
-        self, user_id: str, url: str, caption: str = ""
-    ) -> None:
+    async def send_animation(self, user_id: str, url: str, caption: str = "") -> None:
         """Send an animation/GIF from a URL. Default implementation sends a text link."""
         await self.send(user_id, f"{caption}\n{url}".strip())
 
-    async def send_streaming(
-        self, user_id: str, chunks: AsyncIterator[str]
-    ) -> None:
+    async def send_streaming(self, user_id: str, chunks: AsyncIterator[str]) -> None:
         """Send a streaming response by progressively updating the message.
         Default implementation collects all chunks and sends as one message."""
         full = ""

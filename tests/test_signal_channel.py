@@ -104,9 +104,7 @@ async def test_allowlist_blocks_unknown_dm() -> None:
     ch._handler = handler
     ch._client = AsyncMock()
 
-    msg = SignalMessage(
-        source="+499999999999", timestamp=1, text="hi", is_group=False
-    )
+    msg = SignalMessage(source="+499999999999", timestamp=1, text="hi", is_group=False)
     await ch._process_signal_message(msg)
 
     handler.assert_not_awaited()
@@ -123,9 +121,7 @@ async def test_allowlist_allows_known_dm() -> None:
     mock_client = AsyncMock()
     ch._client = mock_client
 
-    msg = SignalMessage(
-        source="+491111111111", timestamp=2, text="hi", is_group=False
-    )
+    msg = SignalMessage(source="+491111111111", timestamp=2, text="hi", is_group=False)
     await ch._process_signal_message(msg)
 
     handler.assert_awaited_once()
