@@ -1825,6 +1825,8 @@ dev = [
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
     { name = "ruff" },
+    { name = "types-croniter" },
+    { name = "types-qrcode" },
 ]
 image = [
     { name = "fal-client" },
@@ -1900,6 +1902,8 @@ requires-dist = [
     { name = "tavily-python", marker = "extra == 'tavily'", specifier = ">=0.5.0" },
     { name = "twilio", marker = "extra == 'voice'", specifier = ">=9.0" },
     { name = "typer", extras = ["all"], specifier = ">=0.12.0" },
+    { name = "types-croniter", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "types-qrcode", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=12.0" },
     { name = "youtube-transcript-api", marker = "extra == 'skills'" },
@@ -2826,6 +2830,27 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f5/24/cb09efec5cc954f7f9b930bf8279447d24618bb6758d4f6adf2574c41780/typer-0.24.1.tar.gz", hash = "sha256:e39b4732d65fbdcde189ae76cf7cd48aeae72919dea1fdfc16593be016256b45", size = 118613, upload-time = "2026-02-21T16:54:40.609Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/4a/91/48db081e7a63bb37284f9fbcefda7c44c277b18b0e13fbc36ea2335b71e6/typer-0.24.1-py3-none-any.whl", hash = "sha256:112c1f0ce578bfb4cab9ffdabc68f031416ebcc216536611ba21f04e9aa84c9e", size = 56085, upload-time = "2026-02-21T16:54:41.616Z" },
+]
+
+[[package]]
+name = "types-croniter"
+version = "6.0.0.20250809"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/35/ac/7b26a9b19cc2b137293b14af71402ba83d13674c208b141474b6887465ae/types_croniter-6.0.0.20250809.tar.gz", hash = "sha256:c829295d4d65eaddcfafec905b0fbab59e72c3c91ee934a4d504dcafad79ff95", size = 11745, upload-time = "2025-08-09T03:14:10.729Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/99/e8e40592fbecb6671b32e4dab4cca2a1d4fa7d5b2f54aece134ccb42e839/types_croniter-6.0.0.20250809-py3-none-any.whl", hash = "sha256:d9f53f3e837eb6af509e2090fd2f5bb29b38425dd78f77d7b3bf37ccd2b2bf93", size = 9712, upload-time = "2025-08-09T03:14:09.966Z" },
+]
+
+[[package]]
+name = "types-qrcode"
+version = "8.2.0.20250914"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pillow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a6/1b/b662d2baa355df5739ca084b0d959a5ce8d0e1bea742ee3e027372f89a56/types_qrcode-8.2.0.20250914.tar.gz", hash = "sha256:fc82e0112095c60c0ef3e403ab2a604a9ae1929c70fb0e708bc1ebfe8ca5c45e", size = 14988, upload-time = "2025-09-14T02:56:59.106Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/46/47/9105e9949a83789b6982bcbab4874ce7804f74fd27e6ab83d0186805b0aa/types_qrcode-8.2.0.20250914-py3-none-any.whl", hash = "sha256:6b992d62f05c2df0422507c5307ddd969c0a4d2ab23863c4217f96226710c308", size = 19849, upload-time = "2025-09-14T02:56:58.353Z" },
 ]
 
 [[package]]
