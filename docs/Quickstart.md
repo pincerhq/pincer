@@ -81,6 +81,7 @@ Send these to your bot via Telegram to see what it can do:
 | `What can you do?` | Lists all available tools and skills |
 | `Search for the latest news about AI agents` | Web search + summarization |
 | `What's on my calendar today?` | Reads Google Calendar (after OAuth setup) |
+| `Schedule a meeting tomorrow at 2pm` | Creates calendar event; agent returns direct link for verification |
 | `Summarize my unread emails` | Reads Gmail inbox (after OAuth setup) |
 | `Remind me to call the dentist tomorrow at 9am` | Creates a scheduled reminder |
 | `Run: ls -la` | Executes a shell command (asks for approval first) |
