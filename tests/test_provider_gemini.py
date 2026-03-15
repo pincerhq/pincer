@@ -72,9 +72,11 @@ async def test_generate_raises_when_no_candidates():
     mock_client = MagicMock()
     mock_client.aio.models.generate_content = AsyncMock(return_value=response)
 
-    with patch.dict("sys.modules", _make_genai_mock(mock_client)):
-        with pytest.raises(RuntimeError, match="no candidates"):
-            await provider.generate(ImageRequest(prompt="x"))
+    with (
+        patch.dict("sys.modules", _make_genai_mock(mock_client)),
+        pytest.raises(RuntimeError, match="no candidates"),
+    ):
+        await provider.generate(ImageRequest(prompt="x"))
 
 
 def test_is_available_false_without_key():

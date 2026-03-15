@@ -34,9 +34,11 @@ async def test_generate_raises_when_no_images():
     mock_fal = MagicMock()
     mock_fal.run_async = AsyncMock(return_value={"images": []})
 
-    with patch.dict("sys.modules", {"fal_client": mock_fal}):
-        with pytest.raises(RuntimeError, match="no images"):
-            await provider.generate(ImageRequest(prompt="a sunset"))
+    with (
+        patch.dict("sys.modules", {"fal_client": mock_fal}),
+        pytest.raises(RuntimeError, match="no images"),
+    ):
+        await provider.generate(ImageRequest(prompt="a sunset"))
 
 
 def test_is_available_false_without_key():
