@@ -6,6 +6,13 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ## [0.7.3] — 2026-03-15
 
+### Calendar Silent Failure Fix
+- `calendar_create`: Strict response validation — success only when API returns both `id` and `htmlLink`; otherwise returns error
+- IANA timezone handling: naive datetimes use `settings.timezone`; fixed offsets (e.g. UTC+01:00) fall back to IANA; ZoneInfo preserved
+- Success message includes `calendar_id` when non-primary for auditability
+- Tool description and system prompt updated so agent must include event link in response and pass errors through
+- New tests: response validation, timezone edge cases, non-primary calendar
+
 ### Image Generation (Sprint 8)
 - New `src/pincer/image/` module: `ImageProviderRouter`, `FalImageProvider`, `GeminiImageProvider`
 - Primary provider: fal.ai `fal-ai/nano-banana-2` ($0.003/image); fallback: Gemini `gemini-2.5-flash-image` ($0.004/image)

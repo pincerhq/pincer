@@ -5,6 +5,11 @@ Provides calendar_today(), calendar_week(), calendar_create().
 Authentication via InstalledAppFlow; tokens stored at data/google_token.json.
 
 Tools are registered in cli.py via tools.register().
+
+calendar_create behavior:
+- Strict response validation: success only when API returns both id and htmlLink
+- IANA timezone: naive datetimes use settings.timezone; fixed offsets fall back to IANA
+- Success message includes htmlLink and calendar_id (when non-primary) for verification
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pincer.config import get_settings
 
@@ -197,6 +203,21 @@ async def calendar_week(calendar_id: str = "primary") -> str:
 
 # ── Tool: calendar_create ────────────────────────
 
+def _resolve_timezone(start_dt: datetime, settings_tz: str) -> str:
+    """Resolve IANA timezone for Google Calendar API.
+
+    Google expects IANA names (e.g. Europe/Berlin). Fixed offsets (UTC+01:00)
+    are not ideal, so we fall back to settings.timezone for those.
+    """
+    tzinfo = start_dt.tzinfo
+    if tzinfo is None:
+        return settings_tz
+    if hasattr(tzinfo, "key"):  # ZoneInfo
+        return tzinfo.key
+    # Fixed offset (e.g. datetime.timezone) — use IANA from settings
+    return settings_tz
+
+
 async def calendar_create(
     title: str,
     start_time: str,
@@ -205,13 +226,22 @@ async def calendar_create(
     location: str = "",
     calendar_id: str = "primary",
 ) -> str:
-    """Create a new Google Calendar event. Returns confirmation string."""
+    """Create a new Google Calendar event. Returns confirmation string.
+
+    execute() is blocking; the tool waits for the full API response before
+    returning, so there is no fire-and-forget behavior.
+    """
     try:
         service = _get_service()
         settings = get_settings()
         start_dt = datetime.fromisoformat(start_time)
+
+        # Naive datetime: interpret in user's timezone
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=ZoneInfo(settings.timezone))
+
         end_dt = start_dt + timedelta(minutes=duration_minutes)
-        tz = str(start_dt.tzinfo) if start_dt.tzinfo else settings.timezone
+        tz = _resolve_timezone(start_dt, settings.timezone)
 
         event_body: dict[str, Any] = {
             "summary": title,
@@ -223,18 +253,37 @@ async def calendar_create(
         if location:
             event_body["location"] = location
 
+        logger.debug(
+            "calendar_create event_body: start=%s end=%s timeZone=%s",
+            event_body["start"],
+            event_body["end"],
+            tz,
+        )
+
+        # execute() blocks until full response; no fire-and-forget
         created = (
             service.events()
             .insert(calendarId=calendar_id, body=event_body)
             .execute()
         )
 
+        event_id = created.get("id", "")
         link = created.get("htmlLink", "")
+        if not event_id or not link:
+            return (
+                "Error: Calendar API did not return event ID or link. "
+                "Creation may have failed."
+            )
+
         logger.info("Calendar event created: %s at %s", title, start_dt.isoformat())
-        return (
-            f"Event created: '{title}' on {start_dt.strftime('%B %d at %H:%M')}\n"
-            f"Link: {link}"
-        )
+
+        lines = [
+            f"Event created: '{title}' on {start_dt.strftime('%B %d at %H:%M')}",
+            f"Link: {link}",
+        ]
+        if calendar_id != "primary":
+            lines.append(f"Calendar: {calendar_id}")
+        return "\n".join(lines)
 
     except FileNotFoundError as e:
         return str(e)
