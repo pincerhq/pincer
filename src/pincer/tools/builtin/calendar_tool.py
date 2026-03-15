@@ -17,9 +17,9 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from pincer.config import get_settings
-from zoneinfo import ZoneInfo
 
 logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
 
