@@ -812,7 +812,9 @@ async def _run_agent(settings: Settings) -> None:
 
         # Special commands
         if incoming.text == "/clear":
-            session = await session_mgr.get_or_create(incoming.user_id, incoming.channel)
+            session = await session_mgr.get_or_create(
+                incoming.user_id, incoming.channel, pincer_user_id=incoming.pincer_user_id or ""
+            )
             await session_mgr.clear(session)
             return "Conversation cleared."
 
@@ -967,10 +969,12 @@ async def _run_agent(settings: Settings) -> None:
             text = f"{file_context}\n\n{text}" if text else file_context
 
         response = await agent.handle_message(
-            user_id=incoming.user_id,
+            user_id=incoming.pincer_user_id or incoming.user_id,
             channel=incoming.channel,
             text=text,
             images=incoming.images if incoming.images else None,
+            pincer_user_id=incoming.pincer_user_id or "",
+            channel_user_id=incoming.user_id,
         )
 
         cost_str = f"\n\n`${response.cost_usd:.4f}`" if response.cost_usd > 0 else ""
@@ -1030,6 +1034,7 @@ async def _run_agent(settings: Settings) -> None:
             from pincer.channels.whatsapp import WhatsAppChannel
 
             wa = WhatsAppChannel(settings)
+            wa.set_identity_resolver(identity)
             await wa.start(on_message)
             channels.append(wa)
             channel_map[wa.name] = wa

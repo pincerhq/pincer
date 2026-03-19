@@ -143,6 +143,22 @@ class TestIdentityResolver:
         """seed_from_config() with empty config should be a no-op."""
         await resolver.seed_from_config()
 
+    async def test_phone_number_normalization(self, tmp_path):
+        """+49 123 4567890 and 491234567890 should resolve to same identity."""
+        db_path = tmp_path / "phone_norm.db"
+        r = IdentityResolver(
+            db_path,
+            identity_map_config="telegram:12345=whatsapp:+491234567890",
+        )
+        await r.ensure_table()
+        await r.seed_from_config()
+
+        # Resolve with different phone formats — should all link to same pincer_user_id
+        uid1 = await r.resolve(ChannelType.WHATSAPP, "491234567890")
+        uid2 = await r.resolve(ChannelType.WHATSAPP, "+491234567890")
+        uid3 = await r.resolve(ChannelType.WHATSAPP, "+49 123 456 7890")
+        assert uid1 == uid2 == uid3
+
     async def test_seed_from_config_multiple_mappings(self, tmp_path):
         """seed_from_config() should handle multiple comma-separated mappings."""
         db_path = tmp_path / "seed_multi.db"

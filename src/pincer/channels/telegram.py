@@ -380,12 +380,18 @@ class TelegramChannel(BaseChannel):
             if not message.from_user or not self._is_allowed(message.from_user.id):
                 return
             if self._handler:
+                pincer_uid = await self._resolve_identity(
+                    message.from_user.id,
+                    message.from_user.full_name,
+                )
                 await self._handler(
                     IncomingMessage(
                         user_id=str(message.from_user.id),
                         channel="telegram",
                         text="/clear",
                         raw=message,
+                        pincer_user_id=pincer_uid,
+                        channel_type=ChannelType.TELEGRAM,
                     )
                 )
             await message.answer("Conversation cleared.")
@@ -395,12 +401,18 @@ class TelegramChannel(BaseChannel):
             if not message.from_user or not self._is_allowed(message.from_user.id):
                 return
             if self._handler:
+                pincer_uid = await self._resolve_identity(
+                    message.from_user.id,
+                    message.from_user.full_name,
+                )
                 response = await self._handler(
                     IncomingMessage(
                         user_id=str(message.from_user.id),
                         channel="telegram",
                         text="/cost",
                         raw=message,
+                        pincer_user_id=pincer_uid,
+                        channel_type=ChannelType.TELEGRAM,
                     )
                 )
                 await message.answer(response)
@@ -555,6 +567,10 @@ class TelegramChannel(BaseChannel):
             await self._bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
             user_id = str(message.from_user.id)
+            pincer_uid = await self._resolve_identity(
+                message.from_user.id,
+                message.from_user.full_name,
+            )
 
             # Use streaming if agent is available
             if self._stream_agent is not None:
@@ -562,9 +578,11 @@ class TelegramChannel(BaseChannel):
 
                 async def text_chunks() -> AsyncIterator[str]:
                     async for chunk in self._stream_agent.handle_message_stream(
-                        user_id=user_id,
+                        user_id=pincer_uid or user_id,
                         channel="telegram",
                         text=message.text,
+                        pincer_user_id=pincer_uid,
+                        channel_user_id=user_id,
                     ):
                         if chunk.type == StreamEventType.TEXT:
                             yield chunk.content
@@ -574,10 +592,6 @@ class TelegramChannel(BaseChannel):
                 await self.send_streaming(user_id, text_chunks())
                 return
 
-            pincer_uid = await self._resolve_identity(
-                message.from_user.id,
-                message.from_user.full_name,
-            )
             incoming = IncomingMessage(
                 user_id=user_id,
                 channel="telegram",

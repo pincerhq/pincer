@@ -355,6 +355,37 @@ class TestWhatsAppRouting:
         ch._extract_message.assert_not_called()
         assert "echo-msg-id" not in ch._recent_sent_ids
 
+    async def test_self_chat_uses_phone_for_identity(self, routing_channel):
+        """In self-chat with LID as sender, identity.resolve uses own_jid (phone), not LID.
+
+        PINCER_IDENTITY_MAP uses whatsapp:491234567890 (phone). When sender is LID,
+        we must resolve with phone so cross-channel mapping succeeds.
+        """
+        ch = routing_channel
+        mock_identity = AsyncMock()
+        mock_identity.resolve.return_value = "usr_linked_identity"
+        ch._identity = mock_identity
+
+        lid_user = "207855026221128"
+        event, _, _ = _make_message_event(
+            from_me=True,
+            chat_user=lid_user,
+            sender_user=lid_user,
+            is_group=False,
+            chat_jid=f"{lid_user}@lid",
+            chat_server="lid",
+            sender_server="lid",
+        )
+        jid_effect = [f"{lid_user}@lid", f"{lid_user}@lid"]
+        with patch("pincer.channels.whatsapp.Jid2String", side_effect=jid_effect):
+            await ch._on_message(MagicMock(), event)
+
+        mock_identity.resolve.assert_called_once_with(
+            ChannelType.WHATSAPP, OWNER_PHONE
+        )
+        call_kwargs = ch._extract_message.call_args[1]
+        assert call_kwargs["pincer_user_id"] == "usr_linked_identity"
+
 
 class TestIsSelfChat:
     def test_self_chat_true_when_chat_user_is_owner(self):

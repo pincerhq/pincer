@@ -147,17 +147,23 @@ class Agent:
         channel: str,
         text: str,
         images: list[tuple[bytes, str]] | None = None,
+        pincer_user_id: str = "",
+        channel_user_id: str | None = None,
     ) -> AgentResponse:
         """
         Main entry point: process a user message and return agent's response.
 
         Args:
-            user_id: Unique user identifier
+            user_id: Unique user identifier (canonical for session/memory)
             channel: Channel name (telegram, whatsapp, etc.)
             text: User's message text
             images: Optional list of (raw_bytes, media_type) tuples
+            pincer_user_id: Cross-channel identity; when set, used for session key and memory
+            channel_user_id: Channel-specific ID for approval callback (e.g. Telegram chat_id)
         """
-        session = await self._sessions.get_or_create(user_id, channel)
+        canonical_id = pincer_user_id or user_id
+        approval_id = channel_user_id if channel_user_id is not None else user_id
+        session = await self._sessions.get_or_create(user_id, channel, pincer_user_id=pincer_user_id)
 
         # Build user message
         img_contents: list[ImageContent] = []
@@ -177,7 +183,7 @@ class Agent:
             await self._summarizer.maybe_summarize(session)
 
         # Build system prompt with relevant memories
-        system_prompt = await self._build_system_prompt(user_id, text)
+        system_prompt = await self._build_system_prompt(canonical_id, text)
 
         # Get tool schemas
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
@@ -263,7 +269,7 @@ class Agent:
                 iteration_had_error = False
                 for tool_call in response.tool_calls:
                     tool_calls_count += 1
-                    result = await self._execute_tool(tool_call, user_id, channel)
+                    result = await self._execute_tool(tool_call, approval_id, channel)
 
                     result_msg = LLMMessage(
                         role=MessageRole.TOOL_RESULT,
@@ -311,7 +317,7 @@ class Agent:
         if self._memory and final_text:
             try:
                 await self._memory.store_memory(
-                    user_id=user_id,
+                    user_id=canonical_id,
                     content=f"User asked: {text[:200]}\nAssistant replied: {final_text[:300]}",
                     category="exchange",
                 )
@@ -331,6 +337,8 @@ class Agent:
         channel: str,
         text: str,
         images: list[tuple[bytes, str]] | None = None,
+        pincer_user_id: str = "",
+        channel_user_id: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """
         Process a user message, yielding StreamChunks as the response is generated.
@@ -338,7 +346,9 @@ class Agent:
         Tool-call iterations use complete() (non-streaming). Only the final
         text response is streamed token-by-token.
         """
-        session = await self._sessions.get_or_create(user_id, channel)
+        canonical_id = pincer_user_id or user_id
+        approval_id = channel_user_id if channel_user_id is not None else user_id
+        session = await self._sessions.get_or_create(user_id, channel, pincer_user_id=pincer_user_id)
 
         img_contents: list[ImageContent] = []
         if images:
@@ -355,7 +365,7 @@ class Agent:
         if self._summarizer:
             await self._summarizer.maybe_summarize(session)
 
-        system_prompt = await self._build_system_prompt(user_id, text)
+        system_prompt = await self._build_system_prompt(canonical_id, text)
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
         logger.debug(
             "Tools available: %s",
@@ -419,7 +429,7 @@ class Agent:
             iteration_had_error = False
             for tool_call in response.tool_calls:
                 yield StreamChunk(StreamEventType.TOOL_START, f"Using {tool_call.name}...")
-                result = await self._execute_tool(tool_call, user_id, channel)
+                result = await self._execute_tool(tool_call, approval_id, channel)
                 result_msg = LLMMessage(
                     role=MessageRole.TOOL_RESULT,
                     content=result.content,

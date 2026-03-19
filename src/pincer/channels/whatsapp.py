@@ -50,6 +50,7 @@ if TYPE_CHECKING:
     )
 
     from pincer.config import Settings
+    from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,12 @@ class WhatsAppChannel(BaseChannel):
         self._recent_sent_ids: set[str] = set()
         self._recent_sent_ids_order: deque[str] = deque()
         self._max_recent_sent_ids = 100
+
+        self._identity: IdentityResolver | None = None
+
+    def set_identity_resolver(self, resolver: IdentityResolver) -> None:
+        """Set the identity resolver for cross-channel user mapping."""
+        self._identity = resolver
 
     @property
     def name(self) -> str:
@@ -324,7 +331,28 @@ class WhatsAppChannel(BaseChannel):
                 )
                 return
 
-            incoming = await self._extract_message(client, event, sender_phone, chat_jid, msg)
+            # For identity resolution: use phone number in self-chat so PINCER_IDENTITY_MAP
+            # (which uses whatsapp:491234567890) matches; sender_phone can be LID in self-chat.
+            identity_resolve_id = (
+                self._own_jid if (is_self_chat and self._own_jid) else sender_phone
+            )
+
+            pincer_uid = ""
+            if self._identity:
+                try:
+                    pincer_uid = await self._identity.resolve(
+                        ChannelType.WHATSAPP, identity_resolve_id
+                    )
+                except Exception:
+                    logger.debug(
+                        "Identity resolution failed for WA %s",
+                        identity_resolve_id,
+                        exc_info=True,
+                    )
+
+            incoming = await self._extract_message(
+                client, event, sender_phone, chat_jid, msg, pincer_user_id=pincer_uid
+            )
             if incoming is None:
                 logger.warning(
                     "WA skip: unsupported message type from %s (check debug for message type)",
@@ -430,6 +458,7 @@ class WhatsAppChannel(BaseChannel):
         sender_phone: str,
         chat_jid: str,
         msg: WAMessage | None = None,
+        pincer_user_id: str = "",
     ) -> IncomingMessage | None:
         if msg is None:
             msg = event.Message
@@ -442,6 +471,7 @@ class WhatsAppChannel(BaseChannel):
                 text=msg.conversation,
                 channel_type=ChannelType.WHATSAPP,
                 reply_to_message_id=msg_id,
+                pincer_user_id=pincer_user_id,
             )
 
         if msg.HasField("extendedTextMessage"):
@@ -452,6 +482,7 @@ class WhatsAppChannel(BaseChannel):
                 text=text,
                 channel_type=ChannelType.WHATSAPP,
                 reply_to_message_id=msg_id,
+                pincer_user_id=pincer_user_id,
             )
 
         if msg.HasField("imageMessage") and msg.imageMessage.mimetype:
@@ -465,6 +496,7 @@ class WhatsAppChannel(BaseChannel):
                 media_type="image",
                 media_data=image_data,
                 media_mimetype=msg.imageMessage.mimetype or "image/jpeg",
+                pincer_user_id=pincer_user_id,
             )
 
         if msg.HasField("audioMessage") and msg.audioMessage.mimetype:
@@ -481,6 +513,7 @@ class WhatsAppChannel(BaseChannel):
                 media_data=audio_data,
                 media_mimetype=msg.audioMessage.mimetype or "audio/ogg",
                 is_voice_note=True,
+                pincer_user_id=pincer_user_id,
             )
 
         if msg.HasField("documentMessage") and msg.documentMessage.mimetype:
@@ -497,6 +530,7 @@ class WhatsAppChannel(BaseChannel):
                 media_data=doc_data,
                 media_mimetype=mime,
                 media_filename=filename,
+                pincer_user_id=pincer_user_id,
             )
 
         set_fields = self._message_set_fields(msg)

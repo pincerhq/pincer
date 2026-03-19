@@ -26,6 +26,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _normalize_phone(value: str | int) -> str:
+    """Normalize phone number: strip + and spaces for consistent lookup."""
+    return str(value).lstrip("+").replace(" ", "").replace("-", "")
+
+
 class IdentityResolver:
     """Resolves channel-specific user IDs to a unified Pincer user ID."""
 
@@ -131,7 +136,7 @@ class IdentityResolver:
                 (int(channel_user_id),),
             )
         elif channel == ChannelType.WHATSAPP:
-            phone = str(channel_user_id).lstrip("+")
+            phone = _normalize_phone(channel_user_id)
             cursor = await db.execute(
                 "SELECT pincer_user_id FROM identity_map WHERE whatsapp_phone = ?",
                 (phone,),
@@ -142,13 +147,13 @@ class IdentityResolver:
                 (str(channel_user_id),),
             )
         elif channel == ChannelType.VOICE:
-            phone = str(channel_user_id).lstrip("+")
+            phone = _normalize_phone(channel_user_id)
             cursor = await db.execute(
                 "SELECT pincer_user_id FROM identity_map WHERE phone_number = ?",
                 (phone,),
             )
         elif channel == ChannelType.SIGNAL:
-            phone = str(channel_user_id).lstrip("+")
+            phone = _normalize_phone(channel_user_id)
             cursor = await db.execute(
                 "SELECT pincer_user_id FROM identity_map WHERE signal_phone = ?",
                 (phone,),
@@ -181,15 +186,23 @@ class IdentityResolver:
             if len(parts) != 2:
                 continue
 
-            left_channel, left_id = parts[0].split(":", 1)
-            right_channel, right_id = parts[1].split(":", 1)
+            left_channel, left_id = parts[0].strip().split(":", 1)
+            right_channel, right_id = parts[1].strip().split(":", 1)
 
-            current_key = f"{channel.value}:{str(channel_user_id).lstrip('+')}"
+            # Normalize for comparison: phones get normalized, Telegram coerced to str
+            def _norm_key(ch: str, cid: str) -> str:
+                if ch in ("whatsapp", "voice", "signal"):
+                    return f"{ch}:{_normalize_phone(cid)}"
+                if ch == "telegram":
+                    return f"{ch}:{int(cid)}" if cid.lstrip("-").isdigit() else f"{ch}:{cid}"
+                return f"{ch}:{cid}"
+
+            current_key = _norm_key(channel.value, str(channel_user_id))
 
             other_channel, other_id = None, None
-            if f"{left_channel}:{left_id}" == current_key:
+            if _norm_key(left_channel, left_id) == current_key:
                 other_channel, other_id = right_channel, right_id
-            elif f"{right_channel}:{right_id}" == current_key:
+            elif _norm_key(right_channel, right_id) == current_key:
                 other_channel, other_id = left_channel, left_id
 
             if other_channel is None:
@@ -221,10 +234,10 @@ class IdentityResolver:
         display_name: str | None = None,
     ) -> None:
         telegram_id = int(channel_user_id) if channel == ChannelType.TELEGRAM else None
-        whatsapp_phone = str(channel_user_id).lstrip("+") if channel == ChannelType.WHATSAPP else None
+        whatsapp_phone = _normalize_phone(channel_user_id) if channel == ChannelType.WHATSAPP else None
         discord_id = str(channel_user_id) if channel == ChannelType.DISCORD else None
-        phone_number = str(channel_user_id).lstrip("+") if channel == ChannelType.VOICE else None
-        signal_phone = str(channel_user_id).lstrip("+") if channel == ChannelType.SIGNAL else None
+        phone_number = _normalize_phone(channel_user_id) if channel == ChannelType.VOICE else None
+        signal_phone = _normalize_phone(channel_user_id) if channel == ChannelType.SIGNAL else None
 
         await db.execute(
             """INSERT INTO identity_map
@@ -255,13 +268,13 @@ class IdentityResolver:
         if channel == ChannelType.TELEGRAM:
             col, val = "telegram_user_id", int(channel_user_id)
         elif channel == ChannelType.WHATSAPP:
-            col, val = "whatsapp_phone", str(channel_user_id).lstrip("+")
+            col, val = "whatsapp_phone", _normalize_phone(channel_user_id)
         elif channel == ChannelType.DISCORD:
             col, val = "discord_user_id", str(channel_user_id)
         elif channel == ChannelType.VOICE:
-            col, val = "phone_number", str(channel_user_id).lstrip("+")
+            col, val = "phone_number", _normalize_phone(channel_user_id)
         elif channel == ChannelType.SIGNAL:
-            col, val = "signal_phone", str(channel_user_id).lstrip("+")
+            col, val = "signal_phone", _normalize_phone(channel_user_id)
         else:
             return
 
@@ -308,11 +321,11 @@ class IdentityResolver:
                         with contextlib.suppress(ValueError):
                             telegram_id = int(cid)
                     elif ch == "whatsapp":
-                        whatsapp_phone = cid.lstrip("+")
+                        whatsapp_phone = _normalize_phone(cid)
                     elif ch == "discord":
                         discord_id = cid
                     elif ch == "signal":
-                        signal_phone = cid.lstrip("+")
+                        signal_phone = _normalize_phone(cid)
 
                 if telegram_id is None and whatsapp_phone is None and discord_id is None and signal_phone is None:
                     continue
