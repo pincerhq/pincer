@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import logging
 import shutil
-import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import zipfile
 
 from pincer.mcp.config import MCPServerConfig, MCPTransport
 
