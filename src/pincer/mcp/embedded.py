@@ -59,7 +59,7 @@ class EmbeddedMCPShell:
         agent = self._agent
 
         # Build approval backend — late-binds to agent's ask_user callback
-        def _get_ask_cb():
+        def _get_ask_cb() -> Any:
             return getattr(agent, "_ask_user_callback", None)
 
         approval_backend = ChannelApprovalBackend(get_ask_callback=_get_ask_cb)

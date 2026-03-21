@@ -145,6 +145,7 @@ class Agent:
         self._approval_callback = approval_callback
         self.mcp_manager: MCPClientManager | None = None  # set by cli after startup
         self.mcp_server: PincerMCPServer | None = None  # set by cli after startup
+        self.mcp_shell: Any = None  # set by EmbeddedMCPShell.start()
         # (user_id, channel_name) of the most recent message — used by ask_user
         self._last_active: tuple[str, str] | None = None
         # Injected by cli.py: (user_id, channel_name, question) -> answer

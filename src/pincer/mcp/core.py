@@ -297,7 +297,7 @@ class MCPServiceCore:
     def client_tool_count(self) -> int:
         """Number of tools registered from external MCP servers."""
         if self._client_manager is not None:
-            return self._client_manager.total_tool_count()
+            return int(self._client_manager.total_tool_count())
         return 0
 
     @property
@@ -308,5 +308,5 @@ class MCPServiceCore:
     async def list_connected_clients(self) -> list[dict[str, Any]]:
         """Return status info for all configured client servers."""
         if self._client_manager is not None:
-            return await self._client_manager.list_servers()
+            return list(await self._client_manager.list_servers())
         return []

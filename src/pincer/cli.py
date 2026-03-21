@@ -1249,12 +1249,13 @@ async def _run_agent(settings: Settings) -> None:  # noqa: F821
 
         _mcp_full_cfg = _load_mcp_cfg()
         if _mcp_full_cfg.server.enabled:
+            _acb = agent._approval_callback
             mcp_server = PincerMCPServer(
                 config=_mcp_full_cfg.server,
                 tool_registry=tools,
                 approval_callback=(
-                    (lambda tn, args: agent._approval_callback(tn, args, "", ""))
-                    if agent._approval_callback else None
+                    (lambda tn, args: _acb(tn, args, "", ""))
+                    if _acb else None
                 ),
                 ask_user_callback=(
                     (lambda q: agent._ask_user_on_active_channel(q))

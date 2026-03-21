@@ -173,7 +173,7 @@ class MCPToolBridge:
             return f"{self.session.name}__{tool_name}"
         return tool_name
 
-    def _make_handler(self, mcp_name: str, pincer_name: str):
+    def _make_handler(self, mcp_name: str, pincer_name: str) -> Any:
         """Create an async callable that wraps an MCP tool call."""
         session = self.session
         audit = self.audit_logger
@@ -233,8 +233,9 @@ def _convert_schema(input_schema: Any) -> dict[str, Any]:
         return {"type": "object", "properties": {}}
 
     # inputSchema may be a dict or a pydantic model
+    schema: dict[str, Any]
     if hasattr(input_schema, "model_dump"):
-        schema = input_schema.model_dump(exclude_none=True)
+        schema = dict(input_schema.model_dump(exclude_none=True))
     elif isinstance(input_schema, dict):
         schema = dict(input_schema)
     else:

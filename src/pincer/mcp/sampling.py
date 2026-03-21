@@ -77,7 +77,8 @@ class AgentLLMBackend(LLMBackend):
         max_tokens: int = 1024,
     ) -> str:
         try:
-            return await self._router.complete(messages, model=model, max_tokens=max_tokens)
+            result: Any = await self._router.complete(messages, model=model, max_tokens=max_tokens)
+            return str(result)
         except AttributeError:
             # Fallback: try chat() / generate() depending on router interface
             response = await self._router.chat(messages)
@@ -124,10 +125,11 @@ class StandaloneLLMBackend(LLMBackend):
                 "uv pip install anthropic"
             ) from e
 
+        from typing import cast
         client = anthropic.AsyncAnthropic(api_key=self._api_key)
         resp = await client.messages.create(
             model=model or self._default_model,
-            messages=messages,
+            messages=cast(Any, messages),
             max_tokens=max_tokens,
         )
         content = resp.content

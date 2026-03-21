@@ -243,12 +243,11 @@ def _load_builtin_tools_into(registry: Any) -> None:
     """
     # Try to import and register web_search (no agent needed)
     try:
-        from pincer.tools.builtin.web_search import make_web_search_handler
-        handler = make_web_search_handler()
+        from pincer.tools.builtin.web_search import web_search
         registry.register(
             name="web_search",
             description="Search the web",
-            handler=handler,
+            handler=web_search,
             require_approval=False,
         )
     except Exception:
