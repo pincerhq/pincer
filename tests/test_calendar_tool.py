@@ -105,7 +105,6 @@ class TestCalendarWeek:
 class TestCalendarCreate:
     async def test_create_event(self):
         created = {
-          mcp_server
             "id": "evt_123",
             "summary": "New Meeting",
             "start": {"dateTime": "2026-02-22T14:00:00+01:00"},
