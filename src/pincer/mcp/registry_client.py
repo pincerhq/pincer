@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -454,7 +455,7 @@ def _infer_entry(package_name: str) -> MCPRegistryEntry:
     )
 
 
-def _safe_zip_extractall(zf: "zipfile.ZipFile", dest: Path) -> None:
+def _safe_zip_extractall(zf: zipfile.ZipFile, dest: Path) -> None:
     """Extract zip members, skipping any with absolute or traversal paths."""
     from pathlib import PurePosixPath
 
