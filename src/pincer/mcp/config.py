@@ -1,0 +1,364 @@
+"""
+MCP server configuration — loaded from pincer.toml and/or environment variables.
+
+Priority (highest to lowest):
+1. Environment variable overrides (PINCER_MCP_SERVER_N_*)
+2. pincer.toml [[mcp.servers]] entries
+3. Built-in defaults
+
+Environment variable format for a single server:
+    PINCER_MCP_ENABLED=true
+    PINCER_MCP_SERVER_1_NAME=github
+    PINCER_MCP_SERVER_1_TRANSPORT=stdio
+    PINCER_MCP_SERVER_1_COMMAND=npx
+    PINCER_MCP_SERVER_1_ARGS=-y,@modelcontextprotocol/server-github
+    PINCER_MCP_SERVER_1_ENV_GITHUB_TOKEN=ghp_xxxxx
+    PINCER_MCP_SERVER_1_APPROVAL=*
+    PINCER_MCP_SERVER_1_TIMEOUT=30
+    PINCER_MCP_SERVER_1_SANDBOX=true
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+
+
+class MCPTransport(StrEnum):
+    STDIO = "stdio"
+    STREAMABLE_HTTP = "streamable-http"
+
+
+@dataclass(frozen=True)
+class MCPServerConfig:
+    """Configuration for a single MCP server connection."""
+
+    name: str
+    transport: MCPTransport
+    enabled: bool = True
+
+    # stdio transport
+    command: str | None = None
+    args: list[str] = field(default_factory=list)
+    env: dict[str, str] = field(default_factory=dict)
+
+    # streamable-http transport
+    url: str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+
+    # Security & behavior
+    sandbox: bool = True
+    sandbox_memory_mb: int = 256
+    approval_required: list[str] = field(default_factory=lambda: ["*"])
+    timeout_seconds: int = 30
+    max_retries: int = 2
+
+    def __post_init__(self) -> None:
+        if self.transport == MCPTransport.STDIO and not self.command:
+            raise ValueError(f"MCP server '{self.name}': stdio transport requires 'command'")
+        if self.transport == MCPTransport.STREAMABLE_HTTP and not self.url:
+            raise ValueError(f"MCP server '{self.name}': streamable-http transport requires 'url'")
+        if not re.match(r"^[a-zA-Z0-9_]+$", self.name):
+            raise ValueError(f"MCP server name must be alphanumeric/underscore: '{self.name}'")
+
+
+@dataclass(frozen=True)
+class MCPApprovalPolicyConfig:
+    """Approval policy for standalone MCP server mode (no messaging channels)."""
+
+    read: str = "approve"  # auto-approve read-only tools
+    write: str = "deny"  # auto-deny write tools
+    destructive: str = "deny"  # auto-deny destructive tools
+    unknown: str = "deny"  # auto-deny unknown risk tools
+    default: str = "deny"  # default for any unlisted risk level
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "read": self.read,
+            "write": self.write,
+            "destructive": self.destructive,
+            "unknown": self.unknown,
+            "default": self.default,
+        }
+
+
+@dataclass(frozen=True)
+class MCPSamplingConfig:
+    """Sampling configuration — allows MCP server to handle LLM inference requests."""
+
+    enabled: bool = False
+    model: str = "claude-sonnet-4-20250514"
+    budget_per_day: float = 5.00
+    max_tokens: int = 1024
+
+
+@dataclass(frozen=True)
+class MCPServerExportConfig:
+    """Config for Pincer's outbound MCP server (exposes Pincer tools to MCP clients)."""
+
+    enabled: bool = False  # Disabled by default — must explicitly opt in
+    host: str = "127.0.0.1"  # Localhost-only unless explicitly changed
+    port: int = 18800
+    path: str = "/mcp"
+    # Which Pincer tools to expose (conservative default: read-only + ask_user)
+    expose_tools: list[str] = field(
+        default_factory=lambda: [
+            "web_search",
+            "email_check",
+            "calendar_today",
+            "memory_search",
+        ]
+    )
+    # Approval policy for standalone mode
+    approval_policy: MCPApprovalPolicyConfig = field(default_factory=MCPApprovalPolicyConfig)
+    # Sampling configuration
+    sampling: MCPSamplingConfig = field(default_factory=MCPSamplingConfig)
+    # Webhook URL for webhook approval mode
+    webhook_url: str | None = None
+
+
+@dataclass(frozen=True)
+class MCPConfig:
+    """Top-level MCP configuration."""
+
+    enabled: bool = True
+    max_servers: int = 10
+    tool_prefix: bool = True
+    servers: list[MCPServerConfig] = field(default_factory=list)
+    server: MCPServerExportConfig = field(default_factory=MCPServerExportConfig)
+
+    def __post_init__(self) -> None:
+        enabled_servers = [s for s in self.servers if s.enabled]
+        if len(enabled_servers) > self.max_servers:
+            raise ValueError(f"Too many enabled MCP servers ({len(enabled_servers)} > {self.max_servers})")
+        names = [s.name for s in self.servers]
+        if len(names) != len(set(names)):
+            raise ValueError("Duplicate MCP server names detected")
+
+
+def _interpolate_env(value: str) -> str:
+    """Resolve ${VAR} references in config values using os.environ."""
+
+    def _replace(m: re.Match[str]) -> str:
+        var = m.group(1)
+        return os.environ.get(var, m.group(0))
+
+    return re.sub(r"\$\{([^}]+)\}", _replace, value)
+
+
+def _interpolate_dict(d: dict[str, str]) -> dict[str, str]:
+    return {k: _interpolate_env(v) for k, v in d.items()}
+
+
+def _parse_server_from_toml(raw: dict[str, Any]) -> MCPServerConfig:
+    """Parse a single [[mcp.servers]] TOML entry."""
+    transport = MCPTransport(raw.get("transport", "stdio"))
+    env = _interpolate_dict(raw.get("env", {}))
+    headers = _interpolate_dict(raw.get("headers", {}))
+    approval = raw.get("approval_required", ["*"])
+    if isinstance(approval, str):
+        approval = [approval]
+
+    return MCPServerConfig(
+        name=raw["name"],
+        transport=transport,
+        enabled=raw.get("enabled", True),
+        command=raw.get("command"),
+        args=raw.get("args", []),
+        env=env,
+        url=raw.get("url"),
+        headers=headers,
+        sandbox=raw.get("sandbox", True),
+        sandbox_memory_mb=int(raw.get("sandbox_memory_mb", 256)),
+        approval_required=approval,
+        timeout_seconds=int(raw.get("timeout_seconds", 30)),
+        max_retries=int(raw.get("max_retries", 2)),
+    )
+
+
+def _load_toml_config(toml_path: Path) -> MCPConfig | None:
+    """Load [mcp] section from pincer.toml. Returns None if file absent or no [mcp]."""
+    if not toml_path.exists():
+        return None
+    try:
+        import tomllib  # Python 3.11+
+    except ImportError:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            return None
+
+    with open(toml_path, "rb") as f:
+        data = tomllib.load(f)
+
+    mcp_raw = data.get("mcp")
+    if not mcp_raw:
+        return None
+
+    servers = [_parse_server_from_toml(s) for s in mcp_raw.get("servers", [])]
+    srv_raw = mcp_raw.get("server", {})
+    # Parse approval_policy sub-table
+    ap_raw = srv_raw.get("approval_policy", {})
+    approval_policy = MCPApprovalPolicyConfig(
+        read=ap_raw.get("read", "approve"),
+        write=ap_raw.get("write", "deny"),
+        destructive=ap_raw.get("destructive", "deny"),
+        unknown=ap_raw.get("unknown", "deny"),
+        default=ap_raw.get("default", "deny"),
+    )
+    # Parse sampling sub-table
+    samp_raw = srv_raw.get("sampling", {})
+    sampling = MCPSamplingConfig(
+        enabled=samp_raw.get("enabled", False),
+        model=samp_raw.get("model", "claude-sonnet-4-20250514"),
+        budget_per_day=float(samp_raw.get("budget_per_day", 5.00)),
+        max_tokens=int(samp_raw.get("max_tokens", 1024)),
+    )
+    srv_export = MCPServerExportConfig(
+        enabled=srv_raw.get("enabled", False),
+        host=srv_raw.get("host", "127.0.0.1"),
+        port=int(srv_raw.get("port", 18800)),
+        path=srv_raw.get("path", "/mcp"),
+        expose_tools=srv_raw.get(
+            "expose_tools",
+            [
+                "web_search",
+                "email_check",
+                "calendar_today",
+                "memory_search",
+            ],
+        ),
+        approval_policy=approval_policy,
+        sampling=sampling,
+        webhook_url=srv_raw.get("webhook_url"),
+    )
+    return MCPConfig(
+        enabled=mcp_raw.get("enabled", True),
+        max_servers=int(mcp_raw.get("max_servers", 10)),
+        tool_prefix=mcp_raw.get("tool_prefix", True),
+        servers=servers,
+        server=srv_export,
+    )
+
+
+def _load_env_servers() -> list[MCPServerConfig]:
+    """Build server configs from PINCER_MCP_SERVER_N_* env vars."""
+    servers: list[MCPServerConfig] = []
+    # Find all defined server indices: PINCER_MCP_SERVER_1_NAME, PINCER_MCP_SERVER_2_NAME, ...
+    indices: set[str] = set()
+    for key in os.environ:
+        m = re.match(r"^PINCER_MCP_SERVER_(\d+)_NAME$", key, re.IGNORECASE)
+        if m:
+            indices.add(m.group(1))
+
+    for idx in sorted(indices):
+        prefix = f"PINCER_MCP_SERVER_{idx}_"
+        name = os.environ.get(f"{prefix}NAME", "")
+        if not name:
+            continue
+        transport_str = os.environ.get(f"{prefix}TRANSPORT", "stdio")
+        try:
+            transport = MCPTransport(transport_str)
+        except ValueError:
+            continue
+
+        # Parse args: comma-separated
+        args_str = os.environ.get(f"{prefix}ARGS", "")
+        args = [a.strip() for a in args_str.split(",") if a.strip()] if args_str else []
+
+        # Parse env: PINCER_MCP_SERVER_N_ENV_VARNAME=value
+        env: dict[str, str] = {}
+        env_prefix = f"{prefix}ENV_"
+        for key, val in os.environ.items():
+            if key.upper().startswith(env_prefix):
+                env_key = key[len(env_prefix) :]
+                env[env_key] = val
+
+        # Approval patterns
+        approval_str = os.environ.get(f"{prefix}APPROVAL", "*")
+        approval = [a.strip() for a in approval_str.split(",") if a.strip()]
+
+        enabled_str = os.environ.get(f"{prefix}ENABLED", "true").lower()
+        sandbox_str = os.environ.get(f"{prefix}SANDBOX", "true").lower()
+
+        try:
+            servers.append(
+                MCPServerConfig(
+                    name=name,
+                    transport=transport,
+                    enabled=enabled_str in ("true", "1", "yes"),
+                    command=os.environ.get(f"{prefix}COMMAND"),
+                    args=args,
+                    env=env,
+                    url=os.environ.get(f"{prefix}URL"),
+                    headers={},
+                    sandbox=sandbox_str in ("true", "1", "yes"),
+                    sandbox_memory_mb=int(os.environ.get(f"{prefix}SANDBOX_MEMORY_MB", "256")),
+                    approval_required=approval,
+                    timeout_seconds=int(os.environ.get(f"{prefix}TIMEOUT", "30")),
+                    max_retries=int(os.environ.get(f"{prefix}MAX_RETRIES", "2")),
+                )
+            )
+        except (ValueError, TypeError):
+            continue
+
+    return servers
+
+
+def load_mcp_config(config_dir: Path | None = None) -> MCPConfig:
+    """
+    Load MCP configuration from pincer.toml and environment variables.
+
+    Environment variables take precedence over TOML config.
+    Call this at agent startup; invalid config raises ValueError immediately.
+    """
+    toml_path = (config_dir or Path.cwd()) / "pincer.toml"
+    toml_cfg = _load_toml_config(toml_path)
+
+    # Global MCP toggle
+    enabled_env = os.environ.get("PINCER_MCP_ENABLED", "").lower()
+    if enabled_env in ("false", "0", "no"):
+        return MCPConfig(enabled=False)
+    if toml_cfg and not toml_cfg.enabled:
+        return MCPConfig(enabled=False)
+
+    # Merge: TOML servers + env-defined servers
+    toml_servers = toml_cfg.servers if toml_cfg else []
+    env_servers = _load_env_servers()
+
+    # Env servers override TOML servers with the same name
+    toml_by_name = {s.name: s for s in toml_servers}
+    for env_srv in env_servers:
+        toml_by_name[env_srv.name] = env_srv
+    merged_servers = list(toml_by_name.values())
+
+    max_servers = int(os.environ.get("PINCER_MCP_MAX_SERVERS", toml_cfg.max_servers if toml_cfg else 10))
+    tool_prefix_env = os.environ.get("PINCER_MCP_TOOL_PREFIX", "")
+    tool_prefix = (
+        tool_prefix_env.lower() not in ("false", "0", "no")
+        if tool_prefix_env
+        else (toml_cfg.tool_prefix if toml_cfg else True)
+    )
+
+    # MCP server export config (env overrides TOML)
+    toml_srv = toml_cfg.server if toml_cfg else MCPServerExportConfig()
+    srv_enabled_env = os.environ.get("PINCER_MCP_SERVER_EXPORT_ENABLED", "").lower()
+    srv_export = MCPServerExportConfig(
+        enabled=(srv_enabled_env in ("true", "1", "yes") if srv_enabled_env else toml_srv.enabled),
+        host=os.environ.get("PINCER_MCP_SERVER_EXPORT_HOST", toml_srv.host),
+        port=int(os.environ.get("PINCER_MCP_SERVER_EXPORT_PORT", toml_srv.port)),
+        path=os.environ.get("PINCER_MCP_SERVER_EXPORT_PATH", toml_srv.path),
+        expose_tools=toml_srv.expose_tools,
+    )
+
+    return MCPConfig(
+        enabled=True,
+        max_servers=max_servers,
+        tool_prefix=tool_prefix,
+        servers=merged_servers,
+        server=srv_export,
+    )

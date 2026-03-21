@@ -16,7 +16,7 @@ You don't need to be a senior engineer. You don't need a CS degree. You don't ne
 - 🌍 Non-English speakers (we need translations and internationalization)
 - 🎨 Designers who can make the dashboard and docs beautiful
 - 🧪 Tinkerers who break things and file good bug reports
-- 🤖 People who vibe-code with AI — we do too, and we're not ashamed of it
+- 🛠️ Hobbyists and self-taught developers — curiosity beats credentials
 - 🐣 First-time open source contributors — we'll help you through your first PR
 
 ---
@@ -313,21 +313,6 @@ For `main` and `dev` branches, configure branch protection in **GitHub → Setti
 - Optionally: require branches to be up to date before merging
 
 See [GitHub's branch protection docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/managing-a-branch-protection-rule) for details.
-
----
-
-## AI-Assisted Contributions
-
-Let's be honest: Pincer itself was largely vibe-coded with AI assistance. We would be massive hypocrites to reject AI-assisted contributions.
-
-**AI-assisted and vibe-coded PRs are explicitly welcome.** Use Claude, Copilot, Cursor, whatever helps you ship. The only requirements:
-
-1. You understand what the code does (you can explain it in review)
-2. Tests pass
-3. It follows our style
-4. You can respond to review comments
-
-We don't check. We don't care. We care that the code works and you can maintain it.
 
 ---
 

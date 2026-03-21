@@ -37,6 +37,20 @@ pincer
 │   ├── scan <path>         # Security scan
 │   ├── remove <name>       # Uninstall skill
 │   └── info <name>         # Skill details
+├── mcp
+│   ├── list                # MCP servers + connection status
+│   ├── test <server>       # Test connection to a server
+│   ├── tools               # List all registered MCP tools
+│   ├── call <srv> <tool>   # Call a tool directly (testing)
+│   ├── status              # Live connectivity status
+│   ├── search <query>      # Search MCP Registry / ClawHub
+│   ├── install <pkg>       # Install MCP server from registry
+│   ├── scan <pkg>          # Security scan without installing
+│   ├── uninstall <name>    # Remove server from config
+│   └── server              # Manage Pincer's outbound MCP endpoint
+│       ├── start           # Start MCP server export
+│       ├── stop            # Stop MCP server export
+│       └── status          # Show status + connected clients
 ├── memory
 │   ├── search <query>      # Search memories
 │   ├── stats               # Memory usage
@@ -239,7 +253,7 @@ pincer cost --days 30 --export costs_feb.json
 
 ### `pincer doctor`
 
-Run 25+ security health checks.
+Run 36+ security health checks (including 5 MCP-specific checks).
 
 ```bash
 pincer doctor [OPTIONS]
@@ -471,6 +485,88 @@ $ pincer skills info weather
   Tools:
     get_weather(city: str) → Weather forecast
     get_forecast(city: str, days: int) → Multi-day forecast
+```
+
+---
+
+### `pincer mcp list`
+
+List all configured MCP servers and their current connection status.
+
+```bash
+pincer mcp list
+```
+
+**Output:**
+```
+MCP Servers (2 configured)
+
+  Name         Transport  Status     Tools  Uptime
+  ──────────────────────────────────────────────────
+  github       stdio      connected  12     3m 42s
+  filesystem   stdio      connected   8     3m 42s
+```
+
+---
+
+### `pincer mcp test <server>`
+
+Test connection to a specific MCP server. Connects, runs a ping, and reports tools discovered.
+
+```bash
+pincer mcp test github
+```
+
+**Output:**
+```
+Testing MCP server: github
+  Transport: stdio (npx -y @modelcontextprotocol/server-github)
+  ✓ Connected
+  ✓ Ping OK (42ms)
+  ✓ 12 tools discovered
+```
+
+---
+
+### `pincer mcp tools`
+
+List all tools currently registered from all connected MCP servers.
+
+```bash
+pincer mcp tools
+```
+
+**Output:**
+```
+MCP Tools (20 registered)
+
+  Tool                              Server      Approval
+  ─────────────────────────────────────────────────────
+  github__search_repositories       github      No
+  github__create_issue              github      Yes
+  filesystem__read_file             filesystem  No
+  filesystem__write_file            filesystem  Yes
+  ...
+```
+
+---
+
+### `pincer mcp call <server> <tool>`
+
+Call a specific MCP tool directly, useful for testing without the agent.
+
+```bash
+pincer mcp call github search_repositories --args '{"query": "pincer language:python"}'
+```
+
+**Output:**
+```
+Calling github/search_repositories...
+{
+  "repositories": [
+    {"name": "pincerhq/pincer", "stars": 847, "description": "..."}
+  ]
+}
 ```
 
 ---

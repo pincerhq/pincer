@@ -251,6 +251,69 @@ Summary: 22 passed, 3 warnings, 0 critical
 
 ---
 
+## MCP Security Model
+
+MCP (Model Context Protocol) servers run as external processes or remote endpoints and represent an expanded attack surface. Pincer applies several mitigations:
+
+### Subprocess isolation (stdio transport)
+
+When `sandbox = true` (the default), stdio MCP servers start with:
+
+- **Sanitized environment** — only variables you explicitly declare in the server's `env` map are passed to the subprocess. `PINCER_*` secrets and other ambient variables are stripped.
+- **Isolated working directory** — the subprocess starts in a temporary directory, not your project root, limiting filesystem exposure.
+
+> **macOS limitation:** `RLIMIT_AS` memory limits for subprocess memory are not enforced on macOS (kernel limitation). The env and cwd isolation still apply.
+
+### Tool approval gate
+
+MCP tools go through the same approval system as built-in tools. Use `approval_required` patterns to control which tools run silently and which require explicit user confirmation:
+
+```toml
+approval_required = ["create_*", "delete_*"]  # ask for destructive ops only
+approval_required = ["*"]                       # ask for everything
+approval_required = ["none"]                    # ⚠️  never ask (avoid this)
+```
+
+The fail-safe default is **approval required** — if a tool name doesn't match any pattern, it will ask.
+
+### Audit trail
+
+Every MCP tool call is logged via `MCPAuditLogger` into the same SQLite audit log as built-in tools. Events include server name, tool name, arguments, output length, duration, and success/failure.
+
+MCP events have `user_id = "mcp:<server_name>"` for easy filtering:
+
+```bash
+pincer audit --user mcp:github
+```
+
+### Threat table
+
+| MCP Threat | Mitigation |
+|------------|-----------|
+| Secrets leaked to subprocess | Env sanitization — only declared vars forwarded |
+| Malicious server executing arbitrary code | OS-level subprocess isolation; `sandbox = true` |
+| Server exfiltrating data via tools | Approval gate + audit log for all tool calls |
+| Hardcoded credentials in `pincer.toml` | `pincer doctor` checks for plaintext tokens |
+| Unverified remote MCP server | Transport-level auth via `headers`; no unauthenticated HTTP servers |
+
+### What MCP security does NOT cover
+
+- MCP servers that exfiltrate data through their own network connections (they are OS processes with network access)
+- Prompt injection injected through MCP tool results — Pincer doesn't sanitize MCP tool output content
+- Compromised MCP server packages (supply-chain attacks on `npx` packages)
+
+### `pincer doctor` MCP checks
+
+| Check | What it verifies |
+|-------|-----------------|
+| `mcp_config_valid` | `pincer.toml` parses without errors |
+| `mcp_sandbox_enabled` | All stdio servers have `sandbox = true` |
+| `mcp_approval_not_bypassed` | No server uses `approval_required = ["none"]` |
+| `mcp_no_plaintext_secrets` | `pincer.toml` contains no hardcoded tokens |
+| `mcp_tool_count` | Enabled server count is within configured limits |
+
+---
+
 ## Reporting Security Issues
 
 If you find a security vulnerability, please report it responsibly:
