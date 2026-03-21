@@ -8,15 +8,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
       - run: uv sync --all-extras
-      
-      # Change line 11 to generate the XML coverage report
-      - run: uv run pytest --cov=pincer --cov-report=xml
-      
-      - run: uv run ruff check .
-      
-      # Add the Codecov upload step at the very end
+
+      - name: Run tests with coverage
+        run: uv run pytest --cov=pincer --cov-report=xml
+
+      - name: Type check
+        run: uv run mypy src/
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Security scan
+        run: uv run bandit -r src/pincer -ll -s B101,B104,B310,B608
+
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v5
         if: always()
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false

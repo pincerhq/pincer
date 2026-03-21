@@ -5,6 +5,11 @@ Provides calendar_today(), calendar_week(), calendar_create().
 Authentication via InstalledAppFlow; tokens stored at data/google_token.json.
 
 Tools are registered in cli.py via tools.register().
+
+calendar_create behavior:
+- Strict response validation: success only when API returns both id and htmlLink
+- IANA timezone: naive datetimes use settings.timezone; fixed offsets fall back to IANA
+- Success message includes htmlLink and calendar_id (when non-primary) for verification
 """
 
 from __future__ import annotations

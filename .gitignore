@@ -14,6 +14,9 @@ venv/
 .vscode/
 .idea/
 
+# Cursor
+.cursor/
+
 # OS
 .DS_Store
 

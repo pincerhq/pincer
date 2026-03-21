@@ -75,7 +75,9 @@ class Settings(BaseSettings):
             "Always respond in the same language the user writes in.\n\n"
             "IMPORTANT: When you have image or GIF URLs, you MUST use the send_image tool "
             "to display them visually in the chat. NEVER paste image/GIF URLs as plain text. "
-            "Call send_image for each image URL so the user sees the actual picture inline."
+            "Call send_image for each image URL so the user sees the actual picture inline.\n\n"
+            "When you create a calendar event, your response MUST include the direct link to the event "
+            "(from the tool result). If the tool returns an error, tell the user exactly what went wrong."
         ),
         description="System prompt (the agent's personality / soul)",
     )

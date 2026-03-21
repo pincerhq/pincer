@@ -66,9 +66,21 @@ ngrok http 8080
 
 ### Docker + ngrok
 
-When running with Docker Compose, ngrok starts automatically with the stack. Add `NGROK_AUTHTOKEN` to your `.env` (get a free token at [ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken)). The ngrok container tunnels to `pincer:8080` and starts after Pincer is healthy.
+ngrok is optional and only starts when you use the `ngrok` profile. Add `NGROK_AUTHTOKEN` to your `.env` (get a free token at [ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken)). The ngrok container tunnels to `pincer:8080` and starts after Pincer is healthy.
 
-After `docker compose up -d`, check the ngrok container logs for the public URL:
+Start with ngrok:
+
+```bash
+docker compose --profile ngrok up -d
+```
+
+Without the profile, only Pincer runs:
+
+```bash
+docker compose up -d
+```
+
+After starting with the ngrok profile, check the ngrok container logs for the public URL:
 
 ```bash
 docker compose logs ngrok

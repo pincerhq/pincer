@@ -1,7 +1,7 @@
 # ============================================
 # Stage 0: Dashboard build
 # ============================================
-FROM node:20-slim AS dashboard-builder
+FROM node:22-slim AS dashboard-builder
 
 WORKDIR /app
 
@@ -10,7 +10,7 @@ RUN corepack enable pnpm
 COPY dashboard/ ./
 
 ENV CI=true
-RUN pnpm install
+RUN pnpm install --frozen-lockfile
 RUN pnpm build
 
 # ============================================

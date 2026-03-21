@@ -24,6 +24,7 @@ from rich.logging import RichHandler
 
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
+    from pincer.config import Settings
 
 logger = logging.getLogger(__name__)
 app = typer.Typer(
@@ -71,7 +72,7 @@ def run() -> None:
     asyncio.run(_run_agent(settings))
 
 
-async def _run_agent(settings: Settings) -> None:  # noqa: F821
+async def _run_agent(settings: Settings) -> None:
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
