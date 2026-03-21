@@ -62,28 +62,30 @@ class MCPAuditLogger:
     async def log_connect(self, server: str, *, success: bool, error: str | None = None) -> None:
         if not self._log:
             return
-        await self._log.log(AuditEntry(
-            user_id=f"mcp:{server}",
-            action=AuditAction.TOOL_CALL,
-            tool=f"_mcp_connect:{server}",
-            input_summary="transport: connect",
-            output_summary=(
-                "connected" if success else f"failed: {(error or '')[:200]}"
-            ),
-            approved=success,
-            metadata={"mcp_server": server, "mcp_event": "connect"},
-        ))
+        await self._log.log(
+            AuditEntry(
+                user_id=f"mcp:{server}",
+                action=AuditAction.TOOL_CALL,
+                tool=f"_mcp_connect:{server}",
+                input_summary="transport: connect",
+                output_summary=("connected" if success else f"failed: {(error or '')[:200]}"),
+                approved=success,
+                metadata={"mcp_server": server, "mcp_event": "connect"},
+            )
+        )
 
     async def log_disconnect(self, server: str, *, error: str | None = None) -> None:
         if not self._log:
             return
-        await self._log.log(AuditEntry(
-            user_id=f"mcp:{server}",
-            action=AuditAction.TOOL_CALL,
-            tool=f"_mcp_disconnect:{server}",
-            output_summary="disconnected" if not error else f"error: {error[:200]}",
-            metadata={"mcp_server": server, "mcp_event": "disconnect"},
-        ))
+        await self._log.log(
+            AuditEntry(
+                user_id=f"mcp:{server}",
+                action=AuditAction.TOOL_CALL,
+                tool=f"_mcp_disconnect:{server}",
+                output_summary="disconnected" if not error else f"error: {error[:200]}",
+                metadata={"mcp_server": server, "mcp_event": "disconnect"},
+            )
+        )
 
     def start_call(self, server: str, tool: str, call_key: str) -> None:
         """Record the start time of a tool call for duration tracking."""
@@ -107,54 +109,57 @@ class MCPAuditLogger:
         start = self._timers.pop(call_key, None)
         duration_ms = int((time.monotonic() - start) * 1000) if start else None
 
-        await self._log.log(AuditEntry(
-            user_id=f"mcp:{server}",
-            action=AuditAction.TOOL_CALL,
-            tool=tool,
-            input_summary=_truncate_args(arguments, self._security_gate),
-            output_summary=(
-                f"length:{output_length}"
-                if success
-                else "error: " + (
-                    self._security_gate.redact_sensitive((error or "")[:200])
-                    if self._security_gate
-                    else (error or "")[:200]
-                )
-            ),
-            approved=success,
-            duration_ms=duration_ms,
-            metadata={
-                "mcp_server": server,
-                "mcp_event": "tool_call",
-                "mcp_tool": tool,
-                "status": "success" if success else "error",
-            },
-        ))
+        await self._log.log(
+            AuditEntry(
+                user_id=f"mcp:{server}",
+                action=AuditAction.TOOL_CALL,
+                tool=tool,
+                input_summary=_truncate_args(arguments, self._security_gate),
+                output_summary=(
+                    f"length:{output_length}"
+                    if success
+                    else "error: "
+                    + (
+                        self._security_gate.redact_sensitive((error or "")[:200])
+                        if self._security_gate
+                        else (error or "")[:200]
+                    )
+                ),
+                approved=success,
+                duration_ms=duration_ms,
+                metadata={
+                    "mcp_server": server,
+                    "mcp_event": "tool_call",
+                    "mcp_tool": tool,
+                    "status": "success" if success else "error",
+                },
+            )
+        )
 
     async def log_health_check(self, server: str, *, healthy: bool) -> None:
         if not self._log:
             return
-        await self._log.log(AuditEntry(
-            user_id=f"mcp:{server}",
-            action=AuditAction.TOOL_CALL,
-            tool=f"_mcp_health:{server}",
-            output_summary="healthy" if healthy else "unhealthy",
-            metadata={"mcp_server": server, "mcp_event": "health_check"},
-        ))
+        await self._log.log(
+            AuditEntry(
+                user_id=f"mcp:{server}",
+                action=AuditAction.TOOL_CALL,
+                tool=f"_mcp_health:{server}",
+                output_summary="healthy" if healthy else "unhealthy",
+                metadata={"mcp_server": server, "mcp_event": "health_check"},
+            )
+        )
 
-    async def log_reconnect(
-        self, server: str, *, attempt: int, success: bool, error: str | None = None
-    ) -> None:
+    async def log_reconnect(self, server: str, *, attempt: int, success: bool, error: str | None = None) -> None:
         if not self._log:
             return
-        await self._log.log(AuditEntry(
-            user_id=f"mcp:{server}",
-            action=AuditAction.TOOL_CALL,
-            tool=f"_mcp_reconnect:{server}",
-            input_summary=f"attempt {attempt}",
-            output_summary=(
-                "reconnected" if success else f"failed: {(error or '')[:200]}"
-            ),
-            approved=success,
-            metadata={"mcp_server": server, "mcp_event": "reconnect", "attempt": attempt},
-        ))
+        await self._log.log(
+            AuditEntry(
+                user_id=f"mcp:{server}",
+                action=AuditAction.TOOL_CALL,
+                tool=f"_mcp_reconnect:{server}",
+                input_summary=f"attempt {attempt}",
+                output_summary=("reconnected" if success else f"failed: {(error or '')[:200]}"),
+                approved=success,
+                metadata={"mcp_server": server, "mcp_event": "reconnect", "attempt": attempt},
+            )
+        )

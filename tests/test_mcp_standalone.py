@@ -27,9 +27,7 @@ def _make_config(server_enabled=True, expose_tools=None, servers=None, webhook_u
     server_cfg.path = "/mcp"
     server_cfg.expose_tools = expose_tools or ["web_search"]
     server_cfg.sampling = MagicMock(enabled=False)
-    server_cfg.approval_policy = MagicMock(
-        as_dict=MagicMock(return_value={"default": "deny"})
-    )
+    server_cfg.approval_policy = MagicMock(as_dict=MagicMock(return_value={"default": "deny"}))
     server_cfg.webhook_url = webhook_url
     cfg.server = server_cfg
 
@@ -131,9 +129,11 @@ async def test_standalone_run_starts_and_stops_server():
     event_mock = MagicMock()
     event_mock.wait = AsyncMock(side_effect=asyncio.CancelledError)
 
-    with patch("pincer.mcp.core.PincerMCPServer", return_value=mock_server), \
-         patch("asyncio.Event", return_value=event_mock), \
-         patch.object(shell, "_register_standalone_tools"):
+    with (
+        patch("pincer.mcp.core.PincerMCPServer", return_value=mock_server),
+        patch("asyncio.Event", return_value=event_mock),
+        patch.object(shell, "_register_standalone_tools"),
+    ):
         await shell.run()
 
     mock_server.start.assert_called_once()
@@ -152,9 +152,11 @@ async def test_standalone_registers_builtin_prompts():
     event_mock = MagicMock()
     event_mock.wait = AsyncMock(side_effect=asyncio.CancelledError)
 
-    with patch("pincer.mcp.core.PincerMCPServer", return_value=mock_server), \
-         patch("asyncio.Event", return_value=event_mock), \
-         patch.object(shell, "_register_standalone_tools"):
+    with (
+        patch("pincer.mcp.core.PincerMCPServer", return_value=mock_server),
+        patch("asyncio.Event", return_value=event_mock),
+        patch.object(shell, "_register_standalone_tools"),
+    ):
         await shell.run()
 
     core = shell._core

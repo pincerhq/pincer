@@ -54,11 +54,13 @@ def _make_session(tools: list[FakeTool], server_name: str = "testserver"):
 
 def _make_registry():
     from pincer.tools.registry import ToolRegistry
+
     return ToolRegistry()
 
 
 def _make_audit():
     from pincer.mcp.audit import MCPAuditLogger
+
     return MCPAuditLogger(None)  # No real audit logger in unit tests
 
 
@@ -123,10 +125,12 @@ def test_format_image_content() -> None:
 
 
 def test_format_multiple_content_items() -> None:
-    result = FakeCallToolResult(content=[
-        FakeTextContent(text="line 1"),
-        FakeTextContent(text="line 2"),
-    ])
+    result = FakeCallToolResult(
+        content=[
+            FakeTextContent(text="line 1"),
+            FakeTextContent(text="line 2"),
+        ]
+    )
     assert _format_result(result) == "line 1\nline 2"
 
 
@@ -232,9 +236,7 @@ async def test_handler_calls_session() -> None:
     tool = FakeTool("echo_tool")
     session = _make_session([tool])
     session.config.approval_required = ["none"]
-    session.call_tool = AsyncMock(
-        return_value=FakeCallToolResult(content=[FakeTextContent(text="echo: hello")])
-    )
+    session.call_tool = AsyncMock(return_value=FakeCallToolResult(content=[FakeTextContent(text="echo: hello")]))
 
     registry = _make_registry()
     audit = _make_audit()
@@ -253,9 +255,7 @@ async def test_handler_logs_audit_on_success() -> None:
     tool = FakeTool("my_tool")
     session = _make_session([tool])
     session.config.approval_required = ["none"]
-    session.call_tool = AsyncMock(
-        return_value=FakeCallToolResult(content=[FakeTextContent(text="ok")])
-    )
+    session.call_tool = AsyncMock(return_value=FakeCallToolResult(content=[FakeTextContent(text="ok")]))
 
     import tempfile
 
@@ -334,9 +334,7 @@ async def test_handler_measures_duration() -> None:
     tool = FakeTool("timed_tool")
     session = _make_session([tool])
     session.config.approval_required = ["none"]
-    session.call_tool = AsyncMock(
-        return_value=FakeCallToolResult(content=[FakeTextContent(text="done")])
-    )
+    session.call_tool = AsyncMock(return_value=FakeCallToolResult(content=[FakeTextContent(text="done")]))
 
     registry = _make_registry()
     audit = _CapturingAudit(None)

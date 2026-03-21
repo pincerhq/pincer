@@ -25,7 +25,9 @@ def _make_provider(available: bool, result=None, raises=None) -> BaseImageProvid
 async def test_uses_first_available():
     good_result = ImageResult(
         images=[GeneratedImage(url="http://x.com/img.jpg")],
-        provider="fal", model="m", cost_usd=0.003,
+        provider="fal",
+        model="m",
+        cost_usd=0.003,
     )
     p1 = _make_provider(available=True, result=good_result)
     p2 = _make_provider(available=True, result=good_result)
@@ -50,7 +52,9 @@ async def test_fallback_to_second_on_failure():
 async def test_skips_unavailable_provider():
     good_result = ImageResult(
         images=[GeneratedImage(url="http://x.com/img.jpg")],
-        provider="gemini", model="g", cost_usd=0.004,
+        provider="gemini",
+        model="g",
+        cost_usd=0.004,
     )
     p1 = _make_provider(available=False)
     p2 = _make_provider(available=True, result=good_result)

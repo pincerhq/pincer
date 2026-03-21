@@ -312,9 +312,7 @@ async def sandbox_streams(sandbox: MCPSandbox) -> Any:
         from mcp.shared.message import SessionMessage
         from mcp.types import JSONRPCMessage
     except ImportError as exc:
-        raise RuntimeError(
-            "mcp package not installed. Run: uv pip install 'pincer-agent[mcp]'"
-        ) from exc
+        raise RuntimeError("mcp package not installed. Run: uv pip install 'pincer-agent[mcp]'") from exc
 
     import anyio
 
@@ -336,9 +334,7 @@ async def sandbox_streams(sandbox: MCPSandbox) -> Any:
         async with read_send:
             try:
                 while True:
-                    line: bytes = await anyio.to_thread.run_sync(
-                        stdout_pipe.readline, abandon_on_cancel=True
-                    )
+                    line: bytes = await anyio.to_thread.run_sync(stdout_pipe.readline, abandon_on_cancel=True)
                     if not line:
                         break  # EOF
                     stripped = line.strip()
@@ -352,9 +348,7 @@ async def sandbox_streams(sandbox: MCPSandbox) -> Any:
             except anyio.EndOfStream:
                 pass
             except Exception:
-                logger.debug(
-                    "MCPSandbox '%s' stdout reader exited", sandbox.server_name, exc_info=True
-                )
+                logger.debug("MCPSandbox '%s' stdout reader exited", sandbox.server_name, exc_info=True)
 
     async def _stdin_writer() -> None:
         """Unwrap SessionMessage → JSON → write to subprocess stdin."""
@@ -372,9 +366,7 @@ async def sandbox_streams(sandbox: MCPSandbox) -> Any:
 
                     await anyio.to_thread.run_sync(_write, abandon_on_cancel=True)
             except Exception:
-                logger.debug(
-                    "MCPSandbox '%s' stdin writer exited", sandbox.server_name, exc_info=True
-                )
+                logger.debug("MCPSandbox '%s' stdin writer exited", sandbox.server_name, exc_info=True)
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(_stdout_reader)

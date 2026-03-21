@@ -62,8 +62,7 @@ class WhatsAppChannel(BaseChannel):
     def __init__(self, settings: Settings) -> None:
         if not HAS_NEONIZE:
             raise ImportError(
-                "neonize is required for WhatsApp support. "
-                "Install it with: pip install neonize (requires libmagic)"
+                "neonize is required for WhatsApp support. Install it with: pip install neonize (requires libmagic)"
             )
         self._settings = settings
         self._client: NewAClient | None = None
@@ -76,9 +75,7 @@ class WhatsAppChannel(BaseChannel):
         self._dm_allowlist: set[str] = set()
         if settings.whatsapp_dm_allowlist:
             self._dm_allowlist = {
-                phone.strip().lstrip("+")
-                for phone in settings.whatsapp_dm_allowlist.split(",")
-                if phone.strip()
+                phone.strip().lstrip("+") for phone in settings.whatsapp_dm_allowlist.split(",") if phone.strip()
             }
             logger.info("WhatsApp allowlist: %d numbers", len(self._dm_allowlist))
 
@@ -101,11 +98,7 @@ class WhatsAppChannel(BaseChannel):
         # Neonize dispatches all event callbacks via
         # asyncio.run_coroutine_threadsafe(..., event_global_loop) but never
         # starts that loop.  We run it in a daemon thread so callbacks fire.
-        if (
-            not WhatsAppChannel._loop_started
-            and event_global_loop is not None
-            and not event_global_loop.is_running()
-        ):
+        if not WhatsAppChannel._loop_started and event_global_loop is not None and not event_global_loop.is_running():
             threading.Thread(
                 target=event_global_loop.run_forever,
                 daemon=True,
@@ -148,9 +141,7 @@ class WhatsAppChannel(BaseChannel):
         try:
             await asyncio.wait_for(self._connected.wait(), timeout=120)
         except TimeoutError:
-            raise RuntimeError(
-                "WhatsApp connection timed out. Did you scan the QR code?"
-            ) from None
+            raise RuntimeError("WhatsApp connection timed out. Did you scan the QR code?") from None
 
         logger.info(
             "event_global_loop healthy: running=%s, closed=%s",

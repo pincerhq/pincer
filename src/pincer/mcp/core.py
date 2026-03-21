@@ -115,6 +115,7 @@ class MCPServiceCore:
         # Registry for tools imported FROM external MCP servers (client side)
         if client_tool_registry is None:
             from pincer.tools.registry import ToolRegistry as _TR
+
             self._client_tool_registry = _TR()
         else:
             self._client_tool_registry = client_tool_registry
@@ -140,8 +141,8 @@ class MCPServiceCore:
             self.sampling_handler = SamplingHandler(enabled=False)
 
         # Runtime state
-        self._client_manager: Any | None = None   # MCPClientManager
-        self._server: Any | None = None            # PincerMCPServer
+        self._client_manager: Any | None = None  # MCPClientManager
+        self._server: Any | None = None  # PincerMCPServer
 
     # ── Server-side: tool/resource/prompt registration ─────────────────────────
 
@@ -230,12 +231,11 @@ class MCPServiceCore:
             return
 
         if PincerMCPServer is None:
-            raise RuntimeError(
-                "mcp package required for MCP server: uv pip install 'pincer-agent[mcp]'"
-            )
+            raise RuntimeError("mcp package required for MCP server: uv pip install 'pincer-agent[mcp]'")
 
         # Build a ToolRegistry from server-side tool registrations
         from pincer.tools.registry import ToolRegistry
+
         server_registry = ToolRegistry()
         for tool_def in self._server_tools.values():
             server_registry.register(

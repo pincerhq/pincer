@@ -35,9 +35,7 @@ class ImageProviderRouter:
                 )
                 last_error = e
 
-        raise RuntimeError(
-            f"All image providers failed. Last error: {last_error}"
-        ) from last_error
+        raise RuntimeError(f"All image providers failed. Last error: {last_error}") from last_error
 
 
 def build_router_from_settings() -> ImageProviderRouter:

@@ -21,18 +21,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger("pincer.mcp.exporter")
 
 # Default approval-required tools (destructive or sensitive)
-_APPROVAL_REQUIRED = frozenset({
-    "email_send",
-    "shell_exec",
-    "python_exec",
-    "file_write",
-    "voice_call",
-    "pincer_email_send",
-    "pincer_shell_exec",
-    "pincer_python_exec",
-    "pincer_file_write",
-    "pincer_voice_call",
-})
+_APPROVAL_REQUIRED = frozenset(
+    {
+        "email_send",
+        "shell_exec",
+        "python_exec",
+        "file_write",
+        "voice_call",
+        "pincer_email_send",
+        "pincer_shell_exec",
+        "pincer_python_exec",
+        "pincer_file_write",
+        "pincer_voice_call",
+    }
+)
 
 # Canonical prefix added to Pincer tools when exposed via MCP server
 _TOOL_PREFIX = "pincer_"
@@ -77,10 +79,7 @@ class PincerToolExporter:
             if pincer_name not in registered_tools:
                 logger.warning("MCP export: tool '%s' not in registry — skipping", pincer_name)
                 continue
-            mcp_name = (
-                pincer_name if pincer_name.startswith(_TOOL_PREFIX)
-                else f"{_TOOL_PREFIX}{pincer_name}"
-            )
+            mcp_name = pincer_name if pincer_name.startswith(_TOOL_PREFIX) else f"{_TOOL_PREFIX}{pincer_name}"
             needs_approval = (
                 pincer_name in _APPROVAL_REQUIRED
                 or mcp_name in _APPROVAL_REQUIRED

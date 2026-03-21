@@ -28,9 +28,11 @@ def _make_registry(tool_names: list[str] | None = None):
     from pincer.tools.registry import ToolRegistry
 
     reg = ToolRegistry()
-    for name in (tool_names or ["web_search"]):
+    for name in tool_names or ["web_search"]:
+
         async def _handler(**_):
             return "ok"
+
         _handler.__name__ = name
         reg.register(name=name, description=f"Tool {name}", handler=_handler)
     return reg
@@ -124,8 +126,11 @@ async def test_server_exposes_only_whitelisted_tools():
         orig_init(self, tool_registry, expose_tools, **kwargs)
 
     ctx, _fmcp = _fmcp_patch()
-    with ctx, patch.object(PincerToolExporter, "__init__", _capture_init), \
-            patch.object(PincerToolExporter, "export_to", return_value=1):
+    with (
+        ctx,
+        patch.object(PincerToolExporter, "__init__", _capture_init),
+        patch.object(PincerToolExporter, "export_to", return_value=1),
+    ):
         await server.start()
         await server.stop()
 
@@ -189,6 +194,8 @@ async def test_server_logs_start_stop_audit():
 async def test_server_handles_import_error():
     """start() raises RuntimeError when mcp package is not installed."""
     server = _make_server()
-    with patch.dict("sys.modules", {"mcp": None, "mcp.server": None, "mcp.server.fastmcp": None}), \
-            pytest.raises(RuntimeError, match="mcp package required"):
+    with (
+        patch.dict("sys.modules", {"mcp": None, "mcp.server": None, "mcp.server.fastmcp": None}),
+        pytest.raises(RuntimeError, match="mcp package required"),
+    ):
         await server.start()

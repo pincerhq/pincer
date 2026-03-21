@@ -122,9 +122,11 @@ async def test_embedded_start_connects_mcp_clients():
     mock_manager.stop = AsyncMock()
     mock_manager.total_tool_count = MagicMock(return_value=5)
 
-    with patch("pincer.mcp.core.MCPClientManager", return_value=mock_manager), \
-         patch("pincer.mcp.core.MCPSecurityGate"), \
-         patch("pincer.mcp.core.MCPAuditLogger"):
+    with (
+        patch("pincer.mcp.core.MCPClientManager", return_value=mock_manager),
+        patch("pincer.mcp.core.MCPSecurityGate"),
+        patch("pincer.mcp.core.MCPAuditLogger"),
+    ):
         results = await shell.start()
 
     assert results == {"github": True}

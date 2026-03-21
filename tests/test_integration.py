@@ -112,9 +112,7 @@ async def test_get_recent_memories(memory_store: MemoryStore) -> None:
 
 
 @pytest.mark.asyncio
-async def test_summarizer_triggers_on_threshold(
-    memory_store: MemoryStore, session_manager, settings
-) -> None:
+async def test_summarizer_triggers_on_threshold(memory_store: MemoryStore, session_manager, settings) -> None:
     mock_llm = AsyncMock(spec=BaseLLMProvider)
     mock_llm.complete.return_value = LLMResponse(
         content="Summary: User discussed Python and AI topics.",
@@ -133,9 +131,7 @@ async def test_summarizer_triggers_on_threshold(
     session = await session_manager.get_or_create("user1", "test")
     for i in range(8):
         role = MessageRole.USER if i % 2 == 0 else MessageRole.ASSISTANT
-        await session_manager.add_message(
-            session, LLMMessage(role=role, content=f"Message {i}")
-        )
+        await session_manager.add_message(session, LLMMessage(role=role, content=f"Message {i}"))
 
     did_summarize = await summarizer.maybe_summarize(session)
     assert did_summarize is True
@@ -148,9 +144,7 @@ async def test_summarizer_triggers_on_threshold(
 
 
 @pytest.mark.asyncio
-async def test_summarizer_skips_short_conversation(
-    memory_store: MemoryStore, session_manager, settings
-) -> None:
+async def test_summarizer_skips_short_conversation(memory_store: MemoryStore, session_manager, settings) -> None:
     mock_llm = AsyncMock(spec=BaseLLMProvider)
     summarizer = Summarizer(
         llm=mock_llm,
@@ -160,9 +154,7 @@ async def test_summarizer_skips_short_conversation(
     )
 
     session = await session_manager.get_or_create("user2", "test")
-    await session_manager.add_message(
-        session, LLMMessage(role=MessageRole.USER, content="hi")
-    )
+    await session_manager.add_message(session, LLMMessage(role=MessageRole.USER, content="hi"))
 
     did_summarize = await summarizer.maybe_summarize(session)
     assert did_summarize is False
@@ -327,9 +319,7 @@ async def test_agent_stream_with_tools(settings, session_manager, cost_tracker, 
 
 
 @pytest.mark.asyncio
-async def test_agent_with_memory(
-    settings, session_manager, cost_tracker, tool_registry, tmp_path
-) -> None:
+async def test_agent_with_memory(settings, session_manager, cost_tracker, tool_registry, tmp_path) -> None:
     mock_llm = AsyncMock(spec=BaseLLMProvider)
     mock_llm.complete.return_value = LLMResponse(
         content="I remember that you like Python!",
@@ -373,6 +363,7 @@ async def test_browse_returns_error_without_playwright() -> None:
     with patch.dict("sys.modules", {"playwright": None, "playwright.async_api": None}):
         # Force reimport to pick up the patched modules
         from pincer.tools.builtin import browser
+
         # Reset the global browser state
         browser._browser = None
         browser._playwright = None
@@ -386,9 +377,7 @@ async def test_browse_returns_error_without_playwright() -> None:
 
 
 @pytest.mark.asyncio
-async def test_full_flow_message_to_response(
-    settings, session_manager, cost_tracker, tool_registry, tmp_path
-) -> None:
+async def test_full_flow_message_to_response(settings, session_manager, cost_tracker, tool_registry, tmp_path) -> None:
     """Test the complete flow: user message -> agent -> tools -> response."""
     mock_llm = AsyncMock(spec=BaseLLMProvider)
     mock_llm.complete.side_effect = [

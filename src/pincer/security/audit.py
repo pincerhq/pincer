@@ -59,9 +59,7 @@ class AuditEntry:
     channel: str | None = None
     session_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    timestamp: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
-    )
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class AuditLogger:
@@ -129,9 +127,7 @@ class AuditLogger:
             await self._write_queue.put(entry)
 
     @asynccontextmanager
-    async def track(
-        self, user_id: str, action: AuditAction, **kwargs: Any
-    ) -> AsyncIterator[AuditEntry]:
+    async def track(self, user_id: str, action: AuditAction, **kwargs: Any) -> AsyncIterator[AuditEntry]:
         """Context manager that auto-tracks duration and errors."""
         entry = AuditEntry(user_id=user_id, action=action, **kwargs)
         start = time.monotonic()
@@ -230,9 +226,7 @@ class AuditLogger:
                     record = dict(zip(columns, row, strict=False))
                     if record.get("metadata_json"):
                         try:
-                            record["metadata"] = json.loads(
-                                record.pop("metadata_json")
-                            )
+                            record["metadata"] = json.loads(record.pop("metadata_json"))
                         except json.JSONDecodeError:
                             record["metadata"] = {}
                     f.write(f"  {json.dumps(record, default=str)}")
@@ -249,15 +243,12 @@ class AuditLogger:
         time_filter = f"WHERE timestamp >= '{since}'" if since else ""
         stats: dict[str, Any] = {}
 
-        async with self._db.execute(
-            f"SELECT COUNT(*) FROM audit_log {time_filter}"
-        ) as cursor:
+        async with self._db.execute(f"SELECT COUNT(*) FROM audit_log {time_filter}") as cursor:
             row = await cursor.fetchone()
             stats["total_entries"] = row[0] if row else 0
 
         async with self._db.execute(
-            f"SELECT action, COUNT(*) FROM audit_log {time_filter} "
-            "GROUP BY action ORDER BY COUNT(*) DESC"
+            f"SELECT action, COUNT(*) FROM audit_log {time_filter} GROUP BY action ORDER BY COUNT(*) DESC"
         ) as cursor:
             stats["by_action"] = {row[0]: row[1] async for row in cursor}
 
@@ -267,15 +258,11 @@ class AuditLogger:
         ) as cursor:
             stats["by_tool"] = {row[0]: row[1] async for row in cursor}
 
-        async with self._db.execute(
-            f"SELECT SUM(cost_usd) FROM audit_log {time_filter}"
-        ) as cursor:
+        async with self._db.execute(f"SELECT SUM(cost_usd) FROM audit_log {time_filter}") as cursor:
             row = await cursor.fetchone()
             stats["total_cost_usd"] = round(row[0] or 0.0, 6)
 
-        async with self._db.execute(
-            f"SELECT COUNT(*) FROM audit_log {time_filter} WHERE approved = 0"
-        ) as cursor:
+        async with self._db.execute(f"SELECT COUNT(*) FROM audit_log {time_filter} WHERE approved = 0") as cursor:
             row = await cursor.fetchone()
             stats["failed_actions"] = row[0] if row else 0
 

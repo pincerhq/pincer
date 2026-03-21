@@ -460,11 +460,7 @@ class SecurityDoctor:
         )
 
     def _check_tool_call_limits(self) -> CheckResult:
-        configured = sum(
-            1
-            for k in ["PINCER_RATE_TOOLS_PER_MIN", "PINCER_MAX_CONCURRENT_LLM"]
-            if os.environ.get(k)
-        )
+        configured = sum(1 for k in ["PINCER_RATE_TOOLS_PER_MIN", "PINCER_MAX_CONCURRENT_LLM"] if os.environ.get(k))
         if configured == 2:
             return CheckResult(
                 "tool_call_limits",
@@ -640,15 +636,9 @@ class SecurityDoctor:
                 timeout=30,
             )
             if result.returncode == 0:
-                outdated = (
-                    json.loads(result.stdout) if result.stdout.strip() else []
-                )
+                outdated = json.loads(result.stdout) if result.stdout.strip() else []
                 critical = {"anthropic", "openai", "httpx", "cryptography"}
-                crit_outdated = [
-                    p
-                    for p in outdated
-                    if p.get("name", "").lower() in critical
-                ]
+                crit_outdated = [p for p in outdated if p.get("name", "").lower() in critical]
                 if crit_outdated:
                     names = ", ".join(p["name"] for p in crit_outdated)
                     return CheckResult(
@@ -910,9 +900,7 @@ class SecurityDoctor:
         toml_path = self.config_dir / "pincer.toml"
         if not toml_path.exists():
             # No TOML config — check if env-based servers are defined
-            mcp_servers_env = any(
-                k.startswith("PINCER_MCP_SERVER_") for k in os.environ
-            )
+            mcp_servers_env = any(k.startswith("PINCER_MCP_SERVER_") for k in os.environ)
             if not mcp_servers_env:
                 return CheckResult(
                     "mcp_config_valid",
@@ -961,9 +949,7 @@ class SecurityDoctor:
                     category="mcp",
                 )
             unsandboxed = [
-                s.name
-                for s in cfg.servers
-                if s.enabled and s.transport == MCPTransport.STDIO and not s.sandbox
+                s.name for s in cfg.servers if s.enabled and s.transport == MCPTransport.STDIO and not s.sandbox
             ]
             if not unsandboxed:
                 return CheckResult(
@@ -1000,11 +986,7 @@ class SecurityDoctor:
                     "No MCP servers configured",
                     category="mcp",
                 )
-            bypassed = [
-                s.name
-                for s in cfg.servers
-                if s.enabled and "none" in s.approval_required
-            ]
+            bypassed = [s.name for s in cfg.servers if s.enabled and "none" in s.approval_required]
             if not bypassed:
                 return CheckResult(
                     "mcp_approval_not_bypassed",
@@ -1309,9 +1291,7 @@ class SecurityDoctor:
                 "mcp_server_not_exposed",
                 CheckStatus.WARNING,
                 f"MCP server exposed on {srv.host} without OAuth — any host can connect",
-                fix_hint=(
-                    "Set host = '127.0.0.1' in [mcp.server] or enable OAuth authentication"
-                ),
+                fix_hint=("Set host = '127.0.0.1' in [mcp.server] or enable OAuth authentication"),
                 category="mcp",
             )
         except Exception:

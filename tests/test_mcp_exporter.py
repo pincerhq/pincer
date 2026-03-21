@@ -13,12 +13,15 @@ def _make_registry(tool_names: list[str] | None = None):
     from pincer.tools.registry import ToolRegistry
 
     reg = ToolRegistry()
-    for name in (tool_names or []):
+    for name in tool_names or []:
+
         def _make_handler(n: str):
             async def _handler(**_kwargs):
                 return f"result:{n}"
+
             _handler.__name__ = n
             return _handler
+
         reg.register(name=name, description=f"Tool {name}", handler=_make_handler(name))
     return reg
 

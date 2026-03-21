@@ -124,15 +124,9 @@ async def test_stats(audit_logger):
 
 @pytest.mark.asyncio
 async def test_query_with_filters(audit_logger):
-    await audit_logger.log(
-        AuditEntry(user_id="alice", action=AuditAction.TOOL_CALL, tool="search")
-    )
-    await audit_logger.log(
-        AuditEntry(user_id="bob", action=AuditAction.LLM_REQUEST)
-    )
-    await audit_logger.log(
-        AuditEntry(user_id="alice", action=AuditAction.MESSAGE_RECEIVED)
-    )
+    await audit_logger.log(AuditEntry(user_id="alice", action=AuditAction.TOOL_CALL, tool="search"))
+    await audit_logger.log(AuditEntry(user_id="bob", action=AuditAction.LLM_REQUEST))
+    await audit_logger.log(AuditEntry(user_id="alice", action=AuditAction.MESSAGE_RECEIVED))
     await audit_logger._flush_pending()
 
     alice_results = await audit_logger.query(user_id="alice")

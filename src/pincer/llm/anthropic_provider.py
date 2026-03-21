@@ -129,9 +129,7 @@ class AnthropicProvider(BaseLLMProvider):
                 if attempt == max_retries - 1:
                     raise LLMRateLimitError(retry_after=retry_after) from e
                 wait = min(retry_after * (2**attempt), 60)
-                logger.warning(
-                    "Rate limited, retrying in %.1fs (attempt %d)", wait, attempt + 1
-                )
+                logger.warning("Rate limited, retrying in %.1fs (attempt %d)", wait, attempt + 1)
                 await asyncio.sleep(wait)
         raise LLMError("Exhausted retries")  # unreachable but satisfies type checker
 
@@ -143,16 +141,18 @@ class AnthropicProvider(BaseLLMProvider):
                 continue  # system handled separately
 
             if msg.role == MessageRole.TOOL_RESULT:
-                result.append({
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": msg.tool_call_id,
-                            "content": msg.content,
-                        }
-                    ],
-                })
+                result.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg.tool_call_id,
+                                "content": msg.content,
+                            }
+                        ],
+                    }
+                )
                 continue
 
             if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
@@ -160,12 +160,14 @@ class AnthropicProvider(BaseLLMProvider):
                 if msg.content:
                     content_blocks.append({"type": "text", "text": msg.content})
                 for tc in msg.tool_calls:
-                    content_blocks.append({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.arguments,
-                    })
+                    content_blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": tc.arguments,
+                        }
+                    )
                 result.append({"role": "assistant", "content": content_blocks})
                 continue
 
@@ -173,14 +175,16 @@ class AnthropicProvider(BaseLLMProvider):
             if msg.images:
                 content_parts: list[dict[str, Any]] = []
                 for img in msg.images:
-                    content_parts.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": img.media_type,
-                            "data": img.data,
-                        },
-                    })
+                    content_parts.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": img.media_type,
+                                "data": img.data,
+                            },
+                        }
+                    )
                 if msg.content:
                     content_parts.append({"type": "text", "text": msg.content})
                 result.append({"role": msg.role.value, "content": content_parts})
@@ -218,18 +222,12 @@ class AnthropicProvider(BaseLLMProvider):
         for msg in messages:
             if msg["role"] == "assistant" and isinstance(msg.get("content"), list):
                 blocks = msg["content"]
-                has_tool_use = any(
-                    isinstance(b, dict) and b.get("type") == "tool_use"
-                    for b in blocks
-                )
+                has_tool_use = any(isinstance(b, dict) and b.get("type") == "tool_use" for b in blocks)
                 if has_tool_use:
                     surviving = [
-                        b for b in blocks
-                        if not (
-                            isinstance(b, dict)
-                            and b.get("type") == "tool_use"
-                            and b.get("id") not in result_ids
-                        )
+                        b
+                        for b in blocks
+                        if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id") not in result_ids)
                     ]
                     if not surviving:
                         logger.debug("Dropping assistant message: all tool_use blocks orphaned")
@@ -244,10 +242,7 @@ class AnthropicProvider(BaseLLMProvider):
             # Strip orphaned tool_result (no matching tool_use)
             if msg["role"] == "user" and isinstance(msg.get("content"), list):
                 blocks = msg["content"]
-                has_tool_result = any(
-                    isinstance(b, dict) and b.get("type") == "tool_result"
-                    for b in blocks
-                )
+                has_tool_result = any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks)
                 if has_tool_result:
                     use_ids: set[str] = set()
                     for prev in cleaned:
@@ -256,7 +251,8 @@ class AnthropicProvider(BaseLLMProvider):
                                 if isinstance(b, dict) and b.get("type") == "tool_use":
                                     use_ids.add(b["id"])
                     surviving = [
-                        b for b in blocks
+                        b
+                        for b in blocks
                         if not (
                             isinstance(b, dict)
                             and b.get("type") == "tool_result"

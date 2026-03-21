@@ -152,6 +152,7 @@ async def test_agent_llm_backend_complete():
 @pytest.mark.asyncio
 async def test_agent_llm_backend_fallback_to_chat():
     """Fallback to .chat() if .complete() raises AttributeError."""
+
     class FakeRouter:
         async def chat(self, messages):
             return "chat response"

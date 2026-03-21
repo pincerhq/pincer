@@ -27,7 +27,9 @@ class TTSProvider(ABC):
 
     @abstractmethod
     async def synthesize_stream(
-        self, text: str, voice: str | None = None,
+        self,
+        text: str,
+        voice: str | None = None,
     ) -> AsyncIterator[bytes]:
         """Yield PCM 16kHz audio chunks as the text is synthesized."""
         ...
@@ -56,7 +58,9 @@ class ElevenLabsTTS(TTSProvider):
         self._cancelled = False
 
     async def synthesize_stream(
-        self, text: str, voice: str | None = None,
+        self,
+        text: str,
+        voice: str | None = None,
     ) -> AsyncIterator[bytes]:
         """Stream synthesized audio chunks for the given text."""
         self._cancelled = False
@@ -66,13 +70,11 @@ class ElevenLabsTTS(TTSProvider):
             import websockets
         except ImportError as e:
             raise ImportError(
-                "websockets is required for ElevenLabs TTS. "
-                "Install with: uv pip install websockets"
+                "websockets is required for ElevenLabs TTS. Install with: uv pip install websockets"
             ) from e
 
         url = (
-            f"{self._base_url}/v1/text-to-speech/{voice_id}/stream-input"
-            f"?model_id={self._model}&output_format=pcm_16000"
+            f"{self._base_url}/v1/text-to-speech/{voice_id}/stream-input?model_id={self._model}&output_format=pcm_16000"
         )
 
         try:
@@ -81,14 +83,16 @@ class ElevenLabsTTS(TTSProvider):
                 additional_headers={"xi-api-key": self._api_key},
             )
 
-            init_msg = json.dumps({
-                "text": " ",
-                "voice_settings": {
-                    "stability": 0.5,
-                    "similarity_boost": 0.75,
-                },
-                "xi_api_key": self._api_key,
-            })
+            init_msg = json.dumps(
+                {
+                    "text": " ",
+                    "voice_settings": {
+                        "stability": 0.5,
+                        "similarity_boost": 0.75,
+                    },
+                    "xi_api_key": self._api_key,
+                }
+            )
             await self._ws.send(init_msg)
 
             sentences = _split_sentences(text)
@@ -118,6 +122,7 @@ class ElevenLabsTTS(TTSProvider):
                 audio_b64 = parsed.get("audio")
                 if audio_b64:
                     import base64
+
                     yield base64.b64decode(audio_b64)
 
                 if parsed.get("isFinal"):

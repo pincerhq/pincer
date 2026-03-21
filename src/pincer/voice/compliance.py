@@ -24,41 +24,122 @@ class ConsentMode(StrEnum):
 
 
 TWO_PARTY_CONSENT_AREA_CODES = {
-    "202", "203", "206", "209", "213", "310", "323", "341", "350", "408",
-    "415", "424", "442", "510", "530", "559", "562", "619", "626", "628",
-    "650", "657", "661", "669", "707", "714", "747", "760", "805", "818",
-    "831", "858", "909", "916", "925", "949", "951",  # California
-    "475", "860",  # Connecticut
+    "202",
+    "203",
+    "206",
+    "209",
+    "213",
+    "310",
+    "323",
+    "341",
+    "350",
+    "408",
+    "415",
+    "424",
+    "442",
+    "510",
+    "530",
+    "559",
+    "562",
+    "619",
+    "626",
+    "628",
+    "650",
+    "657",
+    "661",
+    "669",
+    "707",
+    "714",
+    "747",
+    "760",
+    "805",
+    "818",
+    "831",
+    "858",
+    "909",
+    "916",
+    "925",
+    "949",
+    "951",  # California
+    "475",
+    "860",  # Connecticut
     "302",  # Delaware
-    "239", "305", "321", "352", "386", "407", "561", "727", "754", "772",
-    "786", "813", "850", "863", "904", "941", "954",  # Florida
-    "217", "224", "309", "312", "331", "618", "630", "708", "773", "779",
-    "815", "847", "872",  # Illinois
-    "301", "240", "410", "443", "667",  # Maryland
-    "339", "351", "413", "508", "617", "774", "781", "857", "978",  # Massachusetts
+    "239",
+    "305",
+    "321",
+    "352",
+    "386",
+    "407",
+    "561",
+    "727",
+    "754",
+    "772",
+    "786",
+    "813",
+    "850",
+    "863",
+    "904",
+    "941",
+    "954",  # Florida
+    "217",
+    "224",
+    "309",
+    "312",
+    "331",
+    "618",
+    "630",
+    "708",
+    "773",
+    "779",
+    "815",
+    "847",
+    "872",  # Illinois
+    "301",
+    "240",
+    "410",
+    "443",
+    "667",  # Maryland
+    "339",
+    "351",
+    "413",
+    "508",
+    "617",
+    "774",
+    "781",
+    "857",
+    "978",  # Massachusetts
     "406",  # Montana
     "603",  # New Hampshire
-    "503", "541", "971",  # Oregon
-    "215", "267", "272", "412", "445", "484", "570", "610", "717", "724",
-    "814", "835", "878",  # Pennsylvania
-    "253", "360", "425", "509", "564",  # Washington
+    "503",
+    "541",
+    "971",  # Oregon
+    "215",
+    "267",
+    "272",
+    "412",
+    "445",
+    "484",
+    "570",
+    "610",
+    "717",
+    "724",
+    "814",
+    "835",
+    "878",  # Pennsylvania
+    "253",
+    "360",
+    "425",
+    "509",
+    "564",  # Washington
 }
 
-CONSENT_ANNOUNCEMENT_EN = (
-    "This call may be recorded for quality purposes."
-)
+CONSENT_ANNOUNCEMENT_EN = "This call may be recorded for quality purposes."
 
-CONSENT_ANNOUNCEMENT_TWO_PARTY_EN = (
-    "This call may be recorded. By continuing this call, you consent to recording."
-)
+CONSENT_ANNOUNCEMENT_TWO_PARTY_EN = "This call may be recorded. By continuing this call, you consent to recording."
 
-CONSENT_ANNOUNCEMENT_DE = (
-    "Dieser Anruf kann zu Qualitätszwecken aufgezeichnet werden."
-)
+CONSENT_ANNOUNCEMENT_DE = "Dieser Anruf kann zu Qualitätszwecken aufgezeichnet werden."
 
-OUTBOUND_RECORDING_DISCLOSURE = (
-    "I should let you know that this call may be recorded."
-)
+OUTBOUND_RECORDING_DISCLOSURE = "I should let you know that this call may be recorded."
 
 
 @dataclass
@@ -109,7 +190,8 @@ def get_consent_mode(settings: Settings, caller_number: str) -> ConsentMode:
 
 
 def get_consent_announcement(
-    mode: ConsentMode, caller_number: str = "",
+    mode: ConsentMode,
+    caller_number: str = "",
 ) -> str | None:
     """Get the appropriate consent announcement text."""
     if mode == ConsentMode.NONE:

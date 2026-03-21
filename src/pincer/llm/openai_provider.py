@@ -38,14 +38,16 @@ def _convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]
     """Convert Anthropic-style tool defs to OpenAI function-calling format."""
     oai_tools: list[dict[str, Any]] = []
     for tool in tools:
-        oai_tools.append({
-            "type": "function",
-            "function": {
-                "name": tool["name"],
-                "description": tool.get("description", ""),
-                "parameters": tool.get("input_schema", {}),
-            },
-        })
+        oai_tools.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool.get("input_schema", {}),
+                },
+            }
+        )
     return oai_tools
 
 
@@ -163,36 +165,44 @@ class OpenAIProvider(BaseLLMProvider):
             if msg.role == MessageRole.SYSTEM:
                 result.append({"role": "system", "content": msg.content})
             elif msg.role == MessageRole.TOOL_RESULT:
-                result.append({
-                    "role": "tool",
-                    "tool_call_id": msg.tool_call_id or "",
-                    "content": msg.content,
-                })
+                result.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": msg.tool_call_id or "",
+                        "content": msg.content,
+                    }
+                )
             elif msg.role == MessageRole.ASSISTANT and msg.tool_calls:
                 tool_calls_api = []
                 for tc in msg.tool_calls:
-                    tool_calls_api.append({
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.name,
-                            "arguments": json.dumps(tc.arguments),
-                        },
-                    })
-                result.append({
-                    "role": "assistant",
-                    "content": msg.content or None,
-                    "tool_calls": tool_calls_api,
-                })
+                    tool_calls_api.append(
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.name,
+                                "arguments": json.dumps(tc.arguments),
+                            },
+                        }
+                    )
+                result.append(
+                    {
+                        "role": "assistant",
+                        "content": msg.content or None,
+                        "tool_calls": tool_calls_api,
+                    }
+                )
             elif msg.images:
                 content_parts: list[dict[str, Any]] = []
                 for img in msg.images:
-                    content_parts.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{img.media_type};base64,{img.data}",
-                        },
-                    })
+                    content_parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{img.media_type};base64,{img.data}",
+                            },
+                        }
+                    )
                 if msg.content:
                     content_parts.append({"type": "text", "text": msg.content})
                 result.append({"role": msg.role.value, "content": content_parts})
@@ -212,9 +222,7 @@ class OpenAIProvider(BaseLLMProvider):
                     args = json.loads(tc.function.arguments)
                 except json.JSONDecodeError:
                     args = {}
-                tool_calls.append(
-                    ToolCall(id=tc.id, name=tc.function.name, arguments=args)
-                )
+                tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=args))
 
         return LLMResponse(
             content=message.content or "",

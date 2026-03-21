@@ -57,16 +57,13 @@ def test_sandbox_force_kills_after_timeout() -> None:
         pytest.skip("SIGTERM/SIGKILL semantics differ on Windows")
 
     # A process that ignores SIGTERM but will be killed
-    ignore_sigterm = (
-        "import signal, time; "
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-        "time.sleep(120)"
-    )
+    ignore_sigterm = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)"
     sb = _make_sandbox(args=["-c", ignore_sigterm])
     sb.start()
     assert sb.alive
 
     import pincer.mcp.sandbox as sandbox_mod
+
     original_wait = sandbox_mod._SIGTERM_WAIT_SECONDS
     sandbox_mod._SIGTERM_WAIT_SECONDS = 1  # type: ignore[attr-defined]
     try:
@@ -179,9 +176,7 @@ def test_sandbox_env_does_not_leak_current_process_env(monkeypatch: pytest.Monke
 
 def test_sandbox_cwd_is_tmpdir() -> None:
     """Verify subprocess runs in the sandbox's tmpdir, not the project root."""
-    sb = _make_sandbox(
-        args=["-c", "import os, sys; sys.stdout.write(os.getcwd()); sys.stdout.flush()"]
-    )
+    sb = _make_sandbox(args=["-c", "import os, sys; sys.stdout.write(os.getcwd()); sys.stdout.flush()"])
     stdin_pipe, stdout_pipe = sb.start()
     # Give it a moment to write cwd to stdout
     time.sleep(0.3)
@@ -195,6 +190,7 @@ def test_sandbox_tmpdir_cleaned_on_stop() -> None:
     tmpdir = sb._tmpdir
     assert tmpdir is not None
     import pathlib
+
     assert pathlib.Path(tmpdir).exists()
     sb.stop()
     assert not pathlib.Path(tmpdir).exists()
@@ -206,7 +202,10 @@ def test_sandbox_tmpdir_cleaned_on_stop() -> None:
 def test_sandbox_stderr_captured() -> None:
     """get_stderr() returns output written to stderr."""
     sb = _make_sandbox(
-        args=["-c", "import sys; sys.stderr.write('hello from stderr\\n'); sys.stderr.flush(); import time; time.sleep(60)"]  # noqa: E501
+        args=[
+            "-c",
+            "import sys; sys.stderr.write('hello from stderr\\n'); sys.stderr.flush(); import time; time.sleep(60)",
+        ]  # noqa: E501
     )
     sb.start()
     time.sleep(0.3)  # let the process write to stderr
@@ -257,6 +256,7 @@ def test_sandbox_memory_limit_set() -> None:
             # returns RLIM_INFINITY.  Just verify the subprocess ran and reported
             # a value (i.e. the preexec_fn didn't crash the child).
             import resource
+
             assert reported_bytes > 0 or reported_bytes == resource.RLIM_INFINITY
 
 

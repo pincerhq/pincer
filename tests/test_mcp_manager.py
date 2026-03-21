@@ -13,10 +13,7 @@ from pincer.tools.registry import ToolRegistry
 
 
 def _make_config(*names: str) -> MCPConfig:
-    servers = [
-        MCPServerConfig(name=n, transport=MCPTransport.STDIO, command="echo")
-        for n in names
-    ]
+    servers = [MCPServerConfig(name=n, transport=MCPTransport.STDIO, command="echo") for n in names]
     return MCPConfig(servers=servers)
 
 
@@ -119,8 +116,10 @@ async def test_stop_deregisters_tools() -> None:
     mock_bridge.register_tools = MagicMock(return_value=0)
     mock_bridge.deregister_tools = MagicMock()
 
-    with patch("pincer.mcp.manager.MCPClientSession", return_value=mock_session), \
-         patch("pincer.mcp.manager.MCPToolBridge", return_value=mock_bridge):
+    with (
+        patch("pincer.mcp.manager.MCPClientSession", return_value=mock_session),
+        patch("pincer.mcp.manager.MCPToolBridge", return_value=mock_bridge),
+    ):
         await manager.start()
         await manager.stop()
 
@@ -147,8 +146,10 @@ async def test_get_session_returns_connected_session() -> None:
     mock_session.connect = AsyncMock()
     mock_session.disconnect = AsyncMock()
 
-    with patch("pincer.mcp.manager.MCPClientSession", return_value=mock_session), \
-         patch("pincer.mcp.manager.MCPToolBridge"):
+    with (
+        patch("pincer.mcp.manager.MCPClientSession", return_value=mock_session),
+        patch("pincer.mcp.manager.MCPToolBridge"),
+    ):
         await manager.start()
         session = await manager.get_session("myserver")
 
@@ -230,8 +231,10 @@ async def test_stop_cancels_health_task() -> None:
     mock_session.connect = AsyncMock()
     mock_session.disconnect = AsyncMock()
 
-    with patch("pincer.mcp.manager.MCPClientSession", return_value=mock_session), \
-         patch("pincer.mcp.manager.MCPToolBridge"):
+    with (
+        patch("pincer.mcp.manager.MCPClientSession", return_value=mock_session),
+        patch("pincer.mcp.manager.MCPToolBridge"),
+    ):
         await manager.start()
         assert manager._health_task is not None
         assert not manager._health_task.done()
@@ -362,8 +365,10 @@ async def test_reconnect_succeeds_on_first_attempt() -> None:
     manager._sessions["recoverable"] = old_session
     manager._bridges["recoverable"] = old_bridge
 
-    with patch("pincer.mcp.manager.MCPClientSession", return_value=new_session), \
-         patch("pincer.mcp.manager.MCPToolBridge") as mock_bridge_cls:
+    with (
+        patch("pincer.mcp.manager.MCPClientSession", return_value=new_session),
+        patch("pincer.mcp.manager.MCPToolBridge") as mock_bridge_cls,
+    ):
         mock_new_bridge = MagicMock()
         mock_new_bridge.register_tools = MagicMock(return_value=0)
         mock_bridge_cls.return_value = mock_new_bridge
@@ -408,8 +413,10 @@ async def test_health_loop_suppresses_generic_exceptions() -> None:
         raise RuntimeError("transient error")
 
     # Start the health loop as a real task so we can cancel it from outside
-    with patch.object(manager, "_run_health_checks", failing_health_checks), \
-         patch("pincer.mcp.manager._HEALTH_INTERVAL_SECONDS", 0):
+    with (
+        patch.object(manager, "_run_health_checks", failing_health_checks),
+        patch("pincer.mcp.manager._HEALTH_INTERVAL_SECONDS", 0),
+    ):
         task = asyncio.create_task(manager._health_loop())
         # Give the loop a few iterations
         for _ in range(5):

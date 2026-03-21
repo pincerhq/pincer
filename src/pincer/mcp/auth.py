@@ -69,9 +69,7 @@ class MCPAuthProvider:
         try:
             import jwt
         except ImportError as e:
-            raise RuntimeError(
-                "PyJWT required for MCP auth: uv pip install 'pincer-agent[mcp]'"
-            ) from e
+            raise RuntimeError("PyJWT required for MCP auth: uv pip install 'pincer-agent[mcp]'") from e
 
         client = self._clients.get(client_id)
         if not client:
@@ -101,9 +99,7 @@ class MCPAuthProvider:
             return None
 
         try:
-            claims: dict[str, Any] = jwt.decode(
-                token, self._signing_key, algorithms=["HS256"]
-            )
+            claims: dict[str, Any] = jwt.decode(token, self._signing_key, algorithms=["HS256"])
             if claims.get("jti") in self._revoked_tokens:
                 logger.debug("OAuth: revoked token presented")
                 return None
@@ -191,8 +187,10 @@ class MCPAuthMiddleware(BaseHTTPMiddleware):
             logger.warning("OAuth: denied token request for client '%s'", client_id)
             return JSONResponse({"error": "invalid_client"}, status_code=401)
 
-        return JSONResponse({
-            "access_token": token,
-            "token_type": "Bearer",
-            "expires_in": self.auth_provider._token_expiry,
-        })
+        return JSONResponse(
+            {
+                "access_token": token,
+                "token_type": "Bearer",
+                "expires_in": self.auth_provider._token_expiry,
+            }
+        )

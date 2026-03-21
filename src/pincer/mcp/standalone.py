@@ -95,6 +95,7 @@ class StandaloneMCPShell:
 
         # Register built-in prompts
         from pincer.mcp.prompts import register_builtin_prompts
+
         register_builtin_prompts(self._core.prompt_registry)
 
         # Connect to external MCP servers (client side)
@@ -153,9 +154,7 @@ class StandaloneMCPShell:
 
         if mode == "webhook":
             if not self._webhook_url:
-                raise ValueError(
-                    "StandaloneMCPShell: approval_mode='webhook' requires webhook_url"
-                )
+                raise ValueError("StandaloneMCPShell: approval_mode='webhook' requires webhook_url")
             return WebhookApprovalBackend(webhook_url=self._webhook_url)
 
         # Default: policy
@@ -186,6 +185,7 @@ class StandaloneMCPShell:
 
         try:
             from pincer.tools.registry import ToolRegistry
+
             temp_registry = ToolRegistry()
             # Attempt to load built-in tools
             _load_builtin_tools_into(temp_registry)
@@ -202,10 +202,7 @@ class StandaloneMCPShell:
             if tool_def is None:
                 continue
 
-            mcp_name = (
-                tool_name if tool_name.startswith("pincer_")
-                else f"pincer_{tool_name}"
-            )
+            mcp_name = tool_name if tool_name.startswith("pincer_") else f"pincer_{tool_name}"
 
             self._core.register_tool(
                 name=mcp_name,
@@ -244,6 +241,7 @@ def _load_builtin_tools_into(registry: Any) -> None:
     # Try to import and register web_search (no agent needed)
     try:
         from pincer.tools.builtin.web_search import web_search
+
         registry.register(
             name="web_search",
             description="Search the web",

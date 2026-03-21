@@ -70,11 +70,11 @@ class MCPServerConfig:
 class MCPApprovalPolicyConfig:
     """Approval policy for standalone MCP server mode (no messaging channels)."""
 
-    read: str = "approve"         # auto-approve read-only tools
-    write: str = "deny"           # auto-deny write tools
-    destructive: str = "deny"     # auto-deny destructive tools
-    unknown: str = "deny"         # auto-deny unknown risk tools
-    default: str = "deny"         # default for any unlisted risk level
+    read: str = "approve"  # auto-approve read-only tools
+    write: str = "deny"  # auto-deny write tools
+    destructive: str = "deny"  # auto-deny destructive tools
+    unknown: str = "deny"  # auto-deny unknown risk tools
+    default: str = "deny"  # default for any unlisted risk level
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -105,12 +105,14 @@ class MCPServerExportConfig:
     port: int = 18800
     path: str = "/mcp"
     # Which Pincer tools to expose (conservative default: read-only + ask_user)
-    expose_tools: list[str] = field(default_factory=lambda: [
-        "web_search",
-        "email_check",
-        "calendar_today",
-        "memory_search",
-    ])
+    expose_tools: list[str] = field(
+        default_factory=lambda: [
+            "web_search",
+            "email_check",
+            "calendar_today",
+            "memory_search",
+        ]
+    )
     # Approval policy for standalone mode
     approval_policy: MCPApprovalPolicyConfig = field(default_factory=MCPApprovalPolicyConfig)
     # Sampling configuration
@@ -132,9 +134,7 @@ class MCPConfig:
     def __post_init__(self) -> None:
         enabled_servers = [s for s in self.servers if s.enabled]
         if len(enabled_servers) > self.max_servers:
-            raise ValueError(
-                f"Too many enabled MCP servers ({len(enabled_servers)} > {self.max_servers})"
-            )
+            raise ValueError(f"Too many enabled MCP servers ({len(enabled_servers)} > {self.max_servers})")
         names = [s.name for s in self.servers]
         if len(names) != len(set(names)):
             raise ValueError("Duplicate MCP server names detected")
@@ -223,9 +223,15 @@ def _load_toml_config(toml_path: Path) -> MCPConfig | None:
         host=srv_raw.get("host", "127.0.0.1"),
         port=int(srv_raw.get("port", 18800)),
         path=srv_raw.get("path", "/mcp"),
-        expose_tools=srv_raw.get("expose_tools", [
-            "web_search", "email_check", "calendar_today", "memory_search",
-        ]),
+        expose_tools=srv_raw.get(
+            "expose_tools",
+            [
+                "web_search",
+                "email_check",
+                "calendar_today",
+                "memory_search",
+            ],
+        ),
         approval_policy=approval_policy,
         sampling=sampling,
         webhook_url=srv_raw.get("webhook_url"),
@@ -269,7 +275,7 @@ def _load_env_servers() -> list[MCPServerConfig]:
         env_prefix = f"{prefix}ENV_"
         for key, val in os.environ.items():
             if key.upper().startswith(env_prefix):
-                env_key = key[len(env_prefix):]
+                env_key = key[len(env_prefix) :]
                 env[env_key] = val
 
         # Approval patterns
@@ -280,21 +286,23 @@ def _load_env_servers() -> list[MCPServerConfig]:
         sandbox_str = os.environ.get(f"{prefix}SANDBOX", "true").lower()
 
         try:
-            servers.append(MCPServerConfig(
-                name=name,
-                transport=transport,
-                enabled=enabled_str in ("true", "1", "yes"),
-                command=os.environ.get(f"{prefix}COMMAND"),
-                args=args,
-                env=env,
-                url=os.environ.get(f"{prefix}URL"),
-                headers={},
-                sandbox=sandbox_str in ("true", "1", "yes"),
-                sandbox_memory_mb=int(os.environ.get(f"{prefix}SANDBOX_MEMORY_MB", "256")),
-                approval_required=approval,
-                timeout_seconds=int(os.environ.get(f"{prefix}TIMEOUT", "30")),
-                max_retries=int(os.environ.get(f"{prefix}MAX_RETRIES", "2")),
-            ))
+            servers.append(
+                MCPServerConfig(
+                    name=name,
+                    transport=transport,
+                    enabled=enabled_str in ("true", "1", "yes"),
+                    command=os.environ.get(f"{prefix}COMMAND"),
+                    args=args,
+                    env=env,
+                    url=os.environ.get(f"{prefix}URL"),
+                    headers={},
+                    sandbox=sandbox_str in ("true", "1", "yes"),
+                    sandbox_memory_mb=int(os.environ.get(f"{prefix}SANDBOX_MEMORY_MB", "256")),
+                    approval_required=approval,
+                    timeout_seconds=int(os.environ.get(f"{prefix}TIMEOUT", "30")),
+                    max_retries=int(os.environ.get(f"{prefix}MAX_RETRIES", "2")),
+                )
+            )
         except (ValueError, TypeError):
             continue
 
@@ -340,11 +348,7 @@ def load_mcp_config(config_dir: Path | None = None) -> MCPConfig:
     toml_srv = toml_cfg.server if toml_cfg else MCPServerExportConfig()
     srv_enabled_env = os.environ.get("PINCER_MCP_SERVER_EXPORT_ENABLED", "").lower()
     srv_export = MCPServerExportConfig(
-        enabled=(
-            srv_enabled_env in ("true", "1", "yes")
-            if srv_enabled_env
-            else toml_srv.enabled
-        ),
+        enabled=(srv_enabled_env in ("true", "1", "yes") if srv_enabled_env else toml_srv.enabled),
         host=os.environ.get("PINCER_MCP_SERVER_EXPORT_HOST", toml_srv.host),
         port=int(os.environ.get("PINCER_MCP_SERVER_EXPORT_PORT", toml_srv.port)),
         path=os.environ.get("PINCER_MCP_SERVER_EXPORT_PATH", toml_srv.path),

@@ -148,11 +148,7 @@ class CostTracker:
     async def get_image_count_today(self) -> int:
         """Get the number of image generations today (UTC)."""
         assert self._db is not None
-        today_start = (
-            datetime.now(UTC)
-            .replace(hour=0, minute=0, second=0, microsecond=0)
-            .timestamp()
-        )
+        today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         async with self._db.execute(
             "SELECT COUNT(*) FROM image_cost_log WHERE timestamp >= ?",
             (today_start,),
@@ -163,11 +159,7 @@ class CostTracker:
     async def get_today_spend(self) -> float:
         """Get total spend for today (UTC), including LLM and image costs."""
         assert self._db is not None
-        today_start = (
-            datetime.now(UTC)
-            .replace(hour=0, minute=0, second=0, microsecond=0)
-            .timestamp()
-        )
+        today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
         async with self._db.execute(
             "SELECT COALESCE(SUM(cost_usd), 0) FROM cost_log WHERE timestamp >= ?",
@@ -218,8 +210,7 @@ class CostTracker:
         day_end = day_start + 86400
 
         async with self._db.execute(
-            "SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM cost_log "
-            "WHERE timestamp >= ? AND timestamp < ?",
+            "SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM cost_log WHERE timestamp >= ? AND timestamp < ?",
             (day_start, day_end),
         ) as cursor:
             row = await cursor.fetchone()
@@ -243,9 +234,7 @@ class CostTracker:
             "by_tool": by_tool,
         }
 
-    async def get_daily_history(
-        self, start: str, end: str
-    ) -> list[dict[str, Any]]:
+    async def get_daily_history(self, start: str, end: str) -> list[dict[str, Any]]:
         """Get daily spend history between two dates (YYYY-MM-DD)."""
         assert self._db is not None
         start_ts = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
@@ -257,14 +246,9 @@ class CostTracker:
             "WHERE timestamp >= ? AND timestamp < ? GROUP BY day ORDER BY day",
             (start_ts, end_ts),
         ) as cursor:
-            return [
-                {"date": row[0], "total": round(float(row[1]), 6), "requests": int(row[2])}
-                async for row in cursor
-            ]
+            return [{"date": row[0], "total": round(float(row[1]), 6), "requests": int(row[2])} async for row in cursor]
 
-    async def get_costs_by_model(
-        self, start: str, end: str
-    ) -> list[dict[str, Any]]:
+    async def get_costs_by_model(self, start: str, end: str) -> list[dict[str, Any]]:
         """Get cost breakdown by model between two dates."""
         assert self._db is not None
         start_ts = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
@@ -287,9 +271,7 @@ class CostTracker:
                 async for row in cursor
             ]
 
-    async def get_costs_by_tool(
-        self, start: str, end: str
-    ) -> list[dict[str, Any]]:
+    async def get_costs_by_tool(self, start: str, end: str) -> list[dict[str, Any]]:
         """Placeholder for per-tool cost breakdown (requires tool tracking)."""
         return []
 
@@ -298,33 +280,22 @@ class CostTracker:
         today_spent = await self.get_today_spend()
         return {
             "daily_limit": self._daily_budget,
-            "spent_pct": round(
-                (today_spent / self._daily_budget) * 100, 1
-            )
-            if self._daily_budget > 0
-            else 0,
-            "remaining": round(
-                max(0, self._daily_budget - today_spent), 4
-            ),
-            "is_downgraded": (
-                today_spent / self._daily_budget >= 0.7
-                if self._daily_budget > 0
-                else False
-            ),
+            "spent_pct": round((today_spent / self._daily_budget) * 100, 1) if self._daily_budget > 0 else 0,
+            "remaining": round(max(0, self._daily_budget - today_spent), 4),
+            "is_downgraded": (today_spent / self._daily_budget >= 0.7 if self._daily_budget > 0 else False),
         }
 
 
 _cost_tracker: CostTracker | None = None
 
 
-async def get_cost_tracker(
-    db_path: Path | None = None, daily_budget: float = 5.0
-) -> CostTracker:
+async def get_cost_tracker(db_path: Path | None = None, daily_budget: float = 5.0) -> CostTracker:
     """Singleton accessor for the cost tracker."""
     global _cost_tracker
     if _cost_tracker is None:
         if db_path is None:
             from pincer.config import get_settings
+
             s = get_settings()
             db_path = s.db_path
             daily_budget = s.daily_budget_usd

@@ -105,8 +105,7 @@ def list_contacts(category: str = "", limit: int = 20) -> dict:
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT name, phone_number, category, notes FROM phone_contacts "
-                "ORDER BY name LIMIT ?",
+                "SELECT name, phone_number, category, notes FROM phone_contacts ORDER BY name LIMIT ?",
                 (limit,),
             ).fetchall()
         contacts = [

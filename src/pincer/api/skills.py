@@ -53,15 +53,17 @@ async def list_skills() -> dict[str, list[dict]]:
         scan_result = scanner.scan_directory(str(skill_dir), manifest=manifest)
         tool_names = [t.get("name", "") for t in manifest.tools if t.get("name")]
 
-        skills.append({
-            "name": manifest.name,
-            "version": manifest.version,
-            "description": manifest.description,
-            "author": manifest.author,
-            "safety_score": scan_result.score,
-            "status": "active" if scan_result.passed else "error",
-            "permissions": manifest.permissions,
-            "tools": tool_names,
-        })
+        skills.append(
+            {
+                "name": manifest.name,
+                "version": manifest.version,
+                "description": manifest.description,
+                "author": manifest.author,
+                "safety_score": scan_result.score,
+                "status": "active" if scan_result.passed else "error",
+                "permissions": manifest.permissions,
+                "tools": tool_names,
+            }
+        )
 
     return {"skills": skills}

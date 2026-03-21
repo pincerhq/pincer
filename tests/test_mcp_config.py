@@ -67,10 +67,7 @@ def test_duplicate_names_rejected() -> None:
 
 
 def test_too_many_servers_rejected() -> None:
-    servers = [
-        MCPServerConfig(name=f"s{i}", transport=MCPTransport.STDIO, command="echo")
-        for i in range(12)
-    ]
+    servers = [MCPServerConfig(name=f"s{i}", transport=MCPTransport.STDIO, command="echo") for i in range(12)]
     with pytest.raises(ValueError, match="Too many"):
         MCPConfig(max_servers=10, servers=servers)
 

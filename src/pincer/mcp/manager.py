@@ -130,10 +130,7 @@ class MCPClientManager:
         """Get a connected session by name. Raises ValueError if not found."""
         session = self._sessions.get(server_name)
         if not session:
-            raise ValueError(
-                f"MCP server '{server_name}' not connected. "
-                f"Available: {list(self._sessions.keys())}"
-            )
+            raise ValueError(f"MCP server '{server_name}' not connected. Available: {list(self._sessions.keys())}")
         return session
 
     async def list_servers(self) -> list[dict[str, Any]]:
@@ -141,16 +138,18 @@ class MCPClientManager:
         statuses: list[dict[str, Any]] = []
         for srv in self.config.servers:
             session = self._sessions.get(srv.name)
-            statuses.append({
-                "name": srv.name,
-                "transport": srv.transport.value,
-                "enabled": srv.enabled,
-                "connected": session.connected if session else False,
-                "tool_count": len(session.tools) if session else 0,
-                "disabled": srv.name in self._disabled,
-                "sandbox": srv.sandbox,
-                "approval_required": srv.approval_required,
-            })
+            statuses.append(
+                {
+                    "name": srv.name,
+                    "transport": srv.transport.value,
+                    "enabled": srv.enabled,
+                    "connected": session.connected if session else False,
+                    "tool_count": len(session.tools) if session else 0,
+                    "disabled": srv.name in self._disabled,
+                    "sandbox": srv.sandbox,
+                    "approval_required": srv.approval_required,
+                }
+            )
         return statuses
 
     def total_tool_count(self) -> int:
@@ -227,7 +226,7 @@ class MCPClientManager:
                 await self._audit.log_reconnect(name, attempt=attempt, success=False, error=str(e))
                 logger.warning("MCP '%s' reconnect attempt %d failed: %s", name, attempt, e)
                 if attempt < srv_config.max_retries:
-                    await asyncio.sleep(2 ** attempt)  # exponential backoff
+                    await asyncio.sleep(2**attempt)  # exponential backoff
 
         logger.error(
             "MCP '%s' exhausted %d reconnect attempts — disabling until restart",

@@ -132,8 +132,14 @@ def create_gate(tool_name: str, arguments: dict, description: str = "") -> Confi
 def requires_confirmation(tool_name: str) -> bool:
     """Check if a tool call requires verbal confirmation during a voice call."""
     no_confirm_tools = {
-        "web_search", "calendar_today", "calendar_week",
-        "email_check", "email_read", "email_search",
-        "email_list_folders", "file_read", "file_list",
+        "web_search",
+        "calendar_today",
+        "calendar_week",
+        "email_check",
+        "email_read",
+        "email_search",
+        "email_list_folders",
+        "file_read",
+        "file_list",
     }
     return tool_name not in no_confirm_tools

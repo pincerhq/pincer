@@ -103,12 +103,8 @@ class StandaloneLLMBackend(LLMBackend):
         default_model: str = "claude-sonnet-4-20250514",
     ) -> None:
         import os
-        self._api_key = (
-            api_key
-            or os.environ.get("PINCER_LLM_API_KEY")
-            or os.environ.get("ANTHROPIC_API_KEY")
-            or ""
-        )
+
+        self._api_key = api_key or os.environ.get("PINCER_LLM_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or ""
         self._default_model = default_model
 
     async def complete(
@@ -120,12 +116,10 @@ class StandaloneLLMBackend(LLMBackend):
         try:
             import anthropic
         except ImportError as e:
-            raise RuntimeError(
-                "anthropic package required for standalone sampling: "
-                "uv pip install anthropic"
-            ) from e
+            raise RuntimeError("anthropic package required for standalone sampling: uv pip install anthropic") from e
 
         from typing import cast
+
         client = anthropic.AsyncAnthropic(api_key=self._api_key)
         resp = await client.messages.create(
             model=model or self._default_model,

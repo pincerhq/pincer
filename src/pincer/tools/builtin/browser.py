@@ -42,7 +42,9 @@ async def _ensure_browser() -> Any:
         try:
             subprocess.run(
                 [sys.executable, "-m", "playwright", "install", "chromium"],
-                check=True, capture_output=True, timeout=120,
+                check=True,
+                capture_output=True,
+                timeout=120,
             )
             logger.info("Playwright Chromium installed successfully")
         except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
@@ -125,6 +127,7 @@ async def screenshot(url: str, context: dict[str, Any] | None = None) -> str:
         workspace = Path.home() / ".pincer" / "workspace"
         workspace.mkdir(parents=True, exist_ok=True)
         import time
+
         filename = f"screenshot_{int(time.time())}.png"
         filepath = workspace / filename
         filepath.write_bytes(screenshot_bytes)

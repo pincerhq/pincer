@@ -91,7 +91,8 @@ class VoiceChannel(BaseChannel):
         if self._identity:
             try:
                 pincer_user_id = await self._identity.resolve(
-                    ChannelType.VOICE, state.caller_number,
+                    ChannelType.VOICE,
+                    state.caller_number,
                 )
             except Exception:
                 logger.debug("Could not resolve identity for %s", state.caller_number)
@@ -122,7 +123,9 @@ class VoiceChannel(BaseChannel):
         self._response_queues.pop(call_sid, None)
         logger.info(
             "Call ended: %s (%s, %ds)",
-            call_sid, state.direction, state.duration_seconds,
+            call_sid,
+            state.direction,
+            state.duration_seconds,
         )
 
     def _find_active_call_for_user(self, user_id: str) -> str:

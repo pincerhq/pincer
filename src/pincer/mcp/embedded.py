@@ -136,10 +136,7 @@ class EmbeddedMCPShell:
             if tool_def is None:
                 continue
 
-            mcp_name = (
-                tool_name if tool_name.startswith("pincer_")
-                else f"pincer_{tool_name}"
-            )
+            mcp_name = tool_name if tool_name.startswith("pincer_") else f"pincer_{tool_name}"
             approval = agent.tool_registry.requires_approval(tool_name)
 
             self._core.register_tool(
@@ -217,9 +214,7 @@ class EmbeddedMCPShell:
             handler=_ask_user_handler,
             schema={
                 "type": "object",
-                "properties": {
-                    "question": {"type": "string", "description": "Question to ask the user"}
-                },
+                "properties": {"question": {"type": "string", "description": "Question to ask the user"}},
                 "required": ["question"],
             },
             approval_required=False,

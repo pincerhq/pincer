@@ -134,9 +134,11 @@ async def test_start_clients_delegates_to_manager():
     mock_manager = AsyncMock()
     mock_manager.start = AsyncMock(return_value={"github": True})
 
-    with patch("pincer.mcp.core.MCPClientManager", return_value=mock_manager), \
-         patch("pincer.mcp.core.MCPSecurityGate"), \
-         patch("pincer.mcp.core.MCPAuditLogger"):
+    with (
+        patch("pincer.mcp.core.MCPClientManager", return_value=mock_manager),
+        patch("pincer.mcp.core.MCPSecurityGate"),
+        patch("pincer.mcp.core.MCPAuditLogger"),
+    ):
         results = await core.start_clients()
 
     assert results == {"github": True}

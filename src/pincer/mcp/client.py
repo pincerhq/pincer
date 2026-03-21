@@ -58,9 +58,7 @@ class MCPClientSession:
             from mcp.client.stdio import StdioServerParameters, stdio_client
             from mcp.client.streamable_http import streamablehttp_client
         except ImportError as e:
-            raise RuntimeError(
-                "MCP package not installed. Run: uv pip install 'pincer-agent[mcp]'"
-            ) from e
+            raise RuntimeError("MCP package not installed. Run: uv pip install 'pincer-agent[mcp]'") from e
 
         self._exit_stack = AsyncExitStack()
         try:
@@ -69,13 +67,9 @@ class MCPClientSession:
                     self._exit_stack, StdioServerParameters, stdio_client
                 )
             else:
-                read_stream, write_stream = await self._connect_http(
-                    self._exit_stack, streamablehttp_client
-                )
+                read_stream, write_stream = await self._connect_http(self._exit_stack, streamablehttp_client)
 
-            self._session = await self._exit_stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
+            self._session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
             await self._session.initialize()
             await self._discover_tools()
             self._connected = True
@@ -88,9 +82,7 @@ class MCPClientSession:
         except Exception as e:
             self._connect_attempts += 1
             await self._cleanup()
-            raise ConnectionError(
-                f"MCP '{self.name}' connection failed (attempt {self._connect_attempts}): {e}"
-            ) from e
+            raise ConnectionError(f"MCP '{self.name}' connection failed (attempt {self._connect_attempts}): {e}") from e
 
     async def disconnect(self) -> None:
         """Gracefully close the MCP session."""
@@ -115,8 +107,7 @@ class MCPClientSession:
             return result
         except TimeoutError:
             raise TimeoutError(
-                f"MCP '{self.name}' tool '{tool_name}' timed out "
-                f"after {self.config.timeout_seconds}s"
+                f"MCP '{self.name}' tool '{tool_name}' timed out after {self.config.timeout_seconds}s"
             ) from None
 
     async def health_check(self) -> bool:
@@ -145,9 +136,7 @@ class MCPClientSession:
 
     # ── Private helpers ───────────────────────────────────
 
-    async def _connect_stdio(
-        self, stack: AsyncExitStack, stdio_params_cls: Any, stdio_client: Any
-    ) -> tuple[Any, Any]:
+    async def _connect_stdio(self, stack: AsyncExitStack, stdio_params_cls: Any, stdio_client: Any) -> tuple[Any, Any]:
         """Set up stdio transport.
 
         When sandbox=True: launches subprocess via MCPSandbox (resource limits,
@@ -171,9 +160,7 @@ class MCPClientSession:
             env=sanitized_env,
             cwd=self._tmpdir,
         )
-        read_stream, write_stream = await stack.enter_async_context(
-            stdio_client(server_params)
-        )
+        read_stream, write_stream = await stack.enter_async_context(stdio_client(server_params))
         return read_stream, write_stream
 
     async def _connect_stdio_sandboxed(self, stack: AsyncExitStack) -> tuple[Any, Any]:
@@ -198,14 +185,10 @@ class MCPClientSession:
 
         stack.push_async_callback(_stop_sandbox)
 
-        read_stream, write_stream = await stack.enter_async_context(
-            sandbox_streams(sb)
-        )
+        read_stream, write_stream = await stack.enter_async_context(sandbox_streams(sb))
         return read_stream, write_stream
 
-    async def _connect_http(
-        self, stack: AsyncExitStack, streamablehttp_client: Any
-    ) -> tuple[Any, Any]:
+    async def _connect_http(self, stack: AsyncExitStack, streamablehttp_client: Any) -> tuple[Any, Any]:
         """Set up streamable-HTTP transport."""
         headers = dict(self.config.headers) if self.config.headers else None
         read_stream, write_stream, _ = await stack.enter_async_context(

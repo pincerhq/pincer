@@ -32,9 +32,7 @@ _INJECTION_PATTERNS: list[str] = [
     r"(?:assistant|system)\s*:\s*\n",
 ]
 
-_COMPILED_INJECTION = [
-    re.compile(p, re.IGNORECASE | re.MULTILINE) for p in _INJECTION_PATTERNS
-]
+_COMPILED_INJECTION = [re.compile(p, re.IGNORECASE | re.MULTILINE) for p in _INJECTION_PATTERNS]
 
 # ── Credential redaction patterns ─────────────────────────────────────────────
 
@@ -100,9 +98,7 @@ class MCPSecurityGate:
     """
 
     def __init__(self, rate_limit_per_min: int = 60) -> None:
-        self._rate_limiter = SlidingWindowRateLimiter(
-            max_calls=rate_limit_per_min, window_seconds=60.0
-        )
+        self._rate_limiter = SlidingWindowRateLimiter(max_calls=rate_limit_per_min, window_seconds=60.0)
 
     # ── Output sanitization ───────────────────────────────────────────────────
 
@@ -125,10 +121,7 @@ class MCPSecurityGate:
                 tool,
                 matched,
             )
-            return (
-                f"[SECURITY NOTE: Possible prompt injection detected in output from {server}::{tool}]\n\n"
-                + output
-            )
+            return f"[SECURITY NOTE: Possible prompt injection detected in output from {server}::{tool}]\n\n" + output
 
         return output
 
@@ -187,8 +180,6 @@ class MCPSecurityGate:
                 and _shell_patterns.search(value)
                 and len(value) < 50
             ):
-                logger.warning(
-                    "MCP security: suspicious shell characters in arg '%s'", key
-                )
+                logger.warning("MCP security: suspicious shell characters in arg '%s'", key)
                 # Warn but don't block — the LLM may have legitimate needs
         return True

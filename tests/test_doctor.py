@@ -97,9 +97,7 @@ def test_no_hardcoded_secrets_critical(tmp_path):
     config_dir.mkdir()
     src_dir = config_dir / "src"
     src_dir.mkdir()
-    (src_dir / "bad.py").write_text(
-        'api_key = "sk-ant-abc123456789012345678901"\n'
-    )
+    (src_dir / "bad.py").write_text('api_key = "sk-ant-abc123456789012345678901"\n')
 
     doc = SecurityDoctor(config_dir=config_dir, data_dir=tmp_path)
     result = doc._check_no_hardcoded_secrets()
@@ -132,12 +130,8 @@ def test_dashboard_not_exposed_default():
 
 def test_report_score():
     report = DoctorReport()
-    report.checks.append(
-        SecurityDoctor()._check_python_version()
-    )
-    report.checks.append(
-        SecurityDoctor()._check_not_running_as_root()
-    )
+    report.checks.append(SecurityDoctor()._check_python_version())
+    report.checks.append(SecurityDoctor()._check_not_running_as_root())
     assert report.score == 100
     assert report.passed == 2
     assert report.critical == 0
@@ -185,7 +179,7 @@ def test_mcp_env_vars_pass_no_refs(tmp_path):
 def test_mcp_env_vars_pass_all_set(tmp_path, monkeypatch):
     toml = tmp_path / "pincer.toml"
     toml.write_text(
-        '[mcp]\nenabled = true\n\n[[mcp.servers]]\n'
+        "[mcp]\nenabled = true\n\n[[mcp.servers]]\n"
         'name = "s"\ntransport = "stdio"\ncommand = "echo"\n'
         'env = {TOKEN = "${MY_TOKEN}"}\n'
     )
@@ -198,7 +192,7 @@ def test_mcp_env_vars_pass_all_set(tmp_path, monkeypatch):
 def test_mcp_env_vars_warning_unset(tmp_path, monkeypatch):
     toml = tmp_path / "pincer.toml"
     toml.write_text(
-        '[mcp]\nenabled = true\n\n[[mcp.servers]]\n'
+        "[mcp]\nenabled = true\n\n[[mcp.servers]]\n"
         'name = "s"\ntransport = "stdio"\ncommand = "echo"\n'
         'env = {TOKEN = "${MISSING_VAR_XYZ}"}\n'
     )
@@ -218,7 +212,7 @@ def test_mcp_collisions_skipped_no_servers(tmp_path):
 def test_mcp_collisions_pass_single_server(tmp_path):
     toml = tmp_path / "pincer.toml"
     toml.write_text(
-        '[mcp]\nenabled = true\ntool_prefix = false\n\n'
+        "[mcp]\nenabled = true\ntool_prefix = false\n\n"
         '[[mcp.servers]]\nname = "s"\ntransport = "stdio"\ncommand = "echo"\n'
     )
     doc = SecurityDoctor(config_dir=tmp_path)
@@ -229,7 +223,7 @@ def test_mcp_collisions_pass_single_server(tmp_path):
 def test_mcp_collisions_warning_multi_no_prefix(tmp_path):
     toml = tmp_path / "pincer.toml"
     toml.write_text(
-        '[mcp]\nenabled = true\ntool_prefix = false\n\n'
+        "[mcp]\nenabled = true\ntool_prefix = false\n\n"
         '[[mcp.servers]]\nname = "a"\ntransport = "stdio"\ncommand = "echo"\n\n'
         '[[mcp.servers]]\nname = "b"\ntransport = "stdio"\ncommand = "echo"\n'
     )
@@ -241,7 +235,7 @@ def test_mcp_collisions_warning_multi_no_prefix(tmp_path):
 def test_mcp_collisions_pass_multi_with_prefix(tmp_path):
     toml = tmp_path / "pincer.toml"
     toml.write_text(
-        '[mcp]\nenabled = true\ntool_prefix = true\n\n'
+        "[mcp]\nenabled = true\ntool_prefix = true\n\n"
         '[[mcp.servers]]\nname = "a"\ntransport = "stdio"\ncommand = "echo"\n\n'
         '[[mcp.servers]]\nname = "b"\ntransport = "stdio"\ncommand = "echo"\n'
     )
@@ -267,7 +261,7 @@ def test_mcp_servers_pass_command_exists(tmp_path):
 def test_mcp_servers_warning_command_missing(tmp_path):
     toml = tmp_path / "pincer.toml"
     toml.write_text(
-        '[mcp]\nenabled = true\n\n[[mcp.servers]]\n'
+        "[mcp]\nenabled = true\n\n[[mcp.servers]]\n"
         'name = "s"\ntransport = "stdio"\ncommand = "nonexistent-binary-xyzzy-99"\n'
     )
     doc = SecurityDoctor(config_dir=tmp_path)
@@ -280,7 +274,7 @@ def test_mcp_servers_skips_http_transport(tmp_path):
     """HTTP servers don't have a local command to check."""
     toml = tmp_path / "pincer.toml"
     toml.write_text(
-        '[mcp]\nenabled = true\n\n[[mcp.servers]]\n'
+        "[mcp]\nenabled = true\n\n[[mcp.servers]]\n"
         'name = "s"\ntransport = "streamable-http"\nurl = "http://localhost:8000"\n'
     )
     doc = SecurityDoctor(config_dir=tmp_path)

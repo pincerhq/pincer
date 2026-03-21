@@ -183,9 +183,7 @@ def register_builtin_prompts(registry: PromptRegistry) -> None:
         name="pincer_summarize",
         handler=summarize_prompt_handler,
         description="Summarize a block of text",
-        arguments=[
-            {"name": "text", "description": "Text to summarize", "required": True}
-        ],
+        arguments=[{"name": "text", "description": "Text to summarize", "required": True}],
     )
     registry.register(
         name="pincer_explain_code",

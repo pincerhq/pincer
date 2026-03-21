@@ -23,6 +23,7 @@ class GeminiImageProvider(BaseImageProvider):
             return False
         try:
             from google import genai  # noqa: F401
+
             return True
         except ImportError:
             return False

@@ -38,10 +38,10 @@ _SCORE_BLOCK_THRESHOLD = 40
 class MCPRegistryEntry:
     """Normalized entry from any MCP package registry."""
 
-    package_name: str          # e.g. "@modelcontextprotocol/server-github"
-    name: str                  # Config-friendly name, e.g. "github"
+    package_name: str  # e.g. "@modelcontextprotocol/server-github"
+    name: str  # Config-friendly name, e.g. "github"
     description: str
-    registry: str              # "mcp" | "clawhub"
+    registry: str  # "mcp" | "clawhub"
     transport: MCPTransport = MCPTransport.STDIO
 
     # Package manager and invocation
@@ -165,16 +165,13 @@ class MCPRegistryClient:
             scan_info = {
                 "score": scan_result.score,
                 "findings": [
-                    {"rule": f.rule, "risk": f.risk, "message": f.message, "file": f.file}
-                    for f in scan_result.findings
+                    {"rule": f.rule, "risk": f.risk, "message": f.message, "file": f.file} for f in scan_result.findings
                 ],
                 "skipped": False,
                 "summary": scan_result.summary(),
             }
             if scan_result.blocked:
-                raise ValueError(
-                    f"Install blocked: scan score {scan_result.score}/100 — {scan_result.summary()}"
-                )
+                raise ValueError(f"Install blocked: scan score {scan_result.score}/100 — {scan_result.summary()}")
 
         config = self._generate_config(entry)
         logger.info("MCP install: generated config for '%s' (scan score: %d)", entry.name, scan_info["score"])
@@ -230,9 +227,7 @@ class MCPRegistryClient:
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
-    async def _search_mcp_registry(
-        self, client: Any, query: str
-    ) -> list[MCPRegistryEntry]:
+    async def _search_mcp_registry(self, client: Any, query: str) -> list[MCPRegistryEntry]:
         try:
             resp = await client.get(
                 f"{_MCP_REGISTRY_URL}/servers",
@@ -247,9 +242,7 @@ class MCPRegistryClient:
             logger.debug("MCP registry search error: %s", exc)
             return []
 
-    async def _search_clawhub(
-        self, client: Any, query: str
-    ) -> list[MCPRegistryEntry]:
+    async def _search_clawhub(self, client: Any, query: str) -> list[MCPRegistryEntry]:
         try:
             resp = await client.get(
                 f"{_CLAWHUB_URL}/packages",
@@ -365,8 +358,13 @@ class MCPRegistryClient:
             raise RuntimeError("npm not found in PATH — cannot scan npm package")
 
         import asyncio
+
         proc = await asyncio.create_subprocess_exec(
-            npm, "pack", package, "--pack-destination", str(dest),
+            npm,
+            "pack",
+            package,
+            "--pack-destination",
+            str(dest),
             cwd=str(dest),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -380,6 +378,7 @@ class MCPRegistryClient:
         tarball_path = dest / tarball
         if tarball_path.exists():
             import tarfile
+
             with tarfile.open(tarball_path) as tf:
                 tf.extractall(dest)  # noqa: S202
 
@@ -394,8 +393,14 @@ class MCPRegistryClient:
             raise RuntimeError("pip not found in PATH — cannot scan Python package")
 
         import asyncio
+
         proc = await asyncio.create_subprocess_exec(
-            pip, "download", "--no-deps", "--dest", str(dest), package,
+            pip,
+            "download",
+            "--no-deps",
+            "--dest",
+            str(dest),
+            package,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -416,6 +421,7 @@ class MCPRegistryClient:
 def _to_config_name(raw: str) -> str:
     """Convert a package name to a config-safe alphanumeric_underscore name."""
     import re
+
     # Strip scope (@org/name → name)
     name = raw.split("/")[-1] if "/" in raw else raw
     # Remove "server-" prefix (common in MCP packages)

@@ -18,9 +18,7 @@ class LLMRateLimitError(LLMError):
 
     def __init__(self, retry_after: float | None = None):
         self.retry_after = retry_after
-        super().__init__(
-            f"Rate limited. Retry after {retry_after}s" if retry_after else "Rate limited."
-        )
+        super().__init__(f"Rate limited. Retry after {retry_after}s" if retry_after else "Rate limited.")
 
 
 class BudgetExceededError(PincerError):

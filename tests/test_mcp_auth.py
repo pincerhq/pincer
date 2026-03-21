@@ -11,9 +11,12 @@ from pincer.mcp.auth import MCPAuthMiddleware, MCPAuthProvider
 
 
 def _make_provider(**kwargs) -> MCPAuthProvider:
-    clients = kwargs.pop("allowed_clients", [
-        {"client_id": "claude-desktop", "client_secret": "secret123", "name": "Claude Desktop"},
-    ])
+    clients = kwargs.pop(
+        "allowed_clients",
+        [
+            {"client_id": "claude-desktop", "client_secret": "secret123", "name": "Claude Desktop"},
+        ],
+    )
     return MCPAuthProvider(allowed_clients=clients, signing_key="test-signing-key", **kwargs)
 
 

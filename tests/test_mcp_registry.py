@@ -195,12 +195,14 @@ def test_scanner_env_access_medium():
 
 def test_low_score_package_blocked():
     scanner = PackageScanner()
-    dangerous = "\n".join([
-        "import subprocess",
-        "import socket",
-        "eval(input())",
-        "exec(compile('x=1','f','exec'))",
-    ])
+    dangerous = "\n".join(
+        [
+            "import subprocess",
+            "import socket",
+            "eval(input())",
+            "exec(compile('x=1','f','exec'))",
+        ]
+    )
     result = scanner.scan_source(dangerous)
     assert result.blocked
 
@@ -254,9 +256,7 @@ async def test_install_scan_skipped_with_no_scan():
 
 def test_uninstall_removes_config_entry(tmp_path: Path):
     toml = tmp_path / "pincer.toml"
-    toml.write_text(
-        '[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = "github"\ntransport = "stdio"\ncommand = "npx"\n'
-    )
+    toml.write_text('[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = "github"\ntransport = "stdio"\ncommand = "npx"\n')
     client = MCPRegistryClient()
     removed = client.uninstall("github", config_path=tmp_path)
     assert removed is True
@@ -266,6 +266,6 @@ def test_uninstall_removes_config_entry(tmp_path: Path):
 
 def test_uninstall_returns_false_if_not_found(tmp_path: Path):
     toml = tmp_path / "pincer.toml"
-    toml.write_text('[mcp]\nenabled = true\n')
+    toml.write_text("[mcp]\nenabled = true\n")
     client = MCPRegistryClient()
     assert client.uninstall("nonexistent", config_path=tmp_path) is False

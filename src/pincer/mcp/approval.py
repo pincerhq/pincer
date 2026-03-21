@@ -305,18 +305,51 @@ class WebhookApprovalBackend(ApprovalBackend):
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 # Risk classification: maps tool name keywords to risk levels
-_DESTRUCTIVE_KEYWORDS = frozenset({
-    "delete", "remove", "drop", "clear", "wipe", "reset", "destroy",
-    "exec", "shell", "python", "eval",
-})
-_WRITE_KEYWORDS = frozenset({
-    "write", "create", "update", "send", "post", "put", "patch",
-    "upload", "publish", "save", "insert",
-})
-_READ_KEYWORDS = frozenset({
-    "read", "get", "list", "search", "find", "check", "fetch",
-    "download", "view", "show", "query",
-})
+_DESTRUCTIVE_KEYWORDS = frozenset(
+    {
+        "delete",
+        "remove",
+        "drop",
+        "clear",
+        "wipe",
+        "reset",
+        "destroy",
+        "exec",
+        "shell",
+        "python",
+        "eval",
+    }
+)
+_WRITE_KEYWORDS = frozenset(
+    {
+        "write",
+        "create",
+        "update",
+        "send",
+        "post",
+        "put",
+        "patch",
+        "upload",
+        "publish",
+        "save",
+        "insert",
+    }
+)
+_READ_KEYWORDS = frozenset(
+    {
+        "read",
+        "get",
+        "list",
+        "search",
+        "find",
+        "check",
+        "fetch",
+        "download",
+        "view",
+        "show",
+        "query",
+    }
+)
 
 
 def classify_risk(tool_name: str) -> str:

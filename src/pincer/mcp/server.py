@@ -83,10 +83,7 @@ class PincerMCPServer:
         try:
             from mcp.server.fastmcp import FastMCP
         except ImportError as e:
-            raise RuntimeError(
-                "mcp package required to run MCP server: "
-                "uv pip install 'pincer-agent[mcp]'"
-            ) from e
+            raise RuntimeError("mcp package required to run MCP server: uv pip install 'pincer-agent[mcp]'") from e
 
         self._fmcp = FastMCP(
             "Pincer Agent",
@@ -123,6 +120,7 @@ class PincerMCPServer:
         if self._auth_provider:
             with contextlib.suppress(Exception):
                 from pincer.mcp.auth import MCPAuthMiddleware
+
                 starlette_app = self._fmcp.streamable_http_app()
                 starlette_app.add_middleware(MCPAuthMiddleware, auth_provider=self._auth_provider)
 
@@ -160,10 +158,7 @@ class PincerMCPServer:
     @property
     def running(self) -> bool:
         """True if the background server task is alive."""
-        return (
-            self._serve_task is not None
-            and not self._serve_task.done()
-        )
+        return self._serve_task is not None and not self._serve_task.done()
 
     @property
     def endpoint(self) -> str:

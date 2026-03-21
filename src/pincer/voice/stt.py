@@ -57,24 +57,20 @@ class STTStream(ABC):
     """Active streaming transcription session."""
 
     @abstractmethod
-    async def send_audio(self, audio_bytes: bytes) -> None:
-        ...
+    async def send_audio(self, audio_bytes: bytes) -> None: ...
 
     @abstractmethod
-    async def receive_transcripts(self) -> AsyncIterator[Transcript]:
-        ...
+    async def receive_transcripts(self) -> AsyncIterator[Transcript]: ...
 
     @abstractmethod
-    async def close(self) -> None:
-        ...
+    async def close(self) -> None: ...
 
 
 class STTProvider(ABC):
     """Abstract speech-to-text provider."""
 
     @abstractmethod
-    async def start_stream(self, config: STTConfig | None = None) -> STTStream:
-        ...
+    async def start_stream(self, config: STTConfig | None = None) -> STTStream: ...
 
 
 class DeepgramSTTStream(STTStream):
@@ -138,9 +134,7 @@ class DeepgramSTTStream(STTStream):
                     await self._transcript_queue.put(transcript)
 
                 elif msg_type == "UtteranceEnd":
-                    await self._transcript_queue.put(
-                        Transcript(text="", is_final=True, speech_final=True)
-                    )
+                    await self._transcript_queue.put(Transcript(text="", is_final=True, speech_final=True))
 
         except Exception:
             if not self._closed:
@@ -159,7 +153,8 @@ class DeepgramSTTStream(STTStream):
         while not self._closed:
             try:
                 transcript = await asyncio.wait_for(
-                    self._transcript_queue.get(), timeout=0.1,
+                    self._transcript_queue.get(),
+                    timeout=0.1,
                 )
                 yield transcript
             except TimeoutError:
@@ -186,10 +181,7 @@ class DeepgramSTT(STTProvider):
         try:
             import websockets
         except ImportError as e:
-            raise ImportError(
-                "websockets is required for Deepgram STT. "
-                "Install with: uv pip install websockets"
-            ) from e
+            raise ImportError("websockets is required for Deepgram STT. Install with: uv pip install websockets") from e
 
         params = (
             f"model={cfg.model}&language={cfg.language}"

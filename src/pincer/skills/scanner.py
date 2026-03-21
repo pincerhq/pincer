@@ -27,10 +27,10 @@ logger = logging.getLogger("pincer.skills.scanner")
 
 
 class RiskLevel(StrEnum):
-    CRITICAL = "critical"   # Block install (score -= 40)
-    HIGH = "high"           # Strong warning (score -= 25)
-    MEDIUM = "medium"       # Warn (score -= 10)
-    INFO = "info"           # Informational (score -= 0)
+    CRITICAL = "critical"  # Block install (score -= 40)
+    HIGH = "high"  # Strong warning (score -= 25)
+    MEDIUM = "medium"  # Warn (score -= 10)
+    INFO = "info"  # Informational (score -= 0)
 
 
 @dataclass
@@ -93,13 +93,15 @@ class _SecurityVisitor(ast.NodeVisitor):
         self.findings: list[ScanFinding] = []
 
     def _add(self, rule: str, risk: RiskLevel, msg: str, node: ast.AST) -> None:
-        self.findings.append(ScanFinding(
-            rule=rule,
-            risk=risk,
-            message=msg,
-            file=self.filename,
-            line=getattr(node, "lineno", 0),
-        ))
+        self.findings.append(
+            ScanFinding(
+                rule=rule,
+                risk=risk,
+                message=msg,
+                file=self.filename,
+                line=getattr(node, "lineno", 0),
+            )
+        )
 
     # ── eval / exec / compile ─────────────────────────────────────────────────
 
@@ -157,11 +159,7 @@ class _SecurityVisitor(ast.NodeVisitor):
     # ── os.environ / os.getenv ────────────────────────────────────────────────
 
     def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
-        if (
-            node.attr == "environ"
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "os"
-        ):
+        if node.attr == "environ" and isinstance(node.value, ast.Name) and node.value.id == "os":
             self._add("env_access", RiskLevel.MEDIUM, "Accesses os.environ (potential credential theft)", node)
         self.generic_visit(node)
 

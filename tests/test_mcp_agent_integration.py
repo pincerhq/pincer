@@ -35,10 +35,12 @@ def _make_agent():
 
 def _make_mcp_manager(connected: bool = True) -> MagicMock:
     manager = MagicMock()
-    manager.list_servers = AsyncMock(return_value=[
-        {"name": "github", "connected": connected, "tool_count": 5},
-        {"name": "slack", "connected": connected, "tool_count": 3},
-    ])
+    manager.list_servers = AsyncMock(
+        return_value=[
+            {"name": "github", "connected": connected, "tool_count": 5},
+            {"name": "slack", "connected": connected, "tool_count": 3},
+        ]
+    )
     manager.total_tool_count = MagicMock(return_value=8 if connected else 0)
     return manager
 
@@ -91,9 +93,11 @@ async def test_build_system_prompt_mcp_no_connected_servers():
     """Prompt does not include MCP section when no servers are connected."""
     agent = _make_agent()
     manager = MagicMock()
-    manager.list_servers = AsyncMock(return_value=[
-        {"name": "down", "connected": False, "tool_count": 0},
-    ])
+    manager.list_servers = AsyncMock(
+        return_value=[
+            {"name": "down", "connected": False, "tool_count": 0},
+        ]
+    )
     agent.mcp_manager = manager
 
     prompt = await agent._build_system_prompt("user1", "hello")
@@ -128,9 +132,11 @@ async def test_build_system_prompt_mcp_and_memory_both_present():
     agent.mcp_manager = _make_mcp_manager(connected=True)
 
     mock_memory = MagicMock(spec=MemoryStore)
-    mock_memory.search_text = AsyncMock(return_value=[
-        MagicMock(content="User prefers brevity"),
-    ])
+    mock_memory.search_text = AsyncMock(
+        return_value=[
+            MagicMock(content="User prefers brevity"),
+        ]
+    )
     agent._memory = mock_memory
 
     prompt = await agent._build_system_prompt("user1", "hello")
