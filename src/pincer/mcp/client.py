@@ -1,0 +1,277 @@
+"""
+MCPClientSession — manages a single MCP server connection.
+
+Wraps the official mcp.ClientSession with:
+- Transport setup (stdio / streamable-http)
+- Session initialization and capability negotiation
+- Tool discovery and caching
+- Timeout enforcement per tool call
+- Graceful shutdown and reconnection tracking
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+from contextlib import AsyncExitStack
+from typing import Any
+
+from pincer.mcp.config import MCPServerConfig, MCPTransport
+from pincer.mcp.sandbox import MCPSandbox, sandbox_streams
+
+logger = logging.getLogger("pincer.mcp")
+
+
+class MCPClientSession:
+    """Manages a single MCP server connection with lifecycle control."""
+
+    def __init__(self, config: MCPServerConfig) -> None:
+        self.config = config
+        self._session: Any = None  # mcp.ClientSession
+        self._exit_stack: AsyncExitStack | None = None
+        self._tools: list[Any] = []  # list[mcp.types.Tool]
+        self._connected = False
+        self._connect_attempts = 0
+        self._tmpdir: str | None = None
+        self._sandbox: MCPSandbox | None = None
+
+    @property
+    def name(self) -> str:
+        return self.config.name
+
+    @property
+    def connected(self) -> bool:
+        return self._connected and self._session is not None
+
+    @property
+    def tools(self) -> list[Any]:
+        return self._tools
+
+    async def connect(self) -> None:
+        """Establish connection and initialize MCP session."""
+        if self._connected:
+            return
+
+        try:
+            from mcp import ClientSession
+            from mcp.client.stdio import StdioServerParameters, stdio_client
+            from mcp.client.streamable_http import streamablehttp_client
+        except ImportError as e:
+            raise RuntimeError(
+                "MCP package not installed. Run: uv pip install 'pincer-agent[mcp]'"
+            ) from e
+
+        self._exit_stack = AsyncExitStack()
+        try:
+            if self.config.transport == MCPTransport.STDIO:
+                read_stream, write_stream = await self._connect_stdio(
+                    self._exit_stack, StdioServerParameters, stdio_client
+                )
+            else:
+                read_stream, write_stream = await self._connect_http(
+                    self._exit_stack, streamablehttp_client
+                )
+
+            self._session = await self._exit_stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
+            )
+            await self._session.initialize()
+            await self._discover_tools()
+            self._connected = True
+            self._connect_attempts = 0
+            logger.info(
+                "MCP '%s' connected — %d tools available",
+                self.name,
+                len(self._tools),
+            )
+        except Exception as e:
+            self._connect_attempts += 1
+            await self._cleanup()
+            raise ConnectionError(
+                f"MCP '{self.name}' connection failed (attempt {self._connect_attempts}): {e}"
+            ) from e
+
+    async def disconnect(self) -> None:
+        """Gracefully close the MCP session."""
+        await self._cleanup()
+        logger.info("MCP '%s' disconnected", self.name)
+
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+        """
+        Execute a tool call with timeout enforcement.
+
+        Returns mcp.types.CallToolResult.
+        Raises ConnectionError if not connected, TimeoutError if timeout exceeded.
+        """
+        if not self.connected:
+            raise ConnectionError(f"MCP '{self.name}' is not connected")
+
+        try:
+            result = await asyncio.wait_for(
+                self._session.call_tool(tool_name, arguments),
+                timeout=self.config.timeout_seconds,
+            )
+            return result
+        except TimeoutError:
+            raise TimeoutError(
+                f"MCP '{self.name}' tool '{tool_name}' timed out "
+                f"after {self.config.timeout_seconds}s"
+            ) from None
+
+    async def health_check(self) -> bool:
+        """Verify the session is still alive via a ping."""
+        if not self.connected:
+            return False
+        try:
+            await asyncio.wait_for(self._session.send_ping(), timeout=5.0)
+            return True
+        except Exception:
+            self._connected = False
+            return False
+
+    async def refresh_tools(self) -> None:
+        """Re-discover tools (called on tools/list_changed notification)."""
+        if not self.connected:
+            return
+        old_count = len(self._tools)
+        await self._discover_tools()
+        logger.info(
+            "MCP '%s' tools refreshed: %d → %d",
+            self.name,
+            old_count,
+            len(self._tools),
+        )
+
+    # ── Private helpers ───────────────────────────────────
+
+    async def _connect_stdio(
+        self, stack: AsyncExitStack, stdio_params_cls: Any, stdio_client: Any
+    ) -> tuple[Any, Any]:
+        """Set up stdio transport.
+
+        When sandbox=True: launches subprocess via MCPSandbox (resource limits,
+        process-group kill) and bridges pipes to anyio message streams.
+        When sandbox=False: uses the MCP SDK's stdio_client directly with the
+        declared env vars merged on top of the current environment.
+        """
+        if self.config.sandbox:
+            return await self._connect_stdio_sandboxed(stack)
+
+        # Non-sandboxed: use stdio_client from MCP SDK with merged env.
+        sanitized_env = self._build_sandbox_env()
+
+        import tempfile as _tmpfile
+
+        self._tmpdir = _tmpfile.mkdtemp(prefix=f"pincer_mcp_{self.name}_")
+
+        server_params = stdio_params_cls(
+            command=self.config.command,
+            args=list(self.config.args),
+            env=sanitized_env,
+            cwd=self._tmpdir,
+        )
+        read_stream, write_stream = await stack.enter_async_context(
+            stdio_client(server_params)
+        )
+        return read_stream, write_stream
+
+    async def _connect_stdio_sandboxed(self, stack: AsyncExitStack) -> tuple[Any, Any]:
+        """Launch the subprocess inside an MCPSandbox and bridge its pipes."""
+        sb = MCPSandbox(
+            command=self.config.command,  # type: ignore[arg-type]
+            args=list(self.config.args),
+            env=dict(self.config.env),
+            memory_limit_mb=self.config.sandbox_memory_mb,
+            server_name=self.name,
+        )
+        sb.start()
+        self._sandbox = sb
+
+        # Register sandbox cleanup: stop the subprocess when the stack closes.
+        async def _stop_sandbox() -> None:
+            stderr_output = sb.get_stderr()
+            if stderr_output:
+                logger.debug("MCPSandbox '%s' stderr: %s", self.name, stderr_output[:500])
+            sb.stop()
+            self._sandbox = None
+
+        stack.push_async_callback(_stop_sandbox)
+
+        read_stream, write_stream = await stack.enter_async_context(
+            sandbox_streams(sb)
+        )
+        return read_stream, write_stream
+
+    async def _connect_http(
+        self, stack: AsyncExitStack, streamablehttp_client: Any
+    ) -> tuple[Any, Any]:
+        """Set up streamable-HTTP transport."""
+        headers = dict(self.config.headers) if self.config.headers else None
+        read_stream, write_stream, _ = await stack.enter_async_context(
+            streamablehttp_client(
+                self.config.url,
+                headers=headers,
+                timeout=float(self.config.timeout_seconds),
+            )
+        )
+        return read_stream, write_stream
+
+    async def _discover_tools(self) -> None:
+        result = await self._session.list_tools()
+        self._tools = result.tools
+
+    def _build_sandbox_env(self) -> dict[str, str] | None:
+        """Build a sanitized environment for stdio subprocesses.
+
+        When sandbox=True (default): start from a minimal base and only add
+        declared env vars, preventing PINCER_* secrets from leaking.
+        When sandbox=False: pass user-declared env vars on top of inherited env.
+        """
+        if not self.config.sandbox:
+            if not self.config.env:
+                return None
+            # Unsandboxed: merge with current env
+            import os
+
+            env = dict(os.environ)
+            env.update(self.config.env)
+            return env
+
+        # Sandboxed: minimal base + declared vars only
+        import os
+
+        base_env: dict[str, str] = {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "HOME": "/tmp",
+            "LANG": "en_US.UTF-8",
+            "TMPDIR": "/tmp",
+        }
+        # Preserve PYTHONPATH / NODE_PATH / similar runtime paths if present
+        for passthrough in ("PYTHONPATH", "NODE_PATH", "npm_config_cache"):
+            val = os.environ.get(passthrough)
+            if val:
+                base_env[passthrough] = val
+
+        base_env.update(self.config.env)
+        return base_env
+
+    async def _cleanup(self) -> None:
+        self._connected = False
+        self._session = None
+        if self._exit_stack:
+            with contextlib.suppress(Exception):
+                await self._exit_stack.aclose()
+            self._exit_stack = None
+        # Clean up temp dir (non-sandbox path)
+        if self._tmpdir:
+            with contextlib.suppress(Exception):
+                import shutil
+
+                shutil.rmtree(self._tmpdir, ignore_errors=True)
+            self._tmpdir = None
+        # Ensure sandbox process is stopped if exit stack didn't handle it
+        if self._sandbox is not None:
+            with contextlib.suppress(Exception):
+                self._sandbox.stop()
+            self._sandbox = None

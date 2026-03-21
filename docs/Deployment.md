@@ -21,17 +21,27 @@ services:
   pincer:
     image: ghcr.io/pincerhq/pincer:latest
     env_file: .env
+    environment:
+      - PINCER_DATA_DIR=/app/data
+      - PINCER_DASHBOARD_HOST=0.0.0.0
+      - PINCER_DASHBOARD_PORT=8080
+      # MCP server — on by default so Claude Desktop, Cursor, etc. can connect
+      - PINCER_MCP_SERVER_EXPORT_ENABLED=true
+      - PINCER_MCP_SERVER_EXPORT_HOST=0.0.0.0
+      - PINCER_MCP_SERVER_EXPORT_PORT=18800
     volumes:
       - pincer-data:/app/data
-      - ./skills:/app/skills  # Optional: mount custom skills
+      - ./skills:/app/skills:ro       # Optional: mount custom skills
+      - ./pincer.toml:/app/pincer.toml:ro  # Optional: MCP server config
     ports:
-      - "8080:8080"  # Dashboard
+      - "8080:8080"    # Dashboard
+      - "18800:18800"  # MCP endpoint (Claude Desktop, Cursor, VS Code, etc.)
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "pincer", "health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G   # Node.js MCP subprocesses need headroom
+          cpus: "1.5"
 
 volumes:
   pincer-data:
@@ -72,8 +82,13 @@ docker compose up -d
 docker run -d \
   --name pincer \
   --env-file .env \
+  -e PINCER_MCP_SERVER_EXPORT_ENABLED=true \
+  -e PINCER_MCP_SERVER_EXPORT_HOST=0.0.0.0 \
+  -e PINCER_MCP_SERVER_EXPORT_PORT=18800 \
   -v pincer-data:/app/data \
   -p 8080:8080 \
+  -p 18800:18800 \
+  --memory 1g \
   --restart unless-stopped \
   ghcr.io/pincerhq/pincer:latest
 ```
@@ -146,15 +161,73 @@ sudo systemctl status pincer
 
 ---
 
+## MCP server endpoint
+
+When running in Docker, the MCP server is **enabled by default** on port `18800`. This lets Claude Desktop, Cursor, VS Code, and other MCP clients connect to Pincer's tools directly.
+
+### Connecting Claude Desktop
+
+Add this to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or the equivalent on your OS:
+
+```json
+{
+  "mcpServers": {
+    "pincer": {
+      "url": "http://localhost:18800/mcp"
+    }
+  }
+}
+```
+
+Restart Claude Desktop. Pincer tools (`pincer_web_search`, `pincer_email_check`, `pincer_memory_search`, etc.) appear in the tool list.
+
+### Connecting Cursor
+
+In Cursor settings → MCP → Add server, enter `http://localhost:18800/mcp`.
+
+### Configuring which tools are exposed
+
+Edit `pincer.toml` (mounted into the container) and set `expose_tools` under `[mcp.server]`:
+
+```toml
+[mcp.server]
+expose_tools = [
+    "web_search",
+    "email_check",
+    "calendar_today",
+    "memory_search",
+    # "shell_exec",   # requires user approval before executing
+    # "file_read",
+]
+```
+
+### Adding MCP client servers
+
+Add `[[mcp.servers]]` blocks to `pincer.toml` to connect Pincer to external MCP servers (GitHub, Slack, Postgres, etc.). See [mcp-guide.md](mcp-guide.md) for the full reference.
+
+### Changing the MCP port
+
+```yaml
+# docker-compose.yml
+environment:
+  - PINCER_MCP_SERVER_EXPORT_PORT=19000
+ports:
+  - "19000:19000"
+```
+
+Or set `PINCER_MCP_PORT=19000` to remap the host port only.
+
+---
+
 ## Resource Requirements
 
 | Scale | CPU | RAM | Disk | Monthly Cost |
 |-------|-----|-----|------|-------------|
-| Personal (1 user) | 1 vCPU | 512MB | 1GB | ~$5/mo |
-| Small team (5 users) | 1 vCPU | 1GB | 5GB | ~$10/mo |
-| Heavy use (10+ users) | 2 vCPU | 2GB | 10GB | ~$20/mo |
+| Personal (1 user, no MCP clients) | 1 vCPU | 512MB | 1GB | ~$5/mo |
+| Personal (with MCP client servers) | 1 vCPU | 1GB | 2GB | ~$10/mo |
+| Small team (5 users) | 2 vCPU | 2GB | 5GB | ~$20/mo |
 
-The Docker image is ~150MB. Pincer itself uses very little compute — most of the work is done by the LLM API.
+The Docker image is ~250MB (includes Node.js for MCP stdio servers). Pincer itself uses very little compute — most of the work is done by the LLM API. Each Node.js MCP subprocess (e.g. GitHub MCP, filesystem MCP) uses ~150-250MB of additional RAM.
 
 ---
 

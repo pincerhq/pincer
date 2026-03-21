@@ -4,6 +4,86 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ---
 
+## [0.7.4] — 2026-03-21
+
+### MCP Architecture Overhaul — Sprint A0
+
+**Replaces Sprints 8–9 from original roadmap. Delivers a layered architecture that supports both embedded and standalone MCP operation from a single shared core.**
+
+#### MCPServiceCore — agent-independent coordination layer
+- New `src/pincer/mcp/core.py`: `MCPServiceCore` owns tool/resource/prompt registries, sampling handler, security, and audit — with no dependency on Telegram, WhatsApp, or the agent loop
+- Layered design: one shared core, two thin shells (embedded + standalone)
+- `register_tool()`, `register_resource()`, `register_prompt()` API for both shells
+- `start_clients()` / `stop_clients()` — consume external MCP servers
+- `start_server()` / `stop_server()` — expose tools/resources/prompts to MCP clients
+
+#### ApprovalBackend — pluggable approval interface
+- New `src/pincer/mcp/approval.py`: `ApprovalBackend` ABC with four implementations
+- `ChannelApprovalBackend` — routes to user's active messaging channel (Telegram, WhatsApp, Signal)
+- `PolicyApprovalBackend` — auto-approve/deny from `[mcp.server.approval_policy]` config
+- `CLIApprovalBackend` — interactive terminal prompt for foreground standalone mode
+- `WebhookApprovalBackend` — POST to external approval service, poll for decision
+- `classify_risk()` — keyword-based risk classification (read / write / destructive / unknown)
+
+#### MCP Resources (spec section: resources/*)
+- New `src/pincer/mcp/resources.py`: `ResourceRegistry` with `export_to(fmcp)` integration
+- Embedded mode: live resources — `pincer://memory/recent`, `pincer://agent/status`
+- Standalone mode: static or file-backed resources
+- Resources exported to FastMCP via programmatic decorator registration
+
+#### MCP Prompts (spec section: prompts/*)
+- New `src/pincer/mcp/prompts.py`: `PromptRegistry` with `export_to(fmcp)` integration
+- Built-in templates: `pincer_summarize`, `pincer_explain_code`
+- Both embedded and standalone modes expose prompts to connected MCP clients
+
+#### MCP Sampling (spec section: sampling/*)
+- New `src/pincer/mcp/sampling.py`: `SamplingHandler` with daily budget enforcement
+- `LLMBackend` ABC; `AgentLLMBackend` (embedded) and `StandaloneLLMBackend` (direct Anthropic API)
+- Disabled by default; enable via `[mcp.server.sampling] enabled = true`
+- Per-call cost estimation; daily budget cap; automatic reset at midnight UTC
+
+#### EmbeddedMCPShell
+- New `src/pincer/mcp/embedded.py`: thin shell wiring `MCPServiceCore` to the running agent
+- Agent's built-in tools registered for server-side export (filtered by `expose_tools`)
+- `pincer_ask_user` always registered — routes to user's active messaging channel
+- Live resources registered from agent's memory and status
+- Shares agent's `ToolRegistry` for MCP client imports (tools appear alongside built-ins)
+
+#### StandaloneMCPShell + `pincer mcp serve`
+- New `src/pincer/mcp/standalone.py`: run Pincer's MCP server without a full agent
+- Use cases: secure MCP gateway, headless API, enterprise deployment, CI/CD
+- `pincer mcp serve` CLI command (`--approval policy|cli|webhook`, `--host`, `--port`, `--verbose`)
+- Built-in prompts registered automatically in standalone mode
+
+#### Config extensions
+- `MCPApprovalPolicyConfig` — per-risk-level approve/deny rules for standalone mode
+- `MCPSamplingConfig` — sampling model, daily budget, max tokens
+- `MCPServerExportConfig` extended: `approval_policy`, `sampling`, `webhook_url` fields
+- New `[mcp.server.approval_policy]` and `[mcp.server.sampling]` TOML sections
+
+#### PincerMCPServer extended (backward-compatible)
+- `server.py` now accepts optional `ResourceRegistry`, `PromptRegistry`, `SamplingHandler`
+- Resources and prompts registered on FastMCP instance during `start()`
+- Existing constructor signature unchanged — all new params are optional
+
+#### MCP Client (from previous sprints, consolidated here)
+- `MCPClientManager` — parallel startup, 60s health loop, exponential-backoff reconnection
+- `MCPClientSession` — wraps official `mcp>=1.8.0` SDK; stdio and streamable-http transports
+- `MCPToolBridge` — converts MCP tool schemas to Pincer `ToolRegistry` entries at runtime
+- `MCPSandbox` — sanitized env, isolated cwd, `RLIMIT_AS` memory limits
+- `MCPAuditLogger` — connect/disconnect/tool-call events in Pincer audit log
+- `MCPSecurityGate` — rate limiting, prompt injection detection, credential redaction
+- `MCPAuthProvider` — OAuth 2.1 `client_credentials` with localhost bypass
+- `MCPRegistryClient` — search and install MCP servers from public registries with AST scan
+- Config: `pincer.toml` `[[mcp.servers]]` + `PINCER_MCP_SERVER_N_*` env vars
+- CLI: `pincer mcp list/test/tools/call/status/serve/search/install/scan/uninstall`
+- Doctor: 5 MCP security checks
+- Optional dep: `uv pip install "pincer-agent[mcp]"` (mcp>=1.8.0)
+
+#### Tests
+- 94 new tests across 7 new test files (approval, resources, prompts, sampling, core, embedded, standalone)
+- 879 total tests passing, 0 failures
+
 ## [0.7.3] — 2026-03-15
 
 ### Image Generation (Sprint 8)

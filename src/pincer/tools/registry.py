@@ -76,6 +76,11 @@ class ToolRegistry:
         )
         logger.info("Registered tool: %s", name)
 
+    def deregister(self, name: str) -> None:
+        """Remove a tool from the registry by name. No-op if not found."""
+        self._tools.pop(name, None)
+        logger.info("Deregistered tool: %s", name)
+
     def get_schemas(self) -> list[dict[str, Any]]:
         """Get all tool schemas in Anthropic tool format."""
         schemas: list[dict[str, Any]] = []

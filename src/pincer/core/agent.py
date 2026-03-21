@@ -38,6 +38,8 @@ if TYPE_CHECKING:
     from pincer.config import Settings
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
+    from pincer.mcp.manager import MCPClientManager
+    from pincer.mcp.server import PincerMCPServer
     from pincer.memory.store import MemoryStore
     from pincer.memory.summarizer import Summarizer
     from pincer.tools.registry import ToolRegistry
@@ -141,6 +143,34 @@ class Agent:
         self._memory = memory_store
         self._summarizer = summarizer
         self._approval_callback = approval_callback
+        self.mcp_manager: MCPClientManager | None = None  # set by cli after startup
+        self.mcp_server: PincerMCPServer | None = None  # set by cli after startup
+        # (user_id, channel_name) of the most recent message — used by ask_user
+        self._last_active: tuple[str, str] | None = None
+        # Injected by cli.py: (user_id, channel_name, question) -> answer
+        self._ask_user_callback: (
+            Callable[[str, str, str], Awaitable[str]] | None
+        ) = None
+
+    @property
+    def tool_registry(self) -> ToolRegistry:
+        return self._tools
+
+    async def _ask_user_on_active_channel(self, question: str) -> str:
+        """
+        Send a question to the user's most-recently active channel and await their reply.
+
+        Called by the MCP server when an external client invokes `pincer_ask_user`.
+        Returns the user's response, or a descriptive message on timeout / no channel.
+        """
+        if not self._ask_user_callback or not self._last_active:
+            return "[No active messaging channel — user unreachable]"
+        user_id, channel_name = self._last_active
+        try:
+            return await self._ask_user_callback(user_id, channel_name, question)
+        except Exception as e:
+            logger.exception("ask_user callback failed")
+            return f"[Error contacting user: {e}]"
 
     async def handle_message(
         self,
@@ -158,6 +188,7 @@ class Agent:
             text: User's message text
             images: Optional list of (raw_bytes, media_type) tuples
         """
+        self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel)
 
         # Build user message
@@ -341,6 +372,7 @@ class Agent:
         Tool-call iterations use complete() (non-streaming). Only the final
         text response is streamed token-by-token.
         """
+        self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel)
 
         img_contents: list[ImageContent] = []
@@ -492,6 +524,23 @@ class Agent:
                 "\n\nWhen the user asks you to call a phone number, you MUST use the "
                 "make_phone_call tool. Do not describe or simulate the call in your response — call the tool."
             )
+
+        # Inject connected MCP server info when available
+        if self.mcp_manager:
+            try:
+                servers = await self.mcp_manager.list_servers()
+                connected = [s for s in servers if s["connected"]]
+                if connected:
+                    server_lines = [
+                        f"  - {s['name']} ({s['tool_count']} tool(s))"
+                        for s in connected
+                    ]
+                    base_prompt += (
+                        "\n\n[Connected MCP servers — use their prefixed tools when relevant]\n"
+                        + "\n".join(server_lines)
+                    )
+            except Exception:
+                logger.debug("Failed to fetch MCP server list for prompt", exc_info=True)
 
         if not self._memory:
             return base_prompt
