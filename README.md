@@ -139,8 +139,8 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 |------|----------------|----------------------|
 | **🟢 Core** | Agent loop, memory, tools, security, cost controls, Telegram | CI-tested, regression-protected, release-blocking |
 | **🟡 Stable** | WhatsApp, Discord, Slack, Email, dashboard, skills system | Tested, maintained, may lag 1–2 weeks on upstream API changes |
-| **🧪 Peripheral** | Voice calling, Signal, proactive scheduler | Working, documented, community-maintained welcome |
-| **🔮 Planned** | iMessage, LINE, Teams, Matrix, MCP | Not yet started — [help wanted](https://github.com/pincerhq/pincer/labels/help-wanted) |
+| **🧪 Peripheral** | Voice calling, Signal, proactive scheduler, MCP client | Working, documented, community-maintained welcome |
+| **🔮 Planned** | iMessage, LINE, Teams, Matrix | Not yet started — [help wanted](https://github.com/pincerhq/pincer/labels/help-wanted) |
 
 ---
 
@@ -274,7 +274,7 @@ If the LLM attempts to exfiltrate data by crafting a `web_search` query containi
 
 ### `pincer doctor`
 
-One command audits your setup — 25+ checks covering config, keys, permissions, skills, and network exposure:
+One command audits your setup — 36+ checks covering config, keys, permissions, skills, and network exposure:
 
 ```
 $ pincer doctor
@@ -375,6 +375,9 @@ pincer chat                        # CLI chat for testing
 pincer doctor                      # security + config audit
 pincer cost                        # spending summary
 pincer skills list|install|scan    # manage skills
+pincer mcp list                        # MCP servers + status
+pincer mcp test <server>              # test MCP connection
+pincer mcp tools                      # list registered MCP tools
 pincer pair approve <ch> <code>    # approve a DM sender
 pincer google setup                # Google Calendar/Gmail OAuth
 ```
@@ -428,7 +431,7 @@ pincer/ (7,800 LOC total)
 │   ├── tools/        registry, sandbox, approval, builtin/ (11 tools)
 │   ├── skills/       loader, scanner (AST), signer
 │   ├── voice/        engine, twiml_server, stt, tts, compliance
-│   ├── security/     firewall, audit, doctor (25+ checks)
+│   ├── security/     firewall, audit, doctor (36+ checks)
 │   └── scheduler/    cron, proactive
 ├── skills/           10 bundled
 ├── tests/            pytest + pytest-asyncio
@@ -448,7 +451,7 @@ pincer/ (7,800 LOC total)
 - [x] Skill system with sandboxing, AST scanning, signing
 - [x] Docker + one-click deploys (Railway, Render, DigitalOcean)
 - [x] Voice calling (Twilio + STT/TTS + compliance)
-- [ ] **MCP support** — Model Context Protocol integration
+- [x] **MCP client** — Model Context Protocol integration (v0.7.4)
 - [ ] **iMessage** — [help wanted](https://github.com/pincerhq/pincer/issues?q=label%3A%22help+wanted%22)
 - [ ] **Encrypted memory** — at-rest database encryption
 - [ ] **Multi-agent routing** — specialized sub-agents
@@ -468,14 +471,14 @@ The plan: grow the contributor community, move toward shared governance as trust
 
 ## 🤝 Community
 
-We welcome contributions from everyone — first-timers, experienced engineers, doctors who code, tinkerers, and vibe-coders.
+We welcome contributions from everyone — first-timers, experienced engineers, doctors who code, tinkerers, and enthusiasts.
 
 | What | How | Difficulty |
 |------|-----|:----------:|
 | **Build a skill** | [Skills guide](docs/Skills guide.md) — 50–150 lines | 🟢 Easy |
 | **Improve docs** | Fix what confused you, translate, write a tutorial | 🟢 Easy |
 | **New channel** | Signal, iMessage, LINE, Matrix | 🟡 Medium |
-| **Core features** | MCP, encrypted memory, multi-agent | 🔴 Hard |
+| **Core features** | Encrypted memory, multi-agent routing | 🔴 Hard |
 
 ```bash
 git clone https://github.com/pincerhq/pincer.git
@@ -500,6 +503,7 @@ cd pincer && uv sync && pytest
 | **[Deployment](docs/Deployment.md)** | Docker, cloud, systemd, reverse proxy |
 | **[Voice Setup](docs/Voice-calling-setup.md)** | Quick setup for outbound phone calls |
 | **[Voice Calling](docs/Voice calling.md)** | Twilio setup, STT/TTS, compliance |
+| **[MCP Guide](docs/mcp-guide.md)** | Connect any MCP-compliant server (GitHub, Postgres, etc.) |
 | **[API Reference](docs/API reference.md)** | REST API for integrations |
 | **[Migrating from OpenClaw](docs/Migration from openclaw.md)** | Import your data in 30 min |
 
@@ -517,7 +521,7 @@ cd pincer && uv sync && pytest
 
 <div align="center">
 
-🦀 **Built with Python and vibe coding.**
+🦀 **Built with Python.**
 
 [pincer.sh](https://pincer.sh) · [GitHub](https://github.com/pincerhq/pincer) · [Discord](https://discord.gg/pincer-agent) · [Twitter](https://x.com/@AgentPincer)
 

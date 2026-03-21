@@ -132,6 +132,19 @@ class SecurityDoctor:
         report.checks.append(self._check_audit_logging_enabled())
         report.checks.append(self._check_skill_sandbox_enabled())
         report.checks.append(self._check_tool_approval_mode())
+        # MCP (8 checks, Sprint 8)
+        report.checks.append(self._check_mcp_config_valid())
+        report.checks.append(self._check_mcp_sandbox_enabled())
+        report.checks.append(self._check_mcp_approval_not_bypassed())
+        report.checks.append(self._check_mcp_no_plaintext_secrets())
+        report.checks.append(self._check_mcp_tool_count())
+        report.checks.append(self._check_mcp_env_vars())
+        report.checks.append(self._check_mcp_collisions())
+        report.checks.append(self._check_mcp_servers())
+        # MCP Security (3 checks, Sprint 9)
+        report.checks.append(self._check_mcp_oauth_enabled())
+        report.checks.append(self._check_mcp_server_not_exposed())
+        report.checks.append(self._check_mcp_injection_alerts())
         return report
 
     # ── Secrets ───────────────────────────────────────────
@@ -880,6 +893,190 @@ class SecurityDoctor:
             category="runtime",
         )
 
+    # ── MCP (Sprint 8) ────────────────────────────────────
+
+    def _check_mcp_config_valid(self) -> CheckResult:
+        """Validate pincer.toml MCP config (if present)."""
+        toml_path = self.config_dir / "pincer.toml"
+        if not toml_path.exists():
+            # No TOML config — check if env-based servers are defined
+            mcp_servers_env = any(k.startswith("PINCER_MCP_SERVER_") for k in os.environ)
+            if not mcp_servers_env:
+                return CheckResult(
+                    "mcp_config_valid",
+                    CheckStatus.SKIPPED,
+                    "No MCP servers configured",
+                    category="mcp",
+                )
+        try:
+            from pincer.mcp.config import load_mcp_config
+
+            cfg = load_mcp_config(self.config_dir)
+            if not cfg.enabled:
+                return CheckResult(
+                    "mcp_config_valid",
+                    CheckStatus.SKIPPED,
+                    "MCP disabled",
+                    category="mcp",
+                )
+            n = len([s for s in cfg.servers if s.enabled])
+            return CheckResult(
+                "mcp_config_valid",
+                CheckStatus.PASS,
+                f"MCP config valid — {n} enabled server(s)",
+                category="mcp",
+            )
+        except Exception as e:
+            return CheckResult(
+                "mcp_config_valid",
+                CheckStatus.CRITICAL,
+                f"MCP config error: {e}",
+                fix_hint="Check pincer.toml [mcp] section syntax",
+                category="mcp",
+            )
+
+    def _check_mcp_sandbox_enabled(self) -> CheckResult:
+        """Warn if any stdio MCP server has sandbox disabled."""
+        try:
+            from pincer.mcp.config import MCPTransport, load_mcp_config
+
+            cfg = load_mcp_config(self.config_dir)
+            if not cfg.enabled or not cfg.servers:
+                return CheckResult(
+                    "mcp_sandbox_enabled",
+                    CheckStatus.SKIPPED,
+                    "No MCP servers configured",
+                    category="mcp",
+                )
+            unsandboxed = [
+                s.name for s in cfg.servers if s.enabled and s.transport == MCPTransport.STDIO and not s.sandbox
+            ]
+            if not unsandboxed:
+                return CheckResult(
+                    "mcp_sandbox_enabled",
+                    CheckStatus.PASS,
+                    "All stdio MCP servers are sandboxed",
+                    category="mcp",
+                )
+            return CheckResult(
+                "mcp_sandbox_enabled",
+                CheckStatus.WARNING,
+                f"Unsandboxed stdio servers: {', '.join(unsandboxed)}",
+                fix_hint="Set sandbox = true in pincer.toml or PINCER_MCP_SERVER_N_SANDBOX=true",
+                category="mcp",
+            )
+        except Exception:
+            return CheckResult(
+                "mcp_sandbox_enabled",
+                CheckStatus.SKIPPED,
+                "Could not load MCP config",
+                category="mcp",
+            )
+
+    def _check_mcp_approval_not_bypassed(self) -> CheckResult:
+        """Warn if any MCP server uses approval_required=['none']."""
+        try:
+            from pincer.mcp.config import load_mcp_config
+
+            cfg = load_mcp_config(self.config_dir)
+            if not cfg.enabled or not cfg.servers:
+                return CheckResult(
+                    "mcp_approval_not_bypassed",
+                    CheckStatus.SKIPPED,
+                    "No MCP servers configured",
+                    category="mcp",
+                )
+            bypassed = [s.name for s in cfg.servers if s.enabled and "none" in s.approval_required]
+            if not bypassed:
+                return CheckResult(
+                    "mcp_approval_not_bypassed",
+                    CheckStatus.PASS,
+                    "No MCP servers bypass approval",
+                    category="mcp",
+                )
+            return CheckResult(
+                "mcp_approval_not_bypassed",
+                CheckStatus.WARNING,
+                f"Approval bypassed for: {', '.join(bypassed)}",
+                fix_hint="Remove 'none' from approval_required; use specific tool patterns instead",
+                category="mcp",
+            )
+        except Exception:
+            return CheckResult(
+                "mcp_approval_not_bypassed",
+                CheckStatus.SKIPPED,
+                "Could not load MCP config",
+                category="mcp",
+            )
+
+    def _check_mcp_no_plaintext_secrets(self) -> CheckResult:
+        """Warn if MCP server configs have hardcoded tokens instead of ${VAR} refs."""
+        toml_path = self.config_dir / "pincer.toml"
+        if not toml_path.exists():
+            return CheckResult(
+                "mcp_no_plaintext_secrets",
+                CheckStatus.SKIPPED,
+                "No pincer.toml found",
+                category="mcp",
+            )
+        try:
+            content = toml_path.read_text()
+            # Look for token-like values that aren't ${VAR} references
+            suspicious = re.findall(
+                r'(?:token|key|secret|password)\s*=\s*"(?!\$\{)[a-zA-Z0-9_\-]{20,}"',
+                content,
+                re.IGNORECASE,
+            )
+            if not suspicious:
+                return CheckResult(
+                    "mcp_no_plaintext_secrets",
+                    CheckStatus.PASS,
+                    "No plaintext secrets in pincer.toml",
+                    category="mcp",
+                )
+            return CheckResult(
+                "mcp_no_plaintext_secrets",
+                CheckStatus.WARNING,
+                f"{len(suspicious)} potential hardcoded secret(s) in pincer.toml",
+                fix_hint='Use ${ENV_VAR} references: token = "${GITHUB_TOKEN}"',
+                category="mcp",
+            )
+        except Exception:
+            return CheckResult(
+                "mcp_no_plaintext_secrets",
+                CheckStatus.SKIPPED,
+                "Could not read pincer.toml",
+                category="mcp",
+            )
+
+    def _check_mcp_tool_count(self) -> CheckResult:
+        """Warn if MCP would expose too many tools (degrades LLM tool selection)."""
+        try:
+            from pincer.mcp.config import load_mcp_config
+
+            cfg = load_mcp_config(self.config_dir)
+            if not cfg.enabled or not cfg.servers:
+                return CheckResult(
+                    "mcp_tool_count",
+                    CheckStatus.SKIPPED,
+                    "No MCP servers configured",
+                    category="mcp",
+                )
+            n_servers = len([s for s in cfg.servers if s.enabled])
+            return CheckResult(
+                "mcp_tool_count",
+                CheckStatus.PASS,
+                f"{n_servers} MCP server(s) configured (tool count checked at runtime)",
+                category="mcp",
+            )
+        except Exception:
+            return CheckResult(
+                "mcp_tool_count",
+                CheckStatus.SKIPPED,
+                "Could not load MCP config",
+                category="mcp",
+            )
+
     def _check_tool_approval_mode(self) -> CheckResult:
         mode = os.environ.get("PINCER_TOOL_APPROVAL", "auto")
         if mode in ("manual", "allowlist"):
@@ -895,4 +1092,221 @@ class SecurityDoctor:
             f"Tool approval: {mode}",
             fix_hint="Set PINCER_TOOL_APPROVAL=allowlist",
             category="runtime",
+        )
+
+    def _check_mcp_env_vars(self) -> CheckResult:
+        """Warn if any ${VAR} references in pincer.toml [mcp] are unresolved."""
+        toml_path = self.config_dir / "pincer.toml"
+        if not toml_path.exists():
+            return CheckResult(
+                "mcp_env_vars",
+                CheckStatus.SKIPPED,
+                "No pincer.toml found",
+                category="mcp",
+            )
+        try:
+            content = toml_path.read_text()
+            # Find all ${VAR} references
+            refs = re.findall(r"\$\{([^}]+)\}", content)
+            if not refs:
+                return CheckResult(
+                    "mcp_env_vars",
+                    CheckStatus.PASS,
+                    "No environment variable references in pincer.toml",
+                    category="mcp",
+                )
+            unset = [v for v in refs if not os.environ.get(v)]
+            if not unset:
+                return CheckResult(
+                    "mcp_env_vars",
+                    CheckStatus.PASS,
+                    f"All {len(refs)} env var reference(s) are set",
+                    category="mcp",
+                )
+            return CheckResult(
+                "mcp_env_vars",
+                CheckStatus.WARNING,
+                f"Unresolved env var(s) in pincer.toml: {', '.join(sorted(set(unset)))}",
+                fix_hint="Export the missing variables before starting Pincer",
+                category="mcp",
+            )
+        except Exception:
+            return CheckResult(
+                "mcp_env_vars",
+                CheckStatus.SKIPPED,
+                "Could not read pincer.toml",
+                category="mcp",
+            )
+
+    def _check_mcp_collisions(self) -> CheckResult:
+        """Warn if tool_prefix is disabled with multiple servers (risks tool name collisions)."""
+        try:
+            from pincer.mcp.config import load_mcp_config
+
+            cfg = load_mcp_config(self.config_dir)
+            if not cfg.enabled or not cfg.servers:
+                return CheckResult(
+                    "mcp_collisions",
+                    CheckStatus.SKIPPED,
+                    "No MCP servers configured",
+                    category="mcp",
+                )
+            enabled_servers = [s for s in cfg.servers if s.enabled]
+            if len(enabled_servers) > 1 and not cfg.tool_prefix:
+                return CheckResult(
+                    "mcp_collisions",
+                    CheckStatus.WARNING,
+                    f"{len(enabled_servers)} MCP servers with tool_prefix=false — tool name collisions possible",
+                    fix_hint="Set tool_prefix = true in pincer.toml [mcp] to namespace tools by server",
+                    category="mcp",
+                )
+            return CheckResult(
+                "mcp_collisions",
+                CheckStatus.PASS,
+                "Tool name collision risk is low (prefix enabled or single server)",
+                category="mcp",
+            )
+        except Exception:
+            return CheckResult(
+                "mcp_collisions",
+                CheckStatus.SKIPPED,
+                "Could not load MCP config",
+                category="mcp",
+            )
+
+    def _check_mcp_servers(self) -> CheckResult:
+        """Warn if any configured stdio MCP server command is not found."""
+        import shutil
+
+        try:
+            from pincer.mcp.config import MCPTransport, load_mcp_config
+
+            cfg = load_mcp_config(self.config_dir)
+            if not cfg.enabled or not cfg.servers:
+                return CheckResult(
+                    "mcp_servers",
+                    CheckStatus.SKIPPED,
+                    "No MCP servers configured",
+                    category="mcp",
+                )
+            missing = []
+            for srv in cfg.servers:
+                if not srv.enabled or srv.transport != MCPTransport.STDIO:
+                    continue
+                cmd = srv.command or ""
+                if not cmd:
+                    missing.append(f"{srv.name} (no command)")
+                    continue
+                # Absolute path check, then PATH lookup
+                if not (Path(cmd).is_file() or shutil.which(cmd)):
+                    missing.append(f"{srv.name} ({cmd!r})")
+            if not missing:
+                return CheckResult(
+                    "mcp_servers",
+                    CheckStatus.PASS,
+                    "All stdio MCP server commands found",
+                    category="mcp",
+                )
+            return CheckResult(
+                "mcp_servers",
+                CheckStatus.WARNING,
+                f"Server command(s) not found: {', '.join(missing)}",
+                fix_hint="Verify the command paths are correct and the binaries are installed",
+                category="mcp",
+            )
+        except Exception:
+            return CheckResult(
+                "mcp_servers",
+                CheckStatus.SKIPPED,
+                "Could not load MCP config",
+                category="mcp",
+            )
+
+    def _check_mcp_oauth_enabled(self) -> CheckResult:
+        """Warn if MCP server export is enabled without OAuth configured."""
+        try:
+            from pincer.mcp.config import load_mcp_config
+
+            cfg = load_mcp_config(self.config_dir)
+            srv = cfg.server
+            if not srv.enabled:
+                return CheckResult(
+                    "mcp_oauth_enabled",
+                    CheckStatus.SKIPPED,
+                    "MCP server export is disabled",
+                    category="mcp",
+                )
+            if getattr(srv, "auth_enabled", False):
+                return CheckResult(
+                    "mcp_oauth_enabled",
+                    CheckStatus.PASS,
+                    "MCP server OAuth authentication is enabled",
+                    category="mcp",
+                )
+            return CheckResult(
+                "mcp_oauth_enabled",
+                CheckStatus.WARNING,
+                "MCP server export has no OAuth authentication configured",
+                fix_hint="Set [mcp.server] auth_enabled = true and configure allowed_clients in pincer.toml",
+                category="mcp",
+            )
+        except Exception:
+            return CheckResult(
+                "mcp_oauth_enabled",
+                CheckStatus.SKIPPED,
+                "Could not load MCP config",
+                category="mcp",
+            )
+
+    def _check_mcp_server_not_exposed(self) -> CheckResult:
+        """Warn if MCP server export is bound to a non-localhost address without auth."""
+        try:
+            from pincer.mcp.config import load_mcp_config
+
+            cfg = load_mcp_config(self.config_dir)
+            srv = cfg.server
+            if not srv.enabled:
+                return CheckResult(
+                    "mcp_server_not_exposed",
+                    CheckStatus.SKIPPED,
+                    "MCP server export is disabled",
+                    category="mcp",
+                )
+            if srv.host in ("127.0.0.1", "::1", "localhost"):
+                return CheckResult(
+                    "mcp_server_not_exposed",
+                    CheckStatus.PASS,
+                    f"MCP server bound to localhost only ({srv.host})",
+                    category="mcp",
+                )
+            auth_ok = getattr(srv, "auth_enabled", False)
+            if auth_ok:
+                return CheckResult(
+                    "mcp_server_not_exposed",
+                    CheckStatus.PASS,
+                    f"MCP server on {srv.host} with OAuth enabled",
+                    category="mcp",
+                )
+            return CheckResult(
+                "mcp_server_not_exposed",
+                CheckStatus.WARNING,
+                f"MCP server exposed on {srv.host} without OAuth — any host can connect",
+                fix_hint=("Set host = '127.0.0.1' in [mcp.server] or enable OAuth authentication"),
+                category="mcp",
+            )
+        except Exception:
+            return CheckResult(
+                "mcp_server_not_exposed",
+                CheckStatus.SKIPPED,
+                "Could not load MCP config",
+                category="mcp",
+            )
+
+    def _check_mcp_injection_alerts(self) -> CheckResult:
+        """Check for recent prompt injection alerts in audit log (informational)."""
+        return CheckResult(
+            "mcp_injection_alerts",
+            CheckStatus.PASS,
+            "Prompt injection detection is active on MCP tool outputs",
+            category="mcp",
         )

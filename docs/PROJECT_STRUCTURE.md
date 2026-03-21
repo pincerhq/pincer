@@ -1,7 +1,7 @@
 # Pincer — Project Structure
 
-> **Version:** 0.3.0 (Sprint 3 Complete)
-> **Date:** February 23, 2026
+> **Version:** 0.7.4 (Sprint A0 Complete)
+> **Date:** March 21, 2026
 > **License:** MIT
 
 *Your personal AI agent. Text it on Telegram or WhatsApp. It does stuff.*
@@ -15,6 +15,12 @@
 | 1 | Days 1–7 | Foundation | ReAct agent core, Telegram bot, tool system, session persistence, cost tracking |
 | 2 | Days 8–14 | Memory & Polish | Persistent memory (SQLite + FTS5), conversation summarizer, browser tool, voice transcription, streaming responses, send_image tool |
 | 3 | Days 15–21 | WhatsApp + Proactive | WhatsApp channel (neonize), cross-channel identity, email & calendar tools, cron scheduler, morning briefings, event triggers |
+| 4–5 | — | Dashboard + Security | FastAPI dashboard, audit log, security doctor, OAuth 2.1, rate limiting |
+| 6 | — | Discord + Web | Discord channel, Web/HTTP channel, multi-channel router |
+| 7 | — | Voice Calling | Twilio Voice, real-time STT/TTS, call state machine, barge-in |
+| 7.5 | — | Signal Channel | Signal via signal-cli-rest-api sidecar, WebSocket receive mode |
+| 8 | — | Image Generation + Grok | fal.ai + Gemini image generation, Grok/xAI LLM provider |
+| A0 | Mar 21, 2026 | MCP Architecture | MCPServiceCore, layered shells (embedded + standalone), resources, prompts, sampling, `pincer mcp serve` |
 
 ---
 
@@ -95,6 +101,69 @@
 - `briefing_config` — per-user briefing preferences
 - `event_triggers` — trigger deduplication
 - `sessions.pincer_user_id` column backfill
+
+---
+
+## Sprint A0 — MCP Architecture Overhaul
+
+### Layered MCP design
+
+```
+┌─────────────────────────────────────┐
+│         MCPServiceCore              │  agent-independent: tools, resources,
+│  (tools · resources · prompts ·     │  prompts, sampling, security, audit
+│   sampling · security · audit)      │  ~230 LOC
+└──────────┬──────────────┬───────────┘
+           │              │
+  ┌────────▼──────┐  ┌────▼──────────────┐
+  │ EmbeddedShell │  │  StandaloneShell  │
+  │  ~175 LOC     │  │  ~175 LOC         │
+  │               │  │                   │
+  │ pincer run    │  │ pincer mcp serve  │
+  │               │  │                   │
+  │ Wires to:     │  │ No agent, no      │
+  │ - agent loop  │  │ channels.         │
+  │ - channels    │  │ Approval via:     │
+  │ - ask_user    │  │ - policy (auto)   │
+  │ - LLM router  │  │ - cli (terminal)  │
+  │ - memory      │  │ - webhook (HTTP)  │
+  └───────────────┘  └───────────────────┘
+```
+
+### New modules (`src/pincer/mcp/`)
+
+| File | Purpose |
+|------|---------|
+| `core.py` | `MCPServiceCore` — agent-independent coordinator |
+| `approval.py` | `ApprovalBackend` + 4 implementations |
+| `resources.py` | `ResourceRegistry` — MCP resources/\* protocol |
+| `prompts.py` | `PromptRegistry` — MCP prompts/\* protocol |
+| `sampling.py` | `SamplingHandler` + `LLMBackend` — MCP sampling/\* protocol |
+| `embedded.py` | `EmbeddedMCPShell` — wires core to running agent |
+| `standalone.py` | `StandaloneMCPShell` — headless MCP server |
+
+### ApprovalBackend implementations
+
+| Class | Approval mechanism | Mode |
+|-------|--------------------|------|
+| `ChannelApprovalBackend` | Routes to Telegram/WhatsApp/Signal | Embedded |
+| `PolicyApprovalBackend` | Auto-approve/deny from config rules | Standalone headless |
+| `CLIApprovalBackend` | Interactive terminal `y/N` prompt | Standalone interactive |
+| `WebhookApprovalBackend` | POST to external approval service | Both modes |
+
+### MCP spec compliance after Sprint A0
+
+| Feature | Spec section | Status |
+|---------|-------------|--------|
+| Tools | tools/\* | ✅ Full |
+| Resources | resources/\* | ✅ Full |
+| Prompts | prompts/\* | ✅ Full |
+| Sampling | sampling/\* | ✅ Infrastructure + budget |
+| Auth (OAuth 2.1) | authorization/\* | ✅ Full |
+| Streamable HTTP | transports | ✅ Full |
+| stdio | transports | ✅ Client + server |
+| Notifications | notifications/\* | ✅ tools/list\_changed |
+| Logging | logging/\* | ✅ Audit log |
 
 ---
 
@@ -234,6 +303,14 @@ pincer/
 │   │   ├── firewall.py
 │   │   └── rate_limiter.py
 │   │
+│   ├── mcp/                        # MCP client (v0.7.4)
+│   │   ├── __init__.py             # Public exports
+│   │   ├── config.py               # MCPConfig, MCPServerConfig, load_mcp_config
+│   │   ├── client.py               # MCPClientSession (stdio + http)
+│   │   ├── manager.py              # MCPClientManager (lifecycle + health loop)
+│   │   ├── bridge.py               # MCP tools → Pincer ToolRegistry bridge
+│   │   └── audit.py                # MCPAuditLogger
+│   │
 │   └── dashboard/                  # Admin dashboard (stub)
 │       └── __init__.py
 │
@@ -290,19 +367,14 @@ pincer/
 | `scheduler/triggers.py` | Event triggers (email polling, calendar reminders, webhooks) |
 | `exceptions.py` | Custom exceptions (`BudgetExceededError`, `LLMError`, `ToolNotFoundError`, `ChannelNotConnectedError`) |
 
+| `mcp/` | MCP platform — client (consume external MCP servers) + server (expose Pincer tools via MCP); sandboxed stdio subprocesses; streamable-http transport; OAuth 2.1; audit trail; registry client (MCP Registry + ClawHub); 225 tests |
+
 ### Stubs / Placeholders (Not Yet Implemented)
 
 | Module | Description |
 |--------|-------------|
 | `channels/discord_channel.py` | Discord bot integration |
 | `channels/web.py` | Web/HTTP REST channel |
-| `tools/approval.py` | Human-in-the-loop tool approval workflow |
-| `tools/sandbox.py` | Docker/subprocess sandboxing for tool execution |
-| `security/audit.py` | Audit logging for all agent actions |
-| `security/doctor.py` | Security health checks and diagnostics |
-| `security/firewall.py` | Input/output filtering rules |
-| `security/rate_limiter.py` | Per-user/channel rate limiting |
-| `dashboard/` | Admin web dashboard with analytics |
 | `llm/ollama_provider.py` | Ollama local model provider |
 
 ---
