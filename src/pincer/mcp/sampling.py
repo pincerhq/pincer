@@ -129,7 +129,7 @@ class StandaloneLLMBackend(LLMBackend):
         client = anthropic.AsyncAnthropic(api_key=self._api_key)
         resp = await client.messages.create(
             model=model or self._default_model,
-            messages=cast(Any, messages),
+            messages=cast("Any", messages),
             max_tokens=max_tokens,
         )
         content = resp.content
