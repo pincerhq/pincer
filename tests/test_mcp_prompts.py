@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,7 +13,6 @@ from pincer.mcp.prompts import (
     register_builtin_prompts,
     summarize_prompt_handler,
 )
-
 
 # ── PromptRegistry ────────────────────────────────────────────────────────────
 

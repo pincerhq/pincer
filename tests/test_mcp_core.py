@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pincer.mcp.approval import PolicyApprovalBackend
-from pincer.mcp.core import MCPServiceCore, ServerToolDef
+from pincer.mcp.core import MCPServiceCore
 
 
 def _make_config(enabled=True, servers=None, server_enabled=False):

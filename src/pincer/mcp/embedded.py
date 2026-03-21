@@ -182,7 +182,7 @@ class EmbeddedMCPShell:
             """Return current agent status and configuration."""
             try:
                 lines = [
-                    f"Agent: Pincer",
+                    "Agent: Pincer",
                     f"Tools: {len(agent.tool_registry.list_tools())}",
                     f"MCP clients connected: {self._core.client_tool_count if self._core else 0}",
                 ]

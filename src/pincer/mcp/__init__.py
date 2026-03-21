@@ -44,8 +44,8 @@ from pincer.mcp.core import MCPServiceCore
 from pincer.mcp.embedded import EmbeddedMCPShell
 from pincer.mcp.exporter import PincerToolExporter
 from pincer.mcp.manager import MCPClientManager
-from pincer.mcp.prompts import PromptRegistry, PromptRegistration, register_builtin_prompts
-from pincer.mcp.resources import ResourceRegistry, ResourceRegistration
+from pincer.mcp.prompts import PromptRegistration, PromptRegistry, register_builtin_prompts
+from pincer.mcp.resources import ResourceRegistration, ResourceRegistry
 from pincer.mcp.sampling import AgentLLMBackend, LLMBackend, SamplingHandler, StandaloneLLMBackend
 from pincer.mcp.sandbox import MCPSandbox
 from pincer.mcp.security import MCPSecurityGate, SlidingWindowRateLimiter

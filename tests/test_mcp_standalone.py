@@ -99,10 +99,10 @@ def test_build_llm_backend_sampling_enabled():
 
     shell = StandaloneMCPShell(mcp_config=cfg, llm_api_key="sk-test")
 
-    with patch("pincer.mcp.standalone.StandaloneLLMBackend") as MockBackend:
-        MockBackend.return_value = MagicMock()
+    with patch("pincer.mcp.standalone.StandaloneLLMBackend") as mock_backend:  # noqa: N806
+        mock_backend.return_value = MagicMock()
         llm = shell._build_llm_backend()
-        MockBackend.assert_called_once()
+        mock_backend.assert_called_once()
         assert llm is not None
 
 

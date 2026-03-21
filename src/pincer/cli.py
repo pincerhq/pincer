@@ -3099,7 +3099,7 @@ async def _mcp_serve(
         )
         raise typer.Exit(1)
 
-    console.print(f"[bold]Starting Pincer MCP server[/bold]")
+    console.print("[bold]Starting Pincer MCP server[/bold]")
     console.print(f"  Endpoint:  http://{cfg.server.host}:{cfg.server.port}{cfg.server.path}")
     console.print(f"  Approval:  {approval_mode}")
     console.print(f"  Tools:     {', '.join(cfg.server.expose_tools) or '(none)'}")

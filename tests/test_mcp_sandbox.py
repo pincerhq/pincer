@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 
 import pytest
 
 from pincer.mcp.sandbox import BLOCKED_ENV_PREFIXES, MCPSandbox
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -66,20 +64,19 @@ def test_sandbox_force_kills_after_timeout() -> None:
     )
     sb = _make_sandbox(args=["-c", ignore_sigterm])
     sb.start()
-    pid = sb.pid
     assert sb.alive
 
     import pincer.mcp.sandbox as sandbox_mod
     original_wait = sandbox_mod._SIGTERM_WAIT_SECONDS
     sandbox_mod._SIGTERM_WAIT_SECONDS = 1  # type: ignore[attr-defined]
     try:
-        exit_code = sb.stop()
+        sb.stop()
     finally:
         sandbox_mod._SIGTERM_WAIT_SECONDS = original_wait  # type: ignore[attr-defined]
 
     assert not sb.alive
     # Process was killed (non-zero exit or -9 on Linux)
-    assert exit_code != 0 or True  # just verify it stopped
+    assert True  # just verify it stopped
 
 
 def test_sandbox_raises_if_started_twice() -> None:
@@ -209,7 +206,7 @@ def test_sandbox_tmpdir_cleaned_on_stop() -> None:
 def test_sandbox_stderr_captured() -> None:
     """get_stderr() returns output written to stderr."""
     sb = _make_sandbox(
-        args=["-c", "import sys; sys.stderr.write('hello from stderr\\n'); sys.stderr.flush(); import time; time.sleep(60)"]
+        args=["-c", "import sys; sys.stderr.write('hello from stderr\\n'); sys.stderr.flush(); import time; time.sleep(60)"]  # noqa: E501
     )
     sb.start()
     time.sleep(0.3)  # let the process write to stderr
@@ -230,12 +227,6 @@ def test_sandbox_stderr_empty_when_not_started() -> None:
 def test_sandbox_memory_limit_set() -> None:
     """Verify that RLIMIT_AS is set in the subprocess (enforced on Linux; accepted but not enforced on macOS)."""
     # Ask the child to print its own RLIMIT_AS
-    check_script = (
-        "import resource, sys; "
-        "soft, hard = resource.getrllimit(resource.RLIMIT_AS); "  # intentional: will fail if not available
-        "sys.stdout.write(str(soft)); sys.stdout.flush(); "
-        "import time; time.sleep(60)"
-    )
     # Use a subprocess that checks and prints its rlimit
     actual_script = (
         "import resource, sys; "

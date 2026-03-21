@@ -57,9 +57,10 @@ async def test_connect_failure_raises_connection_error() -> None:
     cfg = _make_stdio_config()
     session = MCPClientSession(cfg)
 
-    with patch("pincer.mcp.client.MCPClientSession._connect_stdio", side_effect=OSError("not found")):
-        with pytest.raises(ConnectionError, match="connection failed"):
-            await session.connect()
+    exc_ctx = pytest.raises(ConnectionError, match="connection failed")
+    patch_ctx = patch("pincer.mcp.client.MCPClientSession._connect_stdio", side_effect=OSError("not found"))
+    with patch_ctx, exc_ctx:
+        await session.connect()
 
     assert session.connected is False
     assert session._connect_attempts == 1

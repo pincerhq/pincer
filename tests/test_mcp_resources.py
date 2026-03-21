@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-
-from pincer.mcp.resources import ResourceRegistry, ResourceRegistration, _uri_to_name
-
+from pincer.mcp.resources import ResourceRegistry, _uri_to_name
 
 # ── ResourceRegistry ──────────────────────────────────────────────────────────
 

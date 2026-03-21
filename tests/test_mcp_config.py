@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -15,6 +14,8 @@ from pincer.mcp.config import (
     load_mcp_config,
 )
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ── MCPServerConfig validation ──────────────────────────────────────────────
 

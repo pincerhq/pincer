@@ -21,7 +21,7 @@ Both thin shells (EmbeddedMCPShell and StandaloneMCPShell) build on this core.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pincer.mcp.approval import ApprovalDecision, ApprovalRequest, classify_risk
@@ -200,7 +200,7 @@ class MCPServiceCore:
             return {}
 
         security_gate = MCPSecurityGate()
-        audit = MCPAuditLogger(self._audit_log, security_gate)
+        MCPAuditLogger(self._audit_log, security_gate)
 
         self._client_manager = MCPClientManager(
             config=self.config,

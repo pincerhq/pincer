@@ -175,7 +175,6 @@ async def test_sandboxed_connect_and_call(echo_server_script: str) -> None:
 
 async def test_sandboxed_env_isolation(tmp_path, monkeypatch) -> None:
     """Sandboxed subprocess must not see PINCER_* env vars from parent."""
-    import os
 
     monkeypatch.setenv("PINCER_SECRET_KEY", "must-not-leak")
 

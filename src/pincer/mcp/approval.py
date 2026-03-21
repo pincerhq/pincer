@@ -16,7 +16,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -28,7 +28,7 @@ logger = logging.getLogger("pincer.mcp.approval")
 # ── Data types ────────────────────────────────────────────────────────────────
 
 
-class ApprovalDecision(str, Enum):
+class ApprovalDecision(StrEnum):
     """Outcome of an approval request."""
 
     APPROVED = "approved"

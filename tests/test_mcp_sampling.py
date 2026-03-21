@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from pincer.mcp.sampling import (
     AgentLLMBackend,
     SamplingHandler,
-    StandaloneLLMBackend,
     _DailyBudgetTracker,
 )
-
 
 # ── _DailyBudgetTracker ───────────────────────────────────────────────────────
 
