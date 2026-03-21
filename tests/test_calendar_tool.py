@@ -105,6 +105,7 @@ class TestCalendarWeek:
 class TestCalendarCreate:
     async def test_create_event(self):
         created = {
+            "id": "evt_123",
             "summary": "New Meeting",
             "start": {"dateTime": "2026-02-22T14:00:00+01:00"},
             "end": {"dateTime": "2026-02-22T15:00:00+01:00"},
