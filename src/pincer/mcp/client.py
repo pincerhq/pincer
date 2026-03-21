@@ -226,9 +226,9 @@ class MCPClientSession:
 
         base_env: dict[str, str] = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "HOME": "/tmp",
+            "HOME": "/tmp",  # nosec B108 — intentional sandbox restriction
             "LANG": "en_US.UTF-8",
-            "TMPDIR": "/tmp",
+            "TMPDIR": "/tmp",  # nosec B108 — intentional sandbox restriction
         }
         # Preserve PYTHONPATH / NODE_PATH / similar runtime paths if present
         for passthrough in ("PYTHONPATH", "NODE_PATH", "npm_config_cache"):

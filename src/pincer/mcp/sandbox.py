@@ -218,9 +218,9 @@ class MCPSandbox:
         """
         base: dict[str, str] = {
             "PATH": "/usr/local/bin:/usr/bin:/bin",
-            "HOME": "/tmp",
+            "HOME": "/tmp",  # nosec B108 — intentional sandbox restriction
             "LANG": "en_US.UTF-8",
-            "TMPDIR": "/tmp",
+            "TMPDIR": "/tmp",  # nosec B108 — intentional sandbox restriction
             # Disable Python output buffering so stdio-protocol responses
             # are written to the pipe immediately rather than held in a buffer.
             "PYTHONUNBUFFERED": "1",

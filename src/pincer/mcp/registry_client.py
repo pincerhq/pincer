@@ -380,7 +380,7 @@ class MCPRegistryClient:
             import tarfile
 
             with tarfile.open(tarball_path) as tf:
-                tf.extractall(dest)  # noqa: S202
+                tf.extractall(dest, filter="data")  # nosec B202
 
         # npm pack extracts to 'package/' subdirectory
         extracted = dest / "package"
@@ -454,6 +454,17 @@ def _infer_entry(package_name: str) -> MCPRegistryEntry:
     )
 
 
+def _safe_zip_extractall(zf: "zipfile.ZipFile", dest: Path) -> None:
+    """Extract zip members, skipping any with absolute or traversal paths."""
+    from pathlib import PurePosixPath
+
+    for member in zf.infolist():
+        parts = PurePosixPath(member.filename).parts
+        if not parts or parts[0] == "/" or ".." in parts:
+            continue
+        zf.extract(member, dest)
+
+
 def _extract_archive(path: Path, dest: Path) -> None:
     """Extract a wheel/tarball/zip to dest."""
     import tarfile
@@ -461,7 +472,7 @@ def _extract_archive(path: Path, dest: Path) -> None:
 
     if path.suffix == ".whl" or path.suffix == ".zip":
         with zipfile.ZipFile(path) as zf:
-            zf.extractall(dest)  # noqa: S202
+            _safe_zip_extractall(zf, dest)  # nosec B202
     elif path.name.endswith(".tar.gz"):
         with tarfile.open(path) as tf:
-            tf.extractall(dest)  # noqa: S202
+            tf.extractall(dest, filter="data")  # nosec B202
