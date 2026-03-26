@@ -1,6 +1,6 @@
 [project]
 name = "pincer-agent"
-version = "0.7.4"
+version = "0.7.4.2"
 description = "Your personal AI agent. Text it on WhatsApp. It does stuff. 🦀"
 readme = "README.md"
 license = { text = "MIT" }
@@ -64,7 +64,7 @@ image = [
 ]
 mcp = [
     "mcp>=1.8.0",
-    "PyJWT>=2.8.0",
+    "PyJWT[crypto]>=2.8.0",
 ]
 all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp]"]
 dev = [

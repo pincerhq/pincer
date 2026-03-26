@@ -1,7 +1,7 @@
 # Pincer — Project Structure
 
-> **Version:** 0.7.4 (Sprint A0 Complete)
-> **Date:** March 21, 2026
+> **Version:** 0.7.4.2 (MCP OAuth 2.1)
+> **Date:** March 26, 2026
 > **License:** MIT
 
 *Your personal AI agent. Text it on Telegram or WhatsApp. It does stuff.*
@@ -303,7 +303,7 @@ pincer/
 │   │   ├── firewall.py
 │   │   └── rate_limiter.py
 │   │
-│   ├── mcp/                        # MCP client (v0.7.4)
+│   ├── mcp/                        # MCP client + OAuth 2.1 (v0.7.4.2)
 │   │   ├── __init__.py             # Public exports
 │   │   ├── config.py               # MCPConfig, MCPServerConfig, load_mcp_config
 │   │   ├── client.py               # MCPClientSession (stdio + http)

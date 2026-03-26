@@ -189,12 +189,35 @@ class MCPClientSession:
         return read_stream, write_stream
 
     async def _connect_http(self, stack: AsyncExitStack, streamablehttp_client: Any) -> tuple[Any, Any]:
-        """Set up streamable-HTTP transport."""
-        headers = dict(self.config.headers) if self.config.headers else None
+        """Set up streamable-HTTP transport, with optional OAuth 2.1 auth."""
+        headers: dict[str, str] = dict(self.config.headers) if self.config.headers else {}
+
+        if self.config.oauth_enabled:
+            try:
+                from pincer.mcp.auth.client_flow import MCPOAuthClient
+                from pincer.mcp.auth.token_store import TokenStore
+
+                client_config: dict[str, Any] = {}
+                if self.config.oauth_client_id:
+                    client_config["client_id"] = self.config.oauth_client_id
+                if self.config.oauth_client_secret:
+                    client_config["client_secret"] = self.config.oauth_client_secret
+
+                oauth = MCPOAuthClient(
+                    mcp_server_url=str(self.config.url),
+                    token_store=TokenStore(),
+                    client_config=client_config,
+                )
+                auth_headers = await oauth.get_headers()
+                headers.update(auth_headers)
+                logger.debug("MCP '%s': obtained OAuth headers", self.name)
+            except Exception as e:
+                logger.warning("MCP '%s': OAuth failed, connecting without auth: %s", self.name, e)
+
         read_stream, write_stream, _ = await stack.enter_async_context(
             streamablehttp_client(
                 self.config.url,
-                headers=headers,
+                headers=headers or None,
                 timeout=float(self.config.timeout_seconds),
             )
         )
