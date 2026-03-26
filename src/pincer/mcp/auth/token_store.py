@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 logger = logging.getLogger("pincer.mcp.auth.token_store")
 
@@ -43,7 +44,7 @@ class TokenStore:
         self,
         resource: str,
         access_token: str,
-        refresh_token: Optional[str],
+        refresh_token: str | None,
         expires_at: int,
     ) -> None:
         data = {
@@ -58,7 +59,7 @@ class TokenStore:
         else:
             self._memory[resource] = data
 
-    def get_access_token(self, resource: str) -> Optional[str]:
+    def get_access_token(self, resource: str) -> str | None:
         data = self._load(resource)
         if not data:
             return None
@@ -66,7 +67,7 @@ class TokenStore:
             return None  # Treat as expired if within 60s of expiry
         return data.get("access_token")
 
-    def get_refresh_token(self, resource: str) -> Optional[str]:
+    def get_refresh_token(self, resource: str) -> str | None:
         data = self._load(resource)
         return data.get("refresh_token") if data else None
 
@@ -87,10 +88,8 @@ class TokenStore:
 
     def clear_all(self) -> None:
         if self._strategy == "file":
-            try:
+            with contextlib.suppress(Exception):
                 _TOKEN_FILE.unlink(missing_ok=True)
-            except Exception:
-                pass
         self._memory.clear()
 
     # ── Keyring strategy ───────────────────────────────────────────────────────
@@ -105,13 +104,13 @@ class TokenStore:
             self._strategy = "file"
             self._file_store(resource, data)
 
-    def _keyring_load(self, resource: str) -> Optional[dict[str, Any]]:
+    def _keyring_load(self, resource: str) -> dict[str, Any] | None:
         try:
             import keyring
 
             raw = keyring.get_password("pincer_mcp", resource)
             if raw:
-                return cast(dict[str, Any], json.loads(raw))
+                return cast("dict[str, Any]", json.loads(raw))
         except Exception:
             pass
         return None
@@ -128,14 +127,14 @@ class TokenStore:
             self._strategy = "memory"
             self._memory[resource] = data
 
-    def _file_load(self, resource: str) -> Optional[dict[str, Any]]:
+    def _file_load(self, resource: str) -> dict[str, Any] | None:
         all_data = self._file_load_all()
         return all_data.get(resource)
 
     def _file_load_all(self) -> dict[str, Any]:
         try:
             if _TOKEN_FILE.exists():
-                return cast(dict[str, Any], json.loads(_TOKEN_FILE.read_text()))
+                return cast("dict[str, Any]", json.loads(_TOKEN_FILE.read_text()))
         except Exception:
             pass
         return {}
@@ -147,7 +146,7 @@ class TokenStore:
 
     # ── Load helper ────────────────────────────────────────────────────────────
 
-    def _load(self, resource: str) -> Optional[dict[str, Any]]:
+    def _load(self, resource: str) -> dict[str, Any] | None:
         if self._strategy == "keyring":
             return self._keyring_load(resource)
         elif self._strategy == "file":

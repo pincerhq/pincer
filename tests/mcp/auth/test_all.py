@@ -8,16 +8,16 @@ Covers: PKCE, tokens, client registry, scopes, metadata,
 
 from __future__ import annotations
 
+import contextlib
 import re
 import secrets
 import time
 import urllib.parse
-from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.applications import Starlette
-from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
@@ -37,11 +37,16 @@ from pincer.mcp.auth.errors import (
 )
 from pincer.mcp.auth.metadata import build_authorization_server_metadata, build_protected_resource_metadata
 from pincer.mcp.auth.middleware import MCPAuthMiddleware
-from pincer.mcp.auth.models import AuthServerConfig, OAuthClient, TokenClaims
+from pincer.mcp.auth.models import TokenClaims
 from pincer.mcp.auth.pkce import generate_code_challenge, generate_code_verifier, verify_code_challenge
 from pincer.mcp.auth.scopes import check_tool_scope, get_scope_descriptions, validate_scopes
 from pincer.mcp.auth.token_store import TokenStore
 from pincer.mcp.auth.tokens import TokenService
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from starlette.requests import Request
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -97,9 +102,8 @@ def auth_app(token_service: TokenService, client_registry: ClientRegistry) -> St
         claims = getattr(request.state, "auth_claims", None)
         bypassed = getattr(request.state, "auth_bypassed", False)
         # Simulate scope enforcement: requests to /mcp/execute require tools:execute
-        if "execute" in request.url.path and claims:
-            if not check_tool_scope("execute_command", claims.scope):
-                return JSONResponse({"error": "insufficient_scope"}, status_code=403)
+        if "execute" in request.url.path and claims and not check_tool_scope("execute_command", claims.scope):
+            return JSONResponse({"error": "insufficient_scope"}, status_code=403)
         return JSONResponse({"status": "ok", "bypassed": bypassed})
 
     routes = [
@@ -756,6 +760,7 @@ def test_token_passthrough(token_service: TokenService, tmp_path: Path) -> None:
 def test_constant_time(client_registry: ClientRegistry) -> None:
     """verify_secret must use secrets.compare_digest (constant-time)."""
     import inspect
+
     from pincer.mcp.auth import clients as clients_mod
 
     source = inspect.getsource(clients_mod.ClientRegistry.verify_secret)
@@ -830,7 +835,12 @@ def test_token_store_file_strategy(tmp_path: Path) -> None:
 
 
 def test_render_consent_page_structure() -> None:
-    html = render_consent_page("My App", ["tools:read: Read tools", "resources:read: Read resources"], "/authorize/consent", "req123")
+    html = render_consent_page(
+        "My App",
+        ["tools:read: Read tools", "resources:read: Read resources"],
+        "/authorize/consent",
+        "req123",
+    )
     assert "My App" in html
     assert "tools:read" in html
     assert "resources:read" in html
@@ -1059,8 +1069,6 @@ async def test_oauth_client_refresh_on_expired_access() -> None:
     # Store expired access + valid refresh
     store.store("http://test-mcp/mcp", "old-access", "my-refresh", int(time.time()) - 1)
 
-    import httpx
-
     mock_response = MagicMock()
     mock_response.json.return_value = {
         "access_token": "new-access-token",
@@ -1154,10 +1162,8 @@ async def test_callback_server_captures_params() -> None:
         assert params.get("state") == "mystate"
     finally:
         await cb.stop()
-        try:
+        with contextlib.suppress(Exception):
             writer.close()
-        except Exception:
-            pass
 
 
 # ── Legacy middleware dispatch tests ─────────────────────────────────────────
@@ -1215,7 +1221,10 @@ def test_legacy_middleware_wrong_client_secret() -> None:
     app.add_middleware(MCPAuthMiddleware, auth_provider=provider)
     http = TestClient(app, raise_server_exceptions=True)
 
-    r = http.post("/oauth/token", data={"grant_type": "client_credentials", "client_id": "c1", "client_secret": "WRONG"})
+    r = http.post(
+        "/oauth/token",
+        data={"grant_type": "client_credentials", "client_id": "c1", "client_secret": "WRONG"},
+    )
     assert r.status_code == 401
 
 
@@ -1387,8 +1396,6 @@ async def test_refresh_mocked() -> None:
 
 async def test_full_pkce_flow_mocked() -> None:
     """Full PKCE flow with all external deps mocked."""
-    import asyncio as _asyncio
-
     store = TokenStore()
     store._strategy = "memory"
 
@@ -1458,14 +1465,25 @@ async def test_full_pkce_flow_mocked() -> None:
 
 def test_token_missing_code(auth_app: Starlette) -> None:
     http = TestClient(auth_app, raise_server_exceptions=True)
-    r = http.post("/token", data={"grant_type": "authorization_code", "client_id": _CLIENT_ID, "redirect_uri": _REDIRECT_URI, "code_verifier": "v"})
+    r = http.post(
+        "/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": _CLIENT_ID,
+            "redirect_uri": _REDIRECT_URI,
+            "code_verifier": "v",
+        },
+    )
     assert r.status_code == 400
     assert r.json()["error"] == "invalid_request"
 
 
 def test_token_missing_code_verifier(auth_app: Starlette) -> None:
     http = TestClient(auth_app, raise_server_exceptions=True)
-    r = http.post("/token", data={"grant_type": "authorization_code", "code": "c", "client_id": _CLIENT_ID, "redirect_uri": _REDIRECT_URI})
+    r = http.post(
+        "/token",
+        data={"grant_type": "authorization_code", "code": "c", "client_id": _CLIENT_ID, "redirect_uri": _REDIRECT_URI},
+    )
     assert r.status_code == 400
     assert r.json()["error"] == "invalid_request"
 
@@ -1486,7 +1504,10 @@ def test_token_refresh_missing_token(auth_app: Starlette) -> None:
 
 def test_token_client_creds_wrong_secret(auth_app: Starlette) -> None:
     http = TestClient(auth_app, raise_server_exceptions=True)
-    r = http.post("/token", data={"grant_type": "client_credentials", "client_id": "confidential-client", "client_secret": "WRONG"})
+    r = http.post(
+        "/token",
+        data={"grant_type": "client_credentials", "client_id": "confidential-client", "client_secret": "WRONG"},
+    )
     assert r.status_code == 401
     assert r.json()["error"] == "invalid_client"
 
@@ -1976,8 +1997,6 @@ def test_token_client_creds_no_such_grant(
     """endpoints.py lines 375-376: client doesn't support client_credentials."""
     # test-client only supports authorization_code, not client_credentials
     # We need a client with a secret but no client_credentials grant
-    from pincer.mcp.auth.models import OAuthClient as OC
-
     reg = ClientRegistry(
         static_clients=[
             {
@@ -2084,12 +2103,10 @@ def test_token_store_file_store_fallback_to_memory(tmp_path: Path) -> None:
 
 def _make_auth_app(token_service: TokenService, client_registry: ClientRegistry) -> Starlette:
     """Helper: build a minimal auth-enabled Starlette app."""
-    from starlette.routing import Route as R
-
     async def mcp_ep(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
-    routes = [R("/mcp", mcp_ep, methods=["POST"])]
+    routes = [Route("/mcp", mcp_ep, methods=["POST"])]
     app = Starlette(routes=routes)
     mount_oauth_endpoints(app, token_service, client_registry, None, resource_uri=_RESOURCE, issuer=_ISSUER)
     app.add_middleware(

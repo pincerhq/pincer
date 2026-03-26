@@ -23,6 +23,12 @@ Backward-compat (legacy HS256 provider):
 
 from __future__ import annotations
 
+import logging as _logging
+import secrets as _secrets
+import time as _time
+from dataclasses import dataclass as _dataclass
+from typing import Any as _Any
+
 from pincer.mcp.auth.client_flow import MCPOAuthClient
 from pincer.mcp.auth.clients import ClientRegistry
 from pincer.mcp.auth.endpoints import mount_oauth_endpoints
@@ -34,12 +40,6 @@ from pincer.mcp.auth.tokens import TokenService
 # ── Backward-compatibility shim ───────────────────────────────────────────────
 # The pre-Sprint 8 MCPAuthProvider used HS256 HMAC signing and a client
 # whitelist. Kept here so existing code/tests continue to import correctly.
-
-import logging as _logging
-import secrets as _secrets
-import time as _time
-from dataclasses import dataclass as _dataclass
-from typing import Any as _Any
 
 _compat_logger = _logging.getLogger("pincer.mcp.auth.legacy")
 

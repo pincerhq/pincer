@@ -8,7 +8,7 @@ import logging
 import secrets
 import time
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 from pincer.mcp.auth.errors import OAuthError, invalid_grant
 from pincer.mcp.auth.models import AuthorizationCode, RefreshTokenData, TokenClaims
@@ -69,7 +69,7 @@ class TokenService:
             logger.info("Generated new Ed25519 signing key at %s", self._key_path)
         else:
             pem = self._key_path.read_bytes()
-            private_key = cast(Ed25519PrivateKey, load_pem_private_key(pem, password=None))
+            private_key = cast("Ed25519PrivateKey", load_pem_private_key(pem, password=None))
 
         return private_key, private_key.public_key()
 
@@ -210,5 +210,5 @@ class TokenService:
     def store_authorization_code(self, code: AuthorizationCode) -> None:
         self._authorization_codes[code.code] = code
 
-    def get_authorization_code(self, code: str) -> Optional[AuthorizationCode]:
+    def get_authorization_code(self, code: str) -> AuthorizationCode | None:
         return self._authorization_codes.get(code)

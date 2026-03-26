@@ -8,10 +8,12 @@ import secrets
 import time
 import urllib.parse
 import webbrowser
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from pincer.mcp.auth.pkce import generate_code_challenge, generate_code_verifier
-from pincer.mcp.auth.token_store import TokenStore
+
+if TYPE_CHECKING:
+    from pincer.mcp.auth.token_store import TokenStore
 
 logger = logging.getLogger("pincer.mcp.auth.client_flow")
 
@@ -24,9 +26,9 @@ class _CallbackServer:
     """Minimal asyncio HTTP server to capture the OAuth callback."""
 
     def __init__(self) -> None:
-        self._params: Optional[dict[str, str]] = None
+        self._params: dict[str, str] | None = None
         self._event = asyncio.Event()
-        self._server: Optional[asyncio.AbstractServer] = None
+        self._server: asyncio.AbstractServer | None = None
 
     async def start(self, port: int = _CALLBACK_PORT) -> None:
         self._server = await asyncio.start_server(
@@ -90,14 +92,14 @@ class MCPOAuthClient:
         self,
         mcp_server_url: str,
         token_store: TokenStore,
-        client_config: Optional[dict[str, Any]] = None,
+        client_config: dict[str, Any] | None = None,
     ) -> None:
         self._server_url = mcp_server_url.rstrip("/")
         self._token_store = token_store
         self._client_config = client_config or {}
-        self._as_metadata: Optional[dict[str, Any]] = None
-        self._client_id: Optional[str] = None
-        self._client_secret: Optional[str] = None
+        self._as_metadata: dict[str, Any] | None = None
+        self._client_id: str | None = None
+        self._client_secret: str | None = None
 
     async def get_headers(self) -> dict[str, str]:
         """Return Authorization headers, performing OAuth flow if needed."""

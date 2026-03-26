@@ -9,7 +9,6 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 from pincer.mcp.auth.errors import OAuthError
-from pincer.mcp.auth.tokens import TokenService
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -17,6 +16,8 @@ if TYPE_CHECKING:
     from starlette.requests import Request
     from starlette.responses import Response
     from starlette.types import ASGIApp
+
+    from pincer.mcp.auth.tokens import TokenService
 
 logger = logging.getLogger("pincer.mcp.auth.middleware")
 
@@ -136,7 +137,9 @@ class MCPAuthMiddleware(BaseHTTPMiddleware):
             except Exception:
                 token = None
             if token:
-                return JSONResponse({"access_token": token, "token_type": "Bearer", "expires_in": provider._token_expiry})
+                return JSONResponse(
+                    {"access_token": token, "token_type": "Bearer", "expires_in": provider._token_expiry}
+                )
             return JSONResponse({"error": "invalid_client"}, status_code=401)
 
         auth_header = request.headers.get("Authorization", "")
@@ -147,7 +150,10 @@ class MCPAuthMiddleware(BaseHTTPMiddleware):
             )
         claims = provider.validate_token(auth_header[7:])
         if not claims:
-            return JSONResponse({"error": "invalid_token", "error_description": "Token invalid or expired"}, status_code=401)
+            return JSONResponse(
+                {"error": "invalid_token", "error_description": "Token invalid or expired"},
+                status_code=401,
+            )
 
         request.state.mcp_client = claims.get("sub")
         return await call_next(request)

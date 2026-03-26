@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 from pincer.mcp.auth.errors import invalid_request, unauthorized_client
@@ -51,7 +51,7 @@ class ClientRegistry:
 
     # ── Lookups ────────────────────────────────────────────────────────────────
 
-    def get(self, client_id: str) -> Optional[OAuthClient]:
+    def get(self, client_id: str) -> OAuthClient | None:
         return self._clients.get(client_id)
 
     # ── Dynamic Client Registration ────────────────────────────────────────────

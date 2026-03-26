@@ -121,7 +121,7 @@ class PincerMCPServer:
             with contextlib.suppress(Exception):
                 from pathlib import Path
 
-                from pincer.mcp.auth import MCPAuthMiddleware, ClientRegistry, TokenService, mount_oauth_endpoints
+                from pincer.mcp.auth import ClientRegistry, MCPAuthMiddleware, TokenService, mount_oauth_endpoints
 
                 auth_cfg = self._config.auth
                 resource_uri = f"http://{self._config.host}:{self._config.port}{self._config.path}"
@@ -161,8 +161,6 @@ class PincerMCPServer:
         # Legacy HS256 auth provider (backward compat)
         elif self._auth_provider:
             with contextlib.suppress(Exception):
-                from pincer.mcp.auth import MCPAuthMiddleware as _LegacyMCPAuthMiddleware
-
                 # Use the legacy middleware path via the old MCPAuthProvider API
                 from starlette.middleware.base import BaseHTTPMiddleware
                 from starlette.responses import JSONResponse

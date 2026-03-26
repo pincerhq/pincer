@@ -5,20 +5,24 @@ from __future__ import annotations
 import logging
 import secrets
 import time
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
-from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
-from starlette.routing import Route
 
-from pincer.mcp.auth.clients import ClientRegistry
-from pincer.mcp.auth.consent import format_channel_consent, render_consent_page
+from pincer.mcp.auth.consent import render_consent_page
 from pincer.mcp.auth.errors import OAuthError, invalid_grant, invalid_request, unsupported_grant_type
 from pincer.mcp.auth.models import AuthorizationCode, GrantType
 from pincer.mcp.auth.pkce import verify_code_challenge
 from pincer.mcp.auth.scopes import get_scope_descriptions, validate_scopes
-from pincer.mcp.auth.tokens import TokenService
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from starlette.requests import Request
+
+    from pincer.mcp.auth.clients import ClientRegistry
+    from pincer.mcp.auth.tokens import TokenService
 
 logger = logging.getLogger("pincer.mcp.auth.endpoints")
 
@@ -37,7 +41,7 @@ def mount_oauth_endpoints(
     app: Any,
     token_service: TokenService,
     client_registry: ClientRegistry,
-    consent_handler: Optional[Callable[..., Any]],
+    consent_handler: Callable[..., Any] | None,
     resource_uri: str,
     issuer: str,
 ) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -15,7 +15,7 @@ class OAuthClient:
     redirect_uris: list[str]
     grant_types: list[str] = field(default_factory=lambda: ["authorization_code"])
     token_endpoint_auth_method: str = "none"
-    client_secret: Optional[str] = None
+    client_secret: str | None = None
     auto_consent: bool = False
     is_static: bool = False
     registered_at: int = field(default_factory=lambda: int(time.time()))
