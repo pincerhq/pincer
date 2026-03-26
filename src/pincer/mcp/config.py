@@ -57,6 +57,11 @@ class MCPServerConfig:
     timeout_seconds: int = 30
     max_retries: int = 2
 
+    # OAuth 2.1 client-side settings (for HTTP servers that require auth)
+    oauth_enabled: bool = False
+    oauth_client_id: str | None = None
+    oauth_client_secret: str | None = None
+
     def __post_init__(self) -> None:
         if self.transport == MCPTransport.STDIO and not self.command:
             raise ValueError(f"MCP server '{self.name}': stdio transport requires 'command'")
@@ -119,6 +124,8 @@ class MCPServerExportConfig:
     sampling: MCPSamplingConfig = field(default_factory=MCPSamplingConfig)
     # Webhook URL for webhook approval mode
     webhook_url: str | None = None
+    # OAuth 2.1 auth config (None = disabled, uses localhost bypass)
+    auth: Any | None = None
 
 
 @dataclass(frozen=True)

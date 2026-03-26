@@ -30,7 +30,18 @@ from pincer.mcp.approval import (
     WebhookApprovalBackend,
     classify_risk,
 )
-from pincer.mcp.auth import MCPAuthMiddleware, MCPAuthProvider, OAuthClient
+from pincer.mcp.auth import (
+    AuthServerConfig,
+    ClientRegistry,
+    MCPAuthMiddleware,
+    MCPAuthProvider,
+    MCPOAuthClient,
+    OAuthClient,
+    TokenClaims,
+    TokenService,
+    TokenStore,
+    mount_oauth_endpoints,
+)
 from pincer.mcp.config import (
     MCPApprovalPolicyConfig,
     MCPConfig,
@@ -62,10 +73,17 @@ __all__ = [
     "PolicyApprovalBackend",
     "WebhookApprovalBackend",
     "classify_risk",
-    # Auth
+    # Auth (OAuth 2.1)
+    "AuthServerConfig",
+    "ClientRegistry",
     "MCPAuthMiddleware",
     "MCPAuthProvider",
+    "MCPOAuthClient",
     "OAuthClient",
+    "TokenClaims",
+    "TokenService",
+    "TokenStore",
+    "mount_oauth_endpoints",
     # Config
     "MCPApprovalPolicyConfig",
     "MCPConfig",

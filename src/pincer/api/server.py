@@ -99,7 +99,7 @@ def create_app() -> FastAPI:
     async def status() -> dict[str, object]:
         return {
             "agent_running": True,
-            "version": "0.7.4",
+            "version": "0.7.4.2",
             "channels": {
                 "telegram": bool(os.environ.get("PINCER_TELEGRAM_BOT_TOKEN")),
                 "whatsapp": os.environ.get("PINCER_WHATSAPP_ENABLED", "").lower() == "true",
