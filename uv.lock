@@ -1821,11 +1821,7 @@ wheels = [
 
 [[package]]
 name = "pincer-agent"
-<<<<<<< HEAD
-version = "0.7.4.2"
-=======
 version = "0.7.5"
->>>>>>> 1f33b37 (Docs changes to 0.7.5)
 source = { editable = "." }
 dependencies = [
     { name = "aiogoogle" },
