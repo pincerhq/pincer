@@ -31,9 +31,7 @@ class _CallbackServer:
         self._server: asyncio.AbstractServer | None = None
 
     async def start(self, port: int = _CALLBACK_PORT) -> None:
-        self._server = await asyncio.start_server(
-            self._handle_client, "127.0.0.1", port
-        )
+        self._server = await asyncio.start_server(self._handle_client, "127.0.0.1", port)
 
     async def stop(self) -> None:
         if self._server:
@@ -61,9 +59,7 @@ class _CallbackServer:
             headers = (
                 b"HTTP/1.1 200 OK\r\n"
                 b"Content-Type: text/html\r\n"
-                b"Connection: close\r\n"
-                + b"Content-Length: " + str(len(body)).encode() + b"\r\n"
-                + b"\r\n"
+                b"Connection: close\r\n" + b"Content-Length: " + str(len(body)).encode() + b"\r\n" + b"\r\n"
             )
             try:
                 writer.write(headers + body)

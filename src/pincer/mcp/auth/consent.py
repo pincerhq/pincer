@@ -13,9 +13,7 @@ def render_consent_page(
 ) -> str:
     """Render a self-contained HTML consent page."""
     escaped_name = html.escape(client_name)
-    scopes_html = "\n".join(
-        f"<li>{html.escape(desc)}</li>" for desc in scope_descriptions
-    )
+    scopes_html = "\n".join(f"<li>{html.escape(desc)}</li>" for desc in scope_descriptions)
 
     return f"""<!DOCTYPE html>
 <html lang="en">

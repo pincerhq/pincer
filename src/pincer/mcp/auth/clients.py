@@ -152,8 +152,7 @@ class ClientRegistry:
             if host in _LOCALHOST_HOSTS or re.match(r"^127\.\d+\.\d+\.\d+$", host):
                 return
             raise invalid_request(
-                f"Non-localhost HTTP redirect URI not allowed: {uri!r}. "
-                "Use HTTPS or a localhost URI."
+                f"Non-localhost HTTP redirect URI not allowed: {uri!r}. Use HTTPS or a localhost URI."
             )
 
         if "://" not in uri:

@@ -22,9 +22,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("pincer.mcp.auth.middleware")
 
 # Paths that are always exempt from token validation
-_EXEMPT_PREFIXES = (
-    "/.well-known/",
-)
+_EXEMPT_PREFIXES = ("/.well-known/",)
 _EXEMPT_EXACT = {
     "/authorize",
     "/authorize/consent",

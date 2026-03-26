@@ -56,9 +56,7 @@ class TokenService:
                 load_pem_private_key,
             )
         except ImportError as e:
-            raise RuntimeError(
-                "cryptography package required for MCP auth: uv pip install 'pincer-agent[mcp]'"
-            ) from e
+            raise RuntimeError("cryptography package required for MCP auth: uv pip install 'pincer-agent[mcp]'") from e
 
         if not self._key_path.exists():
             private_key = Ed25519PrivateKey.generate()

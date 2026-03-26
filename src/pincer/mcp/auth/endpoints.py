@@ -217,6 +217,7 @@ async def _authorize(
 
     if "authorization_code" not in client.grant_types:
         from pincer.mcp.auth.errors import unauthorized_client
+
         raise unauthorized_client("Client does not support authorization_code grant")
 
     # Validate/clamp scope
@@ -368,15 +369,18 @@ async def _token_client_credentials(
 
     if not client_registry.verify_secret(client_id, client_secret):
         from pincer.mcp.auth.errors import invalid_client
+
         raise invalid_client("Invalid client credentials")
 
     client = client_registry.get(client_id)
     if not client:
         from pincer.mcp.auth.errors import invalid_client
+
         raise invalid_client("Unknown client")
 
     if "client_credentials" not in client.grant_types:
         from pincer.mcp.auth.errors import unauthorized_client
+
         raise unauthorized_client("Client does not support client_credentials grant")
 
     access_token = token_service.issue_access_token(client_id, resource, scope)

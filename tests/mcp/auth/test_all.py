@@ -265,6 +265,7 @@ def test_refresh_invalidates_old(token_service: TokenService) -> None:
     rt = token_service.issue_refresh_token("client-a", "tools:read", _RESOURCE)
     token_service.rotate_refresh_token(rt, "client-a")
     from pincer.mcp.auth.errors import OAuthError as OE
+
     with pytest.raises(OE) as exc_info:
         token_service.rotate_refresh_token(rt, "client-a")
     assert exc_info.value.error == "invalid_grant"
@@ -1649,6 +1650,7 @@ def test_rotate_expired_refresh_token(token_service: TokenService) -> None:
     # Manually expire the token
     data = token_service._refresh_tokens[rt]
     from dataclasses import replace as dc_replace
+
     token_service._refresh_tokens[rt] = dc_replace(data, expires_at=int(time.time()) - 10)
     with pytest.raises(OAuthError) as exc:
         token_service.rotate_refresh_token(rt, "cli")
@@ -1692,12 +1694,16 @@ def test_validate_redirect_uri_wildcard_port(client_registry: ClientRegistry) ->
 
 def test_validate_redirect_uri_https_allowed() -> None:
     """clients.py line 147: HTTPS redirect URI is always valid."""
-    reg = ClientRegistry(static_clients=[{
-        "client_id": "https-client",
-        "client_name": "HTTPS Client",
-        "redirect_uris": ["https://example.com/callback"],
-        "grant_types": ["authorization_code"],
-    }])
+    reg = ClientRegistry(
+        static_clients=[
+            {
+                "client_id": "https-client",
+                "client_name": "HTTPS Client",
+                "redirect_uris": ["https://example.com/callback"],
+                "grant_types": ["authorization_code"],
+            }
+        ]
+    )
     assert reg.validate_redirect_uri("https-client", "https://example.com/callback") is True
 
 
@@ -1833,9 +1839,7 @@ def test_authorize_unregistered_redirect_uri(auth_app: Starlette) -> None:
     assert r.status_code in (302, 400)
 
 
-def test_authorize_client_no_auth_code_grant(
-    token_service: TokenService, client_registry: ClientRegistry
-) -> None:
+def test_authorize_client_no_auth_code_grant(token_service: TokenService, client_registry: ClientRegistry) -> None:
     """endpoints.py lines 215-216: client without authorization_code grant is rejected."""
     # confidential-client only supports client_credentials
     http = TestClient(
@@ -1991,9 +1995,7 @@ def test_token_code_pkce_failure(auth_app: Starlette, token_service: TokenServic
     assert r.json()["error"] == "invalid_grant"
 
 
-def test_token_client_creds_no_such_grant(
-    token_service: TokenService, client_registry: ClientRegistry
-) -> None:
+def test_token_client_creds_no_such_grant(token_service: TokenService, client_registry: ClientRegistry) -> None:
     """endpoints.py lines 375-376: client doesn't support client_credentials."""
     # test-client only supports authorization_code, not client_credentials
     # We need a client with a secret but no client_credentials grant
@@ -2103,6 +2105,7 @@ def test_token_store_file_store_fallback_to_memory(tmp_path: Path) -> None:
 
 def _make_auth_app(token_service: TokenService, client_registry: ClientRegistry) -> Starlette:
     """Helper: build a minimal auth-enabled Starlette app."""
+
     async def mcp_ep(request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
