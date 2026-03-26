@@ -1,6 +1,10 @@
 # Pincer — Project Structure
 
+<<<<<<< HEAD
 > **Version:** 0.7.4.2 (MCP OAuth 2.1)
+=======
+> **Version:** 0.7.5 (Sprint A0 + MCP OAuth Complete)
+>>>>>>> 1f33b37 (Docs changes to 0.7.5)
 > **Date:** March 26, 2026
 > **License:** MIT
 
@@ -303,7 +307,11 @@ pincer/
 │   │   ├── firewall.py
 │   │   └── rate_limiter.py
 │   │
+<<<<<<< HEAD
 │   ├── mcp/                        # MCP client + OAuth 2.1 (v0.7.4.2)
+=======
+│   ├── mcp/                        # MCP client (v0.7.5)
+>>>>>>> 1f33b37 (Docs changes to 0.7.5)
 │   │   ├── __init__.py             # Public exports
 │   │   ├── config.py               # MCPConfig, MCPServerConfig, load_mcp_config
 │   │   ├── client.py               # MCPClientSession (stdio + http)

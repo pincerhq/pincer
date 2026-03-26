@@ -4,6 +4,7 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ---
 
+<<<<<<< HEAD
 ## [0.7.4.2] — 2026-03-26
 
 ### MCP OAuth 2.1 — Full Authorization Server
@@ -73,6 +74,24 @@ oauth_client_secret = ""  # Optional — for client_credentials grant
 #### Tests
 
 127 tests in `tests/mcp/auth/test_all.py` — **93.9% line coverage** on `src/pincer/mcp/auth/`.
+=======
+## [0.7.5] — 2026-03-26
+
+### MCP OAuth 2.0 Authorization Server
+
+- Full OAuth 2.0 Authorization Server built into the MCP server (`src/pincer/mcp/auth/`)
+- PKCE support (RFC 7636) for public clients
+- Token endpoints: `/authorize`, `/token`, `/introspect`, `/revoke`
+- RFC 8414 server metadata endpoint (`/.well-known/oauth-authorization-server`)
+- Bearer token validation middleware for all MCP server routes
+- Registered client storage and user consent flow
+- JWT issuance and validation via `PyJWT[crypto]`
+- SQLite-backed token persistence
+- OAuth client flow integration in MCP client (`client.py`) — automatic token attachment
+- OAuth middleware wiring in MCP server (`server.py`)
+- New `oauth_*` config fields in `src/pincer/mcp/config.py`
+- Tests: `tests/mcp/auth/test_all.py` — comprehensive OAuth flow coverage
+>>>>>>> 1f33b37 (Docs changes to 0.7.5)
 
 ---
 
