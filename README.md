@@ -450,7 +450,7 @@ pincer/ (7,800 LOC total)
 - [x] Skill system with sandboxing, AST scanning, signing
 - [x] Docker + one-click deploys (Railway, Render, DigitalOcean)
 - [x] Voice calling (Twilio + STT/TTS + compliance)
-- [x] **MCP client** — Model Context Protocol integration (v0.7.4)
+- [x] **MCP client + OAuth 2.1** — Model Context Protocol with full authorization server (v0.7.4.2)
 - [ ] **iMessage** — [help wanted](https://github.com/pincerhq/pincer/issues?q=label%3A%22help+wanted%22)
 - [ ] **Encrypted memory** — at-rest database encryption
 - [ ] **Multi-agent routing** — specialized sub-agents
