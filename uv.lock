@@ -1860,7 +1860,7 @@ all = [
     { name = "google-genai" },
     { name = "mcp" },
     { name = "playwright" },
-    { name = "pyjwt" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "pymupdf" },
     { name = "sqlite-vec" },
     { name = "tavily-python" },
@@ -1888,7 +1888,7 @@ image = [
 ]
 mcp = [
     { name = "mcp" },
-    { name = "pyjwt" },
+    { name = "pyjwt", extra = ["crypto"] },
 ]
 memory = [
     { name = "sqlite-vec" },
@@ -1948,7 +1948,7 @@ requires-dist = [
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.40.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pydantic-settings", specifier = ">=2.7.0" },
-    { name = "pyjwt", marker = "extra == 'mcp'", specifier = ">=2.8.0" },
+    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'mcp'", specifier = ">=2.8.0" },
     { name = "pymupdf", marker = "extra == 'pdf'", specifier = ">=1.24.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },

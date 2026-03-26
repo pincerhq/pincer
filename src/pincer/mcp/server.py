@@ -116,13 +116,81 @@ class PincerMCPServer:
             with contextlib.suppress(Exception):
                 self._sampling_handler.register_on(self._fmcp)
 
-        # Wire auth middleware if configured (requires mcp/starlette extras)
-        if self._auth_provider:
+        # Wire OAuth 2.1 auth if configured
+        if self._config.auth is not None and getattr(self._config.auth, "enabled", False):
             with contextlib.suppress(Exception):
-                from pincer.mcp.auth import MCPAuthMiddleware
+                from pathlib import Path
+
+                from pincer.mcp.auth import MCPAuthMiddleware, ClientRegistry, TokenService, mount_oauth_endpoints
+
+                auth_cfg = self._config.auth
+                resource_uri = f"http://{self._config.host}:{self._config.port}{self._config.path}"
+                issuer = f"http://{self._config.host}:{self._config.port}"
+                key_path = Path.home() / ".pincer" / "mcp_signing_key.pem"
+
+                token_svc = TokenService(
+                    issuer=issuer,
+                    signing_key_path=key_path,
+                    access_lifetime=getattr(auth_cfg, "token_lifetime", 3600),
+                    refresh_lifetime=getattr(auth_cfg, "refresh_token_lifetime", 86400),
+                )
+                client_reg = ClientRegistry(
+                    static_clients=getattr(auth_cfg, "static_clients", []),
+                    dcr_enabled=getattr(auth_cfg, "dcr_enabled", True),
+                    max_clients=getattr(auth_cfg, "dcr_max_clients", 20),
+                )
+                starlette_app = self._fmcp.streamable_http_app()
+                mount_oauth_endpoints(
+                    starlette_app,
+                    token_svc,
+                    client_reg,
+                    None,
+                    resource_uri=resource_uri,
+                    issuer=issuer,
+                )
+                localhost_bypass = getattr(auth_cfg, "localhost_bypass", True)
+                starlette_app.add_middleware(
+                    MCPAuthMiddleware,
+                    token_service=token_svc,
+                    resource_uri=resource_uri,
+                    issuer=issuer,
+                    localhost_bypass=localhost_bypass,
+                )
+                logger.info("OAuth 2.1 enabled on MCP server (issuer=%s)", issuer)
+
+        # Legacy HS256 auth provider (backward compat)
+        elif self._auth_provider:
+            with contextlib.suppress(Exception):
+                from pincer.mcp.auth import MCPAuthMiddleware as _LegacyMCPAuthMiddleware
+
+                # Use the legacy middleware path via the old MCPAuthProvider API
+                from starlette.middleware.base import BaseHTTPMiddleware
+                from starlette.responses import JSONResponse
+
+                auth_prov = self._auth_provider
+
+                class _LegacyMiddleware(BaseHTTPMiddleware):
+                    async def dispatch(self, request, call_next):
+                        if auth_prov.is_localhost(request.client.host if request.client else ""):
+                            return await call_next(request)
+                        if request.url.path == "/oauth/token" and request.method == "POST":
+                            form = await request.form()
+                            token = auth_prov.issue_token(
+                                str(form.get("client_id", "")),
+                                str(form.get("client_secret", "")),
+                            )
+                            if token:
+                                return JSONResponse({"access_token": token, "token_type": "Bearer"})
+                            return JSONResponse({"error": "invalid_client"}, status_code=401)
+                        auth_hdr = request.headers.get("Authorization", "")
+                        if not auth_hdr.startswith("Bearer "):
+                            return JSONResponse({"error": "unauthorized"}, status_code=401)
+                        if not auth_prov.validate_token(auth_hdr[7:]):
+                            return JSONResponse({"error": "invalid_token"}, status_code=401)
+                        return await call_next(request)
 
                 starlette_app = self._fmcp.streamable_http_app()
-                starlette_app.add_middleware(MCPAuthMiddleware, auth_provider=self._auth_provider)
+                starlette_app.add_middleware(_LegacyMiddleware)
 
         self._serve_task = asyncio.create_task(
             self._fmcp.run_streamable_http_async(),

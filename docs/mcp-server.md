@@ -175,30 +175,96 @@ OAuth is built into Pincer's MCP server — see the OAuth section below for conf
 
 ## OAuth 2.1
 
-Pincer's MCP server supports OAuth 2.1 `client_credentials` grant for authenticating external clients.
+Pincer ships a full OAuth 2.1 authorization server for authenticating external MCP clients (Claude Desktop, Cursor, or any compliant client). It implements:
+
+- **PKCE** (RFC 7636, S256 mandatory) — standard browser-based authorization flow
+- **Dynamic Client Registration** (RFC 7591) — clients self-register; no manual whitelist
+- **Authorization Server Metadata** (RFC 8414) — autodiscovery at `/.well-known/oauth-authorization-server`
+- **Protected Resource Metadata** (RFC 9728) — resource descriptor at `/.well-known/oauth-protected-resource`
+- **Token Revocation** (RFC 7009) — `/revoke` endpoint
+- **Ed25519 JWT signing** — access tokens signed with an Ed25519 key (`~/.pincer/mcp_signing_key.pem`, chmod 0o600)
+- **Localhost bypass** — requests from `127.0.0.1`/`::1`/`localhost` skip auth entirely (on by default)
+
+### Enabling OAuth
 
 ```toml
 [mcp.server]
 enabled = true
-host    = "0.0.0.0"
+host    = "0.0.0.0"   # or "127.0.0.1" for local-only
 port    = 18800
 
 [mcp.server.auth]
-enabled         = true
-allowed_clients = ["claude-desktop", "cursor"]  # Client ID whitelist
-token_expiry_seconds = 3600
+enabled          = true
+localhost_bypass = true   # Localhost clients need no token (default: true)
+token_lifetime   = 3600   # Access token lifetime in seconds (default: 3600)
+refresh_token_lifetime = 86400  # Refresh token lifetime (default: 86400)
+dcr_enabled      = true   # Allow dynamic client registration (default: true)
+dcr_max_clients  = 20     # Maximum dynamic clients (default: 20)
+default_scopes   = "tools:read resources:read"
+max_scopes       = "tools:all resources:read prompts:read admin:ask_user offline_access"
+
+# Optional: pre-register a static client (e.g. if client can't do DCR)
+# [[mcp.server.auth.static_clients]]
+# client_id   = "my-cursor"
+# client_name = "Cursor"
+# redirect_uris = ["http://127.0.0.1:*/callback"]
+# grant_types = ["authorization_code", "refresh_token"]
+# auto_consent = false
 ```
 
-**Token endpoint:** `POST http://host:18800/oauth/token`
+### How Claude Desktop / Cursor connects
 
-```bash
-curl -X POST http://host:18800/oauth/token \
-  -d "grant_type=client_credentials" \
-  -d "client_id=claude-desktop" \
-  -d "client_secret=YOUR_SECRET"
+No special client config is needed. When the client makes its first unauthenticated request to `/mcp`, it receives:
+
+```
+HTTP 401
+WWW-Authenticate: Bearer resource_metadata="http://host:18800/.well-known/oauth-protected-resource"
 ```
 
-Localhost connections (`127.0.0.1`, `::1`, `localhost`) bypass OAuth automatically — no token needed for local clients.
+The client fetches the metadata documents, registers itself via DCR, and opens a browser to complete the PKCE flow. The user sees a consent page, approves, and the client receives an access token. All subsequent requests include `Authorization: Bearer <token>`.
+
+### OAuth endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/.well-known/oauth-protected-resource` | GET | RFC 9728 resource metadata |
+| `/.well-known/oauth-authorization-server` | GET | RFC 8414 server metadata |
+| `/.well-known/jwks.json` | GET | Ed25519 public key (JWK Set) |
+| `/authorize` | GET | PKCE authorization endpoint |
+| `/authorize/consent` | POST | Consent form submission |
+| `/token` | POST | Token endpoint (`authorization_code`, `refresh_token`, `client_credentials`) |
+| `/register` | POST | Dynamic Client Registration (RFC 7591) |
+| `/revoke` | POST | Token revocation (RFC 7009) |
+
+### Scopes
+
+| Scope | What it grants |
+|-------|---------------|
+| `tools:read` | List and describe available tools |
+| `tools:execute` | Call tools (requires approval if tool needs it) |
+| `tools:all` | Full tool access (implies `tools:read` + `tools:execute`) |
+| `resources:read` | Read MCP resources |
+| `prompts:read` | List and read prompt templates |
+| `admin:ask_user` | Use `pincer_ask_user` — send questions to your messaging channel |
+| `offline_access` | Request a refresh token |
+
+### Claude Desktop config (remote server)
+
+```json
+{
+  "mcpServers": {
+    "pincer": {
+      "url": "http://your-server:18800/mcp"
+    }
+  }
+}
+```
+
+Claude Desktop handles OAuth automatically — it reads the `WWW-Authenticate` header and completes the PKCE flow without manual token management.
+
+### Localhost connections
+
+Localhost connections (`127.0.0.1`, `::1`, `localhost`) bypass OAuth automatically when `localhost_bypass = true` (the default). No token or browser flow required for local clients. This preserves the existing behavior for users running Claude Desktop on the same machine as Pincer.
 
 ---
 
@@ -361,5 +427,10 @@ MCP Server — http://127.0.0.1:18800/mcp
 
 **OAuth token rejected**
 - Localhost connections bypass OAuth — no token needed if client is on the same machine
-- Check `client_id` is in `allowed_clients`
-- Token expiry is 3600 seconds by default — request a new one if expired
+- Access tokens expire after `token_lifetime` seconds (default: 3600) — the client should refresh automatically using the refresh token if `offline_access` scope was granted
+- If the signing key on disk changes (e.g. after server reinstall), all existing tokens become invalid — clients need to re-authorize
+- Check `/.well-known/oauth-authorization-server` is reachable from the client's machine
+
+**Client registration fails**
+- DCR is limited to `dcr_max_clients` dynamic clients (default: 20) — restart Pincer to clear dynamic registrations
+- Redirect URIs must be HTTPS or localhost HTTP — other schemes are rejected

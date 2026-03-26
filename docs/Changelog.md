@@ -4,6 +4,78 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ---
 
+## [0.7.4.2] — 2026-03-26
+
+### MCP OAuth 2.1 — Full Authorization Server
+
+Replaces the `MCPAuthProvider` HS256 stub with a complete, spec-compliant OAuth 2.1 authorization server and matching client flow. Backward-compatible: existing code that passes `auth_provider=` to `MCPAuthMiddleware` continues to work unchanged.
+
+#### Authorization server (`src/pincer/mcp/auth/`)
+
+New package — 14 modules, ~2 000 LOC:
+
+- **`tokens.py`** — `TokenService`: Ed25519 JWT access tokens (RFC 9068), opaque refresh tokens, key generation at `~/.pincer/mcp_signing_key.pem` (chmod 0o600), JWK Set endpoint
+- **`clients.py`** — `ClientRegistry`: in-memory client store; static clients loaded from config; wildcard port matching (`http://127.0.0.1:*/callback`) for native apps
+- **`endpoints.py`** — `mount_oauth_endpoints()`: registers all 8 OAuth routes on any Starlette app; PKCE authorization flow with HTML consent page; 10-minute pending request TTL
+- **`middleware.py`** — `MCPAuthMiddleware`: `Bearer` token enforcement on all non-exempt paths; `WWW-Authenticate` header pointing to RFC 9728 metadata; localhost bypass; backward-compat `auth_provider=` pass-through
+- **`pkce.py`** — PKCE helpers: S256 code verifier/challenge generation and verification (plain rejected)
+- **`scopes.py`** — 9 scopes: `tools:read`, `tools:execute`, `tools:all`, `resources:read`, `prompts:read`, `admin:ask_user`, `offline_access`, plus `tools:all` expansion logic
+- **`models.py`** — Frozen dataclasses: `OAuthClient`, `AuthorizationCode`, `RefreshTokenData`, `TokenClaims`, `AuthServerConfig`
+- **`errors.py`** — `OAuthError` with `status_code` and `to_dict()`; factory functions for all RFC 6749 error codes
+- **`metadata.py`** — RFC 8414 authorization server metadata + RFC 9728 protected resource metadata builders
+- **`consent.py`** — Self-contained HTML consent page; plain-text channel consent formatter
+- **`token_store.py`** — `TokenStore`: keyring → `~/.pincer/mcp_tokens.json` → memory; 60-second expiry buffer; `clear()` and `clear_all()`
+- **`client_flow.py`** — `MCPOAuthClient`: full PKCE flow with local callback server (`asyncio.start_server`), metadata discovery, DCR, token refresh, client_credentials fallback
+
+#### Specs implemented
+
+| RFC | Description |
+|-----|-------------|
+| RFC 7636 | PKCE (S256 only; plain rejected) |
+| RFC 7591 | Dynamic Client Registration |
+| RFC 7009 | Token Revocation |
+| RFC 8414 | Authorization Server Metadata |
+| RFC 8707 | Resource Indicators (audience binding) |
+| RFC 9068 | JWT Access Tokens |
+| RFC 9728 | Protected Resource Metadata |
+| OAuth 2.1 | PKCE mandatory, no implicit flow |
+
+#### Config
+
+```toml
+[mcp.server.auth]
+enabled          = true
+localhost_bypass = true     # Localhost clients skip auth (default: true)
+token_lifetime   = 3600
+refresh_token_lifetime = 86400
+dcr_enabled      = true
+dcr_max_clients  = 20
+default_scopes   = "tools:read resources:read"
+max_scopes       = "tools:all resources:read prompts:read admin:ask_user offline_access"
+```
+
+#### Client config (HTTP MCP servers)
+
+```toml
+[[mcp.servers]]
+transport          = "streamable-http"
+url                = "https://example.com/mcp"
+oauth_enabled      = true
+oauth_client_id    = ""   # Optional — DCR used if omitted
+oauth_client_secret = ""  # Optional — for client_credentials grant
+```
+
+#### Dependencies
+
+- `PyJWT[crypto]>=2.8.0` — Ed25519 JWT signing (was `PyJWT>=2.8.0`)
+- `cryptography>=42` — Ed25519 key generation (already a transitive dep)
+
+#### Tests
+
+127 tests in `tests/mcp/auth/test_all.py` — **93.9% line coverage** on `src/pincer/mcp/auth/`.
+
+---
+
 ## [0.7.4] — 2026-03-21
 
 ### MCP Architecture Overhaul — Sprint A0

@@ -18,7 +18,8 @@ pip install "pincer-agent[mcp]"
 
 This installs:
 - `mcp>=1.8.0` — the official MCP Python SDK
-- `PyJWT>=2.8.0` — for MCP server OAuth (if you expose Pincer to external clients)
+- `PyJWT[crypto]>=2.8.0` — for MCP server OAuth 2.1 with Ed25519 JWT signing
+- `cryptography>=42` — Ed25519 key generation and signing
 
 ---
 
@@ -99,7 +100,20 @@ url       = "http://localhost:3000/mcp"
 headers   = { Authorization = "Bearer ${REMOTE_MCP_TOKEN}" }
 approval_required = ["write_*"]
 timeout_seconds   = 60
+
+# OAuth 2.1 (PKCE or client_credentials) — for servers that require auth
+# Pincer discovers the authorization server automatically from the 401 response.
+oauth_enabled       = true            # Enable OAuth client flow
+oauth_client_id     = ""              # Pre-registered client_id (optional — DCR used if omitted)
+oauth_client_secret = ""              # For client_credentials grant (optional)
 ```
+
+When `oauth_enabled = true`, Pincer:
+1. Detects the `WWW-Authenticate: Bearer resource_metadata="..."` header on the first 401
+2. Fetches `/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server`
+3. Registers itself via Dynamic Client Registration (RFC 7591) if no `oauth_client_id` is set
+4. Opens a browser for the PKCE authorization flow and captures the callback locally
+5. Stores the resulting token (keyring → `~/.pincer/mcp_tokens.json` → memory) and refreshes it automatically
 
 ---
 
