@@ -6,7 +6,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, cast
 
 logger = logging.getLogger("pincer.mcp.auth.token_store")
 
@@ -24,7 +24,7 @@ class TokenStore:
     """
 
     def __init__(self) -> None:
-        self._memory: dict[str, dict] = {}
+        self._memory: dict[str, dict[str, Any]] = {}
         self._strategy = self._detect_strategy()
         logger.debug("TokenStore using strategy: %s", self._strategy)
 
@@ -95,7 +95,7 @@ class TokenStore:
 
     # ── Keyring strategy ───────────────────────────────────────────────────────
 
-    def _keyring_store(self, resource: str, data: dict) -> None:
+    def _keyring_store(self, resource: str, data: dict[str, Any]) -> None:
         try:
             import keyring
 
@@ -105,20 +105,20 @@ class TokenStore:
             self._strategy = "file"
             self._file_store(resource, data)
 
-    def _keyring_load(self, resource: str) -> Optional[dict]:
+    def _keyring_load(self, resource: str) -> Optional[dict[str, Any]]:
         try:
             import keyring
 
             raw = keyring.get_password("pincer_mcp", resource)
             if raw:
-                return json.loads(raw)
+                return cast(dict[str, Any], json.loads(raw))
         except Exception:
             pass
         return None
 
     # ── File strategy ──────────────────────────────────────────────────────────
 
-    def _file_store(self, resource: str, data: dict) -> None:
+    def _file_store(self, resource: str, data: dict[str, Any]) -> None:
         try:
             all_data = self._file_load_all()
             all_data[resource] = data
@@ -128,26 +128,26 @@ class TokenStore:
             self._strategy = "memory"
             self._memory[resource] = data
 
-    def _file_load(self, resource: str) -> Optional[dict]:
+    def _file_load(self, resource: str) -> Optional[dict[str, Any]]:
         all_data = self._file_load_all()
         return all_data.get(resource)
 
-    def _file_load_all(self) -> dict:
+    def _file_load_all(self) -> dict[str, Any]:
         try:
             if _TOKEN_FILE.exists():
-                return json.loads(_TOKEN_FILE.read_text())
+                return cast(dict[str, Any], json.loads(_TOKEN_FILE.read_text()))
         except Exception:
             pass
         return {}
 
-    def _file_save_all(self, data: dict) -> None:
+    def _file_save_all(self, data: dict[str, Any]) -> None:
         _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
         _TOKEN_FILE.write_text(json.dumps(data, indent=2))
         _TOKEN_FILE.chmod(0o600)
 
     # ── Load helper ────────────────────────────────────────────────────────────
 
-    def _load(self, resource: str) -> Optional[dict]:
+    def _load(self, resource: str) -> Optional[dict[str, Any]]:
         if self._strategy == "keyring":
             return self._keyring_load(resource)
         elif self._strategy == "file":

@@ -170,7 +170,7 @@ class PincerMCPServer:
                 auth_prov = self._auth_provider
 
                 class _LegacyMiddleware(BaseHTTPMiddleware):
-                    async def dispatch(self, request, call_next):
+                    async def dispatch(self, request: Any, call_next: Any) -> Any:
                         if auth_prov.is_localhost(request.client.host if request.client else ""):
                             return await call_next(request)
                         if request.url.path == "/oauth/token" and request.method == "POST":

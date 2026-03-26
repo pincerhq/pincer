@@ -270,7 +270,7 @@ class MCPOAuthClient:
             r.raise_for_status()
             token_data = r.json()
 
-        access_token = token_data["access_token"]
+        access_token: str = token_data["access_token"]
         refresh_token = token_data.get("refresh_token")
         expires_in = int(token_data.get("expires_in", 3600))
 
@@ -305,7 +305,7 @@ class MCPOAuthClient:
             r.raise_for_status()
             data = r.json()
 
-        access_token = data["access_token"]
+        access_token: str = data["access_token"]
         new_refresh = data.get("refresh_token", refresh_token)
         expires_in = int(data.get("expires_in", 3600))
 
@@ -343,7 +343,7 @@ class MCPOAuthClient:
             r.raise_for_status()
             data = r.json()
 
-        access_token = data["access_token"]
+        access_token: str = data["access_token"]
         expires_in = int(data.get("expires_in", 3600))
 
         self._token_store.store(

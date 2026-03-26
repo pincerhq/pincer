@@ -100,6 +100,8 @@ class MCPAuthMiddleware(BaseHTTPMiddleware):
             )
 
         token = auth_header[7:]
+        if self._token_service is None:
+            return await call_next(request)
         try:
             claims = self._token_service.validate_access_token(token, self._resource_uri)
         except OAuthError as e:

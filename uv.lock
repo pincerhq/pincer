@@ -1821,7 +1821,7 @@ wheels = [
 
 [[package]]
 name = "pincer-agent"
-version = "0.7.4"
+version = "0.7.4.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiogoogle" },
