@@ -36,6 +36,7 @@ _DRIVE_FIELDS = "id, name, mimeType, size, modifiedTime, owners, sharingUser, we
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
+
 async def google__list_drive_files(
     factory: GoogleServiceFactory,
     folder_id: str = "root",
@@ -149,9 +150,7 @@ async def google__list_shared_drives(
 ) -> str:
     """List shared/team drives."""
     svc = await factory.get("drive")
-    result = await with_backoff(
-        lambda: svc.drives().list(pageSize=max_results).execute()
-    )
+    result = await with_backoff(lambda: svc.drives().list(pageSize=max_results).execute())
     drives = result.get("drives", [])
     if not drives:
         return "No shared drives found."
@@ -166,10 +165,14 @@ async def google__get_file_permissions(
     """List who has access to a file."""
     svc = await factory.get("drive")
     result = await with_backoff(
-        lambda: svc.permissions().list(
-            fileId=file_id,
-            fields="permissions(id, type, role, emailAddress, displayName)",
-        ).execute()
+        lambda: (
+            svc.permissions()
+            .list(
+                fileId=file_id,
+                fields="permissions(id, type, role, emailAddress, displayName)",
+            )
+            .execute()
+        )
     )
     perms = result.get("permissions", [])
     if not perms:
@@ -185,12 +188,16 @@ async def google__list_recent_files(
     """List recently modified files."""
     svc = await factory.get("drive")
     result = await with_backoff(
-        lambda: svc.files().list(
-            orderBy="modifiedTime desc",
-            fields=f"files({_DRIVE_FIELDS})",
-            pageSize=max_results,
-            q="trashed=false",
-        ).execute()
+        lambda: (
+            svc.files()
+            .list(
+                orderBy="modifiedTime desc",
+                fields=f"files({_DRIVE_FIELDS})",
+                pageSize=max_results,
+                q="trashed=false",
+            )
+            .execute()
+        )
     )
     files = result.get("files", [])
     if not files:
@@ -240,9 +247,7 @@ async def google__create_folder(
     }
     if parent_folder_id:
         metadata["parents"] = [parent_folder_id]
-    result = await with_backoff(
-        lambda: svc.files().create(body=metadata, fields="id, name, webViewLink").execute()
-    )
+    result = await with_backoff(lambda: svc.files().create(body=metadata, fields="id, name, webViewLink").execute())
     return f"Folder created: '{name}' (id={result.get('id', '')})"
 
 
@@ -257,12 +262,16 @@ async def google__move_file(
     f = await with_backoff(lambda: svc.files().get(fileId=file_id, fields="parents").execute())
     old_parents = ",".join(f.get("parents", []))
     result = await with_backoff(
-        lambda: svc.files().update(
-            fileId=file_id,
-            addParents=destination_folder_id,
-            removeParents=old_parents,
-            fields="id, name",
-        ).execute()
+        lambda: (
+            svc.files()
+            .update(
+                fileId=file_id,
+                addParents=destination_folder_id,
+                removeParents=old_parents,
+                fields="id, name",
+            )
+            .execute()
+        )
     )
     return f"File '{result.get('name', file_id)}' moved to folder {destination_folder_id}."
 
@@ -322,22 +331,19 @@ async def google__share_file(
     svc = await factory.get("drive")
     if link_sharing:
         body: dict[str, Any] = {"type": "anyone", "role": role}
-        await with_backoff(
-            lambda: svc.permissions().create(fileId=file_id, body=body, fields="id").execute()
-        )
+        await with_backoff(lambda: svc.permissions().create(fileId=file_id, body=body, fields="id").execute())
         return f"Link sharing enabled for {file_id} (role={role})"
     if not email:
         return "Error: provide email or set link_sharing=true"
     body = {"type": "user", "role": role, "emailAddress": email}
     await with_backoff(
-        lambda: svc.permissions().create(
-            fileId=file_id, body=body, sendNotificationEmail=True, fields="id"
-        ).execute()
+        lambda: svc.permissions().create(fileId=file_id, body=body, sendNotificationEmail=True, fields="id").execute()
     )
     return f"Shared {file_id} with {email} as {role}."
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
+
 
 def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 15 Drive tools. Returns count."""
@@ -346,6 +352,7 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
+
         return wrapper
 
     registry.register(

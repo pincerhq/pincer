@@ -31,6 +31,7 @@ def _week_end_iso() -> str:
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
+
 async def google__list_calendars(factory: GoogleServiceFactory) -> str:
     """List all calendars in the account."""
     svc = await factory.get("calendar")
@@ -54,14 +55,18 @@ async def google__list_events(
     t_min = time_min or _now_iso()
     t_max = time_max or _week_end_iso()
     result = await with_backoff(
-        lambda: svc.events().list(
-            calendarId=calendar_id,
-            timeMin=t_min,
-            timeMax=t_max,
-            singleEvents=True,
-            orderBy="startTime",
-            maxResults=max_results,
-        ).execute()
+        lambda: (
+            svc.events()
+            .list(
+                calendarId=calendar_id,
+                timeMin=t_min,
+                timeMax=t_max,
+                singleEvents=True,
+                orderBy="startTime",
+                maxResults=max_results,
+            )
+            .execute()
+        )
     )
     events = result.get("items", [])
     if not events:
@@ -78,9 +83,7 @@ async def google__get_event(
 ) -> str:
     """Get full event details."""
     svc = await factory.get("calendar")
-    event = await with_backoff(
-        lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute()
-    )
+    event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
     lines = [
         f"Title:       {event.get('summary', '(no title)')}",
         f"Start:       {event.get('start', {}).get('dateTime', event.get('start', {}).get('date', ''))}",
@@ -109,13 +112,17 @@ async def google__search_events(
     """Search calendar events by text query."""
     svc = await factory.get("calendar")
     result = await with_backoff(
-        lambda: svc.events().list(
-            calendarId=calendar_id,
-            q=query,
-            singleEvents=True,
-            orderBy="startTime",
-            maxResults=max_results,
-        ).execute()
+        lambda: (
+            svc.events()
+            .list(
+                calendarId=calendar_id,
+                q=query,
+                singleEvents=True,
+                orderBy="startTime",
+                maxResults=max_results,
+            )
+            .execute()
+        )
     )
     events = result.get("items", [])
     if not events:
@@ -209,11 +216,7 @@ async def google__create_event(
     if meet_link:
         extra = f"\nMeet link: {meet_link}"
     elif add_meet_link:
-        uri = (
-            created.get("conferenceData", {})
-            .get("entryPoints", [{}])[0]
-            .get("uri", "")
-        )
+        uri = created.get("conferenceData", {}).get("entryPoints", [{}])[0].get("uri", "")
         if uri:
             extra = f"\nMeet link: {uri}"
 
@@ -239,9 +242,7 @@ async def google__update_event(
 ) -> str:
     """Update fields on an existing calendar event."""
     svc = await factory.get("calendar")
-    event = await with_backoff(
-        lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute()
-    )
+    event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
     if summary:
         event["summary"] = summary
     if description:
@@ -280,11 +281,15 @@ async def google__move_event(
     """Move an event to a different calendar."""
     svc = await factory.get("calendar")
     result = await with_backoff(
-        lambda: svc.events().move(
-            calendarId=source_calendar_id,
-            eventId=event_id,
-            destination=destination_calendar_id,
-        ).execute()
+        lambda: (
+            svc.events()
+            .move(
+                calendarId=source_calendar_id,
+                eventId=event_id,
+                destination=destination_calendar_id,
+            )
+            .execute()
+        )
     )
     return f"Event {event_id} moved to {destination_calendar_id} (new id={result.get('id', '')})"
 
@@ -296,9 +301,7 @@ async def google__accept_event(
 ) -> str:
     """Accept a calendar invitation."""
     svc = await factory.get("calendar")
-    event = await with_backoff(
-        lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute()
-    )
+    event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
     # Update self in attendees list
     profile = await with_backoff(lambda: svc.calendarList().get(calendarId=calendar_id).execute())
     self_email = profile.get("id", "")
@@ -306,10 +309,11 @@ async def google__accept_event(
         if att.get("self") or att.get("email") == self_email:
             att["responseStatus"] = "accepted"
     await with_backoff(
-        lambda: svc.events().patch(
-            calendarId=calendar_id, eventId=event_id,
-            body={"attendees": event.get("attendees", [])}
-        ).execute()
+        lambda: (
+            svc.events()
+            .patch(calendarId=calendar_id, eventId=event_id, body={"attendees": event.get("attendees", [])})
+            .execute()
+        )
     )
     return f"Accepted event: {event.get('summary', event_id)}"
 
@@ -321,17 +325,16 @@ async def google__decline_event(
 ) -> str:
     """Decline a calendar invitation."""
     svc = await factory.get("calendar")
-    event = await with_backoff(
-        lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute()
-    )
+    event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
     for att in event.get("attendees", []):
         if att.get("self"):
             att["responseStatus"] = "declined"
     await with_backoff(
-        lambda: svc.events().patch(
-            calendarId=calendar_id, eventId=event_id,
-            body={"attendees": event.get("attendees", [])}
-        ).execute()
+        lambda: (
+            svc.events()
+            .patch(calendarId=calendar_id, eventId=event_id, body={"attendees": event.get("attendees", [])})
+            .execute()
+        )
     )
     return f"Declined event: {event.get('summary', event_id)}"
 
@@ -343,6 +346,7 @@ async def google__add_google_meet(
 ) -> str:
     """Add a Google Meet link to an existing event."""
     import uuid
+
     svc = await factory.get("calendar")
     body = {
         "conferenceData": {
@@ -353,22 +357,23 @@ async def google__add_google_meet(
         }
     }
     updated = await with_backoff(
-        lambda: svc.events().patch(
-            calendarId=calendar_id,
-            eventId=event_id,
-            body=body,
-            conferenceDataVersion=1,
-        ).execute()
+        lambda: (
+            svc.events()
+            .patch(
+                calendarId=calendar_id,
+                eventId=event_id,
+                body=body,
+                conferenceDataVersion=1,
+            )
+            .execute()
+        )
     )
-    meet_link = (
-        updated.get("conferenceData", {})
-        .get("entryPoints", [{}])[0]
-        .get("uri", "pending")
-    )
+    meet_link = updated.get("conferenceData", {}).get("entryPoints", [{}])[0].get("uri", "pending")
     return f"Google Meet added to event {event_id}: {meet_link}"
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
+
 
 def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 12 Calendar tools. Returns count."""
@@ -377,6 +382,7 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
+
         return wrapper
 
     registry.register(

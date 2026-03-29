@@ -232,9 +232,7 @@ class MeetEventSubscriber:
 
         session = req.Session()
         session.headers["Authorization"] = f"Bearer {creds.token}"
-        resp = await asyncio.to_thread(
-            lambda: session.post(f"{_WORKSPACE_EVENTS_BASE}/subscriptions", json=body)
-        )
+        resp = await asyncio.to_thread(lambda: session.post(f"{_WORKSPACE_EVENTS_BASE}/subscriptions", json=body))
         resp.raise_for_status()
         data = resp.json()
         sub_name = data.get("name", "unknown")
@@ -247,9 +245,7 @@ class MeetEventSubscriber:
 
         session = req.Session()
         session.headers["Authorization"] = f"Bearer {creds.token}"
-        resp = await asyncio.to_thread(
-            lambda: session.delete(f"{_WORKSPACE_EVENTS_BASE}/{sub_name}")
-        )
+        resp = await asyncio.to_thread(lambda: session.delete(f"{_WORKSPACE_EVENTS_BASE}/{sub_name}"))
         resp.raise_for_status()
 
     # ── Polling fallback ───────────────────────────────────────────────────────
@@ -285,16 +281,12 @@ class MeetEventSubscriber:
                     continue
                 try:
                     _sn = space_name
-                    svc = await asyncio.to_thread(
-                        build, "meet", "v2", credentials=creds, cache_discovery=False
-                    )
+                    svc = await asyncio.to_thread(build, "meet", "v2", credentials=creds, cache_discovery=False)
                     space = await asyncio.to_thread(
                         lambda s=_sn, _svc=svc: _svc.spaces().get(name=s).execute()  # type: ignore[misc]
                     )
                     active = space.get("activeConference", {})
-                    conf_record: str | None = (
-                        active.get("conferenceRecord") if active else None
-                    )
+                    conf_record: str | None = active.get("conferenceRecord") if active else None
                     prev_record = self._last_known_conference.get(space_name)
 
                     if prev_record and not conf_record:

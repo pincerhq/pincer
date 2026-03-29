@@ -11,6 +11,7 @@ from typing import Any
 
 # ── Generic ───────────────────────────────────────────────────────────────────
 
+
 def truncate(text: str, max_chars: int = 200) -> str:
     """Truncate *text* to at most *max_chars* characters."""
     if len(text) <= max_chars:
@@ -30,6 +31,7 @@ def fmt_list(items: list[str], header: str = "", more: bool = False) -> str:
 
 
 # ── Gmail ─────────────────────────────────────────────────────────────────────
+
 
 def fmt_message_summary(msg: dict[str, Any]) -> str:
     """One-line summary for a Gmail message (used in list results)."""
@@ -59,6 +61,7 @@ def fmt_message_full(msg: dict[str, Any], body: str) -> str:
 
 # ── Calendar ──────────────────────────────────────────────────────────────────
 
+
 def fmt_event(event: dict[str, Any]) -> str:
     """Format a single calendar event for display."""
     start = event.get("start", {})
@@ -77,6 +80,7 @@ def fmt_event(event: dict[str, Any]) -> str:
 
 # ── Drive ─────────────────────────────────────────────────────────────────────
 
+
 def fmt_file(f: dict[str, Any]) -> str:
     """Format a Drive file entry."""
     name = f.get("name", "(unnamed)")
@@ -90,6 +94,7 @@ def fmt_file(f: dict[str, Any]) -> str:
 
 # ── Sheets ────────────────────────────────────────────────────────────────────
 
+
 def fmt_sheet_values(values: list[list[Any]], range_name: str = "") -> str:
     """Format spreadsheet values as a plain-text table."""
     if not values:
@@ -102,6 +107,7 @@ def fmt_sheet_values(values: list[list[Any]], range_name: str = "") -> str:
 
 
 # ── Tasks ─────────────────────────────────────────────────────────────────────
+
 
 def fmt_task(task: dict[str, Any]) -> str:
     """Format a single task."""

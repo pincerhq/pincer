@@ -68,9 +68,7 @@ class GoogleServiceFactory:
 
         from googleapiclient.discovery import build
 
-        svc = await asyncio.to_thread(
-            build, api, version, credentials=creds, cache_discovery=False
-        )
+        svc = await asyncio.to_thread(build, api, version, credentials=creds, cache_discovery=False)
         self._cache[service_name] = (svc, time.monotonic())
         logger.debug("Built Google API service: %s %s", api, version)
         return svc

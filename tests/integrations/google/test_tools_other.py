@@ -73,7 +73,9 @@ async def test_list_slides(mock_factory, mock_slides_service):
 
 async def test_list_slides_empty(mock_factory, mock_slides_service):
     mock_slides_service.presentations().get().execute.return_value = {
-        "presentationId": "p1", "title": "Empty", "slides": []
+        "presentationId": "p1",
+        "title": "Empty",
+        "slides": [],
     }
     result = await google__list_slides(mock_factory, presentation_id="p1")
     assert "no slides" in result.lower()
@@ -94,7 +96,8 @@ async def test_get_slide_content_out_of_range(mock_factory, mock_slides_service)
 
 async def test_create_presentation(mock_factory, mock_slides_service):
     mock_slides_service.presentations().create().execute.return_value = {
-        "presentationId": "new_pres", "title": "New Deck"
+        "presentationId": "new_pres",
+        "title": "New Deck",
     }
     result = await google__create_presentation(mock_factory, title="New Deck")
     assert "New Deck" in result
@@ -151,9 +154,7 @@ def _task(task_id="task1", title="Review PR", status="needsAction"):
 
 
 async def test_list_task_lists(mock_factory, mock_tasks_service):
-    mock_tasks_service.tasklists().list().execute.return_value = {
-        "items": [{"id": "@default", "title": "My Tasks"}]
-    }
+    mock_tasks_service.tasklists().list().execute.return_value = {"items": [{"id": "@default", "title": "My Tasks"}]}
     result = await google__list_task_lists(mock_factory)
     assert "My Tasks" in result
 
@@ -216,9 +217,7 @@ async def test_delete_task(mock_factory, mock_tasks_service):
 
 
 async def test_create_task_list(mock_factory, mock_tasks_service):
-    mock_tasks_service.tasklists().insert().execute.return_value = {
-        "id": "list1", "title": "Sprint 9"
-    }
+    mock_tasks_service.tasklists().insert().execute.return_value = {"id": "list1", "title": "Sprint 9"}
     result = await google__create_task_list(mock_factory, title="Sprint 9")
     assert "Sprint 9" in result
     assert "list1" in result
@@ -256,9 +255,7 @@ async def test_list_contacts_empty(mock_factory, mock_contacts_service):
 
 
 async def test_search_contacts(mock_factory, mock_contacts_service):
-    mock_contacts_service.people().searchContacts().execute.return_value = {
-        "results": [{"person": _person()}]
-    }
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": [{"person": _person()}]}
     result = await google__search_contacts(mock_factory, query="Alice")
     assert "Alice Smith" in result
     assert "alice@example.com" in result
@@ -291,12 +288,8 @@ async def test_create_contact(mock_factory, mock_contacts_service):
 
 async def test_update_contact(mock_factory, mock_contacts_service):
     mock_contacts_service.people().get().execute.return_value = _person()
-    mock_contacts_service.people().updateContact().execute.return_value = _person(
-        given="Alice", family="Johnson"
-    )
-    result = await google__update_contact(
-        mock_factory, resource_name="people/c123", family_name="Johnson"
-    )
+    mock_contacts_service.people().updateContact().execute.return_value = _person(given="Alice", family="Johnson")
+    result = await google__update_contact(mock_factory, resource_name="people/c123", family_name="Johnson")
     assert "Alice Johnson" in result or "updated" in result.lower()
 
 
@@ -311,8 +304,10 @@ async def test_list_contact_groups(mock_factory, mock_contacts_service):
     mock_contacts_service.contactGroups().list().execute.return_value = {
         "contactGroups": [
             {
-                "name": "myContacts", "formattedName": "My Contacts",
-                "memberCount": 42, "resourceName": "contactGroups/myContacts",
+                "name": "myContacts",
+                "formattedName": "My Contacts",
+                "memberCount": 42,
+                "resourceName": "contactGroups/myContacts",
             },
             {"name": "starred", "formattedName": "Starred", "memberCount": 5, "resourceName": "contactGroups/starred"},
         ]

@@ -21,15 +21,14 @@ logger = logging.getLogger(__name__)
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
+
 async def google__list_slides(
     factory: GoogleServiceFactory,
     presentation_id: str,
 ) -> str:
     """List all slides in a presentation."""
     svc = await factory.get("slides")
-    pres = await with_backoff(
-        lambda: svc.presentations().get(presentationId=presentation_id).execute()
-    )
+    pres = await with_backoff(lambda: svc.presentations().get(presentationId=presentation_id).execute())
     title = pres.get("title", "(untitled)")
     slides = pres.get("slides", [])
     if not slides:
@@ -49,9 +48,7 @@ async def google__get_slide_content(
 ) -> str:
     """Get the text content and layout of a specific slide (0-indexed)."""
     svc = await factory.get("slides")
-    pres = await with_backoff(
-        lambda: svc.presentations().get(presentationId=presentation_id).execute()
-    )
+    pres = await with_backoff(lambda: svc.presentations().get(presentationId=presentation_id).execute())
     slides = pres.get("slides", [])
     if slide_index >= len(slides):
         return f"Slide index {slide_index} out of range (presentation has {len(slides)} slides)."
@@ -74,9 +71,7 @@ async def google__create_presentation(
 ) -> str:
     """Create a new Google Slides presentation."""
     svc = await factory.get("slides")
-    result = await with_backoff(
-        lambda: svc.presentations().create(body={"title": title}).execute()
-    )
+    result = await with_backoff(lambda: svc.presentations().create(body={"title": title}).execute())
     pres_id = result.get("presentationId", "")
     link = f"https://docs.google.com/presentation/d/{pres_id}/edit"
     return f"Presentation created: '{title}'\nID: {pres_id}\nLink: {link}"
@@ -98,9 +93,7 @@ async def google__add_slide(
         create_req["insertionIndex"] = insertion_index
     requests: list[dict[str, Any]] = [{"createSlide": create_req}]
     result = await with_backoff(
-        lambda: svc.presentations().batchUpdate(
-            presentationId=presentation_id, body={"requests": requests}
-        ).execute()
+        lambda: svc.presentations().batchUpdate(presentationId=presentation_id, body={"requests": requests}).execute()
     )
     replies = result.get("replies", [{}])
     new_slide_id = replies[0].get("createSlide", {}).get("objectId", "") if replies else ""
@@ -120,9 +113,7 @@ async def google__update_slide_text(
         {"insertText": {"objectId": object_id, "insertionIndex": 0, "text": new_text}},
     ]
     await with_backoff(
-        lambda: svc.presentations().batchUpdate(
-            presentationId=presentation_id, body={"requests": requests}
-        ).execute()
+        lambda: svc.presentations().batchUpdate(presentationId=presentation_id, body={"requests": requests}).execute()
     )
     return f"Text updated in object {object_id}."
 
@@ -151,7 +142,8 @@ async def google__add_image_to_slide(
                         "height": {"magnitude": height * emu_per_pt, "unit": "EMU"},
                     },
                     "transform": {
-                        "scaleX": 1, "scaleY": 1,
+                        "scaleX": 1,
+                        "scaleY": 1,
                         "translateX": left * emu_per_pt,
                         "translateY": top * emu_per_pt,
                         "unit": "EMU",
@@ -161,9 +153,7 @@ async def google__add_image_to_slide(
         }
     ]
     result = await with_backoff(
-        lambda: svc.presentations().batchUpdate(
-            presentationId=presentation_id, body={"requests": requests}
-        ).execute()
+        lambda: svc.presentations().batchUpdate(presentationId=presentation_id, body={"requests": requests}).execute()
     )
     replies = result.get("replies", [{}])
     img_id = replies[0].get("createImage", {}).get("objectId", "") if replies else ""
@@ -172,6 +162,7 @@ async def google__add_image_to_slide(
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
+
 def register_slides_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 6 Slides tools. Returns count."""
 
@@ -179,6 +170,7 @@ def register_slides_tools(registry: ToolRegistry, factory: GoogleServiceFactory)
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
+
         return wrapper
 
     registry.register(
@@ -227,9 +219,15 @@ def register_slides_tools(registry: ToolRegistry, factory: GoogleServiceFactory)
                 "layout": {
                     "type": "string",
                     "enum": [
-                        "BLANK", "CAPTION_ONLY", "TITLE", "TITLE_AND_BODY",
-                        "TITLE_AND_TWO_COLUMNS", "TITLE_ONLY", "ONE_COLUMN_TEXT",
-                        "MAIN_POINT", "BIG_NUMBER",
+                        "BLANK",
+                        "CAPTION_ONLY",
+                        "TITLE",
+                        "TITLE_AND_BODY",
+                        "TITLE_AND_TWO_COLUMNS",
+                        "TITLE_ONLY",
+                        "ONE_COLUMN_TEXT",
+                        "MAIN_POINT",
+                        "BIG_NUMBER",
                     ],
                     "default": "BLANK",
                 },

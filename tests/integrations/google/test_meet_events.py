@@ -42,6 +42,7 @@ def _make_subscriber_with_capture(auth=None, pubsub_topic=None):
 
 # ── Subscribe with Pub/Sub ────────────────────────────────────────────────────
 
+
 async def test_subscribe_with_pubsub():
     """Pub/Sub subscription creates a Workspace Events subscription."""
     sub, _ = _make_subscriber_with_capture(pubsub_topic="projects/p/topics/t")
@@ -67,9 +68,7 @@ async def test_subscribe_with_pubsub():
                 mock_session_cls.return_value = mock_session
 
                 # Re-create sub with real asyncio.to_thread but patched requests
-                sub2, recv = _make_subscriber_with_capture(
-                    auth=_make_auth(), pubsub_topic="projects/p/topics/t"
-                )
+                sub2, recv = _make_subscriber_with_capture(auth=_make_auth(), pubsub_topic="projects/p/topics/t")
                 # Directly exercise _create_workspace_subscription with mock
                 sub2._subscriptions["spaces/abc123"] = "subscriptions/sub1"
                 result = "Subscribed to events for spaces/abc123.\nSubscription: subscriptions/sub1"
@@ -79,6 +78,7 @@ async def test_subscribe_with_pubsub():
 
 
 # ── Subscribe without Pub/Sub (polling) ───────────────────────────────────────
+
 
 async def test_subscribe_without_pubsub():
     """Without Pub/Sub, falls back to polling and adds to polling_spaces."""
@@ -107,6 +107,7 @@ async def test_subscribe_to_space_uses_polling_when_no_pubsub():
 
 # ── User-level subscription ────────────────────────────────────────────────────
 
+
 async def test_subscribe_to_user_requires_pubsub():
     """subscribe_to_user returns an error message when no Pub/Sub is configured."""
     sub, _ = _make_subscriber_with_capture()  # no pubsub_topic
@@ -117,14 +118,17 @@ async def test_subscribe_to_user_requires_pubsub():
 
 # ── handle_pubsub_message ─────────────────────────────────────────────────────
 
+
 async def test_handle_conference_ended():
     sub, recv = _make_subscriber_with_capture()
-    await sub.handle_pubsub_message({
-        "attributes": {
-            "ce-type": "google.workspace.meet.conference.v2.ended",
-            "ce-resourceName": "spaces/abc123",
+    await sub.handle_pubsub_message(
+        {
+            "attributes": {
+                "ce-type": "google.workspace.meet.conference.v2.ended",
+                "ce-resourceName": "spaces/abc123",
+            }
         }
-    })
+    )
     assert len(recv) == 1
     event_type, data = recv[0]
     assert event_type == "conference_ended"
@@ -134,12 +138,14 @@ async def test_handle_conference_ended():
 
 async def test_handle_recording_ready():
     sub, recv = _make_subscriber_with_capture()
-    await sub.handle_pubsub_message({
-        "attributes": {
-            "ce-type": "google.workspace.meet.recording.v2.fileGenerated",
-            "ce-resourceName": "spaces/abc123",
+    await sub.handle_pubsub_message(
+        {
+            "attributes": {
+                "ce-type": "google.workspace.meet.recording.v2.fileGenerated",
+                "ce-resourceName": "spaces/abc123",
+            }
         }
-    })
+    )
     assert len(recv) == 1
     event_type, data = recv[0]
     assert event_type == "recording_ready"
@@ -148,12 +154,14 @@ async def test_handle_recording_ready():
 
 async def test_handle_transcript_ready():
     sub, recv = _make_subscriber_with_capture()
-    await sub.handle_pubsub_message({
-        "attributes": {
-            "ce-type": "google.workspace.meet.transcript.v2.fileGenerated",
-            "ce-resourceName": "spaces/abc123",
+    await sub.handle_pubsub_message(
+        {
+            "attributes": {
+                "ce-type": "google.workspace.meet.transcript.v2.fileGenerated",
+                "ce-resourceName": "spaces/abc123",
+            }
         }
-    })
+    )
     assert len(recv) == 1
     event_type, data = recv[0]
     assert event_type == "transcript_ready"
@@ -161,6 +169,7 @@ async def test_handle_transcript_ready():
 
 
 # ── Unsubscribe ────────────────────────────────────────────────────────────────
+
 
 async def test_unsubscribe_polling_space():
     """Unsubscribing a polling space removes it from tracking."""

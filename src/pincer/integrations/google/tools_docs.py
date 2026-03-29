@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _extract_doc_text(content: list[dict[str, Any]]) -> str:
     """Extract plain text from a Google Docs content array."""
     parts: list[str] = []
@@ -44,6 +45,7 @@ def _extract_doc_text(content: list[dict[str, Any]]) -> str:
 
 
 # ── Tool implementations ──────────────────────────────────────────────────────
+
 
 async def google__get_doc_content(
     factory: GoogleServiceFactory,
@@ -114,13 +116,9 @@ async def google__create_doc(
         raise
     doc_id = doc.get("documentId", "")
     if content:
-        requests: list[dict[str, Any]] = [
-            {"insertText": {"location": {"index": 1}, "text": content}}
-        ]
+        requests: list[dict[str, Any]] = [{"insertText": {"location": {"index": 1}, "text": content}}]
         await with_backoff(
-            lambda: svc.documents().batchUpdate(
-                documentId=doc_id, body={"requests": requests}
-            ).execute()
+            lambda: svc.documents().batchUpdate(documentId=doc_id, body={"requests": requests}).execute()
         )
     link = f"https://docs.google.com/document/d/{doc_id}/edit"
     return f"Document created: '{title}'\nID: {doc_id}\nLink: {link}"
@@ -134,13 +132,9 @@ async def google__insert_text(
 ) -> str:
     """Insert text at a specific position in a document."""
     svc = await factory.get("docs")
-    requests: list[dict[str, Any]] = [
-        {"insertText": {"location": {"index": index}, "text": text}}
-    ]
+    requests: list[dict[str, Any]] = [{"insertText": {"location": {"index": index}, "text": text}}]
     await with_backoff(
-        lambda: svc.documents().batchUpdate(
-            documentId=document_id, body={"requests": requests}
-        ).execute()
+        lambda: svc.documents().batchUpdate(documentId=document_id, body={"requests": requests}).execute()
     )
     return f"Inserted {len(text)} characters at index {index} in document {document_id}."
 
@@ -163,9 +157,7 @@ async def google__replace_text(
         }
     ]
     result = await with_backoff(
-        lambda: svc.documents().batchUpdate(
-            documentId=document_id, body={"requests": requests}
-        ).execute()
+        lambda: svc.documents().batchUpdate(documentId=document_id, body={"requests": requests}).execute()
     )
     replies = result.get("replies", [{}])
     count = replies[0].get("replaceAllText", {}).get("occurrencesChanged", 0) if replies else 0
@@ -191,9 +183,7 @@ async def google__insert_table(
         }
     ]
     await with_backoff(
-        lambda: svc.documents().batchUpdate(
-            documentId=document_id, body={"requests": requests}
-        ).execute()
+        lambda: svc.documents().batchUpdate(documentId=document_id, body={"requests": requests}).execute()
     )
     return f"Inserted {rows}×{columns} table at index {index}."
 
@@ -217,9 +207,7 @@ async def google__update_paragraph_style(
         }
     ]
     await with_backoff(
-        lambda: svc.documents().batchUpdate(
-            documentId=document_id, body={"requests": requests}
-        ).execute()
+        lambda: svc.documents().batchUpdate(documentId=document_id, body={"requests": requests}).execute()
     )
     return f"Paragraph style set to {named_style} ({start_index}–{end_index})."
 
@@ -238,10 +226,11 @@ async def google__add_comment(
     result = await with_backoff(
         lambda: drive_svc.comments().create(fileId=file_id, body=body, fields="id, content").execute()
     )
-    return f"Comment added (id={result.get('id', '')}): \"{result.get('content', '')}\""
+    return f'Comment added (id={result.get("id", "")}): "{result.get("content", "")}"'
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
+
 
 def register_docs_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 8 Docs tools. Returns count."""
@@ -250,6 +239,7 @@ def register_docs_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
+
         return wrapper
 
     registry.register(
@@ -353,8 +343,15 @@ def register_docs_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -
                 "named_style": {
                     "type": "string",
                     "enum": [
-                        "HEADING_1", "HEADING_2", "HEADING_3", "HEADING_4",
-                        "HEADING_5", "HEADING_6", "NORMAL_TEXT", "TITLE", "SUBTITLE",
+                        "HEADING_1",
+                        "HEADING_2",
+                        "HEADING_3",
+                        "HEADING_4",
+                        "HEADING_5",
+                        "HEADING_6",
+                        "NORMAL_TEXT",
+                        "TITLE",
+                        "SUBTITLE",
                     ],
                     "default": "HEADING_1",
                 },

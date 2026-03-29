@@ -119,10 +119,7 @@ class GoogleAuth:
             )
 
         if not self._token_path.exists():
-            raise FileNotFoundError(
-                "Google Workspace token not found. "
-                "Run 'pincer setup google' to authenticate."
-            )
+            raise FileNotFoundError("Google Workspace token not found. Run 'pincer setup google' to authenticate.")
 
         self._credentials = Credentials.from_authorized_user_file(  # type: ignore[no-untyped-call]
             str(self._token_path), self._scopes
@@ -157,13 +154,11 @@ class GoogleAuth:
                 return self._credentials
             except Exception as exc:
                 raise RuntimeError(
-                    f"Token refresh failed: {exc}. "
-                    f"Delete {self._token_path} and run 'pincer setup-google'."
+                    f"Token refresh failed: {exc}. Delete {self._token_path} and run 'pincer setup-google'."
                 ) from exc
 
         raise RuntimeError(
-            "Google token is invalid (no refresh token). "
-            f"Delete {self._token_path} and run 'pincer setup-google'."
+            f"Google token is invalid (no refresh token). Delete {self._token_path} and run 'pincer setup-google'."
         )
 
     def run_auth_flow(self, open_browser: bool = True) -> Any:
@@ -177,9 +172,7 @@ class GoogleAuth:
         """
         from google_auth_oauthlib.flow import InstalledAppFlow
 
-        flow = InstalledAppFlow.from_client_secrets_file(
-            str(self._credentials_path), self._scopes
-        )
+        flow = InstalledAppFlow.from_client_secrets_file(str(self._credentials_path), self._scopes)
         try:
             creds = flow.run_local_server(port=0, open_browser=open_browser)
         except Exception:

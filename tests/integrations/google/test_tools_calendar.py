@@ -71,20 +71,14 @@ async def test_get_event_returns_details(mock_factory, mock_calendar_service):
 
 
 async def test_search_events_found(mock_factory, mock_calendar_service):
-    mock_calendar_service.events().list().execute.return_value = {
-        "items": [_event("e1", "Budget Review")]
-    }
+    mock_calendar_service.events().list().execute.return_value = {"items": [_event("e1", "Budget Review")]}
     result = await google__search_events(mock_factory, query="budget")
     assert "Budget Review" in result
 
 
 async def test_check_freebusy(mock_factory, mock_calendar_service):
     mock_calendar_service.freebusy().query().execute.return_value = {
-        "calendars": {
-            "alice@example.com": {
-                "busy": [{"start": "2026-03-28T14:00:00Z", "end": "2026-03-28T15:00:00Z"}]
-            }
-        }
+        "calendars": {"alice@example.com": {"busy": [{"start": "2026-03-28T14:00:00Z", "end": "2026-03-28T15:00:00Z"}]}}
     }
     result = await google__check_freebusy(mock_factory, emails="alice@example.com")
     assert "BUSY" in result
@@ -147,9 +141,7 @@ async def test_decline_event(mock_factory, mock_calendar_service):
 
 async def test_add_google_meet(mock_factory, mock_calendar_service):
     mock_calendar_service.events().patch().execute.return_value = {
-        "conferenceData": {
-            "entryPoints": [{"uri": "https://meet.google.com/abc-defg-hij"}]
-        }
+        "conferenceData": {"entryPoints": [{"uri": "https://meet.google.com/abc-defg-hij"}]}
     }
     result = await google__add_google_meet(mock_factory, event_id="evt1")
     assert "meet.google.com" in result

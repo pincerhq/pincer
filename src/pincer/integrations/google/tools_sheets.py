@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
+
 async def google__list_sheets(
     factory: GoogleServiceFactory,
     spreadsheet_id: str,
@@ -29,9 +30,7 @@ async def google__list_sheets(
     """List all sheets/tabs in a spreadsheet."""
     svc = await factory.get("sheets")
     result = await with_backoff(
-        lambda: svc.spreadsheets().get(
-            spreadsheetId=spreadsheet_id, fields="properties,sheets.properties"
-        ).execute()
+        lambda: svc.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="properties,sheets.properties").execute()
     )
     title = result.get("properties", {}).get("title", "?")
     sheets = result.get("sheets", [])
@@ -52,9 +51,7 @@ async def google__get_sheet_values(
     """Read cell values from a range (e.g. 'Sheet1!A1:D10')."""
     svc = await factory.get("sheets")
     result = await with_backoff(
-        lambda: svc.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id, range=range_
-        ).execute()
+        lambda: svc.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=range_).execute()
     )
     values = result.get("values", [])
     return fmt_sheet_values(values, range_name=result.get("range", range_))
@@ -67,10 +64,14 @@ async def google__get_sheet_metadata(
     """Get spreadsheet properties: title, locale, timezone, named ranges."""
     svc = await factory.get("sheets")
     result = await with_backoff(
-        lambda: svc.spreadsheets().get(
-            spreadsheetId=spreadsheet_id,
-            fields="properties, namedRanges",
-        ).execute()
+        lambda: (
+            svc.spreadsheets()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                fields="properties, namedRanges",
+            )
+            .execute()
+        )
     )
     props = result.get("properties", {})
     named = result.get("namedRanges", [])
@@ -96,9 +97,7 @@ async def google__search_sheet_values(
     """Find cells in a sheet that match a value (case-insensitive substring)."""
     svc = await factory.get("sheets")
     result = await with_backoff(
-        lambda: svc.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id, range=sheet_name
-        ).execute()
+        lambda: svc.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=sheet_name).execute()
     )
     values = result.get("values", [])
     matches: list[str] = []
@@ -128,11 +127,7 @@ async def google__create_spreadsheet(
 ) -> str:
     """Create a new Google Spreadsheet."""
     svc = await factory.get("sheets")
-    result = await with_backoff(
-        lambda: svc.spreadsheets().create(
-            body={"properties": {"title": title}}
-        ).execute()
-    )
+    result = await with_backoff(lambda: svc.spreadsheets().create(body={"properties": {"title": title}}).execute())
     ss_id = result.get("spreadsheetId", "")
     link = result.get("spreadsheetUrl", f"https://docs.google.com/spreadsheets/d/{ss_id}/edit")
     return f"Spreadsheet created: '{title}'\nID: {ss_id}\nLink: {link}"
@@ -148,12 +143,17 @@ async def google__update_sheet_values(
     """Write values to a specific range in a spreadsheet."""
     svc = await factory.get("sheets")
     result = await with_backoff(
-        lambda: svc.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range=range_,
-            valueInputOption=value_input_option,
-            body={"values": values},
-        ).execute()
+        lambda: (
+            svc.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=spreadsheet_id,
+                range=range_,
+                valueInputOption=value_input_option,
+                body={"values": values},
+            )
+            .execute()
+        )
     )
     updated = result.get("updatedCells", 0)
     return f"Updated {updated} cell(s) in {range_}."
@@ -169,13 +169,18 @@ async def google__append_sheet_values(
     """Append rows to a sheet (adds after last row with data)."""
     svc = await factory.get("sheets")
     result = await with_backoff(
-        lambda: svc.spreadsheets().values().append(
-            spreadsheetId=spreadsheet_id,
-            range=range_,
-            valueInputOption=value_input_option,
-            insertDataOption="INSERT_ROWS",
-            body={"values": values},
-        ).execute()
+        lambda: (
+            svc.spreadsheets()
+            .values()
+            .append(
+                spreadsheetId=spreadsheet_id,
+                range=range_,
+                valueInputOption=value_input_option,
+                insertDataOption="INSERT_ROWS",
+                body={"values": values},
+            )
+            .execute()
+        )
     )
     updates = result.get("updates", {})
     updated = updates.get("updatedCells", 0)
@@ -191,9 +196,7 @@ async def google__clear_sheet_values(
     """Clear all values in a cell range."""
     svc = await factory.get("sheets")
     await with_backoff(
-        lambda: svc.spreadsheets().values().clear(
-            spreadsheetId=spreadsheet_id, range=range_, body={}
-        ).execute()
+        lambda: svc.spreadsheets().values().clear(spreadsheetId=spreadsheet_id, range=range_, body={}).execute()
     )
     return f"Cleared range {range_} in spreadsheet {spreadsheet_id}."
 
@@ -205,13 +208,9 @@ async def google__add_sheet(
 ) -> str:
     """Add a new sheet/tab to an existing spreadsheet."""
     svc = await factory.get("sheets")
-    requests: list[dict[str, Any]] = [
-        {"addSheet": {"properties": {"title": title}}}
-    ]
+    requests: list[dict[str, Any]] = [{"addSheet": {"properties": {"title": title}}}]
     result = await with_backoff(
-        lambda: svc.spreadsheets().batchUpdate(
-            spreadsheetId=spreadsheet_id, body={"requests": requests}
-        ).execute()
+        lambda: svc.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
     )
     replies = result.get("replies", [{}])
     sheet_id = replies[0].get("addSheet", {}).get("properties", {}).get("sheetId", "") if replies else ""
@@ -264,9 +263,7 @@ async def google__format_cells(
         }
     ]
     await with_backoff(
-        lambda: svc.spreadsheets().batchUpdate(
-            spreadsheetId=spreadsheet_id, body={"requests": requests}
-        ).execute()
+        lambda: svc.spreadsheets().batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests}).execute()
     )
     return f"Formatting applied to rows {start_row}–{end_row}, cols {start_col}–{end_col}."
 
@@ -284,6 +281,7 @@ def _parse_hex_color(hex_color: str) -> tuple[float, float, float]:
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
+
 def register_sheets_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 10 Sheets tools. Returns count."""
 
@@ -291,6 +289,7 @@ def register_sheets_tools(registry: ToolRegistry, factory: GoogleServiceFactory)
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
+
         return wrapper
 
     registry.register(

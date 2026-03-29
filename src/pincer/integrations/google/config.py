@@ -22,8 +22,8 @@ class GoogleIntegrationConfig:
 
     enabled: bool = True
     services: list[str] = field(default_factory=lambda: list(_DEFAULT_SERVICES))
-    credentials_path: str = ""   # empty → auto-detect via settings.google_oauth_dir()
-    token_path: str = ""         # empty → auto-detect
+    credentials_path: str = ""  # empty → auto-detect via settings.google_oauth_dir()
+    token_path: str = ""  # empty → auto-detect
 
 
 def load_config() -> GoogleIntegrationConfig:

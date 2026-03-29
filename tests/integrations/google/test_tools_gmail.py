@@ -71,9 +71,7 @@ async def test_list_labels_empty(mock_factory, mock_gmail_service):
 
 
 async def test_list_messages_returns_summaries(mock_factory, mock_gmail_service):
-    mock_gmail_service.users().messages().list().execute.return_value = {
-        "messages": [{"id": "msg1"}]
-    }
+    mock_gmail_service.users().messages().list().execute.return_value = {"messages": [{"id": "msg1"}]}
     mock_gmail_service.users().messages().get().execute.return_value = _msg()
     result = await google__list_messages(mock_factory)
     assert "Test" in result
@@ -90,9 +88,7 @@ async def test_list_messages_empty(mock_factory, mock_gmail_service):
 
 
 async def test_search_messages_found(mock_factory, mock_gmail_service):
-    mock_gmail_service.users().messages().list().execute.return_value = {
-        "messages": [{"id": "msg1"}, {"id": "msg2"}]
-    }
+    mock_gmail_service.users().messages().list().execute.return_value = {"messages": [{"id": "msg1"}, {"id": "msg2"}]}
     mock_gmail_service.users().messages().get().execute.side_effect = [
         _msg("msg1", "Invoice Q1", "bob@company.com"),
         _msg("msg2", "Invoice Q2", "bob@company.com"),
@@ -155,9 +151,7 @@ async def test_get_attachment(mock_factory, mock_gmail_service):
 
 async def test_send_message(mock_factory, mock_gmail_service):
     mock_gmail_service.users().messages().send().execute.return_value = {"id": "sent1"}
-    result = await google__send_message(
-        mock_factory, to="bob@example.com", subject="Hello", body="World"
-    )
+    result = await google__send_message(mock_factory, to="bob@example.com", subject="Hello", body="World")
     assert "bob@example.com" in result
     assert "Hello" in result
 
@@ -190,9 +184,7 @@ async def test_reply_all(mock_factory, mock_gmail_service):
 async def test_forward_message(mock_factory, mock_gmail_service):
     mock_gmail_service.users().messages().get().execute.return_value = _msg()
     mock_gmail_service.users().messages().send().execute.return_value = {"id": "f1"}
-    result = await google__forward_message(
-        mock_factory, message_id="msg1", to="carol@example.com"
-    )
+    result = await google__forward_message(mock_factory, message_id="msg1", to="carol@example.com")
     assert "carol@example.com" in result
     assert "Fwd:" in result
 
@@ -202,9 +194,7 @@ async def test_forward_message(mock_factory, mock_gmail_service):
 
 async def test_create_draft(mock_factory, mock_gmail_service):
     mock_gmail_service.users().drafts().create().execute.return_value = {"id": "draft1"}
-    result = await google__create_draft(
-        mock_factory, to="dave@example.com", subject="Draft Subject", body="Draft body"
-    )
+    result = await google__create_draft(mock_factory, to="dave@example.com", subject="Draft Subject", body="Draft body")
     assert "draft1" in result
     assert "Dave" in result or "dave@example.com" in result
 
@@ -277,9 +267,7 @@ async def test_remove_label(mock_factory, mock_gmail_service):
 
 
 async def test_create_label(mock_factory, mock_gmail_service):
-    mock_gmail_service.users().labels().create().execute.return_value = {
-        "id": "Label_2", "name": "ProjectX"
-    }
+    mock_gmail_service.users().labels().create().execute.return_value = {"id": "Label_2", "name": "ProjectX"}
     result = await google__create_label(mock_factory, name="ProjectX")
     assert "ProjectX" in result
     assert "Label_2" in result

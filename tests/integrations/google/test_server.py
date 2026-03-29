@@ -67,6 +67,7 @@ async def test_register_all_tools_read_tools_no_approval(mock_factory):
 
 async def test_register_gmail_tool_count(mock_factory):
     from pincer.integrations.google.tools_gmail import register_gmail_tools
+
     registry = ToolRegistry()
     count = register_gmail_tools(registry, mock_factory)
     assert count == 19
@@ -74,6 +75,7 @@ async def test_register_gmail_tool_count(mock_factory):
 
 async def test_register_calendar_tool_count(mock_factory):
     from pincer.integrations.google.tools_calendar import register_calendar_tools
+
     registry = ToolRegistry()
     count = register_calendar_tools(registry, mock_factory)
     assert count == 12
@@ -81,6 +83,7 @@ async def test_register_calendar_tool_count(mock_factory):
 
 async def test_register_drive_tool_count(mock_factory):
     from pincer.integrations.google.tools_drive import register_drive_tools
+
     registry = ToolRegistry()
     count = register_drive_tools(registry, mock_factory)
     assert count == 15
@@ -108,26 +111,30 @@ def test_get_google_factory_returns_factory_when_configured(tmp_path):
     token_path = tmp_path / "google_workspace_token.json"
 
     creds_path.write_text(
-        json.dumps({
-            "installed": {
-                "client_id": "test.apps.googleusercontent.com",
-                "client_secret": "secret",
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": ["http://localhost"],
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "test.apps.googleusercontent.com",
+                    "client_secret": "secret",
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": ["http://localhost"],
+                }
             }
-        })
+        )
     )
     token_path.write_text(
-        json.dumps({
-            "token": "ya29.fake",
-            "refresh_token": "1//fake",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "client_id": "test.apps.googleusercontent.com",
-            "client_secret": "secret",
-            "scopes": [],
-            "expiry": "2099-01-01T00:00:00Z",
-        })
+        json.dumps(
+            {
+                "token": "ya29.fake",
+                "refresh_token": "1//fake",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "test.apps.googleusercontent.com",
+                "client_secret": "secret",
+                "scopes": [],
+                "expiry": "2099-01-01T00:00:00Z",
+            }
+        )
     )
 
     with patch("pincer.config.get_settings_relaxed") as mock_settings:

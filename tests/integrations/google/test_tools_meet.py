@@ -39,6 +39,7 @@ from pincer.integrations.google.tools_meet import (
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _space(name="spaces/abc123", code="abc-defg-hij"):
     return {
         "name": name,
@@ -132,6 +133,7 @@ def _mock_subscriber(subs=None):
 
 # ── Space Management ──────────────────────────────────────────────────────────
 
+
 async def test_create_meet_space(mock_factory, mock_meet_service):
     mock_meet_service.spaces().create().execute.return_value = _space()
     result = await google__create_meet_space(mock_factory)
@@ -202,9 +204,7 @@ async def test_update_meet_space(mock_factory, mock_meet_service):
     updated = _space()
     updated["config"]["accessType"] = "TRUSTED"
     mock_meet_service.spaces().patch().execute.return_value = updated
-    result = await google__update_meet_space(
-        mock_factory, space_name="spaces/abc123", access_type="TRUSTED"
-    )
+    result = await google__update_meet_space(mock_factory, space_name="spaces/abc123", access_type="TRUSTED")
     assert "TRUSTED" in result
     assert "spaces/abc123" in result
 
@@ -274,38 +274,29 @@ async def test_add_meet_member_preview_unavailable(mock_factory, mock_meet_servi
 
 async def test_remove_meet_member(mock_factory, mock_meet_service):
     mock_meet_service.spaces().members().delete().execute.return_value = {}
-    result = await google__remove_meet_member(
-        mock_factory, member_name="spaces/abc123/members/m1"
-    )
+    result = await google__remove_meet_member(mock_factory, member_name="spaces/abc123/members/m1")
     assert "removed" in result or "Developer Preview" in result
 
 
 # ── Conference History ─────────────────────────────────────────────────────────
 
+
 async def test_list_conference_records(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().list().execute.return_value = {
-        "conferenceRecords": [_conference()]
-    }
+    mock_meet_service.conferenceRecords().list().execute.return_value = {"conferenceRecords": [_conference()]}
     result = await google__list_conference_records(mock_factory)
     assert "conferenceRecords/conf1" in result
     assert "spaces/abc123" in result
 
 
 async def test_list_conference_records_empty(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().list().execute.return_value = {
-        "conferenceRecords": []
-    }
+    mock_meet_service.conferenceRecords().list().execute.return_value = {"conferenceRecords": []}
     result = await google__list_conference_records(mock_factory)
     assert "No conference records" in result
 
 
 async def test_list_conference_records_filtered(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().list().execute.return_value = {
-        "conferenceRecords": [_conference()]
-    }
-    result = await google__list_conference_records(
-        mock_factory, space_name="spaces/abc123"
-    )
+    mock_meet_service.conferenceRecords().list().execute.return_value = {"conferenceRecords": [_conference()]}
+    result = await google__list_conference_records(mock_factory, space_name="spaces/abc123")
     assert "Conference records" in result
     # Verify filter was passed
     call_args = mock_meet_service.conferenceRecords().list.call_args
@@ -314,9 +305,7 @@ async def test_list_conference_records_filtered(mock_factory, mock_meet_service)
 
 async def test_get_conference_record(mock_factory, mock_meet_service):
     mock_meet_service.conferenceRecords().get().execute.return_value = _conference()
-    result = await google__get_conference_record(
-        mock_factory, conference_name="conferenceRecords/conf1"
-    )
+    result = await google__get_conference_record(mock_factory, conference_name="conferenceRecords/conf1")
     assert "conferenceRecords/conf1" in result
     assert "2026-03-28" in result
 
@@ -325,9 +314,7 @@ async def test_list_conference_participants(mock_factory, mock_meet_service):
     mock_meet_service.conferenceRecords().participants().list().execute.return_value = {
         "participants": [_participant()]
     }
-    result = await google__list_conference_participants(
-        mock_factory, conference_name="conferenceRecords/conf1"
-    )
+    result = await google__list_conference_participants(mock_factory, conference_name="conferenceRecords/conf1")
     assert "Alice" in result
     assert "signed in" in result
 
@@ -338,20 +325,14 @@ async def test_list_participants_anonymous(mock_factory, mock_meet_service):
         "anonymousUser": {"displayName": "Anonymous User"},
         "earliestStartTime": "2026-03-28T09:05:00Z",
     }
-    mock_meet_service.conferenceRecords().participants().list().execute.return_value = {
-        "participants": [anon]
-    }
-    result = await google__list_conference_participants(
-        mock_factory, conference_name="conferenceRecords/conf1"
-    )
+    mock_meet_service.conferenceRecords().participants().list().execute.return_value = {"participants": [anon]}
+    result = await google__list_conference_participants(mock_factory, conference_name="conferenceRecords/conf1")
     assert "Anonymous User" in result
     assert "anonymous" in result
 
 
 async def test_get_participant_details(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().participants().get().execute.return_value = (
-        _participant()
-    )
+    mock_meet_service.conferenceRecords().participants().get().execute.return_value = _participant()
     result = await google__get_participant_details(
         mock_factory,
         participant_name="conferenceRecords/conf1/participants/p1",
@@ -379,42 +360,29 @@ async def test_list_participant_sessions(mock_factory, mock_meet_service):
 
 # ── Recordings ────────────────────────────────────────────────────────────────
 
+
 async def test_list_meet_recordings(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().recordings().list().execute.return_value = {
-        "recordings": [_recording()]
-    }
-    result = await google__list_meet_recordings(
-        mock_factory, conference_name="conferenceRecords/conf1"
-    )
+    mock_meet_service.conferenceRecords().recordings().list().execute.return_value = {"recordings": [_recording()]}
+    result = await google__list_meet_recordings(mock_factory, conference_name="conferenceRecords/conf1")
     assert "FILE_GENERATED" in result
     assert "1BxiMVs0XRA5nFMd" in result
 
 
 async def test_list_recordings_empty(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().recordings().list().execute.return_value = {
-        "recordings": []
-    }
-    result = await google__list_meet_recordings(
-        mock_factory, conference_name="conferenceRecords/conf1"
-    )
+    mock_meet_service.conferenceRecords().recordings().list().execute.return_value = {"recordings": []}
+    result = await google__list_meet_recordings(mock_factory, conference_name="conferenceRecords/conf1")
     assert "No recordings" in result
 
 
 async def test_get_recording_with_drive_id(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().recordings().get().execute.return_value = (
-        _recording()
-    )
-    result = await google__get_meet_recording(
-        mock_factory, recording_name="conferenceRecords/conf1/recordings/rec1"
-    )
+    mock_meet_service.conferenceRecords().recordings().get().execute.return_value = _recording()
+    result = await google__get_meet_recording(mock_factory, recording_name="conferenceRecords/conf1/recordings/rec1")
     assert "1BxiMVs0XRA5nFMd" in result
     assert "FILE_GENERATED" in result
 
 
 async def test_check_recording_not_ready(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().recordings().get().execute.return_value = (
-        _recording(state="ENDED")
-    )
+    mock_meet_service.conferenceRecords().recordings().get().execute.return_value = _recording(state="ENDED")
     result = await google__check_recording_status(
         mock_factory, recording_name="conferenceRecords/conf1/recordings/rec1"
     )
@@ -423,9 +391,7 @@ async def test_check_recording_not_ready(mock_factory, mock_meet_service):
 
 
 async def test_check_recording_ready(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().recordings().get().execute.return_value = (
-        _recording(state="FILE_GENERATED")
-    )
+    mock_meet_service.conferenceRecords().recordings().get().execute.return_value = _recording(state="FILE_GENERATED")
     result = await google__check_recording_status(
         mock_factory, recording_name="conferenceRecords/conf1/recordings/rec1"
     )
@@ -435,32 +401,23 @@ async def test_check_recording_ready(mock_factory, mock_meet_service):
 
 # ── Transcripts ────────────────────────────────────────────────────────────────
 
+
 async def test_list_meet_transcripts(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {
-        "transcripts": [_transcript()]
-    }
-    result = await google__list_meet_transcripts(
-        mock_factory, conference_name="conferenceRecords/conf1"
-    )
+    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {"transcripts": [_transcript()]}
+    result = await google__list_meet_transcripts(mock_factory, conference_name="conferenceRecords/conf1")
     assert "conferenceRecords/conf1/transcripts/t1" in result
     assert "SAVED" in result
     assert "1DocId123" in result
 
 
 async def test_list_transcripts_empty(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {
-        "transcripts": []
-    }
-    result = await google__list_meet_transcripts(
-        mock_factory, conference_name="conferenceRecords/conf1"
-    )
+    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {"transcripts": []}
+    result = await google__list_meet_transcripts(mock_factory, conference_name="conferenceRecords/conf1")
     assert "No transcripts" in result
 
 
 async def test_get_meet_transcript(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().transcripts().get().execute.return_value = (
-        _transcript()
-    )
+    mock_meet_service.conferenceRecords().transcripts().get().execute.return_value = _transcript()
     result = await google__get_meet_transcript(
         mock_factory,
         transcript_name="conferenceRecords/conf1/transcripts/t1",
@@ -484,8 +441,8 @@ async def test_list_transcript_entries(mock_factory, mock_meet_service):
 
 
 async def test_get_transcript_entry(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().transcripts().entries().get().execute.return_value = (
-        _entry(1, "Alice", "Hello team.")
+    mock_meet_service.conferenceRecords().transcripts().entries().get().execute.return_value = _entry(
+        1, "Alice", "Hello team."
     )
     result = await google__get_transcript_entry(
         mock_factory,
@@ -498,9 +455,7 @@ async def test_get_transcript_entry(mock_factory, mock_meet_service):
 
 async def test_summarize_transcript(mock_factory, mock_meet_service):
     # transcripts list
-    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {
-        "transcripts": [_transcript()]
-    }
+    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {"transcripts": [_transcript()]}
     # participants list
     mock_meet_service.conferenceRecords().participants().list().execute.return_value = {
         "participants": [_participant()]
@@ -512,9 +467,7 @@ async def test_summarize_transcript(mock_factory, mock_meet_service):
             _entry(2, "Bob", "I worked on the API yesterday."),
         ]
     }
-    result = await google__summarize_meet_transcript(
-        mock_factory, conference_name="conferenceRecords/conf1"
-    )
+    result = await google__summarize_meet_transcript(mock_factory, conference_name="conferenceRecords/conf1")
     assert "Alice" in result
     assert "Let's start the standup." in result
     assert "Bob" in result
@@ -522,44 +475,31 @@ async def test_summarize_transcript(mock_factory, mock_meet_service):
 
 
 async def test_summarize_transcript_no_transcripts(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {
-        "transcripts": []
-    }
-    result = await google__summarize_meet_transcript(
-        mock_factory, conference_name="conferenceRecords/conf1"
-    )
+    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {"transcripts": []}
+    result = await google__summarize_meet_transcript(mock_factory, conference_name="conferenceRecords/conf1")
     assert "No transcripts" in result
 
 
 # ── Smart Notes ────────────────────────────────────────────────────────────────
 
+
 async def test_list_smart_notes(mock_factory, mock_meet_service):
     smart = _transcript()
     smart["state"] = "SMART_NOTES_SAVED"
-    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {
-        "transcripts": [smart]
-    }
-    result = await google__list_smart_notes(
-        mock_factory, conference_name="conferenceRecords/conf1"
-    )
+    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {"transcripts": [smart]}
+    result = await google__list_smart_notes(mock_factory, conference_name="conferenceRecords/conf1")
     # Either smart notes found or fallback message
     assert "SMART_NOTES_SAVED" in result or "smart notes" in result.lower()
 
 
 async def test_list_smart_notes_not_configured(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {
-        "transcripts": []
-    }
-    result = await google__list_smart_notes(
-        mock_factory, conference_name="conferenceRecords/conf1"
-    )
+    mock_meet_service.conferenceRecords().transcripts().list().execute.return_value = {"transcripts": []}
+    result = await google__list_smart_notes(mock_factory, conference_name="conferenceRecords/conf1")
     assert "auto_smart_notes" in result or "smart notes" in result.lower()
 
 
 async def test_get_smart_notes(mock_factory, mock_meet_service):
-    mock_meet_service.conferenceRecords().transcripts().get().execute.return_value = (
-        _transcript()
-    )
+    mock_meet_service.conferenceRecords().transcripts().get().execute.return_value = _transcript()
     result = await google__get_smart_notes(
         mock_factory,
         transcript_name="conferenceRecords/conf1/transcripts/t1",
@@ -570,20 +510,17 @@ async def test_get_smart_notes(mock_factory, mock_meet_service):
 
 # ── Event Subscriptions ────────────────────────────────────────────────────────
 
+
 async def test_subscribe_meet_events(mock_factory, mock_meet_service):
     sub = _mock_subscriber()
-    result = await google__subscribe_meet_events(
-        mock_factory, sub, space_name="spaces/abc123"
-    )
+    result = await google__subscribe_meet_events(mock_factory, sub, space_name="spaces/abc123")
     sub.subscribe_to_space.assert_called_once_with("spaces/abc123")
     assert "Subscribed" in result
 
 
 async def test_subscribe_all_user_events(mock_factory, mock_meet_service):
     sub = _mock_subscriber()
-    result = await google__subscribe_meet_events(
-        mock_factory, sub, subscribe_all=True
-    )
+    result = await google__subscribe_meet_events(mock_factory, sub, subscribe_all=True)
     sub.subscribe_to_user.assert_called_once()
     assert "Subscribed" in result
 
@@ -609,8 +546,6 @@ async def test_list_meet_subscriptions_with_entries(mock_factory, mock_meet_serv
 
 async def test_delete_meet_subscription(mock_factory, mock_meet_service):
     sub = _mock_subscriber()
-    result = await google__delete_meet_subscription(
-        mock_factory, sub, space_name="spaces/abc123"
-    )
+    result = await google__delete_meet_subscription(mock_factory, sub, space_name="spaces/abc123")
     sub.unsubscribe.assert_called_once_with("spaces/abc123")
     assert "Unsubscribed" in result

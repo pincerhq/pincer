@@ -42,6 +42,7 @@ def _fmt_contact(person: dict[str, Any]) -> str:
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
+
 async def google__list_contacts(
     factory: GoogleServiceFactory,
     max_results: int = 50,
@@ -56,9 +57,7 @@ async def google__list_contacts(
     }
     if page_token:
         kwargs["pageToken"] = page_token
-    result = await with_backoff(
-        lambda: svc.people().connections().list(**kwargs).execute()
-    )
+    result = await with_backoff(lambda: svc.people().connections().list(**kwargs).execute())
     connections = result.get("connections", [])
     if not connections:
         return "No contacts found."
@@ -76,9 +75,7 @@ async def google__search_contacts(
     """Search contacts by name, email, or phone."""
     svc = await factory.get("contacts")
     result = await with_backoff(
-        lambda: svc.people().searchContacts(
-            query=query, pageSize=max_results, readMask=_PERSON_FIELDS
-        ).execute()
+        lambda: svc.people().searchContacts(query=query, pageSize=max_results, readMask=_PERSON_FIELDS).execute()
     )
     results = result.get("results", [])
     if not results:
@@ -94,9 +91,7 @@ async def google__get_contact(
     """Get details of a specific contact by resource name (e.g. 'people/c123456')."""
     svc = await factory.get("contacts")
     person = await with_backoff(
-        lambda: svc.people().get(
-            resourceName=resource_name, personFields=_PERSON_FIELDS
-        ).execute()
+        lambda: svc.people().get(resourceName=resource_name, personFields=_PERSON_FIELDS).execute()
     )
     return _fmt_contact(person)
 
@@ -120,9 +115,7 @@ async def google__create_contact(
         body["phoneNumbers"] = [{"value": phone}]
     if organization:
         body["organizations"] = [{"name": organization}]
-    result = await with_backoff(
-        lambda: svc.people().createContact(body=body).execute()
-    )
+    result = await with_backoff(lambda: svc.people().createContact(body=body).execute())
     display = result.get("names", [{}])[0].get("displayName", given_name)
     return f"Contact created: '{display}' (id={result.get('resourceName', '')})"
 
@@ -138,19 +131,19 @@ async def google__update_contact(
     """Update a contact's fields."""
     svc = await factory.get("contacts")
     person = await with_backoff(
-        lambda: svc.people().get(
-            resourceName=resource_name, personFields=_PERSON_FIELDS
-        ).execute()
+        lambda: svc.people().get(resourceName=resource_name, personFields=_PERSON_FIELDS).execute()
     )
     etag = person.get("etag", "")
     update_fields: list[str] = []
 
     if given_name or family_name:
         existing_name = person.get("names", [{}])[0] if person.get("names") else {}
-        person["names"] = [{
-            "givenName": given_name or existing_name.get("givenName", ""),
-            "familyName": family_name or existing_name.get("familyName", ""),
-        }]
+        person["names"] = [
+            {
+                "givenName": given_name or existing_name.get("givenName", ""),
+                "familyName": family_name or existing_name.get("familyName", ""),
+            }
+        ]
         update_fields.append("names")
     if email:
         person["emailAddresses"] = [{"value": email}]
@@ -164,11 +157,15 @@ async def google__update_contact(
 
     person["etag"] = etag
     result = await with_backoff(
-        lambda: svc.people().updateContact(
-            resourceName=resource_name,
-            updatePersonFields=",".join(update_fields),
-            body=person,
-        ).execute()
+        lambda: (
+            svc.people()
+            .updateContact(
+                resourceName=resource_name,
+                updatePersonFields=",".join(update_fields),
+                body=person,
+            )
+            .execute()
+        )
     )
     display = result.get("names", [{}])[0].get("displayName", resource_name) if result.get("names") else resource_name
     return f"Contact updated: '{display}'"
@@ -180,18 +177,14 @@ async def google__delete_contact(
 ) -> str:
     """Delete a contact."""
     svc = await factory.get("contacts")
-    await with_backoff(
-        lambda: svc.people().deleteContact(resourceName=resource_name).execute()
-    )
+    await with_backoff(lambda: svc.people().deleteContact(resourceName=resource_name).execute())
     return f"Contact {resource_name} deleted."
 
 
 async def google__list_contact_groups(factory: GoogleServiceFactory) -> str:
     """List contact groups (labels)."""
     svc = await factory.get("contacts")
-    result = await with_backoff(
-        lambda: svc.contactGroups().list(pageSize=200).execute()
-    )
+    result = await with_backoff(lambda: svc.contactGroups().list(pageSize=200).execute())
     groups = result.get("contactGroups", [])
     if not groups:
         return "No contact groups found."
@@ -207,6 +200,7 @@ async def google__list_contact_groups(factory: GoogleServiceFactory) -> str:
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
+
 def register_contacts_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 7 Contacts tools. Returns count."""
 
@@ -214,6 +208,7 @@ def register_contacts_tools(registry: ToolRegistry, factory: GoogleServiceFactor
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
+
         return wrapper
 
     registry.register(

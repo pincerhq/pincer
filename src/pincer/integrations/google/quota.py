@@ -78,7 +78,10 @@ async def with_backoff(
                 wait = min(delay + jitter, max_delay)
                 logger.warning(
                     "Google API quota error (attempt %d/%d), retrying in %.1fs: %s",
-                    attempt + 1, max_retries, wait, exc,
+                    attempt + 1,
+                    max_retries,
+                    wait,
+                    exc,
                 )
                 await asyncio.sleep(wait)
                 delay = min(delay * 2, max_delay)

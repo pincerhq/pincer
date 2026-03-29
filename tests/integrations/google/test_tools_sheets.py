@@ -44,9 +44,7 @@ async def test_get_sheet_values(mock_factory, mock_sheets_service):
 
 
 async def test_get_sheet_values_empty(mock_factory, mock_sheets_service):
-    mock_sheets_service.spreadsheets().values().get().execute.return_value = {
-        "range": "Sheet1", "values": []
-    }
+    mock_sheets_service.spreadsheets().values().get().execute.return_value = {"range": "Sheet1", "values": []}
     result = await google__get_sheet_values(mock_factory, spreadsheet_id="ss1")
     assert "No data" in result
 
@@ -66,9 +64,7 @@ async def test_search_sheet_values(mock_factory, mock_sheets_service):
         "range": "Sheet1",
         "values": [["Name", "Value"], ["Marketing", "12400"], ["Sales", "8000"]],
     }
-    result = await google__search_sheet_values(
-        mock_factory, spreadsheet_id="ss1", search_value="marketing"
-    )
+    result = await google__search_sheet_values(mock_factory, spreadsheet_id="ss1", search_value="marketing")
     assert "Marketing" in result
 
 
@@ -77,9 +73,7 @@ async def test_search_sheet_values_not_found(mock_factory, mock_sheets_service):
         "range": "Sheet1",
         "values": [["Name", "Value"]],
     }
-    result = await google__search_sheet_values(
-        mock_factory, spreadsheet_id="ss1", search_value="XYZ_NOTFOUND"
-    )
+    result = await google__search_sheet_values(mock_factory, spreadsheet_id="ss1", search_value="XYZ_NOTFOUND")
     assert "No cells" in result
 
 
@@ -141,17 +135,28 @@ async def test_add_sheet(mock_factory, mock_sheets_service):
 async def test_format_cells(mock_factory, mock_sheets_service):
     mock_sheets_service.spreadsheets().batchUpdate().execute.return_value = {"replies": []}
     result = await google__format_cells(
-        mock_factory, spreadsheet_id="ss1", sheet_id=0,
-        start_row=0, end_row=1, start_col=0, end_col=3,
-        bold=True, background_color="#FF0000",
+        mock_factory,
+        spreadsheet_id="ss1",
+        sheet_id=0,
+        start_row=0,
+        end_row=1,
+        start_col=0,
+        end_col=3,
+        bold=True,
+        background_color="#FF0000",
     )
     assert "Formatting applied" in result
 
 
 async def test_format_cells_no_changes(mock_factory, mock_sheets_service):
     result = await google__format_cells(
-        mock_factory, spreadsheet_id="ss1", sheet_id=0,
-        start_row=0, end_row=1, start_col=0, end_col=3,
+        mock_factory,
+        spreadsheet_id="ss1",
+        sheet_id=0,
+        start_row=0,
+        end_row=1,
+        start_col=0,
+        end_col=3,
     )
     assert "No formatting" in result
 

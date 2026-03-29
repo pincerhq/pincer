@@ -70,15 +70,11 @@ class MeetArtifactProcessor:
         from googleapiclient.discovery import build  # type: ignore[import-untyped]
 
         creds = await asyncio.to_thread(self._auth.get_credentials)
-        svc = await asyncio.to_thread(
-            build, "meet", "v2", credentials=creds, cache_discovery=False
-        )
+        svc = await asyncio.to_thread(build, "meet", "v2", credentials=creds, cache_discovery=False)
 
         # List transcripts for the conference
         _conf = conference_name
-        result = await asyncio.to_thread(
-            lambda: svc.conferenceRecords().transcripts().list(parent=_conf).execute()
-        )
+        result = await asyncio.to_thread(lambda: svc.conferenceRecords().transcripts().list(parent=_conf).execute())
         transcripts = result.get("transcripts", [])
         if not transcripts:
             return "No transcripts found."
@@ -96,11 +92,7 @@ class MeetArtifactProcessor:
                     if pt:
                         kw["pageToken"] = pt
                     return (  # type: ignore[no-any-return]
-                        svc.conferenceRecords()
-                        .transcripts()
-                        .entries()
-                        .list(**kw)
-                        .execute()
+                        svc.conferenceRecords().transcripts().entries().list(**kw).execute()
                     )
 
                 page_result = await asyncio.to_thread(_fetch)
@@ -178,9 +170,7 @@ class MeetArtifactProcessor:
         """
         docs_svc = await self._factory.get("docs")
         _did = docs_document_id
-        doc = await asyncio.to_thread(
-            lambda: docs_svc.documents().get(documentId=_did).execute()
-        )
+        doc = await asyncio.to_thread(lambda: docs_svc.documents().get(documentId=_did).execute())
 
         content = doc.get("body", {}).get("content", [])
         text_parts: list[str] = []
@@ -210,15 +200,11 @@ class MeetArtifactProcessor:
         from googleapiclient.discovery import build  # type: ignore[import-untyped]
 
         creds = await asyncio.to_thread(self._auth.get_credentials)
-        svc = await asyncio.to_thread(
-            build, "meet", "v2", credentials=creds, cache_discovery=False
-        )
+        svc = await asyncio.to_thread(build, "meet", "v2", credentials=creds, cache_discovery=False)
 
         # Get conference record
         _conf = conference_name
-        record = await asyncio.to_thread(
-            lambda: svc.conferenceRecords().get(name=_conf).execute()
-        )
+        record = await asyncio.to_thread(lambda: svc.conferenceRecords().get(name=_conf).execute())
 
         # Fetch all participants (paginated)
         all_participants: list[dict[str, Any]] = []

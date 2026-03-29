@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+
 def _extract_body(payload: dict[str, Any]) -> str:
     """Recursively extract plain-text body from a Gmail message payload."""
     mime = payload.get("mimeType", "")
@@ -75,6 +76,7 @@ def _build_raw(
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
+
 async def google__list_labels(factory: GoogleServiceFactory) -> str:
     """List all Gmail labels."""
     svc = await factory.get("gmail")
@@ -104,10 +106,14 @@ async def google__list_messages(
     summaries = []
     for ref in msgs:
         msg = await with_backoff(
-            lambda mid=ref["id"]: svc.users().messages().get(  # type: ignore[misc]
-                userId="me", id=mid, format="metadata",
-                metadataHeaders=["Subject", "From", "Date"]
-            ).execute()
+            lambda mid=ref["id"]: (
+                svc.users()
+                .messages()
+                .get(  # type: ignore[misc]
+                    userId="me", id=mid, format="metadata", metadataHeaders=["Subject", "From", "Date"]
+                )
+                .execute()
+            )
         )
         summaries.append(fmt_message_summary(msg))
     more = bool(result.get("nextPageToken"))
@@ -132,10 +138,14 @@ async def google__search_messages(
     summaries = []
     for ref in msgs:
         msg = await with_backoff(
-            lambda mid=ref["id"]: svc.users().messages().get(  # type: ignore[misc]
-                userId="me", id=mid, format="metadata",
-                metadataHeaders=["Subject", "From", "Date"]
-            ).execute()
+            lambda mid=ref["id"]: (
+                svc.users()
+                .messages()
+                .get(  # type: ignore[misc]
+                    userId="me", id=mid, format="metadata", metadataHeaders=["Subject", "From", "Date"]
+                )
+                .execute()
+            )
         )
         summaries.append(fmt_message_summary(msg))
     more = bool(result.get("nextPageToken"))
@@ -149,9 +159,7 @@ async def google__get_message(
 ) -> str:
     """Get full message content (headers + body)."""
     svc = await factory.get("gmail")
-    msg = await with_backoff(
-        lambda: svc.users().messages().get(userId="me", id=message_id, format="full").execute()
-    )
+    msg = await with_backoff(lambda: svc.users().messages().get(userId="me", id=message_id, format="full").execute())
     body = _extract_body(msg.get("payload", {}))[:max_body_chars]
     return fmt_message_full(msg, body)
 
@@ -163,9 +171,7 @@ async def google__get_thread(
 ) -> str:
     """Get a full conversation thread."""
     svc = await factory.get("gmail")
-    thread = await with_backoff(
-        lambda: svc.users().threads().get(userId="me", id=thread_id, format="full").execute()
-    )
+    thread = await with_backoff(lambda: svc.users().threads().get(userId="me", id=thread_id, format="full").execute())
     messages = thread.get("messages", [])
     if not messages:
         return f"Thread {thread_id} is empty."
@@ -184,9 +190,7 @@ async def google__get_attachment(
     """Get attachment metadata and base64-encoded content."""
     svc = await factory.get("gmail")
     att = await with_backoff(
-        lambda: svc.users().messages().attachments().get(
-            userId="me", messageId=message_id, id=attachment_id
-        ).execute()
+        lambda: svc.users().messages().attachments().get(userId="me", messageId=message_id, id=attachment_id).execute()
     )
     size = att.get("size", 0)
     data = att.get("data", "")
@@ -206,7 +210,7 @@ async def google__send_message(
     svc = await factory.get("gmail")
     raw = _build_raw(to, subject, body, cc=cc, bcc=bcc, body_type=body_type)
     await with_backoff(lambda: svc.users().messages().send(userId="me", body={"raw": raw}).execute())
-    return f"Email sent to {to}: \"{subject}\""
+    return f'Email sent to {to}: "{subject}"'
 
 
 async def google__reply_to_message(
@@ -218,10 +222,17 @@ async def google__reply_to_message(
     """Reply to a message (in-thread)."""
     svc = await factory.get("gmail")
     orig = await with_backoff(
-        lambda: svc.users().messages().get(
-            userId="me", id=message_id, format="metadata",
-            metadataHeaders=["Subject", "From", "Message-ID", "References"]
-        ).execute()
+        lambda: (
+            svc.users()
+            .messages()
+            .get(
+                userId="me",
+                id=message_id,
+                format="metadata",
+                metadataHeaders=["Subject", "From", "Message-ID", "References"],
+            )
+            .execute()
+        )
     )
     hdrs = {h["name"]: h["value"] for h in orig.get("payload", {}).get("headers", [])}
     to = hdrs.get("From", "")
@@ -245,10 +256,17 @@ async def google__reply_all(
     """Reply-all to a message."""
     svc = await factory.get("gmail")
     orig = await with_backoff(
-        lambda: svc.users().messages().get(
-            userId="me", id=message_id, format="metadata",
-            metadataHeaders=["Subject", "From", "To", "Cc", "Message-ID", "References"]
-        ).execute()
+        lambda: (
+            svc.users()
+            .messages()
+            .get(
+                userId="me",
+                id=message_id,
+                format="metadata",
+                metadataHeaders=["Subject", "From", "To", "Cc", "Message-ID", "References"],
+            )
+            .execute()
+        )
     )
     hdrs = {h["name"]: h["value"] for h in orig.get("payload", {}).get("headers", [])}
     original_from = hdrs.get("From", "")
@@ -274,9 +292,7 @@ async def google__forward_message(
 ) -> str:
     """Forward a message to a new recipient."""
     svc = await factory.get("gmail")
-    orig = await with_backoff(
-        lambda: svc.users().messages().get(userId="me", id=message_id, format="full").execute()
-    )
+    orig = await with_backoff(lambda: svc.users().messages().get(userId="me", id=message_id, format="full").execute())
     hdrs = {h["name"]: h["value"] for h in orig.get("payload", {}).get("headers", [])}
     subject = "Fwd: " + hdrs.get("Subject", "")
     body = _extract_body(orig.get("payload", {}))
@@ -285,7 +301,7 @@ async def google__forward_message(
     fwd_body = prefix + body
     raw = _build_raw(to, subject, fwd_body)
     await with_backoff(lambda: svc.users().messages().send(userId="me", body={"raw": raw}).execute())
-    return f"Forwarded to {to}: \"{subject}\""
+    return f'Forwarded to {to}: "{subject}"'
 
 
 async def google__create_draft(
@@ -302,7 +318,7 @@ async def google__create_draft(
     result = await with_backoff(
         lambda: svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
     )
-    return f"Draft created (id={result.get('id', '')}) to {to}: \"{subject}\""
+    return f'Draft created (id={result.get("id", "")}) to {to}: "{subject}"'
 
 
 async def google__send_draft(
@@ -311,9 +327,7 @@ async def google__send_draft(
 ) -> str:
     """Send an existing draft."""
     svc = await factory.get("gmail")
-    result = await with_backoff(
-        lambda: svc.users().drafts().send(userId="me", body={"id": draft_id}).execute()
-    )
+    result = await with_backoff(lambda: svc.users().drafts().send(userId="me", body={"id": draft_id}).execute())
     return f"Draft {draft_id} sent (message id={result.get('id', '')})"
 
 
@@ -344,9 +358,7 @@ async def google__mark_as_read(
     """Mark a message as read."""
     svc = await factory.get("gmail")
     await with_backoff(
-        lambda: svc.users().messages().modify(
-            userId="me", id=message_id, body={"removeLabelIds": ["UNREAD"]}
-        ).execute()
+        lambda: svc.users().messages().modify(userId="me", id=message_id, body={"removeLabelIds": ["UNREAD"]}).execute()
     )
     return f"Message {message_id} marked as read."
 
@@ -358,9 +370,7 @@ async def google__mark_as_unread(
     """Mark a message as unread."""
     svc = await factory.get("gmail")
     await with_backoff(
-        lambda: svc.users().messages().modify(
-            userId="me", id=message_id, body={"addLabelIds": ["UNREAD"]}
-        ).execute()
+        lambda: svc.users().messages().modify(userId="me", id=message_id, body={"addLabelIds": ["UNREAD"]}).execute()
     )
     return f"Message {message_id} marked as unread."
 
@@ -373,9 +383,7 @@ async def google__add_label(
     """Apply a label to a message."""
     svc = await factory.get("gmail")
     await with_backoff(
-        lambda: svc.users().messages().modify(
-            userId="me", id=message_id, body={"addLabelIds": [label_id]}
-        ).execute()
+        lambda: svc.users().messages().modify(userId="me", id=message_id, body={"addLabelIds": [label_id]}).execute()
     )
     return f"Label {label_id} added to message {message_id}."
 
@@ -388,9 +396,7 @@ async def google__remove_label(
     """Remove a label from a message."""
     svc = await factory.get("gmail")
     await with_backoff(
-        lambda: svc.users().messages().modify(
-            userId="me", id=message_id, body={"removeLabelIds": [label_id]}
-        ).execute()
+        lambda: svc.users().messages().modify(userId="me", id=message_id, body={"removeLabelIds": [label_id]}).execute()
     )
     return f"Label {label_id} removed from message {message_id}."
 
@@ -404,19 +410,25 @@ async def google__create_label(
     """Create a new Gmail label."""
     svc = await factory.get("gmail")
     result = await with_backoff(
-        lambda: svc.users().labels().create(
-            userId="me",
-            body={
-                "name": name,
-                "labelListVisibility": label_list_visibility,
-                "messageListVisibility": message_list_visibility,
-            },
-        ).execute()
+        lambda: (
+            svc.users()
+            .labels()
+            .create(
+                userId="me",
+                body={
+                    "name": name,
+                    "labelListVisibility": label_list_visibility,
+                    "messageListVisibility": message_list_visibility,
+                },
+            )
+            .execute()
+        )
     )
-    return f"Label created: \"{name}\" (id={result.get('id', '')})"
+    return f'Label created: "{name}" (id={result.get("id", "")})'
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
+
 
 def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 19 Gmail tools in *registry*. Returns count."""
@@ -424,9 +436,11 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
         """Wrap a tool function to inject the factory."""
         import functools
+
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
+
         return wrapper
 
     registry.register(

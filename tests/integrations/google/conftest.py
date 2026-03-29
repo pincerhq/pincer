@@ -29,15 +29,17 @@ def mock_credentials(tmp_path):
 
     # Minimal OAuth client secrets format
     creds_path.write_text(
-        json.dumps({
-            "installed": {
-                "client_id": "test-client-id.apps.googleusercontent.com",
-                "client_secret": "test-secret",
-                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": ["http://localhost"],
+        json.dumps(
+            {
+                "installed": {
+                    "client_id": "test-client-id.apps.googleusercontent.com",
+                    "client_secret": "test-secret",
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "redirect_uris": ["http://localhost"],
+                }
             }
-        })
+        )
     )
     from pincer.integrations.google.auth import ALL_SCOPES
 
@@ -45,15 +47,17 @@ def mock_credentials(tmp_path):
     # check in get_credentials() passes and individual tests can exercise the
     # token-validity / refresh branches.
     token_path.write_text(
-        json.dumps({
-            "token": "ya29.fake_access_token",
-            "refresh_token": "1//fake_refresh_token",
-            "token_uri": "https://oauth2.googleapis.com/token",
-            "client_id": "test-client-id.apps.googleusercontent.com",
-            "client_secret": "test-secret",
-            "scopes": ALL_SCOPES,
-            "expiry": "2099-01-01T00:00:00Z",
-        })
+        json.dumps(
+            {
+                "token": "ya29.fake_access_token",
+                "refresh_token": "1//fake_refresh_token",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "test-client-id.apps.googleusercontent.com",
+                "client_secret": "test-secret",
+                "scopes": ALL_SCOPES,
+                "expiry": "2099-01-01T00:00:00Z",
+            }
+        )
     )
     os.chmod(token_path, 0o600)
     return creds_path, token_path

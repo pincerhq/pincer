@@ -51,9 +51,7 @@ async def test_list_drive_files_empty(mock_factory, mock_drive_service):
 
 
 async def test_search_drive_files(mock_factory, mock_drive_service):
-    mock_drive_service.files().list().execute.return_value = {
-        "files": [_file("f1", "Q1 Budget.xlsx")]
-    }
+    mock_drive_service.files().list().execute.return_value = {"files": [_file("f1", "Q1 Budget.xlsx")]}
     result = await google__search_drive_files(
         mock_factory, query='name contains "budget" type:spreadsheet sharedWithMe'
     )
@@ -69,8 +67,11 @@ async def test_search_drive_files_none(mock_factory, mock_drive_service):
 
 async def test_get_file_metadata(mock_factory, mock_drive_service):
     mock_drive_service.files().get().execute.return_value = {
-        "id": "f1", "name": "Report.pdf", "mimeType": "application/pdf",
-        "size": "10240", "createdTime": "2026-01-01T00:00:00Z",
+        "id": "f1",
+        "name": "Report.pdf",
+        "mimeType": "application/pdf",
+        "size": "10240",
+        "createdTime": "2026-01-01T00:00:00Z",
         "modifiedTime": "2026-03-20T00:00:00Z",
         "owners": [{"emailAddress": "alice@example.com"}],
         "shared": True,
@@ -95,9 +96,7 @@ async def test_export_google_doc(mock_factory, mock_drive_service):
 
 
 async def test_list_shared_drives(mock_factory, mock_drive_service):
-    mock_drive_service.drives().list().execute.return_value = {
-        "drives": [{"id": "d1", "name": "Team Drive"}]
-    }
+    mock_drive_service.drives().list().execute.return_value = {"drives": [{"id": "d1", "name": "Team Drive"}]}
     result = await google__list_shared_drives(mock_factory)
     assert "Team Drive" in result
 
@@ -122,9 +121,7 @@ async def test_get_file_permissions(mock_factory, mock_drive_service):
 
 
 async def test_list_recent_files(mock_factory, mock_drive_service):
-    mock_drive_service.files().list().execute.return_value = {
-        "files": [_file("f1", "recent.docx")]
-    }
+    mock_drive_service.files().list().execute.return_value = {"files": [_file("f1", "recent.docx")]}
     result = await google__list_recent_files(mock_factory)
     assert "recent.docx" in result
 
@@ -136,10 +133,13 @@ async def test_upload_file_not_found(mock_factory, mock_drive_service, tmp_path)
 
 async def test_upload_file_success(mock_factory, mock_drive_service, tmp_path):
     from unittest.mock import MagicMock, patch
+
     test_file = tmp_path / "test.txt"
     test_file.write_text("hello")
     mock_drive_service.files().create().execute.return_value = {
-        "id": "uploaded1", "name": "test.txt", "webViewLink": "https://drive.google.com/file/d/uploaded1/view"
+        "id": "uploaded1",
+        "name": "test.txt",
+        "webViewLink": "https://drive.google.com/file/d/uploaded1/view",
     }
     with patch("googleapiclient.http.MediaFileUpload", MagicMock()):
         result = await google__upload_file(mock_factory, local_path=str(test_file))
@@ -148,7 +148,9 @@ async def test_upload_file_success(mock_factory, mock_drive_service, tmp_path):
 
 async def test_create_folder(mock_factory, mock_drive_service):
     mock_drive_service.files().create().execute.return_value = {
-        "id": "folder1", "name": "Projects", "webViewLink": "https://drive.google.com/drive/folders/folder1"
+        "id": "folder1",
+        "name": "Projects",
+        "webViewLink": "https://drive.google.com/drive/folders/folder1",
     }
     result = await google__create_folder(mock_factory, name="Projects")
     assert "Projects" in result
@@ -170,8 +172,9 @@ async def test_rename_file(mock_factory, mock_drive_service):
 
 async def test_copy_file(mock_factory, mock_drive_service):
     mock_drive_service.files().copy().execute.return_value = {
-        "id": "copy1", "name": "Copy of budget.xlsx",
-        "webViewLink": "https://drive.google.com/file/d/copy1/view"
+        "id": "copy1",
+        "name": "Copy of budget.xlsx",
+        "webViewLink": "https://drive.google.com/file/d/copy1/view",
     }
     result = await google__copy_file(mock_factory, file_id="f1")
     assert "copy1" in result
@@ -185,9 +188,7 @@ async def test_trash_file(mock_factory, mock_drive_service):
 
 async def test_share_file_with_email(mock_factory, mock_drive_service):
     mock_drive_service.permissions().create().execute.return_value = {"id": "perm1"}
-    result = await google__share_file(
-        mock_factory, file_id="f1", email="carol@example.com", role="writer"
-    )
+    result = await google__share_file(mock_factory, file_id="f1", email="carol@example.com", role="writer")
     assert "carol@example.com" in result
 
 

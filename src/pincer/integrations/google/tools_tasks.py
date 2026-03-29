@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
+
 async def google__list_task_lists(factory: GoogleServiceFactory) -> str:
     """List all task lists."""
     svc = await factory.get("tasks")
@@ -42,11 +43,15 @@ async def google__list_tasks(
     """List tasks in a task list."""
     svc = await factory.get("tasks")
     result = await with_backoff(
-        lambda: svc.tasks().list(
-            tasklist=tasklist_id,
-            showCompleted=show_completed,
-            maxResults=max_results,
-        ).execute()
+        lambda: (
+            svc.tasks()
+            .list(
+                tasklist=tasklist_id,
+                showCompleted=show_completed,
+                maxResults=max_results,
+            )
+            .execute()
+        )
     )
     tasks = result.get("items", [])
     if not tasks:
@@ -62,9 +67,7 @@ async def google__get_task(
 ) -> str:
     """Get details of a specific task."""
     svc = await factory.get("tasks")
-    task = await with_backoff(
-        lambda: svc.tasks().get(tasklist=tasklist_id, task=task_id).execute()
-    )
+    task = await with_backoff(lambda: svc.tasks().get(tasklist=tasklist_id, task=task_id).execute())
     return fmt_task(task)
 
 
@@ -82,9 +85,7 @@ async def google__create_task(
         body["notes"] = notes
     if due:
         body["due"] = due  # RFC 3339 format
-    result = await with_backoff(
-        lambda: svc.tasks().insert(tasklist=tasklist_id, body=body).execute()
-    )
+    result = await with_backoff(lambda: svc.tasks().insert(tasklist=tasklist_id, body=body).execute())
     return f"Task created: '{result.get('title', title)}' (id={result.get('id', '')})"
 
 
@@ -99,9 +100,7 @@ async def google__update_task(
 ) -> str:
     """Update task fields."""
     svc = await factory.get("tasks")
-    task = await with_backoff(
-        lambda: svc.tasks().get(tasklist=tasklist_id, task=task_id).execute()
-    )
+    task = await with_backoff(lambda: svc.tasks().get(tasklist=tasklist_id, task=task_id).execute())
     if title:
         task["title"] = title
     if notes:
@@ -110,9 +109,7 @@ async def google__update_task(
         task["due"] = due
     if status:
         task["status"] = status
-    result = await with_backoff(
-        lambda: svc.tasks().update(tasklist=tasklist_id, task=task_id, body=task).execute()
-    )
+    result = await with_backoff(lambda: svc.tasks().update(tasklist=tasklist_id, task=task_id, body=task).execute())
     return f"Task updated: '{result.get('title', task_id)}'"
 
 
@@ -123,13 +120,9 @@ async def google__complete_task(
 ) -> str:
     """Mark a task as completed."""
     svc = await factory.get("tasks")
-    task = await with_backoff(
-        lambda: svc.tasks().get(tasklist=tasklist_id, task=task_id).execute()
-    )
+    task = await with_backoff(lambda: svc.tasks().get(tasklist=tasklist_id, task=task_id).execute())
     task["status"] = "completed"
-    result = await with_backoff(
-        lambda: svc.tasks().update(tasklist=tasklist_id, task=task_id, body=task).execute()
-    )
+    result = await with_backoff(lambda: svc.tasks().update(tasklist=tasklist_id, task=task_id, body=task).execute())
     return f"Task completed: '{result.get('title', task_id)}'"
 
 
@@ -150,13 +143,12 @@ async def google__create_task_list(
 ) -> str:
     """Create a new task list."""
     svc = await factory.get("tasks")
-    result = await with_backoff(
-        lambda: svc.tasklists().insert(body={"title": title}).execute()
-    )
+    result = await with_backoff(lambda: svc.tasklists().insert(body={"title": title}).execute())
     return f"Task list created: '{result.get('title', title)}' (id={result.get('id', '')})"
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
+
 
 def register_tasks_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 8 Tasks tools. Returns count."""
@@ -165,6 +157,7 @@ def register_tasks_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
+
         return wrapper
 
     registry.register(

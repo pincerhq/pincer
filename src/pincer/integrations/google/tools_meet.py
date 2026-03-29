@@ -118,9 +118,7 @@ async def google__get_meet_space(
 
     active_conf = space.get("activeConference", {})
     active_str = (
-        f"Yes — {active_conf.get('conferenceRecord', 'in progress')}"
-        if active_conf
-        else "No active conference"
+        f"Yes — {active_conf.get('conferenceRecord', 'in progress')}" if active_conf else "No active conference"
     )
 
     cfg = space.get("config", {})
@@ -166,9 +164,7 @@ async def google__update_meet_space(
 
     _body = {"config": config}
     _mask = ",".join(mask_parts)
-    space = await with_backoff(
-        lambda: svc.spaces().patch(name=space_name, body=_body, updateMask=_mask).execute()
-    )
+    space = await with_backoff(lambda: svc.spaces().patch(name=space_name, body=_body, updateMask=_mask).execute())
     new_access = space.get("config", {}).get("accessType", "?")
     return f"Space {space_name} updated. Access: {new_access}"
 
@@ -180,9 +176,7 @@ async def google__end_active_conference(
     """End the active conference in a meeting space — disconnects all participants."""
     svc = await factory.get("meet")
     _name = space_name
-    await with_backoff(
-        lambda: svc.spaces().endActiveConference(name=_name, body={}).execute()
-    )
+    await with_backoff(lambda: svc.spaces().endActiveConference(name=_name, body={}).execute())
     return f"Active conference in {space_name} has been ended. All participants disconnected."
 
 
@@ -224,9 +218,7 @@ async def google__configure_meet_moderation(
     _name = space_name
 
     try:
-        await with_backoff(
-            lambda: svc.spaces().patch(name=_name, body=_body, updateMask=_mask).execute()
-        )
+        await with_backoff(lambda: svc.spaces().patch(name=_name, body=_body, updateMask=_mask).execute())
         parts = [f"  {k}: {v}" for k, v in moderation.items()]
         return f"Moderation configured for {space_name}:\n" + "\n".join(parts)
     except Exception as exc:
@@ -274,9 +266,7 @@ async def google__configure_meet_artifacts(
     _mask = ",".join(mask_parts)
     _name = space_name
 
-    await with_backoff(
-        lambda: svc.spaces().patch(name=_name, body=_body, updateMask=_mask).execute()
-    )
+    await with_backoff(lambda: svc.spaces().patch(name=_name, body=_body, updateMask=_mask).execute())
 
     settings = []
     if auto_recording is not None:
@@ -304,14 +294,9 @@ async def google__add_meet_member(
     _body = {"role": role, "signerUser": {"user": f"users/{email}"}}
 
     try:
-        member = await with_backoff(
-            lambda: svc.spaces().members().create(parent=_parent, body=_body).execute()
-        )
+        member = await with_backoff(lambda: svc.spaces().members().create(parent=_parent, body=_body).execute())
         return (
-            f"Member added to {space_name}.\n"
-            f"  Email: {email}\n"
-            f"  Role: {role}\n"
-            f"  Member ID: {member.get('name', '?')}"
+            f"Member added to {space_name}.\n  Email: {email}\n  Role: {role}\n  Member ID: {member.get('name', '?')}"
         )
     except Exception as exc:
         logger.warning("Members API unavailable (Developer Preview): %s", exc)
@@ -339,8 +324,7 @@ async def google__remove_meet_member(
     except Exception as exc:
         logger.warning("Members API unavailable (Developer Preview): %s", exc)
         return (
-            "The Members API is a Developer Preview feature and may not be available "
-            f"for your account.\nError: {exc}"
+            f"The Members API is a Developer Preview feature and may not be available for your account.\nError: {exc}"
         )
 
 
@@ -371,10 +355,7 @@ async def google__list_conference_records(
         start = _fmt_ts(rec.get("startTime"))
         end = _fmt_ts(rec.get("endTime")) if rec.get("endTime") else "ongoing"
         lines.append(
-            f"  {rec.get('name', '?')}\n"
-            f"    Space: {rec.get('space', '?')}\n"
-            f"    Start: {start}\n"
-            f"    End:   {end}"
+            f"  {rec.get('name', '?')}\n    Space: {rec.get('space', '?')}\n    Start: {start}\n    End:   {end}"
         )
 
     more = bool(result.get("nextPageToken"))
@@ -408,9 +389,7 @@ async def google__list_conference_participants(
     svc = await factory.get("meet")
     _parent = conference_name
     result = await with_backoff(
-        lambda: svc.conferenceRecords().participants().list(
-            parent=_parent, pageSize=max_results
-        ).execute()
+        lambda: svc.conferenceRecords().participants().list(parent=_parent, pageSize=max_results).execute()
     )
     participants = result.get("participants", [])
 
@@ -436,11 +415,7 @@ async def google__list_conference_participants(
         leave = _fmt_ts(p.get("latestEndTime")) if p.get("latestEndTime") else "still in meeting"
         kind_str = f" ({kind})" if kind else ""
 
-        lines.append(
-            f"  {identity}{kind_str}\n"
-            f"    Joined: {join} → Left: {leave}\n"
-            f"    ID: {p.get('name', '?')}"
-        )
+        lines.append(f"  {identity}{kind_str}\n    Joined: {join} → Left: {leave}\n    ID: {p.get('name', '?')}")
 
     more = bool(result.get("nextPageToken"))
     return fmt_list(lines, header=f"Participants ({len(lines)}):", more=more)
@@ -453,9 +428,7 @@ async def google__get_participant_details(
     """Get detailed info for a conference participant including earliest/latest times."""
     svc = await factory.get("meet")
     _name = participant_name
-    p = await with_backoff(
-        lambda: svc.conferenceRecords().participants().get(name=_name).execute()
-    )
+    p = await with_backoff(lambda: svc.conferenceRecords().participants().get(name=_name).execute())
 
     if p.get("signerUser"):
         identity = p["signerUser"].get("displayName", "?")
@@ -489,9 +462,7 @@ async def google__list_participant_sessions(
     svc = await factory.get("meet")
     _parent = participant_name
     result = await with_backoff(
-        lambda: svc.conferenceRecords().participants().participantSessions().list(
-            parent=_parent
-        ).execute()
+        lambda: svc.conferenceRecords().participants().participantSessions().list(parent=_parent).execute()
     )
     sessions = result.get("participantSessions", [])
 
@@ -521,9 +492,7 @@ async def google__list_meet_recordings(
     """
     svc = await factory.get("meet")
     _parent = conference_name
-    result = await with_backoff(
-        lambda: svc.conferenceRecords().recordings().list(parent=_parent).execute()
-    )
+    result = await with_backoff(lambda: svc.conferenceRecords().recordings().list(parent=_parent).execute())
     recordings = result.get("recordings", [])
 
     if not recordings:
@@ -542,11 +511,7 @@ async def google__list_meet_recordings(
         if drive.get("exportUri"):
             drive_str += f"\n    Export URI: {drive['exportUri']}"
 
-        lines.append(
-            f"  {r.get('name', '?')}\n"
-            f"    State: {state}\n"
-            f"    Time:  {start} → {end}{drive_str}"
-        )
+        lines.append(f"  {r.get('name', '?')}\n    State: {state}\n    Time:  {start} → {end}{drive_str}")
 
     return fmt_list(lines, header=f"Recordings ({len(lines)}):")
 
@@ -558,9 +523,7 @@ async def google__get_meet_recording(
     """Get details of a specific recording including Drive file ID for download."""
     svc = await factory.get("meet")
     _name = recording_name
-    r = await with_backoff(
-        lambda: svc.conferenceRecords().recordings().get(name=_name).execute()
-    )
+    r = await with_backoff(lambda: svc.conferenceRecords().recordings().get(name=_name).execute())
 
     drive = r.get("driveDestination", {})
     end = _fmt_ts(r.get("endTime")) if r.get("endTime") else "processing"
@@ -602,10 +565,7 @@ async def google__download_meet_recording(
         size_mb = len(buf.getvalue()) / 1_048_576
         return f"Recording downloaded to {local_path} ({size_mb:.1f} MB)"
     except Exception as exc:
-        return (
-            f"Download failed: {exc}\n"
-            "Use google__get_meet_recording to get the export URI and download manually."
-        )
+        return f"Download failed: {exc}\nUse google__get_meet_recording to get the export URI and download manually."
 
 
 async def google__check_recording_status(
@@ -618,9 +578,7 @@ async def google__check_recording_status(
     """
     svc = await factory.get("meet")
     _name = recording_name
-    r = await with_backoff(
-        lambda: svc.conferenceRecords().recordings().get(name=_name).execute()
-    )
+    r = await with_backoff(lambda: svc.conferenceRecords().recordings().get(name=_name).execute())
 
     state = r.get("state", "?")
     drive_file = r.get("driveDestination", {}).get("file", "")
@@ -643,9 +601,7 @@ async def google__list_meet_transcripts(
     """List transcripts for a conference (requires transcription to have been enabled)."""
     svc = await factory.get("meet")
     _parent = conference_name
-    result = await with_backoff(
-        lambda: svc.conferenceRecords().transcripts().list(parent=_parent).execute()
-    )
+    result = await with_backoff(lambda: svc.conferenceRecords().transcripts().list(parent=_parent).execute())
     transcripts = result.get("transcripts", [])
 
     if not transcripts:
@@ -659,11 +615,7 @@ async def google__list_meet_transcripts(
         docs = t.get("docsDestination", {})
         docs_str = f"\n    Docs document: {docs.get('document', '?')}" if docs else ""
 
-        lines.append(
-            f"  {t.get('name', '?')}\n"
-            f"    State: {state}\n"
-            f"    Time:  {start} → {end}{docs_str}"
-        )
+        lines.append(f"  {t.get('name', '?')}\n    State: {state}\n    Time:  {start} → {end}{docs_str}")
 
     return fmt_list(lines, header=f"Transcripts ({len(lines)}):")
 
@@ -675,9 +627,7 @@ async def google__get_meet_transcript(
     """Get details of a specific transcript including the Docs document ID."""
     svc = await factory.get("meet")
     _name = transcript_name
-    t = await with_backoff(
-        lambda: svc.conferenceRecords().transcripts().get(name=_name).execute()
-    )
+    t = await with_backoff(lambda: svc.conferenceRecords().transcripts().get(name=_name).execute())
 
     docs = t.get("docsDestination", {})
     end = _fmt_ts(t.get("endTime")) if t.get("endTime") else "processing"
@@ -701,9 +651,7 @@ async def google__list_transcript_entries(
     svc = await factory.get("meet")
     _parent = transcript_name
     result = await with_backoff(
-        lambda: svc.conferenceRecords().transcripts().entries().list(
-            parent=_parent, pageSize=max_results
-        ).execute()
+        lambda: svc.conferenceRecords().transcripts().entries().list(parent=_parent, pageSize=max_results).execute()
     )
     entries = result.get("transcriptEntries", [])
 
@@ -727,9 +675,7 @@ async def google__get_transcript_entry(
     """Get a single transcript entry: speaker, text, language, timestamps."""
     svc = await factory.get("meet")
     _name = entry_name
-    e = await with_backoff(
-        lambda: svc.conferenceRecords().transcripts().entries().get(name=_name).execute()
-    )
+    e = await with_backoff(lambda: svc.conferenceRecords().transcripts().entries().get(name=_name).execute())
 
     return (
         f"Entry:    {e.get('name', '?')}\n"
@@ -755,9 +701,7 @@ async def google__summarize_meet_transcript(
 
     # 1. List all transcripts for this conference
     _conf = conference_name
-    transcripts_result = await with_backoff(
-        lambda: svc.conferenceRecords().transcripts().list(parent=_conf).execute()
-    )
+    transcripts_result = await with_backoff(lambda: svc.conferenceRecords().transcripts().list(parent=_conf).execute())
     transcripts = transcripts_result.get("transcripts", [])
     if not transcripts:
         return "No transcripts found. Was transcription enabled during the meeting?"
@@ -765,9 +709,7 @@ async def google__summarize_meet_transcript(
     # 2. Build a participant display-name map
     _conf2 = conference_name
     parts_result = await with_backoff(
-        lambda: svc.conferenceRecords().participants().list(
-            parent=_conf2, pageSize=100
-        ).execute()
+        lambda: svc.conferenceRecords().participants().list(parent=_conf2, pageSize=100).execute()
     )
     participant_names: dict[str, str] = {}
     for p in parts_result.get("participants", []):
@@ -812,11 +754,7 @@ async def google__summarize_meet_transcript(
     lines: list[str] = []
     for entry in all_entries:
         participant_ref = entry.get("participant", "")
-        display_name = (
-            entry.get("participantDisplayName")
-            or participant_names.get(participant_ref)
-            or "Unknown"
-        )
+        display_name = entry.get("participantDisplayName") or participant_names.get(participant_ref) or "Unknown"
         speakers_seen.add(display_name)
         ts = _fmt_ts(entry.get("startTime"))
         lines.append(f"[{ts}] {display_name}: {entry.get('text', '')}")
@@ -851,22 +789,15 @@ async def google__list_smart_notes(
     _parent = conference_name
 
     try:
-        result = await with_backoff(
-            lambda: svc.conferenceRecords().transcripts().list(parent=_parent).execute()
-        )
+        result = await with_backoff(lambda: svc.conferenceRecords().transcripts().list(parent=_parent).execute())
         transcripts = result.get("transcripts", [])
 
         # Smart notes have a smartNotesDestination field or state SMART_NOTES_SAVED
-        smart_notes = [
-            t for t in transcripts
-            if t.get("smartNotesDestination") or "SMART_NOTES" in t.get("state", "")
-        ]
+        smart_notes = [t for t in transcripts if t.get("smartNotesDestination") or "SMART_NOTES" in t.get("state", "")]
 
         if not smart_notes:
             if not transcripts:
-                return (
-                    "No smart notes found. Enable auto_smart_notes=True when creating the space."
-                )
+                return "No smart notes found. Enable auto_smart_notes=True when creating the space."
             lines = [f"  {t.get('name', '?')} (state: {t.get('state', '?')})" for t in transcripts]
             return (
                 "No smart notes found (requires auto_smart_notes=True on the space).\n"
@@ -877,11 +808,7 @@ async def google__list_smart_notes(
         for n in smart_notes:
             docs: Any = n.get("smartNotesDestination") or n.get("docsDestination", {})
             doc_id = docs.get("document", "?") if isinstance(docs, dict) else str(docs)
-            lines.append(
-                f"  {n.get('name', '?')}\n"
-                f"    State: {n.get('state', '?')}\n"
-                f"    Docs document: {doc_id}"
-            )
+            lines.append(f"  {n.get('name', '?')}\n    State: {n.get('state', '?')}\n    Docs document: {doc_id}")
         return fmt_list(lines, header=f"Smart notes ({len(lines)}):")
     except Exception as exc:
         return (
@@ -899,9 +826,7 @@ async def google__get_smart_notes(
     _name = transcript_name
 
     try:
-        t = await with_backoff(
-            lambda: svc.conferenceRecords().transcripts().get(name=_name).execute()
-        )
+        t = await with_backoff(lambda: svc.conferenceRecords().transcripts().get(name=_name).execute())
         docs: Any = t.get("smartNotesDestination") or t.get("docsDestination", {})
         if not docs:
             return "No smart notes document found for this transcript."
@@ -982,6 +907,7 @@ def register_meet_tools(
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
+
         return wrapper
 
     def _hs(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -991,6 +917,7 @@ def register_meet_tools(
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, _sub, **kwargs)
+
         return wrapper
 
     # ── Space Management (8) ──────────────────────────────────────────────────
@@ -1386,8 +1313,7 @@ def register_meet_tools(
     registry.register(
         name="google__list_smart_notes",
         description=(
-            "List AI-generated smart notes for a conference "
-            "(requires auto_smart_notes=True on the meeting space)."
+            "List AI-generated smart notes for a conference (requires auto_smart_notes=True on the meeting space)."
         ),
         handler=_h(google__list_smart_notes),
         parameters={

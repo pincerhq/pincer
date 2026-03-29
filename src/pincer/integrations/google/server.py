@@ -34,9 +34,7 @@ def _build_fastmcp(auth: GoogleAuth) -> Any:
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:
-        raise RuntimeError(
-            "mcp package required: uv pip install 'pincer-agent[mcp]'"
-        ) from exc
+        raise RuntimeError("mcp package required: uv pip install 'pincer-agent[mcp]'") from exc
 
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
@@ -45,6 +43,7 @@ def _build_fastmcp(auth: GoogleAuth) -> Any:
     registry = ToolRegistry()
 
     from pincer.integrations.google import register_all_tools
+
     count = register_all_tools(registry, factory)
 
     fmcp = FastMCP("Pincer Google Workspace", stateless_http=True)
@@ -105,6 +104,7 @@ class GoogleWorkspaceMCPServer:
         if self._serve_task:
             self._serve_task.cancel()
             import contextlib
+
             with contextlib.suppress(asyncio.CancelledError):
                 await self._serve_task
             self._serve_task = None
