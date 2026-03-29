@@ -1,6 +1,6 @@
 # Pincer CLI Reference
 
-Complete command reference across all sprints (1-5).
+Complete command reference across all sprints (1–8).
 
 ## Global
 
@@ -21,7 +21,8 @@ Complete command reference across all sprints (1-5).
 | `pincer chat` | CLI chat interface (no messaging app needed) | 4 |
 | `pincer config` | Show current configuration (masked secrets) | 1 |
 | `pincer pair-whatsapp` | Pair WhatsApp via QR code | 3 |
-| `pincer auth-google` | Google Calendar OAuth consent flow | 3 |
+| `pincer auth-google` | Google Calendar OAuth consent flow (legacy, 3 tools) | 3 |
+| `pincer setup-google` | Google Workspace OAuth consent flow (85 tools) | 8 |
 
 ## Cost & Budget
 
@@ -77,6 +78,29 @@ Complete command reference across all sprints (1-5).
 | Command | Description | Sprint |
 |---------|-------------|--------|
 | `pincer schedule list` | List all scheduled tasks | 5 |
+
+## Google Workspace
+
+| Command | Description | Sprint |
+|---------|-------------|--------|
+| `pincer setup-google` | One-time OAuth consent — opens browser, saves token to `~/.pincer/google_workspace_token.json` | 8 |
+
+### What `pincer setup-google` does
+
+1. Verifies `~/.pincer/google_credentials.json` (or `data/google_credentials.json`) — shows instructions if missing
+2. Launches `InstalledAppFlow` — opens browser at Google consent page
+3. Requests all 9 scopes covering Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, and Contacts/People API
+4. Saves the token with `chmod 0o600`
+5. Reports: `Google Workspace tools enabled (85 tools)`
+
+After setup, the 85 `google__*` tools are auto-registered every time `pincer run` is started — no further configuration needed.
+
+### Getting `google_credentials.json`
+
+1. Open [Google Cloud Console](https://console.cloud.google.com)
+2. Create/select a project → APIs & Services → Enable APIs (Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, People)
+3. Credentials → Create → OAuth 2.0 Client ID → Desktop App
+4. Download JSON → save as `~/.pincer/google_credentials.json`
 
 ## Environment Variables
 
