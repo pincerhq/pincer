@@ -1,6 +1,7 @@
 # Pincer — Project Structure
 
-> **Version:** 0.7.4.2 (MCP OAuth 2.1)
+
+> **Version:** 0.8.0 (Google Workspace Sprint Complete)
 > **Date:** March 26, 2026
 > **License:** MIT
 
@@ -21,6 +22,7 @@
 | 7.5 | — | Signal Channel | Signal via signal-cli-rest-api sidecar, WebSocket receive mode |
 | 8 | — | Image Generation + Grok | fal.ai + Gemini image generation, Grok/xAI LLM provider |
 | A0 | Mar 21, 2026 | MCP Architecture | MCPServiceCore, layered shells (embedded + standalone), resources, prompts, sampling, `pincer mcp serve` |
+| 9 | Mar 26, 2026 | Google Workspace | 85-tool native integration (Gmail 19, Calendar 12, Drive 15, Docs 8, Sheets 10, Slides 6, Tasks 8, Contacts 7), `pincer setup-google` |
 
 ---
 
@@ -311,10 +313,28 @@ pincer/
 │   │   ├── bridge.py               # MCP tools → Pincer ToolRegistry bridge
 │   │   └── audit.py                # MCPAuditLogger
 │   │
+│   ├── integrations/               # First-party service integrations
+│   │   └── google/                 # Google Workspace (85 tools)
+│   │       ├── __init__.py         # get_google_factory(), register_all_tools() → 85
+│   │       ├── auth.py             # GoogleAuth (InstalledAppFlow, token cache)
+│   │       ├── service_factory.py  # GoogleServiceFactory (30-min service cache)
+│   │       ├── quota.py            # with_backoff() (429/503/rateLimitExceeded)
+│   │       ├── pagination.py       # collect_pages() (nextPageToken)
+│   │       ├── models.py           # fmt_* formatting helpers
+│   │       ├── tools_gmail.py      # 19 Gmail tools
+│   │       ├── tools_calendar.py   # 12 Calendar tools
+│   │       ├── tools_drive.py      # 15 Drive tools
+│   │       ├── tools_docs.py       # 8 Docs tools
+│   │       ├── tools_sheets.py     # 10 Sheets tools
+│   │       ├── tools_slides.py     # 6 Slides tools
+│   │       ├── tools_tasks.py      # 8 Tasks tools
+│   │       ├── tools_contacts.py   # 7 Contacts/People API tools
+│   │       └── server.py           # Standalone FastMCP server (stdio or HTTP port 18900)
+│   │
 │   └── dashboard/                  # Admin dashboard (stub)
 │       └── __init__.py
 │
-└── tests/                          # Test suite (~1,480 lines)
+└── tests/                          # Test suite (~3,500 lines)
     ├── conftest.py                 # Shared fixtures
     ├── test_agent.py               # Agent core tests
     ├── test_calendar_tool.py       # Calendar tool tests
@@ -327,7 +347,18 @@ pincer/
     ├── test_scheduler.py           # Scheduler tests
     ├── test_telegram.py            # Telegram channel tests
     ├── test_tools.py               # Tool system tests
-    └── test_whatsapp.py            # WhatsApp channel tests
+    ├── test_whatsapp.py            # WhatsApp channel tests
+    └── integrations/
+        └── google/                 # Google Workspace tests (131 tests, all mocked)
+            ├── conftest.py         # Mock fixtures (mock_factory, per-service mocks)
+            ├── test_auth.py        # GoogleAuth unit tests (10)
+            ├── test_tools_gmail.py # Gmail tool tests (19)
+            ├── test_tools_calendar.py # Calendar tool tests (14)
+            ├── test_tools_drive.py # Drive tool tests (17)
+            ├── test_tools_sheets.py # Sheets tool tests (14)
+            ├── test_tools_docs.py  # Docs tool tests (10)
+            ├── test_tools_other.py # Slides + Tasks + Contacts tests (21)
+            └── test_server.py      # Registration + factory tests (9)
 ```
 
 ---
@@ -368,6 +399,7 @@ pincer/
 | `exceptions.py` | Custom exceptions (`BudgetExceededError`, `LLMError`, `ToolNotFoundError`, `ChannelNotConnectedError`) |
 
 | `mcp/` | MCP platform — client (consume external MCP servers) + server (expose Pincer tools via MCP); sandboxed stdio subprocesses; streamable-http transport; OAuth 2.1; audit trail; registry client (MCP Registry + ClawHub); 225 tests |
+| `integrations/google/` | Google Workspace — 85 tools (Gmail 19, Calendar 12, Drive 15, Docs 8, Sheets 10, Slides 6, Tasks 8, Contacts 7); InstalledAppFlow OAuth; 30-min service cache; exponential backoff; pagination; standalone FastMCP server on port 18900; 131 tests |
 
 ### Stubs / Placeholders (Not Yet Implemented)
 
@@ -429,7 +461,8 @@ pincer/
 | `pincer run` | Start the agent (all channels + scheduler) |
 | `pincer config` | Show current configuration |
 | `pincer cost` | Show today's spend |
-| `pincer auth-google` | Run Google Calendar OAuth consent flow |
+| `pincer auth-google` | Run Google Calendar OAuth consent flow (legacy, 3 tools) |
+| `pincer setup-google` | Run Google Workspace OAuth consent flow (85 tools) |
 | `pincer pair-whatsapp` | Pair WhatsApp via QR code |
 | `python main.py` | Start the agent (alternative) |
 | `python -m pincer` | Module entry |
@@ -470,9 +503,20 @@ All configuration via environment variables with `PINCER_` prefix. See `.env.exa
 ### First-Time Setup
 
 1. `cp .env.example .env` — fill in API keys
-2. `pincer auth-google` — one-time Google Calendar consent
+2. `pincer auth-google` — one-time Google Calendar consent (legacy, 3 tools)
+   — **or** —
+   `pincer setup-google` — one-time Google Workspace consent (full 85-tool suite)
 3. `pincer run` — scan WhatsApp QR on first launch
 4. Message yourself on WhatsApp or talk to the bot on Telegram
+
+### Google Workspace
+
+| Variable / File | Purpose |
+|----------------|---------|
+| `~/.pincer/google_credentials.json` | OAuth 2.0 client ID (from Google Cloud Console, Desktop App type) |
+| `~/.pincer/google_workspace_token.json` | OAuth token (created by `pincer setup-google`, `chmod 0o600`) |
+
+When both files exist, all 85 `google__*` tools auto-register on `pincer run`. No env vars required.
 
 ---
 
@@ -480,10 +524,9 @@ All configuration via environment variables with `PINCER_` prefix. See `.env.exa
 
 | Metric | Value |
 |--------|-------|
-| Source code | ~10,600 lines |
-| Test code | ~1,480 lines |
-| Total Python files | 42 |
-| Test files | 13 |
-| Built-in tools | 15 |
-| Active channels | 2 (Telegram, WhatsApp) |
-| Commits (sprint3) | 9 |
+| Source code | ~12,400 lines |
+| Test code | ~3,500 lines |
+| Total Python files | 58 |
+| Test files | 21 |
+| Built-in tools | 15 + 85 Google Workspace = 100 |
+| Active channels | 7 (Telegram, WhatsApp, Discord, Slack, Email, Signal, Voice) |

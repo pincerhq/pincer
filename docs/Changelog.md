@@ -4,75 +4,51 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ---
 
-## [0.7.4.2] — 2026-03-26
+## [0.8.0] — 2026-03-26
 
-### MCP OAuth 2.1 — Full Authorization Server
+### Google Workspace Native MCP Server
 
-Replaces the `MCPAuthProvider` HS256 stub with a complete, spec-compliant OAuth 2.1 authorization server and matching client flow. Backward-compatible: existing code that passes `auth_provider=` to `MCPAuthMiddleware` continues to work unchanged.
+**Replaces the third-party wrapper dependency with a Pincer-owned, first-party Google Workspace integration providing 85 tools across 8 services.**
 
-#### Authorization server (`src/pincer/mcp/auth/`)
+#### 85 tools across 8 services
 
-New package — 14 modules, ~2 000 LOC:
+| Service | Tools | Count |
+|---------|-------|------:|
+| Gmail | `search_messages`, `get_message`, `get_thread`, `list_labels`, `send_message`, `reply_to_message`, `create_draft`, `send_draft`, `trash_message`, `mark_as_read`, `mark_as_unread`, `add_label`, `remove_label`, `create_label`, `delete_label`, `get_attachment`, `forward_message`, `batch_trash`, `batch_mark_read` | 19 |
+| Calendar | `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `search_events`, `list_upcoming_events`, `add_attendee`, `respond_to_event`, `create_recurring_event`, `move_event` | 12 |
+| Drive | `list_drive_files`, `search_drive_files`, `get_file_metadata`, `download_file`, `export_google_doc`, `list_shared_drives`, `get_file_permissions`, `list_recent_files`, `upload_file`, `create_folder`, `move_file`, `rename_file`, `copy_file`, `trash_file`, `share_file` | 15 |
+| Docs | `get_doc_content`, `create_doc`, `append_to_doc`, `insert_text`, `find_replace`, `get_doc_outline`, `export_doc`, `add_comment` | 8 |
+| Sheets | `get_sheet_values`, `update_sheet_values`, `append_sheet_values`, `clear_sheet_range`, `create_spreadsheet`, `add_sheet`, `delete_sheet`, `get_spreadsheet_info`, `format_cells`, `list_sheets` | 10 |
+| Slides | `list_slides`, `get_slide_content`, `create_presentation`, `add_slide`, `update_slide_text`, `add_image_to_slide` | 6 |
+| Tasks | `list_task_lists`, `list_tasks`, `get_task`, `create_task`, `update_task`, `complete_task`, `delete_task`, `create_task_list` | 8 |
+| Contacts | `list_contacts`, `search_contacts`, `get_contact`, `create_contact`, `update_contact`, `delete_contact`, `list_contact_groups` | 7 |
 
-- **`tokens.py`** — `TokenService`: Ed25519 JWT access tokens (RFC 9068), opaque refresh tokens, key generation at `~/.pincer/mcp_signing_key.pem` (chmod 0o600), JWK Set endpoint
-- **`clients.py`** — `ClientRegistry`: in-memory client store; static clients loaded from config; wildcard port matching (`http://127.0.0.1:*/callback`) for native apps
-- **`endpoints.py`** — `mount_oauth_endpoints()`: registers all 8 OAuth routes on any Starlette app; PKCE authorization flow with HTML consent page; 10-minute pending request TTL
-- **`middleware.py`** — `MCPAuthMiddleware`: `Bearer` token enforcement on all non-exempt paths; `WWW-Authenticate` header pointing to RFC 9728 metadata; localhost bypass; backward-compat `auth_provider=` pass-through
-- **`pkce.py`** — PKCE helpers: S256 code verifier/challenge generation and verification (plain rejected)
-- **`scopes.py`** — 9 scopes: `tools:read`, `tools:execute`, `tools:all`, `resources:read`, `prompts:read`, `admin:ask_user`, `offline_access`, plus `tools:all` expansion logic
-- **`models.py`** — Frozen dataclasses: `OAuthClient`, `AuthorizationCode`, `RefreshTokenData`, `TokenClaims`, `AuthServerConfig`
-- **`errors.py`** — `OAuthError` with `status_code` and `to_dict()`; factory functions for all RFC 6749 error codes
-- **`metadata.py`** — RFC 8414 authorization server metadata + RFC 9728 protected resource metadata builders
-- **`consent.py`** — Self-contained HTML consent page; plain-text channel consent formatter
-- **`token_store.py`** — `TokenStore`: keyring → `~/.pincer/mcp_tokens.json` → memory; 60-second expiry buffer; `clear()` and `clear_all()`
-- **`client_flow.py`** — `MCPOAuthClient`: full PKCE flow with local callback server (`asyncio.start_server`), metadata discovery, DCR, token refresh, client_credentials fallback
+#### New modules (`src/pincer/integrations/google/`)
 
-#### Specs implemented
+- `auth.py` — `GoogleAuth` (InstalledAppFlow; token cache at `~/.pincer/google_workspace_token.json` with `chmod 0o600`)
+- `service_factory.py` — `GoogleServiceFactory` (30-min service cache per API; `asyncio.to_thread()` for all sync `.execute()` calls)
+- `quota.py` — `with_backoff()` exponential retry on HTTP 429/503 and `rateLimitExceeded` with jitter
+- `pagination.py` — `collect_pages()` handles `nextPageToken` iteration up to `max_pages`
+- `tools_gmail.py` (19 tools), `tools_calendar.py` (12), `tools_drive.py` (15), `tools_docs.py` (8), `tools_sheets.py` (10), `tools_slides.py` (6), `tools_tasks.py` (8), `tools_contacts.py` (7)
+- `server.py` — standalone FastMCP server (`stdio` or HTTP on port 18900)
+- `__init__.py` — public API: `get_google_factory()` + `register_all_tools(registry, factory) → 85`
 
-| RFC | Description |
-|-----|-------------|
-| RFC 7636 | PKCE (S256 only; plain rejected) |
-| RFC 7591 | Dynamic Client Registration |
-| RFC 7009 | Token Revocation |
-| RFC 8414 | Authorization Server Metadata |
-| RFC 8707 | Resource Indicators (audience binding) |
-| RFC 9068 | JWT Access Tokens |
-| RFC 9728 | Protected Resource Metadata |
-| OAuth 2.1 | PKCE mandatory, no implicit flow |
+#### CLI
 
-#### Config
+- `pincer setup-google` — one-time OAuth consent flow; opens browser, saves token, reports 85 tools enabled
+- Auto-registration in `_run_agent()` when `google_credentials.json` + `google_workspace_token.json` exist
 
-```toml
-[mcp.server.auth]
-enabled          = true
-localhost_bypass = true     # Localhost clients skip auth (default: true)
-token_lifetime   = 3600
-refresh_token_lifetime = 86400
-dcr_enabled      = true
-dcr_max_clients  = 20
-default_scopes   = "tools:read resources:read"
-max_scopes       = "tools:all resources:read prompts:read admin:ask_user offline_access"
-```
+#### Tool design
 
-#### Client config (HTTP MCP servers)
-
-```toml
-[[mcp.servers]]
-transport          = "streamable-http"
-url                = "https://example.com/mcp"
-oauth_enabled      = true
-oauth_client_id    = ""   # Optional — DCR used if omitted
-oauth_client_secret = ""  # Optional — for client_credentials grant
-```
-
-#### Dependencies
-
-- `PyJWT[crypto]>=2.8.0` — Ed25519 JWT signing (was `PyJWT>=2.8.0`)
-- `cryptography>=42` — Ed25519 key generation (already a transitive dep)
+- All tools use `google__` prefix
+- All write/destructive tools have `require_approval=True`
+- All sync Google API calls wrapped in `asyncio.to_thread()`
+- No new pip dependencies — `google-api-python-client`, `google-auth-oauthlib`, `google-auth` were already in core deps
 
 #### Tests
 
-127 tests in `tests/mcp/auth/test_all.py` — **93.9% line coverage** on `src/pincer/mcp/auth/`.
+- 131 new tests in `tests/integrations/google/` — all mocked, 0 real API calls
+- 1,016 total tests passing, 0 failures
 
 ---
 

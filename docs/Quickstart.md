@@ -117,21 +117,30 @@ Connects to your Gmail via OAuth. Pincer can then read, search, draft, and send 
 
 ---
 
-## Step 6: Enable Google Services (Optional)
+## Step 6: Enable Google Workspace (Optional)
 
-To use Gmail and Google Calendar:
+To unlock Gmail, Google Calendar, Drive, Docs, Sheets, Slides, Tasks, and Contacts — 85 tools total:
 
 ```bash
-pincer google setup
+pincer setup-google
 ```
 
-This opens a browser window for Google OAuth. Grant the requested permissions. Pincer stores tokens locally in `data/google_tokens.json`.
+This opens a browser window for Google OAuth consent. Grant the requested permissions. Pincer stores the token locally at `~/.pincer/google_workspace_token.json` (readable only by you).
 
-Required scopes:
-- `gmail.readonly` — read emails
-- `gmail.send` — send emails
-- `calendar.readonly` — read calendar
-- `calendar.events` — create/edit events
+You'll need a `google_credentials.json` OAuth client file first — see [Google Workspace Setup](CLI_REFERENCE.md#google-workspace) for how to get one from Google Cloud Console.
+
+Required scopes (all requested in a single consent flow):
+- `gmail.readonly` / `gmail.compose` / `gmail.modify` — read, draft, and send emails
+- `calendar.events` — create and edit calendar events
+- `calendar.readonly` — read calendar and event list
+- `drive` — read and write Drive files
+- `documents` — read and write Google Docs
+- `spreadsheets` — read and write Google Sheets
+- `presentations` — read and write Google Slides
+- `tasks` — manage Google Tasks
+- `contacts.readonly` / `directory.readonly` — read People / Contacts
+
+Once configured, all 85 `google__*` tools are available every time `pincer run` starts — no further setup needed.
 
 ---
 

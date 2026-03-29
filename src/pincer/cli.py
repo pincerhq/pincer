@@ -12,9 +12,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import signal
+import os
 import socket
-import sys
 from datetime import UTC
 from typing import TYPE_CHECKING
 
@@ -601,6 +600,20 @@ async def _run_agent(settings: Settings) -> None:
         console.print("[green]Calendar tools enabled[/green]")
     except ImportError:
         logging.getLogger(__name__).debug("Google Calendar dependencies not installed, calendar tools disabled")
+
+    # Google Workspace tools (full 85-tool suite)
+    try:
+        from pincer.integrations.google import get_google_factory, register_all_tools
+
+        gws_factory = get_google_factory()
+        if gws_factory is not None:
+            gws_count = register_all_tools(tools, gws_factory)
+            console.print(f"[green]Google Workspace tools enabled ({gws_count} tools)[/green]")
+    except RuntimeError as _gws_exc:
+        console.print(f"[yellow]Google Workspace tools disabled:[/yellow] {_gws_exc}")
+        console.print("[yellow]  Run [bold]pincer setup-google[/bold] to re-authenticate.[/yellow]")
+    except Exception as _gws_exc:
+        logging.getLogger(__name__).debug("Google Workspace tools not loaded: %s", _gws_exc)
 
     # send_file tool — channels dict is populated after channel startup below
     channel_map: dict[str, BaseChannel] = {}
@@ -1356,8 +1369,12 @@ async def _run_agent(settings: Settings) -> None:
         if audit_logger:
             await audit_logger.shutdown()
         console.print("[green]Shutdown complete[/green]")
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
-        sys.exit(0)
+        # Cancel any lingering asyncio tasks (e.g. in-flight LLM calls from
+        # channel update handlers) before exiting so the process doesn't hang.
+        _pending = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
+        for _t in _pending:
+            _t.cancel()
+        os._exit(0)
 
 
 @app.command()
@@ -3135,3 +3152,69 @@ async def _mcp_serve(
         await shell.run()
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped.[/dim]")
+
+
+# ═══════════════════════════════════════════════
+# Google Workspace setup command
+# ═══════════════════════════════════════════════
+
+
+@app.command(name="setup-google")
+def setup_google() -> None:
+    """One-time Google Workspace OAuth setup (opens browser for consent)."""
+    from pincer.config import get_settings_relaxed
+    from pincer.integrations.google.auth import ALL_SCOPES, GoogleAuth
+
+    settings = get_settings_relaxed()
+    oauth_dir = settings.google_oauth_dir()
+    credentials_path = oauth_dir / "google_credentials.json"
+    token_path = oauth_dir / "google_workspace_token.json"
+
+    console.print("[bold]Google Workspace Setup[/bold]\n")
+    console.print("This sets up all Google Workspace tools: Gmail, Calendar, Drive,")
+    console.print("Docs, Sheets, Slides, Tasks, and Contacts (85 tools total).\n")
+
+    if not credentials_path.exists():
+        console.print(f"[red]Missing: {credentials_path}[/red]\n")
+        console.print("Complete these steps in Google Cloud Console (~5 minutes):\n")
+        console.print("  1. Go to [link]https://console.cloud.google.com/apis/credentials[/link]")
+        console.print("  2. Create or select a project")
+        console.print("  3. Enable APIs & Services → Library:")
+        console.print("     Gmail API, Google Calendar API, Google Drive API,")
+        console.print("     Google Docs API, Google Sheets API, Google Slides API,")
+        console.print("     Google Tasks API, People API")
+        console.print("  4. OAuth consent screen → External → Test mode → add your email")
+        console.print("  5. Credentials → Create → OAuth 2.0 Client ID → Desktop App")
+        console.print(f"  6. Download JSON → save as:\n     {credentials_path}\n")
+        raise typer.Exit(1)
+
+    if token_path.exists():
+        console.print(f"[yellow]Token already exists: {token_path}[/yellow]")
+        if not typer.confirm("Re-authenticate (overwrites existing token)?"):
+            raise typer.Exit(0)
+
+    try:
+        from google_auth_oauthlib.flow import InstalledAppFlow  # noqa: F401
+    except ImportError:
+        console.print("[red]google-auth-oauthlib not installed.[/red]\nRun:  uv pip install google-auth-oauthlib")
+        raise typer.Exit(1) from None
+
+    console.print(f"Requesting {len(ALL_SCOPES)} scope(s) for all Workspace APIs...")
+    console.print("Opening browser for Google consent...\n")
+
+    auth = GoogleAuth(
+        credentials_path=str(credentials_path),
+        token_path=str(token_path),
+    )
+    try:
+        creds = auth.run_auth_flow(open_browser=True)
+    except Exception as exc:
+        console.print(f"[red]Authentication failed: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print("\n[green]Google Workspace authenticated![/green]")
+    console.print(f"  Token saved to: {token_path}")
+    console.print(f"  Refresh token:  {'Yes' if creds.refresh_token else 'No'}")
+    console.print(f"  Scopes granted: {len(ALL_SCOPES)}")
+    console.print("\n85 Google Workspace tools are now available in Pincer.")
+    console.print("Start the agent:  [bold]pincer run[/bold]")

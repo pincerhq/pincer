@@ -36,14 +36,14 @@ pip install pincer-agent && pincer init
 - **What:** An open-source AI agent that lives in WhatsApp, Telegram, Discord, Slack, and Email — and actually does things (reads email, manages calendar, browses the web, makes phone calls)
 - **For whom:** Developers and technical users who want a personal agent they can self-host, audit, and extend
 - **Why it exists:** Existing agents had [malicious plugins](https://pincer.sh/docs/security), surprise bills, and codebases too large to review
-- **How it's different:** 7,800 lines of Python. 12 env vars. Skills sandboxed in subprocesses. Hard daily spending cap
+- **How it's different:** 9,500 lines of Python. 12 env vars. Skills sandboxed in subprocesses. Hard daily spending cap
 - **How it stays safe:** User allowlist, tool approval prompts, AST scanning, skill signing, structured audit log — and `pincer doctor` to verify it all
 
 ---
 
 ## What is this?
 
-Pincer is an open-source AI agent that lives in your messaging apps. You text it — *"check my emails, summarize anything important, and add the meetings to my calendar"* — and it does it. It runs on your machine, talks to the LLM of your choice, and the entire codebase is 7,800 lines of Python you can read in an afternoon.
+Pincer is an open-source AI agent that lives in your messaging apps. You text it — *"check my emails, summarize anything important, and add the meetings to my calendar"* — and it does it. It runs on your machine, talks to the LLM of your choice, and the entire codebase is 9,500 lines of Python you can read in an afternoon.
 
 > **You (WhatsApp):** Check my email and brief me on anything important
 >
@@ -78,7 +78,7 @@ So I built it. Pincer is the agent I wanted. If you want the same thing, it's yo
 
 |  | **Pincer** | **OpenClaw** | **LangChain agents** | **Custom bot** |
 |---|:---:|:---:|:---:|:---:|
-| **Codebase** | 7,800 LOC | 200K+ LOC | Framework + glue | Yours |
+| **Codebase** | 9,500 LOC | 200K+ LOC | Framework + glue | Yours |
 | **Language** | Python | TypeScript | Python | Any |
 | **Install → first message** | ~5 min | 30–60 min | Hours | Days |
 | **Skill isolation** | Subprocess sandbox | In-process | DIY | DIY |
@@ -174,6 +174,7 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 | `file_read` / `file_write` | Local file operations | Read: No / Write: **Yes** |
 | `memory_search` | Search past conversations semantically | No |
 | `voice_call` | Outbound phone calls via Twilio | **Yes** |
+| `google__*` (85 tools) | Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Contacts | Read: No / Write: **Yes** |
 
 "Approval" = the agent asks in chat before executing. You reply ✅ or ❌.
 
@@ -379,7 +380,7 @@ pincer mcp list                        # MCP servers + status
 pincer mcp test <server>              # test MCP connection
 pincer mcp tools                      # list registered MCP tools
 pincer pair approve <ch> <code>    # approve a DM sender
-pincer google setup                # Google Calendar/Gmail OAuth
+pincer setup-google                # Google Workspace OAuth (85 tools)
 ```
 
 **Chat commands** (any channel): `/status`, `/budget`, `/new`, `/compact`, `/model <name>`, `/tools`
@@ -422,7 +423,7 @@ No frameworks. No abstractions. `async/await` + the Anthropic SDK.
 <summary><strong>Project structure & tech stack</strong></summary>
 
 ```
-pincer/ (7,800 LOC total)
+pincer/ (9,500 LOC total)
 ├── src/pincer/
 │   ├── core/         agent.py (190 LOC), session.py, config.py, soul.py
 │   ├── llm/          anthropic, openai, ollama, router, cost_tracker
@@ -451,7 +452,9 @@ pincer/ (7,800 LOC total)
 - [x] Skill system with sandboxing, AST scanning, signing
 - [x] Docker + one-click deploys (Railway, Render, DigitalOcean)
 - [x] Voice calling (Twilio + STT/TTS + compliance)
-- [x] **MCP client + OAuth 2.1** — Model Context Protocol with full authorization server (v0.7.4.2)
+
+- [x] **MCP client** — Model Context Protocol integration (v0.7.4)
+- [x] **Google Workspace** — 85 native tools: Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Contacts (v0.8.0)
 - [ ] **iMessage** — [help wanted](https://github.com/pincerhq/pincer/issues?q=label%3A%22help+wanted%22)
 - [ ] **Encrypted memory** — at-rest database encryption
 - [ ] **Multi-agent routing** — specialized sub-agents
