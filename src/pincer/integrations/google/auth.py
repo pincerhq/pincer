@@ -232,7 +232,7 @@ class GoogleAuth:
         try:
             data = json.loads(self._token_path.read_text())
             if "account" not in data:
-                return data.get("client_id", "").split("-")[0]
+                return str(data.get("client_id", "")).split("-")[0]
             return cast("str | None", data.get("account"))
         except Exception:
             return None
