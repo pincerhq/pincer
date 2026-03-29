@@ -108,9 +108,14 @@ async def google__list_messages(
         _mid = ref["id"]
 
         def _fetch_msg(mid: str = _mid) -> Any:
-            return svc.users().messages().get(  # type: ignore[misc]
-                userId="me", id=mid, format="metadata", metadataHeaders=["Subject", "From", "Date"]
-            ).execute()
+            return (
+                svc.users()
+                .messages()
+                .get(  # type: ignore[misc]
+                    userId="me", id=mid, format="metadata", metadataHeaders=["Subject", "From", "Date"]
+                )
+                .execute()
+            )
 
         msg = await with_backoff(cast("Callable[[], Any]", _fetch_msg))
         summaries.append(fmt_message_summary(msg))
@@ -138,9 +143,14 @@ async def google__search_messages(
         _mid = ref["id"]
 
         def _fetch_msg(mid: str = _mid) -> Any:
-            return svc.users().messages().get(  # type: ignore[misc]
-                userId="me", id=mid, format="metadata", metadataHeaders=["Subject", "From", "Date"]
-            ).execute()
+            return (
+                svc.users()
+                .messages()
+                .get(  # type: ignore[misc]
+                    userId="me", id=mid, format="metadata", metadataHeaders=["Subject", "From", "Date"]
+                )
+                .execute()
+            )
 
         msg = await with_backoff(cast("Callable[[], Any]", _fetch_msg))
         summaries.append(fmt_message_summary(msg))
