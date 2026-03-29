@@ -7,7 +7,7 @@ from __future__ import annotations
 import functools
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from pincer.integrations.google.models import fmt_event, fmt_list
 from pincer.integrations.google.quota import with_backoff
@@ -195,11 +195,11 @@ async def google__create_event(
     _body = body
     _cdv = conf_data_version
 
-    def _insert():
+    def _insert() -> dict[str, Any]:
         kw: dict[str, Any] = {"calendarId": _cal, "body": _body}
         if _cdv:
             kw["conferenceDataVersion"] = _cdv
-        return svc.events().insert(**kw).execute()
+        return svc.events().insert(**kw).execute()  # type: ignore[no-any-return]
 
     created = await with_backoff(_insert)
 
@@ -371,7 +371,7 @@ async def google__add_google_meet(
 def register_calendar_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
     """Register all 12 Calendar tools. Returns count."""
 
-    def _h(fn):
+    def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)

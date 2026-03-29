@@ -8,7 +8,7 @@ import asyncio
 import functools
 import logging
 import mimetypes
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from pincer.integrations.google.models import fmt_file, fmt_list
 from pincer.integrations.google.quota import with_backoff
@@ -343,7 +343,7 @@ async def google__share_file(
 def register_drive_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
     """Register all 15 Drive tools. Returns count."""
 
-    def _h(fn):
+    def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)

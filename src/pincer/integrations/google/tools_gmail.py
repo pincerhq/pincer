@@ -13,7 +13,7 @@ import base64
 import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from pincer.integrations.google.models import fmt_message_full, fmt_message_summary, fmt_list
 from pincer.integrations.google.quota import with_backoff
@@ -103,7 +103,7 @@ async def google__list_messages(
     summaries = []
     for ref in msgs:
         msg = await with_backoff(
-            lambda mid=ref["id"]: svc.users().messages().get(
+            lambda mid=ref["id"]: svc.users().messages().get(  # type: ignore[misc]
                 userId="me", id=mid, format="metadata",
                 metadataHeaders=["Subject", "From", "Date"]
             ).execute()
@@ -131,7 +131,7 @@ async def google__search_messages(
     summaries = []
     for ref in msgs:
         msg = await with_backoff(
-            lambda mid=ref["id"]: svc.users().messages().get(
+            lambda mid=ref["id"]: svc.users().messages().get(  # type: ignore[misc]
                 userId="me", id=mid, format="metadata",
                 metadataHeaders=["Subject", "From", "Date"]
             ).execute()
@@ -418,7 +418,7 @@ async def google__create_label(
 def register_gmail_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
     """Register all 19 Gmail tools in *registry*. Returns count."""
 
-    def _h(fn):
+    def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
         """Wrap a tool function to inject the factory."""
         import functools
         @functools.wraps(fn)

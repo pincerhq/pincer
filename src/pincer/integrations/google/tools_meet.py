@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from pincer.integrations.google.models import fmt_list
 from pincer.integrations.google.quota import with_backoff
@@ -785,11 +785,11 @@ async def google__summarize_meet_transcript(
             _t_name = transcript["name"]
             _pt = page_token
 
-            def _list_entries(t=_t_name, pt=_pt) -> dict[str, Any]:
+            def _list_entries(t: str = _t_name, pt: str | None = _pt) -> dict[str, Any]:
                 kw: dict[str, Any] = {"parent": t, "pageSize": 250}
                 if pt:
                     kw["pageToken"] = pt
-                return svc.conferenceRecords().transcripts().entries().list(**kw).execute()
+                return svc.conferenceRecords().transcripts().entries().list(**kw).execute()  # type: ignore[no-any-return]
 
             result = await with_backoff(_list_entries)
             all_entries.extend(result.get("transcriptEntries", []))
@@ -973,13 +973,13 @@ def register_meet_tools(
     if subscriber is None:
         subscriber = _Sub(auth=factory.auth)
 
-    def _h(fn):
+    def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
         return wrapper
 
-    def _hs(fn):
+    def _hs(fn: Callable[..., Any]) -> Callable[..., Any]:
         """Handler with subscriber injected alongside factory."""
         _sub = subscriber
 

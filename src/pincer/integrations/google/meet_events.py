@@ -198,7 +198,7 @@ class MeetEventSubscriber:
             "ttl": "86400s",
         }
         try:
-            import requests as req  # requests is a transitive dep
+            import requests as req  # type: ignore[import-untyped]  # requests is a transitive dep
 
             session = req.Session()
             session.headers["Authorization"] = f"Bearer {creds.token}"
@@ -287,7 +287,7 @@ class MeetEventSubscriber:
                         build, "meet", "v2", credentials=creds, cache_discovery=False
                     )
                     space = await asyncio.to_thread(
-                        lambda s=_sn: svc.spaces().get(name=s).execute()
+                        lambda s=_sn: svc.spaces().get(name=s).execute()  # type: ignore[misc]
                     )
                     active = space.get("activeConference", {})
                     conf_record: str | None = (

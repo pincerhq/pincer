@@ -91,11 +91,11 @@ class MeetArtifactProcessor:
                 _t = transcript["name"]
                 _pt = page_token
 
-                def _fetch(t=_t, pt=_pt) -> dict[str, Any]:
+                def _fetch(t: str = _t, pt: str | None = _pt) -> dict[str, Any]:
                     kw: dict[str, Any] = {"parent": t, "pageSize": 250}
                     if pt:
                         kw["pageToken"] = pt
-                    return (
+                    return (  # type: ignore[no-any-return]
                         svc.conferenceRecords()
                         .transcripts()
                         .entries()
@@ -226,11 +226,11 @@ class MeetArtifactProcessor:
         while True:
             _pt = page_token
 
-            def _list_parts(pt=_pt) -> dict[str, Any]:
+            def _list_parts(pt: str | None = _pt) -> dict[str, Any]:
                 kw: dict[str, Any] = {"parent": conference_name, "pageSize": 100}
                 if pt:
                     kw["pageToken"] = pt
-                return svc.conferenceRecords().participants().list(**kw).execute()
+                return svc.conferenceRecords().participants().list(**kw).execute()  # type: ignore[no-any-return]
 
             result = await asyncio.to_thread(_list_parts)
             all_participants.extend(result.get("participants", []))

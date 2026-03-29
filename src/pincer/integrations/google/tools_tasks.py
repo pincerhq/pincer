@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 from pincer.integrations.google.models import fmt_task
 from pincer.integrations.google.quota import with_backoff
@@ -159,7 +159,7 @@ async def google__create_task_list(
 def register_tasks_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
     """Register all 8 Tasks tools. Returns count."""
 
-    def _h(fn):
+    def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)

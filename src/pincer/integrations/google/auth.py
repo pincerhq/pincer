@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional, cast
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +124,7 @@ class GoogleAuth:
                 "Run 'pincer setup google' to authenticate."
             )
 
-        self._credentials = Credentials.from_authorized_user_file(
+        self._credentials = Credentials.from_authorized_user_file(  # type: ignore[no-untyped-call]
             str(self._token_path), self._scopes
         )
 
@@ -231,6 +231,6 @@ class GoogleAuth:
             return None
         try:
             data = json.loads(self._token_path.read_text())
-            return data.get("client_id", "").split("-")[0] if "account" not in data else data.get("account")
+            return data.get("client_id", "").split("-")[0] if "account" not in data else cast(Optional[str], data.get("account"))
         except Exception:
             return None
