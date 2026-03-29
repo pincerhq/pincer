@@ -12,7 +12,7 @@ import base64
 import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 from pincer.integrations.google.models import fmt_list, fmt_message_full, fmt_message_summary
 from pincer.integrations.google.quota import with_backoff
@@ -105,16 +105,12 @@ async def google__list_messages(
         return f"No messages in {label_ids}."
     summaries = []
     for ref in msgs:
-        msg = await with_backoff(
-            lambda mid=ref["id"]: (
-                svc.users()
-                .messages()
-                .get(  # type: ignore[misc]
-                    userId="me", id=mid, format="metadata", metadataHeaders=["Subject", "From", "Date"]
-                )
-                .execute()
-            )
-        )
+        _mid = ref["id"]
+
+        def _fetch_msg(mid: str = _mid) -> Any:
+            return svc.users().messages().get(userId="me", id=mid, format="metadata", metadataHeaders=["Subject", "From", "Date"]).execute()  # type: ignore[misc]
+
+        msg = await with_backoff(cast(Callable[[], Any], _fetch_msg))
         summaries.append(fmt_message_summary(msg))
     more = bool(result.get("nextPageToken"))
     return fmt_list(summaries, header=f"{len(summaries)} message(s) in {label_ids}:", more=more)
@@ -137,16 +133,12 @@ async def google__search_messages(
         return f"No messages found for: {query}"
     summaries = []
     for ref in msgs:
-        msg = await with_backoff(
-            lambda mid=ref["id"]: (
-                svc.users()
-                .messages()
-                .get(  # type: ignore[misc]
-                    userId="me", id=mid, format="metadata", metadataHeaders=["Subject", "From", "Date"]
-                )
-                .execute()
-            )
-        )
+        _mid = ref["id"]
+
+        def _fetch_msg(mid: str = _mid) -> Any:
+            return svc.users().messages().get(userId="me", id=mid, format="metadata", metadataHeaders=["Subject", "From", "Date"]).execute()  # type: ignore[misc]
+
+        msg = await with_backoff(cast(Callable[[], Any], _fetch_msg))
         summaries.append(fmt_message_summary(msg))
     more = bool(result.get("nextPageToken"))
     return fmt_list(summaries, header=f"Found {len(summaries)} message(s):", more=more)
