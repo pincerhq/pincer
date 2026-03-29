@@ -8,17 +8,18 @@ Registration helpers wire them into Pincer's ToolRegistry with the
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
-from pincer.integrations.google.models import fmt_message_full, fmt_message_summary, fmt_list
+from pincer.integrations.google.models import fmt_list, fmt_message_full, fmt_message_summary
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
 
@@ -74,7 +75,7 @@ def _build_raw(
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
-async def google__list_labels(factory: "GoogleServiceFactory") -> str:
+async def google__list_labels(factory: GoogleServiceFactory) -> str:
     """List all Gmail labels."""
     svc = await factory.get("gmail")
     result = await with_backoff(lambda: svc.users().labels().list(userId="me").execute())
@@ -86,7 +87,7 @@ async def google__list_labels(factory: "GoogleServiceFactory") -> str:
 
 
 async def google__list_messages(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     label_ids: str = "INBOX",
     max_results: int = 20,
     page_token: str = "",
@@ -114,7 +115,7 @@ async def google__list_messages(
 
 
 async def google__search_messages(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     query: str,
     max_results: int = 20,
     page_token: str = "",
@@ -142,7 +143,7 @@ async def google__search_messages(
 
 
 async def google__get_message(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     message_id: str,
     max_body_chars: int = 4000,
 ) -> str:
@@ -156,7 +157,7 @@ async def google__get_message(
 
 
 async def google__get_thread(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     thread_id: str,
     max_body_chars: int = 2000,
 ) -> str:
@@ -176,7 +177,7 @@ async def google__get_thread(
 
 
 async def google__get_attachment(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     message_id: str,
     attachment_id: str,
 ) -> str:
@@ -193,7 +194,7 @@ async def google__get_attachment(
 
 
 async def google__send_message(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     to: str,
     subject: str,
     body: str,
@@ -209,7 +210,7 @@ async def google__send_message(
 
 
 async def google__reply_to_message(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     message_id: str,
     body: str,
     body_type: str = "plain",
@@ -236,7 +237,7 @@ async def google__reply_to_message(
 
 
 async def google__reply_all(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     message_id: str,
     body: str,
     body_type: str = "plain",
@@ -266,7 +267,7 @@ async def google__reply_all(
 
 
 async def google__forward_message(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     message_id: str,
     to: str,
     note: str = "",
@@ -279,14 +280,16 @@ async def google__forward_message(
     hdrs = {h["name"]: h["value"] for h in orig.get("payload", {}).get("headers", [])}
     subject = "Fwd: " + hdrs.get("Subject", "")
     body = _extract_body(orig.get("payload", {}))
-    fwd_body = (note + "\n\n---------- Forwarded message ----------\n" if note else "---------- Forwarded message ----------\n") + body
+    sep = "---------- Forwarded message ----------\n"
+    prefix = note + "\n\n" + sep if note else sep
+    fwd_body = prefix + body
     raw = _build_raw(to, subject, fwd_body)
     await with_backoff(lambda: svc.users().messages().send(userId="me", body={"raw": raw}).execute())
     return f"Forwarded to {to}: \"{subject}\""
 
 
 async def google__create_draft(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     to: str,
     subject: str,
     body: str,
@@ -303,7 +306,7 @@ async def google__create_draft(
 
 
 async def google__send_draft(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     draft_id: str,
 ) -> str:
     """Send an existing draft."""
@@ -315,7 +318,7 @@ async def google__send_draft(
 
 
 async def google__trash_message(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     message_id: str,
 ) -> str:
     """Move a message to Trash."""
@@ -325,7 +328,7 @@ async def google__trash_message(
 
 
 async def google__untrash_message(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     message_id: str,
 ) -> str:
     """Restore a message from Trash."""
@@ -335,7 +338,7 @@ async def google__untrash_message(
 
 
 async def google__mark_as_read(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     message_id: str,
 ) -> str:
     """Mark a message as read."""
@@ -349,7 +352,7 @@ async def google__mark_as_read(
 
 
 async def google__mark_as_unread(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     message_id: str,
 ) -> str:
     """Mark a message as unread."""
@@ -363,7 +366,7 @@ async def google__mark_as_unread(
 
 
 async def google__add_label(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     message_id: str,
     label_id: str,
 ) -> str:
@@ -378,7 +381,7 @@ async def google__add_label(
 
 
 async def google__remove_label(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     message_id: str,
     label_id: str,
 ) -> str:
@@ -393,7 +396,7 @@ async def google__remove_label(
 
 
 async def google__create_label(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     name: str,
     label_list_visibility: str = "labelShow",
     message_list_visibility: str = "show",
@@ -415,7 +418,7 @@ async def google__create_label(
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
-def register_gmail_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
+def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 19 Gmail tools in *registry*. Returns count."""
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -439,8 +442,16 @@ def register_gmail_tools(registry: "ToolRegistry", factory: "GoogleServiceFactor
         parameters={
             "type": "object",
             "properties": {
-                "label_ids": {"type": "string", "description": "Label ID to filter by (default: INBOX)", "default": "INBOX"},
-                "max_results": {"type": "integer", "description": "Max messages to return (default: 20)", "default": 20},
+                "label_ids": {
+                    "type": "string",
+                    "description": "Label ID to filter by (default: INBOX)",
+                    "default": "INBOX",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max messages to return (default: 20)",
+                    "default": 20,
+                },
                 "page_token": {"type": "string", "description": "Pagination token from previous result", "default": ""},
             },
             "required": [],
@@ -472,7 +483,11 @@ def register_gmail_tools(registry: "ToolRegistry", factory: "GoogleServiceFactor
             "type": "object",
             "properties": {
                 "message_id": {"type": "string", "description": "Gmail message ID"},
-                "max_body_chars": {"type": "integer", "description": "Max body characters (default: 4000)", "default": 4000},
+                "max_body_chars": {
+                    "type": "integer",
+                    "description": "Max body characters (default: 4000)",
+                    "default": 4000,
+                },
             },
             "required": ["message_id"],
         },
@@ -485,7 +500,11 @@ def register_gmail_tools(registry: "ToolRegistry", factory: "GoogleServiceFactor
             "type": "object",
             "properties": {
                 "thread_id": {"type": "string", "description": "Gmail thread ID"},
-                "max_body_chars": {"type": "integer", "description": "Max body chars per message (default: 2000)", "default": 2000},
+                "max_body_chars": {
+                    "type": "integer",
+                    "description": "Max body chars per message (default: 2000)",
+                    "default": 2000,
+                },
             },
             "required": ["thread_id"],
         },
@@ -515,7 +534,12 @@ def register_gmail_tools(registry: "ToolRegistry", factory: "GoogleServiceFactor
                 "body": {"type": "string", "description": "Email body"},
                 "cc": {"type": "string", "description": "CC addresses (comma-separated)", "default": ""},
                 "bcc": {"type": "string", "description": "BCC addresses (comma-separated)", "default": ""},
-                "body_type": {"type": "string", "enum": ["plain", "html"], "description": "Body format (default: plain)", "default": "plain"},
+                "body_type": {
+                    "type": "string",
+                    "enum": ["plain", "html"],
+                    "description": "Body format (default: plain)",
+                    "default": "plain",
+                },
             },
             "required": ["to", "subject", "body"],
         },

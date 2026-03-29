@@ -4,8 +4,6 @@ Tests for Docs tools — one test per tool (8 tools).
 
 from __future__ import annotations
 
-import pytest
-
 from pincer.integrations.google.tools_docs import (
     google__add_comment,
     google__create_doc,

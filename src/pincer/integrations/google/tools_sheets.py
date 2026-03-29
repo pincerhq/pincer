@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.models import fmt_sheet_values
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
 
@@ -21,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ── Tool implementations ──────────────────────────────────────────────────────
 
 async def google__list_sheets(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     spreadsheet_id: str,
 ) -> str:
     """List all sheets/tabs in a spreadsheet."""
@@ -43,7 +45,7 @@ async def google__list_sheets(
 
 
 async def google__get_sheet_values(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     spreadsheet_id: str,
     range_: str = "Sheet1",
 ) -> str:
@@ -59,7 +61,7 @@ async def google__get_sheet_values(
 
 
 async def google__get_sheet_metadata(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     spreadsheet_id: str,
 ) -> str:
     """Get spreadsheet properties: title, locale, timezone, named ranges."""
@@ -86,7 +88,7 @@ async def google__get_sheet_metadata(
 
 
 async def google__search_sheet_values(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     spreadsheet_id: str,
     search_value: str,
     sheet_name: str = "Sheet1",
@@ -121,7 +123,7 @@ def _col_letter(index: int) -> str:
 
 
 async def google__create_spreadsheet(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     title: str,
 ) -> str:
     """Create a new Google Spreadsheet."""
@@ -137,7 +139,7 @@ async def google__create_spreadsheet(
 
 
 async def google__update_sheet_values(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     spreadsheet_id: str,
     range_: str,
     values: list[list[Any]],
@@ -158,7 +160,7 @@ async def google__update_sheet_values(
 
 
 async def google__append_sheet_values(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     spreadsheet_id: str,
     range_: str,
     values: list[list[Any]],
@@ -182,7 +184,7 @@ async def google__append_sheet_values(
 
 
 async def google__clear_sheet_values(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     spreadsheet_id: str,
     range_: str,
 ) -> str:
@@ -197,7 +199,7 @@ async def google__clear_sheet_values(
 
 
 async def google__add_sheet(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     spreadsheet_id: str,
     title: str,
 ) -> str:
@@ -217,7 +219,7 @@ async def google__add_sheet(
 
 
 async def google__format_cells(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     spreadsheet_id: str,
     sheet_id: int,
     start_row: int,
@@ -282,7 +284,7 @@ def _parse_hex_color(hex_color: str) -> tuple[float, float, float]:
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
-def register_sheets_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
+def register_sheets_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 10 Sheets tools. Returns count."""
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:

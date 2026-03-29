@@ -4,15 +4,12 @@ Tests for GoogleAuth — token loading, refresh, and scope building.
 
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pincer.integrations.google.auth import ALL_SCOPES, SERVICE_SCOPES, GoogleAuth, scopes_for_services
-
+from pincer.integrations.google.auth import ALL_SCOPES, GoogleAuth, scopes_for_services
 
 # ── scopes_for_services ───────────────────────────────────────────────────────
 
@@ -80,8 +77,8 @@ def test_get_credentials_valid_token(mock_credentials):
     mock_creds.refresh_token = "refresh"
 
     # Credentials and Request are lazily imported inside get_credentials()
-    with patch("google.oauth2.credentials.Credentials") as MockCreds:
-        MockCreds.from_authorized_user_file.return_value = mock_creds
+    with patch("google.oauth2.credentials.Credentials") as mock_creds_cls:
+        mock_creds_cls.from_authorized_user_file.return_value = mock_creds
         with patch("google.auth.transport.requests.Request"):
             creds = auth.get_credentials()
     assert creds is mock_creds
@@ -99,11 +96,11 @@ def test_get_credentials_refreshes_expired_token(mock_credentials):
     mock_creds.refresh_token = "refresh"
     mock_creds.to_json.return_value = '{"token": "new"}'
 
-    with patch("google.oauth2.credentials.Credentials") as MockCreds:
-        MockCreds.from_authorized_user_file.return_value = mock_creds
+    with patch("google.oauth2.credentials.Credentials") as mock_creds_cls:
+        mock_creds_cls.from_authorized_user_file.return_value = mock_creds
         with patch("google.auth.transport.requests.Request"):
             mock_creds.refresh.return_value = None
-            creds = auth.get_credentials()
+            auth.get_credentials()
 
     mock_creds.refresh.assert_called_once()
 
@@ -119,11 +116,10 @@ def test_get_credentials_no_refresh_token_raises(mock_credentials):
     mock_creds.expired = False
     mock_creds.refresh_token = None
 
-    with patch("google.oauth2.credentials.Credentials") as MockCreds:
-        MockCreds.from_authorized_user_file.return_value = mock_creds
-        with patch("google.auth.transport.requests.Request"):
-            with pytest.raises(RuntimeError, match="invalid"):
-                auth.get_credentials()
+    with patch("google.oauth2.credentials.Credentials") as mock_creds_cls:
+        mock_creds_cls.from_authorized_user_file.return_value = mock_creds
+        with patch("google.auth.transport.requests.Request"), pytest.raises(RuntimeError, match="invalid"):
+            auth.get_credentials()
 
 
 def test_save_token_sets_permissions(mock_credentials, tmp_path):

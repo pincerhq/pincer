@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
 
@@ -20,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ── Tool implementations ──────────────────────────────────────────────────────
 
 async def google__list_slides(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     presentation_id: str,
 ) -> str:
     """List all slides in a presentation."""
@@ -41,7 +43,7 @@ async def google__list_slides(
 
 
 async def google__get_slide_content(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     presentation_id: str,
     slide_index: int = 0,
 ) -> str:
@@ -67,7 +69,7 @@ async def google__get_slide_content(
 
 
 async def google__create_presentation(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     title: str,
 ) -> str:
     """Create a new Google Slides presentation."""
@@ -81,16 +83,13 @@ async def google__create_presentation(
 
 
 async def google__add_slide(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     presentation_id: str,
     insertion_index: int = -1,
     layout: str = "BLANK",
 ) -> str:
     """Add a new slide to a presentation."""
     svc = await factory.get("slides")
-    slide_request: dict[str, Any] = {
-        "duplicateObject": {},
-    }
     # Use createSlide for new blank slides
     create_req: dict[str, Any] = {
         "slideLayoutReference": {"predefinedLayout": layout},
@@ -109,7 +108,7 @@ async def google__add_slide(
 
 
 async def google__update_slide_text(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     presentation_id: str,
     object_id: str,
     new_text: str,
@@ -129,7 +128,7 @@ async def google__update_slide_text(
 
 
 async def google__add_image_to_slide(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     presentation_id: str,
     slide_id: str,
     image_url: str,
@@ -173,7 +172,7 @@ async def google__add_image_to_slide(
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
-def register_slides_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
+def register_slides_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 6 Slides tools. Returns count."""
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -225,7 +224,15 @@ def register_slides_tools(registry: "ToolRegistry", factory: "GoogleServiceFacto
             "properties": {
                 "presentation_id": {"type": "string"},
                 "insertion_index": {"type": "integer", "description": "Position to insert (-1 = end)", "default": -1},
-                "layout": {"type": "string", "enum": ["BLANK", "CAPTION_ONLY", "TITLE", "TITLE_AND_BODY", "TITLE_AND_TWO_COLUMNS", "TITLE_ONLY", "ONE_COLUMN_TEXT", "MAIN_POINT", "BIG_NUMBER"], "default": "BLANK"},
+                "layout": {
+                    "type": "string",
+                    "enum": [
+                        "BLANK", "CAPTION_ONLY", "TITLE", "TITLE_AND_BODY",
+                        "TITLE_AND_TWO_COLUMNS", "TITLE_ONLY", "ONE_COLUMN_TEXT",
+                        "MAIN_POINT", "BIG_NUMBER",
+                    ],
+                    "default": "BLANK",
+                },
             },
             "required": ["presentation_id"],
         },

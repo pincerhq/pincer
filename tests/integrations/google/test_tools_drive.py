@@ -4,8 +4,6 @@ Tests for Drive tools — one test per tool (15 tools).
 
 from __future__ import annotations
 
-import pytest
-
 from pincer.integrations.google.tools_drive import (
     google__copy_file,
     google__create_folder,
@@ -137,7 +135,7 @@ async def test_upload_file_not_found(mock_factory, mock_drive_service, tmp_path)
 
 
 async def test_upload_file_success(mock_factory, mock_drive_service, tmp_path):
-    from unittest.mock import patch, MagicMock
+    from unittest.mock import MagicMock, patch
     test_file = tmp_path / "test.txt"
     test_file.write_text("hello")
     mock_drive_service.files().create().execute.return_value = {

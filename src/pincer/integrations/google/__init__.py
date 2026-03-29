@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from pincer.tools.registry import ToolRegistry
 
 
-def get_google_factory() -> "GoogleServiceFactory | None":
+def get_google_factory() -> GoogleServiceFactory | None:
     """Return a GoogleServiceFactory if credentials are configured, else None.
 
     Performs an eager scope check so a stale token is surfaced at startup
@@ -77,7 +77,7 @@ def get_google_factory() -> "GoogleServiceFactory | None":
     return GoogleServiceFactory(auth)
 
 
-def register_all_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
+def register_all_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 112 Google Workspace tools in *registry*. Returns count."""
     from pincer.integrations.google.tools_calendar import register_calendar_tools
     from pincer.integrations.google.tools_contacts import register_contacts_tools

@@ -8,12 +8,14 @@ import asyncio
 import functools
 import logging
 import mimetypes
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.models import fmt_file, fmt_list
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
 
@@ -35,7 +37,7 @@ _DRIVE_FIELDS = "id, name, mimeType, size, modifiedTime, owners, sharingUser, we
 # ── Tool implementations ──────────────────────────────────────────────────────
 
 async def google__list_drive_files(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     folder_id: str = "root",
     max_results: int = 50,
     page_token: str = "",
@@ -60,7 +62,7 @@ async def google__list_drive_files(
 
 
 async def google__search_drive_files(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     query: str,
     max_results: int = 20,
     page_token: str = "",
@@ -84,12 +86,15 @@ async def google__search_drive_files(
 
 
 async def google__get_file_metadata(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     file_id: str,
 ) -> str:
     """Get metadata for a file (size, owner, modified time, sharing info)."""
     svc = await factory.get("drive")
-    fields = "id, name, mimeType, size, modifiedTime, createdTime, owners, sharingUser, webViewLink, parents, shared, permissions"
+    fields = (
+        "id, name, mimeType, size, modifiedTime, createdTime, "
+        "owners, sharingUser, webViewLink, parents, shared, permissions"
+    )
     f = await with_backoff(lambda: svc.files().get(fileId=file_id, fields=fields).execute())
     owners = ", ".join(o.get("emailAddress", "?") for o in f.get("owners", []))
     lines = [
@@ -107,7 +112,7 @@ async def google__get_file_metadata(
 
 
 async def google__download_file(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     file_id: str,
     max_chars: int = 5000,
 ) -> str:
@@ -115,17 +120,14 @@ async def google__download_file(
     svc = await factory.get("drive")
     request = svc.files().get_media(fileId=file_id)
     content = await asyncio.to_thread(request.execute)
-    if isinstance(content, bytes):
-        text = content.decode("utf-8", errors="replace")
-    else:
-        text = str(content)
+    text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(content)
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n... (truncated at {max_chars} chars)"
     return text
 
 
 async def google__export_google_doc(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     file_id: str,
     export_format: str = "txt",
     max_chars: int = 8000,
@@ -135,17 +137,14 @@ async def google__export_google_doc(
     mime = _EXPORT_MIME.get(export_format, "text/plain")
     request = svc.files().export_media(fileId=file_id, mimeType=mime)
     content = await asyncio.to_thread(request.execute)
-    if isinstance(content, bytes):
-        text = content.decode("utf-8", errors="replace")
-    else:
-        text = str(content)
+    text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(content)
     if len(text) > max_chars:
         text = text[:max_chars] + f"\n... (truncated at {max_chars} chars)"
     return text
 
 
 async def google__list_shared_drives(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     max_results: int = 20,
 ) -> str:
     """List shared/team drives."""
@@ -161,7 +160,7 @@ async def google__list_shared_drives(
 
 
 async def google__get_file_permissions(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     file_id: str,
 ) -> str:
     """List who has access to a file."""
@@ -180,7 +179,7 @@ async def google__get_file_permissions(
 
 
 async def google__list_recent_files(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     max_results: int = 20,
 ) -> str:
     """List recently modified files."""
@@ -201,7 +200,7 @@ async def google__list_recent_files(
 
 
 async def google__upload_file(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     local_path: str,
     parent_folder_id: str = "",
     name: str = "",
@@ -229,7 +228,7 @@ async def google__upload_file(
 
 
 async def google__create_folder(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     name: str,
     parent_folder_id: str = "",
 ) -> str:
@@ -248,7 +247,7 @@ async def google__create_folder(
 
 
 async def google__move_file(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     file_id: str,
     destination_folder_id: str,
 ) -> str:
@@ -269,7 +268,7 @@ async def google__move_file(
 
 
 async def google__rename_file(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     file_id: str,
     new_name: str,
 ) -> str:
@@ -282,7 +281,7 @@ async def google__rename_file(
 
 
 async def google__copy_file(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     file_id: str,
     name: str = "",
     parent_folder_id: str = "",
@@ -301,7 +300,7 @@ async def google__copy_file(
 
 
 async def google__trash_file(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     file_id: str,
 ) -> str:
     """Move a file to Drive Trash."""
@@ -313,7 +312,7 @@ async def google__trash_file(
 
 
 async def google__share_file(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     file_id: str,
     email: str = "",
     role: str = "reader",
@@ -323,14 +322,14 @@ async def google__share_file(
     svc = await factory.get("drive")
     if link_sharing:
         body: dict[str, Any] = {"type": "anyone", "role": role}
-        result = await with_backoff(
+        await with_backoff(
             lambda: svc.permissions().create(fileId=file_id, body=body, fields="id").execute()
         )
         return f"Link sharing enabled for {file_id} (role={role})"
     if not email:
         return "Error: provide email or set link_sharing=true"
     body = {"type": "user", "role": role, "emailAddress": email}
-    result = await with_backoff(
+    await with_backoff(
         lambda: svc.permissions().create(
             fileId=file_id, body=body, sendNotificationEmail=True, fields="id"
         ).execute()
@@ -340,7 +339,7 @@ async def google__share_file(
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
-def register_drive_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
+def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 15 Drive tools. Returns count."""
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -412,7 +411,11 @@ def register_drive_tools(registry: "ToolRegistry", factory: "GoogleServiceFactor
             "type": "object",
             "properties": {
                 "file_id": {"type": "string"},
-                "export_format": {"type": "string", "enum": ["pdf", "docx", "xlsx", "csv", "pptx", "txt", "html"], "default": "txt"},
+                "export_format": {
+                    "type": "string",
+                    "enum": ["pdf", "docx", "xlsx", "csv", "pptx", "txt", "html"],
+                    "default": "txt",
+                },
                 "max_chars": {"type": "integer", "default": 8000},
             },
             "required": ["file_id"],
@@ -456,8 +459,16 @@ def register_drive_tools(registry: "ToolRegistry", factory: "GoogleServiceFactor
             "type": "object",
             "properties": {
                 "local_path": {"type": "string", "description": "Absolute local path to the file"},
-                "parent_folder_id": {"type": "string", "description": "Destination folder ID (default: root)", "default": ""},
-                "name": {"type": "string", "description": "Override filename (default: same as local)", "default": ""},
+                "parent_folder_id": {
+                    "type": "string",
+                    "description": "Destination folder ID (default: root)",
+                    "default": "",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Override filename (default: same as local)",
+                    "default": "",
+                },
             },
             "required": ["local_path"],
         },

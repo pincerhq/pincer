@@ -4,16 +4,6 @@ Tests for Slides (6 tools) + Tasks (8 tools) + Contacts (7 tools) = 21 tests.
 
 from __future__ import annotations
 
-import pytest
-
-from pincer.integrations.google.tools_slides import (
-    google__add_image_to_slide,
-    google__add_slide,
-    google__create_presentation,
-    google__get_slide_content,
-    google__list_slides,
-    google__update_slide_text,
-)
 from pincer.integrations.google.tools_contacts import (
     google__create_contact,
     google__delete_contact,
@@ -22,6 +12,14 @@ from pincer.integrations.google.tools_contacts import (
     google__list_contacts,
     google__search_contacts,
     google__update_contact,
+)
+from pincer.integrations.google.tools_slides import (
+    google__add_image_to_slide,
+    google__add_slide,
+    google__create_presentation,
+    google__get_slide_content,
+    google__list_slides,
+    google__update_slide_text,
 )
 from pincer.integrations.google.tools_tasks import (
     google__complete_task,
@@ -33,7 +31,6 @@ from pincer.integrations.google.tools_tasks import (
     google__list_tasks,
     google__update_task,
 )
-
 
 # ═══════════════════════════════════════════════
 # Slides tests
@@ -313,7 +310,10 @@ async def test_delete_contact(mock_factory, mock_contacts_service):
 async def test_list_contact_groups(mock_factory, mock_contacts_service):
     mock_contacts_service.contactGroups().list().execute.return_value = {
         "contactGroups": [
-            {"name": "myContacts", "formattedName": "My Contacts", "memberCount": 42, "resourceName": "contactGroups/myContacts"},
+            {
+                "name": "myContacts", "formattedName": "My Contacts",
+                "memberCount": 42, "resourceName": "contactGroups/myContacts",
+            },
             {"name": "starred", "formattedName": "Starred", "memberCount": 5, "resourceName": "contactGroups/starred"},
         ]
     }

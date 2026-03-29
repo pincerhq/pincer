@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _build_fastmcp(auth: "GoogleAuth") -> Any:
+def _build_fastmcp(auth: GoogleAuth) -> Any:
     """Build a FastMCP instance with all 85 Google Workspace tools registered."""
     try:
         from mcp.server.fastmcp import FastMCP
@@ -76,7 +76,7 @@ class GoogleWorkspaceMCPServer:
 
     def __init__(
         self,
-        auth: "GoogleAuth",
+        auth: GoogleAuth,
         host: str = "127.0.0.1",
         port: int = 18900,
         path: str = "/mcp",
@@ -122,7 +122,6 @@ class GoogleWorkspaceMCPServer:
 def main() -> None:
     """CLI entry point: ``python -m pincer.integrations.google.server [stdio|http]``."""
     import argparse
-    from pathlib import Path
 
     from pincer.config import get_settings_relaxed
     from pincer.integrations.google.auth import GoogleAuth

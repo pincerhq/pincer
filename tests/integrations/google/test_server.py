@@ -6,11 +6,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from pincer.integrations.google import get_google_factory, register_all_tools
 from pincer.tools.registry import ToolRegistry
-
 
 # ── register_all_tools ────────────────────────────────────────────────────────
 

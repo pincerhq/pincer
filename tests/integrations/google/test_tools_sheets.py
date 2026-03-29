@@ -4,8 +4,6 @@ Tests for Sheets tools — one test per tool (10 tools).
 
 from __future__ import annotations
 
-import pytest
-
 from pincer.integrations.google.tools_sheets import (
     _col_letter,
     google__add_sheet,

@@ -7,12 +7,14 @@ from __future__ import annotations
 import functools
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.models import fmt_event, fmt_list
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
 
@@ -29,7 +31,7 @@ def _week_end_iso() -> str:
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
-async def google__list_calendars(factory: "GoogleServiceFactory") -> str:
+async def google__list_calendars(factory: GoogleServiceFactory) -> str:
     """List all calendars in the account."""
     svc = await factory.get("calendar")
     result = await with_backoff(lambda: svc.calendarList().list().execute())
@@ -41,7 +43,7 @@ async def google__list_calendars(factory: "GoogleServiceFactory") -> str:
 
 
 async def google__list_events(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     calendar_id: str = "primary",
     time_min: str = "",
     time_max: str = "",
@@ -70,7 +72,7 @@ async def google__list_events(
 
 
 async def google__get_event(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     event_id: str,
     calendar_id: str = "primary",
 ) -> str:
@@ -99,7 +101,7 @@ async def google__get_event(
 
 
 async def google__search_events(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     query: str,
     calendar_id: str = "primary",
     max_results: int = 20,
@@ -123,7 +125,7 @@ async def google__search_events(
 
 
 async def google__check_freebusy(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     emails: str,
     time_min: str = "",
     time_max: str = "",
@@ -149,7 +151,7 @@ async def google__check_freebusy(
 
 
 async def google__create_event(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     summary: str,
     start: str,
     end: str,
@@ -225,7 +227,7 @@ async def google__create_event(
 
 
 async def google__update_event(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     event_id: str,
     calendar_id: str = "primary",
     summary: str = "",
@@ -259,7 +261,7 @@ async def google__update_event(
 
 
 async def google__delete_event(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     event_id: str,
     calendar_id: str = "primary",
 ) -> str:
@@ -270,7 +272,7 @@ async def google__delete_event(
 
 
 async def google__move_event(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     event_id: str,
     destination_calendar_id: str,
     source_calendar_id: str = "primary",
@@ -288,7 +290,7 @@ async def google__move_event(
 
 
 async def google__accept_event(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     event_id: str,
     calendar_id: str = "primary",
 ) -> str:
@@ -313,7 +315,7 @@ async def google__accept_event(
 
 
 async def google__decline_event(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     event_id: str,
     calendar_id: str = "primary",
 ) -> str:
@@ -335,7 +337,7 @@ async def google__decline_event(
 
 
 async def google__add_google_meet(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     event_id: str,
     calendar_id: str = "primary",
 ) -> str:
@@ -368,7 +370,7 @@ async def google__add_google_meet(
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
-def register_calendar_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
+def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 12 Calendar tools. Returns count."""
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:

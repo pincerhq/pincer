@@ -4,10 +4,6 @@ Tests for Gmail tools — one test per tool (19 tools).
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
-import pytest
-
 from pincer.integrations.google.tools_gmail import (
     google__add_label,
     google__create_draft,
@@ -45,7 +41,11 @@ def _msg(msg_id="msg1", subject="Test", from_="alice@example.com", snippet="Hell
         "id": msg_id,
         "threadId": "thread1",
         "snippet": snippet,
-        "payload": {"headers": _headers(subject, from_), "mimeType": "text/plain", "body": {"data": "SGVsbG8gV29ybGQ="}},
+        "payload": {
+            "headers": _headers(subject, from_),
+            "mimeType": "text/plain",
+            "body": {"data": "SGVsbG8gV29ybGQ="},
+        },
     }
 
 

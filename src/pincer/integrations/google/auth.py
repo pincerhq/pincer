@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +231,8 @@ class GoogleAuth:
             return None
         try:
             data = json.loads(self._token_path.read_text())
-            return data.get("client_id", "").split("-")[0] if "account" not in data else cast(Optional[str], data.get("account"))
+            if "account" not in data:
+                return data.get("client_id", "").split("-")[0]
+            return cast("str | None", data.get("account"))
         except Exception:
             return None

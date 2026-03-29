@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.models import fmt_task
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
 
@@ -20,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 # ── Tool implementations ──────────────────────────────────────────────────────
 
-async def google__list_task_lists(factory: "GoogleServiceFactory") -> str:
+async def google__list_task_lists(factory: GoogleServiceFactory) -> str:
     """List all task lists."""
     svc = await factory.get("tasks")
     result = await with_backoff(lambda: svc.tasklists().list(maxResults=100).execute())
@@ -32,7 +34,7 @@ async def google__list_task_lists(factory: "GoogleServiceFactory") -> str:
 
 
 async def google__list_tasks(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     tasklist_id: str = "@default",
     show_completed: bool = False,
     max_results: int = 100,
@@ -54,7 +56,7 @@ async def google__list_tasks(
 
 
 async def google__get_task(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     task_id: str,
     tasklist_id: str = "@default",
 ) -> str:
@@ -67,7 +69,7 @@ async def google__get_task(
 
 
 async def google__create_task(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     title: str,
     tasklist_id: str = "@default",
     notes: str = "",
@@ -87,7 +89,7 @@ async def google__create_task(
 
 
 async def google__update_task(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     task_id: str,
     tasklist_id: str = "@default",
     title: str = "",
@@ -115,7 +117,7 @@ async def google__update_task(
 
 
 async def google__complete_task(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     task_id: str,
     tasklist_id: str = "@default",
 ) -> str:
@@ -132,7 +134,7 @@ async def google__complete_task(
 
 
 async def google__delete_task(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     task_id: str,
     tasklist_id: str = "@default",
 ) -> str:
@@ -143,7 +145,7 @@ async def google__delete_task(
 
 
 async def google__create_task_list(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     title: str,
 ) -> str:
     """Create a new task list."""
@@ -156,7 +158,7 @@ async def google__create_task_list(
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
-def register_tasks_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
+def register_tasks_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 8 Tasks tools. Returns count."""
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -178,7 +180,11 @@ def register_tasks_tools(registry: "ToolRegistry", factory: "GoogleServiceFactor
         parameters={
             "type": "object",
             "properties": {
-                "tasklist_id": {"type": "string", "description": "Task list ID (default: @default)", "default": "@default"},
+                "tasklist_id": {
+                    "type": "string",
+                    "description": "Task list ID (default: @default)",
+                    "default": "@default",
+                },
                 "show_completed": {"type": "boolean", "description": "Include completed tasks", "default": False},
                 "max_results": {"type": "integer", "default": 100},
             },
@@ -208,7 +214,11 @@ def register_tasks_tools(registry: "ToolRegistry", factory: "GoogleServiceFactor
                 "title": {"type": "string"},
                 "tasklist_id": {"type": "string", "default": "@default"},
                 "notes": {"type": "string", "description": "Task notes", "default": ""},
-                "due": {"type": "string", "description": "Due date in RFC 3339 format (e.g. 2026-03-28T00:00:00Z)", "default": ""},
+                "due": {
+                    "type": "string",
+                    "description": "Due date in RFC 3339 format (e.g. 2026-03-28T00:00:00Z)",
+                    "default": "",
+                },
             },
             "required": ["title"],
         },

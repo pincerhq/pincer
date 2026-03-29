@@ -24,12 +24,14 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.models import fmt_list
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pincer.integrations.google.meet_events import MeetEventSubscriber
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
@@ -54,7 +56,7 @@ def _fmt_ts(ts: str | None) -> str:
 
 
 async def google__create_meet_space(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     access_type: str = "OPEN",
     auto_recording: bool = False,
     auto_transcription: bool = False,
@@ -102,7 +104,7 @@ async def google__create_meet_space(
 
 
 async def google__get_meet_space(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     space_name: str = "",
     meeting_code: str = "",
 ) -> str:
@@ -141,7 +143,7 @@ async def google__get_meet_space(
 
 
 async def google__update_meet_space(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     space_name: str,
     access_type: str = "",
     entry_point_access: str = "",
@@ -172,7 +174,7 @@ async def google__update_meet_space(
 
 
 async def google__end_active_conference(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     space_name: str,
 ) -> str:
     """End the active conference in a meeting space — disconnects all participants."""
@@ -185,7 +187,7 @@ async def google__end_active_conference(
 
 
 async def google__configure_meet_moderation(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     space_name: str,
     chat_restriction: str = "",
     reaction_restriction: str = "",
@@ -237,7 +239,7 @@ async def google__configure_meet_moderation(
 
 
 async def google__configure_meet_artifacts(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     space_name: str,
     auto_recording: bool | None = None,
     auto_transcription: bool | None = None,
@@ -263,7 +265,10 @@ async def google__configure_meet_artifacts(
         mask_parts.append("config.artifactConfig.smartNotesConfig")
 
     if not artifact_config:
-        return "No artifact settings to update. Provide at least one of auto_recording, auto_transcription, auto_smart_notes."
+        return (
+            "No artifact settings to update. "
+            "Provide at least one of auto_recording, auto_transcription, auto_smart_notes."
+        )
 
     _body = {"config": {"artifactConfig": artifact_config}}
     _mask = ",".join(mask_parts)
@@ -285,7 +290,7 @@ async def google__configure_meet_artifacts(
 
 
 async def google__add_meet_member(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     space_name: str,
     email: str,
     role: str = "MEMBER",
@@ -318,7 +323,7 @@ async def google__add_meet_member(
 
 
 async def google__remove_meet_member(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     member_name: str,
 ) -> str:
     """Remove a member from a Google Meet space (Developer Preview).
@@ -343,7 +348,7 @@ async def google__remove_meet_member(
 
 
 async def google__list_conference_records(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     space_name: str = "",
     max_results: int = 10,
 ) -> str:
@@ -377,7 +382,7 @@ async def google__list_conference_records(
 
 
 async def google__get_conference_record(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     conference_name: str,
 ) -> str:
     """Get details of a specific past conference: start/end times, space, expiry."""
@@ -395,7 +400,7 @@ async def google__get_conference_record(
 
 
 async def google__list_conference_participants(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     conference_name: str,
     max_results: int = 50,
 ) -> str:
@@ -442,7 +447,7 @@ async def google__list_conference_participants(
 
 
 async def google__get_participant_details(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     participant_name: str,
 ) -> str:
     """Get detailed info for a conference participant including earliest/latest times."""
@@ -477,7 +482,7 @@ async def google__get_participant_details(
 
 
 async def google__list_participant_sessions(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     participant_name: str,
 ) -> str:
     """List all sessions for a participant (each join/leave pair for participants who reconnected)."""
@@ -506,7 +511,7 @@ async def google__list_participant_sessions(
 
 
 async def google__list_meet_recordings(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     conference_name: str,
 ) -> str:
     """List recordings for a conference.
@@ -547,7 +552,7 @@ async def google__list_meet_recordings(
 
 
 async def google__get_meet_recording(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     recording_name: str,
 ) -> str:
     """Get details of a specific recording including Drive file ID for download."""
@@ -571,7 +576,7 @@ async def google__get_meet_recording(
 
 
 async def google__download_meet_recording(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     drive_file_id: str,
     local_path: str,
 ) -> str:
@@ -604,7 +609,7 @@ async def google__download_meet_recording(
 
 
 async def google__check_recording_status(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     recording_name: str,
 ) -> str:
     """Poll the processing state of a meeting recording.
@@ -632,7 +637,7 @@ async def google__check_recording_status(
 
 
 async def google__list_meet_transcripts(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     conference_name: str,
 ) -> str:
     """List transcripts for a conference (requires transcription to have been enabled)."""
@@ -664,7 +669,7 @@ async def google__list_meet_transcripts(
 
 
 async def google__get_meet_transcript(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     transcript_name: str,
 ) -> str:
     """Get details of a specific transcript including the Docs document ID."""
@@ -688,7 +693,7 @@ async def google__get_meet_transcript(
 
 
 async def google__list_transcript_entries(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     transcript_name: str,
     max_results: int = 100,
 ) -> str:
@@ -716,7 +721,7 @@ async def google__list_transcript_entries(
 
 
 async def google__get_transcript_entry(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     entry_name: str,
 ) -> str:
     """Get a single transcript entry: speaker, text, language, timestamps."""
@@ -737,7 +742,7 @@ async def google__get_transcript_entry(
 
 
 async def google__summarize_meet_transcript(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     conference_name: str,
 ) -> str:
     """Fetch all transcript entries for a conference and return a compiled transcript for AI summarization.
@@ -835,7 +840,7 @@ async def google__summarize_meet_transcript(
 
 
 async def google__list_smart_notes(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     conference_name: str,
 ) -> str:
     """List smart notes (AI-generated meeting summaries by Google Meet) for a conference.
@@ -886,7 +891,7 @@ async def google__list_smart_notes(
 
 
 async def google__get_smart_notes(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     transcript_name: str,
 ) -> str:
     """Get the smart notes document for a transcript. Returns the Docs document ID."""
@@ -918,8 +923,8 @@ async def google__get_smart_notes(
 
 
 async def google__subscribe_meet_events(
-    factory: "GoogleServiceFactory",
-    subscriber: "MeetEventSubscriber",
+    factory: GoogleServiceFactory,
+    subscriber: MeetEventSubscriber,
     space_name: str = "",
     subscribe_all: bool = False,
 ) -> str:
@@ -939,8 +944,8 @@ async def google__subscribe_meet_events(
 
 
 async def google__list_meet_subscriptions(
-    factory: "GoogleServiceFactory",
-    subscriber: "MeetEventSubscriber",
+    factory: GoogleServiceFactory,
+    subscriber: MeetEventSubscriber,
 ) -> str:
     """List active Google Meet event subscriptions."""
     subs = subscriber.active_subscriptions
@@ -951,8 +956,8 @@ async def google__list_meet_subscriptions(
 
 
 async def google__delete_meet_subscription(
-    factory: "GoogleServiceFactory",
-    subscriber: "MeetEventSubscriber",
+    factory: GoogleServiceFactory,
+    subscriber: MeetEventSubscriber,
     space_name: str,
 ) -> str:
     """Delete a Google Meet event subscription for a space."""
@@ -963,9 +968,9 @@ async def google__delete_meet_subscription(
 
 
 def register_meet_tools(
-    registry: "ToolRegistry",
-    factory: "GoogleServiceFactory",
-    subscriber: "MeetEventSubscriber | None" = None,
+    registry: ToolRegistry,
+    factory: GoogleServiceFactory,
+    subscriber: MeetEventSubscriber | None = None,
 ) -> int:
     """Register all 27 Google Meet tools in *registry*. Returns count."""
     from pincer.integrations.google.meet_events import MeetEventSubscriber as _Sub

@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from pincer.integrations.google.meet_events import MeetEventSubscriber
 
 
@@ -74,7 +72,7 @@ async def test_subscribe_with_pubsub():
                 )
                 # Directly exercise _create_workspace_subscription with mock
                 sub2._subscriptions["spaces/abc123"] = "subscriptions/sub1"
-                result = f"Subscribed to events for spaces/abc123.\nSubscription: subscriptions/sub1"
+                result = "Subscribed to events for spaces/abc123.\nSubscription: subscriptions/sub1"
 
     assert "subscriptions/sub1" in result
     assert "spaces/abc123" in result
@@ -104,7 +102,7 @@ async def test_subscribe_to_space_uses_polling_when_no_pubsub():
         result = await sub.subscribe_to_space("spaces/abc123")
 
     mock_poll.assert_called_once_with("spaces/abc123")
-    assert "polling started" == result
+    assert result == "polling started"
 
 
 # ── User-level subscription ────────────────────────────────────────────────────

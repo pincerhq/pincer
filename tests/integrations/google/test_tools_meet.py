@@ -6,9 +6,7 @@ All tests mock the Meet service object so no real API calls are made.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import AsyncMock, MagicMock
 
 from pincer.integrations.google.tools_meet import (
     google__add_meet_member,
@@ -38,7 +36,6 @@ from pincer.integrations.google.tools_meet import (
     google__summarize_meet_transcript,
     google__update_meet_space,
 )
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -126,7 +123,9 @@ def _mock_subscriber(subs=None):
     sub = MagicMock()
     sub.active_subscriptions = subs or {}
     sub.subscribe_to_space = AsyncMock(return_value="Subscribed to events for spaces/abc123.\nSubscription: sub1")
-    sub.subscribe_to_user = AsyncMock(return_value="Subscribed to all Meet events for this user.\nSubscription: sub_user")
+    sub.subscribe_to_user = AsyncMock(
+        return_value="Subscribed to all Meet events for this user.\nSubscription: sub_user"
+    )
     sub.unsubscribe = AsyncMock(return_value="Unsubscribed from events for spaces/abc123.")
     return sub
 
@@ -148,7 +147,7 @@ async def test_create_meet_space_with_auto_recording(mock_factory, mock_meet_ser
     assert "auto-recording" in result
     # Verify artifact config was passed in the create call
     call_args = mock_meet_service.spaces().create.call_args
-    body = call_args[1]["body"] if call_args and "body" in (call_args[1] or {}) else (call_args[0][0] if call_args else {})
+    call_args[1]["body"] if call_args and "body" in (call_args[1] or {}) else (call_args[0][0] if call_args else {})
     assert "artifactConfig" in str(call_args)
 
 

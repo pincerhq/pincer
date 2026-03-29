@@ -50,8 +50,8 @@ class MeetArtifactProcessor:
 
     def __init__(
         self,
-        auth: "GoogleAuth",
-        factory: "GoogleServiceFactory",
+        auth: GoogleAuth,
+        factory: GoogleServiceFactory,
     ) -> None:
         self._auth = auth
         self._factory = factory

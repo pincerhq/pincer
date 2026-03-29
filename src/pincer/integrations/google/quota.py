@@ -11,7 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
 

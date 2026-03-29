@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
 
@@ -41,7 +43,7 @@ def _fmt_contact(person: dict[str, Any]) -> str:
 # ── Tool implementations ──────────────────────────────────────────────────────
 
 async def google__list_contacts(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     max_results: int = 50,
     page_token: str = "",
 ) -> str:
@@ -67,7 +69,7 @@ async def google__list_contacts(
 
 
 async def google__search_contacts(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     query: str,
     max_results: int = 20,
 ) -> str:
@@ -86,7 +88,7 @@ async def google__search_contacts(
 
 
 async def google__get_contact(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     resource_name: str,
 ) -> str:
     """Get details of a specific contact by resource name (e.g. 'people/c123456')."""
@@ -100,7 +102,7 @@ async def google__get_contact(
 
 
 async def google__create_contact(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     given_name: str,
     family_name: str = "",
     email: str = "",
@@ -126,7 +128,7 @@ async def google__create_contact(
 
 
 async def google__update_contact(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     resource_name: str,
     given_name: str = "",
     family_name: str = "",
@@ -173,7 +175,7 @@ async def google__update_contact(
 
 
 async def google__delete_contact(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     resource_name: str,
 ) -> str:
     """Delete a contact."""
@@ -184,7 +186,7 @@ async def google__delete_contact(
     return f"Contact {resource_name} deleted."
 
 
-async def google__list_contact_groups(factory: "GoogleServiceFactory") -> str:
+async def google__list_contact_groups(factory: GoogleServiceFactory) -> str:
     """List contact groups (labels)."""
     svc = await factory.get("contacts")
     result = await with_backoff(
@@ -205,7 +207,7 @@ async def google__list_contact_groups(factory: "GoogleServiceFactory") -> str:
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
-def register_contacts_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
+def register_contacts_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 7 Contacts tools. Returns count."""
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -246,7 +248,9 @@ def register_contacts_tools(registry: "ToolRegistry", factory: "GoogleServiceFac
         handler=_h(google__get_contact),
         parameters={
             "type": "object",
-            "properties": {"resource_name": {"type": "string", "description": "Contact resource name from search results"}},
+            "properties": {
+                "resource_name": {"type": "string", "description": "Contact resource name from search results"},
+            },
             "required": ["resource_name"],
         },
     )

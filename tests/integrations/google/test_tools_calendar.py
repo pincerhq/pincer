@@ -4,8 +4,6 @@ Tests for Calendar tools — one test per tool (12 tools).
 
 from __future__ import annotations
 
-import pytest
-
 from pincer.integrations.google.tools_calendar import (
     google__accept_event,
     google__add_google_meet,

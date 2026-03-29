@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from pincer.integrations.google.auth import GoogleAuth
 
 logger = logging.getLogger(__name__)
@@ -66,7 +68,7 @@ class MeetEventSubscriber:
 
     def __init__(
         self,
-        auth: "GoogleAuth",
+        auth: GoogleAuth,
         on_event: Callable[[str, dict[str, Any]], Awaitable[None]] | None = None,
         pubsub_topic: str | None = None,
     ) -> None:
@@ -287,7 +289,7 @@ class MeetEventSubscriber:
                         build, "meet", "v2", credentials=creds, cache_discovery=False
                     )
                     space = await asyncio.to_thread(
-                        lambda s=_sn: svc.spaces().get(name=s).execute()  # type: ignore[misc]
+                        lambda s=_sn, _svc=svc: _svc.spaces().get(name=s).execute()  # type: ignore[misc]
                     )
                     active = space.get("activeConference", {})
                     conf_record: str | None = (

@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
 
@@ -44,7 +46,7 @@ def _extract_doc_text(content: list[dict[str, Any]]) -> str:
 # ── Tool implementations ──────────────────────────────────────────────────────
 
 async def google__get_doc_content(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     document_id: str,
     max_chars: int = 8000,
 ) -> str:
@@ -60,7 +62,7 @@ async def google__get_doc_content(
 
 
 async def google__get_doc_structure(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     document_id: str,
 ) -> str:
     """Get the structural outline of a Google Document (headings, paragraph counts, tables)."""
@@ -92,7 +94,7 @@ async def google__get_doc_structure(
 
 
 async def google__create_doc(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     title: str,
     content: str = "",
 ) -> str:
@@ -125,7 +127,7 @@ async def google__create_doc(
 
 
 async def google__insert_text(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     document_id: str,
     text: str,
     index: int = 1,
@@ -144,7 +146,7 @@ async def google__insert_text(
 
 
 async def google__replace_text(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     document_id: str,
     find_text: str,
     replace_text: str,
@@ -171,7 +173,7 @@ async def google__replace_text(
 
 
 async def google__insert_table(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     document_id: str,
     rows: int,
     columns: int,
@@ -197,7 +199,7 @@ async def google__insert_table(
 
 
 async def google__update_paragraph_style(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     document_id: str,
     start_index: int,
     end_index: int,
@@ -223,7 +225,7 @@ async def google__update_paragraph_style(
 
 
 async def google__add_comment(
-    factory: "GoogleServiceFactory",
+    factory: GoogleServiceFactory,
     file_id: str,
     content: str,
     anchor: str = "",
@@ -241,7 +243,7 @@ async def google__add_comment(
 
 # ── Registry ──────────────────────────────────────────────────────────────────
 
-def register_docs_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory") -> int:
+def register_docs_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
     """Register all 8 Docs tools. Returns count."""
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -296,7 +298,11 @@ def register_docs_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory
             "properties": {
                 "document_id": {"type": "string"},
                 "text": {"type": "string"},
-                "index": {"type": "integer", "description": "Character index (default: 1 = start of doc)", "default": 1},
+                "index": {
+                    "type": "integer",
+                    "description": "Character index (default: 1 = start of doc)",
+                    "default": 1,
+                },
             },
             "required": ["document_id", "text"],
         },
@@ -344,7 +350,14 @@ def register_docs_tools(registry: "ToolRegistry", factory: "GoogleServiceFactory
                 "document_id": {"type": "string"},
                 "start_index": {"type": "integer"},
                 "end_index": {"type": "integer"},
-                "named_style": {"type": "string", "enum": ["HEADING_1", "HEADING_2", "HEADING_3", "HEADING_4", "HEADING_5", "HEADING_6", "NORMAL_TEXT", "TITLE", "SUBTITLE"], "default": "HEADING_1"},
+                "named_style": {
+                    "type": "string",
+                    "enum": [
+                        "HEADING_1", "HEADING_2", "HEADING_3", "HEADING_4",
+                        "HEADING_5", "HEADING_6", "NORMAL_TEXT", "TITLE", "SUBTITLE",
+                    ],
+                    "default": "HEADING_1",
+                },
             },
             "required": ["document_id", "start_index", "end_index"],
         },

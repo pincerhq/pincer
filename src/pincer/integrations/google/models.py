@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # ── Generic ───────────────────────────────────────────────────────────────────
 
 def truncate(text: str, max_chars: int = 200) -> str:

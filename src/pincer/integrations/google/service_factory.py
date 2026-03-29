@@ -46,7 +46,7 @@ class GoogleServiceFactory:
         )
     """
 
-    def __init__(self, auth: "GoogleAuth") -> None:
+    def __init__(self, auth: GoogleAuth) -> None:
         self._auth = auth
         # service_name → (service_object, created_at_timestamp)
         self._cache: dict[str, tuple[Any, float]] = {}
@@ -83,5 +83,5 @@ class GoogleServiceFactory:
             self._cache.pop(service_name, None)
 
     @property
-    def auth(self) -> "GoogleAuth":
+    def auth(self) -> GoogleAuth:
         return self._auth

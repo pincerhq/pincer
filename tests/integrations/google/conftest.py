@@ -8,13 +8,12 @@ mirrors the real API (e.g. svc.users().messages().list(...).execute()).
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from pincer.integrations.google.auth import GoogleAuth
 from pincer.integrations.google.service_factory import GoogleServiceFactory
-
 
 # ── Auth & factory fixtures ───────────────────────────────────────────────────
 

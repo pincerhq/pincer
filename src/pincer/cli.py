@@ -13,9 +13,7 @@ import asyncio
 import contextlib
 import logging
 import os
-import signal
 import socket
-import sys
 from datetime import UTC
 from typing import TYPE_CHECKING
 
@@ -3214,7 +3212,7 @@ def setup_google() -> None:
         console.print(f"[red]Authentication failed: {exc}[/red]")
         raise typer.Exit(1) from exc
 
-    console.print(f"\n[green]Google Workspace authenticated![/green]")
+    console.print("\n[green]Google Workspace authenticated![/green]")
     console.print(f"  Token saved to: {token_path}")
     console.print(f"  Refresh token:  {'Yes' if creds.refresh_token else 'No'}")
     console.print(f"  Scopes granted: {len(ALL_SCOPES)}")
