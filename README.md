@@ -4,7 +4,7 @@
 
 # Pincer
 
-**Your personal AI agent. Text it. It does stuff.**
+**Open-source AI agent that works across WhatsApp, Telegram, Slack, Email, Voice, and 150+ tools — self-hosted, security-first, runs in Docker.**
 
 [![PyPI](https://img.shields.io/pypi/v/pincer-agent?color=FF6B35&style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/pincer-agent/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
