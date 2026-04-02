@@ -1,7 +1,5 @@
 # Pincer — Project Structure
 
-
-> **Version:** 0.8.0 (Google Workspace Sprint Complete)
 > **Date:** March 26, 2026
 > **License:** MIT
 
@@ -305,7 +303,6 @@ pincer/
 │   │   ├── firewall.py
 │   │   └── rate_limiter.py
 │   │
-│   ├── mcp/                        # MCP client + OAuth 2.1 (v0.7.4.2)
 │   │   ├── __init__.py             # Public exports
 │   │   ├── config.py               # MCPConfig, MCPServerConfig, load_mcp_config
 │   │   ├── client.py               # MCPClientSession (stdio + http)

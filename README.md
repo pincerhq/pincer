@@ -4,7 +4,7 @@
 
 # Pincer
 
-**Your personal AI agent. Text it. It does stuff.**
+**Open-source AI agent that works across WhatsApp, Telegram, Slack, Email, Voice, and 150+ tools — self-hosted, security-first, runs in Docker.**
 
 [![PyPI](https://img.shields.io/pypi/v/pincer-agent?color=FF6B35&style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/pincer-agent/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
@@ -13,8 +13,7 @@
 <br>
 [![License: MIT](https://img.shields.io/badge/license-MIT-22C55E?style=for-the-badge)](LICENSE)
 [![Discord](https://img.shields.io/discord/1475920441792266477?color=5865F2&style=for-the-badge&logo=discord&logoColor=white&label=Discord)](https://discord.gg/eM9Y6utd)
-[![Stars](https://img.shields.io/github/stars/pincerhq/pincer?style=for-the-badge&logo=github&logoColor=white&color=6e5494)](https://github.com/pincerhq/pincer/stargazers)
-[![Downloads](https://img.shields.io/pepy/dt/pincer-agent?style=for-the-badge&logo=python&logoColor=white&color=238636)](https://pepy.tech/project/pincer-agent)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/pincer-agent?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/pincer-agent)
 ![Pincer demo — agent checking email and scheduling a meeting via WhatsApp](docs/assets/demo.gif)
 
 </div>
@@ -553,11 +552,6 @@ pip install "pincer-agent[image]"  # Image generation (fal.ai + Gemini)
 - [x] Skill system with sandboxing, AST scanning, signing
 - [x] Docker + one-click deploys (Railway, Render, DigitalOcean)
 - [x] Voice calling (Twilio + STT/TTS + compliance)
-- [x] **MCP client** — Model Context Protocol integration
-- [x] **MCP OAuth 2.0** — Authorization server with PKCE, scopes, JWT
-- [x] **Image generation** — fal.ai + Gemini with cost controls
-- [x] **Google Workspace** — 85 native tools: Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Contacts
-- [x] **xAI Grok** — Grok-2/Grok-3 provider support
 - [ ] **iMessage** — [help wanted](https://github.com/pincerhq/pincer/issues?q=label%3A%22help+wanted%22)
 - [ ] **SMS** — Twilio SMS channel
 - [ ] **Microsoft Teams** — [help wanted](https://github.com/pincerhq/pincer/issues?q=label%3A%22help+wanted%22)
