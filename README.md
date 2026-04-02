@@ -33,17 +33,17 @@ pip install pincer-agent && pincer init
 
 ### TL;DR
 
-- **What:** An open-source AI agent that lives in WhatsApp, Telegram, Discord, Slack, and Email — and actually does things (reads email, manages calendar, browses the web, makes phone calls)
+- **What:** An open-source AI agent that lives in WhatsApp, Telegram, Discord, Slack, Signal, and Email — generates images, makes phone calls, connects to any MCP server, and actually does things
 - **For whom:** Developers and technical users who want a personal agent they can self-host, audit, and extend
 - **Why it exists:** Existing agents had [malicious plugins](https://pincer.sh/docs/security), surprise bills, and codebases too large to review
-- **How it's different:** 9,500 lines of Python. 12 env vars. Skills sandboxed in subprocesses. Hard daily spending cap
+- **How it's different:** Clean Python codebase. Straightforward config via env vars. Skills sandboxed in subprocesses. Hard daily spending cap
 - **How it stays safe:** User allowlist, tool approval prompts, AST scanning, skill signing, structured audit log — and `pincer doctor` to verify it all
 
 ---
 
 ## What is this?
 
-Pincer is an open-source AI agent that lives in your messaging apps. You text it — *"check my emails, summarize anything important, and add the meetings to my calendar"* — and it does it. It runs on your machine, talks to the LLM of your choice, and the entire codebase is 9,500 lines of Python you can read in an afternoon.
+Pincer is an open-source AI agent that lives in your messaging apps. You text it — *"check my emails, summarize anything important, and add the meetings to my calendar"* — and it does it. It runs on your machine, talks to the LLM of your choice, and the entire codebase is readable Python you can audit in an afternoon.
 
 > **You (WhatsApp):** Check my email and brief me on anything important
 >
@@ -76,17 +76,19 @@ So I built it. Pincer is the agent I wanted. If you want the same thing, it's yo
 
 > **Fair comparison note:** OpenClaw is a respected project that proved personal AI agents are what people want. It optimizes for plugin ecosystem breadth and community size. Pincer optimizes for auditability, cost control, and sandboxed security. Different goals, different trade-offs. Versions compared: Pincer 0.7.x vs OpenClaw as of Feb 2026.
 
-|  | **Pincer** | **OpenClaw** | **LangChain agents** | **Custom bot** |
+|  | **Pincer** | **OpenClaw** | **LangChain agents** | **Custom bot** |
 |---|:---:|:---:|:---:|:---:|
-| **Codebase** | 9,500 LOC | 200K+ LOC | Framework + glue | Yours |
+| **Codebase** | Auditable Python | 200K+ LOC | Framework + glue | Yours |
 | **Language** | Python | TypeScript | Python | Any |
 | **Install → first message** | ~5 min | 30–60 min | Hours | Days |
 | **Skill isolation** | Subprocess sandbox | In-process | DIY | DIY |
 | **Skill vetting** | AST scan + safety score + optional signing | Community-reported | DIY | DIY |
 | **Cost controls** | Hard daily cap, auto-downgrade, per-response cost | None built-in | None built-in | DIY |
-| **Config surface** | 12 env vars | Multi-file JSON | Code | Code |
-| **Channels** | 7 + voice calling | 2–3 | 0 | 1 (usually) |
+| **Config surface** | Env vars + optional TOML | Multi-file JSON | Code | Code |
+| **Channels** | 8 + voice calling | 2–3 | 0 | 1 (usually) |
 | **Memory** | Cross-channel, FTS5 + embeddings | Per-channel | Needs setup | DIY |
+| **MCP** | Full client + OAuth 2.0 server | None | Plugins | DIY |
+| **Image generation** | fal.ai + Gemini built-in | None | DIY | DIY |
 
 ---
 
@@ -94,22 +96,22 @@ So I built it. Pincer is the agent I wanted. If you want the same thing, it's yo
 
 ### Prerequisites
 
-You need three things: **Python 3.11+**, **an LLM API key** (Anthropic, OpenAI, DeepSeek, or free with Ollama), and **a Telegram bot token** (takes 2 min via [@BotFather](https://t.me/BotFather)).
+You need three things: **Python 3.11+**, **an LLM API key** (Anthropic, OpenAI, Grok, or free with Ollama), and **a Telegram bot token** (takes 2 min via [@BotFather](https://t.me/BotFather)).
 
 ### Option 1: pip
 
 ```bash
 pip install pincer-agent
-pincer init                  # 5-min interactive wizard
-pincer run                   # done — message your bot on Telegram
+pincer init                  # 5-min interactive wizard
+pincer run                   # done — message your bot on Telegram
 ```
 
 ### Option 2: Docker
 
 ```bash
 git clone https://github.com/pincerhq/pincer.git && cd pincer
-cp .env.example .env         # edit with your API keys
-docker compose up -d         # dashboard on localhost:8080
+cp .env.example .env         # edit with your API keys
+docker compose up -d         # dashboard on localhost:8080
 ```
 
 ### Option 3: One-click cloud
@@ -121,13 +123,13 @@ docker compose up -d         # dashboard on localhost:8080
 ### Minimal .env
 
 ```bash
-PINCER_LLM_API_KEY=sk-ant-...          # Anthropic, OpenAI, or DeepSeek
-PINCER_TELEGRAM_TOKEN=7000000:AAx...   # From @BotFather
-PINCER_ALLOWED_USERS=123456789         # Your Telegram user ID
-PINCER_BUDGET_DAILY=5.00               # Hard daily spending limit in USD
+PINCER_ANTHROPIC_API_KEY=sk-ant-...    # Anthropic, OpenAI, or Grok
+PINCER_TELEGRAM_BOT_TOKEN=7000000:AAx... # From @BotFather
+PINCER_TELEGRAM_ALLOWED_USERS=123456789  # Your Telegram user ID
+PINCER_DAILY_BUDGET_USD=5.00           # Hard daily spending limit in USD
 ```
 
-Twelve env vars total. No JSON. No YAML. **[Full config reference →](docs/PROJECT_STRUCTURE.md)**
+**[Full config reference →](docs/PROJECT_STRUCTURE.md)**
 
 ---
 
@@ -139,8 +141,8 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 |------|----------------|----------------------|
 | **🟢 Core** | Agent loop, memory, tools, security, cost controls, Telegram | CI-tested, regression-protected, release-blocking |
 | **🟡 Stable** | WhatsApp, Discord, Slack, Email, dashboard, skills system | Tested, maintained, may lag 1–2 weeks on upstream API changes |
-| **🧪 Peripheral** | Voice calling, Signal, proactive scheduler, MCP client | Working, documented, community-maintained welcome |
-| **🔮 Planned** | iMessage, LINE, Teams, Matrix | Not yet started — [help wanted](https://github.com/pincerhq/pincer/labels/help-wanted) |
+| **🧪 Peripheral** | Voice calling, Signal, MCP client + OAuth, image generation, proactive scheduler | Working, documented, community-maintained welcome |
+| **🔮 Planned** | iMessage, SMS, Teams, Zoom, Viber, WeChat, Matrix | Not yet started — [help wanted](https://github.com/pincerhq/pincer/labels/help-wanted) |
 
 ---
 
@@ -153,7 +155,7 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 | **Discord** | 🟡 | Slash commands, threads, rich embeds via discord.py |
 | **Slack** | 🟡 | DMs, channels, threads via slack-bolt |
 | **Email** | 🟡 | Gmail OAuth — read, search, draft, send |
-| **Signal** | 🧪 | E2E encrypted via signal-cli |
+| **Signal** | 🧪 | E2E encrypted via signal-cli-rest-api Docker sidecar; WebSocket or poll receive mode |
 | **Voice** | 🧪 | Make/receive phone calls via Twilio (~$0.12/3-min call) |
 | **Web UI** | 🟡 | Dashboard + chat at `localhost:8080` |
 
@@ -166,14 +168,15 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 | Tool | What it does | Approval required |
 |------|-------------|:---------:|
 | `web_search` | Search via Tavily or DuckDuckGo | No |
-| `web_browse` | Navigate, fill forms, screenshot (Playwright) | No |
+| `browse` / `screenshot` | Navigate, fill forms, screenshot (Playwright) | No |
 | `email_check` / `email_send` | Read inbox, draft and send | Read: No / Send: **Yes** |
 | `calendar_today` / `calendar_create` | Read and create Google Calendar events | Read: No / Create: No |
 | `shell_exec` | Run shell commands | **Yes** |
 | `python_exec` | Execute Python in sandbox | **Yes** |
-| `file_read` / `file_write` | Local file operations | Read: No / Write: **Yes** |
+| `file_read` / `file_write` / `file_list` | Local file operations | Read: No / Write: **Yes** |
 | `memory_search` | Search past conversations semantically | No |
 | `voice_call` | Outbound phone calls via Twilio | **Yes** |
+| `generate_image` | Generate images via fal.ai or Gemini | No |
 | `google__*` (85 tools) | Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Contacts | Read: No / Write: **Yes** |
 
 "Approval" = the agent asks in chat before executing. You reply ✅ or ❌.
@@ -186,17 +189,90 @@ from pincer import Agent
 
 agent = Agent()
 result = agent.ask("Summarize ~/data/sales.csv and plot monthly trends")
-result.display()  # renders inline in Jupyter
+result.display()  # renders inline in Jupyter
 ```
 
 ```python
 async with Agent() as agent:
-    result = await agent.run("What meetings do I have tomorrow?")
-    print(result.text)
-    print(f"Cost: ${result.cost:.4f}")
+    result = await agent.run("What meetings do I have tomorrow?")
+    print(result.text)
+    print(f"Cost: ${result.cost:.4f}")
 ```
 
 </details>
+
+---
+
+## 🖼️ Image Generation
+
+Pincer has a built-in `generate_image` tool powered by **fal.ai** (primary) and **Google Gemini** (fallback). The provider is selected automatically based on which key is configured.
+
+```bash
+# Enable fal.ai (recommended)
+PINCER_FAL_KEY=...
+
+# Or Gemini
+PINCER_GEMINI_API_KEY=...
+
+# Optional controls
+PINCER_IMAGE_MAX_COST_PER_REQUEST=0.10   # USD cap per generation
+PINCER_IMAGE_DAILY_LIMIT=50             # Max generations per day
+```
+
+Install the optional dependency:
+
+```bash
+pip install "pincer-agent[image]"
+```
+
+> **You (Telegram):** Generate an image of a futuristic Tokyo street at night in cyberpunk style
+>
+> **🦀 Pincer:** *(sends the generated image inline)* Done — generated in 4.2s via fal.ai · $0.004
+
+---
+
+## 🔌 MCP — Model Context Protocol
+
+Pincer is a full MCP client **and** MCP server. Connect any MCP-compliant tool server (GitHub, Postgres, Notion, Stripe, custom) and its tools appear in the agent automatically.
+
+```toml
+# pincer.toml
+[[mcp.servers]]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_..." }
+
+[[mcp.servers]]
+name = "postgres"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-postgres", "postgresql://..."]
+```
+
+```bash
+pincer mcp list          # show connected servers + status
+pincer mcp tools         # list all registered MCP tools
+pincer mcp test github   # test a specific server connection
+pincer mcp call github get_file_contents --repo pincerhq/pincer --path README.md
+```
+
+Install the optional dependency:
+
+```bash
+pip install "pincer-agent[mcp]"
+```
+
+### MCP OAuth 2.0
+
+Pincer also acts as an **OAuth 2.0 Authorization Server** for MCP clients. Any MCP client can authenticate against Pincer using standard OAuth 2.0 with PKCE:
+
+- `/authorize`, `/token`, `/introspect`, `/revoke` endpoints
+- RFC 8414 server metadata
+- Scope-based access control
+- JWT tokens via PyJWT
+- Bearer token middleware for protected routes
+
+**[Full MCP guide →](docs/mcp-guide.md)**
 
 ---
 
@@ -205,9 +281,9 @@ async with Agent() as agent:
 Skills extend the agent. Each skill = a Python file + YAML manifest, loaded dynamically on startup.
 
 ```bash
-pincer skills list                     # what's installed
+pincer skills list                     # what's installed
 pincer skills install github:user/repo # install (scanned first)
-pincer skills scan ./untrusted-skill   # security scan before install
+pincer skills scan ./untrusted-skill   # security scan before install
 ```
 
 10 bundled skills ship with Pincer: `weather`, `news`, `translate`, `summarize_url`, `youtube_summary`, `expense_tracker`, `habit_tracker`, `pomodoro`, `stock_price`, `git_status`.
@@ -221,10 +297,10 @@ from pincer.tools import tool
 
 @tool(name="get_weather", description="Get current weather for a city")
 async def get_weather(city: str) -> str:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"https://wttr.in/{city}?format=j1")
-        data = resp.json()
-        return f"{city}: {data['current_condition'][0]['temp_C']}°C"
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"https://wttr.in/{city}?format=j1")
+        data = resp.json()
+        return f"{city}: {data['current_condition'][0]['temp_C']}°C"
 ```
 
 ```yaml
@@ -257,6 +333,7 @@ Pincer is designed around two assumptions: **every inbound message is untrusted 
 | **Prompt injection via tools** | Tool outputs are sanitized; system prompt is hardened against injection |
 | **Runaway costs** | Hard daily budget, per-session limits, auto-downgrade at 80% spend |
 | **Forensic blindness** | Structured JSON audit log for every action — who, what, when, cost |
+| **Unauthorized MCP access** | OAuth 2.0 + PKCE + scope enforcement on all MCP server routes |
 
 ### What Pincer does NOT protect against
 
@@ -275,18 +352,20 @@ If the LLM attempts to exfiltrate data by crafting a `web_search` query containi
 
 ### `pincer doctor`
 
-One command audits your setup — 36+ checks covering config, keys, permissions, skills, and network exposure:
+One command audits your setup — 40+ checks covering config, keys, permissions, skills, MCP, image generation, and network exposure:
 
 ```
 $ pincer doctor
-  🦀 Pincer Doctor v0.7.0
-  ✅ API key valid (claude-sonnet-4-5-20250929)
-  ✅ Telegram connected (@my_pincer_bot)
-  ✅ Daily budget: $5.00
-  ✅ 10 skills installed, all scored ≥ 80
-  ⚠️  Discord DM policy is "open" — consider "pairing"
-  ✅ No exposed ports beyond localhost
-  22 passed · 1 warning · 0 critical
+  🦀 Pincer Doctor v0.8.x
+  ✅ API key valid (claude-sonnet-4-5-20250929)
+  ✅ Telegram connected (@my_pincer_bot)
+  ✅ Daily budget: $5.00
+  ✅ 10 skills installed, all scored ≥ 80
+  ✅ MCP: 2 servers connected (github, postgres)
+  ✅ Image generation: fal.ai key present, daily limit 50
+  ⚠️  Discord DM policy is "open" — consider "pairing"
+  ✅ No exposed ports beyond localhost
+  38 passed · 1 warning · 0 critical
 ```
 
 **[Full security model →](docs/Security.md)** · Found a vulnerability? **[Security Policy](docs/Security%20Policy.md)**
@@ -306,6 +385,11 @@ $ pincer doctor
 - Average call duration: 2.5 minutes
 - Cost per call: **~$0.12** (Twilio + Deepgram + ElevenLabs)
 - Monthly voice cost: **~$2**
+
+**Image generation:**
+- On-demand via fal.ai: **~$0.004/image** (fal-ai/nano-banana-2)
+- Configurable daily limit and per-request cost cap
+- Images delivered inline in Telegram, Discord, and Web UI
 
 **Fully offline with Ollama:**
 - Llama 3.3 70B via Ollama on an M2 Mac
@@ -342,8 +426,9 @@ Set one or more — failover is automatic.
 
 | Provider | Env var | Models |
 |----------|---------|--------|
-| **Anthropic** ⭐ | `PINCER_LLM_API_KEY` | Claude Opus 4.6 / Sonnet 4.5 / Haiku 4.5 |
-| **OpenAI** | `PINCER_LLM_API_KEY` | GPT-4o / GPT-5 / o-series |
+| **Anthropic** ⭐ | `PINCER_ANTHROPIC_API_KEY` | Claude Opus 4.6 / Sonnet 4.5 / Haiku 4.5 |
+| **OpenAI** | `PINCER_OPENAI_API_KEY` | GPT-4o / GPT-5 / o-series |
+| **xAI Grok** | `PINCER_GROK_API_KEY` | Grok-2 / Grok-3 (OpenAI-compatible API) |
 | **DeepSeek** | `PINCER_LLM_API_KEY` | DeepSeek V3 / R1 |
 | **Ollama** | `OLLAMA_HOST` | Any local model — fully offline, $0 |
 | **OpenRouter** | `PINCER_LLM_API_KEY` | 100+ models, single key |
@@ -369,17 +454,18 @@ Pincer doesn't just respond — it reaches out.
 <summary><strong>💻 CLI Reference</strong></summary>
 
 ```bash
-pincer init                        # interactive setup wizard
-pincer run                         # start agent (all channels)
-pincer run --channel telegram      # single channel
-pincer chat                        # CLI chat for testing
-pincer doctor                      # security + config audit
-pincer cost                        # spending summary
-pincer skills list|install|scan    # manage skills
-pincer mcp list                        # MCP servers + status
-pincer mcp test <server>              # test MCP connection
-pincer mcp tools                      # list registered MCP tools
-pincer pair approve <ch> <code>    # approve a DM sender
+pincer init                        # interactive setup wizard
+pincer run                         # start agent (all channels)
+pincer run --channel telegram      # single channel
+pincer chat                        # CLI chat for testing
+pincer doctor                      # security + config audit (40+ checks)
+pincer cost                        # spending summary
+pincer skills list|install|scan    # manage skills
+pincer mcp list                    # MCP servers + status
+pincer mcp test <server>           # test MCP connection
+pincer mcp tools                   # list registered MCP tools
+pincer mcp call <server> <tool>    # call a specific MCP tool
+pincer pair approve <ch> <code>    # approve a DM sender
 pincer setup-google                # Google Workspace OAuth (85 tools)
 ```
 
@@ -393,26 +479,30 @@ pincer setup-google                # Google Workspace OAuth (85 tools)
 
 ```mermaid
 graph TD
-    WA[📱 WhatsApp] --> CR[Channel Router]
-    TG[📱 Telegram] --> CR
-    DC[🎮 Discord] --> CR
-    SL[💼 Slack] --> CR
-    EM[📧 Email] --> CR
-    VC[📞 Voice] --> CR
-    WB[🌐 Web UI] --> CR
+    WA[📱 WhatsApp] --> CR[Channel Router]
+    TG[📱 Telegram] --> CR
+    DC[🎮 Discord] --> CR
+    SL[💼 Slack] --> CR
+    EM[📧 Email] --> CR
+    VC[📞 Voice] --> CR
+    SG[🔒 Signal] --> CR
+    WB[🌐 Web UI] --> CR
 
-    CR --> AC[🧠 Agent Core · ReAct Loop · 190 LOC]
+    CR --> AC[🧠 Agent Core · ReAct Loop]
 
-    AC --> TR[🔧 Tool Registry + Sandbox]
-    AC --> MM[🗃️ Memory · SQLite + FTS5 + Embeddings]
-    AC --> SS[👤 Sessions · Per-channel · Per-user]
+    AC --> TR[🔧 Tool Registry + Sandbox]
+    AC --> MM[🗃️ Memory · SQLite + FTS5 + Embeddings]
+    AC --> SS[👤 Sessions · Per-channel · Per-user]
+    AC --> MCP[🔌 MCP Client + OAuth Server]
+    AC --> IMG[🖼️ Image Generation · fal.ai + Gemini]
 
-    TR --> BT[Built-in Tools · 11]
-    TR --> SK[Custom Skills · Sandboxed]
+    TR --> BT[Built-in Tools · 12+]
+    TR --> SK[Custom Skills · Sandboxed]
+    MCP --> EXT[External MCP Servers · GitHub · Postgres · etc.]
 ```
 
 1. Message arrives → load session + relevant memories
-2. Send to LLM with available tools
+2. Send to LLM with available tools (built-in + skills + MCP tools)
 3. LLM returns tool call → execute in sandbox → feed result back → repeat
 4. LLM returns text → deliver to user via originating channel
 5. Save session, update memory, log cost
@@ -423,23 +513,34 @@ No frameworks. No abstractions. `async/await` + the Anthropic SDK.
 <summary><strong>Project structure & tech stack</strong></summary>
 
 ```
-pincer/ (9,500 LOC total)
+pincer/
 ├── src/pincer/
-│   ├── core/         agent.py (190 LOC), session.py, config.py, soul.py
-│   ├── llm/          anthropic, openai, ollama, router, cost_tracker
-│   ├── channels/     telegram, whatsapp, discord, slack, email, voice, web
-│   ├── memory/       store (SQLite+FTS5), embeddings, entities
-│   ├── tools/        registry, sandbox, approval, builtin/ (11 tools)
-│   ├── skills/       loader, scanner (AST), signer
-│   ├── voice/        engine, twiml_server, stt, tts, compliance
-│   ├── security/     firewall, audit, doctor (36+ checks)
-│   └── scheduler/    cron, proactive
-├── skills/           10 bundled
-├── tests/            pytest + pytest-asyncio
+│   ├── core/         agent.py, session.py, config.py, soul.py, identity.py
+│   ├── llm/          anthropic, openai, grok, ollama, router, cost_tracker
+│   ├── channels/     telegram, whatsapp, discord, slack, email, voice, signal, web
+│   ├── memory/       store (SQLite+FTS5), embeddings, entities, summarizer
+│   ├── tools/        registry, sandbox, approval, builtin/ (12+ tools)
+│   ├── skills/       loader, scanner (AST), signer
+│   ├── image/        router, provider_fal, provider_gemini, types
+│   ├── mcp/          core, client, manager, bridge, audit, security, oauth/
+│   │   └── auth/     endpoints, tokens, pkce, scopes, consent, token_store
+│   ├── voice/        engine, twiml_server, stt, tts, compliance
+│   ├── security/     firewall, audit, doctor (40+ checks), rate_limiter
+│   ├── costs/        budget
+│   └── scheduler/    cron, proactive, triggers
+├── skills/           10 bundled
+├── tests/            pytest + pytest-asyncio
 └── docs/
 ```
 
-**Stack:** Python 3.11+ / asyncio · `anthropic` + `openai` SDKs · `aiogram` 3.x · `neonize` · `discord.py` · `slack-bolt` · `twilio` · `FastAPI` + `HTMX` · SQLite + FTS5 · `Playwright` · `pydantic-settings` · `typer` + `rich`
+**Stack:** Python 3.11+ / asyncio · `anthropic` + `openai` SDKs · `aiogram` 3.x · `neonize` · `discord.py` · `slack-bolt` · `twilio` · `FastAPI` + `HTMX` · SQLite + FTS5 · `Playwright` · `pydantic-settings` · `typer` + `rich` · `mcp>=1.8.0` · `PyJWT[crypto]>=2.8.0` · `fal-client>=0.13.0`
+
+**Optional extras:**
+
+```bash
+pip install "pincer-agent[mcp]"    # MCP client + OAuth server
+pip install "pincer-agent[image]"  # Image generation (fal.ai + Gemini)
+```
 
 </details>
 
@@ -452,10 +553,15 @@ pincer/ (9,500 LOC total)
 - [x] Skill system with sandboxing, AST scanning, signing
 - [x] Docker + one-click deploys (Railway, Render, DigitalOcean)
 - [x] Voice calling (Twilio + STT/TTS + compliance)
-
-- [x] **MCP client** — Model Context Protocol integration (v0.7.4)
-- [x] **Google Workspace** — 85 native tools: Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Contacts (v0.8.0)
+- [x] **MCP client** — Model Context Protocol integration
+- [x] **MCP OAuth 2.0** — Authorization server with PKCE, scopes, JWT
+- [x] **Image generation** — fal.ai + Gemini with cost controls
+- [x] **Google Workspace** — 85 native tools: Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Contacts
+- [x] **xAI Grok** — Grok-2/Grok-3 provider support
 - [ ] **iMessage** — [help wanted](https://github.com/pincerhq/pincer/issues?q=label%3A%22help+wanted%22)
+- [ ] **SMS** — Twilio SMS channel
+- [ ] **Microsoft Teams** — [help wanted](https://github.com/pincerhq/pincer/issues?q=label%3A%22help+wanted%22)
+- [ ] **Zoom** — Meeting channel
 - [ ] **Encrypted memory** — at-rest database encryption
 - [ ] **Multi-agent routing** — specialized sub-agents
 - [ ] **Managed hosting** — for non-self-hosters (exploring, not promised)
@@ -480,7 +586,7 @@ We welcome contributions from everyone — first-timers, experienced engineers, 
 |------|-----|:----------:|
 | **Build a skill** | [Skills guide](docs/Skills guide.md) — 50–150 lines | 🟢 Easy |
 | **Improve docs** | Fix what confused you, translate, write a tutorial | 🟢 Easy |
-| **New channel** | Signal, iMessage, LINE, Matrix | 🟡 Medium |
+| **New channel** | SMS, iMessage, Teams, Zoom, Viber, WeChat | 🟡 Medium |
 | **Core features** | Encrypted memory, multi-agent routing | 🔴 Hard |
 
 ```bash
@@ -506,7 +612,8 @@ cd pincer && uv sync && pytest
 | **[Deployment](docs/Deployment.md)** | Docker, cloud, systemd, reverse proxy |
 | **[Voice Setup](docs/Voice-calling-setup.md)** | Quick setup for outbound phone calls |
 | **[Voice Calling](docs/Voice calling.md)** | Twilio setup, STT/TTS, compliance |
-| **[MCP Guide](docs/mcp-guide.md)** | Connect any MCP-compliant server (GitHub, Postgres, etc.) |
+| **[Signal Setup](docs/signal-setup.md)** | signal-cli Docker sidecar setup |
+| **[MCP Guide](docs/mcp-guide.md)** | Connect any MCP-compliant server; OAuth 2.0 server setup |
 | **[API Reference](docs/API reference.md)** | REST API for integrations |
 | **[Migrating from OpenClaw](docs/Migration from openclaw.md)** | Import your data in 30 min |
 
@@ -514,7 +621,7 @@ cd pincer && uv sync && pytest
 
 ## 🙏 Acknowledgements
 
-[Anthropic](https://anthropic.com) · [aiogram](https://github.com/aiogram/aiogram) · [neonize](https://github.com/krypton-byte/neonize) · [discord.py](https://github.com/Rapptz/discord.py) · [Twilio](https://twilio.com) · [Deepgram](https://deepgram.com) · [ElevenLabs](https://elevenlabs.io) · [Playwright](https://playwright.dev/) · [Rich](https://github.com/Textualize/rich) · [Typer](https://github.com/tiangolo/typer) · [OpenClaw](https://github.com/openclaw/openclaw) — for proving personal AI agents are what people want · Every beta tester and contributor who helped ship this
+[Anthropic](https://anthropic.com) · [aiogram](https://github.com/aiogram/aiogram) · [neonize](https://github.com/krypton-byte/neonize) · [discord.py](https://github.com/Rapptz/discord.py) · [Twilio](https://twilio.com) · [Deepgram](https://deepgram.com) · [ElevenLabs](https://elevenlabs.io) · [Playwright](https://playwright.dev/) · [fal.ai](https://fal.ai) · [Rich](https://github.com/Textualize/rich) · [Typer](https://github.com/tiangolo/typer) · [OpenClaw](https://github.com/openclaw/openclaw) — for proving personal AI agents are what people want · Every beta tester and contributor who helped ship this
 
 ---
 
