@@ -459,10 +459,7 @@ async def test_get_message_no_attachments_no_hint(mock_factory, mock_gmail_servi
 
 async def test_fallback_guard_blocks_google_code():
     """_execute_tool blocks Google library imports in python_exec."""
-    import json
-
     from pincer.core.agent import _GOOGLE_FALLBACK_PATTERNS
-    from pincer.llm.base import ToolCall
 
     # Verify patterns exist and contain expected entries
     assert "googleapiclient" in _GOOGLE_FALLBACK_PATTERNS
