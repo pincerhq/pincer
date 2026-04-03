@@ -13,8 +13,10 @@ import logging
 import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from pincer.integrations.google.email_guard import EmailGuard, EmailVerdict
 from pincer.integrations.google.models import fmt_list, fmt_message_full, fmt_message_summary
 from pincer.integrations.google.quota import with_backoff
 
@@ -25,6 +27,47 @@ if TYPE_CHECKING:
     from pincer.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+# ── Guard helpers ─────────────────────────────────────────────────────────────
+
+
+def _check_recipients(guard: EmailGuard, address_fields: list[str]) -> tuple[str | None, str]:
+    """
+    Run all addresses through the email guard.
+
+    Returns ``(block_message, warning_text)``.
+
+    * If any address is hard-denied, *block_message* is a non-empty string and
+      the caller should return it immediately without sending.
+    * *warning_text* is appended to success messages for WARN-level results.
+    """
+    all_addrs: list[str] = []
+    for field in address_fields:
+        if field:
+            all_addrs.extend(a.strip() for a in field.split(",") if a.strip())
+
+    results = guard.check_all(all_addrs)
+
+    for r in results:
+        if r.verdict in (
+            EmailVerdict.DENY_BLOCKLIST,
+            EmailVerdict.DENY_DANGEROUS,
+            EmailVerdict.DENY_DISPOSABLE,
+        ):
+            return (
+                f"⛔ Email BLOCKED — {r.reason}\n"
+                f"  Recipient: {r.address}\n\n"
+                f"This email was NOT sent. If this is a legitimate address, "
+                f"add it to data/email_allowlist.txt",
+                "",
+            )
+
+    warns = [r for r in results if r.verdict == EmailVerdict.WARN]
+    warning_text = ""
+    if warns:
+        warning_text = "\n⚠️ Warnings:\n" + "".join(f"  - {w.address}: {w.reason}\n" for w in warns)
+    return None, warning_text
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -306,6 +349,7 @@ async def google__reply_to_message(
     message_id: str,
     body: str,
     body_type: str = "plain",
+    _guard: EmailGuard | None = None,
 ) -> str:
     """Reply to a message (in-thread)."""
     svc = await factory.get("gmail")
@@ -328,11 +372,19 @@ async def google__reply_to_message(
     in_reply_to = hdrs.get("Message-ID", "")
     references = hdrs.get("References", "")
     thread_id = orig.get("threadId", "")
+
+    if _guard is not None:
+        block, warning = _check_recipients(_guard, [to])
+        if block:
+            return block
+    else:
+        warning = ""
+
     raw = _build_raw(to, subject, body, body_type=body_type, in_reply_to=in_reply_to, references=references)
     await with_backoff(
         lambda: svc.users().messages().send(userId="me", body={"raw": raw, "threadId": thread_id}).execute()
     )
-    return f"Reply sent to {to}"
+    return f"Reply sent to {to}{warning}"
 
 
 async def google__reply_all(
@@ -340,6 +392,7 @@ async def google__reply_all(
     message_id: str,
     body: str,
     body_type: str = "plain",
+    _guard: EmailGuard | None = None,
 ) -> str:
     """Reply-all to a message."""
     svc = await factory.get("gmail")
@@ -365,11 +418,19 @@ async def google__reply_all(
     subject = "Re: " + hdrs.get("Subject", "")
     in_reply_to = hdrs.get("Message-ID", "")
     thread_id = orig.get("threadId", "")
+
+    if _guard is not None:
+        block, warning = _check_recipients(_guard, [all_recipients, cc])
+        if block:
+            return block
+    else:
+        warning = ""
+
     raw = _build_raw(all_recipients, subject, body, cc=cc, body_type=body_type, in_reply_to=in_reply_to)
     await with_backoff(
         lambda: svc.users().messages().send(userId="me", body={"raw": raw, "threadId": thread_id}).execute()
     )
-    return f"Reply-all sent to {all_recipients}"
+    return f"Reply-all sent to {all_recipients}{warning}"
 
 
 async def google__forward_message(
@@ -518,16 +579,57 @@ async def google__create_label(
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 
-def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
-    """Register all 19 Gmail tools in *registry*. Returns count."""
+def register_gmail_tools(
+    registry: ToolRegistry,
+    factory: GoogleServiceFactory,
+    data_dir: Path | None = None,
+    email_block_disposable: bool = True,
+) -> int:
+    """Register all 19 Gmail tools in *registry*. Returns count.
+
+    Args:
+        registry: Tool registry to register into.
+        factory: Google service factory for API access.
+        data_dir: Directory containing ``email_allowlist.txt``,
+            ``email_blocklist.txt``, and ``disposable_domains.txt``.
+            Defaults to ``./data`` (project root data directory).
+        email_block_disposable: If ``True`` (default), block disposable/
+            temporary email domain services.
+    """
+    import functools
+
+    _data_dir = data_dir if data_dir is not None else Path("data")
+    guard = EmailGuard(data_dir=_data_dir, block_disposable=email_block_disposable)
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
-        """Wrap a tool function to inject the factory."""
-        import functools
+        """Wrap a tool function to inject the factory (read-only tools)."""
 
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
+
+        return wrapper
+
+    def _h_send(fn: Callable[..., Any], *addr_param_names: str) -> Callable[..., Any]:
+        """Wrap a send tool: pre-check named address params, inject factory."""
+
+        @functools.wraps(fn)
+        async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
+            address_fields = [kwargs.get(p, "") for p in addr_param_names]
+            block, warning = _check_recipients(guard, address_fields)
+            if block:
+                return block
+            result = await fn(factory, **kwargs)
+            return result + warning
+
+        return wrapper
+
+    def _h_reply(fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Wrap a reply tool: inject factory + guard (recipient fetched inside fn)."""
+
+        @functools.wraps(fn)
+        async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
+            return await fn(factory, _guard=guard, **kwargs)
 
         return wrapper
 
@@ -653,7 +755,7 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__send_message",
         description="Send a new email. Supports plain text and HTML, CC, and BCC.",
-        handler=_h(google__send_message),
+        handler=_h_send(google__send_message, "to", "cc", "bcc"),
         parameters={
             "type": "object",
             "properties": {
@@ -676,7 +778,7 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__reply_to_message",
         description="Reply to a specific message, keeping it in-thread.",
-        handler=_h(google__reply_to_message),
+        handler=_h_reply(google__reply_to_message),
         parameters={
             "type": "object",
             "properties": {
@@ -691,7 +793,7 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__reply_all",
         description="Reply-all to a message (responds to all recipients).",
-        handler=_h(google__reply_all),
+        handler=_h_reply(google__reply_all),
         parameters={
             "type": "object",
             "properties": {
@@ -706,7 +808,7 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__forward_message",
         description="Forward an email to a new recipient.",
-        handler=_h(google__forward_message),
+        handler=_h_send(google__forward_message, "to"),
         parameters={
             "type": "object",
             "properties": {
@@ -721,7 +823,7 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__create_draft",
         description="Create an email draft (not sent yet).",
-        handler=_h(google__create_draft),
+        handler=_h_send(google__create_draft, "to", "cc"),
         parameters={
             "type": "object",
             "properties": {

@@ -1,0 +1,9 @@
+# Pincer Email Allowlist
+# Addresses/domains listed here skip ALL safety checks (Layers 2–5).
+# One address or domain per line. Lines starting with # are comments.
+#
+# Examples:
+#   sarah@partner.com    — always allow this specific address
+#   company.com          — always allow all @company.com addresses
+#
+# Use this to prevent false positives for addresses you trust.

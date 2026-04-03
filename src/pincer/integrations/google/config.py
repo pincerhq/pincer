@@ -25,6 +25,9 @@ class GoogleIntegrationConfig:
     credentials_path: str = ""  # empty → auto-detect via settings.google_oauth_dir()
     token_path: str = ""  # empty → auto-detect
 
+    # Email safety guard
+    email_block_disposable: bool = True  # Block disposable/temporary email domains (Layer 4)
+
 
 def load_config() -> GoogleIntegrationConfig:
     """Load Google integration config from pincer.toml if present."""
@@ -52,6 +55,7 @@ def load_config() -> GoogleIntegrationConfig:
         services=section.get("services", list(_DEFAULT_SERVICES)),
         credentials_path=section.get("credentials_path", ""),
         token_path=section.get("token_path", ""),
+        email_block_disposable=section.get("email_block_disposable", True),
     )
 
 
