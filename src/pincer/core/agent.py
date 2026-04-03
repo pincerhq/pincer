@@ -604,7 +604,8 @@ class Agent:
                                 "Do not use python_exec/shell_exec for Google Workspace operations. "
                                 "The sandbox has no Google credentials or libraries. "
                                 "Use the native google__* tools instead. "
-                                "For attachments: google__search_messages → google__get_message → google__get_attachment"
+                                "For attachments: google__search_messages → google__get_message"
+                                " → google__get_attachment"
                             )
                         }
                     ),
