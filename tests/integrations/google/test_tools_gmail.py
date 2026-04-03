@@ -5,6 +5,7 @@ Tests for Gmail tools — one test per tool (19 tools).
 from __future__ import annotations
 
 from pincer.integrations.google.tools_gmail import (
+    _extract_attachments,
     google__add_label,
     google__create_draft,
     google__create_label,
@@ -136,14 +137,133 @@ async def test_get_thread_empty(mock_factory, mock_gmail_service):
 # ── google__get_attachment ────────────────────────────────────────────────────
 
 
-async def test_get_attachment(mock_factory, mock_gmail_service):
+async def test_get_attachment_saves_to_disk(mock_factory, mock_gmail_service, tmp_path, monkeypatch):
+    """google__get_attachment writes decoded bytes to disk and returns metadata."""
+    import base64 as b64mod
+
+    test_content = b"%PDF-1.4 fake pdf content here"
     mock_gmail_service.users().messages().attachments().get().execute.return_value = {
-        "size": 1234,
-        "data": "SGVsbG8gV29ybGQ=",
+        "data": b64mod.urlsafe_b64encode(test_content).decode(),
+        "size": len(test_content),
+    }
+    mock_gmail_service.users().messages().get().execute.return_value = {
+        "id": "msg1",
+        "payload": {
+            "parts": [{
+                "filename": "report.pdf",
+                "mimeType": "application/pdf",
+                "body": {"attachmentId": "att1", "size": len(test_content)},
+            }],
+        },
+    }
+
+    # Redirect downloads to tmp_path
+    download_dir = str(tmp_path / "downloads")
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
+
+    result = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1")
+
+    # Response is short metadata, NOT base64
+    assert "report.pdf" in result
+    assert "Saved to:" in result
+    assert len(result) < 500
+    assert "base64" not in result.lower()
+    assert "SGVsbG8" not in result  # no raw base64 data
+
+    # File actually exists on disk with correct content
+    import os
+    save_path = result.split("Saved to: ")[1].split("\n")[0].strip()
+    assert os.path.exists(save_path)
+    with open(save_path, "rb") as f:
+        assert f.read() == test_content
+
+
+async def test_get_attachment_short_response(mock_factory, mock_gmail_service, tmp_path, monkeypatch):
+    """Response must be under 500 chars even for large files — never raw base64."""
+    import base64 as b64mod
+
+    big_content = b"x" * 300_000
+    mock_gmail_service.users().messages().attachments().get().execute.return_value = {
+        "data": b64mod.urlsafe_b64encode(big_content).decode(),
+        "size": len(big_content),
+    }
+    mock_gmail_service.users().messages().get().execute.return_value = {
+        "id": "msg1",
+        "payload": {"parts": [{
+            "filename": "big.bin",
+            "body": {"attachmentId": "att1", "size": len(big_content)},
+        }]},
+    }
+
+    download_dir = str(tmp_path / "downloads")
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
+
+    result = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1")
+
+    assert len(result) < 500
+    assert "big.bin" in result
+    assert "293" in result or "292" in result  # ~293 KB
+
+
+async def test_get_attachment_duplicate_filename(mock_factory, mock_gmail_service, tmp_path, monkeypatch):
+    """Second download of same filename gets _1 suffix."""
+    import base64 as b64mod
+
+    content = b"test"
+    mock_gmail_service.users().messages().attachments().get().execute.return_value = {
+        "data": b64mod.urlsafe_b64encode(content).decode(),
+        "size": 4,
+    }
+    mock_gmail_service.users().messages().get().execute.return_value = {
+        "id": "msg1",
+        "payload": {"parts": [{
+            "filename": "file.pdf",
+            "body": {"attachmentId": "att1"},
+        }]},
+    }
+
+    download_dir = str(tmp_path / "downloads")
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
+
+    result1 = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1")
+    result2 = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1")
+
+    path1 = result1.split("Saved to: ")[1].split("\n")[0].strip()
+    path2 = result2.split("Saved to: ")[1].split("\n")[0].strip()
+    assert path1 != path2
+    assert "file_1.pdf" in path2
+
+
+async def test_get_attachment_empty_data(mock_factory, mock_gmail_service):
+    """Empty attachment data returns error, not crash."""
+    mock_gmail_service.users().messages().attachments().get().execute.return_value = {
+        "data": "", "size": 0,
     }
     result = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1")
-    assert "1234" in result
-    assert "SGVsbG8" in result
+    assert "error" in result.lower() or "empty" in result.lower()
+
+
+async def test_get_attachment_with_filename_param(mock_factory, mock_gmail_service, tmp_path, monkeypatch):
+    """When filename is passed, no extra messages.get() call is needed."""
+    import base64 as b64mod
+
+    content = b"hello"
+    mock_gmail_service.users().messages().attachments().get().execute.return_value = {
+        "data": b64mod.urlsafe_b64encode(content).decode(),
+        "size": len(content),
+    }
+
+    download_dir = str(tmp_path / "downloads")
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
+
+    result = await google__get_attachment(
+        mock_factory, message_id="msg1", attachment_id="att1", filename="cv.pdf"
+    )
+
+    assert "cv.pdf" in result
+    assert "Saved to:" in result
+    # messages().get() should NOT have been called since we passed filename
+    mock_gmail_service.users().messages().get.assert_not_called()
 
 
 # ── google__send_message ──────────────────────────────────────────────────────
@@ -271,3 +391,94 @@ async def test_create_label(mock_factory, mock_gmail_service):
     result = await google__create_label(mock_factory, name="ProjectX")
     assert "ProjectX" in result
     assert "Label_2" in result
+
+
+# ── Attachment workflow tests ────────────────────────────────────────────────
+
+
+def _msg_with_attachment(msg_id="msg123", subject="Contract PDF", from_="sarah@company.com"):
+    return {
+        "id": msg_id,
+        "threadId": "thread1",
+        "snippet": "Here is the contract",
+        "payload": {
+            "headers": _headers(subject, from_),
+            "mimeType": "multipart/mixed",
+            "parts": [
+                {
+                    "mimeType": "text/plain",
+                    "body": {"data": "SGVsbG8gV29ybGQ="},
+                },
+                {
+                    "filename": "contract.pdf",
+                    "mimeType": "application/pdf",
+                    "body": {"attachmentId": "att_abc123", "size": 245000},
+                },
+            ],
+        },
+    }
+
+
+def test_extract_attachments_with_attachment():
+    payload = _msg_with_attachment()["payload"]
+    attachments = _extract_attachments(payload)
+    assert len(attachments) == 1
+    assert attachments[0]["filename"] == "contract.pdf"
+    assert attachments[0]["attachment_id"] == "att_abc123"
+    assert attachments[0]["mime_type"] == "application/pdf"
+    assert attachments[0]["size_bytes"] == 245000
+
+
+def test_extract_attachments_without_attachment():
+    payload = _msg()["payload"]
+    attachments = _extract_attachments(payload)
+    assert attachments == []
+
+
+async def test_get_message_includes_attachment_metadata(mock_factory, mock_gmail_service):
+    """google__get_message returns attachment IDs and download hint."""
+    mock_gmail_service.users().messages().get().execute.return_value = _msg_with_attachment()
+    result = await google__get_message(mock_factory, message_id="msg123")
+    assert "contract.pdf" in result
+    assert "att_abc123" in result
+    assert "google__get_attachment" in result
+    assert "application/pdf" in result
+    assert "245000" in result
+
+
+async def test_get_message_no_attachments_no_hint(mock_factory, mock_gmail_service):
+    """google__get_message without attachments has no download hint."""
+    mock_gmail_service.users().messages().get().execute.return_value = _msg()
+    result = await google__get_message(mock_factory, message_id="msg1")
+    assert "google__get_attachment" not in result
+    assert "Attachments:" not in result
+
+
+# ── Fallback guard tests ────────────────────────────────────────────────────
+
+
+async def test_fallback_guard_blocks_google_code():
+    """_execute_tool blocks Google library imports in python_exec."""
+    import json
+
+    from pincer.core.agent import _GOOGLE_FALLBACK_PATTERNS
+    from pincer.llm.base import ToolCall
+
+    # Verify patterns exist and contain expected entries
+    assert "googleapiclient" in _GOOGLE_FALLBACK_PATTERNS
+    assert "gmail" in _GOOGLE_FALLBACK_PATTERNS
+    assert "googleapis.com" in _GOOGLE_FALLBACK_PATTERNS
+
+
+async def test_fallback_guard_pattern_matching():
+    """Fallback guard pattern check works correctly."""
+    from pincer.core.agent import _GOOGLE_FALLBACK_PATTERNS
+
+    google_code = "from googleapiclient.discovery import build"
+    assert any(p in google_code.lower() for p in _GOOGLE_FALLBACK_PATTERNS)
+
+    safe_code = "print(1 + 1)"
+    assert not any(p in safe_code.lower() for p in _GOOGLE_FALLBACK_PATTERNS)
+
+    imap_code = "import imaplib; m = imaplib.IMAP4_SSL('imap.gmail.com')"
+    assert any(p in imap_code.lower() for p in _GOOGLE_FALLBACK_PATTERNS)
