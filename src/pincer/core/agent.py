@@ -12,6 +12,7 @@ Flow:
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -48,6 +49,34 @@ logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_ERRORS = 3
 _MAX_SANITIZE_ATTEMPTS = 2
+
+_GOOGLE_TOOL_CHAIN_HINTS = """
+## Google Workspace Tool Chains
+
+When the user asks to download or save an email attachment:
+1. google__search_messages → find the email (by sender, subject, keywords, "has:attachment")
+2. google__get_message → get full details including attachment metadata (attachment_id)
+3. google__get_attachment → download the file using message_id + attachment_id from step 2
+4. Report the downloaded file to the user
+
+NEVER use python_exec or shell_exec for Gmail/Google Workspace operations.
+The google__* tools have proper OAuth credentials.
+The sandbox does NOT have Google credentials or libraries installed.
+
+When searching for emails with attachments, include "has:attachment" in the query.
+"""
+
+_GOOGLE_FALLBACK_PATTERNS = [
+    "gmail",
+    "googleapiclient",
+    "google.auth",
+    "google_auth_oauthlib",
+    "oauth2client",
+    "imap.gmail.com",
+    "smtp.gmail.com",
+    "googleapis.com",
+    "google_tokens.json",
+]
 
 
 class StreamEventType(StrEnum):
@@ -517,6 +546,10 @@ class Agent:
                 "make_phone_call tool. Do not describe or simulate the call in your response — call the tool."
             )
 
+        # Google Workspace tool chain hints when google__ tools are registered
+        if any(t.startswith("google__") for t in self._tools.list_tools()):
+            base_prompt += "\n" + _GOOGLE_TOOL_CHAIN_HINTS
+
         # Inject connected MCP server info when available
         if self.mcp_manager:
             try:
@@ -558,6 +591,26 @@ class Agent:
         compat with shell_require_approval) but a warning is logged.
         """
         logger.info("Tool call: %s(%s)", tool_call.name, tool_call.arguments)
+
+        # Guard: block Google-related code in general-purpose execution tools
+        if tool_call.name in ("python_exec", "shell_exec"):
+            code = tool_call.arguments.get("code", "") or tool_call.arguments.get("command", "")
+            if any(p in code.lower() for p in _GOOGLE_FALLBACK_PATTERNS):
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=json.dumps(
+                        {
+                            "error": (
+                                "Do not use python_exec/shell_exec for Google Workspace operations. "
+                                "The sandbox has no Google credentials or libraries. "
+                                "Use the native google__* tools instead. "
+                                "For attachments: google__search_messages → google__get_message"
+                                " → google__get_attachment"
+                            )
+                        }
+                    ),
+                    is_error=True,
+                )
 
         if self._tools.requires_approval(tool_call.name):
             if self._approval_callback:
