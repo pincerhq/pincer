@@ -8,7 +8,6 @@ import pytest
 
 from pincer.integrations.google.email_guard import EmailGuard, EmailVerdict
 
-
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
 
