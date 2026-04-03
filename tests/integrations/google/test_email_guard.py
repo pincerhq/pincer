@@ -14,15 +14,9 @@ from pincer.integrations.google.email_guard import EmailGuard, EmailVerdict
 @pytest.fixture
 def guard(tmp_path):
     """EmailGuard with small test lists."""
-    (tmp_path / "email_allowlist.txt").write_text(
-        "trusted@company.com\ncompany.com\n"
-    )
-    (tmp_path / "email_blocklist.txt").write_text(
-        "blocked@bad.com\nbad.org\n"
-    )
-    (tmp_path / "disposable_domains.txt").write_text(
-        "tempmail.lol\n10minutemail.com\n"
-    )
+    (tmp_path / "email_allowlist.txt").write_text("trusted@company.com\ncompany.com\n")
+    (tmp_path / "email_blocklist.txt").write_text("blocked@bad.com\nbad.org\n")
+    (tmp_path / "disposable_domains.txt").write_text("tempmail.lol\n10minutemail.com\n")
     return EmailGuard(data_dir=tmp_path, block_disposable=True)
 
 

@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 class EmailVerdict(Enum):
     ALLOW = "allow"
-    WARN = "warn"                   # proceed but flag in approval prompt
+    WARN = "warn"  # proceed but flag in approval prompt
     DENY_DISPOSABLE = "deny_disposable"
     DENY_BLOCKLIST = "deny_blocklist"
     DENY_DANGEROUS = "deny_dangerous"
@@ -53,22 +53,24 @@ DANGEROUS_DOMAIN_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"@(spam|phish|scam|hack|evil|malware|abuse)\.", re.IGNORECASE),
 ]
 
-DANGEROUS_EXACT_DOMAINS: frozenset[str] = frozenset({
-    "evil.com",
-    "mailinator.com",
-    "sharklasers.com",
-    "guerrillamail.com",
-    "grr.la",
-    "guerrillamailblock.com",
-    "pokemail.net",
-    "spam4.me",
-    "trashmail.com",
-    "yopmail.com",
-    "throwaway.email",
-    "tempail.com",
-    "dispostable.com",
-    "maildrop.cc",
-})
+DANGEROUS_EXACT_DOMAINS: frozenset[str] = frozenset(
+    {
+        "evil.com",
+        "mailinator.com",
+        "sharklasers.com",
+        "guerrillamail.com",
+        "grr.la",
+        "guerrillamailblock.com",
+        "pokemail.net",
+        "spam4.me",
+        "trashmail.com",
+        "yopmail.com",
+        "throwaway.email",
+        "tempail.com",
+        "dispostable.com",
+        "maildrop.cc",
+    }
+)
 
 # ── Layer 5: Suspicious patterns (warn only) ──────────────────────────────────
 
