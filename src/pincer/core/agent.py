@@ -67,9 +67,15 @@ When searching for emails with attachments, include "has:attachment" in the quer
 """
 
 _GOOGLE_FALLBACK_PATTERNS = [
-    "gmail", "googleapiclient", "google.auth", "google_auth_oauthlib",
-    "oauth2client", "imap.gmail.com", "smtp.gmail.com",
-    "googleapis.com", "google_tokens.json",
+    "gmail",
+    "googleapiclient",
+    "google.auth",
+    "google_auth_oauthlib",
+    "oauth2client",
+    "imap.gmail.com",
+    "smtp.gmail.com",
+    "googleapis.com",
+    "google_tokens.json",
 ]
 
 
@@ -592,14 +598,16 @@ class Agent:
             if any(p in code.lower() for p in _GOOGLE_FALLBACK_PATTERNS):
                 return ToolResult(
                     tool_call_id=tool_call.id,
-                    content=json.dumps({
-                        "error": (
-                            "Do not use python_exec/shell_exec for Google Workspace operations. "
-                            "The sandbox has no Google credentials or libraries. "
-                            "Use the native google__* tools instead. "
-                            "For attachments: google__search_messages → google__get_message → google__get_attachment"
-                        )
-                    }),
+                    content=json.dumps(
+                        {
+                            "error": (
+                                "Do not use python_exec/shell_exec for Google Workspace operations. "
+                                "The sandbox has no Google credentials or libraries. "
+                                "Use the native google__* tools instead. "
+                                "For attachments: google__search_messages → google__get_message → google__get_attachment"
+                            )
+                        }
+                    ),
                     is_error=True,
                 )
 

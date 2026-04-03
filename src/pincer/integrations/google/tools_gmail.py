@@ -166,12 +166,14 @@ def _extract_attachments(payload: dict[str, Any]) -> list[dict[str, Any]]:
         fname = part.get("filename", "")
         att_id = part.get("body", {}).get("attachmentId")
         if fname and att_id:
-            attachments.append({
-                "filename": fname,
-                "attachment_id": att_id,
-                "mime_type": part.get("mimeType", "unknown"),
-                "size_bytes": part.get("body", {}).get("size", 0),
-            })
+            attachments.append(
+                {
+                    "filename": fname,
+                    "attachment_id": att_id,
+                    "mime_type": part.get("mimeType", "unknown"),
+                    "size_bytes": part.get("body", {}).get("size", 0),
+                }
+            )
     return attachments
 
 
@@ -196,7 +198,7 @@ async def google__get_message(
             )
         result += (
             f"\n\nTo download an attachment, call google__get_attachment("
-            f"message_id=\"{msg['id']}\", attachment_id=\"<id from above>\")"
+            f'message_id="{msg["id"]}", attachment_id="<id from above>")'
         )
 
     return result

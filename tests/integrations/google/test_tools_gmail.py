@@ -149,11 +149,13 @@ async def test_get_attachment_saves_to_disk(mock_factory, mock_gmail_service, tm
     mock_gmail_service.users().messages().get().execute.return_value = {
         "id": "msg1",
         "payload": {
-            "parts": [{
-                "filename": "report.pdf",
-                "mimeType": "application/pdf",
-                "body": {"attachmentId": "att1", "size": len(test_content)},
-            }],
+            "parts": [
+                {
+                    "filename": "report.pdf",
+                    "mimeType": "application/pdf",
+                    "body": {"attachmentId": "att1", "size": len(test_content)},
+                }
+            ],
         },
     }
 
@@ -172,6 +174,7 @@ async def test_get_attachment_saves_to_disk(mock_factory, mock_gmail_service, tm
 
     # File actually exists on disk with correct content
     import os
+
     save_path = result.split("Saved to: ")[1].split("\n")[0].strip()
     assert os.path.exists(save_path)
     with open(save_path, "rb") as f:
@@ -189,10 +192,14 @@ async def test_get_attachment_short_response(mock_factory, mock_gmail_service, t
     }
     mock_gmail_service.users().messages().get().execute.return_value = {
         "id": "msg1",
-        "payload": {"parts": [{
-            "filename": "big.bin",
-            "body": {"attachmentId": "att1", "size": len(big_content)},
-        }]},
+        "payload": {
+            "parts": [
+                {
+                    "filename": "big.bin",
+                    "body": {"attachmentId": "att1", "size": len(big_content)},
+                }
+            ]
+        },
     }
 
     download_dir = str(tmp_path / "downloads")
@@ -216,10 +223,14 @@ async def test_get_attachment_duplicate_filename(mock_factory, mock_gmail_servic
     }
     mock_gmail_service.users().messages().get().execute.return_value = {
         "id": "msg1",
-        "payload": {"parts": [{
-            "filename": "file.pdf",
-            "body": {"attachmentId": "att1"},
-        }]},
+        "payload": {
+            "parts": [
+                {
+                    "filename": "file.pdf",
+                    "body": {"attachmentId": "att1"},
+                }
+            ]
+        },
     }
 
     download_dir = str(tmp_path / "downloads")
@@ -237,7 +248,8 @@ async def test_get_attachment_duplicate_filename(mock_factory, mock_gmail_servic
 async def test_get_attachment_empty_data(mock_factory, mock_gmail_service):
     """Empty attachment data returns error, not crash."""
     mock_gmail_service.users().messages().attachments().get().execute.return_value = {
-        "data": "", "size": 0,
+        "data": "",
+        "size": 0,
     }
     result = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1")
     assert "error" in result.lower() or "empty" in result.lower()
@@ -256,9 +268,7 @@ async def test_get_attachment_with_filename_param(mock_factory, mock_gmail_servi
     download_dir = str(tmp_path / "downloads")
     monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
 
-    result = await google__get_attachment(
-        mock_factory, message_id="msg1", attachment_id="att1", filename="cv.pdf"
-    )
+    result = await google__get_attachment(mock_factory, message_id="msg1", attachment_id="att1", filename="cv.pdf")
 
     assert "cv.pdf" in result
     assert "Saved to:" in result
