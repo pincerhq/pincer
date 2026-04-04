@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 
 from pincer.integrations.google.tools_drive import (
+    _resolve_upload_path,
     google__copy_file,
     google__create_folder,
     google__download_file,
@@ -14,6 +15,7 @@ from pincer.integrations.google.tools_drive import (
     google__get_file_metadata,
     google__get_file_permissions,
     google__list_drive_files,
+    google__list_local_files,
     google__list_recent_files,
     google__list_shared_drives,
     google__move_file,
@@ -328,8 +330,9 @@ async def test_list_recent_files(mock_factory, mock_drive_service):
 
 
 async def test_upload_file_not_found(mock_factory, mock_drive_service, tmp_path):
-    result = await google__upload_file(mock_factory, local_path="/nonexistent/file.txt")
-    assert "Error" in result
+    result = await google__upload_file(mock_factory, file_path="/nonexistent/file.txt")
+    assert "not found" in result.lower()
+    assert "google__list_local_files" in result
 
 
 async def test_upload_file_success(mock_factory, mock_drive_service, tmp_path):
@@ -343,8 +346,191 @@ async def test_upload_file_success(mock_factory, mock_drive_service, tmp_path):
         "webViewLink": "https://drive.google.com/file/d/uploaded1/view",
     }
     with patch("googleapiclient.http.MediaFileUpload", MagicMock()):
-        result = await google__upload_file(mock_factory, local_path=str(test_file))
+        result = await google__upload_file(mock_factory, file_path=str(test_file))
     assert "uploaded1" in result
+    assert "uploaded" in result.lower()
+
+
+async def test_upload_file_with_folder_id(mock_factory, mock_drive_service, tmp_path):
+    """folder_id is passed to Drive API parents."""
+    from unittest.mock import MagicMock, patch
+
+    test_file = tmp_path / "data.csv"
+    test_file.write_bytes(b"a,b,c")
+    mock_drive_service.files().create().execute.return_value = {
+        "id": "f2",
+        "name": "data.csv",
+        "webViewLink": "",
+    }
+    with patch("googleapiclient.http.MediaFileUpload", MagicMock()):
+        result = await google__upload_file(mock_factory, file_path=str(test_file), folder_id="folder_abc")
+    assert "f2" in result
+
+
+async def test_upload_file_rename(mock_factory, mock_drive_service, tmp_path):
+    """name parameter overrides filename on Drive."""
+    from unittest.mock import MagicMock, patch
+
+    test_file = tmp_path / "draft.pdf"
+    test_file.write_bytes(b"%PDF")
+    mock_drive_service.files().create().execute.return_value = {
+        "id": "f3",
+        "name": "Final Report.pdf",
+        "webViewLink": "",
+    }
+    with patch("googleapiclient.http.MediaFileUpload", MagicMock()):
+        result = await google__upload_file(mock_factory, file_path=str(test_file), name="Final Report.pdf")
+    assert "Final Report.pdf" in result
+
+
+async def test_upload_file_resolves_from_downloads(mock_factory, mock_drive_service, tmp_path, monkeypatch):
+    """Bare filename resolved to ~/.pincer/downloads/."""
+    from unittest.mock import MagicMock, patch
+
+    pincer_dir = tmp_path / ".pincer"
+    downloads = pincer_dir / "downloads"
+    downloads.mkdir(parents=True)
+    (downloads / "report.pdf").write_bytes(b"%PDF")
+
+    monkeypatch.setattr(
+        "pincer.integrations.google.tools_drive.os.path.expanduser",
+        lambda p: p.replace("~/.pincer", str(pincer_dir)).replace("~/Desktop", str(tmp_path / "Desktop")),
+    )
+
+    mock_drive_service.files().create().execute.return_value = {
+        "id": "drv1",
+        "name": "report.pdf",
+        "webViewLink": "https://drive.google.com/file/d/drv1/view",
+    }
+    with patch("googleapiclient.http.MediaFileUpload", MagicMock()):
+        result = await google__upload_file(mock_factory, file_path="report.pdf")
+
+    assert "drv1" in result
+    assert "uploaded" in result.lower()
+
+
+async def test_upload_file_resolves_from_workspace_exec_output(mock_factory, mock_drive_service, tmp_path, monkeypatch):
+    """Bare filename resolved to ~/.pincer/workspace/exec_output/ when only there."""
+    from unittest.mock import MagicMock, patch
+
+    pincer_dir = tmp_path / ".pincer"
+    exec_dir = pincer_dir / "workspace" / "exec_output"
+    exec_dir.mkdir(parents=True)
+    (exec_dir / "chart.png").write_bytes(b"PNG")
+
+    monkeypatch.setattr(
+        "pincer.integrations.google.tools_drive.os.path.expanduser",
+        lambda p: p.replace("~/.pincer", str(pincer_dir)).replace("~/Desktop", str(tmp_path / "Desktop")),
+    )
+
+    mock_drive_service.files().create().execute.return_value = {
+        "id": "drv2",
+        "name": "chart.png",
+        "webViewLink": "",
+    }
+    with patch("googleapiclient.http.MediaFileUpload", MagicMock()):
+        result = await google__upload_file(mock_factory, file_path="chart.png")
+
+    assert "drv2" in result
+
+
+# ── _resolve_upload_path unit tests ───────────────────────────────────────────
+
+
+def test_resolve_upload_path_exact(tmp_path):
+    """Exact absolute path resolves immediately."""
+    f = tmp_path / "exact.txt"
+    f.write_text("hi")
+    assert _resolve_upload_path(str(f)) == str(f.resolve())
+
+
+def test_resolve_upload_path_none_for_missing():
+    """Returns None when file is not found anywhere."""
+    result = _resolve_upload_path("/definitely/does/not/exist/unicorn.pdf")
+    assert result is None
+
+
+def test_resolve_upload_path_deep_walk(tmp_path, monkeypatch):
+    """Finds file via deep walk when not in top-level downloads."""
+    pincer_dir = tmp_path / ".pincer"
+    nested = pincer_dir / "downloads" / "subdir"
+    nested.mkdir(parents=True)
+    (nested / "nested.csv").write_bytes(b"a,b")
+
+    monkeypatch.setattr(
+        "pincer.integrations.google.tools_drive.os.path.expanduser",
+        lambda p: p.replace("~/.pincer", str(pincer_dir)).replace("~/Desktop", str(tmp_path / "Desktop")),
+    )
+
+    result = _resolve_upload_path("nested.csv")
+    assert result is not None
+    assert "nested.csv" in result
+
+
+# ── google__list_local_files tests ────────────────────────────────────────────
+
+
+async def test_list_local_files_empty(mock_factory, tmp_path, monkeypatch):
+    """No files → helpful message."""
+    pincer_dir = tmp_path / ".pincer"
+    monkeypatch.setattr(
+        "pincer.integrations.google.tools_drive.os.path.expanduser",
+        lambda p: p.replace("~/.pincer", str(pincer_dir)),
+    )
+    result = await google__list_local_files(mock_factory)
+    assert "No files found" in result
+
+
+async def test_list_local_files_lists_both_dirs(mock_factory, tmp_path, monkeypatch):
+    """Lists files from downloads and workspace."""
+    pincer_dir = tmp_path / ".pincer"
+    (pincer_dir / "downloads").mkdir(parents=True)
+    (pincer_dir / "workspace").mkdir(parents=True)
+    (pincer_dir / "downloads" / "report.pdf").write_bytes(b"PDF")
+    (pincer_dir / "workspace" / "chart.png").write_bytes(b"PNG")
+
+    monkeypatch.setattr(
+        "pincer.integrations.google.tools_drive.os.path.expanduser",
+        lambda p: p.replace("~/.pincer", str(pincer_dir)),
+    )
+
+    result = await google__list_local_files(mock_factory)
+    assert "report.pdf" in result
+    assert "chart.png" in result
+    assert "google__upload_file" in result
+
+
+async def test_list_local_files_pattern_filter(mock_factory, tmp_path, monkeypatch):
+    """Pattern filters results by filename."""
+    pincer_dir = tmp_path / ".pincer"
+    (pincer_dir / "downloads").mkdir(parents=True)
+    (pincer_dir / "downloads" / "report.pdf").write_bytes(b"PDF")
+    (pincer_dir / "downloads" / "photo.jpg").write_bytes(b"JPG")
+
+    monkeypatch.setattr(
+        "pincer.integrations.google.tools_drive.os.path.expanduser",
+        lambda p: p.replace("~/.pincer", str(pincer_dir)),
+    )
+
+    result = await google__list_local_files(mock_factory, pattern="report")
+    assert "report.pdf" in result
+    assert "photo.jpg" not in result
+
+
+async def test_list_local_files_pattern_no_match(mock_factory, tmp_path, monkeypatch):
+    """Pattern with no match returns helpful message."""
+    pincer_dir = tmp_path / ".pincer"
+    (pincer_dir / "downloads").mkdir(parents=True)
+    (pincer_dir / "downloads" / "data.csv").write_bytes(b"a,b")
+
+    monkeypatch.setattr(
+        "pincer.integrations.google.tools_drive.os.path.expanduser",
+        lambda p: p.replace("~/.pincer", str(pincer_dir)),
+    )
+
+    result = await google__list_local_files(mock_factory, pattern="unicorn")
+    assert "No files matching" in result
+    assert "unicorn" in result
 
 
 async def test_create_folder(mock_factory, mock_drive_service):
