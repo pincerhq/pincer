@@ -566,7 +566,11 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
                 "file_id": {"type": "string"},
                 "export_format": {
                     "type": "string",
-                    "enum": ["pdf", "docx", "xlsx", "csv", "pptx", "txt", "html", "odt", "rtf", "epub", "ods", "tsv", "odp", "png", "jpg", "svg"],
+                    "enum": [
+                        "pdf", "docx", "xlsx", "csv", "pptx", "txt",
+                        "html", "odt", "rtf", "epub", "ods", "tsv", "odp",
+                        "png", "jpg", "svg",
+                    ],
                     "default": "pdf",
                 },
             },

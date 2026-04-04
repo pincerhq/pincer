@@ -622,9 +622,11 @@ class Agent:
                                 "Do not use python_exec/shell_exec for Google Workspace operations. "
                                 "The sandbox has no Google credentials or libraries. "
                                 "Use the native google__* tools instead. "
-                                "For Gmail attachments: google__search_messages → google__get_message → google__get_attachment. "
+                                "For Gmail attachments: google__search_messages"
+                                " → google__get_message → google__get_attachment. "
                                 "For Drive regular files: google__download_file(file_id=...). "
-                                "For Drive Google Docs/Sheets/Slides: google__export_google_doc(file_id=..., export_format='pdf')."
+                                "For Drive Google Docs/Sheets/Slides: "
+                                "google__export_google_doc(file_id=..., export_format='pdf')."
                             )
                         }
                     ),
