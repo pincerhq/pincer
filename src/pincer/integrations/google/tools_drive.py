@@ -149,9 +149,7 @@ async def google__download_file(
     svc = await factory.get("drive")
 
     # 1. Get file metadata
-    metadata = await with_backoff(
-        lambda: svc.files().get(fileId=file_id, fields="id,name,mimeType,size").execute()
-    )
+    metadata = await with_backoff(lambda: svc.files().get(fileId=file_id, fields="id,name,mimeType,size").execute())
     filename = metadata.get("name", "download")
     mime_type = metadata.get("mimeType", "application/octet-stream")
 
@@ -212,9 +210,7 @@ async def google__export_google_doc(
         return f"Unsupported export format: '{export_format}'. Supported: {supported}"
 
     # 2. Get file metadata
-    metadata = await with_backoff(
-        lambda: svc.files().get(fileId=file_id, fields="id,name,mimeType").execute()
-    )
+    metadata = await with_backoff(lambda: svc.files().get(fileId=file_id, fields="id,name,mimeType").execute())
     original_name = metadata.get("name", "export")
     mime_type = metadata.get("mimeType", "")
 
@@ -236,9 +232,7 @@ async def google__export_google_doc(
 
     # 5. Export via Drive API
     export_mime = _EXPORT_MIME[export_format]
-    file_bytes = await with_backoff(
-        lambda: svc.files().export_media(fileId=file_id, mimeType=export_mime).execute()
-    )
+    file_bytes = await with_backoff(lambda: svc.files().export_media(fileId=file_id, mimeType=export_mime).execute())
 
     if not file_bytes:
         return f"Export returned empty content. The file '{original_name}' may be empty."
@@ -567,9 +561,22 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
                 "export_format": {
                     "type": "string",
                     "enum": [
-                        "pdf", "docx", "xlsx", "csv", "pptx", "txt",
-                        "html", "odt", "rtf", "epub", "ods", "tsv", "odp",
-                        "png", "jpg", "svg",
+                        "pdf",
+                        "docx",
+                        "xlsx",
+                        "csv",
+                        "pptx",
+                        "txt",
+                        "html",
+                        "odt",
+                        "rtf",
+                        "epub",
+                        "ods",
+                        "tsv",
+                        "odp",
+                        "png",
+                        "jpg",
+                        "svg",
                     ],
                     "default": "pdf",
                 },
