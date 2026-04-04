@@ -15,7 +15,7 @@ from pincer.tools.registry import ToolRegistry
 async def test_register_all_tools_returns_112(mock_factory):
     registry = ToolRegistry()
     count = register_all_tools(registry, mock_factory)
-    assert count == 112
+    assert count == 113
 
 
 async def test_register_all_tools_google_prefix(mock_factory):
@@ -86,7 +86,7 @@ async def test_register_drive_tool_count(mock_factory):
 
     registry = ToolRegistry()
     count = register_drive_tools(registry, mock_factory)
-    assert count == 15
+    assert count == 16
 
 
 # ── get_google_factory ────────────────────────────────────────────────────────
