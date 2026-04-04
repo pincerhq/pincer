@@ -4,6 +4,8 @@ Tests for Drive tools — one test per tool (15 tools).
 
 from __future__ import annotations
 
+import os
+
 from pincer.integrations.google.tools_drive import (
     google__copy_file,
     google__create_folder,
@@ -83,16 +85,215 @@ async def test_get_file_metadata(mock_factory, mock_drive_service):
     assert "10240" in result
 
 
-async def test_download_file(mock_factory, mock_drive_service):
-    mock_drive_service.files().get_media().execute.return_value = b"Hello Drive Content"
+async def test_download_file(mock_factory, mock_drive_service, tmp_path, monkeypatch):
+    """google__download_file saves bytes to disk and returns short metadata string."""
+    test_content = b"%PDF-1.4 fake content"
+    mock_drive_service.files().get().execute.return_value = {
+        "id": "f1",
+        "name": "report.pdf",
+        "mimeType": "application/pdf",
+        "size": str(len(test_content)),
+    }
+    mock_drive_service.files().get_media().execute.return_value = test_content
+
+    download_dir = str(tmp_path / "downloads")
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
+
     result = await google__download_file(mock_factory, file_id="f1")
-    assert "Hello Drive Content" in result
+
+    assert "report.pdf" in result
+    assert "Saved to:" in result
+    assert len(result) < 500
+    # Raw bytes must not appear in response
+    assert b"%PDF" not in result.encode()
+    # File must exist on disk
+    save_path = result.split("Saved to:")[1].strip().split("\n")[0]
+    assert os.path.exists(save_path)
+    with open(save_path, "rb") as fh:
+        assert fh.read() == test_content
 
 
-async def test_export_google_doc(mock_factory, mock_drive_service):
-    mock_drive_service.files().export_media().execute.return_value = b"Exported text content"
-    result = await google__export_google_doc(mock_factory, file_id="doc1", export_format="txt")
-    assert "Exported text content" in result
+async def test_download_file_response_never_contains_binary(mock_factory, mock_drive_service, tmp_path, monkeypatch):
+    """Response is short metadata text even for large files."""
+    big_content = b"x" * 500_000
+    mock_drive_service.files().get().execute.return_value = {
+        "id": "f1",
+        "name": "big.zip",
+        "mimeType": "application/zip",
+        "size": str(len(big_content)),
+    }
+    mock_drive_service.files().get_media().execute.return_value = big_content
+
+    download_dir = str(tmp_path / "downloads")
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
+
+    result = await google__download_file(mock_factory, file_id="f1")
+
+    assert len(result) < 500
+    assert "big.zip" in result
+    assert "base64" not in result.lower()
+
+
+async def test_download_file_redirects_google_native(mock_factory, mock_drive_service):
+    """google__download_file on a Google Doc returns redirect to google__export_google_doc."""
+    mock_drive_service.files().get().execute.return_value = {
+        "id": "doc1",
+        "name": "My Proposal",
+        "mimeType": "application/vnd.google-apps.document",
+    }
+
+    result = await google__download_file(mock_factory, file_id="doc1")
+
+    assert "google__export_google_doc" in result
+    assert "Cannot download" in result
+
+
+async def test_download_file_duplicate_filename(mock_factory, mock_drive_service, tmp_path, monkeypatch):
+    """Second download of same filename gets _1 suffix."""
+    test_content = b"data"
+    mock_drive_service.files().get().execute.return_value = {
+        "id": "f1",
+        "name": "data.csv",
+        "mimeType": "text/csv",
+        "size": "4",
+    }
+    mock_drive_service.files().get_media().execute.return_value = test_content
+
+    download_dir = str(tmp_path / "downloads")
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
+
+    result1 = await google__download_file(mock_factory, file_id="f1")
+    result2 = await google__download_file(mock_factory, file_id="f1")
+
+    path1 = result1.split("Saved to:")[1].strip().split("\n")[0]
+    path2 = result2.split("Saved to:")[1].strip().split("\n")[0]
+    assert path1 != path2
+    assert "data_1.csv" in path2
+
+
+async def test_export_google_doc(mock_factory, mock_drive_service, tmp_path, monkeypatch):
+    """google__export_google_doc saves exported bytes to disk and returns metadata."""
+    pdf_bytes = b"%PDF-1.4 fake exported content"
+    mock_drive_service.files().get().execute.return_value = {
+        "id": "doc1",
+        "name": "My Proposal",
+        "mimeType": "application/vnd.google-apps.document",
+    }
+    mock_drive_service.files().export_media().execute.return_value = pdf_bytes
+
+    download_dir = str(tmp_path / "downloads")
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
+
+    result = await google__export_google_doc(mock_factory, file_id="doc1", export_format="pdf")
+
+    assert "My Proposal.pdf" in result
+    assert "Saved to:" in result
+    assert len(result) < 500
+    save_path = result.split("Saved to:")[1].strip().split("\n")[0]
+    assert os.path.exists(save_path)
+    with open(save_path, "rb") as fh:
+        assert fh.read() == pdf_bytes
+
+
+async def test_export_google_sheet_as_xlsx(mock_factory, mock_drive_service, tmp_path, monkeypatch):
+    """Google Sheet exported as XLSX."""
+    xlsx_bytes = b"PK fake xlsx"
+    mock_drive_service.files().get().execute.return_value = {
+        "id": "sheet1",
+        "name": "Q1 Budget",
+        "mimeType": "application/vnd.google-apps.spreadsheet",
+    }
+    mock_drive_service.files().export_media().execute.return_value = xlsx_bytes
+
+    download_dir = str(tmp_path / "downloads")
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
+
+    result = await google__export_google_doc(mock_factory, file_id="sheet1", export_format="xlsx")
+
+    assert "Q1 Budget.xlsx" in result
+    assert "XLSX" in result
+
+
+async def test_export_invalid_format(mock_factory, mock_drive_service):
+    """Invalid export format returns error listing supported formats."""
+    mock_drive_service.files().get().execute.return_value = {
+        "id": "doc1",
+        "name": "Doc",
+        "mimeType": "application/vnd.google-apps.document",
+    }
+
+    result = await google__export_google_doc(mock_factory, file_id="doc1", export_format="mp3")
+
+    assert "Unsupported" in result
+    assert "pdf" in result
+
+
+async def test_export_wrong_format_for_type(mock_factory, mock_drive_service):
+    """CSV export from a Google Doc returns error with allowed formats."""
+    mock_drive_service.files().get().execute.return_value = {
+        "id": "doc1",
+        "name": "My Doc",
+        "mimeType": "application/vnd.google-apps.document",
+    }
+
+    result = await google__export_google_doc(mock_factory, file_id="doc1", export_format="csv")
+
+    assert "cannot be exported as 'csv'" in result
+    assert "pdf" in result
+
+
+async def test_export_non_google_file_redirects(mock_factory, mock_drive_service):
+    """Calling export on a regular PDF redirects to google__download_file."""
+    mock_drive_service.files().get().execute.return_value = {
+        "id": "f1",
+        "name": "manual.pdf",
+        "mimeType": "application/pdf",
+    }
+
+    result = await google__export_google_doc(mock_factory, file_id="f1", export_format="pdf")
+
+    assert "google__download_file" in result
+    assert "not a Google Doc" in result
+
+
+async def test_export_response_never_contains_binary(mock_factory, mock_drive_service, tmp_path, monkeypatch):
+    """Export response is short metadata text even for large exports."""
+    big_bytes = b"x" * 2_000_000
+    mock_drive_service.files().get().execute.return_value = {
+        "id": "doc1",
+        "name": "Huge Report",
+        "mimeType": "application/vnd.google-apps.document",
+    }
+    mock_drive_service.files().export_media().execute.return_value = big_bytes
+
+    download_dir = str(tmp_path / "downloads")
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
+
+    result = await google__export_google_doc(mock_factory, file_id="doc1", export_format="pdf")
+
+    assert len(result) < 500
+
+
+async def test_export_duplicate_filename(mock_factory, mock_drive_service, tmp_path, monkeypatch):
+    """Second export of same filename gets _1 suffix."""
+    pdf_bytes = b"%PDF fake"
+    mock_drive_service.files().get().execute.return_value = {
+        "id": "doc1",
+        "name": "Report",
+        "mimeType": "application/vnd.google-apps.document",
+    }
+    mock_drive_service.files().export_media().execute.return_value = pdf_bytes
+
+    download_dir = str(tmp_path / "downloads")
+    monkeypatch.setattr("os.path.expanduser", lambda p: p.replace("~/.pincer/downloads", download_dir))
+
+    result1 = await google__export_google_doc(mock_factory, file_id="doc1", export_format="pdf")
+    result2 = await google__export_google_doc(mock_factory, file_id="doc1", export_format="pdf")
+
+    path1 = result1.split("Saved to:")[1].strip().split("\n")[0]
+    path2 = result2.split("Saved to:")[1].strip().split("\n")[0]
+    assert path1 != path2
+    assert "Report_1.pdf" in path2
 
 
 async def test_list_shared_drives(mock_factory, mock_drive_service):
