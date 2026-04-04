@@ -8,6 +8,7 @@ import asyncio
 import functools
 import logging
 import mimetypes
+import os
 from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google.models import fmt_file, fmt_list
@@ -29,6 +30,34 @@ _EXPORT_MIME: dict[str, str] = {
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "txt": "text/plain",
     "html": "text/html",
+    "odt": "application/vnd.oasis.opendocument.text",
+    "rtf": "application/rtf",
+    "epub": "application/epub+zip",
+    "ods": "application/vnd.oasis.opendocument.spreadsheet",
+    "tsv": "text/tab-separated-values",
+    "odp": "application/vnd.oasis.opendocument.presentation",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "svg": "image/svg+xml",
+}
+
+# Google-native types that cannot be downloaded with get_media — must be exported
+_GOOGLE_NATIVE_TYPES: frozenset[str] = frozenset(
+    {
+        "application/vnd.google-apps.document",
+        "application/vnd.google-apps.spreadsheet",
+        "application/vnd.google-apps.presentation",
+        "application/vnd.google-apps.drawing",
+        "application/vnd.google-apps.form",
+    }
+)
+
+# Valid export formats per Google-native MIME type
+_SUPPORTED_EXPORTS: dict[str, list[str]] = {
+    "application/vnd.google-apps.document": ["pdf", "docx", "txt", "html", "odt", "rtf", "epub"],
+    "application/vnd.google-apps.spreadsheet": ["pdf", "xlsx", "csv", "ods", "tsv"],
+    "application/vnd.google-apps.presentation": ["pdf", "pptx", "odp", "txt"],
+    "application/vnd.google-apps.drawing": ["pdf", "png", "jpg", "svg"],
 }
 
 _DRIVE_FIELDS = "id, name, mimeType, size, modifiedTime, owners, sharingUser, webViewLink"
@@ -115,33 +144,136 @@ async def google__get_file_metadata(
 async def google__download_file(
     factory: GoogleServiceFactory,
     file_id: str,
-    max_chars: int = 5000,
 ) -> str:
-    """Download a file's text content (plain text, CSV, etc.)."""
+    """Download a non-Google file from Drive and save it to disk. Returns path and metadata."""
     svc = await factory.get("drive")
-    request = svc.files().get_media(fileId=file_id)
-    content = await asyncio.to_thread(request.execute)
-    text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(content)
-    if len(text) > max_chars:
-        text = text[:max_chars] + f"\n... (truncated at {max_chars} chars)"
-    return text
+
+    # 1. Get file metadata
+    metadata = await with_backoff(
+        lambda: svc.files().get(fileId=file_id, fields="id,name,mimeType,size").execute()
+    )
+    filename = metadata.get("name", "download")
+    mime_type = metadata.get("mimeType", "application/octet-stream")
+
+    # 2. Guard: Google-native files must be exported, not downloaded
+    if mime_type in _GOOGLE_NATIVE_TYPES:
+        type_name = mime_type.split(".")[-1]
+        return (
+            f"Cannot download Google {type_name} directly. "
+            f'Use google__export_google_doc(file_id="{file_id}", export_format="pdf") '
+            f"to export it as PDF, DOCX, XLSX, etc."
+        )
+
+    # 3. Download file bytes
+    file_bytes = await with_backoff(lambda: svc.files().get_media(fileId=file_id).execute())
+
+    # 4. Save to disk
+    download_dir = os.path.expanduser("~/.pincer/downloads")
+    os.makedirs(download_dir, exist_ok=True)
+
+    save_path = os.path.join(download_dir, filename)
+    if os.path.exists(save_path):
+        name, ext = os.path.splitext(filename)
+        counter = 1
+        while os.path.exists(save_path):
+            save_path = os.path.join(download_dir, f"{name}_{counter}{ext}")
+            counter += 1
+
+    with open(save_path, "wb") as f:
+        f.write(file_bytes)
+
+    size_kb = len(file_bytes) / 1024
+    size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+
+    # 5. Return ONLY metadata — never raw content
+    return (
+        f"File downloaded from Google Drive.\n"
+        f"  Filename: {filename}\n"
+        f"  Type: {mime_type}\n"
+        f"  Size: {len(file_bytes)} bytes ({size_str})\n"
+        f"  Saved to: {save_path}\n\n"
+        f"The file is saved to disk. Do NOT use python_exec to download it again."
+    )
 
 
 async def google__export_google_doc(
     factory: GoogleServiceFactory,
     file_id: str,
-    export_format: str = "txt",
-    max_chars: int = 8000,
+    export_format: str = "pdf",
 ) -> str:
-    """Export a Google Doc/Sheet/Slide as text, CSV, or other format."""
+    """Export a Google Doc/Sheet/Slide to a standard format and save it to disk. Returns path and metadata."""
     svc = await factory.get("drive")
-    mime = _EXPORT_MIME.get(export_format, "text/plain")
-    request = svc.files().export_media(fileId=file_id, mimeType=mime)
-    content = await asyncio.to_thread(request.execute)
-    text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(content)
-    if len(text) > max_chars:
-        text = text[:max_chars] + f"\n... (truncated at {max_chars} chars)"
-    return text
+
+    export_format = export_format.lower().strip().lstrip(".")
+
+    # 1. Validate export format
+    if export_format not in _EXPORT_MIME:
+        supported = ", ".join(sorted(_EXPORT_MIME.keys()))
+        return f"Unsupported export format: '{export_format}'. Supported: {supported}"
+
+    # 2. Get file metadata
+    metadata = await with_backoff(
+        lambda: svc.files().get(fileId=file_id, fields="id,name,mimeType").execute()
+    )
+    original_name = metadata.get("name", "export")
+    mime_type = metadata.get("mimeType", "")
+
+    # 3. Validate: file must be a Google-native type
+    if mime_type not in _SUPPORTED_EXPORTS:
+        return (
+            f"File '{original_name}' is not a Google Doc/Sheet/Slide (type: {mime_type}). "
+            f'Use google__download_file(file_id="{file_id}") to download it directly.'
+        )
+
+    # 4. Validate: format is supported for this file type
+    allowed = _SUPPORTED_EXPORTS[mime_type]
+    if export_format not in allowed:
+        type_name = mime_type.split(".")[-1]
+        return (
+            f"Google {type_name} cannot be exported as '{export_format}'. "
+            f"Supported formats for this file: {', '.join(allowed)}"
+        )
+
+    # 5. Export via Drive API
+    export_mime = _EXPORT_MIME[export_format]
+    file_bytes = await with_backoff(
+        lambda: svc.files().export_media(fileId=file_id, mimeType=export_mime).execute()
+    )
+
+    if not file_bytes:
+        return f"Export returned empty content. The file '{original_name}' may be empty."
+
+    # 6. Build filename: original name + new extension
+    base_name = os.path.splitext(original_name)[0]
+    filename = f"{base_name}.{export_format}"
+
+    # 7. Save to disk
+    download_dir = os.path.expanduser("~/.pincer/downloads")
+    os.makedirs(download_dir, exist_ok=True)
+
+    save_path = os.path.join(download_dir, filename)
+    if os.path.exists(save_path):
+        counter = 1
+        while os.path.exists(save_path):
+            save_path = os.path.join(download_dir, f"{base_name}_{counter}.{export_format}")
+            counter += 1
+
+    with open(save_path, "wb") as f:
+        f.write(file_bytes)
+
+    size_kb = len(file_bytes) / 1024
+    size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+
+    # 8. Return ONLY metadata — never raw content
+    return (
+        f"Google Doc exported successfully.\n"
+        f"  Original: {original_name}\n"
+        f"  Exported as: {filename}\n"
+        f"  Format: {export_format.upper()} ({export_mime})\n"
+        f"  Size: {len(file_bytes)} bytes ({size_str})\n"
+        f"  Saved to: {save_path}\n\n"
+        f"The file is saved to disk. Do NOT use python_exec to export it again."
+    )
 
 
 async def google__list_shared_drives(
@@ -374,7 +506,9 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
         description=(
             "Search Google Drive files. Query examples: "
             "'name contains \"budget\"', 'mimeType=\"application/vnd.google-apps.spreadsheet\"', "
-            "'sharedWithMe=true', 'starred=true', 'modifiedTime > \"2026-01-01\"'"
+            "'sharedWithMe=true', 'starred=true', 'modifiedTime > \"2026-01-01\"'. "
+            "Results include mimeType — if it starts with 'application/vnd.google-apps.' "
+            "use google__export_google_doc; otherwise use google__download_file."
         ),
         handler=_h(google__search_drive_files),
         parameters={
@@ -399,20 +533,32 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     )
     registry.register(
         name="google__download_file",
-        description="Download the text content of a Drive file (plain text, CSV, etc.).",
+        description=(
+            "Download a file from Google Drive and save it to disk. "
+            "Use this for non-Google files (PDFs, images, ZIPs, Office docs, etc.). "
+            "For Google Docs/Sheets/Slides, use google__export_google_doc instead. "
+            "Returns the saved file path, filename, and size. "
+            "The file is saved automatically — do NOT use python_exec to save it again."
+        ),
         handler=_h(google__download_file),
         parameters={
             "type": "object",
             "properties": {
                 "file_id": {"type": "string"},
-                "max_chars": {"type": "integer", "default": 5000},
             },
             "required": ["file_id"],
         },
     )
     registry.register(
         name="google__export_google_doc",
-        description="Export a Google Doc/Sheet/Slide to a different format (pdf, docx, xlsx, csv, pptx, txt).",
+        description=(
+            "Export a Google Doc, Sheet, Slide, or Drawing to a standard file format "
+            "and save it to disk. "
+            "Supported formats: pdf, docx, xlsx, csv, pptx, txt, html, png, jpg, svg. "
+            "Default export format is 'pdf'. "
+            "Returns the saved file path, filename, and size. "
+            "The file is saved automatically — do NOT use python_exec to save it again."
+        ),
         handler=_h(google__export_google_doc),
         parameters={
             "type": "object",
@@ -420,10 +566,9 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
                 "file_id": {"type": "string"},
                 "export_format": {
                     "type": "string",
-                    "enum": ["pdf", "docx", "xlsx", "csv", "pptx", "txt", "html"],
-                    "default": "txt",
+                    "enum": ["pdf", "docx", "xlsx", "csv", "pptx", "txt", "html", "odt", "rtf", "epub", "ods", "tsv", "odp", "png", "jpg", "svg"],
+                    "default": "pdf",
                 },
-                "max_chars": {"type": "integer", "default": 8000},
             },
             "required": ["file_id"],
         },

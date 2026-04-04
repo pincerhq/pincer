@@ -59,7 +59,19 @@ When the user asks to download or save an email attachment:
 3. google__get_attachment → download the file using message_id + attachment_id from step 2
 4. Report the downloaded file to the user
 
-NEVER use python_exec or shell_exec for Gmail/Google Workspace operations.
+When the user asks to download or save a file from Google Drive:
+1. google__search_drive_files → find the file (by name, type, owner)
+2. Check the mimeType in the result:
+   - If mimeType starts with "application/vnd.google-apps." (Google Doc/Sheet/Slide/Drawing):
+     → google__export_google_doc(file_id="...", export_format="pdf")
+   - Otherwise (PDF, image, ZIP, Office doc, etc.):
+     → google__download_file(file_id="...")
+3. Both tools save the file to disk and return the path — do NOT use python_exec.
+
+When the user says "export as PDF" or "save as DOCX":
+→ google__export_google_doc(file_id="...", export_format="pdf" or "docx")
+
+NEVER use python_exec or shell_exec for Gmail/Google Workspace/Drive operations.
 The google__* tools have proper OAuth credentials.
 The sandbox does NOT have Google credentials or libraries installed.
 
@@ -76,6 +88,12 @@ _GOOGLE_FALLBACK_PATTERNS = [
     "smtp.gmail.com",
     "googleapis.com",
     "google_tokens.json",
+    # Drive-specific patterns
+    "drive.google.com",
+    "files().get_media",
+    "files().export",
+    "mediaiobased",
+    "service.files()",
 ]
 
 
@@ -604,8 +622,9 @@ class Agent:
                                 "Do not use python_exec/shell_exec for Google Workspace operations. "
                                 "The sandbox has no Google credentials or libraries. "
                                 "Use the native google__* tools instead. "
-                                "For attachments: google__search_messages → google__get_message"
-                                " → google__get_attachment"
+                                "For Gmail attachments: google__search_messages → google__get_message → google__get_attachment. "
+                                "For Drive regular files: google__download_file(file_id=...). "
+                                "For Drive Google Docs/Sheets/Slides: google__export_google_doc(file_id=..., export_format='pdf')."
                             )
                         }
                     ),
