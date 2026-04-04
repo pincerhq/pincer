@@ -76,6 +76,20 @@ The google__* tools have proper OAuth credentials.
 The sandbox does NOT have Google credentials or libraries installed.
 
 When searching for emails with attachments, include "has:attachment" in the query.
+
+When the user asks to upload a local file to Google Drive:
+1. If you know the exact path → google__upload_file(file_path="<path>", folder_id="...")
+2. If you don't know the path → google__list_local_files(pattern="<name>") to find it
+3. If the file was just downloaded → it's in ~/.pincer/downloads/ (use that path)
+4. If the file was created by python_exec or file_write → it's in ~/.pincer/workspace/
+5. If still not found → ask the user for the exact file path
+
+To upload into a specific folder:
+1. google__search_drive_files(query="name='Projects' mimeType='application/vnd.google-apps.folder'") → get folder_id
+2. google__upload_file(file_path="...", folder_id="<folder_id>")
+
+NEVER use python_exec or shell_exec for Google Drive uploads.
+The google__upload_file tool has proper OAuth credentials. The sandbox does NOT.
 """
 
 _GOOGLE_FALLBACK_PATTERNS = [
@@ -88,12 +102,16 @@ _GOOGLE_FALLBACK_PATTERNS = [
     "smtp.gmail.com",
     "googleapis.com",
     "google_tokens.json",
-    # Drive-specific patterns
+    # Drive download patterns
     "drive.google.com",
     "files().get_media",
     "files().export",
     "mediaiobased",
     "service.files()",
+    # Drive upload patterns
+    "mediafileupload",
+    "files().create(",
+    "media_body",
 ]
 
 
@@ -626,7 +644,9 @@ class Agent:
                                 " → google__get_message → google__get_attachment. "
                                 "For Drive regular files: google__download_file(file_id=...). "
                                 "For Drive Google Docs/Sheets/Slides: "
-                                "google__export_google_doc(file_id=..., export_format='pdf')."
+                                "google__export_google_doc(file_id=..., export_format='pdf'). "
+                                "For Drive uploads: google__upload_file(file_path=...). "
+                                "If you don't know the file path, call google__list_local_files() first."
                             )
                         }
                     ),

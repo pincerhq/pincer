@@ -63,6 +63,70 @@ _SUPPORTED_EXPORTS: dict[str, list[str]] = {
 _DRIVE_FIELDS = "id, name, mimeType, size, modifiedTime, owners, sharingUser, webViewLink"
 
 
+# ── File discovery helpers ─────────────────────────────────────────────────────
+
+
+def _format_size(size_bytes: int) -> str:
+    """Format byte count as human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    kb = size_bytes / 1024
+    if kb < 1024:
+        return f"{kb:.0f} KB"
+    return f"{kb / 1024:.1f} MB"
+
+
+def _resolve_upload_path(file_path: str) -> str | None:
+    """
+    Resolve a file path for upload. Search order:
+
+    1. Exact path (after ~ expansion)
+    2. ~/.pincer/downloads/{basename}
+    3. ~/.pincer/workspace/{basename}
+    4. ~/.pincer/workspace/exec_output/{basename}
+    5. ~/Desktop/{basename}
+    6. ~/.pincer/{file_path} (relative to pincer home)
+    7. Deep walk of ~/.pincer/downloads and ~/.pincer/workspace
+
+    Returns the resolved absolute path, or None if not found.
+    """
+    expanded = os.path.expanduser(file_path)
+
+    # 1. Exact path
+    if os.path.isfile(expanded):
+        return os.path.abspath(expanded)
+
+    basename = os.path.basename(file_path)
+    pincer_dir = os.path.expanduser("~/.pincer")
+
+    # 2–6. Check known locations
+    candidates = [
+        os.path.join(pincer_dir, "downloads", basename),
+        os.path.join(pincer_dir, "workspace", basename),
+        os.path.join(pincer_dir, "workspace", "exec_output", basename),
+        os.path.expanduser(f"~/Desktop/{basename}"),
+        os.path.join(pincer_dir, file_path),
+    ]
+
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+
+    # 7. Deep walk of known directories
+    for search_dir in [
+        os.path.join(pincer_dir, "downloads"),
+        os.path.join(pincer_dir, "workspace"),
+    ]:
+        if not os.path.isdir(search_dir):
+            continue
+        for root, dirs, files in os.walk(search_dir):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            if basename in files:
+                return os.path.abspath(os.path.join(root, basename))
+
+    return None
+
+
 # ── Tool implementations ──────────────────────────────────────────────────────
 
 
@@ -332,32 +396,113 @@ async def google__list_recent_files(
     return fmt_list(lines, header=f"{len(lines)} recent file(s):")
 
 
+async def google__list_local_files(
+    factory: GoogleServiceFactory,
+    pattern: str = "",
+) -> str:
+    """List local files in Pincer's download and workspace directories available for upload."""
+    pincer_dir = os.path.expanduser("~/.pincer")
+    search_dirs = [
+        os.path.join(pincer_dir, "downloads"),
+        os.path.join(pincer_dir, "workspace"),
+    ]
+
+    found: list[str] = []
+
+    for dir_path in search_dirs:
+        if not os.path.isdir(dir_path):
+            continue
+        for root, dirs, files in os.walk(dir_path):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            for f in sorted(files):
+                if f.startswith("."):
+                    continue
+                if pattern and pattern.lower() not in f.lower():
+                    continue
+                full_path = os.path.join(root, f)
+                try:
+                    size = os.path.getsize(full_path)
+                except OSError:
+                    size = 0
+                rel = os.path.relpath(full_path, pincer_dir)
+                found.append(f"  {f} ({_format_size(size)}) → ~/.pincer/{rel}")
+
+    if not found:
+        if pattern:
+            return (
+                f"No files matching '{pattern}' found in downloads or workspace.\n"
+                f"Ask the user for the exact file path, or use file_list to search the workspace."
+            )
+        return "No files found in ~/.pincer/downloads/ or ~/.pincer/workspace/."
+
+    result = f"Found {len(found)} file(s):\n\n"
+    result += "\n".join(found)
+    result += (
+        "\n\nTo upload one of these, call:\n"
+        'google__upload_file(file_path="~/.pincer/<path from above>")'
+    )
+    return result
+
+
 async def google__upload_file(
     factory: GoogleServiceFactory,
-    local_path: str,
-    parent_folder_id: str = "",
+    file_path: str,
+    folder_id: str = "",
     name: str = "",
 ) -> str:
-    """Upload a local file to Google Drive."""
-    from pathlib import Path as _P
-
+    """Upload a local file to Google Drive with automatic path resolution."""
     from googleapiclient.http import MediaFileUpload
 
-    svc = await factory.get("drive")
-    path = _P(local_path)
-    if not path.exists():
-        return f"Error: File not found: {local_path}"
-    file_name = name or path.name
-    mime, _ = mimetypes.guess_type(str(path))
+    # 1. Resolve the file path across known Pincer directories
+    resolved = _resolve_upload_path(file_path)
+
+    if not resolved:
+        basename = os.path.basename(file_path)
+        return (
+            f"File not found: '{file_path}'\n\n"
+            f"Searched in:\n"
+            f"  - Exact path: {file_path}\n"
+            f"  - Downloads: ~/.pincer/downloads/{basename}\n"
+            f"  - Workspace: ~/.pincer/workspace/{basename}\n\n"
+            f"Use google__list_local_files() to see available files, "
+            f"or ask the user for the correct path."
+        )
+
+    # 2. Detect MIME type
+    mime, _ = mimetypes.guess_type(resolved)
     mime = mime or "application/octet-stream"
+
+    # 3. Build upload request
+    file_name = name or os.path.basename(resolved)
+    file_size = os.path.getsize(resolved)
+    size_str = _format_size(file_size)
+
+    svc = await factory.get("drive")
     metadata: dict[str, Any] = {"name": file_name}
-    if parent_folder_id:
-        metadata["parents"] = [parent_folder_id]
-    media = MediaFileUpload(str(path), mimetype=mime, resumable=True)
-    result = await asyncio.to_thread(
-        lambda: svc.files().create(body=metadata, media_body=media, fields="id,name,webViewLink").execute()
+    if folder_id:
+        metadata["parents"] = [folder_id]
+
+    media = MediaFileUpload(resolved, mimetype=mime, resumable=True)
+
+    # 4. Upload
+    uploaded = await asyncio.to_thread(
+        lambda: svc.files()
+        .create(body=metadata, media_body=media, fields="id,name,mimeType,webViewLink")
+        .execute()
     )
-    return f"Uploaded '{file_name}' → ID: {result.get('id', '')}\nLink: {result.get('webViewLink', '')}"
+
+    # 5. Return metadata only — never raw content
+    web_link = uploaded.get("webViewLink", "")
+    link_line = f"  Link: {web_link}\n" if web_link else ""
+
+    return (
+        f"File uploaded to Google Drive.\n"
+        f"  Filename: {uploaded.get('name', file_name)}\n"
+        f"  Size: {size_str}\n"
+        f"  Type: {mime}\n"
+        f"  Drive ID: {uploaded.get('id', 'unknown')}\n"
+        f"{link_line}"
+    )
 
 
 async def google__create_folder(
@@ -472,7 +617,7 @@ async def google__share_file(
 
 
 def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
-    """Register all 15 Drive tools. Returns count."""
+    """Register all 16 Drive tools. Returns count."""
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
@@ -615,25 +760,65 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
         },
     )
     registry.register(
+        name="google__list_local_files",
+        description=(
+            "List files available for upload from Pincer's local directories. "
+            "Searches ~/.pincer/downloads/ (files from google__download_file, "
+            "google__export_google_doc, google__get_attachment) and "
+            "~/.pincer/workspace/ (files from file_write or python_exec). "
+            "Use this BEFORE google__upload_file when you don't know the file's exact path. "
+            "Optionally filter by filename pattern."
+        ),
+        handler=_h(google__list_local_files),
+        parameters={
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Optional filename substring filter (case-insensitive)",
+                    "default": "",
+                },
+            },
+            "required": [],
+        },
+    )
+    registry.register(
         name="google__upload_file",
-        description="Upload a local file to Google Drive.",
+        description=(
+            "Upload a local file to Google Drive. "
+            "Accepts paths relative to ~/.pincer/ (e.g., 'downloads/report.pdf'), "
+            "bare filenames (e.g., 'report.pdf' — searched in downloads/ and workspace/), "
+            "or absolute paths (e.g., '/Users/user/Documents/file.pdf'). "
+            "Files from google__download_file are in ~/.pincer/downloads/. "
+            "Files from file_write or python_exec are in ~/.pincer/workspace/. "
+            "If you don't know the path, call google__list_local_files first. "
+            "Optionally specify folder_id to upload into a specific Drive folder. "
+            "MIME type is auto-detected from the file extension."
+        ),
         handler=_h(google__upload_file),
         parameters={
             "type": "object",
             "properties": {
-                "local_path": {"type": "string", "description": "Absolute local path to the file"},
-                "parent_folder_id": {
+                "file_path": {
                     "type": "string",
-                    "description": "Destination folder ID (default: root)",
+                    "description": (
+                        "Local file path. Accepts: bare filename ('report.pdf'), "
+                        "path relative to ~/.pincer/ ('downloads/report.pdf'), "
+                        "or absolute path ('/tmp/data.csv')"
+                    ),
+                },
+                "folder_id": {
+                    "type": "string",
+                    "description": "Destination Drive folder ID (default: root)",
                     "default": "",
                 },
                 "name": {
                     "type": "string",
-                    "description": "Override filename (default: same as local)",
+                    "description": "Override filename on Drive (default: same as local)",
                     "default": "",
                 },
             },
-            "required": ["local_path"],
+            "required": ["file_path"],
         },
         require_approval=True,
     )
@@ -721,4 +906,4 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
         },
         require_approval=True,
     )
-    return 15
+    return 16
