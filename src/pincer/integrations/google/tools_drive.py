@@ -437,10 +437,7 @@ async def google__list_local_files(
 
     result = f"Found {len(found)} file(s):\n\n"
     result += "\n".join(found)
-    result += (
-        "\n\nTo upload one of these, call:\n"
-        'google__upload_file(file_path="~/.pincer/<path from above>")'
-    )
+    result += '\n\nTo upload one of these, call:\ngoogle__upload_file(file_path="~/.pincer/<path from above>")'
     return result
 
 
@@ -486,9 +483,7 @@ async def google__upload_file(
 
     # 4. Upload
     uploaded = await asyncio.to_thread(
-        lambda: svc.files()
-        .create(body=metadata, media_body=media, fields="id,name,mimeType,webViewLink")
-        .execute()
+        lambda: svc.files().create(body=metadata, media_body=media, fields="id,name,mimeType,webViewLink").execute()
     )
 
     # 5. Return metadata only — never raw content
