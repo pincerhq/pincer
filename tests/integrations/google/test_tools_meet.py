@@ -216,8 +216,8 @@ async def test_end_active_conference(mock_factory, mock_meet_service):
     assert "disconnected" in result
 
 
-async def test_configure_moderation_success(mock_factory, mock_meet_service):
-    mock_meet_service.spaces().patch().execute.return_value = _space()
+async def test_configure_moderation_success(mock_factory, mock_meet_beta_service):
+    mock_meet_beta_service.spaces().patch().execute.return_value = _space()
     result = await google__configure_meet_moderation(
         mock_factory,
         space_name="spaces/abc123",
@@ -226,8 +226,33 @@ async def test_configure_moderation_success(mock_factory, mock_meet_service):
     assert "Moderation configured" in result or "Developer Preview" in result
 
 
-async def test_configure_moderation_preview_unavailable(mock_factory, mock_meet_service):
-    mock_meet_service.spaces().patch().execute.side_effect = Exception("403 Developer Preview")
+async def test_configure_moderation_uses_v2beta(mock_factory, mock_meet_beta_service):
+    """Moderation must call meet_beta (v2beta), not meet (v2)."""
+    mock_meet_beta_service.spaces().patch().execute.return_value = _space()
+    await google__configure_meet_moderation(
+        mock_factory, space_name="spaces/abc123", chat_restriction="HOST_AND_CO_HOSTS"
+    )
+    # mock_meet_beta_service.spaces().patch should have been called
+    mock_meet_beta_service.spaces().patch.assert_called()
+
+
+async def test_configure_moderation_correct_update_mask(mock_factory, mock_meet_beta_service):
+    """updateMask must use dot-notation paths."""
+    mock_meet_beta_service.spaces().patch().execute.return_value = _space()
+    await google__configure_meet_moderation(
+        mock_factory,
+        space_name="spaces/abc123",
+        chat_restriction="HOST_AND_CO_HOSTS",
+        reaction_restriction="NO_RESTRICTION",
+    )
+    call_kwargs = mock_meet_beta_service.spaces().patch.call_args[1]
+    mask = call_kwargs["updateMask"]
+    assert "config.moderationRestrictions.chatRestriction" in mask
+    assert "config.moderationRestrictions.reactionRestriction" in mask
+
+
+async def test_configure_moderation_preview_unavailable(mock_factory, mock_meet_beta_service):
+    mock_meet_beta_service.spaces().patch().execute.side_effect = Exception("403 Developer Preview")
     result = await google__configure_meet_moderation(
         mock_factory,
         space_name="spaces/abc123",
@@ -236,8 +261,8 @@ async def test_configure_moderation_preview_unavailable(mock_factory, mock_meet_
     assert "Developer Preview" in result
 
 
-async def test_configure_meet_artifacts(mock_factory, mock_meet_service):
-    mock_meet_service.spaces().patch().execute.return_value = _space()
+async def test_configure_meet_artifacts(mock_factory, mock_meet_beta_service):
+    mock_meet_beta_service.spaces().patch().execute.return_value = _space()
     result = await google__configure_meet_artifacts(
         mock_factory,
         space_name="spaces/abc123",
@@ -248,8 +273,26 @@ async def test_configure_meet_artifacts(mock_factory, mock_meet_service):
     assert "Auto-transcription: ENABLED" in result
 
 
-async def test_add_meet_member_success(mock_factory, mock_meet_service):
-    mock_meet_service.spaces().members().create().execute.return_value = {
+async def test_configure_artifacts_uses_v2beta(mock_factory, mock_meet_beta_service):
+    """Artifacts config must call meet_beta (v2beta)."""
+    mock_meet_beta_service.spaces().patch().execute.return_value = _space()
+    await google__configure_meet_artifacts(mock_factory, space_name="spaces/abc123", auto_recording=True)
+    mock_meet_beta_service.spaces().patch.assert_called()
+
+
+async def test_configure_artifacts_correct_update_mask(mock_factory, mock_meet_beta_service):
+    """updateMask must reference nested artifactConfig paths."""
+    mock_meet_beta_service.spaces().patch().execute.return_value = _space()
+    await google__configure_meet_artifacts(
+        mock_factory, space_name="spaces/abc123", auto_recording=True, auto_transcription=True
+    )
+    mask = mock_meet_beta_service.spaces().patch.call_args[1]["updateMask"]
+    assert "config.artifactConfig.recordingConfig" in mask
+    assert "config.artifactConfig.transcriptionConfig" in mask
+
+
+async def test_add_meet_member_success(mock_factory, mock_meet_beta_service):
+    mock_meet_beta_service.spaces().members().create().execute.return_value = {
         "name": "spaces/abc123/members/m1",
         "role": "COHOST",
     }
@@ -259,11 +302,83 @@ async def test_add_meet_member_success(mock_factory, mock_meet_service):
         email="alice@example.com",
         role="COHOST",
     )
-    assert "alice@example.com" in result or "Developer Preview" in result
+    assert "alice@example.com" in result
+    assert "Co-host" in result or "COHOST" in result
 
 
-async def test_add_meet_member_preview_unavailable(mock_factory, mock_meet_service):
-    mock_meet_service.spaces().members().create().execute.side_effect = Exception("404 preview")
+async def test_add_meet_member_uses_v2beta(mock_factory, mock_meet_beta_service):
+    """Members endpoint only exists on v2beta."""
+    mock_meet_beta_service.spaces().members().create().execute.return_value = {
+        "name": "spaces/abc123/members/m1",
+        "role": "ROLE_UNSPECIFIED",
+    }
+    await google__add_meet_member(mock_factory, space_name="spaces/abc123", email="u@t.com")
+    mock_meet_beta_service.spaces().members().create.assert_called()
+
+
+async def test_add_meet_member_uses_email_not_user(mock_factory, mock_meet_beta_service):
+    """Member body must have 'email', NOT 'signerUser'/'user' field."""
+    mock_meet_beta_service.spaces().members().create().execute.return_value = {
+        "name": "spaces/abc123/members/m1",
+        "role": "COHOST",
+    }
+    await google__add_meet_member(mock_factory, space_name="spaces/abc123", email="alice@example.com", role="COHOST")
+    body = mock_meet_beta_service.spaces().members().create.call_args[1]["body"]
+    assert "email" in body
+    assert body["email"] == "alice@example.com"
+    assert "signerUser" not in body
+    assert "user" not in body
+
+
+async def test_add_meet_member_cohost_role_normalization(mock_factory, mock_meet_beta_service):
+    """Various co-host spellings normalize to 'COHOST' in the API body."""
+    mock_meet_beta_service.spaces().members().create().execute.return_value = {
+        "name": "m1",
+        "role": "COHOST",
+    }
+    for input_role in ["COHOST", "co-host", "CO_HOST", "Cohost"]:
+        await google__add_meet_member(mock_factory, space_name="spaces/abc123", email="u@t.com", role=input_role)
+        body = mock_meet_beta_service.spaces().members().create.call_args[1]["body"]
+        assert body.get("role") == "COHOST", f"Failed for input: {input_role}"
+
+
+async def test_add_meet_member_regular_role(mock_factory, mock_meet_beta_service):
+    """Empty role → no 'role' key in body (API defaults to regular member)."""
+    mock_meet_beta_service.spaces().members().create().execute.return_value = {
+        "name": "m1",
+        "role": "ROLE_UNSPECIFIED",
+    }
+    await google__add_meet_member(mock_factory, space_name="spaces/abc123", email="u@t.com", role="")
+    body = mock_meet_beta_service.spaces().members().create.call_args[1]["body"]
+    assert "role" not in body or body.get("role") == "ROLE_UNSPECIFIED"
+
+
+async def test_add_meet_member_invalid_role(mock_factory, mock_meet_beta_service):
+    result = await google__add_meet_member(mock_factory, space_name="spaces/abc123", email="u@t.com", role="SUPERADMIN")
+    assert "Invalid role" in result
+
+
+async def test_add_meet_member_auto_prefix_spaces(mock_factory, mock_meet_beta_service):
+    mock_meet_beta_service.spaces().members().create().execute.return_value = {"name": "m1", "role": "ROLE_UNSPECIFIED"}
+    await google__add_meet_member(mock_factory, space_name="abc123", email="u@t.com")
+    parent = mock_meet_beta_service.spaces().members().create.call_args[1]["parent"]
+    assert parent == "spaces/abc123"
+
+
+async def test_add_meet_member_already_exists(mock_factory, mock_meet_beta_service):
+    mock_meet_beta_service.spaces().members().create().execute.side_effect = Exception("409 already exists")
+    result = await google__add_meet_member(mock_factory, space_name="spaces/abc123", email="u@t.com")
+    assert "already a member" in result
+
+
+async def test_add_meet_member_404_gives_v2beta_hint(mock_factory, mock_meet_beta_service):
+    mock_meet_beta_service.spaces().members().create().execute.side_effect = Exception("404 method not found")
+    result = await google__add_meet_member(mock_factory, space_name="spaces/abc123", email="u@t.com")
+    assert "v2beta" in result
+
+
+async def test_add_meet_member_preview_unavailable(mock_factory, mock_meet_beta_service):
+    mock_meet_beta_service.spaces().members().create().execute.side_effect = Exception("Developer Preview unavailable")
     result = await google__add_meet_member(
         mock_factory,
         space_name="spaces/abc123",
@@ -272,10 +387,28 @@ async def test_add_meet_member_preview_unavailable(mock_factory, mock_meet_servi
     assert "Developer Preview" in result
 
 
-async def test_remove_meet_member(mock_factory, mock_meet_service):
-    mock_meet_service.spaces().members().delete().execute.return_value = {}
+async def test_remove_meet_member(mock_factory, mock_meet_beta_service):
+    mock_meet_beta_service.spaces().members().delete().execute.return_value = {}
     result = await google__remove_meet_member(mock_factory, member_name="spaces/abc123/members/m1")
-    assert "removed" in result or "Developer Preview" in result
+    assert "removed" in result
+
+
+async def test_remove_meet_member_uses_v2beta(mock_factory, mock_meet_beta_service):
+    mock_meet_beta_service.spaces().members().delete().execute.return_value = {}
+    await google__remove_meet_member(mock_factory, member_name="spaces/abc123/members/m1")
+    mock_meet_beta_service.spaces().members().delete.assert_called()
+
+
+async def test_remove_meet_member_invalid_format(mock_factory, mock_meet_beta_service):
+    result = await google__remove_meet_member(mock_factory, member_name="bad_format")
+    assert "Invalid" in result
+    assert "spaces/" in result
+
+
+async def test_remove_meet_member_already_removed(mock_factory, mock_meet_beta_service):
+    mock_meet_beta_service.spaces().members().delete().execute.side_effect = Exception("404 not found")
+    result = await google__remove_meet_member(mock_factory, member_name="spaces/abc123/members/m1")
+    assert "not found" in result.lower() or "already been removed" in result.lower()
 
 
 # ── Conference History ─────────────────────────────────────────────────────────
