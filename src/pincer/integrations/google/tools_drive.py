@@ -810,7 +810,10 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
                 },
                 "file_type": {
                     "type": "string",
-                    "description": "Filter by type: 'spreadsheet', 'document', 'presentation', 'pdf', 'folder', 'image', 'xlsx', 'any'",
+                    "description": (
+                        "Filter by type: 'spreadsheet', 'document', 'presentation',"
+                        " 'pdf', 'folder', 'image', 'xlsx', 'any'"
+                    ),
                     "default": "any",
                 },
                 "shared_with_me": {

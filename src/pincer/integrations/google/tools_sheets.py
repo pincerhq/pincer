@@ -30,7 +30,10 @@ async def google__list_sheets(
     svc = await factory.get("sheets")
     try:
         result = await with_backoff(
-            lambda: svc.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="properties,sheets.properties").execute()
+            lambda: svc.spreadsheets().get(
+                spreadsheetId=spreadsheet_id,
+                fields="properties,sheets.properties",
+            ).execute()
         )
     except Exception as e:
         error_msg = str(e)
@@ -235,13 +238,12 @@ async def google__search_sheet_values(
         safe_tab = _quote_tab_name(tab)
 
         try:
-            _t = safe_tab
             result = await with_backoff(
-                lambda: svc.spreadsheets().values().get(
+                (lambda t: lambda: svc.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
-                    range=f"{_t}!A:ZZ",
+                    range=f"{t}!A:ZZ",
                     valueRenderOption="FORMATTED_VALUE",
-                ).execute()
+                ).execute())(safe_tab)
             )
         except Exception:
             continue  # skip tabs that can't be read (e.g. chart sheets)
@@ -564,12 +566,18 @@ def register_sheets_tools(registry: ToolRegistry, factory: GoogleServiceFactory)
                 "spreadsheet_id": {"type": "string"},
                 "range_": {
                     "type": "string",
-                    "description": "A1 notation range e.g. Sheet1!A1:D10 or Budget!A:A. Optional if using sheet_name/columns/rows.",
+                    "description": (
+                        "A1 notation range e.g. Sheet1!A1:D10 or Budget!A:A."
+                        " Optional if using sheet_name/columns/rows."
+                    ),
                     "default": "",
                 },
                 "sheet_name": {
                     "type": "string",
-                    "description": "Tab/sheet name e.g. 'Budget' or 'Q1 Data'. Use with columns/rows for friendly access.",
+                    "description": (
+                        "Tab/sheet name e.g. 'Budget' or 'Q1 Data'."
+                        " Use with columns/rows for friendly access."
+                    ),
                     "default": "",
                 },
                 "columns": {
@@ -612,7 +620,10 @@ def register_sheets_tools(registry: ToolRegistry, factory: GoogleServiceFactory)
             "type": "object",
             "properties": {
                 "spreadsheet_id": {"type": "string"},
-                "search_value": {"type": "string", "description": "Value to search for (case-insensitive substring by default)"},
+                "search_value": {
+                    "type": "string",
+                    "description": "Value to search for (case-insensitive substring by default)",
+                },
                 "sheet_name": {
                     "type": "string",
                     "description": "Limit search to a specific tab. Leave empty to search all tabs.",

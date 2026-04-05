@@ -699,9 +699,12 @@ class Agent:
                                 "google__export_google_doc(file_id=..., export_format='pdf'). "
                                 "For Drive uploads: google__upload_file(file_path=...). "
                                 "If you don't know the file path, call google__list_local_files() first. "
-                                "For Sheets: google__get_sheet_values(spreadsheet_id=..., sheet_name=..., columns=...). "
-                                "For Sheets search: google__search_sheet_values(spreadsheet_id=..., search_value=...). "
-                                "Get spreadsheet_id via google__search_drive_files(name='<name>', file_type='spreadsheet')."
+                                "For Sheets: google__get_sheet_values("
+                                "spreadsheet_id=..., sheet_name=..., columns=...). "
+                                "For Sheets search: google__search_sheet_values("
+                                "spreadsheet_id=..., search_value=...). "
+                                "Get spreadsheet_id via google__search_drive_files("
+                                "name='<name>', file_type='spreadsheet')."
                             )
                         }
                     ),

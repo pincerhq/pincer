@@ -4,8 +4,6 @@ Tests for Sheets tools — covers all 10 tools plus new SH-03/SH-05 functionalit
 
 from __future__ import annotations
 
-import pytest
-
 from pincer.integrations.google.tools_sheets import (
     _build_a1_range,
     _col_letter,
