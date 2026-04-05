@@ -5,6 +5,7 @@ Google Contacts / People API tools — 7 tools for reading and managing contacts
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import logging
 from typing import TYPE_CHECKING, Any
@@ -137,12 +138,10 @@ async def google__search_contacts(
 
     # Google requires a warmup request with empty query to hydrate its lazy cache.
     # Failure is non-fatal — the real search below may still return results.
-    try:
+    with contextlib.suppress(Exception):
         await with_backoff(
             lambda: svc.people().searchContacts(query="", readMask=_SEARCH_FIELDS).execute()
         )
-    except Exception:
-        pass
     await asyncio.sleep(0.5)
 
     result = await with_backoff(
@@ -224,8 +223,12 @@ async def google__update_contact(
     """Update a contact's fields."""
     svc = await factory.get("contacts")
 
-    if not (given_name or family_name or email or phone or organization or job_title or notes or remove_email or remove_phone):
-        return "No fields to update. Specify at least one: given_name, family_name, email, phone, organization, job_title, notes, remove_email, remove_phone."
+    if not (given_name or family_name or email or phone or organization or job_title
+            or notes or remove_email or remove_phone):
+        return (
+            "No fields to update. Specify at least one: given_name, family_name, email,"
+            " phone, organization, job_title, notes, remove_email, remove_phone."
+        )
 
     # Auto-prefix "people/" so bare IDs also work
     if not resource_name.startswith("people/"):
@@ -459,7 +462,10 @@ def register_contacts_tools(registry: ToolRegistry, factory: GoogleServiceFactor
     )
     registry.register(
         name="google__update_contact",
-        description="Update a Google Contact's name, email, phone, organization, or notes. Use remove_email/remove_phone to delete a specific value.",
+        description=(
+            "Update a Google Contact's name, email, phone, organization, or notes."
+            " Use remove_email/remove_phone to delete a specific value."
+        ),
         handler=_h(google__update_contact),
         parameters={
             "type": "object",

@@ -4,8 +4,6 @@ Tests for Contacts tools — covers all 5 bug-fixed tools.
 
 from __future__ import annotations
 
-import pytest
-
 from pincer.integrations.google.tools_contacts import (
     google__get_contact,
     google__list_contacts,
