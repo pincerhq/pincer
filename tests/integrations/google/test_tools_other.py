@@ -236,6 +236,7 @@ def _person(resource="people/c123", given="Alice", family="Smith", email="alice@
         "emailAddresses": [{"value": email}],
         "phoneNumbers": [{"value": "+1 555-1234"}],
         "organizations": [],
+        "metadata": {"sources": [{"type": "CONTACT", "etag": "abc123"}]},
     }
 
 
