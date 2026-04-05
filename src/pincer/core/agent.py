@@ -59,13 +59,24 @@ When the user asks to download or save an email attachment:
 3. google__get_attachment → download the file using message_id + attachment_id from step 2
 4. Report the downloaded file to the user
 
+### Searching Google Drive
+Use friendly parameters — do NOT write raw Drive API query syntax:
+  google__search_drive_files(name="budget")
+  google__search_drive_files(name="report", file_type="spreadsheet")
+  google__search_drive_files(name="proposal", file_type="document")
+  google__search_drive_files(name="Projects", file_type="folder")
+
+The results include file type labels and tell you which tool to use next:
+  - Google Sheet → google__get_sheet_values(spreadsheet_id="<ID>")
+  - Google Doc   → google__get_doc_content(file_id="<ID>")
+  - .xlsx / PDF  → google__download_file(file_id="<ID>")
+  - Google Doc/Sheet/Slide (to export) → google__export_google_doc(file_id="<ID>", export_format="pdf")
+
 When the user asks to download or save a file from Google Drive:
-1. google__search_drive_files → find the file (by name, type, owner)
-2. Check the mimeType in the result:
-   - If mimeType starts with "application/vnd.google-apps." (Google Doc/Sheet/Slide/Drawing):
-     → google__export_google_doc(file_id="...", export_format="pdf")
-   - Otherwise (PDF, image, ZIP, Office doc, etc.):
-     → google__download_file(file_id="...")
+1. google__search_drive_files(name="<filename>") → find the file
+2. Check the type label in the result:
+   - Google Sheet/Doc/Slide → google__export_google_doc(file_id="...", export_format="pdf")
+   - PDF, image, ZIP, .xlsx → google__download_file(file_id="...")
 3. Both tools save the file to disk and return the path — do NOT use python_exec.
 
 When the user says "export as PDF" or "save as DOCX":
@@ -85,11 +96,39 @@ When the user asks to upload a local file to Google Drive:
 5. If still not found → ask the user for the exact file path
 
 To upload into a specific folder:
-1. google__search_drive_files(query="name='Projects' mimeType='application/vnd.google-apps.folder'") → get folder_id
+1. google__search_drive_files(name="Projects", file_type="folder") → get folder_id
 2. google__upload_file(file_path="...", folder_id="<folder_id>")
 
 NEVER use python_exec or shell_exec for Google Drive uploads.
 The google__upload_file tool has proper OAuth credentials. The sandbox does NOT.
+
+### Google Sheets — Reading Data
+google__get_sheet_values works ONLY on Google Sheets (online). NOT on .xlsx files.
+The search result tells you: "Google Sheet" → use get_sheet_values; "Excel (.xlsx)" → download first.
+
+When the user asks to read, show, or display data from a Google Sheet:
+1. google__search_drive_files(name="<spreadsheet name>", file_type="spreadsheet") → get spreadsheet_id
+2. Optionally: google__list_sheets(spreadsheet_id="...") → get tab/sheet names
+3. google__get_sheet_values(spreadsheet_id="...", sheet_name="Budget", columns="A")
+
+Friendly parameter examples (no A1 notation needed):
+  - "Show column A from Budget tab"  → sheet_name="Budget", columns="A"
+  - "Show columns A through C"       → columns="A:C"
+  - "Show rows 1 to 50"              → rows="1:50"
+  - "Show B2:D20 from Sheet1"        → range_="Sheet1!B2:D20"
+  - "Show all data"                  → just pass spreadsheet_id
+
+If a column returns only 1 row, the data is in OTHER columns — read all columns next:
+  google__get_sheet_values(spreadsheet_id="...")
+
+### Google Sheets — Searching
+When the user asks to find or locate a value in a spreadsheet:
+1. google__search_drive_files(name="<name>", file_type="spreadsheet") → get spreadsheet_id
+2. google__search_sheet_values(spreadsheet_id="...", search_value="SH-05")
+   → returns cell references like "Sheet1!C14" with row context
+
+NEVER use python_exec for Google Sheets operations.
+The sandbox has no gspread, no openpyxl, no pandas Google Sheets support, and no Google credentials.
 """
 
 _GOOGLE_FALLBACK_PATTERNS = [
@@ -112,6 +151,19 @@ _GOOGLE_FALLBACK_PATTERNS = [
     "mediafileupload",
     "files().create(",
     "media_body",
+    # Sheets patterns
+    "gspread",
+    "openpyxl",
+    "spreadsheets().values()",
+    "spreadsheets().get(",
+    "col_values(",
+    "row_values(",
+    "worksheet(",
+    "open_by_key(",
+    "open_by_url(",
+    # pandas reading Google Sheets or Excel
+    "pd.read_excel",
+    "read_excel(",
 ]
 
 
@@ -638,7 +690,7 @@ class Agent:
                         {
                             "error": (
                                 "Do not use python_exec/shell_exec for Google Workspace operations. "
-                                "The sandbox has no Google credentials or libraries. "
+                                "The sandbox has no Google credentials or libraries (no gspread, no openpyxl). "
                                 "Use the native google__* tools instead. "
                                 "For Gmail attachments: google__search_messages"
                                 " → google__get_message → google__get_attachment. "
@@ -646,7 +698,13 @@ class Agent:
                                 "For Drive Google Docs/Sheets/Slides: "
                                 "google__export_google_doc(file_id=..., export_format='pdf'). "
                                 "For Drive uploads: google__upload_file(file_path=...). "
-                                "If you don't know the file path, call google__list_local_files() first."
+                                "If you don't know the file path, call google__list_local_files() first. "
+                                "For Sheets: google__get_sheet_values("
+                                "spreadsheet_id=..., sheet_name=..., columns=...). "
+                                "For Sheets search: google__search_sheet_values("
+                                "spreadsheet_id=..., search_value=...). "
+                                "Get spreadsheet_id via google__search_drive_files("
+                                "name='<name>', file_type='spreadsheet')."
                             )
                         }
                     ),

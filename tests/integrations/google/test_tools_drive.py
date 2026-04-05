@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 
 from pincer.integrations.google.tools_drive import (
+    _build_drive_query,
     _resolve_upload_path,
     google__copy_file,
     google__create_folder,
@@ -56,16 +57,14 @@ async def test_list_drive_files_empty(mock_factory, mock_drive_service):
 
 async def test_search_drive_files(mock_factory, mock_drive_service):
     mock_drive_service.files().list().execute.return_value = {"files": [_file("f1", "Q1 Budget.xlsx")]}
-    result = await google__search_drive_files(
-        mock_factory, query='name contains "budget" type:spreadsheet sharedWithMe'
-    )
+    result = await google__search_drive_files(mock_factory, name="budget", file_type="spreadsheet")
     assert "Q1 Budget.xlsx" in result
     assert "f1" in result
 
 
 async def test_search_drive_files_none(mock_factory, mock_drive_service):
     mock_drive_service.files().list().execute.return_value = {"files": []}
-    result = await google__search_drive_files(mock_factory, query="xyz123notfound")
+    result = await google__search_drive_files(mock_factory, name="xyz123notfound")
     assert "No files" in result
 
 
@@ -588,3 +587,142 @@ async def test_share_file_link_sharing(mock_factory, mock_drive_service):
 async def test_share_file_no_email_no_link(mock_factory, mock_drive_service):
     result = await google__share_file(mock_factory, file_id="f1")
     assert "Error" in result
+
+
+# ── _build_drive_query tests (Bug 1 regression suite) ─────────────────────────
+
+
+class TestBuildDriveQuery:
+    def test_name_only(self):
+        q = _build_drive_query(name="budget")
+        assert q == "name contains 'budget' and trashed = false"
+
+    def test_name_with_spaces_not_split(self):
+        """CRITICAL: spaces in name must NOT produce spurious 'and' tokens."""
+        q = _build_drive_query(name="Q1 Budget Report")
+        assert "Q1 Budget Report" in q
+        # Only one 'and' — between name clause and trashed clause
+        assert q.count(" and ") == 1
+        assert "Q1 and Budget" not in q
+
+    def test_name_with_file_type_spreadsheet(self):
+        q = _build_drive_query(name="budget", file_type="spreadsheet")
+        assert "name contains 'budget'" in q
+        assert "mimeType = 'application/vnd.google-apps.spreadsheet'" in q
+        assert "trashed = false" in q
+
+    def test_name_with_file_type_folder(self):
+        q = _build_drive_query(name="Projects", file_type="folder")
+        assert "mimeType = 'application/vnd.google-apps.folder'" in q
+
+    def test_file_type_image(self):
+        q = _build_drive_query(file_type="image")
+        assert "mimeType contains 'image/'" in q
+
+    def test_shared_with_me(self):
+        q = _build_drive_query(name="report", shared_with_me=True)
+        assert "sharedWithMe = true" in q
+
+    def test_starred(self):
+        q = _build_drive_query(starred=True)
+        assert "starred = true" in q
+
+    def test_legacy_bare_string_treated_as_name(self):
+        """Bare string like 'GOOGLE_WORKSPACE_QA_CHECKLIST' → name search."""
+        q = _build_drive_query(legacy_query="GOOGLE_WORKSPACE_QA_CHECKLIST")
+        assert "name contains 'GOOGLE_WORKSPACE_QA_CHECKLIST'" in q
+        assert "trashed = false" in q
+
+    def test_legacy_structured_passthrough_contains(self):
+        """Drive API syntax with 'contains' → passed through untouched."""
+        raw = "name contains 'budget' and mimeType = 'application/pdf'"
+        q = _build_drive_query(legacy_query=raw)
+        assert q == raw
+
+    def test_legacy_name_equals_passthrough(self):
+        """name='file.xlsx' syntax → passed through."""
+        raw = "name='GOOGLE_WORKSPACE_QA_CHECKLIST.xlsx'"
+        q = _build_drive_query(legacy_query=raw)
+        assert q == raw
+
+    def test_drive_query_raw_passthrough(self):
+        """drive_query parameter → zero processing, returned verbatim."""
+        raw = "modifiedTime > '2026-01-01' and mimeType contains 'image/'"
+        q = _build_drive_query(drive_query=raw)
+        assert q == raw
+
+    def test_trashed_always_excluded(self):
+        """All queries include trashed = false."""
+        q = _build_drive_query(name="anything")
+        assert "trashed = false" in q
+
+    def test_no_name_no_type_still_valid(self):
+        """No parameters → just trashed = false."""
+        q = _build_drive_query()
+        assert q == "trashed = false"
+
+    def test_name_with_apostrophe_escaped(self):
+        """Apostrophes in names are escaped."""
+        q = _build_drive_query(name="Alice's Report")
+        assert "Alice\\'s Report" in q
+
+
+# ── google__search_drive_files output format tests ────────────────────────────
+
+
+async def test_search_drive_files_google_sheet_hint(mock_factory, mock_drive_service):
+    """Results for Google Sheet include get_sheet_values hint."""
+    mock_drive_service.files().list().execute.return_value = {
+        "files": [_file("ss1", "QA Checklist", "application/vnd.google-apps.spreadsheet")]
+    }
+    result = await google__search_drive_files(mock_factory, name="QA Checklist")
+    assert "QA Checklist" in result
+    assert "google__get_sheet_values" in result
+    assert "ss1" in result
+
+
+async def test_search_drive_files_xlsx_hint(mock_factory, mock_drive_service):
+    """Results for .xlsx include download_file hint."""
+    mock_drive_service.files().list().execute.return_value = {
+        "files": [_file("x1", "Budget.xlsx")]  # default mime is xlsx
+    }
+    result = await google__search_drive_files(mock_factory, name="Budget")
+    assert "google__download_file" in result
+
+
+async def test_search_drive_files_google_doc_hint(mock_factory, mock_drive_service):
+    """Results for Google Doc include get_doc_content hint."""
+    mock_drive_service.files().list().execute.return_value = {
+        "files": [_file("d1", "Proposal", "application/vnd.google-apps.document")]
+    }
+    result = await google__search_drive_files(mock_factory, name="Proposal")
+    assert "google__get_doc_content" in result
+
+
+async def test_search_drive_files_name_param_builds_correct_query(mock_factory, mock_drive_service):
+    """name parameter produces a valid Drive API query (no spurious 'and' tokens)."""
+    mock_drive_service.files().list().execute.return_value = {"files": []}
+    await google__search_drive_files(mock_factory, name="Q1 Budget Report")
+    call_kwargs = mock_drive_service.files().list.call_args[1]
+    q = call_kwargs["q"]
+    # Must contain the full name, not split on spaces
+    assert "Q1 Budget Report" in q
+    # Must not insert 'and' between words of the name
+    assert "Q1 and Budget" not in q
+
+
+async def test_search_drive_files_legacy_query_bare_string(mock_factory, mock_drive_service):
+    """Legacy query='bare_string' is treated as a name search."""
+    mock_drive_service.files().list().execute.return_value = {"files": []}
+    await google__search_drive_files(mock_factory, query="GOOGLE_WORKSPACE_QA_CHECKLIST")
+    call_kwargs = mock_drive_service.files().list.call_args[1]
+    q = call_kwargs["q"]
+    assert "name contains 'GOOGLE_WORKSPACE_QA_CHECKLIST'" in q
+
+
+async def test_search_drive_files_400_returns_guidance(mock_factory, mock_drive_service):
+    """400 error returns helpful guidance including the name parameter suggestion."""
+    mock_drive_service.files().list().execute.side_effect = Exception("400 Invalid Value")
+    result = await google__search_drive_files(mock_factory, drive_query="broken bad query")
+    assert "failed" in result.lower() or "error" in result.lower()
+    assert "name" in result
