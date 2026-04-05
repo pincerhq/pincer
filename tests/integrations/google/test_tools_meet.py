@@ -322,9 +322,7 @@ async def test_add_meet_member_uses_email_not_user(mock_factory, mock_meet_beta_
         "name": "spaces/abc123/members/m1",
         "role": "COHOST",
     }
-    await google__add_meet_member(
-        mock_factory, space_name="spaces/abc123", email="alice@example.com", role="COHOST"
-    )
+    await google__add_meet_member(mock_factory, space_name="spaces/abc123", email="alice@example.com", role="COHOST")
     body = mock_meet_beta_service.spaces().members().create.call_args[1]["body"]
     assert "email" in body
     assert body["email"] == "alice@example.com"
@@ -339,9 +337,7 @@ async def test_add_meet_member_cohost_role_normalization(mock_factory, mock_meet
         "role": "COHOST",
     }
     for input_role in ["COHOST", "co-host", "CO_HOST", "Cohost"]:
-        await google__add_meet_member(
-            mock_factory, space_name="spaces/abc123", email="u@t.com", role=input_role
-        )
+        await google__add_meet_member(mock_factory, space_name="spaces/abc123", email="u@t.com", role=input_role)
         body = mock_meet_beta_service.spaces().members().create.call_args[1]["body"]
         assert body.get("role") == "COHOST", f"Failed for input: {input_role}"
 
@@ -358,9 +354,7 @@ async def test_add_meet_member_regular_role(mock_factory, mock_meet_beta_service
 
 
 async def test_add_meet_member_invalid_role(mock_factory, mock_meet_beta_service):
-    result = await google__add_meet_member(
-        mock_factory, space_name="spaces/abc123", email="u@t.com", role="SUPERADMIN"
-    )
+    result = await google__add_meet_member(mock_factory, space_name="spaces/abc123", email="u@t.com", role="SUPERADMIN")
     assert "Invalid role" in result
 
 

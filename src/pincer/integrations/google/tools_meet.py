@@ -303,10 +303,7 @@ async def google__add_meet_member(
     elif role_upper in ("MEMBER", "REGULAR", "CONTRIBUTOR", "ROLE_UNSPECIFIED", ""):
         api_role = "ROLE_UNSPECIFIED"
     else:
-        return (
-            f"Invalid role: '{role}'. "
-            "Valid values: 'COHOST' (co-host privileges) or empty (regular member)."
-        )
+        return f"Invalid role: '{role}'. Valid values: 'COHOST' (co-host privileges) or empty (regular member)."
 
     _body: dict[str, Any] = {"email": email}
     if api_role == "COHOST":
