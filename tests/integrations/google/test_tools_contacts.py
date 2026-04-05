@@ -78,9 +78,7 @@ async def test_list_contacts_pagination_token(mock_factory, mock_contacts_servic
 
 
 async def test_search_contacts_uses_read_mask(mock_factory, mock_contacts_service):
-    mock_contacts_service.people().searchContacts().execute.return_value = {
-        "results": [{"person": _person()}]
-    }
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": [{"person": _person()}]}
     # Reset to clear the setup call so only production calls appear in call_args_list
     mock_contacts_service.people().searchContacts.reset_mock()
     await google__search_contacts(mock_factory, query="John")
@@ -104,9 +102,7 @@ async def test_search_contacts_warmup_before_real_search(mock_factory, mock_cont
 
 
 async def test_search_contacts_returns_results(mock_factory, mock_contacts_service):
-    mock_contacts_service.people().searchContacts().execute.return_value = {
-        "results": [{"person": _person()}]
-    }
+    mock_contacts_service.people().searchContacts().execute.return_value = {"results": [{"person": _person()}]}
     result = await google__search_contacts(mock_factory, query="John")
     assert "John Doe" in result
 
@@ -200,9 +196,7 @@ async def test_update_contact_update_person_fields_set(mock_factory, mock_contac
 async def test_update_contact_preserves_family_name(mock_factory, mock_contacts_service):
     """Updating only given_name keeps existing family_name."""
     mock_contacts_service.people().get().execute.return_value = _person(given="Old", family="Smith")
-    mock_contacts_service.people().updateContact().execute.return_value = _person(
-        given="New", family="Smith"
-    )
+    mock_contacts_service.people().updateContact().execute.return_value = _person(given="New", family="Smith")
     await google__update_contact(mock_factory, resource_name="people/c1", given_name="New")
     body = mock_contacts_service.people().updateContact.call_args[1]["body"]
     assert body["names"][0]["familyName"] == "Smith"
@@ -219,9 +213,7 @@ async def test_update_contact_auto_prefix(mock_factory, mock_contacts_service):
 async def test_update_contact_organization_and_job_title(mock_factory, mock_contacts_service):
     mock_contacts_service.people().get().execute.return_value = _person()
     mock_contacts_service.people().updateContact().execute.return_value = _person()
-    await google__update_contact(
-        mock_factory, resource_name="people/c1", organization="NewCo", job_title="CTO"
-    )
+    await google__update_contact(mock_factory, resource_name="people/c1", organization="NewCo", job_title="CTO")
     body = mock_contacts_service.people().updateContact.call_args[1]["body"]
     assert body["organizations"][0]["name"] == "NewCo"
     assert body["organizations"][0]["title"] == "CTO"
@@ -246,28 +238,22 @@ async def test_update_contact_no_fields_returns_guidance(mock_factory, mock_cont
 async def test_update_contact_stale_etag_auto_retries(mock_factory, mock_contacts_service):
     """Stale etag with a different fresh etag triggers an automatic retry."""
     mock_contacts_service.people().get().execute.side_effect = [
-        _person(etag="old_etag"),   # first fetch for current data
-        _person(etag="fresh_etag"), # retry fetch for fresh etag
+        _person(etag="old_etag"),  # first fetch for current data
+        _person(etag="fresh_etag"),  # retry fetch for fresh etag
     ]
     mock_contacts_service.people().updateContact().execute.side_effect = [
-        Exception("400: failedPrecondition"),           # first attempt fails
-        _person(given="Test", display_name="Test Doe"), # retry succeeds
+        Exception("400: failedPrecondition"),  # first attempt fails
+        _person(given="Test", display_name="Test Doe"),  # retry succeeds
     ]
-    result = await google__update_contact(
-        mock_factory, resource_name="people/c1", given_name="Test"
-    )
+    result = await google__update_contact(mock_factory, resource_name="people/c1", given_name="Test")
     assert "updated" in result.lower()
 
 
 async def test_update_contact_stale_etag_conflict_when_same(mock_factory, mock_contacts_service):
     """When retried etag is the same (read-only contact), returns conflict message."""
     mock_contacts_service.people().get().execute.return_value = _person(etag="same_etag")
-    mock_contacts_service.people().updateContact().execute.side_effect = Exception(
-        "400: failedPrecondition"
-    )
-    result = await google__update_contact(
-        mock_factory, resource_name="people/c1", given_name="Test"
-    )
+    mock_contacts_service.people().updateContact().execute.side_effect = Exception("400: failedPrecondition")
+    result = await google__update_contact(mock_factory, resource_name="people/c1", given_name="Test")
     assert "etag" in result.lower() or "conflict" in result.lower() or "read-only" in result.lower()
 
 
@@ -277,9 +263,7 @@ async def test_update_contact_no_contact_etag_returns_error(mock_factory, mock_c
         "resourceName": "people/c1",
         "metadata": {"sources": [{"type": "PROFILE"}]},
     }
-    result = await google__update_contact(
-        mock_factory, resource_name="people/c1", given_name="Test"
-    )
+    result = await google__update_contact(mock_factory, resource_name="people/c1", given_name="Test")
     assert "etag" in result.lower() or "read-only" in result.lower()
 
 
@@ -333,9 +317,7 @@ async def test_update_contact_remove_email_not_found(mock_factory, mock_contacts
         "etag": "e1",
         "emailAddresses": [{"value": "other@example.com"}],
     }
-    result = await google__update_contact(
-        mock_factory, resource_name="people/c1", remove_email="missing@example.com"
-    )
+    result = await google__update_contact(mock_factory, resource_name="people/c1", remove_email="missing@example.com")
     assert "not found" in result.lower()
     assert "other@example.com" in result
 
@@ -372,9 +354,7 @@ async def test_update_contact_remove_phone(mock_factory, mock_contacts_service):
         "resourceName": "people/c1",
         "etag": "e2",
     }
-    result = await google__update_contact(
-        mock_factory, resource_name="people/c1", remove_phone="+49123456789"
-    )
+    result = await google__update_contact(mock_factory, resource_name="people/c1", remove_phone="+49123456789")
     body = mock_contacts_service.people().updateContact.call_args[1]["body"]
     phones = [p["value"] for p in body["phoneNumbers"]]
     assert "+49987654321" in phones

@@ -93,8 +93,7 @@ def _fmt_contact_full(person: dict[str, Any]) -> str:
     output += f"Resource: {resource}\n"
 
     if person.get("etag") or any(
-        s.get("type") == "CONTACT" and s.get("etag")
-        for s in person.get("metadata", {}).get("sources", [])
+        s.get("type") == "CONTACT" and s.get("etag") for s in person.get("metadata", {}).get("sources", [])
     ):
         output += "(etag available — contact can be updated with google__update_contact)\n"
 
@@ -139,15 +138,11 @@ async def google__search_contacts(
     # Google requires a warmup request with empty query to hydrate its lazy cache.
     # Failure is non-fatal — the real search below may still return results.
     with contextlib.suppress(Exception):
-        await with_backoff(
-            lambda: svc.people().searchContacts(query="", readMask=_SEARCH_FIELDS).execute()
-        )
+        await with_backoff(lambda: svc.people().searchContacts(query="", readMask=_SEARCH_FIELDS).execute())
     await asyncio.sleep(0.5)
 
     result = await with_backoff(
-        lambda: svc.people().searchContacts(
-            query=query, pageSize=max_results, readMask=_SEARCH_FIELDS
-        ).execute()
+        lambda: svc.people().searchContacts(query=query, pageSize=max_results, readMask=_SEARCH_FIELDS).execute()
     )
     results = result.get("results", [])
     if not results:
@@ -175,8 +170,7 @@ async def google__get_contact(
         err = str(e)
         if "404" in err or "not found" in err.lower():
             return (
-                f"Contact '{resource_name}' not found. "
-                "Use google__search_contacts to find the correct resource name."
+                f"Contact '{resource_name}' not found. Use google__search_contacts to find the correct resource name."
             )
         return f"Failed to get contact: {err}"
 
@@ -223,8 +217,17 @@ async def google__update_contact(
     """Update a contact's fields."""
     svc = await factory.get("contacts")
 
-    if not (given_name or family_name or email or phone or organization or job_title
-            or notes or remove_email or remove_phone):
+    if not (
+        given_name
+        or family_name
+        or email
+        or phone
+        or organization
+        or job_title
+        or notes
+        or remove_email
+        or remove_phone
+    ):
         return (
             "No fields to update. Specify at least one: given_name, family_name, email,"
             " phone, organization, job_title, notes, remove_email, remove_phone."
@@ -303,10 +306,12 @@ async def google__update_contact(
 
     if organization or job_title:
         existing_org = current.get("organizations", [{}])[0] if current.get("organizations") else {}
-        body["organizations"] = [{
-            "name": organization or existing_org.get("name", ""),
-            "title": job_title or existing_org.get("title", ""),
-        }]
+        body["organizations"] = [
+            {
+                "name": organization or existing_org.get("name", ""),
+                "title": job_title or existing_org.get("title", ""),
+            }
+        ]
         update_fields.append("organizations")
 
     if notes:
@@ -347,21 +352,14 @@ async def google__update_contact(
                     return f"Contact updated (retried with fresh etag): '{display}'"
             except Exception as retry_err:
                 return f"Update failed on retry: {retry_err}"
-            return (
-                f"etag conflict — contact may be read-only or synced from an external source.\n"
-                f"Error: {err}"
-            )
+            return f"etag conflict — contact may be read-only or synced from an external source.\nError: {err}"
         return (
             f"Failed to update contact: {err}\n"
             f"Debug: resource={resource_name}, fields={','.join(update_fields)}, "
             f"etag={'present' if etag else 'MISSING'}, body_keys={list(body.keys())}"
         )
 
-    display = (
-        result.get("names", [{}])[0].get("displayName", resource_name)
-        if result.get("names")
-        else resource_name
-    )
+    display = result.get("names", [{}])[0].get("displayName", resource_name) if result.get("names") else resource_name
     return f"Contact updated: '{display}'"
 
 
