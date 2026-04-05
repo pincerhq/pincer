@@ -29,6 +29,7 @@ _API_VERSIONS: dict[str, tuple[str, str]] = {
     "tasks": ("tasks", "v1"),
     "contacts": ("people", "v1"),
     "meet": ("meet", "v2"),
+    "meet_beta": ("meet", "v2beta"),   # members, moderation, artifacts — require v2beta
 }
 
 _CACHE_TTL = 1800  # 30 minutes
