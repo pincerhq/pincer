@@ -30,10 +30,14 @@ async def google__list_sheets(
     svc = await factory.get("sheets")
     try:
         result = await with_backoff(
-            lambda: svc.spreadsheets().get(
-                spreadsheetId=spreadsheet_id,
-                fields="properties,sheets.properties",
-            ).execute()
+            lambda: (
+                svc.spreadsheets()
+                .get(
+                    spreadsheetId=spreadsheet_id,
+                    fields="properties,sheets.properties",
+                )
+                .execute()
+            )
         )
     except Exception as e:
         error_msg = str(e)
@@ -94,11 +98,16 @@ async def google__get_sheet_values(
 
     try:
         result = await with_backoff(
-            lambda: svc.spreadsheets().values().get(
-                spreadsheetId=spreadsheet_id,
-                range=range_,
-                valueRenderOption="FORMATTED_VALUE",
-            ).execute()
+            lambda: (
+                svc.spreadsheets()
+                .values()
+                .get(
+                    spreadsheetId=spreadsheet_id,
+                    range=range_,
+                    valueRenderOption="FORMATTED_VALUE",
+                )
+                .execute()
+            )
         )
     except Exception as e:
         error_msg = str(e)
@@ -152,10 +161,7 @@ async def google__get_sheet_values(
         )
         if sheet_name:
             output += f", sheet_name='{sheet_name}'"
-        output += (
-            f")\n"
-            f"Or list tabs first: google__list_sheets(spreadsheet_id='{spreadsheet_id}'))"
-        )
+        output += f")\nOr list tabs first: google__list_sheets(spreadsheet_id='{spreadsheet_id}'))"
 
     # Truncate large output to avoid context window overload
     max_output = 3000
@@ -216,15 +222,16 @@ async def google__search_sheet_values(
     else:
         try:
             spreadsheet = await with_backoff(
-                lambda: svc.spreadsheets().get(
-                    spreadsheetId=spreadsheet_id,
-                    fields="sheets.properties.title",
-                ).execute()
+                lambda: (
+                    svc.spreadsheets()
+                    .get(
+                        spreadsheetId=spreadsheet_id,
+                        fields="sheets.properties.title",
+                    )
+                    .execute()
+                )
             )
-            sheets_to_search = [
-                s["properties"]["title"]
-                for s in spreadsheet.get("sheets", [])
-            ]
+            sheets_to_search = [s["properties"]["title"] for s in spreadsheet.get("sheets", [])]
         except Exception as e:
             return f"Error accessing spreadsheet: {e}"
 
@@ -239,11 +246,20 @@ async def google__search_sheet_values(
 
         try:
             result = await with_backoff(
-                (lambda t: lambda: svc.spreadsheets().values().get(
-                    spreadsheetId=spreadsheet_id,
-                    range=f"{t}!A:ZZ",
-                    valueRenderOption="FORMATTED_VALUE",
-                ).execute())(safe_tab)
+                (
+                    lambda t: (
+                        lambda: (
+                            svc.spreadsheets()
+                            .values()
+                            .get(
+                                spreadsheetId=spreadsheet_id,
+                                range=f"{t}!A:ZZ",
+                                valueRenderOption="FORMATTED_VALUE",
+                            )
+                            .execute()
+                        )
+                    )
+                )(safe_tab)
             )
         except Exception:
             continue  # skip tabs that can't be read (e.g. chart sheets)
@@ -261,9 +277,7 @@ async def google__search_sheet_values(
                     col_letter = _col_letter(col_idx)
                     cell_ref = f"{tab}!{col_letter}{row_idx + 1}"
                     row_context = " | ".join(str(c) for c in row[:10])
-                    matches.append(
-                        f"  {cell_ref}\n   Value: {cell_str[:200]}\n   Row: {row_context[:300]}"
-                    )
+                    matches.append(f"  {cell_ref}\n   Value: {cell_str[:200]}\n   Row: {row_context[:300]}")
                     if len(matches) >= 50:
                         break
             if len(matches) >= 50:
@@ -273,10 +287,7 @@ async def google__search_sheet_values(
 
     if not matches:
         searched = ", ".join(sheets_to_search)
-        return (
-            f"No cells containing '{search_value}' found.\n"
-            f"Searched sheets: {searched}"
-        )
+        return f"No cells containing '{search_value}' found.\nSearched sheets: {searched}"
 
     output = f"Found {len(matches)} cell(s) containing '{search_value}':\n\n"
     output += "\n\n".join(matches)
@@ -567,16 +578,14 @@ def register_sheets_tools(registry: ToolRegistry, factory: GoogleServiceFactory)
                 "range_": {
                     "type": "string",
                     "description": (
-                        "A1 notation range e.g. Sheet1!A1:D10 or Budget!A:A."
-                        " Optional if using sheet_name/columns/rows."
+                        "A1 notation range e.g. Sheet1!A1:D10 or Budget!A:A. Optional if using sheet_name/columns/rows."
                     ),
                     "default": "",
                 },
                 "sheet_name": {
                     "type": "string",
                     "description": (
-                        "Tab/sheet name e.g. 'Budget' or 'Q1 Data'."
-                        " Use with columns/rows for friendly access."
+                        "Tab/sheet name e.g. 'Budget' or 'Q1 Data'. Use with columns/rows for friendly access."
                     ),
                     "default": "",
                 },

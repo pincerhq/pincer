@@ -44,9 +44,7 @@ def test_list_sheets_shows_workflow_hint(mock_factory, mock_sheets_service):
         "properties": {"title": "Budget"},
         "sheets": [{"properties": {"title": "Sheet1", "index": 0, "sheetId": 0}}],
     }
-    result = asyncio.get_event_loop().run_until_complete(
-        google__list_sheets(mock_factory, spreadsheet_id="ss1")
-    )
+    result = asyncio.get_event_loop().run_until_complete(google__list_sheets(mock_factory, spreadsheet_id="ss1"))
     assert "google__get_sheet_values" in result
 
 
@@ -90,9 +88,7 @@ async def test_get_sheet_values_friendly_column(mock_factory, mock_sheets_servic
         "range": "Budget!A1:A5",
         "values": [["Category"], ["Rent"], ["Food"], ["Travel"], ["Misc"]],
     }
-    result = await google__get_sheet_values(
-        mock_factory, spreadsheet_id="ss1", sheet_name="Budget", columns="A"
-    )
+    result = await google__get_sheet_values(mock_factory, spreadsheet_id="ss1", sheet_name="Budget", columns="A")
     assert "Category" in result
     assert "Rent" in result
     # Verify the API was called with the correct A1 range
@@ -128,9 +124,7 @@ async def test_get_sheet_values_sheet_name_with_spaces(mock_factory, mock_sheets
         "range": "'Q1 Budget'!A:A",
         "values": [["Total"]],
     }
-    await google__get_sheet_values(
-        mock_factory, spreadsheet_id="ss1", sheet_name="Q1 Budget", columns="A"
-    )
+    await google__get_sheet_values(mock_factory, spreadsheet_id="ss1", sheet_name="Q1 Budget", columns="A")
     call_args = str(mock_sheets_service.spreadsheets().values().get.call_args)
     assert "'Q1 Budget'" in call_args
 
@@ -188,9 +182,7 @@ async def test_list_sheets_timeout_returns_actionable_message(mock_factory, mock
 
 async def test_list_sheets_not_found_error(mock_factory, mock_sheets_service):
     """Not-found error on list_sheets returns a helpful search hint."""
-    mock_sheets_service.spreadsheets().get().execute.side_effect = Exception(
-        "404: Requested entity was not found"
-    )
+    mock_sheets_service.spreadsheets().get().execute.side_effect = Exception("404: Requested entity was not found")
     result = await google__list_sheets(mock_factory, spreadsheet_id="bad_id")
     assert "not found" in result.lower()
     assert "google__search_drive_files" in result
@@ -223,9 +215,7 @@ async def test_get_sheet_metadata(mock_factory, mock_sheets_service):
 
 async def test_search_sheet_values_all_tabs(mock_factory, mock_sheets_service):
     """Without sheet_name, lists all tabs then searches each."""
-    mock_sheets_service.spreadsheets().get().execute.return_value = {
-        "sheets": [{"properties": {"title": "Sheet1"}}]
-    }
+    mock_sheets_service.spreadsheets().get().execute.return_value = {"sheets": [{"properties": {"title": "Sheet1"}}]}
     mock_sheets_service.spreadsheets().values().get().execute.return_value = {
         "range": "Sheet1",
         "values": [["Name", "Value"], ["Marketing", "12400"], ["Sales", "8000"]],
@@ -237,9 +227,7 @@ async def test_search_sheet_values_all_tabs(mock_factory, mock_sheets_service):
 
 async def test_search_sheet_values_finds_cell_reference(mock_factory, mock_sheets_service):
     """Returns cell references like 'Sheet1!A3'."""
-    mock_sheets_service.spreadsheets().get().execute.return_value = {
-        "sheets": [{"properties": {"title": "Sheet1"}}]
-    }
+    mock_sheets_service.spreadsheets().get().execute.return_value = {"sheets": [{"properties": {"title": "Sheet1"}}]}
     mock_sheets_service.spreadsheets().values().get().execute.return_value = {
         "values": [
             ["ID", "Task", "Status"],
@@ -254,9 +242,7 @@ async def test_search_sheet_values_finds_cell_reference(mock_factory, mock_sheet
 
 async def test_search_sheet_values_not_found(mock_factory, mock_sheets_service):
     """No matches returns a clear message with searched sheets."""
-    mock_sheets_service.spreadsheets().get().execute.return_value = {
-        "sheets": [{"properties": {"title": "Sheet1"}}]
-    }
+    mock_sheets_service.spreadsheets().get().execute.return_value = {"sheets": [{"properties": {"title": "Sheet1"}}]}
     mock_sheets_service.spreadsheets().values().get().execute.return_value = {
         "range": "Sheet1",
         "values": [["Name", "Value"]],
@@ -299,9 +285,7 @@ async def test_search_sheet_values_searches_multiple_tabs(mock_factory, mock_she
 
 async def test_search_sheet_values_caps_at_50(mock_factory, mock_sheets_service):
     """Results are capped at 50 matches."""
-    mock_sheets_service.spreadsheets().get().execute.return_value = {
-        "sheets": [{"properties": {"title": "Sheet1"}}]
-    }
+    mock_sheets_service.spreadsheets().get().execute.return_value = {"sheets": [{"properties": {"title": "Sheet1"}}]}
     mock_sheets_service.spreadsheets().values().get().execute.return_value = {
         "values": [["match"] for _ in range(100)],
     }
@@ -312,9 +296,7 @@ async def test_search_sheet_values_caps_at_50(mock_factory, mock_sheets_service)
 
 async def test_search_sheet_values_case_sensitive(mock_factory, mock_sheets_service):
     """match_case=True performs case-sensitive search."""
-    mock_sheets_service.spreadsheets().get().execute.return_value = {
-        "sheets": [{"properties": {"title": "Sheet1"}}]
-    }
+    mock_sheets_service.spreadsheets().get().execute.return_value = {"sheets": [{"properties": {"title": "Sheet1"}}]}
     mock_sheets_service.spreadsheets().values().get().execute.return_value = {
         "values": [["Hello World"], ["hello world"]],
     }
@@ -328,9 +310,7 @@ async def test_search_sheet_values_case_sensitive(mock_factory, mock_sheets_serv
 
 async def test_search_sheet_values_entire_cell(mock_factory, mock_sheets_service):
     """match_entire_cell=True only matches exact cell values."""
-    mock_sheets_service.spreadsheets().get().execute.return_value = {
-        "sheets": [{"properties": {"title": "Sheet1"}}]
-    }
+    mock_sheets_service.spreadsheets().get().execute.return_value = {"sheets": [{"properties": {"title": "Sheet1"}}]}
     mock_sheets_service.spreadsheets().values().get().execute.return_value = {
         "values": [["SH-05"], ["SH-05-extra"], ["SH-06"]],
     }

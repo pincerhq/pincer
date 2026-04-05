@@ -723,8 +723,6 @@ async def test_search_drive_files_legacy_query_bare_string(mock_factory, mock_dr
 async def test_search_drive_files_400_returns_guidance(mock_factory, mock_drive_service):
     """400 error returns helpful guidance including the name parameter suggestion."""
     mock_drive_service.files().list().execute.side_effect = Exception("400 Invalid Value")
-    result = await google__search_drive_files(
-        mock_factory, drive_query="broken bad query"
-    )
+    result = await google__search_drive_files(mock_factory, drive_query="broken bad query")
     assert "failed" in result.lower() or "error" in result.lower()
     assert "name" in result

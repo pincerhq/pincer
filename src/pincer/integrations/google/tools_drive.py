@@ -284,11 +284,11 @@ async def google__search_drive_files(
         error_msg = str(e)
         if "Invalid Value" in error_msg or "Invalid query" in error_msg or "400" in error_msg:
             return (
-                f"Drive search failed. Query sent to API: q=\"{q}\"\n\n"
+                f'Drive search failed. Query sent to API: q="{q}"\n\n'
                 f"Use the simple 'name' parameter to avoid query syntax issues:\n"
-                f"  google__search_drive_files(name=\"budget\")\n"
-                f"  google__search_drive_files(name=\"report\", file_type=\"spreadsheet\")\n"
-                f"  google__search_drive_files(name=\"proposal\", file_type=\"document\")"
+                f'  google__search_drive_files(name="budget")\n'
+                f'  google__search_drive_files(name="report", file_type="spreadsheet")\n'
+                f'  google__search_drive_files(name="proposal", file_type="document")'
             )
         return f"Drive search error: {error_msg}"
     files = result.get("files", [])
@@ -302,20 +302,16 @@ async def google__search_drive_files(
         type_label = _mime_to_label(mime)
         size = f.get("size", "")
         size_str = f" ({_format_size(int(size))})" if size else ""
-        output += (
-            f"  {f['name']}{size_str}\n"
-            f"   Type: {type_label}\n"
-            f"   ID: {f['id']}\n"
-        )
+        output += f"  {f['name']}{size_str}\n   Type: {type_label}\n   ID: {f['id']}\n"
         # Next-step hint based on file type
         if mime == "application/vnd.google-apps.spreadsheet":
-            output += f"   → Use: google__get_sheet_values(spreadsheet_id=\"{f['id']}\")\n"
+            output += f'   → Use: google__get_sheet_values(spreadsheet_id="{f["id"]}")\n'
         elif mime == "application/vnd.google-apps.document":
-            output += f"   → Use: google__get_doc_content(file_id=\"{f['id']}\")\n"
+            output += f'   → Use: google__get_doc_content(file_id="{f["id"]}")\n'
         elif mime.startswith("application/vnd.google-apps."):
-            output += f"   → Use: google__export_google_doc(file_id=\"{f['id']}\")\n"
+            output += f'   → Use: google__export_google_doc(file_id="{f["id"]}")\n'
         else:
-            output += f"   → Use: google__download_file(file_id=\"{f['id']}\")\n"
+            output += f'   → Use: google__download_file(file_id="{f["id"]}")\n'
         output += "\n"
 
     if result.get("nextPageToken"):
