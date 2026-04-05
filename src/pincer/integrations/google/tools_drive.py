@@ -62,6 +62,100 @@ _SUPPORTED_EXPORTS: dict[str, list[str]] = {
 
 _DRIVE_FIELDS = "id, name, mimeType, size, modifiedTime, owners, sharingUser, webViewLink"
 
+# MIME type mapping for file_type parameter in google__search_drive_files
+_FILE_TYPE_MIMES: dict[str, str | None] = {
+    "spreadsheet": "application/vnd.google-apps.spreadsheet",
+    "sheet": "application/vnd.google-apps.spreadsheet",
+    "document": "application/vnd.google-apps.document",
+    "doc": "application/vnd.google-apps.document",
+    "presentation": "application/vnd.google-apps.presentation",
+    "slides": "application/vnd.google-apps.presentation",
+    "folder": "application/vnd.google-apps.folder",
+    "pdf": "application/pdf",
+    "image": None,  # handled specially
+    "csv": "text/csv",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+
+
+def _build_drive_query(
+    name: str = "",
+    file_type: str = "any",
+    shared_with_me: bool = False,
+    starred: bool = False,
+    drive_query: str = "",
+    legacy_query: str = "",
+) -> str:
+    """Build a Drive API q parameter from friendly parameters.
+
+    NEVER splits on whitespace. NEVER inserts 'and' between arbitrary words.
+    Only joins parts that were individually constructed as complete Drive clauses.
+    """
+    # Advanced mode: raw query passed directly (zero processing)
+    if drive_query:
+        return drive_query
+
+    # Legacy compatibility: detect whether the old 'query' param contains
+    # structured Drive API syntax or is just a bare search string.
+    if legacy_query:
+        # Drive API query syntax markers: operators used in predicates
+        has_contains = "contains" in legacy_query
+        has_equals = "=" in legacy_query  # covers both name='x' and name = 'x'
+        has_compare = "<" in legacy_query or ">" in legacy_query
+        has_has = " has " in legacy_query
+        if has_contains or has_equals or has_compare or has_has:
+            # Looks like real Drive API syntax — pass through untouched, DO NOT SPLIT
+            return legacy_query
+        else:
+            # Bare string like "GOOGLE_WORKSPACE_QA_CHECKLIST" — treat as name search
+            name = legacy_query
+
+    # Build query from friendly parameters
+    parts: list[str] = []
+
+    if name:
+        safe_name = name.replace("\\", "\\\\").replace("'", "\\'")
+        parts.append(f"name contains '{safe_name}'")
+
+    file_type_lower = file_type.lower().strip() if file_type else "any"
+    if file_type_lower and file_type_lower != "any":
+        if file_type_lower == "image":
+            parts.append("mimeType contains 'image/'")
+        elif file_type_lower in _FILE_TYPE_MIMES:
+            mime = _FILE_TYPE_MIMES[file_type_lower]
+            if mime:
+                parts.append(f"mimeType = '{mime}'")
+
+    if shared_with_me:
+        parts.append("sharedWithMe = true")
+
+    if starred:
+        parts.append("starred = true")
+
+    # Always exclude trash
+    parts.append("trashed = false")
+
+    return " and ".join(parts)
+
+
+def _mime_to_label(mime: str) -> str:
+    """Return a human-readable file type label for a MIME type."""
+    labels = {
+        "application/vnd.google-apps.spreadsheet": "Google Sheet",
+        "application/vnd.google-apps.document": "Google Doc",
+        "application/vnd.google-apps.presentation": "Google Slides",
+        "application/vnd.google-apps.folder": "Folder",
+        "application/pdf": "PDF",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "Excel (.xlsx)",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "Word (.docx)",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": "PowerPoint (.pptx)",
+        "text/csv": "CSV",
+        "text/plain": "Text",
+    }
+    return labels.get(mime, mime.split("/")[-1] if "/" in mime else mime)
+
 
 # ── File discovery helpers ─────────────────────────────────────────────────────
 
@@ -157,26 +251,76 @@ async def google__list_drive_files(
 
 async def google__search_drive_files(
     factory: GoogleServiceFactory,
-    query: str,
+    name: str = "",
+    file_type: str = "any",
+    shared_with_me: bool = False,
+    starred: bool = False,
+    drive_query: str = "",
+    query: str = "",
     max_results: int = 20,
     page_token: str = "",
 ) -> str:
-    """Search Drive files. Supports: name contains, type, owner, modifiedTime, sharedWithMe, starred."""
+    """Search Drive files using friendly parameters or raw Drive API query syntax."""
+    q = _build_drive_query(
+        name=name,
+        file_type=file_type,
+        shared_with_me=shared_with_me,
+        starred=starred,
+        drive_query=drive_query,
+        legacy_query=query,
+    )
     svc = await factory.get("drive")
     kwargs: dict[str, Any] = {
-        "q": query,
+        "q": q,
         "fields": f"nextPageToken, files({_DRIVE_FIELDS})",
         "pageSize": max_results,
+        "orderBy": "modifiedTime desc",
     }
     if page_token:
         kwargs["pageToken"] = page_token
-    result = await with_backoff(lambda: svc.files().list(**kwargs).execute())
+    try:
+        result = await with_backoff(lambda: svc.files().list(**kwargs).execute())
+    except Exception as e:
+        error_msg = str(e)
+        if "Invalid Value" in error_msg or "Invalid query" in error_msg or "400" in error_msg:
+            return (
+                f"Drive search failed. Query sent to API: q=\"{q}\"\n\n"
+                f"Use the simple 'name' parameter to avoid query syntax issues:\n"
+                f"  google__search_drive_files(name=\"budget\")\n"
+                f"  google__search_drive_files(name=\"report\", file_type=\"spreadsheet\")\n"
+                f"  google__search_drive_files(name=\"proposal\", file_type=\"document\")"
+            )
+        return f"Drive search error: {error_msg}"
     files = result.get("files", [])
+    search_term = name or drive_query or query
     if not files:
-        return f"No files found for: {query}"
-    lines = [fmt_file(f) for f in files]
-    more = bool(result.get("nextPageToken"))
-    return fmt_list(lines, header=f"Found {len(lines)} file(s):", more=more)
+        return f"No files found matching '{search_term}'."
+
+    output = f"Found {len(files)} file(s):\n\n"
+    for f in files:
+        mime = f.get("mimeType", "")
+        type_label = _mime_to_label(mime)
+        size = f.get("size", "")
+        size_str = f" ({_format_size(int(size))})" if size else ""
+        output += (
+            f"  {f['name']}{size_str}\n"
+            f"   Type: {type_label}\n"
+            f"   ID: {f['id']}\n"
+        )
+        # Next-step hint based on file type
+        if mime == "application/vnd.google-apps.spreadsheet":
+            output += f"   → Use: google__get_sheet_values(spreadsheet_id=\"{f['id']}\")\n"
+        elif mime == "application/vnd.google-apps.document":
+            output += f"   → Use: google__get_doc_content(file_id=\"{f['id']}\")\n"
+        elif mime.startswith("application/vnd.google-apps."):
+            output += f"   → Use: google__export_google_doc(file_id=\"{f['id']}\")\n"
+        else:
+            output += f"   → Use: google__download_file(file_id=\"{f['id']}\")\n"
+        output += "\n"
+
+    if result.get("nextPageToken"):
+        output += "(More results available — use page_token to get the next page)\n"
+    return output
 
 
 async def google__get_file_metadata(
@@ -638,21 +782,61 @@ def register_drive_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__search_drive_files",
         description=(
-            "Search Google Drive files. Query examples: "
-            "'name contains \"budget\"', 'mimeType=\"application/vnd.google-apps.spreadsheet\"', "
-            "'sharedWithMe=true', 'starred=true', 'modifiedTime > \"2026-01-01\"'. "
-            "Results include mimeType — if it starts with 'application/vnd.google-apps.' "
-            "use google__export_google_doc; otherwise use google__download_file."
+            "Search for files and folders in Google Drive.\n\n"
+            "Simple search (recommended): pass 'name' to find files by name.\n"
+            "  Example: name='budget'  → finds files with 'budget' in the name\n"
+            "  Example: name='QA checklist', file_type='spreadsheet'  → only Google Sheets\n\n"
+            "Optional filters:\n"
+            "  file_type: 'spreadsheet', 'document', 'presentation', 'pdf', "
+            "'folder', 'image', 'xlsx', 'any' (default: 'any')\n"
+            "  shared_with_me: True to show only shared files\n"
+            "  starred: True to show only starred files\n\n"
+            "Results include file type labels and next-step tool hints:\n"
+            "  Google Sheet → use google__get_sheet_values(spreadsheet_id='...')\n"
+            "  Google Doc → use google__get_doc_content(file_id='...')\n"
+            "  .xlsx / PDF / other → use google__download_file(file_id='...')\n\n"
+            "For advanced Drive API queries, use 'drive_query' with raw syntax "
+            "(e.g., drive_query=\"modifiedTime > '2026-01-01'\").\n"
+            "NEVER construct raw Drive query syntax via 'query' — use 'name' instead."
         ),
         handler=_h(google__search_drive_files),
         parameters={
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Drive search query"},
+                "name": {
+                    "type": "string",
+                    "description": "Search by filename (substring match). Recommended for most searches.",
+                    "default": "",
+                },
+                "file_type": {
+                    "type": "string",
+                    "description": "Filter by type: 'spreadsheet', 'document', 'presentation', 'pdf', 'folder', 'image', 'xlsx', 'any'",
+                    "default": "any",
+                },
+                "shared_with_me": {
+                    "type": "boolean",
+                    "description": "Only return files shared with me",
+                    "default": False,
+                },
+                "starred": {
+                    "type": "boolean",
+                    "description": "Only return starred files",
+                    "default": False,
+                },
+                "drive_query": {
+                    "type": "string",
+                    "description": "Raw Drive API query string (advanced — passed through unchanged)",
+                    "default": "",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Legacy: bare filename or raw Drive API query (use 'name' instead)",
+                    "default": "",
+                },
                 "max_results": {"type": "integer", "default": 20},
                 "page_token": {"type": "string", "default": ""},
             },
-            "required": ["query"],
+            "required": [],
         },
     )
     registry.register(
