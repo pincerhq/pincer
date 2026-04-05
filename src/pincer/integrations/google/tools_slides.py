@@ -69,7 +69,7 @@ async def google__get_slide_content(
     pres = await with_backoff(lambda: svc.presentations().get(presentationId=presentation_id).execute())
     slides = pres.get("slides", [])
     if slide_index < 0 or slide_index >= len(slides):
-        return f"Invalid slide_index={slide_index}. Presentation has {len(slides)} slides (0-indexed)."
+        return f"slide_index={slide_index} is out of range. Presentation has {len(slides)} slides (0-indexed)."
     slide = slides[slide_index]
     page_id = slide.get("objectId", "?")
     output = f"Slide {slide_index} (page ID: {page_id} — do NOT use this for text editing):\n\n"
@@ -84,6 +84,8 @@ async def google__get_slide_content(
             label = _placeholder_label(ph_type)
         elif shape.get("shapeType"):
             label = f"Shape ({shape['shapeType']})"
+        elif shape.get("text") is not None:
+            label = "Shape"
         else:
             continue
 
