@@ -236,7 +236,9 @@ async def google__update_slide_text(
                 await with_backoff(
                     lambda: svc.presentations().batchUpdate(
                         presentationId=presentation_id,
-                        body={"requests": [{"insertText": {"objectId": object_id, "insertionIndex": 0, "text": new_text}}]},
+                        body={"requests": [{"insertText": {
+                            "objectId": object_id, "insertionIndex": 0, "text": new_text,
+                        }}]},
                     ).execute()
                 )
                 return f"Text updated: \"{new_text[:100]}\" on element {object_id}"
@@ -316,7 +318,9 @@ async def google__update_slide_text(
                     await with_backoff(
                         lambda: svc.presentations().batchUpdate(
                             presentationId=presentation_id,
-                            body={"requests": [{"insertText": {"objectId": resolved_id, "insertionIndex": 0, "text": new_text}}]},
+                            body={"requests": [{"insertText": {
+                                "objectId": resolved_id, "insertionIndex": 0, "text": new_text,
+                            }}]},
                         ).execute()
                     )
                     return success_msg

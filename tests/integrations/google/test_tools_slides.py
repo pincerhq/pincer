@@ -5,7 +5,6 @@ that was broken by the LLM passing a slide page ID to google__update_slide_text.
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import MagicMock
 
 from pincer.integrations.google.tools_slides import (
