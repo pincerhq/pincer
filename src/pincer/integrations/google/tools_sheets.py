@@ -235,10 +235,11 @@ async def google__search_sheet_values(
         safe_tab = _quote_tab_name(tab)
 
         try:
+            _t = safe_tab
             result = await with_backoff(
-                lambda t=safe_tab: svc.spreadsheets().values().get(
+                lambda: svc.spreadsheets().values().get(
                     spreadsheetId=spreadsheet_id,
-                    range=f"{t}!A:ZZ",
+                    range=f"{_t}!A:ZZ",
                     valueRenderOption="FORMATTED_VALUE",
                 ).execute()
             )
