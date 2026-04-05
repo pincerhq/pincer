@@ -284,9 +284,7 @@ async def test_update_text_non_slide_object_id_error(mock_slides_service, mock_f
     )
     mock_slides_service.presentations().pages().get().execute.side_effect = Exception("not found")
 
-    result = await google__update_slide_text(
-        mock_factory, presentation_id="p1", object_id="bad_id", new_text="text"
-    )
+    result = await google__update_slide_text(mock_factory, presentation_id="p1", object_id="bad_id", new_text="text")
 
     assert "get_slide_content" in result or "not a text element" in result.lower()
 
@@ -354,9 +352,7 @@ async def test_update_text_other_api_error_propagated(mock_slides_service, mock_
         content=b"The caller does not have permission",
     )
 
-    result = await google__update_slide_text(
-        mock_factory, presentation_id="p1", object_id="title_1", new_text="text"
-    )
+    result = await google__update_slide_text(mock_factory, presentation_id="p1", object_id="title_1", new_text="text")
 
     assert "Failed" in result or "permission" in result.lower()
     assert "auto-resolved" not in result

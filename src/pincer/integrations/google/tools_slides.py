@@ -100,9 +100,9 @@ async def google__get_slide_content(
             text_elements_found = True
             output += (
                 f"  {label}\n"
-                f"     object_id: \"{obj_id}\"\n"
-                f"     text: \"{text[:200]}\"\n"
-                f"     → google__update_slide_text(object_id=\"{obj_id}\", new_text=\"...\")\n\n"
+                f'     object_id: "{obj_id}"\n'
+                f'     text: "{text[:200]}"\n'
+                f'     → google__update_slide_text(object_id="{obj_id}", new_text="...")\n\n'
             )
 
     if not text_elements_found:
@@ -144,9 +144,9 @@ async def google__add_slide(
     requests: list[dict[str, Any]] = [{"createSlide": create_req}]
     try:
         result = await with_backoff(
-            lambda: svc.presentations().batchUpdate(
-                presentationId=presentation_id, body={"requests": requests}
-            ).execute()
+            lambda: (
+                svc.presentations().batchUpdate(presentationId=presentation_id, body={"requests": requests}).execute()
+            )
         )
     except Exception as e:
         error_msg = str(e)
@@ -166,9 +166,7 @@ async def google__add_slide(
     # Fetch placeholder IDs from the new slide so the LLM can target them directly
     try:
         page = await with_backoff(
-            lambda: svc.presentations().pages().get(
-                presentationId=presentation_id, pageObjectId=new_slide_id
-            ).execute()
+            lambda: svc.presentations().pages().get(presentationId=presentation_id, pageObjectId=new_slide_id).execute()
         )
         placeholders = []
         for elem in page.get("pageElements", []):
@@ -181,7 +179,7 @@ async def google__add_slide(
         if placeholders:
             output += "Text placeholders — use these object_ids with google__update_slide_text:\n"
             for label, obj_id in placeholders:
-                output += f"  {label}: object_id=\"{obj_id}\"\n"
+                output += f'  {label}: object_id="{obj_id}"\n'
         else:
             output += "(Layout has no text placeholders — BLANK slides have none.)\n"
         return output
@@ -213,11 +211,11 @@ async def google__update_slide_text(
     ]
     try:
         await with_backoff(
-            lambda: svc.presentations().batchUpdate(
-                presentationId=presentation_id, body={"requests": requests}
-            ).execute()
+            lambda: (
+                svc.presentations().batchUpdate(presentationId=presentation_id, body={"requests": requests}).execute()
+            )
         )
-        return f"Text updated: \"{new_text[:100]}\" on element {object_id}"
+        return f'Text updated: "{new_text[:100]}" on element {object_id}'
 
     except Exception as e:
         error_msg = str(e)
@@ -234,14 +232,26 @@ async def google__update_slide_text(
         ):
             try:
                 await with_backoff(
-                    lambda: svc.presentations().batchUpdate(
-                        presentationId=presentation_id,
-                        body={"requests": [{"insertText": {
-                            "objectId": object_id, "insertionIndex": 0, "text": new_text,
-                        }}]},
-                    ).execute()
+                    lambda: (
+                        svc.presentations()
+                        .batchUpdate(
+                            presentationId=presentation_id,
+                            body={
+                                "requests": [
+                                    {
+                                        "insertText": {
+                                            "objectId": object_id,
+                                            "insertionIndex": 0,
+                                            "text": new_text,
+                                        }
+                                    }
+                                ]
+                            },
+                        )
+                        .execute()
+                    )
                 )
-                return f"Text updated: \"{new_text[:100]}\" on element {object_id}"
+                return f'Text updated: "{new_text[:100]}" on element {object_id}'
             except Exception as insert_err:
                 return f"Failed to update text: {insert_err}"
 
@@ -251,9 +261,9 @@ async def google__update_slide_text(
         # AUTO-RESOLVE: object_id appears to be a slide page ID — find the real placeholder
         try:
             page = await with_backoff(
-                lambda: svc.presentations().pages().get(
-                    presentationId=presentation_id, pageObjectId=object_id
-                ).execute()
+                lambda: (
+                    svc.presentations().pages().get(presentationId=presentation_id, pageObjectId=object_id).execute()
+                )
             )
         except Exception:
             return (
@@ -286,7 +296,7 @@ async def google__update_slide_text(
             return (
                 f"Slide '{object_id}' has no text-editable placeholders.\n"
                 f"This slide may use a BLANK layout. Add a slide with text placeholders:\n"
-                f"  google__add_slide(presentation_id=\"{presentation_id}\", layout=\"TITLE\")"
+                f'  google__add_slide(presentation_id="{presentation_id}", layout="TITLE")'
             )
 
         retry_requests: list[dict[str, Any]] = [
@@ -294,15 +304,17 @@ async def google__update_slide_text(
             {"insertText": {"objectId": resolved_id, "insertionIndex": 0, "text": new_text}},
         ]
         success_msg = (
-            f"Text updated: \"{new_text[:100]}\" on {resolved_label} (auto-resolved).\n\n"
+            f'Text updated: "{new_text[:100]}" on {resolved_label} (auto-resolved).\n\n'
             f"TIP: Next time use the placeholder ID directly:\n"
-            f"  google__update_slide_text(object_id=\"{resolved_id}\", new_text=\"...\")"
+            f'  google__update_slide_text(object_id="{resolved_id}", new_text="...")'
         )
         try:
             await with_backoff(
-                lambda: svc.presentations().batchUpdate(
-                    presentationId=presentation_id, body={"requests": retry_requests}
-                ).execute()
+                lambda: (
+                    svc.presentations()
+                    .batchUpdate(presentationId=presentation_id, body={"requests": retry_requests})
+                    .execute()
+                )
             )
             return success_msg
         except Exception as retry_err:
@@ -316,12 +328,24 @@ async def google__update_slide_text(
             ):
                 try:
                     await with_backoff(
-                        lambda: svc.presentations().batchUpdate(
-                            presentationId=presentation_id,
-                            body={"requests": [{"insertText": {
-                                "objectId": resolved_id, "insertionIndex": 0, "text": new_text,
-                            }}]},
-                        ).execute()
+                        lambda: (
+                            svc.presentations()
+                            .batchUpdate(
+                                presentationId=presentation_id,
+                                body={
+                                    "requests": [
+                                        {
+                                            "insertText": {
+                                                "objectId": resolved_id,
+                                                "insertionIndex": 0,
+                                                "text": new_text,
+                                            }
+                                        }
+                                    ]
+                                },
+                            )
+                            .execute()
+                        )
                     )
                     return success_msg
                 except Exception as insert_err:
