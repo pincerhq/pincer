@@ -281,12 +281,20 @@ def register_docs_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -
     )
     registry.register(
         name="google__insert_text",
-        description="Insert text at a specific character index in a Google Document.",
+        description=(
+            "Insert text at a specific character index in a Google Document (Docs). "
+            "document_id must be a Google Docs document ID (from the URL: docs.google.com/document/d/<ID>/). "
+            "NEVER use a Google Slides presentation ID, slide page ID, or placeholder object ID here — "
+            "those belong to google__update_slide_text."
+        ),
         handler=_h(google__insert_text),
         parameters={
             "type": "object",
             "properties": {
-                "document_id": {"type": "string"},
+                "document_id": {
+                    "type": "string",
+                    "description": "Google Docs document ID (NOT a Slides ID or slide object ID)",
+                },
                 "text": {"type": "string"},
                 "index": {
                     "type": "integer",
