@@ -219,3 +219,17 @@ def mock_meet_service(mock_factory):
 
     mock_factory.get = _get
     return svc
+
+
+@pytest.fixture
+def mock_meet_beta_service(mock_factory):
+    """Mock for the Meet v2beta service (members, moderation, artifacts)."""
+    svc = _build_mock_service()
+    services = getattr(mock_factory, "_services_dict", {})
+    services["meet_beta"] = svc
+
+    async def _get(name):
+        return services.get(name, _build_mock_service())
+
+    mock_factory.get = _get
+    return svc

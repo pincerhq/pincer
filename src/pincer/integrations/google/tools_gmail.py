@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from pincer.integrations.google.email_guard import EmailGuard, EmailVerdict
 from pincer.integrations.google.models import fmt_list, fmt_message_full, fmt_message_summary
 from pincer.integrations.google.quota import with_backoff
 
@@ -24,6 +27,47 @@ if TYPE_CHECKING:
     from pincer.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+
+# ── Guard helpers ─────────────────────────────────────────────────────────────
+
+
+def _check_recipients(guard: EmailGuard, address_fields: list[str]) -> tuple[str | None, str]:
+    """
+    Run all addresses through the email guard.
+
+    Returns ``(block_message, warning_text)``.
+
+    * If any address is hard-denied, *block_message* is a non-empty string and
+      the caller should return it immediately without sending.
+    * *warning_text* is appended to success messages for WARN-level results.
+    """
+    all_addrs: list[str] = []
+    for field in address_fields:
+        if field:
+            all_addrs.extend(a.strip() for a in field.split(",") if a.strip())
+
+    results = guard.check_all(all_addrs)
+
+    for r in results:
+        if r.verdict in (
+            EmailVerdict.DENY_BLOCKLIST,
+            EmailVerdict.DENY_DANGEROUS,
+            EmailVerdict.DENY_DISPOSABLE,
+        ):
+            return (
+                f"⛔ Email BLOCKED — {r.reason}\n"
+                f"  Recipient: {r.address}\n\n"
+                f"This email was NOT sent. If this is a legitimate address, "
+                f"add it to data/email_allowlist.txt",
+                "",
+            )
+
+    warns = [r for r in results if r.verdict == EmailVerdict.WARN]
+    warning_text = ""
+    if warns:
+        warning_text = "\n⚠️ Warnings:\n" + "".join(f"  - {w.address}: {w.reason}\n" for w in warns)
+    return None, warning_text
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -158,16 +202,49 @@ async def google__search_messages(
     return fmt_list(summaries, header=f"Found {len(summaries)} message(s):", more=more)
 
 
+def _extract_attachments(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract attachment metadata from a Gmail message payload."""
+    attachments: list[dict[str, Any]] = []
+    for part in payload.get("parts", []):
+        fname = part.get("filename", "")
+        att_id = part.get("body", {}).get("attachmentId")
+        if fname and att_id:
+            attachments.append(
+                {
+                    "filename": fname,
+                    "attachment_id": att_id,
+                    "mime_type": part.get("mimeType", "unknown"),
+                    "size_bytes": part.get("body", {}).get("size", 0),
+                }
+            )
+    return attachments
+
+
 async def google__get_message(
     factory: GoogleServiceFactory,
     message_id: str,
     max_body_chars: int = 4000,
 ) -> str:
-    """Get full message content (headers + body)."""
+    """Get full message content (headers + body + attachment metadata)."""
     svc = await factory.get("gmail")
     msg = await with_backoff(lambda: svc.users().messages().get(userId="me", id=message_id, format="full").execute())
     body = _extract_body(msg.get("payload", {}))[:max_body_chars]
-    return fmt_message_full(msg, body)
+    result = fmt_message_full(msg, body)
+
+    attachments = _extract_attachments(msg.get("payload", {}))
+    if attachments:
+        result += "\n\nAttachments:"
+        for att in attachments:
+            result += (
+                f"\n  - {att['filename']} ({att['mime_type']}, {att['size_bytes']} bytes)"
+                f"\n    attachment_id: {att['attachment_id']}"
+            )
+        result += (
+            f"\n\nTo download an attachment, call google__get_attachment("
+            f'message_id="{msg["id"]}", attachment_id="<id from above>")'
+        )
+
+    return result
 
 
 async def google__get_thread(
@@ -192,15 +269,63 @@ async def google__get_attachment(
     factory: GoogleServiceFactory,
     message_id: str,
     attachment_id: str,
+    filename: str = "",
 ) -> str:
-    """Get attachment metadata and base64-encoded content."""
+    """Download an attachment from Gmail, save to disk, return file path and metadata."""
     svc = await factory.get("gmail")
+
+    # 1. Fetch attachment data from Gmail API
     att = await with_backoff(
         lambda: svc.users().messages().attachments().get(userId="me", messageId=message_id, id=attachment_id).execute()
     )
-    size = att.get("size", 0)
-    data = att.get("data", "")
-    return f"Attachment size: {size} bytes\nBase64 data (first 200 chars): {data[:200]}"
+
+    raw_data = att.get("data", "")
+    if not raw_data:
+        return "Error: Attachment data is empty."
+
+    # 2. Decode base64
+    file_bytes = base64.urlsafe_b64decode(raw_data)
+
+    # 3. Resolve filename — use provided name, or look it up from message metadata
+    if not filename:
+        msg = await with_backoff(
+            lambda: svc.users().messages().get(userId="me", id=message_id, format="full").execute()
+        )
+        for part in msg.get("payload", {}).get("parts", []):
+            if part.get("body", {}).get("attachmentId") == attachment_id:
+                filename = part.get("filename", "")
+                break
+    if not filename:
+        filename = "attachment"
+
+    # 4. Save to disk
+    download_dir = os.path.expanduser("~/.pincer/downloads")
+    os.makedirs(download_dir, exist_ok=True)
+
+    save_path = os.path.join(download_dir, filename)
+
+    # Handle duplicate filenames
+    if os.path.exists(save_path):
+        name, ext = os.path.splitext(filename)
+        counter = 1
+        while os.path.exists(save_path):
+            save_path = os.path.join(download_dir, f"{name}_{counter}{ext}")
+            counter += 1
+
+    with open(save_path, "wb") as f:
+        f.write(file_bytes)
+
+    size_kb = len(file_bytes) / 1024
+    size_str = f"{size_kb:.0f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+
+    # 5. Return ONLY metadata — never raw content
+    return (
+        f"Attachment saved successfully.\n"
+        f"  Filename: {os.path.basename(save_path)}\n"
+        f"  Size: {len(file_bytes)} bytes ({size_str})\n"
+        f"  Saved to: {save_path}\n\n"
+        f"The file is already saved to disk. Do NOT use python_exec to save it again."
+    )
 
 
 async def google__send_message(
@@ -224,6 +349,7 @@ async def google__reply_to_message(
     message_id: str,
     body: str,
     body_type: str = "plain",
+    _guard: EmailGuard | None = None,
 ) -> str:
     """Reply to a message (in-thread)."""
     svc = await factory.get("gmail")
@@ -246,11 +372,19 @@ async def google__reply_to_message(
     in_reply_to = hdrs.get("Message-ID", "")
     references = hdrs.get("References", "")
     thread_id = orig.get("threadId", "")
+
+    if _guard is not None:
+        block, warning = _check_recipients(_guard, [to])
+        if block:
+            return block
+    else:
+        warning = ""
+
     raw = _build_raw(to, subject, body, body_type=body_type, in_reply_to=in_reply_to, references=references)
     await with_backoff(
         lambda: svc.users().messages().send(userId="me", body={"raw": raw, "threadId": thread_id}).execute()
     )
-    return f"Reply sent to {to}"
+    return f"Reply sent to {to}{warning}"
 
 
 async def google__reply_all(
@@ -258,6 +392,7 @@ async def google__reply_all(
     message_id: str,
     body: str,
     body_type: str = "plain",
+    _guard: EmailGuard | None = None,
 ) -> str:
     """Reply-all to a message."""
     svc = await factory.get("gmail")
@@ -283,11 +418,19 @@ async def google__reply_all(
     subject = "Re: " + hdrs.get("Subject", "")
     in_reply_to = hdrs.get("Message-ID", "")
     thread_id = orig.get("threadId", "")
+
+    if _guard is not None:
+        block, warning = _check_recipients(_guard, [all_recipients, cc])
+        if block:
+            return block
+    else:
+        warning = ""
+
     raw = _build_raw(all_recipients, subject, body, cc=cc, body_type=body_type, in_reply_to=in_reply_to)
     await with_backoff(
         lambda: svc.users().messages().send(userId="me", body={"raw": raw, "threadId": thread_id}).execute()
     )
-    return f"Reply-all sent to {all_recipients}"
+    return f"Reply-all sent to {all_recipients}{warning}"
 
 
 async def google__forward_message(
@@ -436,16 +579,57 @@ async def google__create_label(
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 
-def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) -> int:
-    """Register all 19 Gmail tools in *registry*. Returns count."""
+def register_gmail_tools(
+    registry: ToolRegistry,
+    factory: GoogleServiceFactory,
+    data_dir: Path | None = None,
+    email_block_disposable: bool = True,
+) -> int:
+    """Register all 19 Gmail tools in *registry*. Returns count.
+
+    Args:
+        registry: Tool registry to register into.
+        factory: Google service factory for API access.
+        data_dir: Directory containing ``email_allowlist.txt``,
+            ``email_blocklist.txt``, and ``disposable_domains.txt``.
+            Defaults to ``./data`` (project root data directory).
+        email_block_disposable: If ``True`` (default), block disposable/
+            temporary email domain services.
+    """
+    import functools
+
+    _data_dir = data_dir if data_dir is not None else Path("data")
+    guard = EmailGuard(data_dir=_data_dir, block_disposable=email_block_disposable)
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
-        """Wrap a tool function to inject the factory."""
-        import functools
+        """Wrap a tool function to inject the factory (read-only tools)."""
 
         @functools.wraps(fn)
         async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
             return await fn(factory, **kwargs)
+
+        return wrapper
+
+    def _h_send(fn: Callable[..., Any], *addr_param_names: str) -> Callable[..., Any]:
+        """Wrap a send tool: pre-check named address params, inject factory."""
+
+        @functools.wraps(fn)
+        async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
+            address_fields = [kwargs.get(p, "") for p in addr_param_names]
+            block, warning = _check_recipients(guard, address_fields)
+            if block:
+                return block
+            result = await fn(factory, **kwargs)
+            return result + warning
+
+        return wrapper
+
+    def _h_reply(fn: Callable[..., Any]) -> Callable[..., Any]:
+        """Wrap a reply tool: inject factory + guard (recipient fetched inside fn)."""
+
+        @functools.wraps(fn)
+        async def wrapper(**kwargs):  # type: ignore[no-untyped-def]
+            return await fn(factory, _guard=guard, **kwargs)
 
         return wrapper
 
@@ -497,7 +681,12 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     )
     registry.register(
         name="google__get_message",
-        description="Get full email content (headers + body). Use message ID from search or list results.",
+        description=(
+            "Get full email content including headers, body, and attachment metadata. "
+            "Use message ID from search or list results. "
+            "If the email has attachments, returns their filenames, sizes, and attachment_ids "
+            "needed for google__get_attachment."
+        ),
         handler=_h(google__get_message),
         parameters={
             "type": "object",
@@ -531,13 +720,34 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     )
     registry.register(
         name="google__get_attachment",
-        description="Download a message attachment. Returns base64 content.",
+        description=(
+            "Download a file attachment from a Gmail email and save it to disk. "
+            "Returns the saved file path, filename, and size. "
+            "PREREQUISITE: First call google__search_messages to find the email, "
+            "then call google__get_message to get attachment metadata "
+            "(attachment_id in the Attachments section). Then call this tool with those IDs. "
+            "The file is saved automatically — do NOT use python_exec to save it again."
+        ),
         handler=_h(google__get_attachment),
         parameters={
             "type": "object",
             "properties": {
-                "message_id": {"type": "string", "description": "Gmail message ID"},
-                "attachment_id": {"type": "string", "description": "Attachment ID from message payload"},
+                "message_id": {
+                    "type": "string",
+                    "description": "Gmail message ID from google__search_messages or google__get_message",
+                },
+                "attachment_id": {
+                    "type": "string",
+                    "description": (
+                        "Attachment ID from google__get_message output "
+                        "(shown as 'attachment_id' in the Attachments section)"
+                    ),
+                },
+                "filename": {
+                    "type": "string",
+                    "description": "Optional filename (from google__get_message). If omitted, looked up automatically.",
+                    "default": "",
+                },
             },
             "required": ["message_id", "attachment_id"],
         },
@@ -545,7 +755,7 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__send_message",
         description="Send a new email. Supports plain text and HTML, CC, and BCC.",
-        handler=_h(google__send_message),
+        handler=_h_send(google__send_message, "to", "cc", "bcc"),
         parameters={
             "type": "object",
             "properties": {
@@ -568,7 +778,7 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__reply_to_message",
         description="Reply to a specific message, keeping it in-thread.",
-        handler=_h(google__reply_to_message),
+        handler=_h_reply(google__reply_to_message),
         parameters={
             "type": "object",
             "properties": {
@@ -583,7 +793,7 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__reply_all",
         description="Reply-all to a message (responds to all recipients).",
-        handler=_h(google__reply_all),
+        handler=_h_reply(google__reply_all),
         parameters={
             "type": "object",
             "properties": {
@@ -598,7 +808,7 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__forward_message",
         description="Forward an email to a new recipient.",
-        handler=_h(google__forward_message),
+        handler=_h_send(google__forward_message, "to"),
         parameters={
             "type": "object",
             "properties": {
@@ -613,7 +823,7 @@ def register_gmail_tools(registry: ToolRegistry, factory: GoogleServiceFactory) 
     registry.register(
         name="google__create_draft",
         description="Create an email draft (not sent yet).",
-        handler=_h(google__create_draft),
+        handler=_h_send(google__create_draft, "to", "cc"),
         parameters={
             "type": "object",
             "properties": {

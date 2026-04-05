@@ -8,7 +8,6 @@ import functools
 import logging
 from typing import TYPE_CHECKING, Any
 
-from pincer.integrations.google.models import fmt_sheet_values
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
@@ -29,9 +28,37 @@ async def google__list_sheets(
 ) -> str:
     """List all sheets/tabs in a spreadsheet."""
     svc = await factory.get("sheets")
-    result = await with_backoff(
-        lambda: svc.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="properties,sheets.properties").execute()
-    )
+    try:
+        result = await with_backoff(
+            lambda: (
+                svc.spreadsheets()
+                .get(
+                    spreadsheetId=spreadsheet_id,
+                    fields="properties,sheets.properties",
+                )
+                .execute()
+            )
+        )
+    except Exception as e:
+        error_msg = str(e)
+        if "not supported" in error_msg.lower() or "unsupported" in error_msg.lower():
+            return (
+                f"This file (ID: {spreadsheet_id}) is not a Google Sheets spreadsheet — "
+                f"it may be an Excel (.xlsx) file. "
+                f"Download it with google__download_file(file_id='{spreadsheet_id}') instead.\n"
+                f"To confirm the file type: google__get_file_metadata(file_id='{spreadsheet_id}')."
+            )
+        if "not found" in error_msg.lower() or "404" in error_msg:
+            return (
+                f"Spreadsheet not found (ID: {spreadsheet_id}). "
+                f"Search with google__search_drive_files(name='<name>', file_type='spreadsheet')."
+            )
+        # Timeout or other transient error — give actionable guidance
+        return (
+            f"Error accessing spreadsheet (ID: {spreadsheet_id}): {type(e).__name__}: {error_msg}\n"
+            f"If this is an Excel file, use google__download_file(file_id='{spreadsheet_id}') instead.\n"
+            f"To check file type: google__get_file_metadata(file_id='{spreadsheet_id}')."
+        )
     title = result.get("properties", {}).get("title", "?")
     sheets = result.get("sheets", [])
     lines = [
@@ -40,21 +67,108 @@ async def google__list_sheets(
         f"id={s['properties'].get('sheetId', '?')})"
         for s in sheets
     ]
-    return f"Spreadsheet: {title}\n{len(lines)} sheet(s):\n" + "\n".join(lines)
+    output = f"Spreadsheet: {title}\n{len(lines)} sheet(s):\n" + "\n".join(lines)
+    if sheets:
+        first_tab = sheets[0]["properties"].get("title", "Sheet1")
+        output += (
+            f'\n\nTo read data: google__get_sheet_values(spreadsheet_id="{spreadsheet_id}",'
+            f' sheet_name="{first_tab}", columns="A:C")'
+        )
+    return output
 
 
 async def google__get_sheet_values(
     factory: GoogleServiceFactory,
     spreadsheet_id: str,
-    range_: str = "Sheet1",
+    range_: str = "",
+    sheet_name: str = "",
+    columns: str = "",
+    rows: str = "",
 ) -> str:
-    """Read cell values from a range (e.g. 'Sheet1!A1:D10')."""
+    """Read cell values from a Google Sheet using A1 notation or friendly parameters."""
     svc = await factory.get("sheets")
-    result = await with_backoff(
-        lambda: svc.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=range_).execute()
-    )
+
+    # Build A1 range from friendly parameters if no explicit range given
+    if not range_:
+        range_ = _build_a1_range(sheet_name, columns, rows)
+
+    # Default: read all populated cells from first sheet
+    if not range_:
+        range_ = "A:ZZ"
+
+    try:
+        result = await with_backoff(
+            lambda: (
+                svc.spreadsheets()
+                .values()
+                .get(
+                    spreadsheetId=spreadsheet_id,
+                    range=range_,
+                    valueRenderOption="FORMATTED_VALUE",
+                )
+                .execute()
+            )
+        )
+    except Exception as e:
+        error_msg = str(e)
+        if "Unable to parse range" in error_msg:
+            return (
+                f"Invalid range: '{range_}'. "
+                f"Check tab names with google__list_sheets(spreadsheet_id='{spreadsheet_id}'). "
+                f"A1 examples: 'Sheet1!A1:D10', 'Budget!A:A', 'A1:C50'."
+            )
+        if "Requested entity was not found" in error_msg:
+            return (
+                f"Spreadsheet not found (ID: {spreadsheet_id}). "
+                f"Search with google__search_drive_files(name='<name>', file_type='spreadsheet')."
+            )
+        if "not supported" in error_msg.lower() or "unsupported" in error_msg.lower():
+            return (
+                f"This file (ID: {spreadsheet_id}) is not a Google Sheets spreadsheet — "
+                f"it may be an Excel (.xlsx) file. "
+                f"Download it with google__download_file(file_id='{spreadsheet_id}') instead. "
+                f"To confirm: google__get_file_metadata(file_id='{spreadsheet_id}')."
+            )
+        return f"Error reading spreadsheet: {error_msg}"
+
     values = result.get("values", [])
-    return fmt_sheet_values(values, range_name=result.get("range", range_))
+    if not values:
+        return (
+            f"No data found in range '{range_}'. "
+            f"The sheet may be empty or the range may be wrong. "
+            f"Try google__list_sheets(spreadsheet_id='{spreadsheet_id}') to check tab names, "
+            f"then call google__get_sheet_values with no range to read all columns."
+        )
+
+    actual_range = result.get("range", range_)
+    output = f"Data from {actual_range} ({len(values)} rows):\n\n"
+
+    # Treat first row as headers when multiple rows present
+    if len(values) > 1:
+        headers = values[0]
+        output += " | ".join(str(h) for h in headers) + "\n"
+        output += "-|-".join("---" for _ in headers) + "\n"
+        for row in values[1:]:
+            padded = row + [""] * (len(headers) - len(row))
+            output += " | ".join(str(c) for c in padded) + "\n"
+    else:
+        # Only a single row returned (possibly just a header)
+        output += " | ".join(str(c) for c in values[0]) + "\n"
+        output += (
+            f"\n(Only 1 row returned — this column may be empty or the data is in OTHER columns. "
+            f"Read all columns to see the full spreadsheet structure:\n"
+            f"  google__get_sheet_values(spreadsheet_id='{spreadsheet_id}'"
+        )
+        if sheet_name:
+            output += f", sheet_name='{sheet_name}'"
+        output += f")\nOr list tabs first: google__list_sheets(spreadsheet_id='{spreadsheet_id}'))"
+
+    # Truncate large output to avoid context window overload
+    max_output = 3000
+    if len(output) > max_output:
+        output = output[:max_output] + f"\n\n... (truncated at {max_output} chars of {len(output)} total)"
+
+    return output
 
 
 async def google__get_sheet_metadata(
@@ -92,24 +206,96 @@ async def google__search_sheet_values(
     factory: GoogleServiceFactory,
     spreadsheet_id: str,
     search_value: str,
-    sheet_name: str = "Sheet1",
+    sheet_name: str = "",
+    match_case: bool = False,
+    match_entire_cell: bool = False,
 ) -> str:
-    """Find cells in a sheet that match a value (case-insensitive substring)."""
+    """Find cells in a spreadsheet matching a value (case-insensitive substring by default).
+
+    Searches all tabs unless sheet_name is specified.
+    """
     svc = await factory.get("sheets")
-    result = await with_backoff(
-        lambda: svc.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range=sheet_name).execute()
-    )
-    values = result.get("values", [])
+
+    # Determine which tabs to search
+    if sheet_name:
+        sheets_to_search = [sheet_name]
+    else:
+        try:
+            spreadsheet = await with_backoff(
+                lambda: (
+                    svc.spreadsheets()
+                    .get(
+                        spreadsheetId=spreadsheet_id,
+                        fields="sheets.properties.title",
+                    )
+                    .execute()
+                )
+            )
+            sheets_to_search = [s["properties"]["title"] for s in spreadsheet.get("sheets", [])]
+        except Exception as e:
+            return f"Error accessing spreadsheet: {e}"
+
+    if not sheets_to_search:
+        return "No sheets/tabs found in this spreadsheet."
+
+    search_lower = search_value.lower() if not match_case else search_value
     matches: list[str] = []
-    search_lower = search_value.lower()
-    for row_idx, row in enumerate(values):
-        for col_idx, cell in enumerate(row):
-            if search_lower in str(cell).lower():
-                col_letter = _col_letter(col_idx)
-                matches.append(f"  {col_letter}{row_idx + 1}: {cell}")
+
+    for tab in sheets_to_search:
+        safe_tab = _quote_tab_name(tab)
+
+        try:
+            result = await with_backoff(
+                (
+                    lambda t: (
+                        lambda: (
+                            svc.spreadsheets()
+                            .values()
+                            .get(
+                                spreadsheetId=spreadsheet_id,
+                                range=f"{t}!A:ZZ",
+                                valueRenderOption="FORMATTED_VALUE",
+                            )
+                            .execute()
+                        )
+                    )
+                )(safe_tab)
+            )
+        except Exception:
+            continue  # skip tabs that can't be read (e.g. chart sheets)
+
+        values = result.get("values", [])
+        for row_idx, row in enumerate(values):
+            for col_idx, cell in enumerate(row):
+                cell_str = str(cell)
+                if match_entire_cell:
+                    is_match = (cell_str == search_value) if match_case else (cell_str.lower() == search_lower)
+                else:
+                    is_match = (search_value in cell_str) if match_case else (search_lower in cell_str.lower())
+
+                if is_match:
+                    col_letter = _col_letter(col_idx)
+                    cell_ref = f"{tab}!{col_letter}{row_idx + 1}"
+                    row_context = " | ".join(str(c) for c in row[:10])
+                    matches.append(f"  {cell_ref}\n   Value: {cell_str[:200]}\n   Row: {row_context[:300]}")
+                    if len(matches) >= 50:
+                        break
+            if len(matches) >= 50:
+                break
+        if len(matches) >= 50:
+            break
+
     if not matches:
-        return f"No cells matching '{search_value}' in {sheet_name}."
-    return f"Found {len(matches)} cell(s) matching '{search_value}':\n" + "\n".join(matches)
+        searched = ", ".join(sheets_to_search)
+        return f"No cells containing '{search_value}' found.\nSearched sheets: {searched}"
+
+    output = f"Found {len(matches)} cell(s) containing '{search_value}':\n\n"
+    output += "\n\n".join(matches)
+
+    if len(matches) == 50:
+        output += "\n\n(Results capped at 50 matches. Use a more specific search term.)"
+
+    return output
 
 
 def _col_letter(index: int) -> str:
@@ -119,6 +305,64 @@ def _col_letter(index: int) -> str:
         result = chr(index % 26 + ord("A")) + result
         index = index // 26 - 1
     return result
+
+
+def _quote_tab_name(name: str) -> str:
+    """Quote a sheet/tab name for A1 notation if it contains spaces or apostrophes."""
+    if " " in name or "'" in name or "!" in name:
+        return "'" + name.replace("'", "\\'") + "'"
+    return name
+
+
+def _build_a1_range(sheet_name: str = "", columns: str = "", rows: str = "") -> str:
+    """Build A1 notation from friendly parameters.
+
+    Examples:
+        sheet_name="Budget", columns="A"         → "Budget!A:A"
+        sheet_name="Budget", columns="A:C"        → "Budget!A:C"
+        columns="A", rows="1:50"                  → "A1:A50"
+        sheet_name="Q1 Budget", columns="A"       → "'Q1 Budget'!A:A"
+        rows="1:10"                               → "A1:ZZ10"
+        sheet_name="Sheet1"                       → "Sheet1"
+        (nothing)                                 → ""
+    """
+    if not columns and not rows and not sheet_name:
+        return ""
+
+    range_part = ""
+    if columns and rows:
+        col_start, col_end = _parse_column_range(columns)
+        row_start, row_end = _parse_row_range(rows)
+        range_part = f"{col_start}{row_start}:{col_end}{row_end}"
+    elif columns:
+        col_start, col_end = _parse_column_range(columns)
+        range_part = f"{col_start}:{col_end}"
+    elif rows:
+        row_start, row_end = _parse_row_range(rows)
+        range_part = f"A{row_start}:ZZ{row_end}"
+
+    if sheet_name:
+        safe_name = _quote_tab_name(sheet_name)
+        return f"{safe_name}!{range_part}" if range_part else safe_name
+    return range_part
+
+
+def _parse_column_range(columns: str) -> tuple[str, str]:
+    """Parse 'A', 'A:C', 'B:D' into (start_col, end_col)."""
+    columns = columns.upper().strip()
+    if ":" in columns:
+        parts = columns.split(":", 1)
+        return parts[0].strip(), parts[1].strip()
+    return columns, columns
+
+
+def _parse_row_range(rows: str) -> tuple[str, str]:
+    """Parse '1:50', '1', '10:100' into (start_row, end_row)."""
+    rows = rows.strip()
+    if ":" in rows:
+        parts = rows.split(":", 1)
+        return parts[0].strip(), parts[1].strip()
+    return rows, rows
 
 
 async def google__create_spreadsheet(
@@ -294,7 +538,13 @@ def register_sheets_tools(registry: ToolRegistry, factory: GoogleServiceFactory)
 
     registry.register(
         name="google__list_sheets",
-        description="List all sheets/tabs in a Google Spreadsheet.",
+        description=(
+            "List all sheets/tabs in a Google Spreadsheet. "
+            "Returns tab names, indices, and sheet IDs. "
+            "Use this when you need tab names before calling google__get_sheet_values. "
+            "If you don't have the spreadsheet_id, call "
+            "google__search_drive_files(name='<name>', file_type='spreadsheet') first."
+        ),
         handler=_h(google__list_sheets),
         parameters={
             "type": "object",
@@ -304,13 +554,51 @@ def register_sheets_tools(registry: ToolRegistry, factory: GoogleServiceFactory)
     )
     registry.register(
         name="google__get_sheet_values",
-        description="Read cell values from a Google Sheet range (e.g. 'Sheet1!A1:D10' or just 'Sheet1' for all data).",
+        description=(
+            "Read values from a Google Sheets spreadsheet (online Google-native format). "
+            "This does NOT work on .xlsx files — for those, use google__download_file "
+            "then python_exec with openpyxl.\n\n"
+            "Accepts friendly parameters (no A1 notation needed) OR an explicit A1 range string.\n"
+            "Friendly params: sheet_name='Budget', columns='A' or columns='A:C', rows='1:50'\n"
+            "A1 range: range_='Sheet1!A1:D10' or range_='Budget!A:A'\n\n"
+            "If you only have the spreadsheet name (not ID), first call "
+            "google__search_drive_files(name='<name>', file_type='spreadsheet').\n"
+            "The search results will tell you whether the file is a Google Sheet or .xlsx.\n"
+            "If you don't know tab names, call google__list_sheets(spreadsheet_id='...') first.\n\n"
+            "If a column returns only 1 row (just a header), read ALL columns first to understand "
+            "the spreadsheet structure: google__get_sheet_values(spreadsheet_id='...')\n\n"
+            "Examples: sheet_name='Budget' columns='A' → column A from Budget tab; "
+            "columns='A:C' → columns A through C; rows='1:50' → rows 1-50."
+        ),
         handler=_h(google__get_sheet_values),
         parameters={
             "type": "object",
             "properties": {
                 "spreadsheet_id": {"type": "string"},
-                "range_": {"type": "string", "description": "Range notation e.g. Sheet1!A1:Z100", "default": "Sheet1"},
+                "range_": {
+                    "type": "string",
+                    "description": (
+                        "A1 notation range e.g. Sheet1!A1:D10 or Budget!A:A. Optional if using sheet_name/columns/rows."
+                    ),
+                    "default": "",
+                },
+                "sheet_name": {
+                    "type": "string",
+                    "description": (
+                        "Tab/sheet name e.g. 'Budget' or 'Q1 Data'. Use with columns/rows for friendly access."
+                    ),
+                    "default": "",
+                },
+                "columns": {
+                    "type": "string",
+                    "description": "Column(s) to read: 'A' for single column, 'A:C' for range. Use with sheet_name.",
+                    "default": "",
+                },
+                "rows": {
+                    "type": "string",
+                    "description": "Row range to read: '1:50' for rows 1-50. Use with sheet_name/columns.",
+                    "default": "",
+                },
             },
             "required": ["spreadsheet_id"],
         },
@@ -327,14 +615,31 @@ def register_sheets_tools(registry: ToolRegistry, factory: GoogleServiceFactory)
     )
     registry.register(
         name="google__search_sheet_values",
-        description="Search for cells matching a value in a sheet (case-insensitive substring match).",
+        description=(
+            "Search for a value in a Google Sheets spreadsheet (online Google-native format). "
+            "Does NOT work on .xlsx files. "
+            "Finds all cells containing the search term and returns their cell references "
+            "(e.g. 'Sheet1!C14') with the matching value and row context. "
+            "Searches across ALL tabs by default unless sheet_name is specified. "
+            "If you don't have the spreadsheet_id, call "
+            "google__search_drive_files(name='<name>', file_type='spreadsheet') first."
+        ),
         handler=_h(google__search_sheet_values),
         parameters={
             "type": "object",
             "properties": {
                 "spreadsheet_id": {"type": "string"},
-                "search_value": {"type": "string"},
-                "sheet_name": {"type": "string", "default": "Sheet1"},
+                "search_value": {
+                    "type": "string",
+                    "description": "Value to search for (case-insensitive substring by default)",
+                },
+                "sheet_name": {
+                    "type": "string",
+                    "description": "Limit search to a specific tab. Leave empty to search all tabs.",
+                    "default": "",
+                },
+                "match_case": {"type": "boolean", "default": False},
+                "match_entire_cell": {"type": "boolean", "default": False},
             },
             "required": ["spreadsheet_id", "search_value"],
         },

@@ -192,7 +192,7 @@ async def google__configure_meet_moderation(
 
     Restriction values: NO_RESTRICTION, HOST_AND_CO_HOSTS, ORGANIZER_ONLY
     """
-    svc = await factory.get("meet")
+    svc = await factory.get("meet_beta")
 
     moderation: dict[str, Any] = {}
     mask_parts: list[str] = []
@@ -238,7 +238,7 @@ async def google__configure_meet_artifacts(
     auto_smart_notes: bool | None = None,
 ) -> str:
     """Pre-configure auto-recording, auto-transcription, and smart notes for a space."""
-    svc = await factory.get("meet")
+    svc = await factory.get("meet_beta")
 
     artifact_config: dict[str, Any] = {}
     mask_parts: list[str] = []
@@ -287,19 +287,56 @@ async def google__add_meet_member(
 ) -> str:
     """Add a member to a Google Meet space (Developer Preview).
 
-    Roles: HOST, COHOST, MEMBER. Members can join without knocking.
+    Roles: COHOST (co-host privileges) or empty/MEMBER (regular member).
+    Requires Google Workspace account.
     """
-    svc = await factory.get("meet")
-    _parent = space_name
-    _body = {"role": role, "signerUser": {"user": f"users/{email}"}}
+    svc = await factory.get("meet_beta")
+
+    if not space_name.startswith("spaces/"):
+        space_name = f"spaces/{space_name}"
+
+    # Normalise role — API accepts "COHOST" or "ROLE_UNSPECIFIED" only.
+    # email is required; setting both user and email causes an API error.
+    role_upper = role.upper().strip() if role else ""
+    if role_upper in ("COHOST", "CO-HOST", "CO_HOST"):
+        api_role = "COHOST"
+    elif role_upper in ("MEMBER", "REGULAR", "CONTRIBUTOR", "ROLE_UNSPECIFIED", ""):
+        api_role = "ROLE_UNSPECIFIED"
+    else:
+        return f"Invalid role: '{role}'. Valid values: 'COHOST' (co-host privileges) or empty (regular member)."
+
+    _body: dict[str, Any] = {"email": email}
+    if api_role == "COHOST":
+        _body["role"] = "COHOST"
 
     try:
-        member = await with_backoff(lambda: svc.spaces().members().create(parent=_parent, body=_body).execute())
+        member = await with_backoff(lambda: svc.spaces().members().create(parent=space_name, body=_body).execute())
+        assigned_role = member.get("role", "ROLE_UNSPECIFIED")
+        role_label = "Co-host" if assigned_role == "COHOST" else "Member"
         return (
-            f"Member added to {space_name}.\n  Email: {email}\n  Role: {role}\n  Member ID: {member.get('name', '?')}"
+            f"{role_label} added to {space_name}.\n"
+            f"  Email: {email}\n"
+            f"  Role: {assigned_role}\n"
+            f"  Member ID: {member.get('name', '?')}"
         )
     except Exception as exc:
+        err = str(exc)
         logger.warning("Members API unavailable (Developer Preview): %s", exc)
+        if "already exists" in err.lower() or "409" in err:
+            return f"'{email}' is already a member of this space."
+        if "404" in err:
+            return (
+                "Members API not found. This usually means:\n"
+                "  1. The Meet API must use the v2beta endpoint (members are v2beta-only)\n"
+                "  2. Your Google Cloud project may not be enrolled in Developer Preview\n"
+                f"Error: {err}"
+            )
+        if "403" in err or "PERMISSION_DENIED" in err:
+            return (
+                "Permission denied. Adding members requires a Google Workspace account "
+                "(Business/Enterprise/Education) and you must be the meeting organizer.\n"
+                f"Error: {err}"
+            )
         return (
             "The Members API is a Developer Preview feature and may not be available "
             "for your account. As a workaround, share the meeting link directly. "
@@ -314,15 +351,27 @@ async def google__remove_meet_member(
     """Remove a member from a Google Meet space (Developer Preview).
 
     member_name format: spaces/xxx/members/yyy
+    Get member names from google__add_meet_member output.
     """
-    svc = await factory.get("meet")
-    _name = member_name
+    if "/members/" not in member_name:
+        return (
+            f"Invalid member_name format: '{member_name}'. "
+            "Expected: 'spaces/{space}/members/{member}'. "
+            "Get this from google__add_meet_member output."
+        )
+
+    svc = await factory.get("meet_beta")
 
     try:
-        await with_backoff(lambda: svc.spaces().members().delete(name=_name).execute())
+        await with_backoff(lambda: svc.spaces().members().delete(name=member_name).execute())
         return f"Member {member_name} removed from the meeting space."
     except Exception as exc:
+        err = str(exc)
         logger.warning("Members API unavailable (Developer Preview): %s", exc)
+        if "404" in err:
+            return f"Member '{member_name}' not found. They may have already been removed."
+        if "403" in err:
+            return "Permission denied. Only the meeting organizer can remove members."
         return (
             f"The Members API is a Developer Preview feature and may not be available for your account.\nError: {exc}"
         )

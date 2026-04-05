@@ -1,0 +1,9 @@
+# Pincer Email Blocklist
+# One address or domain per line. Lines starting with # are comments.
+#
+# Examples:
+#   spam@evil.com        — blocks this exact address
+#   evil.com             — blocks all @evil.com addresses
+#   scammer.org          — blocks all @scammer.org addresses
+#
+# The allowlist (email_allowlist.txt) takes priority over this file.
