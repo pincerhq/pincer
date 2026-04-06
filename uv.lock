@@ -1481,6 +1481,20 @@ wheels = [
 ]
 
 [[package]]
+name = "msal"
+version = "1.35.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3c/aa/5a646093ac218e4a329391d5a31e5092a89db7d2ef1637a90b82cd0b6f94/msal-1.35.1.tar.gz", hash = "sha256:70cac18ab80a053bff86219ba64cfe3da1f307c74b009e2da57ef040eb1b5656", size = 165658, upload-time = "2026-03-04T23:38:51.812Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/96/86/16815fddf056ca998853c6dc525397edf0b43559bb4073a80d2bc7fe8009/msal-1.35.1-py3-none-any.whl", hash = "sha256:8f4e82f34b10c19e326ec69f44dc6b30171f2f7098f3720ea8a9f0c11832caa3", size = 119909, upload-time = "2026-03-04T23:38:50.452Z" },
+]
+
+[[package]]
 name = "msgpack"
 version = "1.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1859,6 +1873,7 @@ all = [
     { name = "fpdf2" },
     { name = "google-genai" },
     { name = "mcp" },
+    { name = "msal" },
     { name = "playwright" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "pymupdf" },
@@ -1892,6 +1907,9 @@ mcp = [
 ]
 memory = [
     { name = "sqlite-vec" },
+]
+ms365 = [
+    { name = "msal" },
 ]
 pdf = [
     { name = "pymupdf" },
@@ -1941,10 +1959,11 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.8.0" },
+    { name = "msal", marker = "extra == 'ms365'", specifier = ">=1.28.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13.0" },
     { name = "neonize", specifier = ">=0.3.14" },
     { name = "openai", specifier = ">=1.60.0" },
-    { name = "pincer-agent", extras = ["search", "tavily", "browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp"], marker = "extra == 'all'" },
+    { name = "pincer-agent", extras = ["search", "tavily", "browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "ms365"], marker = "extra == 'all'" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.40.0" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pydantic-settings", specifier = ">=2.7.0" },
@@ -1968,7 +1987,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=12.0" },
     { name = "youtube-transcript-api", marker = "extra == 'skills'" },
 ]
-provides-extras = ["search", "tavily", "browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "all", "dev"]
+provides-extras = ["search", "tavily", "browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "ms365", "all", "dev"]
 
 [[package]]
 name = "playwright"

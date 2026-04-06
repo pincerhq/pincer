@@ -66,7 +66,10 @@ mcp = [
     "mcp>=1.8.0",
     "PyJWT[crypto]>=2.8.0",
 ]
-all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp]"]
+ms365 = [
+    "msal>=1.28.0",
+]
+all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp,ms365]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
@@ -133,6 +136,7 @@ module = [
     "pincer.memory.store",
     "pincer.api.skills",
     "pincer.cli",
+    "pincer.integrations.ms365.*",
 ]
 disable_error_code = [
     "type-arg",
