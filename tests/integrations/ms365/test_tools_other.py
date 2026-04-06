@@ -4,25 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from pincer.integrations.ms365.tools_todo import (
-    ms_todo__complete_task,
-    ms_todo__create_task,
-    ms_todo__create_task_list,
-    ms_todo__delete_task,
-    ms_todo__get_task,
-    ms_todo__list_task_lists,
-    ms_todo__list_tasks,
-    ms_todo__update_task,
-)
-from pincer.integrations.ms365.tools_teams import (
-    teams__get_channel_message,
-    teams__list_channel_messages,
-    teams__list_channels,
-    teams__list_chats,
-    teams__list_teams,
-    teams__send_channel_message,
-    teams__send_chat_message,
-)
 from pincer.integrations.ms365.tools_contacts import (
     outlook__create_contact,
     outlook__delete_contact,
@@ -38,7 +19,25 @@ from pincer.integrations.ms365.tools_onenote import (
     onenote__list_pages,
     onenote__list_sections,
 )
-
+from pincer.integrations.ms365.tools_teams import (
+    teams__get_channel_message,
+    teams__list_channel_messages,
+    teams__list_channels,
+    teams__list_chats,
+    teams__list_teams,
+    teams__send_channel_message,
+    teams__send_chat_message,
+)
+from pincer.integrations.ms365.tools_todo import (
+    ms_todo__complete_task,
+    ms_todo__create_task,
+    ms_todo__create_task_list,
+    ms_todo__delete_task,
+    ms_todo__get_task,
+    ms_todo__list_task_lists,
+    ms_todo__list_tasks,
+    ms_todo__update_task,
+)
 
 # ── To Do ─────────────────────────────────────────────────────────────────────
 

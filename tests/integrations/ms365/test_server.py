@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
-
 import pytest
 
 from pincer.integrations.ms365 import register_all_tools
-from pincer.integrations.ms365.auth import MS365Auth
-from pincer.integrations.ms365.config import MS365IntegrationConfig, load_config, resolve_cache_path
-from pincer.integrations.ms365.graph_client import GraphClient
+from pincer.integrations.ms365.config import MS365IntegrationConfig, resolve_cache_path
 from pincer.tools.registry import ToolRegistry
 
 _MS365_PREFIXES = ("outlook__", "teams__", "onedrive__", "onenote__", "ms_todo__")

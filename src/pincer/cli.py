@@ -617,7 +617,8 @@ async def _run_agent(settings: Settings) -> None:
 
     # Microsoft 365 tools (69 tools — email, calendar, OneDrive, To Do, Teams, Contacts, OneNote)
     try:
-        from pincer.integrations.ms365 import get_ms365_client, register_all_tools as register_ms365_tools
+        from pincer.integrations.ms365 import get_ms365_client
+        from pincer.integrations.ms365 import register_all_tools as register_ms365_tools
 
         ms365_client = get_ms365_client()
         if ms365_client is not None:
@@ -3270,7 +3271,7 @@ def setup_ms365() -> None:
     tenant_id = typer.prompt("Tenant ID (press Enter for 'common')", default="common")
 
     from pincer.integrations.ms365.auth import MS365Auth
-    from pincer.integrations.ms365.config import resolve_cache_path, MS365IntegrationConfig
+    from pincer.integrations.ms365.config import MS365IntegrationConfig, resolve_cache_path
 
     cfg = MS365IntegrationConfig(client_id=client_id, tenant_id=tenant_id)
     cache_path = resolve_cache_path(cfg)
@@ -3300,7 +3301,7 @@ def setup_ms365() -> None:
         console.print(f"[bold cyan]{auth._pending_flow_message}[/bold cyan]\n")
 
     account = auth.authenticated_account() or result.get("id_token_claims", {}).get("preferred_username", "unknown")
-    console.print(f"\n[green]Microsoft 365 authenticated![/green]")
+    console.print("\n[green]Microsoft 365 authenticated![/green]")
     console.print(f"  Account:      {account}")
     console.print(f"  Token cached: {cache_path}")
     console.print(f"  Scopes:       {len(auth.scopes)}")

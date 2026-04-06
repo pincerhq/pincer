@@ -6,7 +6,7 @@ All tests mock the GraphClient HTTP methods so no real Microsoft APIs are hit.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

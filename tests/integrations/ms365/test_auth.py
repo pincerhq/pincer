@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from pincer.integrations.ms365.auth import (
     ALL_SCOPES,
+    SERVICE_SCOPES,
     MS365Auth,
     MS365AuthError,
-    SERVICE_SCOPES,
     scopes_for_services,
 )
 
