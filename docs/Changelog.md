@@ -5,6 +5,46 @@ All notable changes to Pincer. Format: [Version] — Date.
 ---
 
 
+## [0.7.5] — 2026-04-06
+
+### Microsoft 365 Integration — 69 tools
+
+**New module:** `src/pincer/integrations/ms365/` — native Microsoft Graph REST integration covering Outlook, Calendar, OneDrive, To Do, Teams, Contacts, and OneNote.
+
+#### New files
+
+- `integrations/ms365/__init__.py` — `get_ms365_client()` / `register_all_tools()` public API
+- `integrations/ms365/config.py` — `MS365IntegrationConfig` dataclass; reads `[integrations.ms365]` from `pincer.toml` + `PINCER_MS365_CLIENT_ID` / `PINCER_MS365_TENANT_ID` env vars; supports `${VAR}` references in `client_id`
+- `integrations/ms365/auth.py` — `MS365Auth`: MSAL-backed OAuth via device code or interactive browser flow; token cached to `~/.pincer/ms365_token_cache.json` (mode `0600`); automatic token refresh
+- `integrations/ms365/graph_client.py` — `GraphClient`: authenticated httpx async client; rate-limit retry (429 + `Retry-After`); pagination via `@odata.nextLink`
+- `integrations/ms365/tools_email.py` — 17 Outlook email tools (`outlook__*`)
+- `integrations/ms365/tools_calendar.py` — 12 calendar tools (`calendar__*`)
+- `integrations/ms365/tools_onedrive.py` — 14 OneDrive tools (`onedrive__*`)
+- `integrations/ms365/tools_todo.py` — 8 To Do tools (`ms_todo__*`)
+- `integrations/ms365/tools_teams.py` — 7 Teams tools (`teams__*`)
+- `integrations/ms365/tools_contacts.py` — 6 Contacts tools (`contacts__*`)
+- `integrations/ms365/tools_onenote.py` — 5 OneNote tools (`onenote__*`)
+
+#### CLI
+
+- `pincer setup-ms365` — one-time device code auth flow; saves token + appends `[integrations.ms365]` to `pincer.toml`
+
+#### Agent integration (`cli.py`)
+
+- MS365 tools auto-registered at startup when `[integrations.ms365]` is configured and a cached token exists
+- Yellow warning + re-auth hint shown when token is missing or `RuntimeError` raised
+- Grok/xAI provider wired in `_run_agent()` (`settings.default_provider == "grok"`)
+
+#### Other changes
+
+- `pyproject.toml`: version bumped to `0.7.5`; `python-multipart>=0.0.9` added to core deps; `voice`, `image`, `mcp` optional dep groups added; `[all]` extended; `bandit`, `types-croniter`, `types-qrcode` added to `dev`; `mypy` overrides extended to suppress errors in generated/third-party-heavy modules
+
+#### Tests
+
+- `tests/integrations/ms365/` — `test_auth.py`, `test_server.py`, `test_tools_calendar.py`, `test_tools_email.py`, `test_tools_onedrive.py`, `test_tools_other.py` (To Do, Teams, Contacts, OneNote)
+
+---
+
 ## [0.7.4] — 2026-03-21
 
 ### MCP Architecture Overhaul — Sprint A0

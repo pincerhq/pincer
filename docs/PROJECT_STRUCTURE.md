@@ -21,6 +21,7 @@
 | 8 | — | Image Generation + Grok | fal.ai + Gemini image generation, Grok/xAI LLM provider |
 | A0 | Mar 21, 2026 | MCP Architecture | MCPServiceCore, layered shells (embedded + standalone), resources, prompts, sampling, `pincer mcp serve` |
 | 9 | Mar 26, 2026 | Google Workspace | 85-tool native integration (Gmail 19, Calendar 12, Drive 15, Docs 8, Sheets 10, Slides 6, Tasks 8, Contacts 7), `pincer setup-google` |
+| 10 | Apr 6, 2026 | Microsoft 365 | 69-tool native integration (Outlook 17, Calendar 12, OneDrive 14, To Do 8, Teams 7, Contacts 6, OneNote 5), `pincer setup-ms365` |
 
 ---
 
