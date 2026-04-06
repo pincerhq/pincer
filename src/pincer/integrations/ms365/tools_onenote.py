@@ -47,8 +47,7 @@ async def onenote__list_sections(
     lines = []
     for s in sections:
         lines.append(
-            f"  {s.get('displayName', '?')} — modified {s.get('lastModifiedDateTime', '')}\n"
-            f"    ID: {s.get('id', '')}"
+            f"  {s.get('displayName', '?')} — modified {s.get('lastModifiedDateTime', '')}\n    ID: {s.get('id', '')}"
         )
     return f"{len(lines)} section(s):\n" + "\n\n".join(lines)
 
@@ -84,6 +83,7 @@ async def onenote__get_page_content(
     html = content.decode("utf-8", errors="replace")
     # Strip HTML for readability
     import re
+
     text = re.sub(r"<[^>]+>", "", html)
     text = re.sub(r"\s+", " ", text).strip()
     return f"Page content:\n{text[:5000]}"
@@ -96,10 +96,7 @@ async def onenote__create_page(
     content: str,
 ) -> str:
     """Create a new OneNote page with HTML content."""
-    html_body = (
-        f"<!DOCTYPE html><html><head><title>{title}</title></head>"
-        f"<body><p>{content}</p></body></html>"
-    )
+    html_body = f"<!DOCTYPE html><html><head><title>{title}</title></head><body><p>{content}</p></body></html>"
     # OneNote pages require text/html content type
     result = await client.put(
         f"/me/onenote/sections/{section_id}/pages",
@@ -119,6 +116,7 @@ def register_onenote_tools(registry: ToolRegistry, client: GraphClient) -> int:
         @functools.wraps(fn)
         async def wrapper(**kwargs: Any) -> str:
             return await fn(client, **kwargs)
+
         return wrapper
 
     registry.register(

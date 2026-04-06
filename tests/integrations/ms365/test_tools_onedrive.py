@@ -26,10 +26,20 @@ from pincer.integrations.ms365.tools_onedrive import (
 async def test_list_drive_items(mock_client):
     mock_client.get.return_value = {
         "value": [
-            {"id": "file-1", "name": "report.docx", "size": 51200, "lastModifiedDateTime": "2026-03-26T10:00:00Z",
-             "file": {"mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}},
-            {"id": "folder-1", "name": "Documents", "size": 0, "lastModifiedDateTime": "2026-03-25T10:00:00Z",
-             "folder": {"childCount": 5}},
+            {
+                "id": "file-1",
+                "name": "report.docx",
+                "size": 51200,
+                "lastModifiedDateTime": "2026-03-26T10:00:00Z",
+                "file": {"mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+            },
+            {
+                "id": "folder-1",
+                "name": "Documents",
+                "size": 0,
+                "lastModifiedDateTime": "2026-03-25T10:00:00Z",
+                "folder": {"childCount": 5},
+            },
         ]
     }
     result = await onedrive__list_drive_items(mock_client)
@@ -42,8 +52,14 @@ async def test_list_drive_items(mock_client):
 async def test_search_files(mock_client):
     mock_client.get.return_value = {
         "value": [
-            {"id": "file-2", "name": "Q3 Report.xlsx", "size": 102400, "lastModifiedDateTime": "2026-03-26T12:00:00Z",
-             "file": {}, "parentReference": {"path": "/drive/root:/Documents"}},
+            {
+                "id": "file-2",
+                "name": "Q3 Report.xlsx",
+                "size": 102400,
+                "lastModifiedDateTime": "2026-03-26T12:00:00Z",
+                "file": {},
+                "parentReference": {"path": "/drive/root:/Documents"},
+            },
         ]
     }
     result = await onedrive__search_files(mock_client, query="Q3 Report")
@@ -70,7 +86,9 @@ async def test_get_file_metadata(mock_client):
 @pytest.mark.asyncio
 async def test_download_file_text(mock_client):
     mock_client.get.return_value = {
-        "name": "notes.txt", "size": 100, "file": {"mimeType": "text/plain"},
+        "name": "notes.txt",
+        "size": 100,
+        "file": {"mimeType": "text/plain"},
     }
     mock_client.get_binary.return_value = b"Hello, world!"
     result = await onedrive__download_file(mock_client, item_id="file-1")
@@ -81,7 +99,9 @@ async def test_download_file_text(mock_client):
 @pytest.mark.asyncio
 async def test_download_file_binary(mock_client):
     mock_client.get.return_value = {
-        "name": "image.png", "size": 5000, "file": {"mimeType": "image/png"},
+        "name": "image.png",
+        "size": 5000,
+        "file": {"mimeType": "image/png"},
     }
     mock_client.get_binary.return_value = b"\x89PNG"
     result = await onedrive__download_file(mock_client, item_id="file-2")
@@ -93,7 +113,10 @@ async def test_download_file_binary(mock_client):
 async def test_get_file_preview(mock_client):
     mock_client.get.return_value = {
         "value": [
-            {"large": {"url": "https://preview.example.com/large"}, "medium": {"url": "https://preview.example.com/medium"}},
+            {
+                "large": {"url": "https://preview.example.com/large"},
+                "medium": {"url": "https://preview.example.com/medium"},
+            },
         ]
     }
     result = await onedrive__get_file_preview(mock_client, item_id="file-1")
@@ -104,8 +127,13 @@ async def test_get_file_preview(mock_client):
 async def test_list_shared_with_me(mock_client):
     mock_client.get.return_value = {
         "value": [
-            {"id": "shared-1", "name": "shared-doc.docx", "size": 30000, "lastModifiedDateTime": "2026-03-20T10:00:00Z",
-             "file": {}},
+            {
+                "id": "shared-1",
+                "name": "shared-doc.docx",
+                "size": 30000,
+                "lastModifiedDateTime": "2026-03-20T10:00:00Z",
+                "file": {},
+            },
         ]
     }
     result = await onedrive__list_shared_with_me(mock_client)
@@ -116,8 +144,13 @@ async def test_list_shared_with_me(mock_client):
 async def test_list_recent_files(mock_client):
     mock_client.get.return_value = {
         "value": [
-            {"id": "recent-1", "name": "memo.txt", "size": 500, "lastModifiedDateTime": "2026-03-26T15:00:00Z",
-             "file": {}},
+            {
+                "id": "recent-1",
+                "name": "memo.txt",
+                "size": 500,
+                "lastModifiedDateTime": "2026-03-26T15:00:00Z",
+                "file": {},
+            },
         ]
     }
     result = await onedrive__list_recent_files(mock_client)

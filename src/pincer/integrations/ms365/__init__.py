@@ -58,8 +58,7 @@ def get_ms365_client() -> GraphClient | None:
 
     if not auth.has_cached_token():
         _log.warning(
-            "Microsoft 365 token not found — tools will be disabled. "
-            "Run 'pincer setup-ms365' to authenticate."
+            "Microsoft 365 token not found — tools will be disabled. Run 'pincer setup-ms365' to authenticate."
         )
         return None
 

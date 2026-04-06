@@ -63,12 +63,9 @@ async def teams__list_channel_messages(
         body = msg.get("body", {}).get("content", "")
         # Strip HTML
         import re
+
         body_text = re.sub(r"<[^>]+>", "", body).strip()[:200]
-        lines.append(
-            f"  [{msg.get('createdDateTime', '')}] {sender}:\n"
-            f"    {body_text}\n"
-            f"    ID: {msg.get('id', '')}"
-        )
+        lines.append(f"  [{msg.get('createdDateTime', '')}] {sender}:\n    {body_text}\n    ID: {msg.get('id', '')}")
     return f"{len(lines)} message(s):\n" + "\n\n".join(lines)
 
 
@@ -83,6 +80,7 @@ async def teams__get_channel_message(
     sender = msg.get("from", {}).get("user", {}).get("displayName", "?")
     body = msg.get("body", {}).get("content", "")
     import re
+
     body_text = re.sub(r"<[^>]+>", "", body).strip()
 
     lines = [
@@ -169,6 +167,7 @@ def register_teams_tools(registry: ToolRegistry, client: GraphClient) -> int:
         @functools.wraps(fn)
         async def wrapper(**kwargs: Any) -> str:
             return await fn(client, **kwargs)
+
         return wrapper
 
     registry.register(

@@ -53,8 +53,13 @@ async def test_list_task_lists(mock_client):
 async def test_list_tasks(mock_client):
     mock_client.get.return_value = {
         "value": [
-            {"id": "task-1", "title": "Buy groceries", "status": "notStarted", "importance": "normal",
-             "dueDateTime": {"dateTime": "2026-03-28T00:00:00"}},
+            {
+                "id": "task-1",
+                "title": "Buy groceries",
+                "status": "notStarted",
+                "importance": "normal",
+                "dueDateTime": {"dateTime": "2026-03-28T00:00:00"},
+            },
         ]
     }
     result = await ms_todo__list_tasks(mock_client, list_id="list-1")
@@ -64,9 +69,14 @@ async def test_list_tasks(mock_client):
 @pytest.mark.asyncio
 async def test_get_task(mock_client):
     mock_client.get.return_value = {
-        "id": "task-1", "title": "Review PR", "status": "inProgress", "importance": "high",
-        "dueDateTime": {"dateTime": "2026-03-27T00:00:00"}, "body": {"content": "Check the tests"},
-        "createdDateTime": "2026-03-25T10:00:00Z", "lastModifiedDateTime": "2026-03-26T10:00:00Z",
+        "id": "task-1",
+        "title": "Review PR",
+        "status": "inProgress",
+        "importance": "high",
+        "dueDateTime": {"dateTime": "2026-03-27T00:00:00"},
+        "body": {"content": "Check the tests"},
+        "createdDateTime": "2026-03-25T10:00:00Z",
+        "lastModifiedDateTime": "2026-03-26T10:00:00Z",
     }
     result = await ms_todo__get_task(mock_client, list_id="list-1", task_id="task-1")
     assert "Review PR" in result
@@ -124,9 +134,7 @@ async def test_list_teams(mock_client):
 
 @pytest.mark.asyncio
 async def test_list_channels(mock_client):
-    mock_client.get.return_value = {
-        "value": [{"id": "ch-1", "displayName": "General", "membershipType": "standard"}]
-    }
+    mock_client.get.return_value = {"value": [{"id": "ch-1", "displayName": "General", "membershipType": "standard"}]}
     result = await teams__list_channels(mock_client, team_id="team-1")
     assert "General" in result
 
@@ -195,8 +203,15 @@ async def test_send_chat_message(mock_client):
 async def test_list_contacts(mock_client):
     mock_client.get.return_value = {
         "value": [
-            {"id": "ct-1", "displayName": "Jane Doe", "emailAddresses": [{"address": "jane@example.com"}],
-             "businessPhones": ["555-1234"], "mobilePhone": "", "companyName": "Acme", "jobTitle": "CTO"},
+            {
+                "id": "ct-1",
+                "displayName": "Jane Doe",
+                "emailAddresses": [{"address": "jane@example.com"}],
+                "businessPhones": ["555-1234"],
+                "mobilePhone": "",
+                "companyName": "Acme",
+                "jobTitle": "CTO",
+            },
         ]
     }
     result = await outlook__list_contacts(mock_client)
@@ -208,8 +223,15 @@ async def test_list_contacts(mock_client):
 async def test_search_contacts(mock_client):
     mock_client.get.return_value = {
         "value": [
-            {"id": "ct-2", "displayName": "John Smith", "emailAddresses": [{"address": "john@example.com"}],
-             "businessPhones": [], "mobilePhone": "", "companyName": "", "jobTitle": ""},
+            {
+                "id": "ct-2",
+                "displayName": "John Smith",
+                "emailAddresses": [{"address": "john@example.com"}],
+                "businessPhones": [],
+                "mobilePhone": "",
+                "companyName": "",
+                "jobTitle": "",
+            },
         ]
     }
     result = await outlook__search_contacts(mock_client, query="John")
@@ -219,9 +241,16 @@ async def test_search_contacts(mock_client):
 @pytest.mark.asyncio
 async def test_get_contact(mock_client):
     mock_client.get.return_value = {
-        "id": "ct-1", "displayName": "Jane Doe", "givenName": "Jane", "surname": "Doe",
-        "emailAddresses": [{"address": "jane@example.com"}], "businessPhones": ["555-1234"],
-        "mobilePhone": "555-5678", "companyName": "Acme", "jobTitle": "CTO", "department": "Engineering",
+        "id": "ct-1",
+        "displayName": "Jane Doe",
+        "givenName": "Jane",
+        "surname": "Doe",
+        "emailAddresses": [{"address": "jane@example.com"}],
+        "businessPhones": ["555-1234"],
+        "mobilePhone": "555-5678",
+        "companyName": "Acme",
+        "jobTitle": "CTO",
+        "department": "Engineering",
         "businessAddress": {},
     }
     result = await outlook__get_contact(mock_client, contact_id="ct-1")

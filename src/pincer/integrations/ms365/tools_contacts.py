@@ -197,6 +197,7 @@ def register_contacts_tools(registry: ToolRegistry, client: GraphClient) -> int:
         @functools.wraps(fn)
         async def wrapper(**kwargs: Any) -> str:
             return await fn(client, **kwargs)
+
         return wrapper
 
     registry.register(

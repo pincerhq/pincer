@@ -3326,11 +3326,6 @@ def _save_ms365_config(client_id: str, tenant_id: str) -> None:
     else:
         content = ""
 
-    section = (
-        "\n[integrations.ms365]\n"
-        "enabled = true\n"
-        f'client_id = "{client_id}"\n'
-        f'tenant_id = "{tenant_id}"\n'
-    )
+    section = f'\n[integrations.ms365]\nenabled = true\nclient_id = "{client_id}"\ntenant_id = "{tenant_id}"\n'
     toml_path.write_text(content + section)
     console.print(f"  Config saved:  {toml_path}")

@@ -132,8 +132,10 @@ async def outlook__get_message(
     """Get full message content by ID."""
     msg = await client.get(
         f"/me/messages/{message_id}",
-        params={"$select": "id,subject,from,toRecipients,ccRecipients,bccRecipients,"
-                "receivedDateTime,body,isRead,hasAttachments,importance,flag"},
+        params={
+            "$select": "id,subject,from,toRecipients,ccRecipients,bccRecipients,"
+            "receivedDateTime,body,isRead,hasAttachments,importance,flag"
+        },
     )
     sender = msg.get("from", {}).get("emailAddress", {})
     to_list = [r.get("emailAddress", {}).get("address", "") for r in msg.get("toRecipients", [])]
@@ -144,6 +146,7 @@ async def outlook__get_message(
     # Strip HTML tags for cleaner display if HTML
     if body.get("contentType") == "html":
         import re
+
         body_content = re.sub(r"<[^>]+>", "", body_content)
         body_content = re.sub(r"\s+", " ", body_content).strip()
 
@@ -154,15 +157,17 @@ async def outlook__get_message(
     ]
     if cc_list:
         lines.append(f"CC: {', '.join(cc_list)}")
-    lines.extend([
-        f"Date: {msg.get('receivedDateTime', '')}",
-        f"Importance: {msg.get('importance', 'normal')}",
-        f"Read: {'Yes' if msg.get('isRead') else 'No'}",
-        f"Attachments: {'Yes' if msg.get('hasAttachments') else 'No'}",
-        f"ID: {msg.get('id', '')}",
-        "",
-        body_content[:3000],
-    ])
+    lines.extend(
+        [
+            f"Date: {msg.get('receivedDateTime', '')}",
+            f"Importance: {msg.get('importance', 'normal')}",
+            f"Read: {'Yes' if msg.get('isRead') else 'No'}",
+            f"Attachments: {'Yes' if msg.get('hasAttachments') else 'No'}",
+            f"ID: {msg.get('id', '')}",
+            "",
+            body_content[:3000],
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -181,8 +186,7 @@ async def outlook__get_message_attachments(
         size = att.get("size", 0)
         size_str = f"{size / 1024:.1f} KB" if size < 1048576 else f"{size / 1048576:.1f} MB"
         lines.append(
-            f"  {att.get('name', '?')} ({att.get('contentType', '?')}, {size_str})\n"
-            f"    ID: {att.get('id', '')}"
+            f"  {att.get('name', '?')} ({att.get('contentType', '?')}, {size_str})\n    ID: {att.get('id', '')}"
         )
     return f"{len(lines)} attachment(s):\n" + "\n".join(lines)
 
@@ -201,6 +205,7 @@ async def outlook__download_attachment(
 
     if content_type.startswith("text/"):
         import base64
+
         try:
             text = base64.b64decode(content).decode("utf-8", errors="replace")
             return f"Attachment: {name}\nContent:\n{text[:5000]}"
@@ -208,10 +213,7 @@ async def outlook__download_attachment(
             pass
 
     return (
-        f"Attachment: {name}\n"
-        f"Type: {content_type}\n"
-        f"Size: {size} bytes\n"
-        f"Content: [base64 encoded, {len(content)} chars]"
+        f"Attachment: {name}\nType: {content_type}\nSize: {size} bytes\nContent: [base64 encoded, {len(content)} chars]"
     )
 
 
@@ -232,26 +234,21 @@ async def outlook__send_message(
             "contentType": "HTML" if body_type == "html" else "Text",
             "content": body,
         },
-        "toRecipients": [
-            {"emailAddress": {"address": addr.strip()}}
-            for addr in to.split(",") if addr.strip()
-        ],
+        "toRecipients": [{"emailAddress": {"address": addr.strip()}} for addr in to.split(",") if addr.strip()],
         "importance": importance,
     }
     if cc:
         message["ccRecipients"] = [
-            {"emailAddress": {"address": addr.strip()}}
-            for addr in cc.split(",") if addr.strip()
+            {"emailAddress": {"address": addr.strip()}} for addr in cc.split(",") if addr.strip()
         ]
     if bcc:
         message["bccRecipients"] = [
-            {"emailAddress": {"address": addr.strip()}}
-            for addr in bcc.split(",") if addr.strip()
+            {"emailAddress": {"address": addr.strip()}} for addr in bcc.split(",") if addr.strip()
         ]
 
     await client.post("/me/sendMail", json={"message": message})
     recipients = [a.strip() for a in to.split(",") if a.strip()]
-    return f"Email sent to {', '.join(recipients)}: \"{subject}\""
+    return f'Email sent to {", ".join(recipients)}: "{subject}"'
 
 
 async def outlook__reply_to_message(
@@ -298,10 +295,7 @@ async def outlook__forward_message(
 ) -> str:
     """Forward an email to new recipients."""
     forward_body: dict[str, Any] = {
-        "toRecipients": [
-            {"emailAddress": {"address": addr.strip()}}
-            for addr in to.split(",") if addr.strip()
-        ],
+        "toRecipients": [{"emailAddress": {"address": addr.strip()}} for addr in to.split(",") if addr.strip()],
     }
     if comment:
         forward_body["comment"] = comment
@@ -325,19 +319,13 @@ async def outlook__create_draft(
             "contentType": "HTML" if body_type == "html" else "Text",
             "content": body,
         },
-        "toRecipients": [
-            {"emailAddress": {"address": addr.strip()}}
-            for addr in to.split(",") if addr.strip()
-        ],
+        "toRecipients": [{"emailAddress": {"address": addr.strip()}} for addr in to.split(",") if addr.strip()],
     }
     if cc:
-        draft["ccRecipients"] = [
-            {"emailAddress": {"address": addr.strip()}}
-            for addr in cc.split(",") if addr.strip()
-        ]
+        draft["ccRecipients"] = [{"emailAddress": {"address": addr.strip()}} for addr in cc.split(",") if addr.strip()]
 
     result = await client.post("/me/messages", json=draft)
-    return f"Draft created: \"{subject}\" (id={result.get('id', '')})"
+    return f'Draft created: "{subject}" (id={result.get("id", "")})'
 
 
 async def outlook__update_draft(
@@ -359,8 +347,7 @@ async def outlook__update_draft(
         }
     if to:
         updates["toRecipients"] = [
-            {"emailAddress": {"address": addr.strip()}}
-            for addr in to.split(",") if addr.strip()
+            {"emailAddress": {"address": addr.strip()}} for addr in to.split(",") if addr.strip()
         ]
 
     await client.patch(f"/me/messages/{message_id}", json=updates)
@@ -433,6 +420,7 @@ def register_email_tools(registry: ToolRegistry, client: GraphClient) -> int:
         @functools.wraps(fn)
         async def wrapper(**kwargs: Any) -> str:
             return await fn(client, **kwargs)
+
         return wrapper
 
     registry.register(

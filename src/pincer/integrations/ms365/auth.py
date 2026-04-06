@@ -141,9 +141,7 @@ class MS365Auth:
         if token:
             return token
 
-        raise MS365AuthError(
-            "No valid Microsoft 365 token found. Run 'pincer setup-ms365' to authenticate."
-        )
+        raise MS365AuthError("No valid Microsoft 365 token found. Run 'pincer setup-ms365' to authenticate.")
 
     async def device_code_flow(self) -> dict[str, Any]:
         """Run device code flow: user enters code in browser. Returns MSAL result."""
@@ -154,8 +152,7 @@ class MS365Auth:
             raise MS365AuthError(f"Device flow failed: {flow.get('error_description', 'unknown error')}")
 
         self._pending_flow_message = (
-            f"To sign in, visit https://microsoft.com/devicelogin "
-            f"and enter code: {flow['user_code']}"
+            f"To sign in, visit https://microsoft.com/devicelogin and enter code: {flow['user_code']}"
         )
 
         # This blocks until user completes auth (up to 15 min)

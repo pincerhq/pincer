@@ -215,7 +215,8 @@ async def outlook__create_event(
                 "emailAddress": {"address": addr.strip()},
                 "type": "required",
             }
-            for addr in attendees.split(",") if addr.strip()
+            for addr in attendees.split(",")
+            if addr.strip()
         ]
     if is_online_meeting:
         body["isOnlineMeeting"] = True
@@ -225,12 +226,7 @@ async def outlook__create_event(
     extra = ""
     if (result.get("onlineMeeting") or {}).get("joinUrl"):
         extra = f"\nTeams link: {result['onlineMeeting']['joinUrl']}"
-    return (
-        f"Event created: '{subject}'\n"
-        f"Start: {start} | End: {end}\n"
-        f"ID: {result.get('id', '')}"
-        f"{extra}"
-    )
+    return f"Event created: '{subject}'\nStart: {start} | End: {end}\nID: {result.get('id', '')}{extra}"
 
 
 async def outlook__update_event(
@@ -323,11 +319,7 @@ async def outlook__create_online_meeting(
     result = await client.post("/me/onlineMeetings", json=body)
     join_url = result.get("joinWebUrl", "")
     meeting_id = result.get("id", "")
-    return (
-        f"Online meeting created: '{subject}'\n"
-        f"Join URL: {join_url}\n"
-        f"Meeting ID: {meeting_id}"
-    )
+    return f"Online meeting created: '{subject}'\nJoin URL: {join_url}\nMeeting ID: {meeting_id}"
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
@@ -340,6 +332,7 @@ def register_calendar_tools(registry: ToolRegistry, client: GraphClient) -> int:
         @functools.wraps(fn)
         async def wrapper(**kwargs: Any) -> str:
             return await fn(client, **kwargs)
+
         return wrapper
 
     registry.register(

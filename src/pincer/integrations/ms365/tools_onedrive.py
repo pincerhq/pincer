@@ -131,12 +131,7 @@ async def onedrive__download_file(
         return f"File: {name}\nContent:\n{text[:5000]}"
 
     encoded = base64.b64encode(content).decode("ascii")
-    return (
-        f"File: {name}\n"
-        f"Type: {mime}\n"
-        f"Size: {size} bytes\n"
-        f"Content: [base64, {len(encoded)} chars]"
-    )
+    return f"File: {name}\nType: {mime}\nSize: {size} bytes\nContent: [base64, {len(encoded)} chars]"
 
 
 async def onedrive__get_file_preview(
@@ -201,11 +196,7 @@ async def onedrive__upload_file(
         file_bytes = base64.b64decode(content)
 
     result = await client.put(api_path, content=file_bytes, content_type=content_type)
-    return (
-        f"File uploaded: {path}\n"
-        f"Size: {result.get('size', len(file_bytes))} bytes\n"
-        f"ID: {result.get('id', '')}"
-    )
+    return f"File uploaded: {path}\nSize: {result.get('size', len(file_bytes))} bytes\nID: {result.get('id', '')}"
 
 
 async def onedrive__create_folder(
@@ -306,6 +297,7 @@ def register_onedrive_tools(registry: ToolRegistry, client: GraphClient) -> int:
         @functools.wraps(fn)
         async def wrapper(**kwargs: Any) -> str:
             return await fn(client, **kwargs)
+
         return wrapper
 
     registry.register(
