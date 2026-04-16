@@ -20,9 +20,7 @@ logger = logging.getLogger(__name__)
 # ── pins ───────────────────────────────────────────────────────────────────────
 
 
-async def slack__pin_message(
-    client: SlackClient, channel: str, timestamp: str
-) -> str:
+async def slack__pin_message(client: SlackClient, channel: str, timestamp: str) -> str:
     """Pin a message to a channel."""
     try:
         await client.bot.pins_add(channel=channel, timestamp=timestamp)
@@ -31,9 +29,7 @@ async def slack__pin_message(
         return f"Error pinning message: {exc}"
 
 
-async def slack__unpin_message(
-    client: SlackClient, channel: str, timestamp: str
-) -> str:
+async def slack__unpin_message(client: SlackClient, channel: str, timestamp: str) -> str:
     """Unpin a message from a channel."""
     try:
         await client.bot.pins_remove(channel=channel, timestamp=timestamp)
@@ -95,18 +91,13 @@ async def slack__list_bookmarks(client: SlackClient, channel_id: str) -> str:
         bookmarks = resp.get("bookmarks", [])
         if not bookmarks:
             return f"No bookmarks in {channel_id}."
-        lines = [
-            f"'{bm.get('title', '?')}' — {bm.get('link', '')} (ID: {bm.get('id', '?')})"
-            for bm in bookmarks
-        ]
+        lines = [f"'{bm.get('title', '?')}' — {bm.get('link', '')} (ID: {bm.get('id', '?')})" for bm in bookmarks]
         return f"Bookmarks in {channel_id} ({len(lines)}):\n" + "\n".join(lines)
     except Exception as exc:
         return f"Error listing bookmarks: {exc}"
 
 
-async def slack__remove_bookmark(
-    client: SlackClient, channel_id: str, bookmark_id: str
-) -> str:
+async def slack__remove_bookmark(client: SlackClient, channel_id: str, bookmark_id: str) -> str:
     """Remove a bookmark from a channel."""
     try:
         await client.bot.bookmarks_remove(channel_id=channel_id, bookmark_id=bookmark_id)
@@ -135,10 +126,7 @@ async def slack__create_reminder(
             kwargs["user"] = user
         resp = await client.bot.reminders_add(**kwargs)
         r = resp.get("reminder", {})
-        return (
-            f"Reminder created: '{r.get('text', text)}' "
-            f"(ID: {r.get('id', '?')}, time: {r.get('time', time)})"
-        )
+        return f"Reminder created: '{r.get('text', text)}' (ID: {r.get('id', '?')}, time: {r.get('time', time)})"
     except Exception as exc:
         return f"Error creating reminder: {exc}"
 
@@ -153,10 +141,7 @@ async def slack__list_reminders(client: SlackClient) -> str:
         lines = []
         for r in reminders:
             complete = " [complete]" if r.get("complete_ts") else ""
-            lines.append(
-                f"ID: {r.get('id', '?')} | time: {r.get('time', '?')} | "
-                f"'{r.get('text', '')}'{complete}"
-            )
+            lines.append(f"ID: {r.get('id', '?')} | time: {r.get('time', '?')} | '{r.get('text', '')}'{complete}")
         return f"Found {len(lines)} reminder(s):\n" + "\n".join(lines)
     except Exception as exc:
         return f"Error listing reminders: {exc}"
@@ -338,10 +323,7 @@ def register_misc_tools(registry: ToolRegistry, client: SlackClient) -> int:
     )
     registry.register(
         name="slack__create_reminder",
-        description=(
-            "Create a Slack reminder. "
-            "time can be natural language ('tomorrow 9am') or a Unix timestamp."
-        ),
+        description=("Create a Slack reminder. time can be natural language ('tomorrow 9am') or a Unix timestamp."),
         handler=_h(slack__create_reminder),
         parameters={
             "type": "object",
@@ -384,8 +366,7 @@ def register_misc_tools(registry: ToolRegistry, client: SlackClient) -> int:
     registry.register(
         name="slack__search_messages",
         description=(
-            "Full-text search across all Slack messages. "
-            "Requires a user token (SLACK_USER_TOKEN) for access."
+            "Full-text search across all Slack messages. Requires a user token (SLACK_USER_TOKEN) for access."
         ),
         handler=_h(slack__search_messages),
         parameters={
@@ -400,10 +381,7 @@ def register_misc_tools(registry: ToolRegistry, client: SlackClient) -> int:
     )
     registry.register(
         name="slack__search_files",
-        description=(
-            "Full-text search for files across the workspace. "
-            "Requires a user token (SLACK_USER_TOKEN)."
-        ),
+        description=("Full-text search for files across the workspace. Requires a user token (SLACK_USER_TOKEN)."),
         handler=_h(slack__search_files),
         parameters={
             "type": "object",

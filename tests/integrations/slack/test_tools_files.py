@@ -6,7 +6,7 @@ import pytest
 
 
 def fake_resp(**kwargs):
-    d = {'ok': True}
+    d = {"ok": True}
     d.update(kwargs)
     return d
 
@@ -25,8 +25,7 @@ async def test_list_files_with_data(mock_client):
 
     mock_client.bot.files_list.return_value = fake_resp(
         files=[
-            {"id": "F001", "name": "report.pdf", "size": 1024, "filetype": "pdf",
-             "pretty_type": "PDF", "user": "U001"},
+            {"id": "F001", "name": "report.pdf", "size": 1024, "filetype": "pdf", "pretty_type": "PDF", "user": "U001"},
         ]
     )
     result = await slack__list_files(mock_client)
@@ -40,10 +39,15 @@ async def test_get_file_info(mock_client):
 
     mock_client.bot.files_info.return_value = fake_resp(
         file={
-            "id": "F001", "name": "report.pdf", "size": 2048,
-            "pretty_type": "PDF", "filetype": "pdf",
-            "title": "Q4 Report", "user": "U001",
-            "created": 1700000000, "url_private": "https://files.slack.com/F001",
+            "id": "F001",
+            "name": "report.pdf",
+            "size": 2048,
+            "pretty_type": "PDF",
+            "filetype": "pdf",
+            "title": "Q4 Report",
+            "user": "U001",
+            "created": 1700000000,
+            "url_private": "https://files.slack.com/F001",
             "channels": ["C001"],
         }
     )
@@ -65,9 +69,7 @@ async def test_upload_file_no_content(mock_client):
 async def test_upload_file_with_content(mock_client):
     from pincer.integrations.slack.tools_files import slack__upload_file
 
-    result = await slack__upload_file(
-        mock_client, channel="C001", content="print('hello')", filename="hello.py"
-    )
+    result = await slack__upload_file(mock_client, channel="C001", content="print('hello')", filename="hello.py")
     assert "F123" in result or "uploaded" in result.lower()
 
 
@@ -99,9 +101,7 @@ async def test_list_remote_files_empty(mock_client):
 async def test_add_remote_file(mock_client):
     from pincer.integrations.slack.tools_files import slack__add_remote_file
 
-    result = await slack__add_remote_file(
-        mock_client, title="Google Doc", external_url="https://docs.google.com/123"
-    )
+    result = await slack__add_remote_file(mock_client, title="Google Doc", external_url="https://docs.google.com/123")
     assert "added" in result.lower() or "F123" in result
 
 

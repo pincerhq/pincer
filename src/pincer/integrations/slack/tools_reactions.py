@@ -20,9 +20,7 @@ logger = logging.getLogger(__name__)
 # ── tool functions ─────────────────────────────────────────────────────────────
 
 
-async def slack__add_reaction(
-    client: SlackClient, channel: str, timestamp: str, name: str
-) -> str:
+async def slack__add_reaction(client: SlackClient, channel: str, timestamp: str, name: str) -> str:
     """Add an emoji reaction to a message.
 
     name: emoji name without colons (e.g. 'thumbsup').
@@ -34,9 +32,7 @@ async def slack__add_reaction(
         return f"Error adding reaction: {exc}"
 
 
-async def slack__remove_reaction(
-    client: SlackClient, channel: str, timestamp: str, name: str
-) -> str:
+async def slack__remove_reaction(client: SlackClient, channel: str, timestamp: str, name: str) -> str:
     """Remove an emoji reaction from a message."""
     try:
         await client.bot.reactions_remove(channel=channel, timestamp=timestamp, name=name)
@@ -45,9 +41,7 @@ async def slack__remove_reaction(
         return f"Error removing reaction: {exc}"
 
 
-async def slack__get_message_reactions(
-    client: SlackClient, channel: str, timestamp: str
-) -> str:
+async def slack__get_message_reactions(client: SlackClient, channel: str, timestamp: str) -> str:
     """Get all emoji reactions on a specific message."""
     try:
         resp = await client.bot.reactions_get(channel=channel, timestamp=timestamp)
@@ -64,9 +58,7 @@ async def slack__get_message_reactions(
         return f"Error getting reactions: {exc}"
 
 
-async def slack__list_reactions(
-    client: SlackClient, user: str = "", full: bool = False
-) -> str:
+async def slack__list_reactions(client: SlackClient, user: str = "", full: bool = False) -> str:
     """List items the calling user (or specified user) has reacted to."""
     try:
         kwargs: dict[str, Any] = {"limit": 50, "full": full}
@@ -79,9 +71,7 @@ async def slack__list_reactions(
         lines = []
         for item in items:
             kind = item.get("type", "?")
-            reactions = [
-                f":{r.get('name')}:" for r in item.get("reactions", [])
-            ]
+            reactions = [f":{r.get('name')}:" for r in item.get("reactions", [])]
             lines.append(f"{kind}: {', '.join(reactions)}")
         return f"Found {len(lines)} reacted item(s):\n" + "\n".join(lines)
     except Exception as exc:

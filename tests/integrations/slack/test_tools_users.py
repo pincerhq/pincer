@@ -6,7 +6,7 @@ import pytest
 
 
 def fake_resp(**kwargs):
-    d = {'ok': True}
+    d = {"ok": True}
     d.update(kwargs)
     return d
 
@@ -25,8 +25,14 @@ async def test_list_users_with_data(mock_client):
 
     mock_client.bot.users_list.return_value = fake_resp(
         members=[
-            {"id": "U001", "name": "alice", "real_name": "Alice Smith",
-             "is_bot": False, "deleted": False, "profile": {"email": "alice@example.com"}},
+            {
+                "id": "U001",
+                "name": "alice",
+                "real_name": "Alice Smith",
+                "is_bot": False,
+                "deleted": False,
+                "profile": {"email": "alice@example.com"},
+            },
         ],
         response_metadata={"next_cursor": ""},
     )
@@ -63,11 +69,19 @@ async def test_get_user_info(mock_client):
 
     mock_client.bot.users_info.return_value = fake_resp(
         user={
-            "id": "U001", "name": "alice", "real_name": "Alice Smith",
-            "is_bot": False, "is_admin": False, "tz": "America/New_York", "tz_label": "EST",
+            "id": "U001",
+            "name": "alice",
+            "real_name": "Alice Smith",
+            "is_bot": False,
+            "is_admin": False,
+            "tz": "America/New_York",
+            "tz_label": "EST",
             "profile": {
-                "email": "alice@example.com", "title": "Engineer",
-                "phone": "+1234567890", "status_emoji": ":coffee:", "status_text": "Coding",
+                "email": "alice@example.com",
+                "title": "Engineer",
+                "phone": "+1234567890",
+                "status_emoji": ":coffee:",
+                "status_text": "Coding",
             },
         }
     )
@@ -89,9 +103,7 @@ async def test_get_user_by_email(mock_client):
 async def test_set_user_status(mock_client):
     from pincer.integrations.slack.tools_users import slack__set_user_status
 
-    result = await slack__set_user_status(
-        mock_client, status_text="Working from home", status_emoji=":house:"
-    )
+    result = await slack__set_user_status(mock_client, status_text="Working from home", status_emoji=":house:")
     assert "Working from home" in result
 
 
@@ -117,8 +129,7 @@ async def test_list_user_groups_with_data(mock_client):
 
     mock_client.bot.usergroups_list.return_value = fake_resp(
         usergroups=[
-            {"id": "S001", "name": "Engineering", "handle": "eng",
-             "user_count": 5, "date_delete": None},
+            {"id": "S001", "name": "Engineering", "handle": "eng", "user_count": 5, "date_delete": None},
         ]
     )
     result = await slack__list_user_groups(mock_client)
@@ -130,9 +141,7 @@ async def test_list_user_groups_with_data(mock_client):
 async def test_get_user_group_members(mock_client):
     from pincer.integrations.slack.tools_users import slack__get_user_group_members
 
-    mock_client.bot.usergroups_users_list.return_value = fake_resp(
-        users=["U001", "U002"]
-    )
+    mock_client.bot.usergroups_users_list.return_value = fake_resp(users=["U001", "U002"])
     result = await slack__get_user_group_members(mock_client, usergroup="S001")
     assert "U001" in result
     assert "2" in result

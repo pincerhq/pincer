@@ -6,7 +6,7 @@ import pytest
 
 
 def fake_resp(**kwargs):
-    d = {'ok': True}
+    d = {"ok": True}
     d.update(kwargs)
     return d
 
@@ -100,9 +100,7 @@ async def test_post_message_with_thread_ts(mock_client):
 async def test_post_threaded_reply(mock_client):
     from pincer.integrations.slack.tools_messages import slack__post_threaded_reply
 
-    result = await slack__post_threaded_reply(
-        mock_client, channel="C001", thread_ts="1.0", text="My reply"
-    )
+    result = await slack__post_threaded_reply(mock_client, channel="C001", thread_ts="1.0", text="My reply")
     assert "1.0" in result or "Reply posted" in result
 
 
@@ -110,9 +108,7 @@ async def test_post_threaded_reply(mock_client):
 async def test_post_ephemeral(mock_client):
     from pincer.integrations.slack.tools_messages import slack__post_ephemeral
 
-    result = await slack__post_ephemeral(
-        mock_client, channel="C001", user="U001", text="Only you see this"
-    )
+    result = await slack__post_ephemeral(mock_client, channel="C001", user="U001", text="Only you see this")
     assert "Ephemeral" in result or "U001" in result
 
 
@@ -136,9 +132,7 @@ async def test_delete_message(mock_client):
 async def test_schedule_message(mock_client):
     from pincer.integrations.slack.tools_messages import slack__schedule_message
 
-    result = await slack__schedule_message(
-        mock_client, channel="C001", text="Future", post_at=9999999999
-    )
+    result = await slack__schedule_message(mock_client, channel="C001", text="Future", post_at=9999999999)
     assert "scheduled" in result.lower() or "Qxxx" in result
 
 
@@ -154,9 +148,7 @@ async def test_list_scheduled_messages_empty(mock_client):
 async def test_delete_scheduled_message(mock_client):
     from pincer.integrations.slack.tools_messages import slack__delete_scheduled_message
 
-    result = await slack__delete_scheduled_message(
-        mock_client, channel="C001", scheduled_message_id="Qxxx"
-    )
+    result = await slack__delete_scheduled_message(mock_client, channel="C001", scheduled_message_id="Qxxx")
     assert "cancelled" in result.lower() or "Qxxx" in result
 
 
@@ -176,9 +168,7 @@ async def test_post_message_with_blocks(mock_client):
 async def test_post_message_with_blocks_invalid_json(mock_client):
     from pincer.integrations.slack.tools_messages import slack__post_message_with_blocks
 
-    result = await slack__post_message_with_blocks(
-        mock_client, channel="C001", blocks_json="not-json"
-    )
+    result = await slack__post_message_with_blocks(mock_client, channel="C001", blocks_json="not-json")
     assert "Error" in result
 
 
@@ -216,9 +206,7 @@ async def test_post_dm_by_email(mock_client):
 async def test_post_broadcast_reply(mock_client):
     from pincer.integrations.slack.tools_messages import slack__post_broadcast_reply
 
-    result = await slack__post_broadcast_reply(
-        mock_client, channel="C001", thread_ts="1.0", text="See this!"
-    )
+    result = await slack__post_broadcast_reply(mock_client, channel="C001", thread_ts="1.0", text="See this!")
     assert "Broadcast" in result or "1.0" in result
 
 

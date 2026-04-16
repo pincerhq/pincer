@@ -35,16 +35,12 @@ def _fmt_user(u: dict[str, Any]) -> str:
 # ── tool functions ─────────────────────────────────────────────────────────────
 
 
-async def slack__list_users(
-    client: SlackClient, include_bots: bool = False, limit: int = 200
-) -> str:
+async def slack__list_users(client: SlackClient, include_bots: bool = False, limit: int = 200) -> str:
     """List all workspace members."""
     try:
         from pincer.integrations.slack.pagination import paginate
 
-        users = await paginate(
-            client.bot.users_list, "members", limit=min(limit, 200)
-        )
+        users = await paginate(client.bot.users_list, "members", limit=min(limit, 200))
         if not include_bots:
             users = [u for u in users if not u.get("is_bot") and not u.get("deleted")]
         if not users:
@@ -119,22 +115,15 @@ async def slack__get_user_presence(client: SlackClient, user: str) -> str:
         online = resp.get("online", False)
         auto_away = resp.get("auto_away", False)
         manual_away = resp.get("manual_away", False)
-        return (
-            f"User {user}: presence={presence}, online={online}, "
-            f"auto_away={auto_away}, manual_away={manual_away}"
-        )
+        return f"User {user}: presence={presence}, online={online}, auto_away={auto_away}, manual_away={manual_away}"
     except Exception as exc:
         return f"Error getting user presence: {exc}"
 
 
-async def slack__list_user_groups(
-    client: SlackClient, include_disabled: bool = False
-) -> str:
+async def slack__list_user_groups(client: SlackClient, include_disabled: bool = False) -> str:
     """List all user groups (teams/departments) in the workspace."""
     try:
-        resp = await client.bot.usergroups_list(
-            include_disabled=include_disabled, include_users=False
-        )
+        resp = await client.bot.usergroups_list(include_disabled=include_disabled, include_users=False)
         groups = resp.get("usergroups", [])
         if not groups:
             return "No user groups found."
@@ -150,9 +139,7 @@ async def slack__list_user_groups(
         return f"Error listing user groups: {exc}"
 
 
-async def slack__get_user_group_members(
-    client: SlackClient, usergroup: str
-) -> str:
+async def slack__get_user_group_members(client: SlackClient, usergroup: str) -> str:
     """List all members of a user group."""
     try:
         resp = await client.bot.usergroups_users_list(usergroup=usergroup)
@@ -208,13 +195,8 @@ async def slack__update_user_group(
         # Update members if provided
         if users:
             user_list = [u.strip() for u in users.split(",") if u.strip()]
-            await client.bot.usergroups_users_update(
-                usergroup=usergroup, users=user_list
-            )
-            return (
-                f"User group {g.get('name', usergroup)} updated, members set to: "
-                + ", ".join(user_list)
-            )
+            await client.bot.usergroups_users_update(usergroup=usergroup, users=user_list)
+            return f"User group {g.get('name', usergroup)} updated, members set to: " + ", ".join(user_list)
         return f"User group updated: {g.get('name', usergroup)}"
     except Exception as exc:
         return f"Error updating user group: {exc}"

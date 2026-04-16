@@ -90,9 +90,7 @@ async def validate_bot_token(bot_token: str) -> dict[str, str]:
     try:
         from slack_sdk.web.async_client import AsyncWebClient
     except ImportError as exc:
-        raise RuntimeError(
-            "slack-sdk not installed. Run: uv pip install 'pincer-agent[slack]'"
-        ) from exc
+        raise RuntimeError("slack-sdk not installed. Run: uv pip install 'pincer-agent[slack]'") from exc
 
     client = AsyncWebClient(token=bot_token)
     try:

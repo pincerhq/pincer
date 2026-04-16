@@ -6,7 +6,7 @@ import pytest
 
 
 def fake_resp(**kwargs):
-    d = {'ok': True}
+    d = {"ok": True}
     d.update(kwargs)
     return d
 
@@ -56,9 +56,7 @@ async def test_list_pins_with_data(mock_client):
 async def test_add_bookmark(mock_client):
     from pincer.integrations.slack.tools_misc import slack__add_bookmark
 
-    result = await slack__add_bookmark(
-        mock_client, channel_id="C001", title="Docs", link="https://docs.example.com"
-    )
+    result = await slack__add_bookmark(mock_client, channel_id="C001", title="Docs", link="https://docs.example.com")
     assert "added" in result.lower() or "Bk123" in result
 
 
@@ -96,12 +94,8 @@ async def test_remove_bookmark(mock_client):
 async def test_create_reminder(mock_client):
     from pincer.integrations.slack.tools_misc import slack__create_reminder
 
-    mock_client.bot.reminders_add.return_value = fake_resp(
-        reminder={"id": "Rm123", "text": "Follow up", "time": 9999}
-    )
-    result = await slack__create_reminder(
-        mock_client, text="Follow up", time="tomorrow 9am"
-    )
+    mock_client.bot.reminders_add.return_value = fake_resp(reminder={"id": "Rm123", "text": "Follow up", "time": 9999})
+    result = await slack__create_reminder(mock_client, text="Follow up", time="tomorrow 9am")
     assert "Reminder created" in result or "Rm123" in result
     assert "Follow up" in result
 
@@ -119,9 +113,7 @@ async def test_list_reminders_with_data(mock_client):
     from pincer.integrations.slack.tools_misc import slack__list_reminders
 
     mock_client.bot.reminders_list.return_value = fake_resp(
-        reminders=[
-            {"id": "Rm001", "text": "Review PR", "time": 9999999, "complete_ts": None}
-        ]
+        reminders=[{"id": "Rm001", "text": "Review PR", "time": 9999999, "complete_ts": None}]
     )
     result = await slack__list_reminders(mock_client)
     assert "Review PR" in result
@@ -246,6 +238,12 @@ async def test_misc_read_tools_no_approval():
     client = MagicMock()
     register_misc_tools(registry, client)
 
-    for name in ["slack__list_pins", "slack__list_bookmarks", "slack__list_reminders",
-                 "slack__complete_reminder", "slack__search_messages", "slack__search_files"]:
+    for name in [
+        "slack__list_pins",
+        "slack__list_bookmarks",
+        "slack__list_reminders",
+        "slack__complete_reminder",
+        "slack__search_messages",
+        "slack__search_files",
+    ]:
         assert not registry.requires_approval(name), f"{name} should NOT require approval"

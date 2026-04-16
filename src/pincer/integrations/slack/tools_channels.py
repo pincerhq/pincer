@@ -80,9 +80,7 @@ async def slack__get_channel_info(client: SlackClient, channel: str) -> str:
         return f"Error getting channel info: {exc}"
 
 
-async def slack__list_channel_members(
-    client: SlackClient, channel: str, limit: int = 200
-) -> str:
+async def slack__list_channel_members(client: SlackClient, channel: str, limit: int = 200) -> str:
     """List all member user IDs in a channel."""
     try:
         from pincer.integrations.slack.pagination import paginate
@@ -100,9 +98,7 @@ async def slack__list_channel_members(
         return f"Error listing channel members: {exc}"
 
 
-async def slack__create_channel(
-    client: SlackClient, name: str, is_private: bool = False
-) -> str:
+async def slack__create_channel(client: SlackClient, name: str, is_private: bool = False) -> str:
     """Create a new public or private channel."""
     try:
         resp = await client.bot.conversations_create(name=name, is_private=is_private)
@@ -141,9 +137,7 @@ async def slack__rename_channel(client: SlackClient, channel: str, name: str) ->
         return f"Error renaming channel: {exc}"
 
 
-async def slack__set_channel_topic(
-    client: SlackClient, channel: str, topic: str
-) -> str:
+async def slack__set_channel_topic(client: SlackClient, channel: str, topic: str) -> str:
     """Set the topic for a channel."""
     try:
         await client.bot.conversations_setTopic(channel=channel, topic=topic)
@@ -152,9 +146,7 @@ async def slack__set_channel_topic(
         return f"Error setting channel topic: {exc}"
 
 
-async def slack__set_channel_purpose(
-    client: SlackClient, channel: str, purpose: str
-) -> str:
+async def slack__set_channel_purpose(client: SlackClient, channel: str, purpose: str) -> str:
     """Set the purpose/description for a channel."""
     try:
         await client.bot.conversations_setPurpose(channel=channel, purpose=purpose)
@@ -182,9 +174,7 @@ async def slack__leave_channel(client: SlackClient, channel: str) -> str:
         return f"Error leaving channel: {exc}"
 
 
-async def slack__invite_to_channel(
-    client: SlackClient, channel: str, users: str
-) -> str:
+async def slack__invite_to_channel(client: SlackClient, channel: str, users: str) -> str:
     """Invite one or more users (comma-separated IDs) to a channel."""
     try:
         user_list = [u.strip() for u in users.split(",") if u.strip()]
@@ -194,9 +184,7 @@ async def slack__invite_to_channel(
         return f"Error inviting to channel: {exc}"
 
 
-async def slack__kick_from_channel(
-    client: SlackClient, channel: str, user: str
-) -> str:
+async def slack__kick_from_channel(client: SlackClient, channel: str, user: str) -> str:
     """Remove a user from a channel."""
     try:
         await client.bot.conversations_kick(channel=channel, user=user)
@@ -226,9 +214,7 @@ async def slack__open_group_dm(client: SlackClient, users: str) -> str:
         return f"Error opening group DM: {exc}"
 
 
-async def slack__list_dm_conversations(
-    client: SlackClient, limit: int = 100
-) -> str:
+async def slack__list_dm_conversations(client: SlackClient, limit: int = 100) -> str:
     """List all open DM (im) and multi-person DM (mpim) conversations."""
     try:
         from pincer.integrations.slack.pagination import paginate
@@ -269,8 +255,7 @@ def register_channel_tools(registry: ToolRegistry, client: SlackClient) -> int:
     registry.register(
         name="slack__list_channels",
         description=(
-            "List all channels in the Slack workspace. "
-            "Use types to filter: public_channel, private_channel, im, mpim."
+            "List all channels in the Slack workspace. Use types to filter: public_channel, private_channel, im, mpim."
         ),
         handler=_h(slack__list_channels),
         parameters={

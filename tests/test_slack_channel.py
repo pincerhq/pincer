@@ -306,9 +306,7 @@ async def test_mention_strips_bot_id_from_text() -> None:
     ch._identity = make_identity()
 
     mock_client = AsyncMock()
-    mock_client.users_info = AsyncMock(
-        return_value={"user": {"profile": {"display_name": "Bob", "real_name": "Bob"}}}
-    )
+    mock_client.users_info = AsyncMock(return_value={"user": {"profile": {"display_name": "Bob", "real_name": "Bob"}}})
 
     event = {
         "user": "U_BOB",
@@ -339,9 +337,7 @@ async def test_channel_message_replied_in_thread() -> None:
     ch._identity = make_identity()
 
     mock_client = AsyncMock()
-    mock_client.users_info = AsyncMock(
-        return_value={"user": {"profile": {"display_name": "Eve", "real_name": "Eve"}}}
-    )
+    mock_client.users_info = AsyncMock(return_value={"user": {"profile": {"display_name": "Eve", "real_name": "Eve"}}})
 
     event = {
         "user": "U_EVE",
@@ -377,6 +373,7 @@ async def test_skip_own_messages() -> None:
         def decorator(fn):
             registered[event_type] = fn
             return fn
+
         return decorator
 
     mock_app.event = event_decorator
@@ -415,6 +412,7 @@ async def test_skip_bot_messages() -> None:
         def decorator(fn):
             registered[event_type] = fn
             return fn
+
         return decorator
 
     mock_app.event = event_decorator
@@ -451,6 +449,7 @@ async def test_skip_message_subtypes() -> None:
         def decorator(fn):
             registered[event_type] = fn
             return fn
+
         return decorator
 
     mock_app.event = event_decorator
@@ -621,9 +620,7 @@ async def test_channel_message_session_key_format() -> None:
     ch._identity = make_identity()
 
     mock_client = AsyncMock()
-    mock_client.users_info = AsyncMock(
-        return_value={"user": {"profile": {"display_name": "Eve", "real_name": "Eve"}}}
-    )
+    mock_client.users_info = AsyncMock(return_value={"user": {"profile": {"display_name": "Eve", "real_name": "Eve"}}})
     event = {
         "user": "U_EVE",
         "channel": "C_ENG",

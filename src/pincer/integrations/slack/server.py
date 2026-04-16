@@ -25,18 +25,14 @@ def _build_fastmcp() -> object:
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:
-        raise RuntimeError(
-            "mcp package not installed. Run: uv pip install 'pincer-agent[mcp]'"
-        ) from exc
+        raise RuntimeError("mcp package not installed. Run: uv pip install 'pincer-agent[mcp]'") from exc
 
     from pincer.integrations.slack import get_slack_client, register_all_tools
     from pincer.tools.registry import ToolRegistry
 
     client = get_slack_client()
     if client is None:
-        raise RuntimeError(
-            "Slack tokens not configured. Run: pincer setup-slack"
-        )
+        raise RuntimeError("Slack tokens not configured. Run: pincer setup-slack")
 
     registry = ToolRegistry()
     count = register_all_tools(registry, client)

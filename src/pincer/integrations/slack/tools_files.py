@@ -81,9 +81,7 @@ async def slack__get_file_info(client: SlackClient, file: str) -> str:
         return f"Error getting file info: {exc}"
 
 
-async def slack__download_file(
-    client: SlackClient, file: str, save_path: str = ""
-) -> str:
+async def slack__download_file(client: SlackClient, file: str, save_path: str = "") -> str:
     """Download a Slack file to disk.
 
     file: File ID (F...).
@@ -167,9 +165,7 @@ async def slack__upload_file(
         return f"Error uploading file: {exc}"
 
 
-async def slack__share_file(
-    client: SlackClient, file: str, channels: str
-) -> str:
+async def slack__share_file(client: SlackClient, file: str, channels: str) -> str:
     """Share an existing file to additional channels (comma-separated channel IDs)."""
     try:
         channel_list = [c.strip() for c in channels.split(",") if c.strip()]
@@ -203,10 +199,7 @@ async def slack__list_remote_files(client: SlackClient, count: int = 20) -> str:
         files = resp.get("files", [])
         if not files:
             return "No remote files found."
-        lines = [
-            f"{f.get('title', '?')} (ID: {f.get('id', '?')}, url: {f.get('external_url', '')})"
-            for f in files
-        ]
+        lines = [f"{f.get('title', '?')} (ID: {f.get('id', '?')}, url: {f.get('external_url', '')})" for f in files]
         return f"Found {len(lines)} remote file(s):\n" + "\n".join(lines)
     except Exception as exc:
         return f"Error listing remote files: {exc}"

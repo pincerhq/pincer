@@ -27,9 +27,7 @@ class SlackClient:
         try:
             from slack_sdk.web.async_client import AsyncWebClient
         except ImportError as exc:
-            raise RuntimeError(
-                "slack-sdk not installed. Run: uv pip install 'pincer-agent[slack]'"
-            ) from exc
+            raise RuntimeError("slack-sdk not installed. Run: uv pip install 'pincer-agent[slack]'") from exc
 
         if not bot_token:
             raise ValueError("bot_token must be non-empty")

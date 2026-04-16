@@ -8,7 +8,7 @@ import pytest
 
 
 def fake_resp(**kwargs):
-    d = {'ok': True}
+    d = {"ok": True}
     d.update(kwargs)
     return d
 
@@ -96,9 +96,7 @@ async def test_create_channel(mock_client):
 async def test_create_channel_private(mock_client):
     from pincer.integrations.slack.tools_channels import slack__create_channel
 
-    mock_client.bot.conversations_create.return_value = fake_resp(
-        channel={"id": "C999", "name": "secret"}
-    )
+    mock_client.bot.conversations_create.return_value = fake_resp(channel={"id": "C999", "name": "secret"})
     result = await slack__create_channel(mock_client, name="secret", is_private=True)
     assert "private" in result
 

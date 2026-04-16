@@ -9,7 +9,7 @@ import pytest
 
 
 def fake_resp(**kwargs):
-    d = {'ok': True}
+    d = {"ok": True}
     d.update(kwargs)
     return d
 
@@ -24,6 +24,7 @@ async def test_get_slack_client_no_tokens():
 
     with patch("pincer.integrations.slack.auth.load_tokens") as mock_load:
         from pincer.integrations.slack.auth import SlackTokens
+
         mock_load.return_value = SlackTokens()
         result = get_slack_client()
     assert result is None
@@ -39,6 +40,7 @@ async def test_get_slack_client_with_token():
         patch("pincer.integrations.slack.client.SlackClient.__init__", return_value=None),
     ):
         from pincer.integrations.slack.auth import SlackTokens
+
         mock_load.return_value = SlackTokens(bot_token="xoxb-test-123")
         result = get_slack_client()
     assert result is not None
@@ -106,6 +108,7 @@ async def test_token_load_from_file(tmp_path):
         patch("pincer.integrations.slack.config.load_config") as mock_cfg,
     ):
         from pincer.integrations.slack.config import SlackIntegrationConfig
+
         mock_cfg.return_value = SlackIntegrationConfig()
 
         # Simulate no env vars by loading directly from file
@@ -192,25 +195,47 @@ def test_all_write_tools_require_approval():
     # These tools should require approval per the spec
     approval_required = {
         # Channels
-        "slack__create_channel", "slack__archive_channel", "slack__unarchive_channel",
-        "slack__rename_channel", "slack__set_channel_topic", "slack__set_channel_purpose",
-        "slack__join_channel", "slack__leave_channel", "slack__invite_to_channel",
+        "slack__create_channel",
+        "slack__archive_channel",
+        "slack__unarchive_channel",
+        "slack__rename_channel",
+        "slack__set_channel_topic",
+        "slack__set_channel_purpose",
+        "slack__join_channel",
+        "slack__leave_channel",
+        "slack__invite_to_channel",
         "slack__kick_from_channel",
         # Messages
-        "slack__post_message", "slack__post_threaded_reply", "slack__post_ephemeral",
-        "slack__update_message", "slack__delete_message", "slack__schedule_message",
-        "slack__delete_scheduled_message", "slack__post_message_with_blocks",
-        "slack__share_message", "slack__post_dm", "slack__post_broadcast_reply",
+        "slack__post_message",
+        "slack__post_threaded_reply",
+        "slack__post_ephemeral",
+        "slack__update_message",
+        "slack__delete_message",
+        "slack__schedule_message",
+        "slack__delete_scheduled_message",
+        "slack__post_message_with_blocks",
+        "slack__share_message",
+        "slack__post_dm",
+        "slack__post_broadcast_reply",
         # Files
-        "slack__upload_file", "slack__share_file", "slack__delete_file",
-        "slack__add_remote_file", "slack__update_remote_file", "slack__remove_remote_file",
+        "slack__upload_file",
+        "slack__share_file",
+        "slack__delete_file",
+        "slack__add_remote_file",
+        "slack__update_remote_file",
+        "slack__remove_remote_file",
         # Users
-        "slack__set_user_status", "slack__create_user_group",
-        "slack__update_user_group", "slack__disable_user_group",
+        "slack__set_user_status",
+        "slack__create_user_group",
+        "slack__update_user_group",
+        "slack__disable_user_group",
         # Misc
-        "slack__pin_message", "slack__unpin_message",
-        "slack__add_bookmark", "slack__remove_bookmark",
-        "slack__create_reminder", "slack__delete_reminder",
+        "slack__pin_message",
+        "slack__unpin_message",
+        "slack__add_bookmark",
+        "slack__remove_bookmark",
+        "slack__create_reminder",
+        "slack__delete_reminder",
     }
 
     for name in approval_required:
@@ -228,19 +253,40 @@ def test_read_tools_no_approval():
     register_all_tools(registry, client)
 
     read_only = {
-        "slack__list_channels", "slack__get_channel_info", "slack__list_channel_members",
-        "slack__get_channel_history", "slack__get_thread_replies", "slack__get_message_permalink",
-        "slack__list_scheduled_messages", "slack__get_unread_messages",
-        "slack__mark_channel_read", "slack__summarize_channel",
-        "slack__list_files", "slack__get_file_info", "slack__download_file",
-        "slack__list_remote_files", "slack__list_users", "slack__get_user_info",
-        "slack__get_user_by_email", "slack__get_user_presence", "slack__list_user_groups",
+        "slack__list_channels",
+        "slack__get_channel_info",
+        "slack__list_channel_members",
+        "slack__get_channel_history",
+        "slack__get_thread_replies",
+        "slack__get_message_permalink",
+        "slack__list_scheduled_messages",
+        "slack__get_unread_messages",
+        "slack__mark_channel_read",
+        "slack__summarize_channel",
+        "slack__list_files",
+        "slack__get_file_info",
+        "slack__download_file",
+        "slack__list_remote_files",
+        "slack__list_users",
+        "slack__get_user_info",
+        "slack__get_user_by_email",
+        "slack__get_user_presence",
+        "slack__list_user_groups",
         "slack__get_user_group_members",
-        "slack__add_reaction", "slack__remove_reaction", "slack__get_message_reactions",
-        "slack__list_reactions", "slack__list_emoji",
-        "slack__list_pins", "slack__list_bookmarks", "slack__list_reminders",
-        "slack__complete_reminder", "slack__search_messages", "slack__search_files",
-        "slack__open_dm", "slack__open_group_dm", "slack__list_dm_conversations",
+        "slack__add_reaction",
+        "slack__remove_reaction",
+        "slack__get_message_reactions",
+        "slack__list_reactions",
+        "slack__list_emoji",
+        "slack__list_pins",
+        "slack__list_bookmarks",
+        "slack__list_reminders",
+        "slack__complete_reminder",
+        "slack__search_messages",
+        "slack__search_files",
+        "slack__open_dm",
+        "slack__open_group_dm",
+        "slack__list_dm_conversations",
     }
 
     for name in read_only:

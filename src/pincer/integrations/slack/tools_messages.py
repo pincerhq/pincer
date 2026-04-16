@@ -60,9 +60,7 @@ async def slack__get_channel_history(
         return f"Error getting channel history: {exc}"
 
 
-async def slack__get_thread_replies(
-    client: SlackClient, channel: str, thread_ts: str
-) -> str:
+async def slack__get_thread_replies(client: SlackClient, channel: str, thread_ts: str) -> str:
     """Get all replies in a thread."""
     try:
         resp = await client.bot.conversations_replies(channel=channel, ts=thread_ts)
@@ -75,9 +73,7 @@ async def slack__get_thread_replies(
         return f"Error getting thread replies: {exc}"
 
 
-async def slack__get_message_permalink(
-    client: SlackClient, channel: str, message_ts: str
-) -> str:
+async def slack__get_message_permalink(client: SlackClient, channel: str, message_ts: str) -> str:
     """Get a permanent link to a specific message."""
     try:
         resp = await client.bot.chat_getPermalink(channel=channel, message_ts=message_ts)
@@ -118,18 +114,14 @@ async def slack__post_threaded_reply(
 ) -> str:
     """Reply in an existing thread."""
     try:
-        resp = await client.bot.chat_postMessage(
-            channel=channel, text=text, thread_ts=thread_ts
-        )
+        resp = await client.bot.chat_postMessage(channel=channel, text=text, thread_ts=thread_ts)
         ts = resp.get("ts", "?")
         return f"Reply posted in thread {thread_ts} (ts: {ts})"
     except Exception as exc:
         return f"Error posting threaded reply: {exc}"
 
 
-async def slack__post_ephemeral(
-    client: SlackClient, channel: str, user: str, text: str
-) -> str:
+async def slack__post_ephemeral(client: SlackClient, channel: str, user: str, text: str) -> str:
     """Send a message visible only to one user in a channel."""
     try:
         await client.bot.chat_postEphemeral(channel=channel, user=user, text=text)
@@ -138,9 +130,7 @@ async def slack__post_ephemeral(
         return f"Error posting ephemeral message: {exc}"
 
 
-async def slack__update_message(
-    client: SlackClient, channel: str, ts: str, text: str
-) -> str:
+async def slack__update_message(client: SlackClient, channel: str, ts: str, text: str) -> str:
     """Edit an existing message."""
     try:
         resp = await client.bot.chat_update(channel=channel, ts=ts, text=text)
@@ -169,9 +159,7 @@ async def slack__schedule_message(
     post_at is a Unix timestamp (seconds since epoch).
     """
     try:
-        resp = await client.bot.chat_scheduleMessage(
-            channel=channel, text=text, post_at=post_at
-        )
+        resp = await client.bot.chat_scheduleMessage(channel=channel, text=text, post_at=post_at)
         return (
             f"Message scheduled for {channel} at unix timestamp {post_at} "
             f"(scheduled_message_id: {resp.get('scheduled_message_id', '?')})"
@@ -180,9 +168,7 @@ async def slack__schedule_message(
         return f"Error scheduling message: {exc}"
 
 
-async def slack__list_scheduled_messages(
-    client: SlackClient, channel: str = ""
-) -> str:
+async def slack__list_scheduled_messages(client: SlackClient, channel: str = "") -> str:
     """List pending scheduled messages."""
     try:
         kwargs: dict[str, Any] = {}
@@ -203,14 +189,10 @@ async def slack__list_scheduled_messages(
         return f"Error listing scheduled messages: {exc}"
 
 
-async def slack__delete_scheduled_message(
-    client: SlackClient, channel: str, scheduled_message_id: str
-) -> str:
+async def slack__delete_scheduled_message(client: SlackClient, channel: str, scheduled_message_id: str) -> str:
     """Cancel a scheduled message before it is sent."""
     try:
-        await client.bot.chat_deleteScheduledMessage(
-            channel=channel, scheduled_message_id=scheduled_message_id
-        )
+        await client.bot.chat_deleteScheduledMessage(channel=channel, scheduled_message_id=scheduled_message_id)
         return f"Scheduled message {scheduled_message_id} cancelled."
     except Exception as exc:
         return f"Error deleting scheduled message: {exc}"
@@ -230,9 +212,7 @@ async def slack__post_message_with_blocks(
         import json
 
         blocks = json.loads(blocks_json)
-        resp = await client.bot.chat_postMessage(
-            channel=channel, blocks=blocks, text=text
-        )
+        resp = await client.bot.chat_postMessage(channel=channel, blocks=blocks, text=text)
         return f"Block Kit message posted to {channel} (ts: {resp.get('ts', '?')})"
     except Exception as exc:
         return f"Error posting block message: {exc}"
@@ -248,15 +228,11 @@ async def slack__share_message(
     """Forward/share a message to another channel by its timestamp."""
     try:
         # Get the permalink for the original message and attach it
-        perm_resp = await client.bot.chat_getPermalink(
-            channel=source_channel, message_ts=message_ts
-        )
+        perm_resp = await client.bot.chat_getPermalink(channel=source_channel, message_ts=message_ts)
         permalink = perm_resp.get("permalink", "")
         text = comment or "Shared message:"
         attachments = [{"text": "", "footer": permalink}]
-        resp = await client.bot.chat_postMessage(
-            channel=channel, text=text, attachments=attachments
-        )
+        resp = await client.bot.chat_postMessage(channel=channel, text=text, attachments=attachments)
         return f"Message shared to {channel} (ts: {resp.get('ts', '?')})"
     except Exception as exc:
         return f"Error sharing message: {exc}"
@@ -305,9 +281,7 @@ async def slack__post_broadcast_reply(
         return f"Error posting broadcast reply: {exc}"
 
 
-async def slack__get_unread_messages(
-    client: SlackClient, max_channels: int = 10
-) -> str:
+async def slack__get_unread_messages(client: SlackClient, max_channels: int = 10) -> str:
     """Get channels with unread messages and their counts."""
     try:
         from pincer.integrations.slack.pagination import paginate
@@ -323,9 +297,7 @@ async def slack__get_unread_messages(
         for c in channels:
             count = c.get("unread_count", 0)
             if count and count > 0:
-                unread.append(
-                    f"#{c.get('name', '?')} (ID: {c.get('id')}) — {count} unread"
-                )
+                unread.append(f"#{c.get('name', '?')} (ID: {c.get('id')}) — {count} unread")
         if not unread:
             return "No unread messages found."
         return f"Channels with unread messages ({len(unread)}):\n" + "\n".join(unread[:max_channels])
@@ -342,17 +314,13 @@ async def slack__mark_channel_read(client: SlackClient, channel: str, ts: str) -
         return f"Error marking channel read: {exc}"
 
 
-async def slack__summarize_channel(
-    client: SlackClient, channel: str, limit: int = 20
-) -> str:
+async def slack__summarize_channel(client: SlackClient, channel: str, limit: int = 20) -> str:
     """Fetch the last N messages from a channel for summarisation.
 
     Returns formatted message history — the calling agent should summarise it.
     """
     try:
-        resp = await client.bot.conversations_history(
-            channel=channel, limit=min(limit, 100)
-        )
+        resp = await client.bot.conversations_history(channel=channel, limit=min(limit, 100))
         messages = resp.get("messages", [])
         if not messages:
             return f"No messages found in {channel}."
@@ -622,8 +590,7 @@ def register_message_tools(registry: ToolRegistry, client: SlackClient) -> int:
     registry.register(
         name="slack__summarize_channel",
         description=(
-            "Fetch the last N messages from a channel. "
-            "Returns formatted history for summarisation by the agent."
+            "Fetch the last N messages from a channel. Returns formatted history for summarisation by the agent."
         ),
         handler=_h(slack__summarize_channel),
         parameters={

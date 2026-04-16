@@ -18,13 +18,9 @@ def mock_bot() -> MagicMock:
     """A MagicMock representing AsyncWebClient for bot operations."""
     bot = MagicMock()
     # Default: most calls return ok=True
-    bot.conversations_list = AsyncMock(
-        return_value=fake_resp(channels=[], response_metadata={"next_cursor": ""})
-    )
+    bot.conversations_list = AsyncMock(return_value=fake_resp(channels=[], response_metadata={"next_cursor": ""}))
     bot.conversations_info = AsyncMock(return_value=fake_resp(channel={}))
-    bot.conversations_members = AsyncMock(
-        return_value=fake_resp(members=[], response_metadata={"next_cursor": ""})
-    )
+    bot.conversations_members = AsyncMock(return_value=fake_resp(members=[], response_metadata={"next_cursor": ""}))
     bot.conversations_create = AsyncMock(return_value=fake_resp(channel={"id": "C123", "name": "test"}))
     bot.conversations_archive = AsyncMock(return_value=fake_resp())
     bot.conversations_unarchive = AsyncMock(return_value=fake_resp())
@@ -56,9 +52,7 @@ def mock_bot() -> MagicMock:
     bot.files_remote_add = AsyncMock(return_value=fake_resp(file={"id": "F123", "title": "Test"}))
     bot.files_remote_update = AsyncMock(return_value=fake_resp(file={"id": "F123", "title": "Test"}))
     bot.files_remote_remove = AsyncMock(return_value=fake_resp())
-    bot.users_list = AsyncMock(
-        return_value=fake_resp(members=[], response_metadata={"next_cursor": ""})
-    )
+    bot.users_list = AsyncMock(return_value=fake_resp(members=[], response_metadata={"next_cursor": ""}))
     bot.users_info = AsyncMock(return_value=fake_resp(user={"id": "U123", "name": "alice", "profile": {}}))
     bot.users_lookupByEmail = AsyncMock(return_value=fake_resp(user={"id": "U123", "name": "alice", "profile": {}}))
     bot.users_getPresence = AsyncMock(return_value=fake_resp(presence="active", online=True))
