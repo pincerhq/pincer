@@ -193,6 +193,14 @@ class Settings(BaseSettings):
     )
     image_daily_limit: int = Field(default=50, ge=0, description="Max image generations per day (0 = unlimited)")
 
+    # ── Slack Channel (Socket Mode) ──────────────────────
+    slack_bot_token: SecretStr = Field(default=SecretStr(""), description="Slack Bot Token (xoxb-...)")
+    slack_app_token: SecretStr = Field(default=SecretStr(""), description="Slack App-Level Token for Socket Mode (xapp-...)")
+    slack_user_allowlist: list[str] = Field(
+        default_factory=list,
+        description="Optional Slack user IDs allowed to use the bot (empty = allow all)",
+    )
+
     # ── Signal Messenger (Sprint 7.5) ────────────────────
     signal_enabled: bool = Field(default=False, description="Enable Signal channel")
     signal_api_url: str = Field(default="http://signal-api:8080", description="signal-cli-rest-api base URL")
@@ -252,6 +260,15 @@ class Settings(BaseSettings):
     rate_messages_per_min: int = Field(default=30, ge=1, description="Per-user message rate limit")
     rate_tools_per_min: int = Field(default=20, ge=1, description="Per-user tool call rate limit")
     max_concurrent_llm: int = Field(default=5, ge=1, description="Max concurrent LLM requests")
+
+    @field_validator("slack_user_allowlist", mode="before")
+    @classmethod
+    def parse_slack_allowlist(cls, v: str | list[str]) -> list[str]:
+        if isinstance(v, str):
+            if not v.strip():
+                return []
+            return [uid.strip() for uid in v.split(",") if uid.strip()]
+        return v
 
     @field_validator("telegram_allowed_users", mode="before")
     @classmethod

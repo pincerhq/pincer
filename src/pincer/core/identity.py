@@ -79,9 +79,19 @@ class IdentityResolver:
             except Exception as e:
                 if "duplicate column" not in str(e).lower():
                     raise
+            # Add slack_user_id if missing (Slack channel)
+            try:
+                await db.execute("ALTER TABLE identity_map ADD COLUMN slack_user_id TEXT")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
             await db.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_discord
                 ON identity_map(discord_user_id) WHERE discord_user_id IS NOT NULL
+            """)
+            await db.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_slack
+                ON identity_map(slack_user_id) WHERE slack_user_id IS NOT NULL
             """)
             await db.commit()
 
@@ -152,6 +162,11 @@ class IdentityResolver:
             cursor = await db.execute(
                 "SELECT pincer_user_id FROM identity_map WHERE signal_phone = ?",
                 (phone,),
+            )
+        elif channel == ChannelType.SLACK:
+            cursor = await db.execute(
+                "SELECT pincer_user_id FROM identity_map WHERE slack_user_id = ?",
+                (str(channel_user_id),),
             )
         else:
             return None
@@ -225,12 +240,13 @@ class IdentityResolver:
         discord_id = str(channel_user_id) if channel == ChannelType.DISCORD else None
         phone_number = str(channel_user_id).lstrip("+") if channel == ChannelType.VOICE else None
         signal_phone = str(channel_user_id).lstrip("+") if channel == ChannelType.SIGNAL else None
+        slack_user_id = str(channel_user_id) if channel == ChannelType.SLACK else None
 
         await db.execute(
             """INSERT INTO identity_map
                (pincer_user_id, telegram_user_id, whatsapp_phone, discord_user_id,
-                phone_number, signal_phone, display_name, preferred_channel)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                phone_number, signal_phone, slack_user_id, display_name, preferred_channel)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 pincer_user_id,
                 telegram_id,
@@ -238,6 +254,7 @@ class IdentityResolver:
                 discord_id,
                 phone_number,
                 signal_phone,
+                slack_user_id,
                 display_name,
                 channel.value,
             ),
@@ -262,6 +279,8 @@ class IdentityResolver:
             col, val = "phone_number", str(channel_user_id).lstrip("+")
         elif channel == ChannelType.SIGNAL:
             col, val = "signal_phone", str(channel_user_id).lstrip("+")
+        elif channel == ChannelType.SLACK:
+            col, val = "slack_user_id", str(channel_user_id)
         else:
             return
 
@@ -302,6 +321,7 @@ class IdentityResolver:
                 whatsapp_phone: str | None = None
                 discord_id: str | None = None
                 signal_phone: str | None = None
+                slack_uid: str | None = None
 
                 for ch, cid in ((left_channel, left_id), (right_channel, right_id)):
                     if ch == "telegram":
@@ -313,8 +333,16 @@ class IdentityResolver:
                         discord_id = cid
                     elif ch == "signal":
                         signal_phone = cid.lstrip("+")
+                    elif ch == "slack":
+                        slack_uid = cid
 
-                if telegram_id is None and whatsapp_phone is None and discord_id is None and signal_phone is None:
+                if (
+                    telegram_id is None
+                    and whatsapp_phone is None
+                    and discord_id is None
+                    and signal_phone is None
+                    and slack_uid is None
+                ):
                     continue
 
                 pincer_user_id = self._generate_user_id(
@@ -324,7 +352,7 @@ class IdentityResolver:
 
                 cursor = await db.execute(
                     "SELECT pincer_user_id, telegram_user_id, whatsapp_phone, "
-                    "discord_user_id, signal_phone "
+                    "discord_user_id, signal_phone, slack_user_id "
                     "FROM identity_map WHERE pincer_user_id = ?",
                     (pincer_user_id,),
                 )
@@ -360,23 +388,31 @@ class IdentityResolver:
                             (signal_phone, pincer_user_id),
                         )
                         needs_update = True
+                    if slack_uid and not existing["slack_user_id"]:
+                        await db.execute(
+                            "UPDATE identity_map SET slack_user_id = ?, "
+                            "updated_at = datetime('now') WHERE pincer_user_id = ?",
+                            (slack_uid, pincer_user_id),
+                        )
+                        needs_update = True
                     if needs_update:
                         logger.info("Identity updated from config: %s", pincer_user_id)
                 else:
                     await db.execute(
                         """INSERT INTO identity_map
                            (pincer_user_id, telegram_user_id, whatsapp_phone,
-                            discord_user_id, signal_phone, preferred_channel)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (pincer_user_id, telegram_id, whatsapp_phone, discord_id, signal_phone, left_channel),
+                            discord_user_id, signal_phone, slack_user_id, preferred_channel)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (pincer_user_id, telegram_id, whatsapp_phone, discord_id, signal_phone, slack_uid, left_channel),
                     )
                     logger.info(
-                        "Identity seeded from config: %s (tg=%s, wa=%s, dc=%s, sig=%s)",
+                        "Identity seeded from config: %s (tg=%s, wa=%s, dc=%s, sig=%s, slack=%s)",
                         pincer_user_id,
                         telegram_id,
                         whatsapp_phone,
                         discord_id,
                         signal_phone,
+                        slack_uid,
                     )
             await db.commit()
 
@@ -389,7 +425,7 @@ class IdentityResolver:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT telegram_user_id, whatsapp_phone, discord_user_id, "
-                "signal_phone, preferred_channel "
+                "signal_phone, slack_user_id, preferred_channel "
                 "FROM identity_map WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             )
@@ -397,8 +433,10 @@ class IdentityResolver:
             if not row:
                 raise ValueError(f"Unknown user: {pincer_user_id}")
 
-            telegram_id, whatsapp_phone, discord_id, signal_phone, preferred = row
+            telegram_id, whatsapp_phone, discord_id, signal_phone, slack_uid, preferred = row
 
+            if preferred == "slack" and slack_uid:
+                return ChannelType.SLACK, slack_uid
             if preferred == "signal" and signal_phone:
                 return ChannelType.SIGNAL, signal_phone
             if preferred == "discord" and discord_id:
@@ -408,6 +446,8 @@ class IdentityResolver:
             if preferred == "telegram" and telegram_id:
                 return ChannelType.TELEGRAM, str(telegram_id)
 
+            if slack_uid:
+                return ChannelType.SLACK, slack_uid
             if signal_phone:
                 return ChannelType.SIGNAL, signal_phone
             if discord_id:
@@ -424,7 +464,8 @@ class IdentityResolver:
         async with self._get_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT telegram_user_id, whatsapp_phone, discord_user_id, signal_phone "
+                "SELECT telegram_user_id, whatsapp_phone, discord_user_id, "
+                "signal_phone, slack_user_id "
                 "FROM identity_map WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             )
@@ -433,7 +474,7 @@ class IdentityResolver:
                 return {}
 
             channels: dict[ChannelType, str] = {}
-            telegram_id, whatsapp_phone, discord_id, signal_phone = row
+            telegram_id, whatsapp_phone, discord_id, signal_phone, slack_uid = row
             if telegram_id:
                 channels[ChannelType.TELEGRAM] = str(telegram_id)
             if whatsapp_phone:
@@ -442,6 +483,8 @@ class IdentityResolver:
                 channels[ChannelType.DISCORD] = discord_id
             if signal_phone:
                 channels[ChannelType.SIGNAL] = signal_phone
+            if slack_uid:
+                channels[ChannelType.SLACK] = slack_uid
             return channels
 
     @staticmethod
