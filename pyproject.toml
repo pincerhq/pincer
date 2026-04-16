@@ -69,7 +69,11 @@ mcp = [
 ms365 = [
     "msal>=1.28.0",
 ]
-all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp,ms365]"]
+slack = [
+    "slack-sdk>=3.27.0",
+    "slack-bolt>=1.18.0",
+]
+all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp,ms365,slack]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

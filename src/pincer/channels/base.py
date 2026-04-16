@@ -19,6 +19,7 @@ class ChannelType(StrEnum):
     WEB = "web"
     VOICE = "voice"
     SIGNAL = "signal"
+    SLACK = "slack"
 
 
 @dataclass
