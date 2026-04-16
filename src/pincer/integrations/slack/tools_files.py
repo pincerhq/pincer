@@ -6,6 +6,7 @@ All functions are async, accept a SlackClient as first arg, and return str.
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -101,7 +102,12 @@ async def slack__download_file(client: SlackClient, file: str, save_path: str = 
         # Get the bot token for auth
         bot_token = client.bot.token  # type: ignore[attr-defined]
 
-        dest = Path(save_path) if save_path else Path(tempfile.mktemp(suffix="_" + f.get("name", "file")))
+        if save_path:
+            dest = Path(save_path)
+        else:
+            fd, tmp_path = tempfile.mkstemp(suffix="_" + f.get("name", "file"))
+            os.close(fd)
+            dest = Path(tmp_path)
         async with httpx.AsyncClient() as http:
             r = await http.get(url, headers={"Authorization": f"Bearer {bot_token}"}, follow_redirects=True)
             r.raise_for_status()
