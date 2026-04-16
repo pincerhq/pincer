@@ -7,6 +7,7 @@ The register_channel_tools() helper wires them into Pincer's ToolRegistry.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -256,7 +257,9 @@ async def slack__list_dm_conversations(
 def register_channel_tools(registry: ToolRegistry, client: SlackClient) -> int:
     """Register all 16 channel tools. Returns 16."""
 
-    def _h(fn: Any):  # type: ignore[return]
+    def _h(
+        fn: Callable[..., Awaitable[str]],
+    ) -> Callable[..., Awaitable[str]]:
         async def handler(**kwargs: Any) -> str:
             return await fn(client, **kwargs)
 

@@ -6,6 +6,7 @@ All functions are async, accept a SlackClient as first arg, and return str.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -105,7 +106,9 @@ async def slack__list_emoji(client: SlackClient) -> str:
 def register_reaction_tools(registry: ToolRegistry, client: SlackClient) -> int:
     """Register all 5 reaction tools. Returns 5."""
 
-    def _h(fn: Any):  # type: ignore[return]
+    def _h(
+        fn: Callable[..., Awaitable[str]],
+    ) -> Callable[..., Awaitable[str]]:
         async def handler(**kwargs: Any) -> str:
             return await fn(client, **kwargs)
 

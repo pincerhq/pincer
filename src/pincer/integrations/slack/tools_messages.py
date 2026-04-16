@@ -6,6 +6,7 @@ All functions are async, accept a SlackClient as first arg, and return str.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -367,7 +368,9 @@ async def slack__summarize_channel(
 def register_message_tools(registry: ToolRegistry, client: SlackClient) -> int:
     """Register all 18 message tools. Returns 18."""
 
-    def _h(fn: Any):  # type: ignore[return]
+    def _h(
+        fn: Callable[..., Awaitable[str]],
+    ) -> Callable[..., Awaitable[str]]:
         async def handler(**kwargs: Any) -> str:
             return await fn(client, **kwargs)
 

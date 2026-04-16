@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -268,7 +269,9 @@ async def slack__remove_remote_file(client: SlackClient, file: str) -> str:
 def register_file_tools(registry: ToolRegistry, client: SlackClient) -> int:
     """Register all 10 file tools. Returns 10."""
 
-    def _h(fn: Any):  # type: ignore[return]
+    def _h(
+        fn: Callable[..., Awaitable[str]],
+    ) -> Callable[..., Awaitable[str]]:
         async def handler(**kwargs: Any) -> str:
             return await fn(client, **kwargs)
 

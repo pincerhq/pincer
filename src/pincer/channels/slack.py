@@ -237,7 +237,7 @@ class SlackChannel(BaseChannel):
     def _register_listeners(self) -> None:
         """Register all slack-bolt event and action listeners."""
 
-        @self._app.event("message")
+        @self._app.event("message")  # type: ignore[untyped-decorator]
         async def handle_message(event: dict[str, Any], client: Any) -> None:
             # Ignore own messages and all bot messages
             if event.get("user") == self._bot_user_id:
@@ -258,20 +258,20 @@ class SlackChannel(BaseChannel):
                 # Channel message that mentions the bot (belt-and-suspenders for app_mention)
                 await self._process_message(event, client)
 
-        @self._app.event("app_mention")
+        @self._app.event("app_mention")  # type: ignore[untyped-decorator]
         async def handle_mention(event: dict[str, Any], client: Any) -> None:
             """Handle @pincer mentions in channels."""
             if event.get("user") == self._bot_user_id:
                 return
             await self._process_message(event, client)
 
-        @self._app.action("pincer_approve")
+        @self._app.action("pincer_approve")  # type: ignore[untyped-decorator]
         async def handle_approve(ack: Any, body: dict[str, Any], client: Any) -> None:
             await ack()
             approval_id = body["actions"][0].get("value", "")
             await self._resolve_approval(approval_id, approved=True, body=body, client=client)
 
-        @self._app.action("pincer_deny")
+        @self._app.action("pincer_deny")  # type: ignore[untyped-decorator]
         async def handle_deny(ack: Any, body: dict[str, Any], client: Any) -> None:
             await ack()
             approval_id = body["actions"][0].get("value", "")

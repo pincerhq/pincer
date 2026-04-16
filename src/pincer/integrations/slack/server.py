@@ -57,7 +57,7 @@ def _register_fmcp_tool(fmcp: object, name: str, tool_def: object) -> None:
     handler = tool_def.handler  # type: ignore[attr-defined]
     description = tool_def.description  # type: ignore[attr-defined]
 
-    @fmcp.tool(name=name, description=description)  # type: ignore[attr-defined]
+    @fmcp.tool(name=name, description=description)  # type: ignore[attr-defined,untyped-decorator]
     @functools.wraps(handler)
     async def _tool(**kwargs: object) -> str:
         try:
@@ -112,7 +112,7 @@ class SlackMCPServer:
             task = self._task  # type: ignore[assignment]
             task.cancel()  # type: ignore[attr-defined]
             with contextlib.suppress(asyncio.CancelledError, Exception):
-                await asyncio.shield(task)
+                await asyncio.shield(task)  # type: ignore[arg-type]
             self._task = None
 
 
