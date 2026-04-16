@@ -403,7 +403,15 @@ class IdentityResolver:
                            (pincer_user_id, telegram_user_id, whatsapp_phone,
                             discord_user_id, signal_phone, slack_user_id, preferred_channel)
                            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        (pincer_user_id, telegram_id, whatsapp_phone, discord_id, signal_phone, slack_uid, left_channel),
+                        (
+                            pincer_user_id,
+                            telegram_id,
+                            whatsapp_phone,
+                            discord_id,
+                            signal_phone,
+                            slack_uid,
+                            left_channel,
+                        ),
                     )
                     logger.info(
                         "Identity seeded from config: %s (tg=%s, wa=%s, dc=%s, sig=%s, slack=%s)",

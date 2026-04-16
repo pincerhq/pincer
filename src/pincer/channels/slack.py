@@ -132,8 +132,8 @@ class SlackChannel(BaseChannel):
         self._handler = handler
 
         try:
-            from slack_bolt.app.async_app import AsyncApp
             from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+            from slack_bolt.app.async_app import AsyncApp
         except ImportError:
             logger.error(
                 "slack-bolt not installed. Run: pip install 'pincer-agent[slack]'"
@@ -435,15 +435,14 @@ class SlackChannel(BaseChannel):
         try:
             import aiohttp
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    headers={"Authorization": f"Bearer {bot_token}"},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as resp:
-                    if resp.status == 200:
-                        return await resp.read()
-                    logger.debug("Slack file download HTTP %s for %s", resp.status, url)
+            async with aiohttp.ClientSession() as session, session.get(
+                url,
+                headers={"Authorization": f"Bearer {bot_token}"},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.read()
+                logger.debug("Slack file download HTTP %s for %s", resp.status, url)
         except ImportError:
             logger.debug("aiohttp not available; Slack file downloads disabled")
         except Exception as e:

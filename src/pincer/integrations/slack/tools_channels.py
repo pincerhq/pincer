@@ -7,10 +7,11 @@ The register_channel_tools() helper wires them into Pincer's ToolRegistry.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from pincer.integrations.slack.client import SlackClient
     from pincer.tools.registry import ToolRegistry
 

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from pincer.channels.slack_formatters import build_approval_blocks, markdown_to_mrkdwn
 
 

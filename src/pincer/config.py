@@ -195,7 +195,10 @@ class Settings(BaseSettings):
 
     # ── Slack Channel (Socket Mode) ──────────────────────
     slack_bot_token: SecretStr = Field(default=SecretStr(""), description="Slack Bot Token (xoxb-...)")
-    slack_app_token: SecretStr = Field(default=SecretStr(""), description="Slack App-Level Token for Socket Mode (xapp-...)")
+    slack_app_token: SecretStr = Field(
+        default=SecretStr(""),
+        description="Slack App-Level Token for Socket Mode (xapp-...)",
+    )
     slack_user_allowlist: list[str] = Field(
         default_factory=list,
         description="Optional Slack user IDs allowed to use the bot (empty = allow all)",

@@ -664,7 +664,8 @@ async def _run_agent(settings: Settings) -> None:
 
     # Slack tools (71-tool suite)
     try:
-        from pincer.integrations.slack import get_slack_client, register_all_tools as _slack_register
+        from pincer.integrations.slack import get_slack_client
+        from pincer.integrations.slack import register_all_tools as _slack_register
 
         slack_client = get_slack_client()
         if slack_client is not None:

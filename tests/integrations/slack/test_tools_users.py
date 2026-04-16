@@ -41,7 +41,14 @@ async def test_list_users_excludes_bots_by_default(mock_client):
     mock_client.bot.users_list.return_value = fake_resp(
         members=[
             {"id": "U001", "name": "alice", "real_name": "Alice", "is_bot": False, "deleted": False, "profile": {}},
-            {"id": "B001", "name": "slackbot", "real_name": "Slackbot", "is_bot": True, "deleted": False, "profile": {}},
+            {
+                "id": "B001",
+                "name": "slackbot",
+                "real_name": "Slackbot",
+                "is_bot": True,
+                "deleted": False,
+                "profile": {},
+            },
         ],
         response_metadata={"next_cursor": ""},
     )

@@ -15,7 +15,6 @@ import pytest
 from pincer.channels.base import ChannelType, IncomingMessage
 from pincer.channels.slack import SlackChannel, split_message
 
-
 # ── Helpers / fixtures ────────────────────────────────────────────────────────
 
 

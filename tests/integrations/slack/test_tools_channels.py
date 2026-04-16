@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -224,7 +224,6 @@ async def test_list_channels_error_handling(mock_client):
 
 @pytest.mark.asyncio
 async def test_register_channel_tools_count():
-    from unittest.mock import MagicMock
 
     from pincer.integrations.slack.tools_channels import register_channel_tools
     from pincer.tools.registry import ToolRegistry
@@ -239,7 +238,6 @@ async def test_register_channel_tools_count():
 @pytest.mark.asyncio
 async def test_channel_write_tools_require_approval():
     """Ensure all channel write tools have require_approval=True."""
-    from unittest.mock import MagicMock
 
     from pincer.integrations.slack.tools_channels import register_channel_tools
     from pincer.tools.registry import ToolRegistry
@@ -267,7 +265,6 @@ async def test_channel_write_tools_require_approval():
 @pytest.mark.asyncio
 async def test_channel_read_tools_no_approval():
     """Ensure read-only channel tools do NOT require approval."""
-    from unittest.mock import MagicMock
 
     from pincer.integrations.slack.tools_channels import register_channel_tools
     from pincer.tools.registry import ToolRegistry

@@ -6,10 +6,11 @@ All functions are async, accept a SlackClient as first arg, and return str.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from pincer.integrations.slack.client import SlackClient
     from pincer.tools.registry import ToolRegistry
 

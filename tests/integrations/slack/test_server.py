@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -48,7 +47,6 @@ async def test_get_slack_client_with_token():
 @pytest.mark.asyncio
 async def test_register_all_tools_total_count():
     """register_all_tools returns 71."""
-    from unittest.mock import MagicMock
 
     from pincer.integrations.slack import register_all_tools
     from pincer.tools.registry import ToolRegistry
@@ -63,7 +61,6 @@ async def test_register_all_tools_total_count():
 @pytest.mark.asyncio
 async def test_all_tool_names_have_slack_prefix():
     """All registered tools must have the slack__ prefix."""
-    from unittest.mock import MagicMock
 
     from pincer.integrations.slack import register_all_tools
     from pincer.tools.registry import ToolRegistry
@@ -110,7 +107,6 @@ async def test_token_load_from_file(tmp_path):
     ):
         from pincer.integrations.slack.config import SlackIntegrationConfig
         mock_cfg.return_value = SlackIntegrationConfig()
-        from pincer.integrations.slack.auth import load_tokens
 
         # Simulate no env vars by loading directly from file
         data = json.loads(token_file.read_text())
@@ -185,7 +181,6 @@ async def test_slack_client_requires_bot_token():
 
 def test_all_write_tools_require_approval():
     """Comprehensive check: all write operations need approval."""
-    from unittest.mock import MagicMock
 
     from pincer.integrations.slack import register_all_tools
     from pincer.tools.registry import ToolRegistry
@@ -224,7 +219,6 @@ def test_all_write_tools_require_approval():
 
 def test_read_tools_no_approval():
     """Read-only tools must NOT require approval."""
-    from unittest.mock import MagicMock
 
     from pincer.integrations.slack import register_all_tools
     from pincer.tools.registry import ToolRegistry
@@ -255,7 +249,6 @@ def test_read_tools_no_approval():
 
 def test_bot_token_not_exposed_in_tool_descriptions():
     """Tool descriptions must not leak token strings."""
-    from unittest.mock import MagicMock
 
     from pincer.integrations.slack import register_all_tools
     from pincer.tools.registry import ToolRegistry
