@@ -4,7 +4,7 @@
 
 # Pincer
 
-**Open-source AI agent that works across WhatsApp, Telegram, Slack, Email, Voice, and 150+ tools — self-hosted, security-first, runs in Docker.**
+**Open-source AI agent that works across WhatsApp, Telegram, Slack, Email, Voice, and 600+ tools — self-hosted, security-first, runs in Docker.**
 
 [![PyPI](https://img.shields.io/pypi/v/pincer-agent?color=FF6B35&style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/pincer-agent/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
@@ -32,7 +32,7 @@ pip install pincer-agent && pincer init
 
 ### TL;DR
 
-- **What:** An open-source AI agent that lives in WhatsApp, Telegram, Discord, Slack, Signal, and Email — generates images, makes phone calls, connects to any MCP server, and actually does things
+- **What:** An open-source AI agent that lives in WhatsApp, Telegram, Discord, Slack, Signal, and Email — 600+ tools out of the box (Google Workspace, Microsoft 365, native Slack, Google Meet, image generation, voice calling, MCP), connects to any MCP server, and actually does things
 - **For whom:** Developers and technical users who want a personal agent they can self-host, audit, and extend
 - **Why it exists:** Existing agents had [malicious plugins](https://pincer.sh/docs/security), surprise bills, and codebases too large to review
 - **How it's different:** Clean Python codebase. Straightforward config via env vars. Skills sandboxed in subprocesses. Hard daily spending cap
@@ -85,8 +85,12 @@ So I built it. Pincer is the agent I wanted. If you want the same thing, it's yo
 | **Cost controls** | Hard daily cap, auto-downgrade, per-response cost | None built-in | None built-in | DIY |
 | **Config surface** | Env vars + optional TOML | Multi-file JSON | Code | Code |
 | **Channels** | 8 + voice calling | 2–3 | 0 | 1 (usually) |
+| **Native tool count** | 304 (304+ MCP) | ~60 | ~40 | DIY |
 | **Memory** | Cross-channel, FTS5 + embeddings | Per-channel | Needs setup | DIY |
 | **MCP** | Full client + OAuth 2.0 server | None | Plugins | DIY |
+| **Google Workspace** | 113 tools (Gmail/Calendar/Drive/Docs/Sheets/Slides/Meet/Tasks/Contacts) | Partial | DIY | DIY |
+| **Microsoft 365** | 69 tools (Outlook/OneDrive/Teams/OneNote/To Do) | None | DIY | DIY |
+| **Slack (native)** | 71 tools (messages/channels/users/files/reactions) | None | DIY | DIY |
 | **Image generation** | fal.ai + Gemini built-in | None | DIY | DIY |
 
 ---
@@ -139,9 +143,9 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 | Tier | What's included | Maintenance guarantee |
 |------|----------------|----------------------|
 | **🟢 Core** | Agent loop, memory, tools, security, cost controls, Telegram | CI-tested, regression-protected, release-blocking |
-| **🟡 Stable** | WhatsApp, Discord, Slack, Email, dashboard, skills system | Tested, maintained, may lag 1–2 weeks on upstream API changes |
-| **🧪 Peripheral** | Voice calling, Signal, MCP client + OAuth, image generation, proactive scheduler | Working, documented, community-maintained welcome |
-| **🔮 Planned** | iMessage, SMS, Teams, Zoom, Viber, WeChat, Matrix | Not yet started — [help wanted](https://github.com/pincerhq/pincer/labels/help-wanted) |
+| **🟡 Stable** | WhatsApp, Discord, Slack (channel + 71 native tools), Email, Google Workspace (113 tools), dashboard, skills system | Tested, maintained, may lag 1–2 weeks on upstream API changes |
+| **🧪 Peripheral** | Voice calling, Signal, Microsoft 365 (69 tools), MCP client + OAuth 2.0 server, image generation, proactive scheduler | Working, documented, community-maintained welcome |
+| **🔮 Planned** | iMessage, SMS, Zoom, Viber, WeChat, Matrix | Not yet started — [help wanted](https://github.com/pincerhq/pincer/labels/help-wanted) |
 
 ---
 
@@ -162,23 +166,23 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 
 ---
 
-## 🔧 Built-in Tools
+## 🔧 Tools — 304 native, 600+ with MCP
 
-| Tool | What it does | Approval required |
-|------|-------------|:---------:|
-| `web_search` | Search via Tavily or DuckDuckGo | No |
-| `browse` / `screenshot` | Navigate, fill forms, screenshot (Playwright) | No |
-| `email_check` / `email_send` | Read inbox, draft and send | Read: No / Send: **Yes** |
-| `calendar_today` / `calendar_create` | Read and create Google Calendar events | Read: No / Create: No |
-| `shell_exec` | Run shell commands | **Yes** |
-| `python_exec` | Execute Python in sandbox | **Yes** |
-| `file_read` / `file_write` / `file_list` | Local file operations | Read: No / Write: **Yes** |
-| `memory_search` | Search past conversations semantically | No |
-| `voice_call` | Outbound phone calls via Twilio | **Yes** |
-| `generate_image` | Generate images via fal.ai or Gemini | No |
-| `google__*` (85 tools) | Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, Contacts | Read: No / Write: **Yes** |
+Pincer ships **304 first-party tools** and plugs into **any MCP server** to reach 600+ out of the box. Full list in **[docs/TOOLS_CATALOG.md](docs/TOOLS_CATALOG.md)**.
 
-"Approval" = the agent asks in chat before executing. You reply ✅ or ❌.
+| Category | Count | Enable with |
+|---|---:|---|
+| Core built-ins (`web_search`, `shell_exec`, `python_exec`, file ops, browser, email, calendar, image, voice) | 24 | Always on |
+| Bundled skills (weather, news, translate, stocks, expenses, habits, pomodoro, git, contacts…) | 27 | Always on |
+| **Google Workspace** — Gmail · Calendar · Drive · Docs · Sheets · Slides · Meet · Tasks · Contacts | **113** | `pincer setup-google` |
+| **Microsoft 365** — Outlook · Calendar · OneDrive · Teams · OneNote · To Do · Contacts | **69** | `pincer setup-ms365` |
+| **Slack (native)** — messages · channels · users · files · reactions · pins · reminders · search | **71** | `PINCER_SLACK_BOT_TOKEN` |
+| **MCP tools** (GitHub, Postgres, Notion, Linear, Stripe, filesystem, …) | unlimited | `pincer.toml` + `[mcp]` |
+| Custom skills (AST-scanned + sandboxed) | unlimited | `pincer skills install` |
+
+**Approval model:** destructive tools (`shell_exec`, `python_exec`, `file_write`, `email_send`, `make_phone_call`, and every writing action on external APIs) ask in chat before executing. You reply ✅ or ❌.
+
+**[Full tools catalog →](docs/TOOLS_CATALOG.md)**
 
 <details>
 <summary><strong>Python SDK</strong></summary>
@@ -285,7 +289,7 @@ pincer skills install github:user/repo # install (scanned first)
 pincer skills scan ./untrusted-skill   # security scan before install
 ```
 
-10 bundled skills ship with Pincer: `weather`, `news`, `translate`, `summarize_url`, `youtube_summary`, `expense_tracker`, `habit_tracker`, `pomodoro`, `stock_price`, `git_status`.
+11 bundled skills ship with Pincer (27 tool functions total): `weather`, `news`, `translate`, `summarize_url`, `youtube_summary`, `expense_tracker`, `habit_tracker`, `pomodoro`, `stock_price`, `git_status`, `phone_contacts`.
 
 <details>
 <summary><strong>Writing your own skill</strong></summary>
@@ -359,12 +363,15 @@ $ pincer doctor
   ✅ API key valid (claude-sonnet-4-5-20250929)
   ✅ Telegram connected (@my_pincer_bot)
   ✅ Daily budget: $5.00
-  ✅ 10 skills installed, all scored ≥ 80
-  ✅ MCP: 2 servers connected (github, postgres)
+  ✅ 11 skills installed, all scored ≥ 80
+  ✅ Google Workspace: 113 tools registered
+  ✅ Microsoft 365: 69 tools registered (token cached)
+  ✅ Slack native: 71 tools registered
+  ✅ MCP: 2 servers connected (github, postgres) — 42 extra tools
   ✅ Image generation: fal.ai key present, daily limit 50
   ⚠️  Discord DM policy is "open" — consider "pairing"
   ✅ No exposed ports beyond localhost
-  38 passed · 1 warning · 0 critical
+  44 passed · 1 warning · 0 critical
 ```
 
 **[Full security model →](docs/Security.md)** · Found a vulnerability? **[Security Policy](docs/Security%20Policy.md)**
@@ -465,7 +472,8 @@ pincer mcp test <server>           # test MCP connection
 pincer mcp tools                   # list registered MCP tools
 pincer mcp call <server> <tool>    # call a specific MCP tool
 pincer pair approve <ch> <code>    # approve a DM sender
-pincer setup-google                # Google Workspace OAuth (85 tools)
+pincer setup-google                # Google Workspace OAuth (113 tools)
+pincer setup-ms365                 # Microsoft 365 device-code auth (69 tools)
 ```
 
 **Chat commands** (any channel): `/status`, `/budget`, `/new`, `/compact`, `/model <name>`, `/tools`
@@ -495,8 +503,11 @@ graph TD
     AC --> MCP[🔌 MCP Client + OAuth Server]
     AC --> IMG[🖼️ Image Generation · fal.ai + Gemini]
 
-    TR --> BT[Built-in Tools · 12+]
+    TR --> BT[Built-in Tools · 304 native]
     TR --> SK[Custom Skills · Sandboxed]
+    TR --> GW[Google Workspace · 113 tools]
+    TR --> MS[Microsoft 365 · 69 tools]
+    TR --> SLK[Slack Native · 71 tools]
     MCP --> EXT[External MCP Servers · GitHub · Postgres · etc.]
 ```
 
@@ -518,18 +529,22 @@ pincer/
 │   ├── llm/          anthropic, openai, grok, ollama, router, cost_tracker
 │   ├── channels/     telegram, whatsapp, discord, slack, email, voice, signal, web
 │   ├── memory/       store (SQLite+FTS5), embeddings, entities, summarizer
-│   ├── tools/        registry, sandbox, approval, builtin/ (12+ tools)
+│   ├── tools/        registry, sandbox, approval, builtin/ (24 core tools)
 │   ├── skills/       loader, scanner (AST), signer
 │   ├── image/        router, provider_fal, provider_gemini, types
-│   ├── mcp/          core, client, manager, bridge, audit, security, oauth/
-│   │   └── auth/     endpoints, tokens, pkce, scopes, consent, token_store
+│   ├── integrations/
+│   │   ├── google/   113 tools — Gmail, Calendar, Drive, Docs, Sheets, Slides, Meet, Tasks, Contacts
+│   │   ├── ms365/    69 tools — Outlook, Calendar, OneDrive, Teams, OneNote, To Do, Contacts
+│   │   └── slack/    71 tools — messages, channels, users, files, reactions, pins, search
+│   ├── mcp/          core, client, manager, bridge, audit, security, exporter, registry_client
+│   │   └── auth/     endpoints, tokens, pkce, scopes, consent, token_store (OAuth 2.0 server)
 │   ├── voice/        engine, twiml_server, stt, tts, compliance
 │   ├── security/     firewall, audit, doctor (40+ checks), rate_limiter
 │   ├── costs/        budget
 │   └── scheduler/    cron, proactive, triggers
-├── skills/           10 bundled
+├── skills/           11 bundled (27 tool functions)
 ├── tests/            pytest + pytest-asyncio
-└── docs/
+└── docs/             includes TOOLS_CATALOG.md (every tool)
 ```
 
 **Stack:** Python 3.11+ / asyncio · `anthropic` + `openai` SDKs · `aiogram` 3.x · `neonize` · `discord.py` · `slack-bolt` · `twilio` · `FastAPI` + `HTMX` · SQLite + FTS5 · `Playwright` · `pydantic-settings` · `typer` + `rich` · `mcp>=1.8.0` · `PyJWT[crypto]>=2.8.0` · `fal-client>=0.13.0`
@@ -552,9 +567,13 @@ pip install "pincer-agent[image]"  # Image generation (fal.ai + Gemini)
 - [x] Skill system with sandboxing, AST scanning, signing
 - [x] Docker + one-click deploys (Railway, Render, DigitalOcean)
 - [x] Voice calling (Twilio + STT/TTS + compliance)
+- [x] Google Workspace integration (113 tools via `pincer setup-google`)
+- [x] Microsoft 365 integration (69 tools via `pincer setup-ms365`)
+- [x] Slack native integration (71 tools)
+- [x] MCP client + OAuth 2.0 authorization server
+- [x] Google Meet full surface — spaces, recordings, transcripts, smart notes
 - [ ] **iMessage** — [help wanted](https://github.com/pincerhq/pincer/issues?q=label%3A%22help+wanted%22)
 - [ ] **SMS** — Twilio SMS channel
-- [ ] **Microsoft Teams** — [help wanted](https://github.com/pincerhq/pincer/issues?q=label%3A%22help+wanted%22)
 - [ ] **Zoom** — Meeting channel
 - [ ] **Encrypted memory** — at-rest database encryption
 - [ ] **Multi-agent routing** — specialized sub-agents
@@ -609,6 +628,8 @@ cd pincer && uv sync && pytest
 | **[Signal Setup](docs/signal-setup.md)** | signal-cli Docker sidecar setup |
 | **[MCP Guide](docs/mcp-guide.md)** | Connect any MCP-compliant server; OAuth 2.0 server setup |
 | **[API Reference](docs/API reference.md)** | REST API for integrations |
+| **[Tools Catalog](docs/TOOLS_CATALOG.md)** | Every tool Pincer can call — 304 native + MCP |
+| **[Microsoft 365 Setup](docs/ms365-setup.md)** | Azure app registration + device-code auth |
 | **[Migrating from OpenClaw](docs/Migration from openclaw.md)** | Import your data in 30 min |
 
 ---

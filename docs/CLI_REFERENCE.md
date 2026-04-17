@@ -1,6 +1,6 @@
 # Pincer CLI Reference
 
-Complete command reference across all sprints (1–8).
+Complete command reference across all sprints (1–13). For the full list of tools the agent itself can call, see [TOOLS_CATALOG.md](TOOLS_CATALOG.md) — **304 first-party tools + unlimited via MCP**.
 
 ## Global
 
@@ -22,8 +22,9 @@ Complete command reference across all sprints (1–8).
 | `pincer config` | Show current configuration (masked secrets) | 1 |
 | `pincer pair-whatsapp` | Pair WhatsApp via QR code | 3 |
 | `pincer auth-google` | Google Calendar OAuth consent flow (legacy, 3 tools) | 3 |
-| `pincer setup-google` | Google Workspace OAuth consent flow (85 tools) | 8 |
-| `pincer setup-ms365` | Microsoft 365 device code auth flow (69 tools) | 9 |
+| `pincer setup-google` | Google Workspace OAuth consent flow (113 tools incl. Meet v2) | 9 |
+| `pincer setup-ms365` | Microsoft 365 device code auth flow (69 tools) | 10 |
+| `pincer signal start/stop/status/link` | Manage Signal integration (signal-cli sidecar) | 7.5 |
 
 ## Cost & Budget
 
@@ -84,17 +85,17 @@ Complete command reference across all sprints (1–8).
 
 | Command | Description | Sprint |
 |---------|-------------|--------|
-| `pincer setup-google` | One-time OAuth consent — opens browser, saves token to `~/.pincer/google_workspace_token.json` | 8 |
+| `pincer setup-google` | One-time OAuth consent — opens browser, saves token to `~/.pincer/google_workspace_token.json` | 9 |
 
 ### What `pincer setup-google` does
 
 1. Verifies `~/.pincer/google_credentials.json` (or `data/google_credentials.json`) — shows instructions if missing
 2. Launches `InstalledAppFlow` — opens browser at Google consent page
-3. Requests all 9 scopes covering Gmail, Calendar, Drive, Docs, Sheets, Slides, Tasks, and Contacts/People API
+3. Requests all scopes covering Gmail, Calendar, Drive, Docs, Sheets, Slides, Meet, Tasks, and Contacts/People API
 4. Saves the token with `chmod 0o600`
-5. Reports: `Google Workspace tools enabled (85 tools)`
+5. Reports: `Google Workspace tools enabled (113 tools)`
 
-After setup, the 85 `google__*` tools are auto-registered every time `pincer run` is started — no further configuration needed.
+After setup, the 113 `google__*` tools are auto-registered every time `pincer run` is started — no further configuration needed. Full catalog: [TOOLS_CATALOG.md](TOOLS_CATALOG.md#google-workspace-113-tools).
 
 ### Getting `google_credentials.json`
 
@@ -118,7 +119,32 @@ After setup, the 85 `google__*` tools are auto-registered every time `pincer run
 5. Appends `[integrations.ms365]` section to `pincer.toml`
 6. Reports: `Microsoft 365 authenticated! … 69 Microsoft 365 tools are now available`
 
-After setup, all 69 tools are auto-registered on every `pincer run`.
+After setup, all 69 tools are auto-registered on every `pincer run`. Full catalog: [TOOLS_CATALOG.md](TOOLS_CATALOG.md#microsoft-365-69-tools).
+
+## Slack Native
+
+The Slack *channel* (bot that responds to @mentions and DMs) and the Slack *native tools* (71 tools for reading/posting messages, managing channels, users, files) are both enabled by setting `PINCER_SLACK_BOT_TOKEN`.
+
+| Requirement | For |
+|---|---|
+| `PINCER_SLACK_BOT_TOKEN=xoxb-…` | All 71 Slack tools + channel |
+| `PINCER_SLACK_USER_TOKEN=xoxp-…` (optional) | `slack__search_messages` and `slack__search_files` (full-text search requires a user token per Slack API) |
+
+Full catalog: [TOOLS_CATALOG.md](TOOLS_CATALOG.md#slack-native-71-tools).
+
+## MCP
+
+| Command | Description |
+|---------|-------------|
+| `pincer mcp list` | Connected MCP servers and status |
+| `pincer mcp tools` | List every MCP tool currently registered |
+| `pincer mcp test <server>` | Smoke-test a specific MCP server connection |
+| `pincer mcp call <server> <tool> --arg v` | Invoke a tool directly |
+| `pincer mcp server start|stop|status` | Manage Pincer's outbound MCP server endpoint |
+| `pincer mcp oauth init` | Generate Ed25519 signing key + seed OAuth tables |
+| `pincer mcp oauth client add|list` | Register / list OAuth 2.0 clients |
+
+See [mcp-guide.md](mcp-guide.md) for the full MCP client + OAuth 2.0 server documentation.
 
 ### Getting an Azure App client ID
 

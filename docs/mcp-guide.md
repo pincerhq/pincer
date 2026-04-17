@@ -1,6 +1,9 @@
-# MCP Client Guide
+# MCP Client + Server Guide
 
-Pincer supports the [Model Context Protocol (MCP)](https://modelcontextprotocol.io) — the open standard for connecting AI agents to external tools. Any MCP-compliant server (GitHub, Slack, Postgres, file system, browser automation, Home Assistant, and thousands more) can expose its tools to Pincer with a few lines of config.
+Pincer is both a full **MCP 1.x client** *and* an **MCP OAuth 2.0 Authorization Server**. It supports the [Model Context Protocol](https://modelcontextprotocol.io) — the open standard for connecting AI agents to external tools.
+
+- **As a client:** any MCP-compliant server (GitHub, Slack, Postgres, file system, browser automation, Home Assistant, and thousands more) can expose its tools to Pincer with a few lines of config.
+- **As a server:** Pincer's own 304 first-party tools ([see catalog](TOOLS_CATALOG.md)) can be exposed to external MCP clients via OAuth 2.0 with PKCE, JWT access tokens, and scope-based access control.
 
 MCP tools appear identically to built-in tools in the agent loop. The LLM calls them, the user sees the same approval prompts, and everything goes through the same audit log.
 
@@ -264,6 +267,54 @@ pincer mcp server status   # Show status and connected clients
 ```
 
 See [mcp-server.md](mcp-server.md) for the full server export guide.
+
+---
+
+## OAuth 2.0 Authorization Server
+
+When running Pincer as an MCP server, it exposes a full OAuth 2.0 Authorization Server so external MCP clients can authenticate and access a scoped subset of Pincer's 304 first-party tools. Implementation lives in `src/pincer/mcp/auth/`.
+
+### Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 server metadata |
+| `GET /authorize` | Authorization endpoint (PKCE required) |
+| `POST /token` | Token endpoint (code → access/refresh tokens) |
+| `POST /introspect` | RFC 7662 token introspection |
+| `POST /revoke` | RFC 7009 token revocation |
+| (consent UI) | User-facing approval page for requested scopes |
+
+### Features
+
+- **PKCE** — `S256` code challenge required for all authorization requests
+- **JWT access tokens** — signed via Ed25519 using `PyJWT[crypto]>=2.8.0`
+- **Refresh tokens** — rotated on each use; old tokens revoked
+- **Scope enforcement** — fine-grained scopes map to tool groups (e.g. `admin:email`, `admin:memory`, `admin:ask_user`); see `src/pincer/mcp/auth/scopes.py`
+- **Token storage** — SQLite-backed, with optional OS keyring (`keyring` package) for secrets at rest
+- **Bearer middleware** — protects MCP tool routes; invalid/expired/insufficient-scope tokens return 401/403
+
+### Configuration
+
+```toml
+[mcp]
+enabled = true
+
+[mcp.oauth]
+enabled = true
+issuer = "https://your-pincer-host.example"
+signing_key_path = "~/.pincer/mcp_signing_key.pem"   # Ed25519 private key
+access_token_ttl_seconds = 3600
+refresh_token_ttl_seconds = 2592000                  # 30 days
+```
+
+First-run provisioning:
+
+```bash
+pincer mcp oauth init        # Generate Ed25519 key pair + seed clients table
+pincer mcp oauth client add  # Register a new MCP client (PKCE public or confidential)
+pincer mcp oauth client list # List registered clients
+```
 
 ---
 

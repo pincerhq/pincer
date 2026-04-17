@@ -21,7 +21,11 @@
 | 8 | — | Image Generation + Grok | fal.ai + Gemini image generation, Grok/xAI LLM provider |
 | A0 | Mar 21, 2026 | MCP Architecture | MCPServiceCore, layered shells (embedded + standalone), resources, prompts, sampling, `pincer mcp serve` |
 | 9 | Mar 26, 2026 | Google Workspace | 85-tool native integration (Gmail 19, Calendar 12, Drive 15, Docs 8, Sheets 10, Slides 6, Tasks 8, Contacts 7), `pincer setup-google` |
+| 9.5 | — | Google Meet | Extended Google Workspace integration to 113 tools — full Meet v2 REST surface (27 tools: spaces, conference records, participants, recordings, transcripts, smart notes, event subscriptions) |
 | 10 | Apr 6, 2026 | Microsoft 365 | 69-tool native integration (Outlook 17, Calendar 12, OneDrive 14, To Do 8, Teams 7, Contacts 6, OneNote 5), `pincer setup-ms365` |
+| 11 | Apr 2026 | Slack Native | 71-tool native integration (messages 18, channels 16, users 10, files 10, misc 12, reactions 5) on top of the existing Slack channel; supports bot + user tokens for full-text search |
+| 12 | Apr 2026 | MCP OAuth 2.0 | Full OAuth 2.0 Authorization Server for MCP — `/authorize`, `/token`, `/introspect`, `/revoke`, RFC 8414 metadata, PKCE, JWT tokens, scope enforcement, `token_store.py` (SQLite + keyring) |
+| 13 | Apr 17, 2026 | Tools Catalog | 304 first-party tools catalogued in `docs/TOOLS_CATALOG.md`; README + docs refreshed to reflect 600+ with popular MCP servers |
 
 ---
 
@@ -193,22 +197,16 @@
    │   tool execution · sessions)   │
    └──┬──────────┬──────────┬──────┘
       │          │          │
- ┌────▼───┐ ┌───▼────┐ ┌───▼──────────┐
- │  LLM   │ │ Memory │ │    Tools      │
- │Provider │ │ Store  │ │  (15 built-in)│
- │Anthropic│ │ SQLite │ │              │
- │ OpenAI  │ │ + FTS5 │ │ web_search   │
- └────────┘ └────────┘ │ shell_exec   │
-                        │ file_*       │
-                        │ browse       │
-                        │ screenshot   │
-                        │ python_exec  │
-                        │ email_*      │
-                        │ calendar_*   │
-                        │ send_file    │
-                        │ send_image   │
-                        │ transcribe   │
-                        └──────────────┘
+ ┌────▼───┐ ┌───▼────┐ ┌───▼────────────────┐
+ │  LLM   │ │ Memory │ │   Tools (304 native)│
+ │Provider │ │ Store  │ │                     │
+ │Anthropic│ │ SQLite │ │ 24  core built-ins  │
+ │ OpenAI  │ │ + FTS5 │ │ 27  bundled skills  │
+ │ Grok    │ │        │ │ 113 Google Workspace│
+ │ Ollama  │ │        │ │ 69  Microsoft 365   │
+ └────────┘ └────────┘ │ 71  Slack native    │
+                       │  +  MCP (unlimited) │
+                       └─────────────────────┘
 
    ┌────────────────────────────────┐
    │        Scheduler               │
@@ -279,7 +277,7 @@ pincer/
 │   │   ├── store.py                # SQLite + FTS5 + vector similarity
 │   │   └── summarizer.py           # Conversation summarization (pair-safe)
 │   │
-│   ├── tools/                      # Tool system (15 built-in tools)
+│   ├── tools/                      # Tool system (24 core built-ins + skills loader; see docs/TOOLS_CATALOG.md)
 │   │   ├── registry.py             # Registration, schema gen, dispatch
 │   │   ├── approval.py             # Tool approval flow (stub)
 │   │   ├── sandbox.py              # Tool sandboxing (stub)
@@ -312,7 +310,7 @@ pincer/
 │   │   └── audit.py                # MCPAuditLogger
 │   │
 │   ├── integrations/               # First-party service integrations
-│   │   └── google/                 # Google Workspace (85 tools)
+│   │   └── google/                 # Google Workspace (113 tools incl. Meet v2)
 │   │       ├── __init__.py         # get_google_factory(), register_all_tools() → 85
 │   │       ├── auth.py             # GoogleAuth (InstalledAppFlow, token cache)
 │   │       ├── service_factory.py  # GoogleServiceFactory (30-min service cache)
@@ -397,7 +395,7 @@ pincer/
 | `exceptions.py` | Custom exceptions (`BudgetExceededError`, `LLMError`, `ToolNotFoundError`, `ChannelNotConnectedError`) |
 
 | `mcp/` | MCP platform — client (consume external MCP servers) + server (expose Pincer tools via MCP); sandboxed stdio subprocesses; streamable-http transport; OAuth 2.1; audit trail; registry client (MCP Registry + ClawHub); 225 tests |
-| `integrations/google/` | Google Workspace — 85 tools (Gmail 19, Calendar 12, Drive 15, Docs 8, Sheets 10, Slides 6, Tasks 8, Contacts 7); InstalledAppFlow OAuth; 30-min service cache; exponential backoff; pagination; standalone FastMCP server on port 18900; 131 tests |
+| `integrations/google/` | Google Workspace — 113 tools (Gmail 19, Calendar 12, Drive 16, Docs 8, Sheets 10, Slides 6, Meet 27, Tasks 8, Contacts 7); InstalledAppFlow OAuth; 30-min service cache; exponential backoff; pagination; standalone FastMCP server on port 18900; 131 tests |
 
 ### Stubs / Placeholders (Not Yet Implemented)
 
@@ -460,7 +458,7 @@ pincer/
 | `pincer config` | Show current configuration |
 | `pincer cost` | Show today's spend |
 | `pincer auth-google` | Run Google Calendar OAuth consent flow (legacy, 3 tools) |
-| `pincer setup-google` | Run Google Workspace OAuth consent flow (85 tools) |
+| `pincer setup-google` | Run Google Workspace OAuth consent flow (113 tools) |
 | `pincer pair-whatsapp` | Pair WhatsApp via QR code |
 | `python main.py` | Start the agent (alternative) |
 | `python -m pincer` | Module entry |
@@ -503,7 +501,7 @@ All configuration via environment variables with `PINCER_` prefix. See `.env.exa
 1. `cp .env.example .env` — fill in API keys
 2. `pincer auth-google` — one-time Google Calendar consent (legacy, 3 tools)
    — **or** —
-   `pincer setup-google` — one-time Google Workspace consent (full 85-tool suite)
+   `pincer setup-google` — one-time Google Workspace consent (full 113-tool suite incl. Meet v2)
 3. `pincer run` — scan WhatsApp QR on first launch
 4. Message yourself on WhatsApp or talk to the bot on Telegram
 

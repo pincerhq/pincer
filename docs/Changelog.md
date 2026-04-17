@@ -4,6 +4,47 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ---
 
+## [0.7.6] — 2026-04-17
+
+### Tools Catalog + Slack Native + MCP OAuth 2.0 documented
+
+**Consolidation release.** No new first-party tool code — docs catch up with what's already shipped on `dev`.
+
+- `docs/TOOLS_CATALOG.md` — new, authoritative catalog of every tool Pincer can call: **304 native tools** (24 core + 27 bundled-skill functions + 113 Google Workspace + 69 Microsoft 365 + 71 Slack native) plus unlimited via MCP
+- `README.md` — refreshed headline ("600+ tools"), design trade-offs table, roadmap, architecture diagram, CLI reference, and doc index
+- `docs/PROJECT_STRUCTURE.md` — sprint history updated (Sprint 9.5 Google Meet, Sprint 11 Slack Native, Sprint 12 MCP OAuth, Sprint 13 Tools Catalog); architecture diagram updated to reflect 304 native tools
+- Google Workspace total corrected from 85 → 113 (Google Meet v2 REST surface was added in Sprint 9.5 but undercounted in prior docs)
+
+### Slack Native Integration — 71 tools
+
+**New module:** `src/pincer/integrations/slack/` — full native Slack tool surface (bot + user tokens) separate from the Slack *channel* code.
+
+- `tools_messages.py` — 18 tools (channel history, threads, post, schedule, Block Kit, DM, broadcast replies, summarize channel)
+- `tools_channels.py` — 16 tools (list/create/archive/rename/topic/purpose/join/leave/invite/kick/DM/group DM)
+- `tools_users.py` — 10 tools (list users, lookup by email, presence, user groups CRUD)
+- `tools_files.py` — 10 tools (list/upload/download/share/delete + remote-file references)
+- `tools_misc.py` — 12 tools (pins, bookmarks, reminders, search messages + files via user token)
+- `tools_reactions.py` — 5 tools (add/remove reactions, list emoji)
+
+Enabled automatically when `PINCER_SLACK_BOT_TOKEN` is set; search tools additionally require `PINCER_SLACK_USER_TOKEN`.
+
+### MCP OAuth 2.0 Authorization Server
+
+**New module:** `src/pincer/mcp/auth/` — full OAuth 2.0 server for exposing Pincer tools to MCP clients.
+
+- `/authorize`, `/token`, `/introspect`, `/revoke` endpoints
+- RFC 8414 server metadata
+- PKCE (verifier/challenge helpers)
+- JWT issuance + validation via `PyJWT[crypto]>=2.8.0`
+- Scope-based access control
+- Bearer token middleware for protected routes
+- Token storage via SQLite + OS keyring
+
+### Google Workspace — Meet v2 REST surface (27 tools)
+
+Extends Sprint 9 (85 tools) to **113 tools** total. Added: spaces (create/get/update/end/moderation/artifacts/members), conference records + participants + sessions, recordings (list/get/download/status), transcripts + entries + summarization, smart notes, event subscriptions.
+
+---
 
 ## [0.7.5] — 2026-04-06
 
