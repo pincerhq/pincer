@@ -119,7 +119,7 @@ Connects to your Gmail via OAuth. Pincer can then read, search, draft, and send 
 
 ## Step 6: Enable Google Workspace (Optional)
 
-To unlock Gmail, Google Calendar, Drive, Docs, Sheets, Slides, Tasks, and Contacts — 85 tools total:
+To unlock Gmail, Google Calendar, Drive, Docs, Sheets, Slides, Meet, Tasks, and Contacts — 113 tools total:
 
 ```bash
 pincer setup-google
