@@ -59,8 +59,6 @@ services:
       pincer:
         condition: service_healthy
     restart: unless-stopped
-    profiles:
-      - ngrok
 
 volumes:
   pincer-data:
