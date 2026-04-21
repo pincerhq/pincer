@@ -217,9 +217,7 @@ class TestWhatsAppMediaAndApproval:
             fut.set_result(True)
 
         resolver = asyncio.create_task(resolve_later())
-        result = await wa_channel.request_approval(
-            "491234567890", "shell_exec", {"cmd": "ls"}
-        )
+        result = await wa_channel.request_approval("491234567890", "shell_exec", {"cmd": "ls"})
         await resolver
         assert result is True
 
@@ -234,9 +232,7 @@ class TestWhatsAppMediaAndApproval:
             fut.set_result(False)
 
         t = asyncio.create_task(deny_later())
-        result = await wa_channel.request_approval(
-            "491234567890", "shell_exec", {"cmd": "rm -rf"}
-        )
+        result = await wa_channel.request_approval("491234567890", "shell_exec", {"cmd": "rm -rf"})
         await t
         assert result is False
 
@@ -251,9 +247,7 @@ class TestWhatsAppMediaAndApproval:
         )
 
         with caplog.at_level(logging.WARNING, logger="pincer.channels.whatsapp"):
-            result = await wa_channel.request_approval(
-                "491234567890", "google__create_doc", {"title": "x"}
-            )
+            result = await wa_channel.request_approval("491234567890", "google__create_doc", {"title": "x"})
 
         assert result is False
         assert "491234567890" not in wa_channel._pending_approvals
@@ -263,9 +257,7 @@ class TestWhatsAppMediaAndApproval:
     async def test_request_input_returns_fallback_when_send_fails(self, wa_channel):
         """Undeliverable input prompts should return a user-visible message, not raise."""
         wa_channel._client = MagicMock()
-        wa_channel._client.send_message = AsyncMock(
-            side_effect=RuntimeError("no LID found")
-        )
+        wa_channel._client.send_message = AsyncMock(side_effect=RuntimeError("no LID found"))
 
         result = await wa_channel.request_input("491234567890", "What's your name?")
 
@@ -315,9 +307,7 @@ class TestWhatsAppMediaAndApproval:
         assert ("207855026221128", "lid") in captured
 
     @pytest.mark.asyncio
-    async def test_send_defaults_to_bare_user_when_no_target_learned(
-        self, wa_channel, monkeypatch
-    ):
+    async def test_send_defaults_to_bare_user_when_no_target_learned(self, wa_channel, monkeypatch):
         """Unknown user_id with no '@' falls back to neonize default server."""
         wa_globals = type(wa_channel)._jid_for.__globals__
         captured: list[tuple] = []
@@ -365,9 +355,7 @@ class TestWhatsAppLoginFailure:
     """Login-failure handlers must surface actionable errors and unblock start()."""
 
     @pytest.mark.asyncio
-    async def test_connect_failure_client_outdated_records_actionable_error(
-        self, wa_channel
-    ):
+    async def test_connect_failure_client_outdated_records_actionable_error(self, wa_channel):
         event = MagicMock()
         event.Reason = 6  # CLIENT_OUTDATED
         await wa_channel._on_connect_failure(MagicMock(), event)
