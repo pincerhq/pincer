@@ -22,6 +22,7 @@ def _ensure_neonize_mocks():
         "neonize.proto.waE2E",
         "neonize.proto.waE2E.WAWebProtobufsE2E_pb2",
         "neonize.utils",
+        "neonize.utils.enum",
         "neonize.client",
         "magic",
     ):
@@ -59,6 +60,10 @@ def _ensure_neonize_mocks():
     neonize_utils.build_jid = MagicMock()  # type: ignore[attr-defined]
     neonize_utils.Jid2String = MagicMock(return_value="1234@s.whatsapp.net")  # type: ignore[attr-defined]
     neonize_utils.log = MagicMock()  # type: ignore[attr-defined]
+
+    neonize_enum = sys.modules["neonize.utils.enum"]
+    neonize_enum.ChatPresence = MagicMock()  # type: ignore[attr-defined]
+    neonize_enum.ChatPresenceMedia = MagicMock()  # type: ignore[attr-defined]
 
     return mods
 
