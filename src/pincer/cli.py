@@ -1095,6 +1095,20 @@ async def _run_agent(settings: Settings) -> None:
     await identity.ensure_table()
     await identity.seed_from_config()
 
+    # Pending ask_user futures per user_id — populated by channels that route
+    # ask_user responses back through on_message (WhatsApp).  Telegram uses
+    # inline buttons so it owns its own pending state.
+    _pending_ask: dict[str, asyncio.Future[str]] = {}
+
+    _orig_on_message_fn = on_message
+
+    async def on_message(incoming: IncomingMessage) -> str:  # type: ignore[misc]
+        fut = _pending_ask.get(incoming.user_id)
+        if fut and not fut.done():
+            fut.set_result(incoming.text)
+            return ""
+        return await _orig_on_message_fn(incoming)
+
     # Start channels
     channels: list[BaseChannel] = []
     tg = None
@@ -1107,60 +1121,6 @@ async def _run_agent(settings: Settings) -> None:
         await tg.start(on_message)
         channels.append(tg)
         channel_map[tg.name] = tg
-
-        async def _approval_via_telegram(
-            tool_name: str,
-            arguments: dict,
-            user_id: str,
-            channel: str,
-        ) -> bool:
-            if channel == "telegram":
-                return await tg.request_approval(user_id, tool_name, arguments)
-            logger.warning(
-                "No approval UI for channel %s; auto-approving %s",
-                channel,
-                tool_name,
-            )
-            return True
-
-        agent._approval_callback = _approval_via_telegram
-
-        # Wire ask_user callback so MCP server can proxy questions to Telegram users
-        _pending_ask: dict[str, asyncio.Future[str]] = {}
-
-        async def _ask_user_via_telegram(
-            user_id: str,
-            channel: str,
-            question: str,
-        ) -> str:
-            if channel != "telegram":
-                return "[No supported channel for ask_user]"
-            import asyncio as _asyncio
-
-            fut: asyncio.Future[str] = _asyncio.get_event_loop().create_future()
-            _pending_ask[user_id] = fut
-            try:
-                await tg.send(
-                    user_id,
-                    f"🔌 **MCP Client** asks:\n\n{question}\n\n_Reply with your answer:_",
-                )
-                return await _asyncio.wait_for(fut, timeout=120)
-            except TimeoutError:
-                return "[No response from user — timed out after 120s]"
-            finally:
-                _pending_ask.pop(user_id, None)
-
-        agent._ask_user_callback = _ask_user_via_telegram
-
-        # Patch on_message to resolve pending ask_user futures
-        _orig_on_message = on_message
-
-        async def on_message(incoming: IncomingMessage) -> str:  # type: ignore[misc]
-            fut = _pending_ask.get(incoming.user_id)
-            if fut and not fut.done():
-                fut.set_result(incoming.text)
-                return ""  # Swallow the message — it was the ask_user reply
-            return await _orig_on_message(incoming)
 
         console.print("[green]Telegram connected (streaming enabled)[/green]")
 
@@ -1179,6 +1139,7 @@ async def _run_agent(settings: Settings) -> None:
             from pincer.channels.whatsapp import WhatsAppChannel
 
             wa = WhatsAppChannel(settings)
+            wa.set_identity_resolver(identity)
             await wa.start(on_message)
             channels.append(wa)
             channel_map[wa.name] = wa
@@ -1186,6 +1147,49 @@ async def _run_agent(settings: Settings) -> None:
             console.print("[green]WhatsApp connected[/green]")
         except Exception as e:
             console.print(f"[yellow]WhatsApp failed: {e}[/yellow]")
+
+    # Wire approval + ask_user callbacks across all interactive channels.
+    async def _channel_approval(
+        tool_name: str,
+        arguments: dict,
+        user_id: str,
+        channel: str,
+    ) -> bool:
+        if channel == "telegram" and tg is not None:
+            return await tg.request_approval(user_id, tool_name, arguments)
+        if channel == "whatsapp" and wa is not None:
+            return await wa.request_approval(user_id, tool_name, arguments)
+        logger.warning(
+            "No approval UI for channel %s; denying %s",
+            channel,
+            tool_name,
+        )
+        return False
+
+    async def _channel_ask_user(user_id: str, channel: str, question: str) -> str:
+        if channel == "whatsapp" and wa is not None:
+            return await wa.request_input(
+                user_id,
+                f"🔌 *MCP Client* asks:\n\n{question}\n\n_Reply with your answer:_",
+            )
+        if channel == "telegram" and tg is not None:
+            fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
+            _pending_ask[user_id] = fut
+            try:
+                await tg.send(
+                    user_id,
+                    f"🔌 **MCP Client** asks:\n\n{question}\n\n_Reply with your answer:_",
+                )
+                return await asyncio.wait_for(fut, timeout=120)
+            except TimeoutError:
+                return "[No response from user — timed out after 120s]"
+            finally:
+                _pending_ask.pop(user_id, None)
+        return "[No supported channel for ask_user]"
+
+    if tg is not None or wa is not None:
+        agent._approval_callback = _channel_approval
+        agent._ask_user_callback = _channel_ask_user
 
     # Sprint 7: Voice channel (optional)
     # Start when either inbound (voice_enabled) or outbound (voice_outbound_enabled) is enabled
