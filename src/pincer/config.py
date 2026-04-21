@@ -143,6 +143,10 @@ class Settings(BaseSettings):
         default="pincer",
         description="Trigger word for group chat mentions",
     )
+    whatsapp_show_progress: bool = Field(
+        default=True,
+        description="Edit an in-place status message while tools run (and show typing indicator).",
+    )
 
     # ── Cross-Channel Identity (Sprint 3) ────────────────
     identity_map: str = Field(

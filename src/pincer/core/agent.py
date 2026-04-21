@@ -33,6 +33,10 @@ from pincer.llm.base import (
 # Signature: (tool_name, arguments, user_id, channel) -> approved?
 ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool]]
 
+# Signature: (phase, tool_name, arguments, user_id, channel) -> None
+# phase is "start" (before execution) or "end" (after execution, success or error).
+ToolEventCallback = Callable[[str, str, dict[str, Any], str, str], Awaitable[None]]
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -250,6 +254,7 @@ class Agent:
         memory_store: MemoryStore | None = None,
         summarizer: Summarizer | None = None,
         approval_callback: ApprovalCallback | None = None,
+        tool_event_callback: ToolEventCallback | None = None,
     ) -> None:
         self._settings = settings
         self._llm = llm
@@ -259,6 +264,7 @@ class Agent:
         self._memory = memory_store
         self._summarizer = summarizer
         self._approval_callback = approval_callback
+        self._tool_event_callback = tool_event_callback
         self.mcp_manager: MCPClientManager | None = None  # set by cli after startup
         self.mcp_server: PincerMCPServer | None = None  # set by cli after startup
         self.mcp_shell: Any = None  # set by EmbeddedMCPShell.start()
@@ -735,34 +741,58 @@ class Agent:
                     tool_call.name,
                 )
 
+        await self._fire_tool_event("start", tool_call, user_id, channel)
         try:
-            result_text = await self._tools.execute(
+            try:
+                result_text = await self._tools.execute(
+                    tool_call.name,
+                    tool_call.arguments,
+                    context={"user_id": user_id, "channel": channel},
+                )
+                if tool_call.name == "make_phone_call":
+                    logger.info(
+                        "make_phone_call result: %s",
+                        (result_text[:200] + "..." if len(result_text) > 200 else result_text)
+                        if result_text
+                        else "(empty)",
+                    )
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=result_text,
+                    is_error=False,
+                )
+            except ToolNotFoundError:
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=f"Error: Tool '{tool_call.name}' not found.",
+                    is_error=True,
+                )
+            except Exception as e:
+                logger.exception("Tool '%s' failed", tool_call.name)
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=f"Error executing {tool_call.name}: {type(e).__name__}: {e}",
+                    is_error=True,
+                )
+        finally:
+            await self._fire_tool_event("end", tool_call, user_id, channel)
+
+    async def _fire_tool_event(
+        self,
+        phase: str,
+        tool_call: ToolCall,
+        user_id: str,
+        channel: str,
+    ) -> None:
+        if not self._tool_event_callback:
+            return
+        try:
+            await self._tool_event_callback(
+                phase,
                 tool_call.name,
                 tool_call.arguments,
-                context={"user_id": user_id, "channel": channel},
+                user_id,
+                channel,
             )
-            if tool_call.name == "make_phone_call":
-                logger.info(
-                    "make_phone_call result: %s",
-                    (result_text[:200] + "..." if len(result_text) > 200 else result_text)
-                    if result_text
-                    else "(empty)",
-                )
-            return ToolResult(
-                tool_call_id=tool_call.id,
-                content=result_text,
-                is_error=False,
-            )
-        except ToolNotFoundError:
-            return ToolResult(
-                tool_call_id=tool_call.id,
-                content=f"Error: Tool '{tool_call.name}' not found.",
-                is_error=True,
-            )
-        except Exception as e:
-            logger.exception("Tool '%s' failed", tool_call.name)
-            return ToolResult(
-                tool_call_id=tool_call.id,
-                content=f"Error executing {tool_call.name}: {type(e).__name__}: {e}",
-                is_error=True,
-            )
+        except Exception:
+            logger.debug("tool_event_callback failed", exc_info=True)

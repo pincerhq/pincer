@@ -1187,9 +1187,23 @@ async def _run_agent(settings: Settings) -> None:
                 _pending_ask.pop(user_id, None)
         return "[No supported channel for ask_user]"
 
+    async def _channel_tool_event(
+        phase: str,
+        tool_name: str,
+        arguments: dict,
+        user_id: str,
+        channel: str,
+    ) -> None:
+        if channel == "whatsapp" and wa is not None and settings.whatsapp_show_progress:
+            try:
+                await wa.notify_tool_event(phase, tool_name, arguments, user_id)
+            except Exception:
+                logger.debug("WA tool_event notify failed", exc_info=True)
+
     if tg is not None or wa is not None:
         agent._approval_callback = _channel_approval
         agent._ask_user_callback = _channel_ask_user
+        agent._tool_event_callback = _channel_tool_event
 
     # Sprint 7: Voice channel (optional)
     # Start when either inbound (voice_enabled) or outbound (voice_outbound_enabled) is enabled

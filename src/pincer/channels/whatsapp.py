@@ -32,8 +32,10 @@ try:
         PairStatusEv,
         StreamErrorEv,
     )
+    from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import Message as _WAMessageProto
     from neonize.utils import Jid2String, build_jid
     from neonize.utils import log as neonize_log
+    from neonize.utils.enum import ChatPresence, ChatPresenceMedia
 
     HAS_NEONIZE = True
     _NEONIZE_VERSION = getattr(neonize, "__version__", "unknown")
@@ -42,6 +44,9 @@ except ImportError:
     NewAClient = None  # type: ignore[assignment,misc]
     neonize_log = None  # type: ignore[assignment]
     _neonize_events = None  # type: ignore[assignment]
+    _WAMessageProto = None  # type: ignore[assignment,misc]
+    ChatPresence = None  # type: ignore[assignment,misc]
+    ChatPresenceMedia = None  # type: ignore[assignment,misc]
     _NEONIZE_VERSION = "not installed"
 
 from pincer.channels.base import (
@@ -154,6 +159,10 @@ class WhatsAppChannel(BaseChannel):
         self._identity: IdentityResolver | None = None
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
         self._pending_inputs: dict[str, asyncio.Future[str]] = {}
+        # message_id of approval prompt → user_id; used to accept 👍/👎 reactions.
+        self._approval_prompt_ids: dict[str, str] = {}
+        # Per-user in-place progress message: user_id → {id, jid, tools}
+        self._progress: dict[str, dict[str, Any]] = {}
         # Reply targets learned from inbound messages: sender_phone → (user, server).
         # Needed because sender_phone may be a LID user part that only resolves on
         # the "@lid" server — `build_jid(lid_user)` defaults to "@s.whatsapp.net"
@@ -212,10 +221,11 @@ class WhatsAppChannel(BaseChannel):
             f"🔐 *Approval required*\n\n"
             f"Tool: `{tool_name}`\n"
             f"Args: `{args_preview}`\n\n"
-            f"Reply *yes* to approve or *no* to deny."
+            f"Reply *yes* / *no*, or react with 👍 / 👎."
         )
+        prompt_id: str | None = None
         try:
-            await self.send(user_id, prompt)
+            prompt_id = await self._send_tracked(user_id, prompt)
         except Exception as e:
             # Can't reach the user to ask — deny cleanly so the tool call
             # surfaces as "declined by user" rather than a confusing
@@ -231,6 +241,8 @@ class WhatsAppChannel(BaseChannel):
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[bool] = loop.create_future()
         self._pending_approvals[user_id] = fut
+        if prompt_id:
+            self._approval_prompt_ids[prompt_id] = user_id
         try:
             return await asyncio.wait_for(fut, timeout=120)
         except TimeoutError:
@@ -238,6 +250,8 @@ class WhatsAppChannel(BaseChannel):
             return False
         finally:
             self._pending_approvals.pop(user_id, None)
+            if prompt_id:
+                self._approval_prompt_ids.pop(prompt_id, None)
 
     async def request_input(self, user_id: str, question: str) -> str:
         """Prompt the user and wait for their next message as the answer."""
@@ -266,6 +280,145 @@ class WhatsAppChannel(BaseChannel):
         if t in {"no", "n", "deny", "denied", "cancel", "stop", "abort", "👎", "❌"}:
             return False
         return None
+
+    _REACTION_APPROVE = {"👍", "✅", "👌", "❤"}
+    _REACTION_DENY = {"👎", "❌", "🚫"}
+
+    def _handle_reaction_approval(self, msg: WAMessage) -> bool:
+        """If this reaction targets a pending-approval prompt, resolve it.
+
+        Returns True if the reaction was consumed (and the caller should stop),
+        False if it's an unrelated reaction that should be ignored normally.
+        """
+        reaction = msg.reactionMessage
+        target_id = getattr(reaction.key, "ID", "") or ""
+        if not target_id:
+            return False
+        user_id = self._approval_prompt_ids.get(target_id)
+        if not user_id:
+            return False
+        fut = self._pending_approvals.get(user_id)
+        if not fut or fut.done():
+            return False
+
+        emoji = (reaction.text or "").strip()
+        if emoji in self._REACTION_APPROVE:
+            fut.set_result(True)
+            return True
+        if emoji in self._REACTION_DENY:
+            fut.set_result(False)
+            return True
+        # Empty string = reaction removed; ignore without consuming.
+        return False
+
+    async def _send_tracked(self, user_id: str, text: str) -> str | None:
+        """Send a message and return the final chunk's WA message id (or None)."""
+        if not self._client:
+            from pincer.exceptions import ChannelNotConnectedError
+
+            raise ChannelNotConnectedError("WhatsApp client not connected")
+        jid = self._jid_for(user_id)
+        last_id: str | None = None
+        for chunk in _split_whatsapp_message(text or ""):
+            result = await self._client.send_message(jid, chunk)
+            sid = getattr(result, "ID", None) if result is not None else None
+            if sid is not None:
+                last_id = str(sid)
+                # Echo suppression: don't re-process this as an inbound message.
+                while len(self._recent_sent_ids_order) >= self._max_recent_sent_ids:
+                    old = self._recent_sent_ids_order.popleft()
+                    self._recent_sent_ids.discard(old)
+                self._recent_sent_ids_order.append(last_id)
+                self._recent_sent_ids.add(last_id)
+        return last_id
+
+    # ── Progress reporting (tool_event_callback bridge) ─────
+
+    async def notify_tool_event(
+        self,
+        phase: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        user_id: str,
+    ) -> None:
+        """Surface live tool-execution progress in the user's chat.
+
+        Maintains one in-place status bubble per user, edited on each "start".
+        Also pings a COMPOSING presence so the phone shows "typing…".
+        """
+        if not self._client:
+            return
+        jid = self._jid_for(user_id)
+        try:
+            await self._client.send_chat_presence(
+                jid,
+                ChatPresence.CHAT_PRESENCE_COMPOSING,
+                ChatPresenceMedia.CHAT_PRESENCE_MEDIA_TEXT,
+            )
+        except Exception:
+            logger.debug("WA presence notify failed", exc_info=True)
+
+        if phase != "start":
+            return
+
+        args_preview = self._format_args_preview(arguments)
+        status_text = f"🟡 Running `{tool_name}`" + (f" — {args_preview}" if args_preview else "…")
+
+        state = self._progress.get(user_id)
+        if state is None:
+            try:
+                msg_id = await self._send_tracked(user_id, status_text)
+            except Exception:
+                logger.debug("WA progress send failed", exc_info=True)
+                return
+            if msg_id is None:
+                return
+            self._progress[user_id] = {
+                "id": msg_id,
+                "jid": jid,
+                "tools": [tool_name],
+            }
+            return
+
+        state["tools"].append(tool_name)
+        try:
+            new_msg = _WAMessageProto()
+            new_msg.conversation = status_text
+            await self._client.edit_message(state["jid"], state["id"], new_msg)
+        except Exception:
+            logger.debug("WA progress edit failed", exc_info=True)
+
+    async def _finalize_progress(self, user_id: str) -> None:
+        """Mark the status message as done once the final reply is about to land."""
+        state = self._progress.pop(user_id, None)
+        if not state or not self._client:
+            return
+        tools = state.get("tools") or []
+        summary = f"✅ Done — {len(tools)} step(s)"
+        try:
+            new_msg = _WAMessageProto()
+            new_msg.conversation = summary
+            await self._client.edit_message(state["jid"], state["id"], new_msg)
+        except Exception:
+            logger.debug("WA progress finalize failed", exc_info=True)
+
+    @staticmethod
+    def _format_args_preview(arguments: dict[str, Any], max_len: int = 80) -> str:
+        if not arguments:
+            return ""
+        try:
+            parts = []
+            for k, v in arguments.items():
+                sv = str(v)
+                if len(sv) > 40:
+                    sv = sv[:40] + "…"
+                parts.append(f"{k}={sv}")
+            preview = ", ".join(parts)
+        except Exception:
+            return ""
+        if len(preview) > max_len:
+            preview = preview[:max_len] + "…"
+        return preview
 
     # ── Lifecycle ────────────────────────────────
 
@@ -645,6 +798,11 @@ class WhatsAppChannel(BaseChannel):
             # message so content checks find the actual text/media.
             msg = self._unwrap_message(msg)
 
+            # Reaction-based approval: handled before the content filter,
+            # which drops reactionMessage as "unsupported content".
+            if msg.HasField("reactionMessage") and self._handle_reaction_approval(msg):
+                return
+
             if not self._has_supported_content(msg):
                 set_fields = self._message_set_fields(msg)
                 logger.info(
@@ -691,6 +849,7 @@ class WhatsAppChannel(BaseChannel):
 
             if self._handler:
                 response = await self._handler(incoming)
+                await self._finalize_progress(sender_phone)
                 if response:
                     reply_jid = build_jid(chat_user, source.Chat.Server)
                     for chunk in _split_whatsapp_message(response):
