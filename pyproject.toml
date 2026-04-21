@@ -1,6 +1,6 @@
 [project]
 name = "pincer-agent"
-version = "0.7.5"
+version = "0.7.6"
 description = "Your personal AI agent. Text it on WhatsApp. It does stuff. 🦀"
 readme = "README.md"
 license = { text = "MIT" }
@@ -27,7 +27,14 @@ dependencies = [
     "rich>=13.9.0",
     "structlog>=24.4.0",
     # Sprint 3: WhatsApp + Proactive Agent
-    "neonize>=0.3.14",
+    # WhatsApp frequently invalidates older protocol versions; keep floor at a
+    # release that carries a known-accepted whatsmeow build. Bump when the
+    # server returns `err-client-outdated` (see docs/whatsapp-troubleshooting.md).
+    "neonize>=0.3.16",
+    # neonize 0.3.16 ships protobuf gencode 7.34.1 without pinning a runtime
+    # floor; older protobuf runtimes raise `incompatible Protobuf Gencode/Runtime
+    # versions` at pairing time. Keep this aligned with neonize's gencode.
+    "protobuf>=7.34.1",
     # Sprint 4: Discord (PyNaCl required for voice)
     "discord.py[voice]>=2.3,<3.0",
     "qrcode[pil]>=8.0",

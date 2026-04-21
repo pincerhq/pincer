@@ -4,7 +4,25 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ---
 
-## [0.7.6] — 2026-04-17
+## [0.7.6] — 2026-04-19
+
+### WhatsApp `err-client-outdated` — actionable failure surface
+
+WhatsApp periodically rejects older `whatsmeow` client versions with a silent
+`Login event: err-client-outdated` line that previously let `pincer run`
+hang to its 120-second timeout. Now:
+
+- `src/pincer/channels/whatsapp.py` subscribes to `ConnectFailureEv`,
+  `ClientOutdatedEv`, `LoggedOutEv`, and `StreamErrorEv`. Each failure logs
+  a structured ERROR with the reason, installed `neonize` version, and the
+  exact command to run, then `start()` raises with the same message instead
+  of hanging.
+- `pincer doctor` adds a `whatsapp_neonize_version` check: PASS at or above
+  the known-good minimum, WARNING otherwise, with `uv pip install -U
+  'neonize>=X.Y.Z'` in the fix hint.
+- `pyproject.toml` pin raised: `neonize>=0.3.16` (was `>=0.3.14`).
+- New: `docs/whatsapp-troubleshooting.md` covering `err-client-outdated`,
+  `logged_out`, `temp_banned`, and `main_device_gone` reasons.
 
 ### Tools Catalog + Slack Native + MCP OAuth 2.0 documented
 

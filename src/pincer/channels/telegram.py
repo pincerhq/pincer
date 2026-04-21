@@ -258,6 +258,25 @@ class TelegramChannel(BaseChannel):
         photo = BufferedInputFile(data, filename=f"image.{ext}")
         await self._bot.send_photo(chat_id=chat_id, photo=photo, caption=caption or None)
 
+    async def send_photo_from_bytes(
+        self,
+        user_id: str,
+        data: bytes,
+        mimetype: str = "image/png",
+        caption: str = "",
+    ) -> None:
+        """Send a photo supplied as raw bytes."""
+        assert self._bot is not None
+        from aiogram.types import BufferedInputFile
+
+        ext = "png"
+        if mimetype:
+            sub = mimetype.split("/", 1)[-1].lower()
+            if sub in ("jpeg", "jpg", "png", "webp", "gif"):
+                ext = "jpg" if sub == "jpeg" else sub
+        photo = BufferedInputFile(data, filename=f"image.{ext}")
+        await self._bot.send_photo(chat_id=int(user_id), photo=photo, caption=caption or None)
+
     async def send_animation(self, user_id: str, url: str, caption: str = "") -> None:
         """Send a GIF/animation from a URL inline in the chat.
 
