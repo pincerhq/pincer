@@ -24,9 +24,20 @@ pip install pincer-agent && pincer init
 
 <div align="center">
 
-[Website](https://pincer.sh) · [Docs](https://pincer.sh/docs) · [Quick Start](#-quick-start) · [Discord](https://discord.gg/pincer) · [Contributing](docs/Contributing.md)
+[Website](https://pincer.sh) · [Docs](https://pincer.sh/docs) · [Quick Start](#-quick-start) · [Discord](https://discord.gg/pincer) · [Contributing](docs/Contributing.md) · [Changelog](CHANGELOG.md)
 
 </div>
+
+---
+
+### 🆕 What's new in 0.7.6 (2026-04-19)
+
+- **Slack Native — 71 tools** (messages, channels, users, files, reactions, pins/bookmarks/reminders/search) in `src/pincer/integrations/slack/`. Enable with `PINCER_SLACK_BOT_TOKEN` (+ `PINCER_SLACK_USER_TOKEN` for search).
+- **MCP OAuth 2.0 Authorization Server** — expose Pincer tools to remote MCP clients: `/authorize` · `/token` · `/introspect` · `/revoke`, RFC 8414 metadata, PKCE, JWT, scope-based access.
+- **Google Workspace Meet v2** — 27 new tools (spaces, conference records, recordings, transcripts, smart notes). Google Workspace total is now **113**.
+- **Tools Catalog** — `docs/TOOLS_CATALOG.md` documents all **304 native tools** (24 core + 27 skills + 113 Google Workspace + 69 Microsoft 365 + 71 Slack) plus unlimited via MCP.
+
+📖 Full release notes → [`CHANGELOG.md`](CHANGELOG.md) · Upgrade guide → [`docs/announcements/v0.7.6.md`](docs/announcements/v0.7.6.md)
 
 ---
 

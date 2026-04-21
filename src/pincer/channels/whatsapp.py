@@ -20,22 +20,29 @@ from collections import deque
 from typing import TYPE_CHECKING, Any
 
 try:
+    import neonize
+    from neonize.aioze import events as _neonize_events
     from neonize.aioze.client import NewAClient
     from neonize.aioze.events import (
+        ClientOutdatedEv,
         ConnectedEv,
+        ConnectFailureEv,
+        LoggedOutEv,
         MessageEv,
         PairStatusEv,
-        event_global_loop,
+        StreamErrorEv,
     )
     from neonize.utils import Jid2String, build_jid
     from neonize.utils import log as neonize_log
 
     HAS_NEONIZE = True
+    _NEONIZE_VERSION = getattr(neonize, "__version__", "unknown")
 except ImportError:
     HAS_NEONIZE = False
     NewAClient = None  # type: ignore[assignment,misc]
     neonize_log = None  # type: ignore[assignment]
-    event_global_loop = None  # type: ignore[assignment]
+    _neonize_events = None  # type: ignore[assignment]
+    _NEONIZE_VERSION = "not installed"
 
 from pincer.channels.base import (
     BaseChannel,
@@ -50,8 +57,78 @@ if TYPE_CHECKING:
     )
 
     from pincer.config import Settings
+    from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
+
+MAX_WHATSAPP_MESSAGE_LENGTH = 4096
+
+# Remediation text keyed by neonize ConnectFailureReason enum values.
+# Kept as plain ints so tests can exercise the map without the neonize stub.
+# (2=LOGGED_OUT, 3=TEMP_BANNED, 4=MAIN_DEVICE_GONE, 6=CLIENT_OUTDATED, 7=BAD_USER_AGENT)
+_WA_CLIENT_OUTDATED_ACTION = (
+    "WhatsApp rejected the client protocol version. "
+    "Run `uv pip install -U 'neonize>=0.3.16'` (or `pip install -U neonize`) and restart. "
+    "See docs/whatsapp-troubleshooting.md if already on the latest neonize."
+)
+_WA_LOGGED_OUT_ACTION = (
+    "Phone removed the linked device. Delete the neonize session under your data dir "
+    "and re-pair with `pincer run --channel whatsapp`."
+)
+_WA_TEMP_BANNED_ACTION = (
+    "WhatsApp temporarily banned this number. Wait out the ban; the Linked Devices "
+    "screen in WhatsApp shows the remaining duration."
+)
+_WA_MAIN_DEVICE_GONE_ACTION = (
+    "The primary phone is offline or logged out of WhatsApp. Re-verify the primary "
+    "device, then delete the neonize session and re-pair."
+)
+_WA_BAD_USER_AGENT_ACTION = (
+    "WhatsApp rejected the client user-agent — upgrade neonize "
+    "(`pip install -U neonize`). See docs/whatsapp-troubleshooting.md if already latest."
+)
+
+_WA_CONNECT_FAILURE_REMEDIATION: dict[int, tuple[str, str]] = {
+    2: ("logged_out", _WA_LOGGED_OUT_ACTION),
+    3: ("temp_banned", _WA_TEMP_BANNED_ACTION),
+    4: ("main_device_gone", _WA_MAIN_DEVICE_GONE_ACTION),
+    6: ("client_outdated", _WA_CLIENT_OUTDATED_ACTION),
+    7: ("bad_user_agent", _WA_BAD_USER_AGENT_ACTION),
+}
+
+
+def _split_whatsapp_message(text: str, max_len: int = MAX_WHATSAPP_MESSAGE_LENGTH) -> list[str]:
+    """Split long text at paragraph → line → hard boundaries so nothing is lost."""
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+    for paragraph in text.split("\n\n"):
+        if len(paragraph) > max_len:
+            if current.strip():
+                chunks.append(current.strip())
+                current = ""
+            for line in paragraph.split("\n"):
+                while len(line) > max_len:
+                    chunks.append(line[:max_len])
+                    line = line[max_len:]
+                if len(current) + len(line) + 1 > max_len:
+                    if current.strip():
+                        chunks.append(current.strip())
+                    current = line + "\n"
+                else:
+                    current += line + "\n"
+        elif len(current) + len(paragraph) + 2 > max_len:
+            if current.strip():
+                chunks.append(current.strip())
+            current = paragraph + "\n\n"
+        else:
+            current += paragraph + "\n\n"
+
+    if current.strip():
+        chunks.append(current.strip())
+    return chunks or [text[:max_len]]
 
 
 class WhatsAppChannel(BaseChannel):
@@ -71,6 +148,17 @@ class WhatsAppChannel(BaseChannel):
         self._own_jid_full: str | None = None
         self._own_lid: str | None = None
         self._connected = asyncio.Event()
+        # Set by login-failure handlers. Consumed by start() to turn silent
+        # upstream rejections (err-client-outdated etc.) into loud errors.
+        self._login_error: str | None = None
+        self._identity: IdentityResolver | None = None
+        self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
+        self._pending_inputs: dict[str, asyncio.Future[str]] = {}
+        # Reply targets learned from inbound messages: sender_phone → (user, server).
+        # Needed because sender_phone may be a LID user part that only resolves on
+        # the "@lid" server — `build_jid(lid_user)` defaults to "@s.whatsapp.net"
+        # and the WA server rejects it with "no LID found".
+        self._reply_targets: dict[str, tuple[str, str]] = {}
 
         self._dm_allowlist: set[str] = set()
         if settings.whatsapp_dm_allowlist:
@@ -88,6 +176,97 @@ class WhatsAppChannel(BaseChannel):
     def name(self) -> str:
         return "whatsapp"
 
+    def set_identity_resolver(self, identity: IdentityResolver) -> None:
+        """Set the identity resolver for cross-channel user mapping."""
+        self._identity = identity
+
+    async def _resolve_identity(self, sender_phone: str) -> str:
+        if not self._identity:
+            return ""
+        try:
+            return await self._identity.resolve(
+                ChannelType.WHATSAPP,
+                sender_phone,
+            )
+        except Exception:
+            logger.debug("Identity resolution failed for %s", sender_phone, exc_info=True)
+            return ""
+
+    # ── Interactive prompts (approval / ask_user) ────
+
+    # Shaped like Telegram's approval: returns True/False. On WhatsApp there
+    # are no inline buttons, so we ask the user to reply yes/no and consume
+    # the next inbound message for this user.
+    async def request_approval(
+        self,
+        user_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> bool:
+        if self._client is None:
+            return False
+        args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
+        if len(args_preview) > 200:
+            args_preview = args_preview[:200] + "…"
+        prompt = (
+            f"🔐 *Approval required*\n\n"
+            f"Tool: `{tool_name}`\n"
+            f"Args: `{args_preview}`\n\n"
+            f"Reply *yes* to approve or *no* to deny."
+        )
+        try:
+            await self.send(user_id, prompt)
+        except Exception as e:
+            # Can't reach the user to ask — deny cleanly so the tool call
+            # surfaces as "declined by user" rather than a confusing
+            # "approval callback failed" error upstream.
+            logger.warning(
+                "WA approval prompt undeliverable to %s for %s (%s); denying.",
+                user_id,
+                tool_name,
+                e,
+            )
+            return False
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[bool] = loop.create_future()
+        self._pending_approvals[user_id] = fut
+        try:
+            return await asyncio.wait_for(fut, timeout=120)
+        except TimeoutError:
+            logger.info("WA approval timed out for %s / %s", user_id, tool_name)
+            return False
+        finally:
+            self._pending_approvals.pop(user_id, None)
+
+    async def request_input(self, user_id: str, question: str) -> str:
+        """Prompt the user and wait for their next message as the answer."""
+        if self._client is None:
+            return "[WhatsApp not connected]"
+        try:
+            await self.send(user_id, question)
+        except Exception as e:
+            logger.warning("WA input prompt undeliverable to %s (%s)", user_id, e)
+            return "[Could not deliver question to user]"
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[str] = loop.create_future()
+        self._pending_inputs[user_id] = fut
+        try:
+            return await asyncio.wait_for(fut, timeout=120)
+        except TimeoutError:
+            return "[No response from user — timed out after 120s]"
+        finally:
+            self._pending_inputs.pop(user_id, None)
+
+    @staticmethod
+    def _parse_yes_no(text: str) -> bool | None:
+        t = (text or "").strip().lower()
+        if t in {"yes", "y", "ok", "okay", "sure", "approve", "approved", "allow", "👍", "✅"}:
+            return True
+        if t in {"no", "n", "deny", "denied", "cancel", "stop", "abort", "👎", "❌"}:
+            return False
+        return None
+
     # ── Lifecycle ────────────────────────────────
 
     _loop_started = False
@@ -95,12 +274,16 @@ class WhatsAppChannel(BaseChannel):
     async def start(self, handler: MessageHandler) -> None:
         self._handler = handler
 
-        # Neonize dispatches all event callbacks via
-        # asyncio.run_coroutine_threadsafe(..., event_global_loop) but never
-        # starts that loop.  We run it in a daemon thread so callbacks fire.
-        if not WhatsAppChannel._loop_started and event_global_loop is not None and not event_global_loop.is_running():
+        # Neonize sets event_global_loop lazily inside connect() (to the
+        # running asyncio loop). Older versions pre-created a separate loop
+        # that required a daemon-thread runner; keep that path as a no-op
+        # safety net in case a future neonize reverts. Must resolve the
+        # attribute through the module — `from X import Y` captures the
+        # value at import time (None), missing later reassignments.
+        loop = _neonize_events.event_global_loop if _neonize_events is not None else None
+        if not WhatsAppChannel._loop_started and loop is not None and not loop.is_running():
             threading.Thread(
-                target=event_global_loop.run_forever,
+                target=loop.run_forever,
                 daemon=True,
             ).start()
             WhatsAppChannel._loop_started = True
@@ -113,6 +296,10 @@ class WhatsAppChannel(BaseChannel):
         self._client.event(ConnectedEv)(self._on_connected)
         self._client.event(PairStatusEv)(self._on_pair_status)
         self._client.event(MessageEv)(self._on_message)
+        self._client.event(ConnectFailureEv)(self._on_connect_failure)
+        self._client.event(ClientOutdatedEv)(self._on_client_outdated)
+        self._client.event(LoggedOutEv)(self._on_logged_out)
+        self._client.event(StreamErrorEv)(self._on_stream_error)
 
         neonize_log.setLevel(logging.WARNING)
         for _name in ("whatsmeow", "whatsmeow.Client", "Whatsmeow", "Whatsmeow.Database"):
@@ -133,21 +320,29 @@ class WhatsAppChannel(BaseChannel):
         logger.info("Connecting to WhatsApp...")
         await self._client.connect()
 
-        # connect() schedules the Go backend coroutine on event_global_loop via
-        # create_task(), but that call from the main thread doesn't wake the
-        # daemon loop's I/O selector.  Poke it so it picks up the queued task.
-        event_global_loop.call_soon_threadsafe(lambda: None)
+        # connect() assigns neonize's event_global_loop to the running loop.
+        # If a separate loop is running in our daemon thread (older neonize),
+        # poke it so it picks up any task create_task() just queued.
+        loop = _neonize_events.event_global_loop if _neonize_events is not None else None
+        if loop is not None and loop is not asyncio.get_running_loop():
+            loop.call_soon_threadsafe(lambda: None)
 
         try:
             await asyncio.wait_for(self._connected.wait(), timeout=120)
         except TimeoutError:
             raise RuntimeError("WhatsApp connection timed out. Did you scan the QR code?") from None
 
-        logger.info(
-            "event_global_loop healthy: running=%s, closed=%s",
-            event_global_loop.is_running(),
-            event_global_loop.is_closed(),
-        )
+        # Login-failure handlers set _login_error AND wake _connected so we
+        # don't hang to the timeout. Surface the reason here instead.
+        if self._login_error:
+            raise RuntimeError(f"WhatsApp login failed: {self._login_error}")
+
+        if loop is not None:
+            logger.info(
+                "event_global_loop healthy: running=%s, closed=%s",
+                loop.is_running(),
+                loop.is_closed(),
+            )
 
     async def stop(self) -> None:
         if self._client:
@@ -155,10 +350,35 @@ class WhatsAppChannel(BaseChannel):
                 await self._client.disconnect()
             except Exception as e:
                 logger.warning("WhatsApp disconnect error: %s", e)
-        if event_global_loop is not None and event_global_loop.is_running():
-            event_global_loop.call_soon_threadsafe(event_global_loop.stop)
+        loop = _neonize_events.event_global_loop if _neonize_events is not None else None
+        # Only stop if it's a separate loop we started in a daemon thread.
+        # In current neonize, this is the running asyncio loop — stopping it
+        # would kill the caller.
+        if loop is not None and loop.is_running() and loop is not asyncio.get_running_loop():
+            loop.call_soon_threadsafe(loop.stop)
             await asyncio.sleep(0.2)
         logger.info("WhatsApp channel stopped")
+
+    def _jid_for(self, user_id: str) -> Any:
+        """Build a JID to send to.
+
+        Honors, in order:
+          1. An explicit "user@server" in user_id (e.g. "207855026221128@lid").
+          2. A server learned from an inbound message for this user.
+          3. The neonize default server (s.whatsapp.net).
+
+        Step 2 is load-bearing for LID-based self-chats: the sender's User part
+        is a LID that only resolves on "@lid", so build_jid(lid_user) defaults
+        to "@s.whatsapp.net" and WA returns "no LID found".
+        """
+        if "@" in user_id:
+            user, server = user_id.split("@", 1)
+            return build_jid(user, server)
+        target = self._reply_targets.get(user_id)
+        if target is not None:
+            user, server = target
+            return build_jid(user, server)
+        return build_jid(user_id)
 
     async def send(self, user_id: str, text: str, **kwargs: Any) -> None:
         if not self._client:
@@ -166,9 +386,74 @@ class WhatsAppChannel(BaseChannel):
 
             raise ChannelNotConnectedError("WhatsApp client not connected")
 
-        jid = build_jid(user_id.split("@")[0])
-        await self._client.send_message(jid, text)
+        jid = self._jid_for(user_id)
+        for chunk in _split_whatsapp_message(text or ""):
+            await self._client.send_message(jid, chunk)
         logger.debug("WhatsApp message sent to %s (%d chars)", user_id, len(text))
+
+    async def send_photo(self, user_id: str, url: str, caption: str = "") -> None:
+        """Send a photo (URL, local path, or bytes) inline in the chat."""
+        if not self._client:
+            from pincer.exceptions import ChannelNotConnectedError
+
+            raise ChannelNotConnectedError("WhatsApp client not connected")
+        jid = self._jid_for(user_id)
+        await self._client.send_image(jid, url, caption=caption or None)
+
+    async def send_photo_from_bytes(
+        self,
+        user_id: str,
+        data: bytes,
+        mimetype: str = "image/png",
+        caption: str = "",
+    ) -> None:
+        """Send a photo supplied as raw bytes."""
+        if not self._client:
+            from pincer.exceptions import ChannelNotConnectedError
+
+            raise ChannelNotConnectedError("WhatsApp client not connected")
+        jid = self._jid_for(user_id)
+        await self._client.send_image(jid, data, caption=caption or None)
+
+    async def send_file(self, user_id: str, file_path: str, caption: str = "") -> None:
+        """Send a file as a WhatsApp document."""
+        if not self._client:
+            from pincer.exceptions import ChannelNotConnectedError
+
+            raise ChannelNotConnectedError("WhatsApp client not connected")
+        import mimetypes
+        from pathlib import Path
+
+        p = Path(file_path)
+        filename = p.name
+        mime, _ = mimetypes.guess_type(filename)
+        jid = self._jid_for(user_id)
+        await self._client.send_document(
+            jid,
+            file_path,
+            caption=caption or None,
+            filename=filename,
+            mimetype=mime or "application/octet-stream",
+        )
+
+    async def send_animation(self, user_id: str, url: str, caption: str = "") -> None:
+        """Send a GIF/animation — delivered as a looping video on WhatsApp."""
+        if not self._client:
+            from pincer.exceptions import ChannelNotConnectedError
+
+            raise ChannelNotConnectedError("WhatsApp client not connected")
+        jid = self._jid_for(user_id)
+        try:
+            await self._client.send_video(
+                jid,
+                url,
+                caption=caption or None,
+                gifplayback=True,
+                is_gif=True,
+            )
+        except Exception:
+            logger.exception("send_animation failed, falling back to image")
+            await self._client.send_image(jid, url, caption=caption or None)
 
     # ── Event Handlers ───────────────────────────
 
@@ -211,6 +496,43 @@ class WhatsAppChannel(BaseChannel):
 
     async def _on_pair_status(self, _client: NewAClient, event: PairStatusEv) -> None:
         logger.info("WhatsApp paired: %s", Jid2String(event.ID))
+
+    # ── Login-failure surface ────────────────────
+    # Neonize otherwise prints a bare `Login event: <reason>` line to stdout
+    # and lets start() hang to its 120s timeout. These handlers turn each
+    # reason into an actionable ERROR log and unblock start() so it can raise.
+
+    def _record_login_failure(self, reason_name: str, action: str) -> None:
+        logger.error(
+            "WhatsApp login failed reason=%s neonize=%s action=%s",
+            reason_name,
+            _NEONIZE_VERSION,
+            action,
+        )
+        self._login_error = f"{reason_name}: {action}"
+        self._connected.set()
+
+    async def _on_connect_failure(self, _client: NewAClient, event: ConnectFailureEv) -> None:
+        reason_val = int(getattr(event, "Reason", 0) or 0)
+        name, action = _WA_CONNECT_FAILURE_REMEDIATION.get(
+            reason_val,
+            ("connect_failure", "See neonize/whatsmeow release notes; upgrade neonize first."),
+        )
+        self._record_login_failure(name, action)
+
+    async def _on_client_outdated(self, _client: NewAClient, _event: ClientOutdatedEv) -> None:
+        self._record_login_failure("client_outdated", _WA_CLIENT_OUTDATED_ACTION)
+
+    async def _on_logged_out(self, _client: NewAClient, _event: LoggedOutEv) -> None:
+        self._record_login_failure("logged_out", _WA_LOGGED_OUT_ACTION)
+
+    async def _on_stream_error(self, _client: NewAClient, event: StreamErrorEv) -> None:
+        code = getattr(event, "Code", "") or "unknown"
+        logger.error(
+            "WhatsApp stream error code=%s neonize=%s — reconnect may be required",
+            code,
+            _NEONIZE_VERSION,
+        )
 
     # Skip messages older than this (seconds) — filters history-sync flood
     _MAX_MESSAGE_AGE = 120
@@ -260,6 +582,13 @@ class WhatsAppChannel(BaseChannel):
                 if sender_server == "lid":
                     self._own_lid = sender_phone
                     logger.info("WA learned owner LID from sender: %s", self._own_lid)
+
+            # Remember where to reply to this sender. Mirrors what the handler-
+            # reply path at the bottom of this function uses (chat JID), so
+            # approval/input prompts route to the same place.
+            chat_server = source.Chat.Server
+            if sender_phone and chat_user and chat_server:
+                self._reply_targets[sender_phone] = (chat_user, chat_server)
 
             msg_type = getattr(info, "Type", None) or "unknown"
             logger.info(
@@ -332,6 +661,26 @@ class WhatsAppChannel(BaseChannel):
                 )
                 return
 
+            # Intercept approval/input responses before normal routing.
+            approval_fut = self._pending_approvals.get(sender_phone)
+            if approval_fut and not approval_fut.done():
+                decision = self._parse_yes_no(incoming.text)
+                if decision is None:
+                    await client.send_message(
+                        build_jid(chat_user, source.Chat.Server),
+                        "Please reply *yes* or *no*.",
+                    )
+                    return
+                approval_fut.set_result(decision)
+                return
+            input_fut = self._pending_inputs.get(sender_phone)
+            if input_fut and not input_fut.done():
+                input_fut.set_result(incoming.text)
+                return
+
+            # Populate cross-channel identity for tools that depend on it.
+            incoming.pincer_user_id = await self._resolve_identity(sender_phone)
+
             logger.info(
                 "WhatsApp message from %s (media=%s, self_chat=%s, text=%.60r)",
                 sender_phone,
@@ -344,15 +693,16 @@ class WhatsAppChannel(BaseChannel):
                 response = await self._handler(incoming)
                 if response:
                     reply_jid = build_jid(chat_user, source.Chat.Server)
-                    result = await client.send_message(reply_jid, response)
-                    sent_id = getattr(result, "ID", None) if result is not None else None
-                    if sent_id is not None:
-                        sid = str(sent_id)
-                        while len(self._recent_sent_ids_order) >= self._max_recent_sent_ids:
-                            old = self._recent_sent_ids_order.popleft()
-                            self._recent_sent_ids.discard(old)
-                        self._recent_sent_ids_order.append(sid)
-                        self._recent_sent_ids.add(sid)
+                    for chunk in _split_whatsapp_message(response):
+                        result = await client.send_message(reply_jid, chunk)
+                        sent_id = getattr(result, "ID", None) if result is not None else None
+                        if sent_id is not None:
+                            sid = str(sent_id)
+                            while len(self._recent_sent_ids_order) >= self._max_recent_sent_ids:
+                                old = self._recent_sent_ids_order.popleft()
+                                self._recent_sent_ids.discard(old)
+                            self._recent_sent_ids_order.append(sid)
+                            self._recent_sent_ids.add(sid)
                     logger.debug("WA reply sent to %s (%d chars)", chat_jid, len(response))
                 else:
                     logger.debug("WA handler returned empty response")

@@ -94,6 +94,16 @@ class BaseChannel(ABC):
         """Send a photo from a URL. Default implementation sends a text link."""
         await self.send(user_id, f"{caption}\n{url}".strip())
 
+    async def send_photo_from_bytes(
+        self,
+        user_id: str,
+        data: bytes,
+        mimetype: str = "image/png",
+        caption: str = "",
+    ) -> None:
+        """Send a photo from raw bytes. Default implementation sends the caption as text."""
+        await self.send(user_id, caption or "[image]")
+
     async def send_animation(self, user_id: str, url: str, caption: str = "") -> None:
         """Send an animation/GIF from a URL. Default implementation sends a text link."""
         await self.send(user_id, f"{caption}\n{url}".strip())

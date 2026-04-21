@@ -26,7 +26,7 @@ def doctor_env(tmp_path):
 def test_run_all_returns_report(doctor_env):
     report = doctor_env.run_all()
     assert isinstance(report, DoctorReport)
-    assert len(report.checks) == 42  # 31 original + 8 MCP checks + 3 MCP security checks
+    assert len(report.checks) == 43  # 31 original + 8 MCP + 3 MCP security + 1 WA neonize
     assert 0 <= report.score <= 100
 
 
@@ -280,3 +280,46 @@ def test_mcp_servers_skips_http_transport(tmp_path):
     doc = SecurityDoctor(config_dir=tmp_path)
     result = doc._check_mcp_servers()
     assert result.status == CheckStatus.PASS
+
+
+def test_whatsapp_neonize_version_passes_on_recent(monkeypatch):
+    """A neonize version at or above the minimum is a PASS."""
+    import sys
+    from types import ModuleType
+
+    fake = ModuleType("neonize")
+    fake.__version__ = "0.3.16.post0"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "neonize", fake)
+
+    result = SecurityDoctor()._check_whatsapp_neonize_version()
+    assert result.status == CheckStatus.PASS
+    assert "0.3.16" in result.message
+
+
+def test_whatsapp_neonize_version_warns_on_old(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    fake = ModuleType("neonize")
+    fake.__version__ = "0.3.14"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "neonize", fake)
+
+    result = SecurityDoctor()._check_whatsapp_neonize_version()
+    assert result.status == CheckStatus.WARNING
+    assert "err-client-outdated" in result.message
+    assert "neonize" in result.fix_hint
+
+
+def test_whatsapp_neonize_version_skipped_when_missing(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked_import(name, *a, **kw):
+        if name == "neonize":
+            raise ImportError("blocked for test")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+    result = SecurityDoctor()._check_whatsapp_neonize_version()
+    assert result.status == CheckStatus.SKIPPED
