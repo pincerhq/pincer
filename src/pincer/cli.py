@@ -1102,7 +1102,7 @@ async def _run_agent(settings: Settings) -> None:
 
     _orig_on_message_fn = on_message
 
-    async def on_message(incoming: IncomingMessage) -> str:  # type: ignore[misc]
+    async def on_message(incoming: IncomingMessage) -> str:  # type: ignore[no-redef]
         fut = _pending_ask.get(incoming.user_id)
         if fut and not fut.done():
             fut.set_result(incoming.text)
