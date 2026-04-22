@@ -102,6 +102,7 @@ class SecurityDoctor:
         # Access Control (4 checks)
         report.checks.append(self._check_telegram_allowlist())
         report.checks.append(self._check_whatsapp_dm_policy())
+        report.checks.append(self._check_whatsapp_neonize_version())
         report.checks.append(self._check_discord_allowlist())
         report.checks.append(self._check_dashboard_auth_token())
         # Budget (3 checks)
@@ -374,6 +375,44 @@ class SecurityDoctor:
             "whatsapp_dm_policy",
             CheckStatus.SKIPPED,
             "WhatsApp not configured",
+            category="access",
+        )
+
+    # Minimum neonize release carrying a whatsmeow build WhatsApp still accepts.
+    # Bump when upstream ships a fix for a fresh `err-client-outdated` wave.
+    _WA_NEONIZE_MIN = (0, 3, 16)
+
+    def _check_whatsapp_neonize_version(self) -> CheckResult:
+        try:
+            import neonize  # type: ignore[import-not-found]
+        except ImportError:
+            return CheckResult(
+                "whatsapp_neonize_version",
+                CheckStatus.SKIPPED,
+                "neonize not installed (WhatsApp disabled)",
+                category="access",
+            )
+        raw = getattr(neonize, "__version__", "")
+        parts: list[int] = []
+        for p in raw.split("."):
+            digits = "".join(c for c in p if c.isdigit())
+            if not digits:
+                break
+            parts.append(int(digits))
+        parsed = tuple(parts[:3])
+        min_str = ".".join(str(x) for x in self._WA_NEONIZE_MIN)
+        if parsed and parsed >= self._WA_NEONIZE_MIN:
+            return CheckResult(
+                "whatsapp_neonize_version",
+                CheckStatus.PASS,
+                f"neonize {raw} (>= {min_str})",
+                category="access",
+            )
+        return CheckResult(
+            "whatsapp_neonize_version",
+            CheckStatus.WARNING,
+            f"neonize {raw or 'unknown'} — WhatsApp may return err-client-outdated",
+            fix_hint=f"uv pip install -U 'neonize>={min_str}'",
             category="access",
         )
 
