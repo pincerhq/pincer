@@ -61,10 +61,9 @@ class Settings(BaseSettings):
     discord_bot_token: SecretStr = Field(default=SecretStr(""), description="Discord bot token")
     telegram_allowed_users: list[int] = Field(
         default_factory=list,
-        description="Telegram user IDs allowed to use the bot "
-            "(empty = allow all)",
+        description="Telegram user IDs allowed to use the bot (empty = allow all)",
     )
-    #telegram_allowed_users: IntList = []
+    # telegram_allowed_users: IntList = []
 
     # ── Agent ────────────────────────────────────────────
     agent_name: str = Field(default="Pincer", description="Agent display name")
