@@ -17,7 +17,7 @@ import argparse
 import json
 import logging
 import os
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import httpx
 import uvicorn
@@ -25,7 +25,9 @@ from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.middleware.cors import CORSMiddleware
-from starlette.requests import Request
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 API_KEY = os.environ.get("API_KEY", "")

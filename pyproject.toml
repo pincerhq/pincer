@@ -104,10 +104,12 @@ pythonpath = ["src"]
 [tool.ruff]
 target-version = "py312"
 line-length = 120
+# ignore submodules if installed
+extend-exclude = ["mcp_servers/memory-mcp"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
-extend-ignore = ["N814", "N818"]
+extend-ignore = ["N814", "N818", "B008"]
 
 [tool.mypy]
 python_version = "3.12"

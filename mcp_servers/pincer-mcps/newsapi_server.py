@@ -20,16 +20,18 @@ import argparse
 import json
 import logging
 import os
-import uvicorn
-from enum import Enum
-from typing import Optional, Annotated
+from enum import StrEnum
+from typing import TYPE_CHECKING
 
 import httpx
+import uvicorn
+from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from fastapi.responses import JSONResponse
 from starlette.middleware.cors import CORSMiddleware
-from starlette.requests import Request
+
+if TYPE_CHECKING:
+    from starlette.requests import Request
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -169,7 +171,7 @@ def _format_articles(articles: list[dict], total: int, offset: int) -> str:
 # ---------------------------------------------------------------------------
 
 
-class SortBy(str, Enum):
+class SortBy(StrEnum):
     RELEVANCY = "relevancy"
     POPULARITY = "popularity"
     PUBLISHED_AT = "publishedAt"
@@ -193,13 +195,13 @@ class SearchEverythingInput(BaseModel):
         ),
         max_length=500,
     )
-    q_in_title: Optional[str] = Field(
+    q_in_title: str | None = Field(
         default=None,
         alias="qInTitle",
         description="Keywords that must appear in the article title only.",
         max_length=500,
     )
-    sources: Optional[str] = Field(
+    sources: str | None = Field(
         default=None,
         description=(
             "Comma-separated source IDs (max 20). "
@@ -207,11 +209,11 @@ class SearchEverythingInput(BaseModel):
             "Cannot be combined with language or country."
         ),
     )
-    domains: Optional[str] = Field(
+    domains: str | None = Field(
         default=None,
         description="Comma-separated domains to include, e.g. 'bbc.co.uk,techcrunch.com'.",
     )
-    exclude_domains: Optional[str] = Field(
+    exclude_domains: str | None = Field(
         default=None,
         alias="excludeDomains",
         description="Comma-separated domains to exclude from results.",
@@ -227,7 +229,7 @@ class SearchEverythingInput(BaseModel):
     #     alias="to",
     #     description="Newest article date in ISO 8601 format.",
     # )
-    language: Optional[str] = Field(
+    language: str | None = Field(
         default="en",
         description=f"2-letter language code. Options: {', '.join(VALID_LANGUAGES)}.",
     )
@@ -251,7 +253,7 @@ class SearchEverythingInput(BaseModel):
 
     @field_validator("language")
     @classmethod
-    def _check_language(cls, v: Optional[str]) -> Optional[str]:
+    def _check_language(cls, v: str | None) -> str | None:
         if v and v not in VALID_LANGUAGES:
             raise ValueError(f"'{v}' is not a valid language code. Options: {', '.join(VALID_LANGUAGES)}")
         return v
@@ -267,26 +269,26 @@ class TopHeadlinesInput(BaseModel):
         extra="forbid",
     )
 
-    q: Optional[str] = Field(
+    q: str | None = Field(
         default=None,
         description="Keyword filter for headlines.",
         max_length=500,
     )
-    sources: Optional[str] = Field(
+    sources: str | None = Field(
         default=None,
         description=(
             "Comma-separated source IDs (max 20). "
             "Cannot be combined with country or category."
         ),
     )
-    country: Optional[str] = Field(
+    country: str | None = Field(
         default=None,
         description=(
             "2-letter ISO 3166-1 country code, e.g. 'us', 'de', 'gb'. "
             "Cannot be combined with sources."
         ),
     )
-    category: Optional[str] = Field(
+    category: str | None = Field(
         default=None,
         description=f"News category. Options: {', '.join(VALID_CATEGORIES)}.",
     )
@@ -305,14 +307,14 @@ class TopHeadlinesInput(BaseModel):
 
     @field_validator("country")
     @classmethod
-    def _check_country(cls, v: Optional[str]) -> Optional[str]:
+    def _check_country(cls, v: str | None) -> str | None:
         if v and v not in VALID_COUNTRIES:
             raise ValueError(f"'{v}' is not a valid country code.")
         return v
 
     @field_validator("category")
     @classmethod
-    def _check_category(cls, v: Optional[str]) -> Optional[str]:
+    def _check_category(cls, v: str | None) -> str | None:
         if v and v not in VALID_CATEGORIES:
             raise ValueError(f"'{v}' is not valid. Options: {', '.join(VALID_CATEGORIES)}")
         return v
@@ -328,36 +330,36 @@ class ListSourcesInput(BaseModel):
         extra="forbid",
     )
 
-    category: Optional[str] = Field(
+    category: str | None = Field(
         default=None,
         description=f"Filter by category. Options: {', '.join(VALID_CATEGORIES)}.",
     )
-    language: Optional[str] = Field(
+    language: str | None = Field(
         default=None,
         description=f"Filter by language code. Options: {', '.join(VALID_LANGUAGES)}.",
     )
-    country: Optional[str] = Field(
+    country: str | None = Field(
         default=None,
         description="Filter by country (2-letter ISO 3166-1 code).",
     )
 
     @field_validator("category")
     @classmethod
-    def _check_category(cls, v: Optional[str]) -> Optional[str]:
+    def _check_category(cls, v: str | None) -> str | None:
         if v and v not in VALID_CATEGORIES:
             raise ValueError(f"'{v}' is not valid. Options: {', '.join(VALID_CATEGORIES)}")
         return v
 
     @field_validator("language")
     @classmethod
-    def _check_language(cls, v: Optional[str]) -> Optional[str]:
+    def _check_language(cls, v: str | None) -> str | None:
         if v and v not in VALID_LANGUAGES:
             raise ValueError(f"'{v}' is not a valid language code. Options: {', '.join(VALID_LANGUAGES)}")
         return v
 
     @field_validator("country")
     @classmethod
-    def _check_country(cls, v: Optional[str]) -> Optional[str]:
+    def _check_country(cls, v: str | None) -> str | None:
         if v and v not in VALID_COUNTRIES:
             raise ValueError(f"'{v}' is not a valid country code.")
         return v
@@ -393,13 +395,17 @@ async def health_check(request: Request):
 )
 async def search_everything(params: SearchEverythingInput) -> str:
     """
-    Search millions of news articles across sources published in the last 5 years.
+    Search millions of news articles across sources published in the last 5
+    years.
 
     Args:
-        params: structured query params with fields q, sources, country, category, page_size, page
+        params: structured query params with fields q, sources, country,
+        category, page_size, page
 
     Returns:
-        JSON with total_results, returned, offset, has_more, and an articles list. Each article has: title, source, source_id, author, description, url, image_url, published_at.
+        JSON with total_results, returned, offset, has_more, and an articles
+        list. Each article has: title, source, source_id, author, description,
+        url, image_url, published_at.
     """
     try:
         data = await _newsapi_get(
@@ -416,12 +422,6 @@ async def search_everything(params: SearchEverythingInput) -> str:
                 "page": params.page,
             },
         )
-        #data = await _newsapi_get(
-        #    "everything",
-        #    {
-        #        "q": q
-        #    },
-        #)
         offset = (params.page - 1) * params.page_size
         return _format_articles(data.get("articles", []),
             data.get("totalResults", 0), offset)

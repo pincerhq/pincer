@@ -6,18 +6,15 @@ A Model Context Protocol server for managing Pomodoro sessions.
 import argparse
 import json
 import uuid
-from datetime import datetime, timezone
-from typing import Optional, List
+from datetime import UTC, datetime
 
 import uvicorn
 from fastapi.responses import JSONResponse
-from fastmcp import FastMCP, Context
+from fastmcp import Context, FastMCP
 from pydantic import Field
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-
-from state import PomodoroStore, Session, SessionStatus, BreakType
-
+from state import BreakType, PomodoroStore, Session, SessionStatus
 
 mcp = FastMCP(
     name="pomodoro_mcp",
@@ -38,9 +35,9 @@ def _format_duration(seconds: int) -> str:
 
 
 def _session_to_dict(s: Session) -> dict:
-    now = datetime.now(timezone.utc)
-    remaining: Optional[int] = None
-    elapsed: Optional[int] = None
+    now = datetime.now(UTC)
+    remaining: int | None = None
+    elapsed: int | None = None
 
     if s.status == SessionStatus.RUNNING and s.started_at:
         elapsed = int((now - s.started_at).total_seconds())
@@ -86,9 +83,13 @@ async def health_check(request: Request) -> JSONResponse:
 
 @mcp.tool
 async def pomodoro_start(
-    description: str = Field(description="What you are working on (e.g. 'Write unit tests for auth module')", min_length=1, max_length=200),
-    duration_minutes: int = Field(default=25, description="Focus session length in minutes (1–90). Default is 25.", ge=1, le=90),
-    tags: List[str] = Field(default_factory=list, description="Optional labels such as ['work', 'deep-focus']"),
+    description: str = Field(min_length=1, max_length=200,
+        description="What you are working on (e.g. 'Write unit tests for auth "
+            " module')"),
+    duration_minutes: int = Field(default=25, ge=1, le=90,
+        description="Focus session length in minutes (1–90). Default is 25."),
+    tags: list[str] = Field(default_factory=list,
+        description="Optional labels such as ['work', 'deep-focus']"),
     ctx: Context = None,
 ) -> str:
     """Start a new Pomodoro focus session.
@@ -110,7 +111,7 @@ async def pomodoro_start(
         tags=tags,
         duration_seconds=duration_minutes * 60,
         status=SessionStatus.RUNNING,
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
     store.set_active(session)
     if ctx:
@@ -158,7 +159,7 @@ async def pomodoro_pause(ctx: Context = None) -> str:
         return json.dumps({"error": "Session is already paused.", "session": _session_to_dict(session)}, indent=2)
 
     session.status = SessionStatus.PAUSED
-    session.paused_at = datetime.now(timezone.utc)
+    session.paused_at = datetime.now(UTC)
     if ctx:
         await ctx.info("Session paused")
 
@@ -182,7 +183,7 @@ async def pomodoro_resume(ctx: Context = None) -> str:
     if session.status != SessionStatus.PAUSED:
         return json.dumps({"error": "Session is not paused.", "session": _session_to_dict(session)}, indent=2)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if session.paused_at:
         session.paused_duration += int((now - session.paused_at).total_seconds())
         session.paused_at = None
@@ -210,7 +211,7 @@ async def pomodoro_finish(ctx: Context = None) -> str:
         return json.dumps({"error": "No active session to finish."}, indent=2)
 
     session.status = SessionStatus.COMPLETED
-    session.completed_at = datetime.now(timezone.utc)
+    session.completed_at = datetime.now(UTC)
     store.complete_active()
 
     stats = store.daily_stats()
@@ -241,7 +242,7 @@ async def pomodoro_cancel(ctx: Context = None) -> str:
         return json.dumps({"error": "No active session to cancel."}, indent=2)
 
     session.status = SessionStatus.CANCELLED
-    session.cancelled_at = datetime.now(timezone.utc)
+    session.cancelled_at = datetime.now(UTC)
     store.complete_active()
     if ctx:
         await ctx.info("Session cancelled")
@@ -254,8 +255,11 @@ async def pomodoro_cancel(ctx: Context = None) -> str:
 
 @mcp.tool
 async def pomodoro_break(
-    break_type: BreakType = Field(default=BreakType.SHORT, description="'short' (5 min) or 'long' (15 min). Custom overrides duration_minutes."),
-    duration_minutes: Optional[int] = Field(default=None, description="Override the default break length (1–60 minutes)", ge=1, le=60),
+    break_type: BreakType = Field(default=BreakType.SHORT,
+        description="'short' (5 min) or 'long' (15 min). Custom overrides "
+            "duration_minutes."),
+    duration_minutes: int | None = Field(default=None, ge=1, le=60,
+        description="Override the default break length (1–60 minutes)"),
     ctx: Context = None,
 ) -> str:
     """Start a short or long break session.
@@ -280,7 +284,7 @@ async def pomodoro_break(
         tags=[],
         duration_seconds=duration * 60,
         status=SessionStatus.RUNNING,
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
     store.set_active(session)
 
@@ -293,8 +297,10 @@ async def pomodoro_break(
 
 @mcp.tool
 async def pomodoro_amend(
-    description: Optional[str] = Field(default=None, description="New task description", min_length=1, max_length=200),
-    tags: Optional[List[str]] = Field(default=None, description="Replace the tag list"),
+    description: str | None = Field(default=None, min_length=1, max_length=200,
+        description="New task description"),
+    tags: list[str] | None = Field(default=None,
+        description="Replace the tag list"),
     ctx: Context = None,
 ) -> str:
     """Update the description or tags of the currently active session.
@@ -341,7 +347,7 @@ async def pomodoro_repeat(ctx: Context = None) -> str:
         tags=list(last.tags),
         duration_seconds=last.duration_seconds,
         status=SessionStatus.RUNNING,
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
     )
     store.set_active(session)
 
@@ -353,9 +359,12 @@ async def pomodoro_repeat(ctx: Context = None) -> str:
 
 @mcp.tool
 async def pomodoro_history(
-    limit: int = Field(default=10, description="Number of past sessions to return (1–50)", ge=1, le=50),
-    session_type: Optional[str] = Field(default=None, description="Filter by type: 'pomodoro', 'short_break', or 'long_break'"),
-    tag: Optional[str] = Field(default=None, description="Filter sessions that include this tag"),
+    limit: int = Field(default=10, ge=1, le=50,
+        description="Number of past sessions to return (1–50)"),
+    session_type: str | None = Field(default=None,
+        description="Filter by type: 'pomodoro, 'short_break' or 'long_break'"),
+    tag: str | None = Field(default=None,
+        description="Filter sessions that include this tag"),
     ctx: Context = None,
 ) -> str:
     """List past Pomodoro and break sessions with optional filters."""
