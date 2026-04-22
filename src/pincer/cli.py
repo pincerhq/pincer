@@ -1442,6 +1442,9 @@ async def _run_agent(settings: Settings) -> None:
     except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[yellow]Shutting down...[/yellow]")
     finally:
+        import signal as _signal
+
+        _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
         if api_server:
             api_server.should_exit = True
             if api_task:
