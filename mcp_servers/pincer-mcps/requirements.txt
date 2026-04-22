@@ -1,0 +1,5 @@
+httpx>=0.28.1
+pydantic>=2.13.3,<3.0.0
+fastapi>=0.115.12
+fastmcp>=3.2.4
+youtube-transcript-api>=0.6.3
