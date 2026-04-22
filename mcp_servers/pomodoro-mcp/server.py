@@ -18,9 +18,7 @@ from state import BreakType, PomodoroStore, Session, SessionStatus
 
 mcp = FastMCP(
     name="pomodoro_mcp",
-    instructions=(
-        ""
-    ),
+    instructions=(""),
 )
 store = PomodoroStore()
 
@@ -28,6 +26,7 @@ store = PomodoroStore()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _format_duration(seconds: int) -> str:
     m, s = divmod(seconds, 60)
@@ -60,6 +59,7 @@ def _session_to_dict(s: Session) -> dict:
         "cancelled_at": s.cancelled_at.isoformat() if s.cancelled_at else None,
     }
 
+
 # ---------------------------------------------------------------------------
 # Health check
 # ---------------------------------------------------------------------------
@@ -76,6 +76,7 @@ async def health_check(request: Request) -> JSONResponse:
             "transport": "http",
         }
     )
+
 
 # ---------------------------------------------------------------------------
 # Tools
@@ -111,11 +112,14 @@ async def pomodoro_start(
     can be active at a time; finish or cancel the current one first.
     """
     if store.active_session:
-        return json.dumps({
-            "error": "A session is already active.",
-            "active_session": _session_to_dict(store.active_session),
-            "hint": "Use pomodoro_finish, pomodoro_cancel, or pomodoro_pause first.",
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "A session is already active.",
+                "active_session": _session_to_dict(store.active_session),
+                "hint": "Use pomodoro_finish, pomodoro_cancel, or pomodoro_pause first.",
+            },
+            indent=2,
+        )
 
     session = Session(
         id=str(uuid.uuid4())[:8],
@@ -130,10 +134,13 @@ async def pomodoro_start(
     if ctx:
         await ctx.info(f"Pomodoro started: {description}")
 
-    return json.dumps({
-        "message": f"🍅 Pomodoro started! Focus for {duration_minutes} minutes.",
-        "session": _session_to_dict(session),
-    }, indent=2)
+    return json.dumps(
+        {
+            "message": f"🍅 Pomodoro started! Focus for {duration_minutes} minutes.",
+            "session": _session_to_dict(session),
+        },
+        indent=2,
+    )
 
 
 @mcp.tool
@@ -144,17 +151,23 @@ async def pomodoro_status(ctx: Context = None) -> str:
     Returns a message if no session is active.
     """
     if not store.active_session:
-        return json.dumps({
-            "status": "idle",
-            "message": "No active session. Use pomodoro_start to begin.",
-            "today": store.daily_stats(),
-        }, indent=2)
+        return json.dumps(
+            {
+                "status": "idle",
+                "message": "No active session. Use pomodoro_start to begin.",
+                "today": store.daily_stats(),
+            },
+            indent=2,
+        )
 
-    return json.dumps({
-        "status": "active",
-        "session": _session_to_dict(store.active_session),
-        "today": store.daily_stats(),
-    }, indent=2)
+    return json.dumps(
+        {
+            "status": "active",
+            "session": _session_to_dict(store.active_session),
+            "today": store.daily_stats(),
+        },
+        indent=2,
+    )
 
 
 @mcp.tool
@@ -176,10 +189,13 @@ async def pomodoro_pause(ctx: Context = None) -> str:
     if ctx:
         await ctx.info("Session paused")
 
-    return json.dumps({
-        "message": "⏸ Session paused.",
-        "session": _session_to_dict(session),
-    }, indent=2)
+    return json.dumps(
+        {
+            "message": "⏸ Session paused.",
+            "session": _session_to_dict(session),
+        },
+        indent=2,
+    )
 
 
 @mcp.tool
@@ -205,10 +221,13 @@ async def pomodoro_resume(ctx: Context = None) -> str:
     if ctx:
         await ctx.info("Session resumed")
 
-    return json.dumps({
-        "message": "▶ Session resumed.",
-        "session": _session_to_dict(session),
-    }, indent=2)
+    return json.dumps(
+        {
+            "message": "▶ Session resumed.",
+            "session": _session_to_dict(session),
+        },
+        indent=2,
+    )
 
 
 @mcp.tool
@@ -235,12 +254,15 @@ async def pomodoro_finish(ctx: Context = None) -> str:
         else "Take a short break (5 min) ☕"
     )
 
-    return json.dumps({
-        "message": f"✅ Session complete! {recommendation}",
-        "session": _session_to_dict(session),
-        "today": stats,
-        "next_step": "Use pomodoro_break to start a break.",
-    }, indent=2)
+    return json.dumps(
+        {
+            "message": f"✅ Session complete! {recommendation}",
+            "session": _session_to_dict(session),
+            "today": stats,
+            "next_step": "Use pomodoro_break to start a break.",
+        },
+        indent=2,
+    )
 
 
 @mcp.tool
@@ -260,10 +282,13 @@ async def pomodoro_cancel(ctx: Context = None) -> str:
     if ctx:
         await ctx.info("Session cancelled")
 
-    return json.dumps({
-        "message": "🚫 Session cancelled.",
-        "session": _session_to_dict(session),
-    }, indent=2)
+    return json.dumps(
+        {
+            "message": "🚫 Session cancelled.",
+            "session": _session_to_dict(session),
+        },
+        indent=2,
+    )
 
 
 _POMODORO_BREAK_TYPE = Field(
@@ -290,10 +315,13 @@ async def pomodoro_break(
     Use duration_minutes to override. A break counts as an active session.
     """
     if store.active_session:
-        return json.dumps({
-            "error": "Finish or cancel the current session before starting a break.",
-            "active_session": _session_to_dict(store.active_session),
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "Finish or cancel the current session before starting a break.",
+                "active_session": _session_to_dict(store.active_session),
+            },
+            indent=2,
+        )
 
     defaults = {BreakType.SHORT: 5, BreakType.LONG: 15}
     duration = duration_minutes or defaults[break_type]
@@ -311,10 +339,13 @@ async def pomodoro_break(
     store.set_active(session)
 
     emoji = "☕" if break_type == BreakType.SHORT else "🌿"
-    return json.dumps({
-        "message": f"{emoji} Break started for {duration} minutes. Relax!",
-        "session": _session_to_dict(session),
-    }, indent=2)
+    return json.dumps(
+        {
+            "message": f"{emoji} Break started for {duration} minutes. Relax!",
+            "session": _session_to_dict(session),
+        },
+        indent=2,
+    )
 
 
 _POMODORO_AMEND_DESCRIPTION = Field(
@@ -349,10 +380,13 @@ async def pomodoro_amend(
     if tags is not None:
         session.tags = tags
 
-    return json.dumps({
-        "message": "✏️ Session updated.",
-        "session": _session_to_dict(session),
-    }, indent=2)
+    return json.dumps(
+        {
+            "message": "✏️ Session updated.",
+            "session": _session_to_dict(session),
+        },
+        indent=2,
+    )
 
 
 @mcp.tool
@@ -363,10 +397,13 @@ async def pomodoro_repeat(ctx: Context = None) -> str:
     completed Pomodoro session.
     """
     if store.active_session:
-        return json.dumps({
-            "error": "Finish or cancel the current session first.",
-            "active_session": _session_to_dict(store.active_session),
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "Finish or cancel the current session first.",
+                "active_session": _session_to_dict(store.active_session),
+            },
+            indent=2,
+        )
 
     last = store.last_pomodoro()
     if not last:
@@ -383,10 +420,13 @@ async def pomodoro_repeat(ctx: Context = None) -> str:
     )
     store.set_active(session)
 
-    return json.dumps({
-        "message": f"🔁 Repeating: {last.description}",
-        "session": _session_to_dict(session),
-    }, indent=2)
+    return json.dumps(
+        {
+            "message": f"🔁 Repeating: {last.description}",
+            "session": _session_to_dict(session),
+        },
+        indent=2,
+    )
 
 
 _POMODORO_HISTORY_LIMIT = Field(
@@ -415,25 +455,31 @@ async def pomodoro_history(
     """List past Pomodoro and break sessions with optional filters."""
     sessions = store.history(limit=limit, session_type=session_type, tag=tag)
 
-    return json.dumps({
-        "count": len(sessions),
-        "sessions": [_session_to_dict(s) for s in sessions],
-        "today": store.daily_stats(),
-    }, indent=2)
+    return json.dumps(
+        {
+            "count": len(sessions),
+            "sessions": [_session_to_dict(s) for s in sessions],
+            "today": store.daily_stats(),
+        },
+        indent=2,
+    )
 
 
 @mcp.tool
 async def pomodoro_settings(ctx: Context = None) -> str:
     """Return the current default settings and today's progress summary."""
-    return json.dumps({
-        "defaults": {
-            "pomodoro_minutes": 25,
-            "short_break_minutes": 5,
-            "long_break_minutes": 15,
-            "long_break_interval": 4,
+    return json.dumps(
+        {
+            "defaults": {
+                "pomodoro_minutes": 25,
+                "short_break_minutes": 5,
+                "long_break_minutes": 15,
+                "long_break_interval": 4,
+            },
+            "today": store.daily_stats(),
         },
-        "today": store.daily_stats(),
-    }, indent=2)
+        indent=2,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +488,7 @@ async def pomodoro_settings(ctx: Context = None) -> str:
 
 if __name__ == "__main__":
     import os
+
     parser = argparse.ArgumentParser(description="Stock & crypto price MCP server (fastmcp)")
     parser.add_argument(
         "--transport",

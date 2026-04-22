@@ -42,26 +42,89 @@ NEWSAPI_BASE_URL = "https://newsapi.org/v2"
 API_KEY = os.environ.get("API_KEY", "")
 
 VALID_CATEGORIES = [
-    "business", "entertainment", "general",
-    "health", "science", "sports", "technology",
+    "business",
+    "entertainment",
+    "general",
+    "health",
+    "science",
+    "sports",
+    "technology",
 ]
 VALID_LANGUAGES = [
-    "ar", "de", "en", "es", "fr", "he", "it",
-    "nl", "no", "pt", "ru", "sv", "ud", "zh",
+    "ar",
+    "de",
+    "en",
+    "es",
+    "fr",
+    "he",
+    "it",
+    "nl",
+    "no",
+    "pt",
+    "ru",
+    "sv",
+    "ud",
+    "zh",
 ]
 VALID_COUNTRIES = [
-    "ae", "ar", "at", "au", "be", "bg", "br", "ca", "ch", "cn", "co", "cu",
-    "cz", "de", "eg", "fr", "gb", "gr", "hk", "hu", "id", "ie", "il", "in",
-    "it", "jp", "kr", "lt", "lv", "ma", "mx", "my", "ng", "nl", "no", "nz",
-    "ph", "pl", "pt", "ro", "rs", "ru", "sa", "se", "sg", "si", "sk", "th",
-    "tr", "tw", "ua", "us", "ve", "za",
+    "ae",
+    "ar",
+    "at",
+    "au",
+    "be",
+    "bg",
+    "br",
+    "ca",
+    "ch",
+    "cn",
+    "co",
+    "cu",
+    "cz",
+    "de",
+    "eg",
+    "fr",
+    "gb",
+    "gr",
+    "hk",
+    "hu",
+    "id",
+    "ie",
+    "il",
+    "in",
+    "it",
+    "jp",
+    "kr",
+    "lt",
+    "lv",
+    "ma",
+    "mx",
+    "my",
+    "ng",
+    "nl",
+    "no",
+    "nz",
+    "ph",
+    "pl",
+    "pt",
+    "ro",
+    "rs",
+    "ru",
+    "sa",
+    "se",
+    "sg",
+    "si",
+    "sk",
+    "th",
+    "tr",
+    "tw",
+    "ua",
+    "us",
+    "ve",
+    "za",
 ]
 
 # Configure logging
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=getattr(logging, LOG_LEVEL), format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -91,7 +154,7 @@ mcp = FastMCP(
         - Multi-language support
         - Rate limit awareness (100 calls/day free tier)
         """
-    )
+    ),
 )
 
 
@@ -276,17 +339,11 @@ class TopHeadlinesInput(BaseModel):
     )
     sources: str | None = Field(
         default=None,
-        description=(
-            "Comma-separated source IDs (max 20). "
-            "Cannot be combined with country or category."
-        ),
+        description=("Comma-separated source IDs (max 20). Cannot be combined with country or category."),
     )
     country: str | None = Field(
         default=None,
-        description=(
-            "2-letter ISO 3166-1 country code, e.g. 'us', 'de', 'gb'. "
-            "Cannot be combined with sources."
-        ),
+        description=("2-letter ISO 3166-1 country code, e.g. 'us', 'de', 'gb'. Cannot be combined with sources."),
     )
     category: str | None = Field(
         default=None,
@@ -369,6 +426,7 @@ class ListSourcesInput(BaseModel):
 # Health check
 # ---------------------------------------------------------------------------
 
+
 @mcp.custom_route("/", methods=["GET"])
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request):
@@ -389,9 +447,8 @@ async def health_check(request: Request):
 
 @mcp.tool(
     name="search_everything",
-    description="Search millions of news articles across sources published "
-        "in the last 5 years.",
-    tags={"news", "search"}
+    description="Search millions of news articles across sources published in the last 5 years.",
+    tags={"news", "search"},
 )
 async def search_everything(params: SearchEverythingInput) -> str:
     """
@@ -419,15 +476,14 @@ async def search_everything(params: SearchEverythingInput) -> str:
                 "page": params.page,
             },
         )
-        #data = await _newsapi_get(
+        # data = await _newsapi_get(
         #    "everything",
         #    {
         #        "q": q
         #    },
-        #)
+        # )
         offset = (params.page - 1) * params.page_size
-        return _format_articles(data.get("articles", []),
-            data.get("totalResults", 0), offset)
+        return _format_articles(data.get("articles", []), data.get("totalResults", 0), offset)
     except Exception as exc:
         return _handle_error(exc)
 

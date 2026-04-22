@@ -156,9 +156,7 @@ async def list_languages() -> str:
         return _handle_error(exc)
 
     languages = [
-        {"code": item.get("code", ""), "name": item.get("name", "")}
-        for item in data
-        if isinstance(item, dict)
+        {"code": item.get("code", ""), "name": item.get("name", "")} for item in data if isinstance(item, dict)
     ]
     return json.dumps({"languages": languages})
 
