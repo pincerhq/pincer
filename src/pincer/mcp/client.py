@@ -54,10 +54,9 @@ class MCPClientSession:
             return
 
         try:
+            from mcp import ClientSession
             from mcp.client.stdio import StdioServerParameters, stdio_client
             from mcp.client.streamable_http import streamablehttp_client
-
-            from mcp import ClientSession
         except ImportError as e:
             raise RuntimeError("MCP package not installed. Run: uv pip install 'pincer-agent[mcp]'") from e
 

@@ -4,20 +4,19 @@ In-memory state management for the Pomodoro MCP server.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
-from typing import List, Optional
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
 
 
-class SessionStatus(str, Enum):
+class SessionStatus(StrEnum):
     RUNNING = "running"
     PAUSED = "paused"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
 
 
-class BreakType(str, Enum):
+class BreakType(StrEnum):
     SHORT = "short"
     LONG = "long"
 
@@ -27,13 +26,13 @@ class Session:
     id: str
     session_type: str          # "pomodoro" | "short_break" | "long_break"
     description: str
-    tags: List[str]
+    tags: list[str]
     duration_seconds: int
     status: SessionStatus
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    cancelled_at: Optional[datetime] = None
-    paused_at: Optional[datetime] = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    paused_at: datetime | None = None
     paused_duration: int = 0   # cumulative seconds spent paused
 
 
@@ -41,13 +40,13 @@ class PomodoroStore:
     """Thread-safe (asyncio) in-memory store for sessions."""
 
     def __init__(self) -> None:
-        self._active: Optional[Session] = None
-        self._history: List[Session] = []
+        self._active: Session | None = None
+        self._history: list[Session] = []
 
     # ── Active session ────────────────────────────────────────────────────
 
     @property
-    def active_session(self) -> Optional[Session]:
+    def active_session(self) -> Session | None:
         return self._active
 
     def set_active(self, session: Session) -> None:
@@ -61,7 +60,7 @@ class PomodoroStore:
 
     # ── Queries ───────────────────────────────────────────────────────────
 
-    def last_pomodoro(self) -> Optional[Session]:
+    def last_pomodoro(self) -> Session | None:
         """Return the most recent completed Pomodoro session."""
         for s in reversed(self._history):
             if s.session_type == "pomodoro" and s.status == SessionStatus.COMPLETED:
@@ -71,9 +70,9 @@ class PomodoroStore:
     def history(
         self,
         limit: int = 10,
-        session_type: Optional[str] = None,
-        tag: Optional[str] = None,
-    ) -> List[Session]:
+        session_type: str | None = None,
+        tag: str | None = None,
+    ) -> list[Session]:
         results = list(reversed(self._history))
 
         if session_type:
@@ -84,7 +83,7 @@ class PomodoroStore:
         return results[:limit]
 
     def daily_stats(self) -> dict:
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
 
         today_sessions = [
             s for s in self._history
