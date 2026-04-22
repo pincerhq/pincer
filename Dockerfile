@@ -16,7 +16,7 @@ RUN pnpm build
 # ============================================
 # Stage 1: Build
 # ============================================
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
@@ -30,14 +30,14 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project --extra mcp
 
 COPY src/ src/
-COPY skills/ skills/
+#COPY skills/ skills/
 COPY README.md ./
 RUN uv sync --frozen --no-dev --extra mcp
 
 # ============================================
 # Stage 2: Runtime
 # ============================================
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
@@ -55,7 +55,7 @@ RUN groupadd -r pincer && useradd -r -g pincer -m pincer
 
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
-COPY --from=builder /app/skills /app/skills
+#COPY --from=builder /app/skills /app/skills
 COPY --from=builder /app/pyproject.toml /app/
 COPY --from=dashboard-builder /app/dist /app/dashboard/dist
 
