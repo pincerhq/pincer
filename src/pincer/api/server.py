@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from pincer.api.audit import router as audit_router
+from pincer.api.chat import router as chat_router
 from pincer.api.conversations import router as conversations_router
 from pincer.api.costs import router as costs_router
 from pincer.api.skills import router as skills_router
@@ -29,10 +30,14 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 DASHBOARD_TOKEN = os.environ.get("PINCER_DASHBOARD_TOKEN", "")
+WEB_CHAT_TOKEN = os.environ.get("PINCER_WEB_CHAT_TOKEN", "")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    import logging
+
+    from pincer.api._deps import build_agent_from_settings
     from pincer.config import get_settings_relaxed
     from pincer.security.audit import get_audit_logger
 
@@ -42,6 +47,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         audit_db = Path("data/audit.db")
     audit = await get_audit_logger(audit_db)
+
+    try:
+        app.state.agent = await build_agent_from_settings()
+    except Exception as e:
+        # Allow the server to start without the agent (e.g. in tests) — chat
+        # endpoints will return 503 until the agent is attached.
+        logging.getLogger(__name__).warning("Agent not built at startup: %s", e)
+        app.state.agent = None
+
     yield
     await audit.shutdown()
 
@@ -60,7 +74,9 @@ def create_app() -> FastAPI:
         allow_origins=[
             "http://localhost:3000",
             "http://localhost:5173",
+            "http://localhost:8080",  # 3Days.ai dev
             os.environ.get("PINCER_DASHBOARD_URL", ""),
+            os.environ.get("PINCER_WEB_CHAT_URL", ""),
         ],
         allow_credentials=True,
         allow_methods=["*"],
@@ -74,10 +90,11 @@ def create_app() -> FastAPI:
             return await call_next(request)
         if not request.url.path.startswith("/api/"):
             return await call_next(request)  # dashboard static files
-        if not DASHBOARD_TOKEN:
+        if not DASHBOARD_TOKEN and not WEB_CHAT_TOKEN:
             return await call_next(request)  # no token configured: allow (dev/tests)
         auth = request.headers.get("Authorization", "")
-        if auth == f"Bearer {DASHBOARD_TOKEN}":
+        allowed = {f"Bearer {t}" for t in (DASHBOARD_TOKEN, WEB_CHAT_TOKEN) if t}
+        if auth in allowed:
             return await call_next(request)
         return JSONResponse(status_code=401, content={"error": "Invalid token"})
 
@@ -85,6 +102,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_router)
     app.include_router(conversations_router)
     app.include_router(skills_router)
+    app.include_router(chat_router)
 
     # Voice routes (Sprint 7) — mounted unconditionally; handlers check engine state
     from pincer.voice.twiml_server import voice_router

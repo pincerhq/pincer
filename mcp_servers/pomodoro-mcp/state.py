@@ -24,7 +24,7 @@ class BreakType(StrEnum):
 @dataclass
 class Session:
     id: str
-    session_type: str          # "pomodoro" | "short_break" | "long_break"
+    session_type: str  # "pomodoro" | "short_break" | "long_break"
     description: str
     tags: list[str]
     duration_seconds: int
@@ -33,7 +33,11 @@ class Session:
     completed_at: datetime | None = None
     cancelled_at: datetime | None = None
     paused_at: datetime | None = None
+<<<<<<< HEAD
     paused_duration: int = 0   # cumulative seconds spent paused
+=======
+    paused_duration: int = 0  # cumulative seconds spent paused
+>>>>>>> dev
 
 
 class PomodoroStore:
@@ -85,18 +89,15 @@ class PomodoroStore:
     def daily_stats(self) -> dict:
         today = datetime.now(UTC).date()
 
-        today_sessions = [
-            s for s in self._history
-            if s.started_at and s.started_at.date() == today
-        ]
+        today_sessions = [s for s in self._history if s.started_at and s.started_at.date() == today]
 
         pomodoros = [s for s in today_sessions if s.session_type == "pomodoro"]
         completed = [s for s in pomodoros if s.status == SessionStatus.COMPLETED]
         cancelled = [s for s in pomodoros if s.status == SessionStatus.CANCELLED]
         breaks = [
-            s for s in today_sessions
-            if s.session_type in ("short_break", "long_break")
-            and s.status == SessionStatus.COMPLETED
+            s
+            for s in today_sessions
+            if s.session_type in ("short_break", "long_break") and s.status == SessionStatus.COMPLETED
         ]
 
         focus_seconds = sum(s.duration_seconds for s in completed)
