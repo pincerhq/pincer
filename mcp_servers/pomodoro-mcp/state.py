@@ -33,11 +33,7 @@ class Session:
     completed_at: datetime | None = None
     cancelled_at: datetime | None = None
     paused_at: datetime | None = None
-<<<<<<< HEAD
-    paused_duration: int = 0   # cumulative seconds spent paused
-=======
     paused_duration: int = 0  # cumulative seconds spent paused
->>>>>>> dev
 
 
 class PomodoroStore:
