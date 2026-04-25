@@ -500,7 +500,7 @@ class WhatsAppChannel(BaseChannel):
     async def stop(self) -> None:
         if self._client:
             try:
-                await self._client.disconnect()
+                await asyncio.wait_for(self._client.disconnect(), timeout=5.0)
             except Exception as e:
                 logger.warning("WhatsApp disconnect error: %s", e)
         loop = _neonize_events.event_global_loop if _neonize_events is not None else None
