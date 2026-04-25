@@ -63,6 +63,7 @@ class Settings(BaseSettings):
         default_factory=list,
         description="Telegram user IDs allowed to use the bot (empty = allow all)",
     )
+    # telegram_allowed_users: IntList = []
 
     # ── Agent ────────────────────────────────────────────
     agent_name: str = Field(default="Pincer", description="Agent display name")
@@ -279,8 +280,10 @@ class Settings(BaseSettings):
 
     @field_validator("telegram_allowed_users", mode="before")
     @classmethod
-    def parse_allowed_users(cls, v: str | list[int]) -> list[int]:
-        if isinstance(v, str):
+    def parse_allowed_users(cls, v: list[int] | str) -> list[int]:
+        if isinstance(v, int):
+            return [v]
+        elif isinstance(v, str):
             if not v.strip():
                 return []
             return [int(uid.strip()) for uid in v.split(",") if uid.strip()]
