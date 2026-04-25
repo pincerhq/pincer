@@ -49,12 +49,14 @@ _MAX_STR_LEN = 500
 
 def set_send_event(
     send_event: Callable[[str, dict[str, Any]], Awaitable[None]],
-) -> contextvars.Token:
+) -> contextvars.Token[Callable[[str, dict[str, Any]], Awaitable[None]] | None]:
     """Bind a per-request `send_event` callable to the current context."""
     return _send_event_var.set(send_event)
 
 
-def reset_send_event(token: contextvars.Token) -> None:
+def reset_send_event(
+    token: contextvars.Token[Callable[[str, dict[str, Any]], Awaitable[None]] | None],
+) -> None:
     _send_event_var.reset(token)
 
 

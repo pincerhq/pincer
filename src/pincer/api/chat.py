@@ -68,13 +68,13 @@ def _require_user(value: str | None) -> str:
 
 
 def _get_agent(request: Request) -> Agent:
-    agent = getattr(request.app.state, "agent", None)
+    agent: Agent | None = getattr(request.app.state, "agent", None)
     if agent is None:
         raise HTTPException(503, "Agent is not initialized")
     return agent
 
 
-def _sse(event: str, data: dict) -> str:
+def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
@@ -83,7 +83,7 @@ async def post_message(
     body: ChatIn,
     request: Request,
     x_pincer_user: str | None = Header(default=None, alias="X-Pincer-User"),
-) -> dict:
+) -> dict[str, Any]:
     user_id = _require_user(x_pincer_user)
     agent = _get_agent(request)
     try:
@@ -106,7 +106,7 @@ async def post_stream(
 
     async def gen() -> AsyncIterator[str]:
         # Multiplex agent stream events and approval-prompt events onto one queue.
-        queue: asyncio.Queue[tuple[str, dict] | object] = asyncio.Queue()
+        queue: asyncio.Queue[tuple[str, dict[str, Any]] | object] = asyncio.Queue()
 
         async def send_event(name: str, data: dict[str, Any]) -> None:
             await queue.put((name, data))
@@ -164,7 +164,7 @@ async def post_stream(
 async def post_approval(
     body: ApprovalIn,
     x_pincer_user: str | None = Header(default=None, alias="X-Pincer-User"),
-) -> dict:
+) -> dict[str, Any]:
     user_id = _require_user(x_pincer_user)
     if not resolve_web_approval(body.approval_id, user_id, body.approved):
         raise HTTPException(404, "Unknown, expired, or unauthorized approval")
