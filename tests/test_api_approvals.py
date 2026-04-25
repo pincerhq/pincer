@@ -61,9 +61,7 @@ async def test_request_web_approval_resolves_when_approved():
         # Schedule the approval to be granted shortly after the SSE frame
         # is emitted. Mirrors the user clicking Approve in the browser.
         approval_id = data["approval_id"]
-        asyncio.get_running_loop().call_soon(
-            lambda: resolve_web_approval(approval_id, UUID, True)
-        )
+        asyncio.get_running_loop().call_soon(lambda: resolve_web_approval(approval_id, UUID, True))
 
     token = set_send_event(send_event)
     try:
@@ -88,15 +86,11 @@ async def test_request_web_approval_resolves_when_approved():
 async def test_request_web_approval_returns_false_on_deny():
     async def send_event(name, data):
         approval_id = data["approval_id"]
-        asyncio.get_running_loop().call_soon(
-            lambda: resolve_web_approval(approval_id, UUID, False)
-        )
+        asyncio.get_running_loop().call_soon(lambda: resolve_web_approval(approval_id, UUID, False))
 
     token = set_send_event(send_event)
     try:
-        approved = await request_web_approval(
-            "google__upload_file", {"file_path": "/tmp/x"}, UUID, "web", timeout=2.0
-        )
+        approved = await request_web_approval("google__upload_file", {"file_path": "/tmp/x"}, UUID, "web", timeout=2.0)
     finally:
         reset_send_event(token)
     assert approved is False
@@ -109,9 +103,7 @@ async def test_request_web_approval_times_out():
 
     token = set_send_event(send_event)
     try:
-        approved = await request_web_approval(
-            "google__create_doc", {}, UUID, "web", timeout=0.05
-        )
+        approved = await request_web_approval("google__create_doc", {}, UUID, "web", timeout=0.05)
     finally:
         reset_send_event(token)
     assert approved is False
@@ -153,9 +145,7 @@ async def test_resolve_web_approval_rejects_other_user():
     try:
         # Spawn the request, give the send_event time to fire, then
         # try to resolve as the wrong user — should return False.
-        task = asyncio.create_task(
-            request_web_approval("x", {}, UUID, "web", timeout=2.0)
-        )
+        task = asyncio.create_task(request_web_approval("x", {}, UUID, "web", timeout=2.0))
         await asyncio.sleep(0.005)  # let send_event run
         assert resolve_web_approval(captured["approval_id"], OTHER_UUID, True) is False
         approved = await task

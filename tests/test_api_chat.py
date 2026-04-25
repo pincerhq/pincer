@@ -29,9 +29,7 @@ def _make_client(*, token: str = "", web_chat_token: str = "") -> TestClient:
     app = create_app()
 
     agent = MagicMock()
-    agent.handle_message = AsyncMock(
-        return_value=AgentResponse(text="hi back", cost_usd=0.01, model="test-model")
-    )
+    agent.handle_message = AsyncMock(return_value=AgentResponse(text="hi back", cost_usd=0.01, model="test-model"))
 
     async def _stream(*_args, **_kwargs):
         yield StreamChunk(StreamEventType.TEXT, "hi ")
