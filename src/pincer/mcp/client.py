@@ -11,11 +11,12 @@ Wraps the official mcp.ClientSession with:
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import logging
 from contextlib import AsyncExitStack
 from typing import Any
+
+import anyio
 
 from pincer.mcp.config import MCPServerConfig, MCPTransport
 from pincer.mcp.sandbox import MCPSandbox, sandbox_streams
@@ -63,15 +64,30 @@ class MCPClientSession:
         self._exit_stack = AsyncExitStack()
         try:
             if self.config.transport == MCPTransport.STDIO:
-                read_stream, write_stream = await self._connect_stdio(
-                    self._exit_stack, StdioServerParameters, stdio_client
-                )
+                if self.config.sandbox:
+                    # sandbox_streams and ClientSession create persistent task groups —
+                    # enter them outside any fail_after scope to avoid cancel scope ordering errors.
+                    read_stream, write_stream = await self._connect_stdio_sandboxed(self._exit_stack)
+                    # Readiness check is a pure coroutine (sleep + poll), safe to timeout.
+                    with anyio.fail_after(self.config.startup_timeout):
+                        await self._wait_for_sandbox_startup()
+                else:
+                    read_stream, write_stream = await self._connect_stdio(
+                        self._exit_stack, StdioServerParameters, stdio_client
+                    )
             else:
                 read_stream, write_stream = await self._connect_http(self._exit_stack, streamablehttp_client)
 
-            self._session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
-            await self._session.initialize()
-            await self._discover_tools()
+            # Enter ClientSession outside fail_after — it spawns background tasks whose
+            # cancel scope must outlive our timeout scope.
+            self._session = await self._exit_stack.enter_async_context(
+                ClientSession(read_stream, write_stream)
+            )
+            # Timeout only the pure protocol operations.
+            with anyio.fail_after(self.config.timeout):
+                await self._session.initialize()
+                await self._discover_tools()
+
             self._connected = True
             self._connect_attempts = 0
             logger.info(
@@ -100,14 +116,12 @@ class MCPClientSession:
             raise ConnectionError(f"MCP '{self.name}' is not connected")
 
         try:
-            result = await asyncio.wait_for(
-                self._session.call_tool(tool_name, arguments),
-                timeout=self.config.timeout_seconds,
-            )
+            with anyio.fail_after(self.config.timeout):
+                result = await self._session.call_tool(tool_name, arguments)
             return result
         except TimeoutError:
             raise TimeoutError(
-                f"MCP '{self.name}' tool '{tool_name}' timed out after {self.config.timeout_seconds}s"
+                f"MCP '{self.name}' tool '{tool_name}' timed out after {self.config.timeout}s"
             ) from None
 
     async def health_check(self) -> bool:
@@ -115,7 +129,8 @@ class MCPClientSession:
         if not self.connected:
             return False
         try:
-            await asyncio.wait_for(self._session.send_ping(), timeout=5.0)
+            with anyio.fail_after(5.0):
+                await self._session.send_ping()
             return True
         except Exception:
             self._connected = False
@@ -135,6 +150,22 @@ class MCPClientSession:
         )
 
     # ── Private helpers ───────────────────────────────────
+
+    async def _wait_for_sandbox_startup(self) -> None:
+        """Confirm sandbox process is alive before attempting MCP connection.
+
+        Returns as soon as the process is confirmed running — does not wait
+        the full startup_timeout. Raises RuntimeError if the process exited.
+        """
+        if self._sandbox is None:
+            return
+        # Brief delay so the process has time to either crash or stabilise.
+        await anyio.sleep(0.2)
+        if not self._sandbox.alive:
+            stderr = self._sandbox.get_stderr()
+            raise RuntimeError(
+                f"MCP '{self.name}' server exited on startup: {stderr or '(no output)'}"
+            )
 
     async def _connect_stdio(self, stack: AsyncExitStack, stdio_params_cls: Any, stdio_client: Any) -> tuple[Any, Any]:
         """Set up stdio transport.
@@ -218,7 +249,7 @@ class MCPClientSession:
             streamablehttp_client(
                 self.config.url,
                 headers=headers or None,
-                timeout=float(self.config.timeout_seconds),
+                timeout=float(self.config.timeout),
             )
         )
         return read_stream, write_stream

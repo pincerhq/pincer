@@ -17,7 +17,7 @@ dependencies = [
 [project.scripts]
 newsapi_server = "newsapi_server:main"
 openweathermap_server = "openweathermap_server:main"
-stock-price_server = "stock_price_server:main"
+stock_price_server = "stock_price_server:main"
 summarize_server = "summarize_server:main"
 translate_server = "translate_server:main"
 

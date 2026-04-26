@@ -18,7 +18,7 @@ def _make_stdio_config(sandbox: bool = True) -> MCPServerConfig:
         command="echo",
         args=["hello"],
         sandbox=sandbox,
-        timeout_seconds=5,
+        timeout=5,
         max_retries=1,
     )
 
@@ -28,7 +28,7 @@ def _make_http_config() -> MCPServerConfig:
         name="httpserver",
         transport=MCPTransport.STREAMABLE_HTTP,
         url="https://example.com/mcp",
-        timeout_seconds=5,
+        timeout=5,
         max_retries=1,
     )
 
@@ -103,7 +103,7 @@ async def test_call_tool_raises_timeout() -> None:
         name="testserver",
         transport=MCPTransport.STDIO,
         command="echo",
-        timeout_seconds=1,
+        timeout=1,
     )
 
     with pytest.raises(TimeoutError, match="timed out"):

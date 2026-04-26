@@ -69,7 +69,7 @@ def two_echo_servers(tmp_path):
             command=sys.executable,
             args=[script_a],
             sandbox=False,
-            timeout_seconds=15,
+            timeout=15,
             approval_required=["none"],
         ),
         MCPServerConfig(
@@ -78,7 +78,7 @@ def two_echo_servers(tmp_path):
             command=sys.executable,
             args=[script_b],
             sandbox=False,
-            timeout_seconds=15,
+            timeout=15,
             approval_required=["none"],
         ),
     ]
@@ -99,7 +99,7 @@ def one_good_one_bad(tmp_path):
             command=sys.executable,
             args=[script_a],
             sandbox=False,
-            timeout_seconds=15,
+            timeout=15,
             approval_required=["none"],
         ),
         MCPServerConfig(
@@ -108,7 +108,7 @@ def one_good_one_bad(tmp_path):
             command="nonexistent-command-that-does-not-exist",
             args=[],
             sandbox=False,
-            timeout_seconds=5,
+            timeout=5,
             approval_required=["none"],
         ),
     ]

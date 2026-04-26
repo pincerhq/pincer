@@ -54,13 +54,14 @@ COPY --from=dashboard-builder /usr/local/lib/node_modules /usr/local/lib/node_mo
 
 RUN groupadd -r pincer && useradd -r -g pincer -m pincer
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/src /app/src
-#COPY --from=builder /app/skills /app/skills
-COPY --from=builder /app/packages /app/packages
-COPY --from=builder /app/pyproject.toml /app/
-COPY --from=dashboard-builder /app/dist /app/dashboard/dist
+COPY --chown=pincer:pincer --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --chown=pincer:pincer --from=builder /app/src /app/src
+COPY --chown=pincer:pincer --from=builder /app/.venv /app/.venv
+#COPY --chown=pincer:pincer --from=builder /app/skills /app/skills
+COPY --chown=pincer:pincer --from=builder /app/packages /app/packages
+COPY --chown=pincer:pincer --from=builder /app/pyproject.toml /app/
+COPY --chown=pincer:pincer --from=dashboard-builder \
+    /app/dist /app/dashboard/dist
 
 # npm cache goes inside the data volume so it persists and is writable by pincer user
 ENV PATH="/app/.venv/bin:/usr/local/bin:$PATH" \
@@ -68,9 +69,9 @@ ENV PATH="/app/.venv/bin:/usr/local/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     npm_config_cache=/app/data/.npm
 
-RUN mkdir -p /app/data && chown -R pincer:pincer /app
-
 USER pincer
+
+ENV VIRTUAL_ENV=/app/.venv
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8080/api/health || exit 1

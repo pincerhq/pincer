@@ -2619,7 +2619,7 @@ async def _mcp_list() -> None:
             "[green]yes[/green]" if s.enabled else "[dim]no[/dim]",
             "[green]yes[/green]" if s.sandbox else "[yellow]no[/yellow]",
             ", ".join(s.approval_required),
-            f"{s.timeout_seconds}s",
+            f"{s.timeout}s",
         )
     console.print(table)
 

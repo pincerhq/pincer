@@ -23,7 +23,7 @@ dependencies = [
     "aiosqlite>=0.22.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
-    "typer[all]>=0.12.0",
+    "typer>=0.12.0",
     "rich>=13.9.0",
     "structlog>=24.4.0",
     # Sprint 3: WhatsApp + Proactive Agent
@@ -74,7 +74,7 @@ mcp = [
     "PyJWT[crypto]>=2.8.0",
     "pomodoro-mcp",
     "pincer-mcps",
-    "mcp-memory-service-lite>=10.40.3"
+    "mcp-memory-service-lite>=10.39.1"
 ]
 ms365 = [
     "msal>=1.28.0",

@@ -14,8 +14,9 @@ venv/
 .vscode/
 .idea/
 
-# Cursor
+# AI
 .cursor/
+.claude/
 
 # OS
 .DS_Store
@@ -27,6 +28,7 @@ htmlcov/
 
 # mypy
 .mypy_cache/
+.ruff_cache/
 
 # Google OAuth secrets
 data/google_credentials.json
@@ -43,5 +45,3 @@ packages/*
 !packages/pincer-mcps/**
 !packages/pomodoro-mcp
 !packages/pomodoro-mcp/**
-!packages/memory-mcp
-!packages/memory-mcp/**

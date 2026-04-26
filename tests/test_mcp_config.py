@@ -119,7 +119,7 @@ transport = "stdio"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 approval_required = ["*"]
-timeout_seconds = 30
+timeout = 30
 """
     (tmp_path / "pincer.toml").write_text(toml_content)
     cfg = load_mcp_config(tmp_path)

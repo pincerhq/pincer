@@ -11,10 +11,11 @@ Responsibilities:
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
+
+import anyio
 
 from pincer.mcp.audit import MCPAuditLogger
 from pincer.mcp.bridge import MCPToolBridge
@@ -29,7 +30,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("pincer.mcp")
 
 _HEALTH_INTERVAL_SECONDS = 60
-_CONNECT_TIMEOUT_SECONDS = 15
 
 
 class MCPClientManager:
@@ -56,7 +56,8 @@ class MCPClientManager:
         self._security_gate = security_gate
         self._sessions: dict[str, MCPClientSession] = {}
         self._bridges: dict[str, MCPToolBridge] = {}
-        self._health_task: asyncio.Task[None] | None = None
+        self._task_group: anyio.abc.TaskGroup | None = None
+        self._task_group_ctx: Any = None
         self._disabled: set[str] = set()  # servers that exhausted retries
 
     async def start(self) -> dict[str, bool]:
@@ -73,14 +74,19 @@ class MCPClientManager:
         if not enabled_servers:
             return {}
 
-        async def _connect_one(srv_config: Any) -> tuple[str, bool]:
+        results: dict[str, bool] = {}
+
+        async def _connect_one(srv_config: Any) -> None:
+
             session = MCPClientSession(srv_config)
             try:
-                await asyncio.wait_for(session.connect(), timeout=_CONNECT_TIMEOUT_SECONDS)
+                # Client handles startup_timeout + timeout internally
+                await session.connect()
             except Exception as e:
                 logger.warning("MCP '%s' failed to connect: %s", srv_config.name, e)
                 await self._audit.log_connect(srv_config.name, success=False, error=str(e))
-                return srv_config.name, False
+                results[srv_config.name] = False
+                return
 
             self._sessions[srv_config.name] = session
             bridge = MCPToolBridge(
@@ -93,25 +99,27 @@ class MCPClientManager:
             bridge.register_tools()
             self._bridges[srv_config.name] = bridge
             await self._audit.log_connect(srv_config.name, success=True)
-            return srv_config.name, True
+            results[srv_config.name] = True
 
-        results_list = await asyncio.gather(
-            *[_connect_one(s) for s in enabled_servers],
-            return_exceptions=False,
-        )
-        results: dict[str, bool] = dict(results_list)  # type: ignore[arg-type]
+        async with anyio.create_task_group() as tg:
+            for s in enabled_servers:
+                tg.start_soon(_connect_one, s)
 
-        # Start background health check loop
-        self._health_task = asyncio.create_task(self._health_loop())
+        # Start background health check loop via persistent task group
+        tg_ctx = anyio.create_task_group()
+        self._task_group = await tg_ctx.__aenter__()
+        self._task_group_ctx = tg_ctx
+        self._task_group.start_soon(self._health_loop)
+
         return results
 
     async def stop(self) -> None:
         """Disconnect all MCP servers and deregister tools."""
-        if self._health_task:
-            self._health_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._health_task
-            self._health_task = None
+        if self._task_group is not None:
+            self._task_group.cancel_scope.cancel()
+            await self._task_group_ctx.__aexit__(None, None, None)
+            self._task_group = None
+            self._task_group_ctx = None
 
         for _name, bridge in list(self._bridges.items()):
             bridge.deregister_tools()
@@ -162,10 +170,8 @@ class MCPClientManager:
         """Background task: periodic health checks + reconnection."""
         while True:
             try:
-                await asyncio.sleep(_HEALTH_INTERVAL_SECONDS)
+                await anyio.sleep(_HEALTH_INTERVAL_SECONDS)
                 await self._run_health_checks()
-            except asyncio.CancelledError:
-                break
             except Exception:
                 logger.debug("MCP health loop error", exc_info=True)
 
@@ -201,7 +207,7 @@ class MCPClientManager:
         for attempt in range(1, srv_config.max_retries + 1):
             try:
                 new_session = MCPClientSession(srv_config)
-                await asyncio.wait_for(new_session.connect(), timeout=_CONNECT_TIMEOUT_SECONDS)
+                await new_session.connect()
 
                 # Deregister old tools, register new ones
                 if name in self._bridges:
@@ -226,7 +232,7 @@ class MCPClientManager:
                 await self._audit.log_reconnect(name, attempt=attempt, success=False, error=str(e))
                 logger.warning("MCP '%s' reconnect attempt %d failed: %s", name, attempt, e)
                 if attempt < srv_config.max_retries:
-                    await asyncio.sleep(2**attempt)  # exponential backoff
+                    await anyio.sleep(2**attempt)  # exponential backoff
 
         logger.error(
             "MCP '%s' exhausted %d reconnect attempts — disabling until restart",
