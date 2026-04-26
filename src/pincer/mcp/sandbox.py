@@ -212,9 +212,10 @@ class MCPSandbox:
         Build a sanitized environment for the subprocess.
 
         Starts from a minimal base (PATH, HOME=/tmp, LANG), adds safe
-        passthrough vars (PYTHONPATH, NODE_PATH, etc.), then adds the
-        user-declared env vars from config. Blocked prefixes are never
-        included, even if explicitly declared.
+        passthrough vars (PYTHONPATH, NODE_PATH, etc.), then overlays
+        user-declared vars from pincer.toml. User-declared vars always win —
+        _is_blocked only prevents leaking the parent environment, not
+        explicit declarations.
         """
         import sys
 
@@ -255,10 +256,10 @@ class MCPSandbox:
             if val:
                 base[key] = val
 
-        # Add user-declared vars, excluding blocked prefixes
-        for key, val in self.user_env.items():
-            if not self._is_blocked(key):
-                base[key] = val
+        # User-declared vars (from pincer.toml) are always passed through —
+        # _is_blocked only guards against leaking the parent environment,
+        # not against explicit declarations the user made intentionally.
+        base.update(self.user_env)
 
         return base
 

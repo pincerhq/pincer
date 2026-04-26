@@ -123,11 +123,11 @@ services:
     container_name: pincer
     profiles:
       - stdio
-    env_file:
-      - path: .env
-        required: false
-      - path: ../.env
-        required: false
+    #env_file:
+    #  - path: .env
+    #    required: false
+    #  - path: ../.env
+    #    required: false
     volumes:
       - pincer-data:/app/data
       - ./mc_servers:/app/mc_servers

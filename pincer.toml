@@ -64,38 +64,37 @@ expose_tools = [
 # timeout_seconds   = 60
 #
 # See docs/mcp-guide.md for the full configuration reference.
+# WARNING: run through uv or uvx not supported yet
 
 # Default mcp servers which worked in one container as subprocesses via stdio
-#[[mcp.servers]]
-#name = "memory"
-#transport = "stdio"
-#command = "uvx"
-#args = ["mcp-memory-serivce-lite", "memory", "server", "--debug"]
-#env = { MCP_MEMORY_STORAGE_BACKEND = "sqlite_vec", MCP_MEMORY_DB_PATH = "${HOME}/.pincer/memory/memory.db", MCP_HYBRID_SEARCH_ENABLED = "true" }
-#approval_required = ["delete_*", "update_*"]
-#timeout_seconds   = 90
-#sandbox           = false
+[[mcp.servers]]
+name = "memory"
+transport = "stdio"
+command = "memory"
+args = ["server", "--debug"]
+env = { MCP_MEMORY_STORAGE_BACKEND = "sqlite_vec", MCP_MEMORY_DB_PATH = "/app/data/memory.db", MCP_HYBRID_SEARCH_ENABLED = "true" }
+approval_required = ["delete_*", "update_*"]
+timeout_seconds   = 90
+# memory service should run without sandboxing at the moment
+sandbox           = false
 
-#[[mcp.servers]]
-#name      = "newsapi"
-#transport = "stdio"
-#command = "uv"
-#args = ["run", "--project", "/app/packages/pincer-mcps", "newsapi_server"]
-#env = { API_KEY="${NEWSAPI_API_KEY}" }
-#timeout_seconds = 15
+[[mcp.servers]]
+name      = "newsapi"
+transport = "stdio"
+command = "python"
+args = ["/app/packages/pincer-mcps/newsapi_server.py"]
+env = { API_KEY="${PINCER_NEWSAPI_KEY}" }
 
-#[[mcp.servers]]
-#name      = "openweathermap"
-#transport = "stdio"
-#command = "uv"
-#args = ["run", "--project", "/app/packages/pincer-mcps", "openweathermap_server"]
-#env = { API_KEY="${OPENWEATHERMAP_API_KEY}" }
-#timeout_seconds = 15
+[[mcp.servers]]
+name      = "openweathermap"
+transport = "stdio"
+command = "python"
+args = ["/app/packages/pincer-mcps/openweathermap_server.py"]
+env = { API_KEY="${PINCER_OPENWEATHERMAP_API_KEY}" }
 
 [[mcp.servers]]
 name      = "pomodoro"
 transport = "stdio"
-# uv or uvx not supported yet
 command = "python"
 args = ["/app/packages/pomodoro-mcp/server.py"]
 
