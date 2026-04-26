@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pomodoro-mcp"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.12",
+    "fastmcp>=3.2.4",
+    "pydantic>=2.4.1,<2.13",
+    "uvicorn>=0.34.0",
+]
+
+[project.scripts]
+server = "server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

@@ -46,7 +46,7 @@ x-pincer-base: &pincer-base
 services:
   newsapi-mcp:
     extends:
-      file: ./mcp_servers/pincer-mcps/docker-compose.yml
+      file: ./packages/pincer-mcps/docker-compose.yml
       service: newsapi-mcp
     image: pincer/newsapi-mcp:latest
     profiles:
@@ -56,7 +56,7 @@ services:
 
   openweathermap-mcp:
     extends:
-      file: ./mcp_servers/pincer-mcps/docker-compose.yml
+      file: ./packages/pincer-mcps/docker-compose.yml
       service: openweathermap-mcp
     image: pincer/openweathermap-mcp:latest
     profiles:
@@ -66,7 +66,7 @@ services:
 
   pomodoro-mcp:
     extends:
-      file: ./mcp_servers/pomodoro-mcp/docker-compose.yml
+      file: ./packages/pomodoro-mcp/docker-compose.yml
       service: pomodoro-mcp
     image: pincer/pomodoro-mcp:latest
     profiles:
@@ -74,7 +74,7 @@ services:
 
   stock-price-mcp:
     extends:
-      file: ./mcp_servers/pincer-mcps/docker-compose.yml
+      file: ./packages/pincer-mcps/docker-compose.yml
       service: stock-price-mcp
     image: pincer/stock-price-mcp:latest
     profiles:
@@ -82,7 +82,7 @@ services:
 
   summarize-mcp:
     extends:
-      file: ./mcp_servers/pincer-mcps/docker-compose.yml
+      file: ./packages/pincer-mcps/docker-compose.yml
       service: summarize-mcp
     image: pincer/summarize-mcp:latest
     profiles:
@@ -90,33 +90,33 @@ services:
 
   translate-mcp:
     extends:
-      file: ./mcp_servers/pincer-mcps/docker-compose.yml
+      file: ./packages/pincer-mcps/docker-compose.yml
       service: translate-mcp
     image: pincer/translate-mcp:latest
     profiles:
       - http
 
-  memory-mcp:
-    extends:
-      file: ./mcp_servers/memory-mcp/tools/docker/docker-compose.http.yml
-      service: mcp-memory-service
-    restart: unless-stopped
-    profiles:
-      - http
-    #env_file: .env
-    volumes:
-      # Single data directory for all storage
-      - memory-data:/app/data
-    ports:
-      - "8001:8000"
-    environment:
-      - MCP_ALLOW_ANONYMOUS_ACCESS=true
-      # Storage configuration
-      - MCP_MEMORY_STORAGE_BACKEND=sqlite_vec
-      - MCP_MEMORY_SQLITE_PATH=/app/data/mem_sqlite_vec.db
-      - MCP_MEMORY_BACKUPS_PATH=/app/data/mem_backups
-      # Performance tuning
-      - SIMILARITY_THRESHOLD=0.75
+#  memory-mcp:
+#    extends:
+#      file: ./packages/memory-mcp/tools/docker/docker-compose.http.yml
+#      service: mcp-memory-service
+#    restart: unless-stopped
+#    profiles:
+#      - http
+#    #env_file: .env
+#    volumes:
+#      # Single data directory for all storage
+#      - memory-data:/app/data
+#    ports:
+#      - "8001:8000"
+#    environment:
+#      - MCP_ALLOW_ANONYMOUS_ACCESS=true
+#      # Storage configuration
+#      - MCP_MEMORY_STORAGE_BACKEND=sqlite_vec
+#      - MCP_MEMORY_SQLITE_PATH=/app/data/mem_sqlite_vec.db
+#      - MCP_MEMORY_BACKUPS_PATH=/app/data/mem_backups
+#      # Performance tuning
+#      - SIMILARITY_THRESHOLD=0.75
 
   pincer-stdio:
     <<: *pincer-base
@@ -128,6 +128,11 @@ services:
         required: false
       - path: ../.env
         required: false
+    volumes:
+      - pincer-data:/app/data
+      - ./mc_servers:/app/mc_servers
+      - ./pincer/src:/app/src/pincer/src
+      - ./pincer.toml:/app/data/pincer.toml:ro
 
   pincer-http:
     <<: *pincer-base

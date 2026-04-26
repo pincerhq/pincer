@@ -64,3 +64,23 @@ expose_tools = [
 # timeout_seconds   = 60
 #
 # See docs/mcp-guide.md for the full configuration reference.
+
+# Default mcp servers which worked in one container as subprocesses via stdio
+#[[mcp.servers]]
+#name = "memory"
+#transport = "stdio"
+#command = "uvx"
+#args = ["mcp-memory-serivce-lite", "memory", "server", "--debug"]
+#env = { MCP_MEMORY_STORAGE_BACKEND = "sqlite_vec", MCP_MEMORY_DB_PATH = "${HOME}/.pincer/memory/memory.db", MCP_HYBRID_SEARCH_ENABLED = "true" }
+#approval_required = ["delete_*", "update_*"]
+#timeout_seconds   = 90
+#sandbox           = false
+
+[[mcp.servers]]
+name      = "pomodoro"
+transport = "stdio"
+#command = "uvx"
+#args = ["--from", "../packages/pomodoro-mcp", "server.py"]
+command = "uv"
+args = ["run", "--project", "/app/packages/pomodoro-mcp", "server"]
+timeout_seconds = 15

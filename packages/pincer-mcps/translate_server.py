@@ -165,7 +165,7 @@ async def list_languages() -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description="LibreTranslate MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -193,3 +193,7 @@ if __name__ == "__main__":
         uvicorn.run(app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

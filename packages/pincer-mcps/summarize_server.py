@@ -355,7 +355,7 @@ async def get_youtube_transcript(params: YoutubeInput) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -383,3 +383,7 @@ if __name__ == "__main__":
         uvicorn.run(app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

@@ -486,15 +486,16 @@ async def pomodoro_settings(ctx: Context = None) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+
+def main() -> None:
     import os
 
-    parser = argparse.ArgumentParser(description="Stock & crypto price MCP server (fastmcp)")
+    parser = argparse.ArgumentParser(description="Pomodoro MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
         choices=["http", "stdio"],
         default=os.environ.get("TRANSPORT", "stdio"),
-        help="Transport: 'http' (streamable HTTP, default) or 'stdio'",
+        help="Transport: 'http' (streamable HTTP) or 'stdio' (default)",
     )
     parser.add_argument(
         "--host",
@@ -510,9 +511,13 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.transport == "http":
-        print(f"Starting stock_price_mcp · HTTP transport · {args.host}:{args.port}/mcp")
+        print(f"Starting pomodoro_mcp · HTTP transport · {args.host}:{args.port}/mcp")
         app = mcp.http_app()
         app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
         uvicorn.run(app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

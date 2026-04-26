@@ -1,3 +1,0 @@
-[submodule "mcp_servers/memory-mcp"]
-	path = mcp_servers/memory-mcp
-	url = https://github.com/doobidoo/mcp-memory-service

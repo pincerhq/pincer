@@ -1,7 +1,7 @@
 [project]
 name = "pincer-agent"
 version = "0.7.6"
-description = "Your personal AI agent. Text it on WhatsApp. It does stuff. 🦀"
+description = "Your personal AI agent. Text it on WhatsApp. It does stuff. 🦜"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
@@ -72,6 +72,9 @@ image = [
 mcp = [
     "mcp>=1.8.0",
     "PyJWT[crypto]>=2.8.0",
+    "pomodoro-mcp",
+    "pincer-mcps",
+    "mcp-memory-service-lite>=10.40.3"
 ]
 ms365 = [
     "msal>=1.28.0",
@@ -167,3 +170,12 @@ disable_error_code = [
 [tool.bandit]
 exclude_dirs = ["tests", "dashboard"]
 skips = ["B101", "B104", "B310", "B608"]
+
+[tool.uv.workspace]
+members = [
+    "packages/*",
+]
+
+[tool.uv.sources]
+pomodoro-mcp = { workspace = true }
+pincer-mcps = { workspace = true }

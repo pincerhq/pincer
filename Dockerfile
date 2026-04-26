@@ -27,10 +27,11 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/app/.venv
 
 COPY pyproject.toml uv.lock ./
+COPY packages/ packages/
 RUN uv sync --frozen --no-dev --no-install-project --extra mcp
 
 COPY src/ src/
-#COPY skills/ skills/
+COPY skills/ skills/
 COPY README.md ./
 RUN uv sync --frozen --no-dev --extra mcp
 
@@ -53,9 +54,11 @@ COPY --from=dashboard-builder /usr/local/lib/node_modules /usr/local/lib/node_mo
 
 RUN groupadd -r pincer && useradd -r -g pincer -m pincer
 
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
 #COPY --from=builder /app/skills /app/skills
+COPY --from=builder /app/packages /app/packages
 COPY --from=builder /app/pyproject.toml /app/
 COPY --from=dashboard-builder /app/dist /app/dashboard/dist
 

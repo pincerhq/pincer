@@ -1,4 +1,4 @@
-# Governance 🦀
+# Governance 🦜
 
 ## How Decisions Get Made
 

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pincer-mcps"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.12",
+    "fastmcp>=3.2.4",
+    "httpx>=0.28.1",
+    "pydantic>=2.4.1,<2.13",
+    "youtube-transcript-api>=0.6.3",
+]
+
+[project.scripts]
+newsapi_server = "newsapi_server:main"
+openweathermap_server = "openweathermap_server:main"
+stock-price_server = "stock_price_server:main"
+summarize_server = "summarize_server:main"
+translate_server = "translate_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

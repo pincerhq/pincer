@@ -203,7 +203,7 @@ async def get_crypto_price(params: CryptoInput) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main() -> None:
     parser = argparse.ArgumentParser(description="Stock & crypto price MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -231,3 +231,7 @@ if __name__ == "__main__":
         uvicorn.run(app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

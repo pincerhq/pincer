@@ -10,12 +10,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── App user (non-root) ───────────────────────────────────────────────────────
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+
 RUN useradd --create-home --shell /bin/bash pomodoro
 WORKDIR /app
 
 # ── Python deps ───────────────────────────────────────────────────────────────
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+#COPY requirements.txt .
+#RUN pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml ./
+RUN uv sync --frozen --no-dev --no-install-project --extra mcp
 
 # ── Application code ──────────────────────────────────────────────────────────
 COPY server.py state.py ./

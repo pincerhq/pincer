@@ -59,7 +59,7 @@ pincer run
 You should see:
 
 ```
-🦀 Pincer v0.7.0
+🦜 Pincer v0.7.0
 ✅ LLM: Claude claude-sonnet-4-20250514 (Anthropic)
 ✅ Channel: Telegram (@your_bot_name)
 ✅ Memory: SQLite (data/pincer.db)
