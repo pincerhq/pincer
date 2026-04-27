@@ -258,10 +258,12 @@ class MCPSandbox:
             if val:
                 base[key] = val
 
-        # User-declared vars (from pincer.toml) are always passed through —
-        # _is_blocked only guards against leaking the parent environment,
-        # not against explicit declarations the user made intentionally.
-        base.update(self.user_env)
+        # User-declared vars (from pincer.toml) win over defaults, but still
+        # filtered through _is_blocked — intentional declarations of blocked
+        # prefixes (e.g. ANTHROPIC_API_KEY) are not passed to the sandbox.
+        for key, val in self.user_env.items():
+            if not self._is_blocked(key):
+                base[key] = val
 
         return base
 

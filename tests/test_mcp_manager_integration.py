@@ -192,7 +192,7 @@ async def test_manager_shutdown_cleans_everything(two_echo_servers) -> None:
     assert registry.list_tools() == []
     assert manager._sessions == {}
     assert manager._bridges == {}
-    assert manager._health_task is None
+    assert manager._task_group is None
 
 
 async def test_manager_audit_log_populated(two_echo_servers, tmp_path) -> None:
