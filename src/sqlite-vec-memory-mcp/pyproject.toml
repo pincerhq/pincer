@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-sqlite-vec-memory-mcp = "server:main"
+memory_server = "memory_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── App user (non-root) ───────────────────────────────────────────────────────
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -24,7 +24,8 @@ COPY pyproject.toml ./
 RUN uv sync --no-dev
 
 # ── Application code ──────────────────────────────────────────────────────────
-COPY --chown=pomodoro:pomodoro server.py state.py ./
+COPY --chown=pomodoro:pomodoro state.py ./
+COPY --chown=pomodoro:pomodoro pomodoro_server.py ./server.py
 
 USER pomodoro
 

@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-server = "server:main"
+pomodoro_server = "pomodoro_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

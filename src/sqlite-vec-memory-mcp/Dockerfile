@@ -13,7 +13,8 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 # Install package and deps
-COPY pyproject.toml server.py ./
+COPY pyproject.toml ./
+COPY memory_server.py ./server.py
 RUN uv sync --no-cache
 
 # Pre-download the ONNX model into the image so first request isn't slow.
