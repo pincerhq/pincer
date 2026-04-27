@@ -74,7 +74,7 @@ mcp = [
     "PyJWT[crypto]>=2.8.0",
     "pomodoro-mcp",
     "pincer-mcps",
-    "mcp-memory-service-lite>=10.39.1"
+    "sqlite-vec-memory-mcp",
 ]
 ms365 = [
     "msal>=1.28.0",
@@ -173,9 +173,12 @@ skips = ["B101", "B104", "B310", "B608"]
 
 [tool.uv.workspace]
 members = [
-    "packages/*",
+    "src/pincer-mcps",
+    "src/pomodoro-mcp",
+    "src/sqlite-vec-memory-mcp",
 ]
 
 [tool.uv.sources]
 pomodoro-mcp = { workspace = true }
 pincer-mcps = { workspace = true }
+sqlite-vec-memory-mcp = { workspace = true }

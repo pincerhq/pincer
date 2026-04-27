@@ -40,8 +40,4 @@ data/google_workspace_token.json
 
 # Internal and required MCP servers
 pincer.local.toml
-packages/*
-!packages/pincer-mcps
-!packages/pincer-mcps/**
-!packages/pomodoro-mcp
-!packages/pomodoro-mcp/**
+mcp-servers/*

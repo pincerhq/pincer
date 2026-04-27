@@ -27,12 +27,10 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/app/.venv
 
 COPY pyproject.toml uv.lock ./
-COPY packages/ packages/
-RUN uv sync --frozen --no-dev --no-install-project --extra mcp
-
 COPY src/ src/
-COPY skills/ skills/
 COPY README.md ./
+# DEPRCATED: skills are deprecated and will removed in 0.9.0 version
+COPY skills/ skills/
 RUN uv sync --frozen --no-dev --extra mcp
 
 # ============================================
@@ -58,10 +56,11 @@ COPY --chown=pincer:pincer --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY --chown=pincer:pincer --from=builder /app/src /app/src
 COPY --chown=pincer:pincer --from=builder /app/.venv /app/.venv
 #COPY --chown=pincer:pincer --from=builder /app/skills /app/skills
-COPY --chown=pincer:pincer --from=builder /app/packages /app/packages
 COPY --chown=pincer:pincer --from=builder /app/pyproject.toml /app/
 COPY --chown=pincer:pincer --from=dashboard-builder \
     /app/dist /app/dashboard/dist
+
+#RUN mkdir -p /app/data/backups && chown -R pincer:pincer /app/data
 
 # npm cache goes inside the data volume so it persists and is writable by pincer user
 ENV PATH="/app/.venv/bin:/usr/local/bin:$PATH" \

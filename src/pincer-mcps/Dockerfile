@@ -13,11 +13,9 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 
-#COPY requirements.txt .
-#RUN pip install --no-cache-dir -r requirements.txt
 COPY pyproject.toml ./
-#RUN uv sync --frozen --no-dev --no-install-project --extra mcp
-RUN uv sync --frozen --no-dev --extra mcp
+#RUN uv sync --frozen --no-dev --system
+RUN uv sync --no-dev
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD sh -c 'curl -f http://localhost:${PORT:-8000}/health || exit 1'
@@ -28,7 +26,7 @@ ENV PORT=8000
 
 EXPOSE 8000
 
-CMD ["python", "server.py"]
+CMD ["uv", "run", "server.py"]
 
 
 # NewsAPI mcp server

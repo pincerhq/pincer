@@ -20,15 +20,12 @@ RUN useradd --create-home --shell /bin/bash pomodoro
 WORKDIR /app
 
 # ── Python deps ───────────────────────────────────────────────────────────────
-#COPY requirements.txt .
-#RUN pip install --no-cache-dir -r requirements.txt
 COPY pyproject.toml ./
-RUN uv sync --frozen --no-dev --no-install-project --extra mcp
+RUN uv sync --no-dev
 
 # ── Application code ──────────────────────────────────────────────────────────
-COPY server.py state.py ./
+COPY --chown=pomodoro:pomodoro server.py state.py ./
 
-RUN chown -R pomodoro:pomodoro /app
 USER pomodoro
 
 # Healthcheck: poll the health endpoint
@@ -42,4 +39,4 @@ ENV PORT=8000
 
 EXPOSE 8000
 
-CMD ["python", "server.py"]
+CMD ["uv", "run", "server.py"]

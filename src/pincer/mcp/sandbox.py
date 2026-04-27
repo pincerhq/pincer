@@ -226,7 +226,9 @@ class MCPSandbox:
         in_venv = sys.prefix != sys.base_prefix
 
         # Prefer explicit VIRTUAL_ENV; fall back to sys.prefix when inside a venv.
-        venv = os.environ.get("VIRTUAL_ENV") or os.environ.get("UV_PROJECT_ENVIRONMENT") or (sys.prefix if in_venv else "")
+        venv = (os.environ.get("VIRTUAL_ENV")
+            or os.environ.get("UV_PROJECT_ENVIRONMENT")
+            or (sys.prefix if in_venv else ""))
 
         # Build PATH: always include the actual Python's bin dir first.
         path_parts = [python_bin_dir]

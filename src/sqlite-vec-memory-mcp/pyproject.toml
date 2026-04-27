@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sqlite-vec-memory-mcp"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.12",
+    "pydantic>=2.4.1,<2.13",
+    "uvicorn>=0.34.0",
+    "fastmcp>=3.2.4",
+    "fastembed>=0.4.0",
+    "sqlite-vec>=0.1.6",
+]
+
+[project.scripts]
+sqlite-vec-memory-mcp = "server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]

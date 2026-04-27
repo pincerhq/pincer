@@ -321,7 +321,7 @@ class MCPClientSession:
         # Declared vars always win — they are explicitly trusted by the user.
         if self.config.env:
             for key, value in self.config.env.items():
-                logger.info(f"{key}: {value}")
+                logger.info(f"MCP server {self.config.name} consumed {key} from env")
                 if (value.startswith("$")
                     and (ev := extract_env_var_name(value))):
                         value = os.getenv(ev)
