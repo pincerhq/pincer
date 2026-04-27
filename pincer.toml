@@ -120,7 +120,6 @@ expose_tools = [
 #url       = "http://translate-mcp:8000/mcp"
 
 # In app runtime servers using stdio protocol for fast startup (default)
-# git commit -am "http and stdio vcp servers runs. mcps could be sadboxed and use "
 [[mcp.servers]]
 name = "memory"
 transport = "stdio"
