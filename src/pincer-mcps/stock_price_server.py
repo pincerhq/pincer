@@ -203,6 +203,7 @@ async def get_crypto_price(params: CryptoInput) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Stock & crypto price MCP server (fastmcp)")
     parser.add_argument(

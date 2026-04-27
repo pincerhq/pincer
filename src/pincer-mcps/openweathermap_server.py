@@ -303,6 +303,7 @@ async def get_forecast(params: ForecastInput) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="OpenWeatherMap MCP server (fastmcp)")
     parser.add_argument(

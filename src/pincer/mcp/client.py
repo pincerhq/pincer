@@ -80,9 +80,7 @@ class MCPClientSession:
 
             # Enter ClientSession outside fail_after — it spawns background tasks whose
             # cancel scope must outlive our timeout scope.
-            self._session = await self._exit_stack.enter_async_context(
-                ClientSession(read_stream, write_stream)
-            )
+            self._session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
             # Timeout only the pure protocol operations.
             with anyio.fail_after(self.config.timeout):
                 await self._session.initialize()
@@ -120,9 +118,7 @@ class MCPClientSession:
                 result = await self._session.call_tool(tool_name, arguments)
             return result
         except TimeoutError:
-            raise TimeoutError(
-                f"MCP '{self.name}' tool '{tool_name}' timed out after {self.config.timeout}s"
-            ) from None
+            raise TimeoutError(f"MCP '{self.name}' tool '{tool_name}' timed out after {self.config.timeout}s") from None
 
     async def health_check(self) -> bool:
         """Verify the session is still alive via a ping."""
@@ -163,9 +159,7 @@ class MCPClientSession:
         await anyio.sleep(0.2)
         if not self._sandbox.alive:
             stderr = self._sandbox.get_stderr()
-            raise RuntimeError(
-                f"MCP '{self.name}' server exited on startup: {stderr or '(no output)'}"
-            )
+            raise RuntimeError(f"MCP '{self.name}' server exited on startup: {stderr or '(no output)'}")
 
     async def _connect_stdio(self, stack: AsyncExitStack, stdio_params_cls: Any, stdio_client: Any) -> tuple[Any, Any]:
         """Set up stdio transport.
@@ -273,7 +267,7 @@ class MCPClientSession:
         import sys
 
         def extract_env_var_name(s: str) -> str | None:
-            match = re.search(r'\$\{(\w+)\}', s)
+            match = re.search(r"\$\{(\w+)\}", s)
             return match.group(1) if match else None
 
         if not self.config.sandbox:
@@ -281,9 +275,8 @@ class MCPClientSession:
             env.update(self.config.env)
             if self.config.env:
                 for key, value in self.config.env.items():
-                    if (value.startswith("$")
-                        and (ev := extract_env_var_name(value))):
-                            value = os.getenv(ev) or ""
+                    if value.startswith("$") and (ev := extract_env_var_name(value)):
+                        value = os.getenv(ev) or ""
                     if value:
                         env[key] = value
             return env
@@ -291,9 +284,7 @@ class MCPClientSession:
         python_bin_dir = os.path.dirname(sys.executable)
         in_venv = sys.prefix != sys.base_prefix
         venv = (
-            os.environ.get("VIRTUAL_ENV")
-            or os.environ.get("UV_PROJECT_ENVIRONMENT")
-            or (sys.prefix if in_venv else "")
+            os.environ.get("VIRTUAL_ENV") or os.environ.get("UV_PROJECT_ENVIRONMENT") or (sys.prefix if in_venv else "")
         )
 
         path_parts = [python_bin_dir]
@@ -322,10 +313,9 @@ class MCPClientSession:
         if self.config.env:
             for key, value in self.config.env.items():
                 logger.info(f"MCP server {self.config.name} consumed {key} from env")
-                if (value.startswith("$")
-                    and (ev := extract_env_var_name(value))):
-                        value = os.getenv(ev) or ""
-                        logger.info(f"{ev}: {value}")
+                if value.startswith("$") and (ev := extract_env_var_name(value)):
+                    value = os.getenv(ev) or ""
+                    logger.info(f"{ev}: {value}")
                 if value:
                     base_env[key] = value
         return base_env

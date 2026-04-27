@@ -355,6 +355,7 @@ async def get_youtube_transcript(params: YoutubeInput) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize MCP server (fastmcp)")
     parser.add_argument(

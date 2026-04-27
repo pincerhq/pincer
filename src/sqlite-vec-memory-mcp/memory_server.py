@@ -32,13 +32,10 @@ from starlette.middleware.cors import CORSMiddleware
 if TYPE_CHECKING:
     from starlette.requests import Request
 
-mcp = FastMCP(
-    name="sqlite_vec_memory",
-    instructions="Long-term memory with semantic search."
-)
+mcp = FastMCP(name="sqlite_vec_memory", instructions="Long-term memory with semantic search.")
 
 _DB_PATH = Path(os.environ.get("MEMORY_DB_PATH", Path.home() / "memory.db"))
-_EMBED_MODEL = os.environ.get("EMBED_MODEL", "BAAI/bge-small-en-v1.5") # ex. all-MiniLM-L6-v2
+_EMBED_MODEL = os.environ.get("EMBED_MODEL", "BAAI/bge-small-en-v1.5")  # ex. all-MiniLM-L6-v2
 _EMBED_DIM = int(os.environ.get("EMBED_DIM", "384"))
 
 # Lazy singleton — loaded once on first embedding call.
@@ -49,10 +46,12 @@ _embed_model: Any = None
 # Embeddings (ONNX via fastembed)
 # ---------------------------------------------------------------------------
 
+
 def _get_embed_model() -> Any:
     global _embed_model
     if _embed_model is None:
         from fastembed import TextEmbedding
+
         _embed_model = TextEmbedding(model_name=_EMBED_MODEL)
     return _embed_model
 
@@ -60,13 +59,14 @@ def _get_embed_model() -> Any:
 def _embed(text: str) -> bytes:
     """Return float32 bytes ready for sqlite_vec."""
     model = _get_embed_model()
-    vec = next(model.embed([text]))          # numpy float32 array
+    vec = next(model.embed([text]))  # numpy float32 array
     return struct.pack(f"{len(vec)}f", *vec)
 
 
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
+
 
 def _connect() -> sqlite3.Connection:
     db = sqlite3.connect(_DB_PATH)
@@ -98,6 +98,7 @@ def _init_db() -> None:
 # Health check
 # ---------------------------------------------------------------------------
 
+
 @mcp.custom_route("/", methods=["GET"])
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
@@ -110,9 +111,11 @@ async def health_check(request: Request) -> JSONResponse:
         }
     )
 
+
 # ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
+
 
 @mcp.tool()
 def memory_store(content: str, tags: list[str] | None = None) -> str:
@@ -225,6 +228,7 @@ def memory_update(memory_id: int, content: str, tags: list[str] | None = None) -
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     import argparse

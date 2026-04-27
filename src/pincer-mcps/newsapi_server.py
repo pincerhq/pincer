@@ -556,6 +556,7 @@ async def list_sources(params: ListSourcesInput) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="NewsAPI.org MCP server (fastmcp)")
     parser.add_argument(

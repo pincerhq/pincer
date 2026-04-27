@@ -165,6 +165,7 @@ async def list_languages() -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="LibreTranslate MCP server (fastmcp)")
     parser.add_argument(
