@@ -118,7 +118,7 @@ async def translate_text(params: TranslateInput) -> str:
 
     Returns translated_text, source_language (detected when source='auto'), and target_language.
     """
-    payload: dict = {"q": params.text, "source": params.source, "target": params.target}
+    payload: dict[str, str] = {"q": params.text, "source": params.source, "target": params.target}
     if API_KEY:
         payload["api_key"] = API_KEY
 
@@ -189,8 +189,8 @@ def main() -> None:
     if args.transport == "http":
         print(f"Starting translate_mcp · HTTP transport · {args.host}:{args.port}/mcp")
         app = mcp.http_app()
-        app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-        uvicorn.run(app, host=args.host, port=args.port)
+        cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+        uvicorn.run(cors_app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
 

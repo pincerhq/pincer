@@ -7,6 +7,7 @@ import argparse
 import json
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import uvicorn
 from fastapi.responses import JSONResponse
@@ -33,7 +34,7 @@ def _format_duration(seconds: int) -> str:
     return f"{m:02d}:{s:02d}"
 
 
-def _session_to_dict(s: Session) -> dict:
+def _session_to_dict(s: Session) -> dict[str, Any]:
     now = datetime.now(UTC)
     remaining: int | None = None
     elapsed: int | None = None
@@ -93,7 +94,7 @@ _POMODORO_START_DURATION = Field(
     ge=1,
     le=90,
 )
-_POMODORO_START_TAGS = Field(
+_POMODORO_START_TAGS: list[str] = Field(
     default_factory=list,
     description="Optional labels such as ['work', 'deep-focus']",
 )
@@ -104,7 +105,7 @@ async def pomodoro_start(
     description: str = _POMODORO_START_DESCRIPTION,
     duration_minutes: int = _POMODORO_START_DURATION,
     tags: list[str] = _POMODORO_START_TAGS,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> str:
     """Start a new Pomodoro focus session.
 
@@ -144,7 +145,7 @@ async def pomodoro_start(
 
 
 @mcp.tool
-async def pomodoro_status(ctx: Context = None) -> str:
+async def pomodoro_status(ctx: Context | None = None) -> str:
     """Get the status of the currently active Pomodoro or break session.
 
     Returns time elapsed, time remaining, and session metadata.
@@ -171,7 +172,7 @@ async def pomodoro_status(ctx: Context = None) -> str:
 
 
 @mcp.tool
-async def pomodoro_pause(ctx: Context = None) -> str:
+async def pomodoro_pause(ctx: Context | None = None) -> str:
     """Pause the currently running Pomodoro session.
 
     Freezes the timer; resume with pomodoro_resume.
@@ -199,7 +200,7 @@ async def pomodoro_pause(ctx: Context = None) -> str:
 
 
 @mcp.tool
-async def pomodoro_resume(ctx: Context = None) -> str:
+async def pomodoro_resume(ctx: Context | None = None) -> str:
     """Resume a paused Pomodoro session.
 
     Continues the timer from where it was paused.
@@ -231,7 +232,7 @@ async def pomodoro_resume(ctx: Context = None) -> str:
 
 
 @mcp.tool
-async def pomodoro_finish(ctx: Context = None) -> str:
+async def pomodoro_finish(ctx: Context | None = None) -> str:
     """Mark the active session as successfully completed.
 
     Records it in history and clears the active slot.
@@ -266,7 +267,7 @@ async def pomodoro_finish(ctx: Context = None) -> str:
 
 
 @mcp.tool
-async def pomodoro_cancel(ctx: Context = None) -> str:
+async def pomodoro_cancel(ctx: Context | None = None) -> str:
     """Cancel and discard the active session without recording it as complete.
 
     Use when you were interrupted and don't want to count this session.
@@ -307,7 +308,7 @@ _POMODORO_BREAK_DURATION = Field(
 async def pomodoro_break(
     break_type: BreakType = _POMODORO_BREAK_TYPE,
     duration_minutes: int | None = _POMODORO_BREAK_DURATION,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> str:
     """Start a short or long break session.
 
@@ -364,7 +365,7 @@ _POMODORO_AMEND_TAGS = Field(
 async def pomodoro_amend(
     description: str | None = _POMODORO_AMEND_DESCRIPTION,
     tags: list[str] | None = _POMODORO_AMEND_TAGS,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> str:
     """Update the description or tags of the currently active session.
 
@@ -390,7 +391,7 @@ async def pomodoro_amend(
 
 
 @mcp.tool
-async def pomodoro_repeat(ctx: Context = None) -> str:
+async def pomodoro_repeat(ctx: Context | None = None) -> str:
     """Start a new Pomodoro using the same settings as the last completed one.
 
     Copies the description, duration, and tags from the most recent
@@ -450,7 +451,7 @@ async def pomodoro_history(
     limit: int = _POMODORO_HISTORY_LIMIT,
     session_type: str | None = _POMODORO_HISTORY_TYPE,
     tag: str | None = _POMODORO_HISTORY_TAG,
-    ctx: Context = None,
+    ctx: Context | None = None,
 ) -> str:
     """List past Pomodoro and break sessions with optional filters."""
     sessions = store.history(limit=limit, session_type=session_type, tag=tag)
@@ -466,7 +467,7 @@ async def pomodoro_history(
 
 
 @mcp.tool
-async def pomodoro_settings(ctx: Context = None) -> str:
+async def pomodoro_settings(ctx: Context | None = None) -> str:
     """Return the current default settings and today's progress summary."""
     return json.dumps(
         {
@@ -513,8 +514,8 @@ def main() -> None:
     if args.transport == "http":
         print(f"Starting pomodoro_mcp · HTTP transport · {args.host}:{args.port}/mcp")
         app = mcp.http_app()
-        app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-        uvicorn.run(app, host=args.host, port=args.port)
+        cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+        uvicorn.run(cors_app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
 

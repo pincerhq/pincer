@@ -283,7 +283,7 @@ class MCPClientSession:
                 for key, value in self.config.env.items():
                     if (value.startswith("$")
                         and (ev := extract_env_var_name(value))):
-                            value = os.getenv(ev)
+                            value = os.getenv(ev) or ""
                     if value:
                         env[key] = value
             return env
@@ -324,7 +324,7 @@ class MCPClientSession:
                 logger.info(f"MCP server {self.config.name} consumed {key} from env")
                 if (value.startswith("$")
                     and (ev := extract_env_var_name(value))):
-                        value = os.getenv(ev)
+                        value = os.getenv(ev) or ""
                         logger.info(f"{ev}: {value}")
                 if value:
                     base_env[key] = value

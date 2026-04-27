@@ -100,7 +100,7 @@ def _init_db() -> None:
 
 @mcp.custom_route("/", methods=["GET"])
 @mcp.custom_route("/health", methods=["GET"])
-def health_check(request: Request) -> JSONResponse:
+async def health_check(request: Request) -> JSONResponse:
     return JSONResponse(
         {
             "status": "healthy",
@@ -254,8 +254,8 @@ def main() -> None:
     if args.transport == "http":
         print(f"Starting sqlite_vec_memory_mcp · HTTP transport · {args.host}:{args.port}/mcp")
         app = mcp.http_app()
-        app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-        uvicorn.run(app, host=args.host, port=args.port)
+        cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+        uvicorn.run(cors_app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
 

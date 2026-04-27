@@ -227,8 +227,8 @@ def main() -> None:
     if args.transport == "http":
         print(f"Starting stock_price_mcp · HTTP transport · {args.host}:{args.port}/mcp")
         app = mcp.http_app()
-        app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-        uvicorn.run(app, host=args.host, port=args.port)
+        cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+        uvicorn.run(cors_app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
 
