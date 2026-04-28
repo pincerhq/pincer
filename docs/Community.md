@@ -1,4 +1,4 @@
-# 🦀 The Pincer Community
+# 🦜 The Pincer Community
 
 > *"A personal AI agent is only as good as the community that builds it."*
 
@@ -168,4 +168,4 @@ We're not trying to build a company. We're not trying to raise money. We're not 
 
 If that resonates with you — welcome. Pull up a chair. There's work to do and we're glad you're here.
 
-🦀
+🦜

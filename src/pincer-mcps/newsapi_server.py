@@ -21,7 +21,7 @@ import json
 import logging
 import os
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import uvicorn
@@ -163,7 +163,7 @@ mcp = FastMCP(
 # ---------------------------------------------------------------------------
 
 
-async def _newsapi_get(endpoint: str, params: dict) -> dict:
+async def _newsapi_get(endpoint: str, params: dict[str, Any]) -> dict[str, Any]:
     """Authenticated GET request to NewsAPI.org. Strips None values."""
     if not API_KEY:
         raise ValueError(
@@ -177,7 +177,7 @@ async def _newsapi_get(endpoint: str, params: dict) -> dict:
         logger.info(f"Requesting {NEWSAPI_BASE_URL}/{endpoint}")
         r = await client.get(f"{NEWSAPI_BASE_URL}/{endpoint}", params=clean)
         r.raise_for_status()
-        return r.json()
+        return r.json()  # type: ignore[no-any-return]
 
 
 def _handle_error(exc: Exception) -> str:
@@ -202,7 +202,7 @@ def _handle_error(exc: Exception) -> str:
     return f"Error: {type(exc).__name__}: {exc}"
 
 
-def _format_articles(articles: list[dict], total: int, offset: int) -> str:
+def _format_articles(articles: list[dict[str, Any]], total: int, offset: int) -> str:
     """Serialise a list of raw NewsAPI article dicts to compact JSON."""
     items = [
         {
@@ -250,7 +250,7 @@ class SearchEverythingInput(BaseModel):
         extra="forbid",
     )
 
-    q: str = Field(
+    q: str | None = Field(
         default=None,
         description=(
             "Keyword / phrase query. Supports AND, OR, NOT and quoted phrases. "
@@ -429,7 +429,7 @@ class ListSourcesInput(BaseModel):
 
 @mcp.custom_route("/", methods=["GET"])
 @mcp.custom_route("/health", methods=["GET"])
-async def health_check(request: Request):
+async def health_check(request: Request) -> JSONResponse:
     return JSONResponse(
         {
             "status": "healthy",
@@ -556,7 +556,8 @@ async def list_sources(params: ListSourcesInput) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="NewsAPI.org MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -580,12 +581,16 @@ if __name__ == "__main__":
     if args.transport == "http":
         print(f"Starting newsapi_mcp · HTTP transport · {args.host}:{args.port}/mcp")
         app = mcp.http_app()
-        app = CORSMiddleware(
+        cors_app = CORSMiddleware(
             app=app,
             allow_origins=["*"],
             allow_methods=["*"],
             allow_headers=["*"],
         )
-        uvicorn.run(app, host=args.host, port=args.port)
+        uvicorn.run(cors_app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

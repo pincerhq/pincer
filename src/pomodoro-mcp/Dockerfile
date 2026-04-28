@@ -10,17 +10,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── App user (non-root) ───────────────────────────────────────────────────────
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/app/.venv
+
 RUN useradd --create-home --shell /bin/bash pomodoro
 WORKDIR /app
 
 # ── Python deps ───────────────────────────────────────────────────────────────
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml ./
+RUN uv sync --no-dev
 
 # ── Application code ──────────────────────────────────────────────────────────
-COPY server.py state.py ./
+COPY --chown=pomodoro:pomodoro state.py ./
+COPY --chown=pomodoro:pomodoro pomodoro_server.py ./server.py
 
-RUN chown -R pomodoro:pomodoro /app
 USER pomodoro
 
 # Healthcheck: poll the health endpoint
@@ -34,4 +40,4 @@ ENV PORT=8000
 
 EXPOSE 8000
 
-CMD ["python", "server.py"]
+CMD ["uv", "run", "server.py"]

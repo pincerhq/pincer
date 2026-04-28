@@ -84,7 +84,7 @@ async def test_connect_discover_call_disconnect(echo_server_script: str) -> None
         command=sys.executable,
         args=[echo_server_script],
         sandbox=False,
-        timeout_seconds=15,
+        timeout=15,
     )
     session = MCPClientSession(config)
     await session.connect()
@@ -111,7 +111,7 @@ async def test_tool_call_timeout(slow_server_script: str) -> None:
         command=sys.executable,
         args=[slow_server_script],
         sandbox=False,
-        timeout_seconds=2,
+        timeout=2,
     )
     session = MCPClientSession(config)
     await session.connect()
@@ -133,7 +133,7 @@ async def test_health_check_on_live_session(echo_server_script: str) -> None:
         command=sys.executable,
         args=[echo_server_script],
         sandbox=False,
-        timeout_seconds=15,
+        timeout=15,
     )
     session = MCPClientSession(config)
     await session.connect()
@@ -158,7 +158,7 @@ async def test_sandboxed_connect_and_call(echo_server_script: str) -> None:
         args=[echo_server_script],
         sandbox=True,
         sandbox_memory_mb=256,
-        timeout_seconds=15,
+        timeout=15,
     )
     session = MCPClientSession(config)
     await session.connect()
@@ -207,7 +207,7 @@ if __name__ == "__main__":
         command=sys.executable,
         args=[str(script)],
         sandbox=True,
-        timeout_seconds=15,
+        timeout=15,
     )
     session = MCPClientSession(config)
     await session.connect()

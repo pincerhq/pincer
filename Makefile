@@ -48,7 +48,7 @@ up:
 	$(COMPOSE) up
 
 down:
-	$(COMPOSE) down -v --remove-orphans
+	$(COMPOSE) down --remove-orphans
 
 rm:
 	$(COMPOSE) rm -f

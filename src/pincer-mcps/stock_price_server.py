@@ -203,7 +203,8 @@ async def get_crypto_price(params: CryptoInput) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="Stock & crypto price MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -227,7 +228,11 @@ if __name__ == "__main__":
     if args.transport == "http":
         print(f"Starting stock_price_mcp · HTTP transport · {args.host}:{args.port}/mcp")
         app = mcp.http_app()
-        app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-        uvicorn.run(app, host=args.host, port=args.port)
+        cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+        uvicorn.run(cors_app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

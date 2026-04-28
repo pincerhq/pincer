@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Any
 
 
 class SessionStatus(StrEnum):
@@ -82,7 +83,7 @@ class PomodoroStore:
 
         return results[:limit]
 
-    def daily_stats(self) -> dict:
+    def daily_stats(self) -> dict[str, Any]:
         today = datetime.now(UTC).date()
 
         today_sessions = [s for s in self._history if s.started_at and s.started_at.date() == today]

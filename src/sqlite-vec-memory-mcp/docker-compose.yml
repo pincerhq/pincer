@@ -1,0 +1,31 @@
+services:
+  sqlite-vec-memory-mcp:
+    build: .
+    restart: unless-stopped
+    environment:
+      TRANSPORT: http
+      HOST: 0.0.0.0
+      PORT: ${MCP_PORT:-8000}
+      MEMORY_DB_PATH: /app/data/memory.db
+      EMBED_MODEL: BAAI/bge-small-en-v1.5
+      EMBED_DIM: 384
+      # FASTEMBED_CACHE_DIR is already /app/models inside the image.
+      # Mount model_cache to avoid re-downloading on container restart.
+      FASTEMBED_CACHE_DIR: /app/models
+      # Passed through to the server if you later add env-based config
+      PYTHONUNBUFFERED: 1
+    volumes:
+      - memory-data:/app/data
+      - model-cache:/app/models
+    #ports:
+    #  - "8100:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:${MCP_PORT:-8000}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  memory-data:
+  model-cache:

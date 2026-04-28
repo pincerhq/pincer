@@ -1,4 +1,4 @@
-# 🦀 Pincer CLI Reference
+# 🦜 Pincer CLI Reference
 ## Complete Command Documentation (Sprints 1–5)
 
 ---
@@ -91,7 +91,7 @@ pincer init
 **Example:**
 ```bash
 $ pincer init
-🦀 Welcome to Pincer Setup!
+🦜 Welcome to Pincer Setup!
 
 ? LLM Provider: Anthropic
 ? API Key: sk-ant-***
@@ -140,7 +140,7 @@ pincer run --reload --port 9090
 
 **Output:**
 ```
-🦀 Pincer Agent v0.5.0
+🦜 Pincer Agent v0.5.0
   Provider:  anthropic (claude-3-5-sonnet-20241022)
   Channels:  telegram ✓  whatsapp ✗  discord ✓
   Budget:    $0.00 / $5.00
@@ -170,7 +170,7 @@ pincer chat [OPTIONS]
 **Example:**
 ```bash
 $ pincer chat
-🦀 Pincer CLI Chat (type /quit to exit)
+🦜 Pincer CLI Chat (type /quit to exit)
 
 You: What's the weather in Berlin?
 🔧 Using tool: web_search("weather Berlin")
@@ -191,7 +191,7 @@ pincer config
 
 **Output:**
 ```
-🦀 Pincer Configuration
+🦜 Pincer Configuration
 
   Provider:     anthropic
   Model:        claude-3-5-sonnet-20241022

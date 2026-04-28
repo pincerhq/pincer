@@ -106,4 +106,4 @@ We don't currently have a paid bug bounty program, but we hope to establish one 
 - **General questions about Pincer's security model:** [Discord #security](https://discord.gg/pincer) or [docs/security.md](docs/security.md)
 - **PGP key:** Available upon request for encrypted communication
 
-Thank you for helping keep Pincer and its users safe. 🦀
+Thank you for helping keep Pincer and its users safe. 🦜

@@ -16,7 +16,7 @@ from pincer.tools import tool
     description="Says hello to someone by name",
 )
 async def hello_world(name: str) -> str:
-    return f"Hello, {name}! 🦀"
+    return f"Hello, {name}! 🦜"
 ```
 
 Create `skills/hello_world/skill.yaml`:

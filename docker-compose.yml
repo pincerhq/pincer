@@ -1,5 +1,6 @@
 x-pincer-base: &pincer-base
   restart: unless-stopped
+  image: pincer/pincer:latest
   build:
     context: .
     target: runtime
@@ -20,7 +21,7 @@ x-pincer-base: &pincer-base
     - pincer-data:/app/data
     - ./skills:/app/skills:ro
     # Optional: mount pincer.toml to configure MCP client servers
-    - ./pincer.toml:/app/pincer.toml:ro
+    - ./pincer.toml:/app/data/pincer.toml:ro
   ports:
     - "${PINCER_PORT:-8080}:8080"
     # MCP endpoint for Claude Desktop, Cursor, VS Code, etc.
@@ -31,12 +32,6 @@ x-pincer-base: &pincer-base
     timeout: 10s
     retries: 3
     start_period: 15s
-  deploy:
-    resources:
-      limits:
-        # Increased from 512M — Node.js MCP subprocess each use ~150-250MB
-        memory: 1G
-        cpus: "1.5"
   logging:
     driver: json-file
     options:
@@ -46,7 +41,7 @@ x-pincer-base: &pincer-base
 services:
   newsapi-mcp:
     extends:
-      file: ./mcp_servers/pincer-mcps/docker-compose.yml
+      file: ./src/pincer-mcps/docker-compose.yml
       service: newsapi-mcp
     image: pincer/newsapi-mcp:latest
     profiles:
@@ -56,7 +51,7 @@ services:
 
   openweathermap-mcp:
     extends:
-      file: ./mcp_servers/pincer-mcps/docker-compose.yml
+      file: ./src/pincer-mcps/docker-compose.yml
       service: openweathermap-mcp
     image: pincer/openweathermap-mcp:latest
     profiles:
@@ -66,7 +61,7 @@ services:
 
   pomodoro-mcp:
     extends:
-      file: ./mcp_servers/pomodoro-mcp/docker-compose.yml
+      file: ./src/pomodoro-mcp/docker-compose.yml
       service: pomodoro-mcp
     image: pincer/pomodoro-mcp:latest
     profiles:
@@ -74,7 +69,7 @@ services:
 
   stock-price-mcp:
     extends:
-      file: ./mcp_servers/pincer-mcps/docker-compose.yml
+      file: ./src/pincer-mcps/docker-compose.yml
       service: stock-price-mcp
     image: pincer/stock-price-mcp:latest
     profiles:
@@ -82,7 +77,7 @@ services:
 
   summarize-mcp:
     extends:
-      file: ./mcp_servers/pincer-mcps/docker-compose.yml
+      file: ./src/pincer-mcps/docker-compose.yml
       service: summarize-mcp
     image: pincer/summarize-mcp:latest
     profiles:
@@ -90,7 +85,7 @@ services:
 
   translate-mcp:
     extends:
-      file: ./mcp_servers/pincer-mcps/docker-compose.yml
+      file: ./src/pincer-mcps/docker-compose.yml
       service: translate-mcp
     image: pincer/translate-mcp:latest
     profiles:
@@ -98,46 +93,31 @@ services:
 
   memory-mcp:
     extends:
-      file: ./mcp_servers/memory-mcp/tools/docker/docker-compose.http.yml
-      service: mcp-memory-service
-    restart: unless-stopped
+      file: ./src/sqlite-vec-memory-mcp/docker-compose.yml
+      service: sqlite-vec-memory-mcp
+    image: pincer/memory-mcp:latest
     profiles:
       - http
-    #env_file: .env
-    volumes:
-      # Single data directory for all storage
-      - memory-data:/app/data
-    ports:
-      - "8001:8000"
-    environment:
-      - MCP_ALLOW_ANONYMOUS_ACCESS=true
-      # Storage configuration
-      - MCP_MEMORY_STORAGE_BACKEND=sqlite_vec
-      - MCP_MEMORY_SQLITE_PATH=/app/data/mem_sqlite_vec.db
-      - MCP_MEMORY_BACKUPS_PATH=/app/data/mem_backups
-      # Performance tuning
-      - SIMILARITY_THRESHOLD=0.75
 
   pincer-stdio:
     <<: *pincer-base
     container_name: pincer
     profiles:
       - stdio
-    env_file:
-      - path: .env
-        required: false
-      - path: ../.env
-        required: false
+    deploy:
+      resources:
+        limits:
+          # Increased from 512M — Node.js MCP subprocess each use ~150-250MB
+          memory: 2G
+          cpus: "2"
 
   pincer-http:
     <<: *pincer-base
-    image: pincer/pincer:latest
     profiles:
       - http
     env_file: .env
     volumes:
       - pincer-data:/app/data
-      - ./pincer/src:/app/src/pincer/src
       - ./pincer.local.toml:/app/data/pincer.toml:ro
     environment:
       - PINCER_DATA_DIR=/app/data
@@ -176,6 +156,7 @@ services:
 volumes:
   pincer-data:
   memory-data:
+  model-cache:
 
 networks:
   pincer-net:

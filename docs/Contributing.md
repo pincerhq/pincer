@@ -1,4 +1,4 @@
-# Contributing to Pincer 🦀
+🦜
 
 > *"We don't need your resume. We need your pull request."*
 
@@ -370,4 +370,4 @@ We will never make you feel bad for asking a question. If someone does, that's a
 
 ---
 
-Thank you for being here. Every person who contributes — code, docs, bug reports, ideas, encouragement — makes Pincer better for everyone. 🦀
+Thank you for being here. Every person who contributes — code, docs, bug reports, ideas, encouragement — makes Pincer better for everyone. 🦜

@@ -236,10 +236,10 @@ async def test_stop_cancels_health_task() -> None:
         patch("pincer.mcp.manager.MCPToolBridge"),
     ):
         await manager.start()
-        assert manager._health_task is not None
-        assert not manager._health_task.done()
+        assert manager._task_group is not None
+        assert manager._task_group_ctx is not None
         await manager.stop()
-        assert manager._health_task is None
+        assert manager._task_group is None
 
 
 async def test_health_loop_reconnects_on_failure() -> None:

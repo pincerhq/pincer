@@ -17,7 +17,7 @@ import argparse
 import json
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import uvicorn
@@ -82,7 +82,7 @@ def _handle_error(exc: Exception) -> str:
     return f"Error: {type(exc).__name__}: {exc}"
 
 
-def _format_weather(data: dict, units: str) -> dict:
+def _format_weather(data: dict[str, Any], units: str) -> dict[str, Any]:
     """Extract the key fields from a /weather response."""
     unit = _UNITS_LABEL.get(units, "")
     main = data.get("main", {})
@@ -303,7 +303,8 @@ async def get_forecast(params: ForecastInput) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="OpenWeatherMap MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -327,7 +328,11 @@ if __name__ == "__main__":
     if args.transport == "http":
         print(f"Starting openweathermap_mcp · HTTP transport · {args.host}:{args.port}/mcp")
         app = mcp.http_app()
-        app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-        uvicorn.run(app, host=args.host, port=args.port)
+        cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+        uvicorn.run(cors_app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

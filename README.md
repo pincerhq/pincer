@@ -57,7 +57,7 @@ Pincer is an open-source AI agent that lives in your messaging apps. You text it
 
 > **You (WhatsApp):** Check my email and brief me on anything important
 >
-> **🦀 Pincer:**
+> **🦜 Pincer:**
 > 📧 12 unread, 3 need attention:
 >
 > 1. Contract from Sarah — needs signature by 5pm
@@ -241,7 +241,7 @@ pip install "pincer-agent[image]"
 
 > **You (Telegram):** Generate an image of a futuristic Tokyo street at night in cyberpunk style
 >
-> **🦀 Pincer:** *(sends the generated image inline)* Done — generated in 4.2s via fal.ai · $0.004
+> **🦜 Pincer:** *(sends the generated image inline)* Done — generated in 4.2s via fal.ai · $0.004
 
 ---
 
@@ -370,7 +370,7 @@ One command audits your setup — 40+ checks covering config, keys, permissions,
 
 ```
 $ pincer doctor
-  🦀 Pincer Doctor v0.8.x
+  🦜 Pincer Doctor v0.8.x
   ✅ API key valid (claude-sonnet-4-5-20250929)
   ✅ Telegram connected (@my_pincer_bot)
   ✅ Daily budget: $5.00
@@ -657,7 +657,7 @@ cd pincer && uv sync && pytest
 
 <div align="center">
 
-🦀 **Built with Python.**
+🦜 **Built with Python.**
 
 [pincer.sh](https://pincer.sh) · [GitHub](https://github.com/pincerhq/pincer) · [Discord](https://discord.gg/pincer-agent) · [Twitter](https://x.com/@AgentPincer)
 

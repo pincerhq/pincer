@@ -26,6 +26,15 @@ services:
       <<: *env-base
       API_KEY: ${NEWSAPI_API_KEY:-}
 
+  openweathermap-mcp:
+    <<: *service-base
+    build:
+      context: .
+      target: openweathermap-mcp
+    environment:
+      <<: *env-base
+      API_KEY: ${OPENWEATHERMAP_API_KEY:-}
+
   stock-price-mcp:
     <<: *service-base
     build:
@@ -47,12 +56,3 @@ services:
       <<: *env-base
       LIBRETRANSLATE_URL: ${LIBRETRANSLATE_URL:-https://libretranslate.com}
       API_KEY: ${LIBRETRANSLATE_API_KEY:-}
-
-  openweathermap-mcp:
-    <<: *service-base
-    build:
-      context: .
-      target: openweathermap-mcp
-    environment:
-      <<: *env-base
-      API_KEY: ${OPENWEATHERMAP_API_KEY:-}

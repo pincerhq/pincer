@@ -18,7 +18,7 @@ def _make_stdio_config(sandbox: bool = True) -> MCPServerConfig:
         command="echo",
         args=["hello"],
         sandbox=sandbox,
-        timeout_seconds=5,
+        timeout=5,
         max_retries=1,
     )
 
@@ -28,7 +28,7 @@ def _make_http_config() -> MCPServerConfig:
         name="httpserver",
         transport=MCPTransport.STREAMABLE_HTTP,
         url="https://example.com/mcp",
-        timeout_seconds=5,
+        timeout=5,
         max_retries=1,
     )
 
@@ -103,7 +103,7 @@ async def test_call_tool_raises_timeout() -> None:
         name="testserver",
         transport=MCPTransport.STDIO,
         command="echo",
-        timeout_seconds=1,
+        timeout=1,
     )
 
     with pytest.raises(TimeoutError, match="timed out"):
@@ -166,8 +166,8 @@ def test_sandbox_env_excludes_pincer_secrets(monkeypatch: pytest.MonkeyPatch) ->
     assert env.get("MY_TOKEN") == "ghp_123"
 
 
-def test_unsandboxed_no_extra_env_returns_none_inheriting_all(monkeypatch: pytest.MonkeyPatch) -> None:
-    """sandbox=False + no declared env → return None (subprocess inherits full env)."""
+def test_unsandboxed_no_extra_env_inherits_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """sandbox=False + no declared env → full inherited env dict (including SOME_VAR)."""
     monkeypatch.setenv("SOME_VAR", "some_value")
 
     cfg = MCPServerConfig(
@@ -179,8 +179,8 @@ def test_unsandboxed_no_extra_env_returns_none_inheriting_all(monkeypatch: pytes
     session = MCPClientSession(cfg)
     env = session._build_sandbox_env()
 
-    # None means the subprocess inherits the full process environment (including SOME_VAR)
-    assert env is None
+    assert env is not None
+    assert env.get("SOME_VAR") == "some_value"
 
 
 def test_unsandboxed_with_declared_env_merges(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,7 +202,7 @@ def test_unsandboxed_with_declared_env_merges(monkeypatch: pytest.MonkeyPatch) -
     assert env.get("EXISTING_VAR") == "existing"
 
 
-def test_unsandboxed_no_extra_env_returns_none() -> None:
+def test_unsandboxed_no_extra_env_returns_full_env() -> None:
     cfg = MCPServerConfig(
         name="test",
         transport=MCPTransport.STDIO,
@@ -211,5 +211,6 @@ def test_unsandboxed_no_extra_env_returns_none() -> None:
     )
     session = MCPClientSession(cfg)
     env = session._build_sandbox_env()
-    # No extra env declared, sandbox=False → returns None (inherit all)
-    assert env is None
+    # No extra env declared, sandbox=False → returns full inherited env dict
+    assert env is not None
+    assert isinstance(env, dict)

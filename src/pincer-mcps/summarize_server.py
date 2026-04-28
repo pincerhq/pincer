@@ -20,7 +20,7 @@ import json
 import logging
 import os
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import uvicorn
@@ -100,7 +100,7 @@ def _extract_video_id(url: str) -> str | None:
     return None
 
 
-def _parse_caption_events(cap_data: dict) -> str:
+def _parse_caption_events(cap_data: dict[str, Any]) -> str:
     parts = []
     for ev in cap_data.get("events", []):
         for seg in ev.get("segs", []):
@@ -110,11 +110,11 @@ def _parse_caption_events(cap_data: dict) -> str:
     return " ".join(parts)
 
 
-def _pick_caption_url(tracks: list, language: str) -> str | None:
+def _pick_caption_url(tracks: list[Any], language: str) -> str | None:
     for t in tracks:
         if t.get("languageCode", "").startswith(language[:2]):
-            return t.get("baseUrl")
-    return tracks[0].get("baseUrl") if tracks else None
+            return t.get("baseUrl") or None
+    return tracks[0].get("baseUrl") or None if tracks else None
 
 
 async def _fetch_captions(client: httpx.AsyncClient, base_url: str) -> str:
@@ -185,18 +185,18 @@ async def _fetch_transcript_fallback(video_id: str, language: str) -> tuple[str,
     return await _try_watch_page(video_id, language)
 
 
-def _get_transcript_via_api(video_id: str, language: str) -> list[dict]:
+def _get_transcript_via_api(video_id: str, language: str) -> list[dict[str, Any]]:
     """Run youtube_transcript_api (blocking) — called via asyncio.to_thread."""
     from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore[import]
 
     with contextlib.suppress(Exception):
-        result = YouTubeTranscriptApi.get_transcript(video_id)
+        result = YouTubeTranscriptApi.get_transcript(video_id)  # type: ignore[attr-defined]
         if result:
             return list(result)
     try:
         api = YouTubeTranscriptApi()
         fetched = api.fetch(video_id, languages=[language[:2]])
-        return list(fetched) if hasattr(fetched, "__iter__") else []
+        return list(fetched) if hasattr(fetched, "__iter__") else []  # type: ignore[arg-type]
     except Exception:
         return []
 
@@ -355,7 +355,8 @@ async def get_youtube_transcript(params: YoutubeInput) -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -379,7 +380,11 @@ if __name__ == "__main__":
     if args.transport == "http":
         print(f"Starting summarize_mcp · HTTP transport · {args.host}:{args.port}/mcp")
         app = mcp.http_app()
-        app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
-        uvicorn.run(app, host=args.host, port=args.port)
+        cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+        uvicorn.run(cors_app, host=args.host, port=args.port)
     else:
         mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
