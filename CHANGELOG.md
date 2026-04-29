@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - skills became deprecated and will removed in 0.9.0
 - docker compose adopted for run MCP servers as container and as result separated service which not depends on pincer run
+- MCP server could interact with pincer via http and stdio protocols
 
 
 ## [0.7.6] — 2026-04-19

@@ -237,7 +237,7 @@ expose_tools = [
 
 ### Adding MCP client servers
 
-Add `[[mcp.servers]]` blocks to `pincer.toml` to connect Pincer to external MCP servers (GitHub, Slack, Postgres, etc.). See [mcp-guide.md](mcp-guide.md) for the full reference.
+Add `[[mcp.servers]]` blocks to `pincer.toml` to connect Pincer to external MCP servers (GitHub, Slack, Postgres, etc.). See [MCP Guide](../guides/mcp-guide.md) for the full reference.
 
 ### Changing the MCP port
 

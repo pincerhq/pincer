@@ -3,7 +3,7 @@
 Pincer is both a full **MCP 1.x client** *and* an **MCP OAuth 2.0 Authorization Server**. It supports the [Model Context Protocol](https://modelcontextprotocol.io) — the open standard for connecting AI agents to external tools.
 
 - **As a client:** any MCP-compliant server (GitHub, Slack, Postgres, file system, browser automation, Home Assistant, and thousands more) can expose its tools to Pincer with a few lines of config.
-- **As a server:** Pincer's own 304 first-party tools ([see catalog](TOOLS_CATALOG.md)) can be exposed to external MCP clients via OAuth 2.0 with PKCE, JWT access tokens, and scope-based access control.
+- **As a server:** Pincer's own 304 first-party tools (see `docs/TOOLS_CATALOG.md` in the repository) can be exposed to external MCP clients via OAuth 2.0 with PKCE, JWT access tokens, and scope-based access control.
 
 MCP tools appear identically to built-in tools in the agent loop. The LLM calls them, the user sees the same approval prompts, and everything goes through the same audit log.
 
@@ -69,9 +69,9 @@ command   = "npx"                  # Executable to run (stdio only)
 args      = ["-y", "@modelcontextprotocol/server-github"]
 env       = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }
 sandbox   = true                   # Subprocess isolation (default: true)
-sandbox_memory_mb = 256            # Memory cap for subprocess in MB (default: 256)
+sandbox_memory_mb = 0              # 0 = no RLIMIT_AS limit (default); set only for binaries with known-bounded VA usage
 approval_required = ["create_*", "delete_*", "merge_*"]  # Glob patterns
-timeout_seconds   = 30             # Per-call timeout (default: 30)
+timeout           = 30             # Per-call timeout in seconds (default: 30)
 max_retries       = 2              # Reconnect attempts before disabling (default: 2)
 enabled           = true           # Can be toggled off without removing (default: true)
 
@@ -83,7 +83,7 @@ args      = ["-y", "@modelcontextprotocol/server-postgres", "${DATABASE_URL}"]
 env       = { DATABASE_URL = "${PINCER_DATABASE_URL}" }
 sandbox   = true
 approval_required = ["*"]          # Require approval for ALL tools
-timeout_seconds   = 60
+timeout           = 60
 ```
 
 ### Transport types
@@ -102,7 +102,7 @@ transport = "streamable-http"
 url       = "http://localhost:3000/mcp"
 headers   = { Authorization = "Bearer ${REMOTE_MCP_TOKEN}" }
 approval_required = ["write_*"]
-timeout_seconds   = 60
+timeout           = 60
 
 # OAuth 2.1 (PKCE or client_credentials) — for servers that require auth
 # Pincer discovers the authorization server automatically from the 401 response.
@@ -266,7 +266,7 @@ pincer mcp server stop     # Stop it
 pincer mcp server status   # Show status and connected clients
 ```
 
-See [mcp-server.md](mcp-server.md) for the full server export guide.
+See [MCP Server guide](../core-components/pincer-mcp-server.md) for the full server export guide.
 
 ---
 
@@ -425,7 +425,7 @@ command   = "npx"
 args      = ["-y", "@modelcontextprotocol/server-postgres", "${DATABASE_URL}"]
 env       = { DATABASE_URL = "${DATABASE_URL}" }
 approval_required = ["*"]
-timeout_seconds   = 60
+timeout           = 60
 ```
 
 ### Local filesystem
@@ -472,7 +472,7 @@ transport = "streamable-http"
 url       = "http://homeassistant.local:8123/mcp"
 headers   = { Authorization = "Bearer ${HA_TOKEN}" }
 approval_required = ["*"]  # Approve all home automation actions
-timeout_seconds   = 15
+timeout           = 15
 ```
 
 ---

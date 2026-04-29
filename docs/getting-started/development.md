@@ -320,7 +320,7 @@ uv run mypy src/
 uv run bandit -r src/pincer -ll -s B101,B104,B310,B608
 ```
 
-CI runs these on every push. See [CONTRIBUTING.md](CONTRIBUTING.md) for full code style guidelines.
+CI runs these on every push. See [Contributing Guide](../contributing/contributing.md) for full code style guidelines.
 
 ---
 
@@ -335,7 +335,7 @@ Every push and pull request triggers the CI workflow (`.github/workflows/ci.yml`
 5. **Security** — bandit scan on `src/pincer`
 6. **Coverage upload** — Codecov (optional; `CODECOV_TOKEN` secret)
 
-All steps must pass before merge. See [Contributing.md](Contributing.md) for the full CI matrix and branch protection setup.
+All steps must pass before merge. See [Contributing Guide](../contributing/contributing.md) for the full CI matrix and branch protection setup.
 
 ---
 

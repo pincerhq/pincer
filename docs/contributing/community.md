@@ -92,14 +92,14 @@ For well-defined bugs and feature requests with clear scope. If you're not sure 
 
 ### If You Have an Hour
 
-- Go through the [Quickstart](quickstart.md) and report anything confusing
+- Go through the [Quickstart](../getting-started/quickstart.md) and report anything confusing
 - Pick a `good-first-issue` from the [issue tracker](https://github.com/pincerhq/pincer/labels/good-first-issue)
 - Answer someone's question in Discord
 - Read a doc and fix a typo (PRs for typos are PRs for quality)
 
 ### If You Have a Weekend
 
-- Build a skill — check the [Skills Guide](skills-guide.md) and the ideas list in [CONTRIBUTING.md](../CONTRIBUTING.md)
+- Build an MCP server — check the [MCP Guide](../guides/mcp-guide.md) and the ideas list in [Contributing Guide](contributing.md)
 - Improve test coverage for a module you've been reading
 - Write a tutorial or blog post about your experience with Pincer
 - Translate documentation into your language

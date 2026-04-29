@@ -2,7 +2,7 @@
 
 Quick setup guide for outbound phone calls via Pincer. Text your agent "Call the dentist and reschedule" — it dials and talks.
 
-For architecture, state machine, compliance, and full configuration, see [Voice calling](Voice%20calling.md).
+For architecture, state machine, compliance, and full configuration, see the [Voice Calling component docs](../core-components/voice-calling.md).
 
 ---
 
@@ -155,5 +155,5 @@ Check logs for:
 
 ## Next Steps
 
-- [Voice calling](Voice%20calling.md) — Full guide: architecture, state machine, compliance, configuration reference
-- [Configuration](PROJECT_STRUCTURE.md) — All env vars
+- [Voice Calling](../core-components/voice-calling.md) — Full guide: architecture, state machine, compliance, configuration reference
+- [Project Structure](../getting-started/project-structure.md) — All env vars and architecture overview

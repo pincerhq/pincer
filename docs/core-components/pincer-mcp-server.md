@@ -2,7 +2,7 @@
 
 Pincer can act as an MCP server itself, exposing its tools to any MCP-compatible client — Claude Desktop, Cursor, VS Code, another Pincer instance, or any custom client that speaks the [Model Context Protocol](https://modelcontextprotocol.io).
 
-This is the **outbound** direction of MCP. See [mcp-guide.md](mcp-guide.md) for the **inbound** direction (Pincer consuming external MCP servers).
+This is the **outbound** direction of MCP. See [MCP Client guide](../guides/mcp-guide.md) for the **inbound** direction (Pincer consuming external MCP servers).
 
 Pincer supports two modes:
 

@@ -6,7 +6,7 @@ Get a personal AI agent running on your machine, answering you on Telegram, in u
 
 ## Prerequisites
 
-- **Python 3.11+** — [install](https://python.org/downloads)
+- **Python 3.12+** — [install](https://python.org/downloads)
 - **A Telegram account** — you'll create a bot via BotFather
 - **An LLM API key** — Anthropic (Claude) recommended, OpenAI also supported
 
@@ -127,7 +127,7 @@ pincer setup-google
 
 This opens a browser window for Google OAuth consent. Grant the requested permissions. Pincer stores the token locally at `~/.pincer/google_workspace_token.json` (readable only by you).
 
-You'll need a `google_credentials.json` OAuth client file first — see [Google Workspace Setup](CLI_REFERENCE.md#google-workspace) for how to get one from Google Cloud Console.
+You'll need a `google_credentials.json` OAuth client file first — see [CLI Reference](../reference/cli.md) for how to get one from Google Cloud Console.
 
 Required scopes (all requested in a single consent flow):
 - `gmail.readonly` / `gmail.compose` / `gmail.modify` — read, draft, and send emails
@@ -154,18 +154,19 @@ pincer setup-ms365
 
 You'll need to [register a free Azure app](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) first to get a client ID. The wizard walks you through it. The token is cached locally at `~/.pincer/ms365_token_cache.json` (readable only by you).
 
-See [Microsoft 365 Setup Guide](ms365-setup.md) for detailed instructions.
+See [Microsoft 365 Setup Guide](../guides/ms365-setup.md) for detailed instructions.
 
 ---
 
 ## What's Next?
 
-- **[Configuration Reference](configuration.md)** — all 30+ config options explained
-- **[Skills Guide](skills-guide.md)** — build custom skills and tools
-- **[Security Model](security.md)** — understand how Pincer keeps you safe
-- **[Architecture](architecture.md)** — how it all works under the hood
+- **[CLI Reference](../reference/cli.md)** — all commands and config options explained
+- **[Skills Guide](../guides/skills-guide.md)** — build custom skills and tools *(deprecated in 0.8.0, removed in 0.9.0 — use MCP instead)*
+- **[Security Model](../core-components/security-model.md)** — understand how Pincer keeps you safe
+- **[Project Structure](project-structure.md)** — architecture overview and module map
 - **[Deployment](deployment.md)** — run Pincer 24/7 with Docker
-- **[Voice Calling](voice-calling.md)** — make and receive phone calls (Sprint 7)
+- **[Voice Calling](../guides/voice-calling-setup.md)** — make and receive phone calls
+- **[MCP Guide](../guides/mcp-guide.md)** — connect Pincer to external tools via MCP
 
 ---
 

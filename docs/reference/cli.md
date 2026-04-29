@@ -1,6 +1,6 @@
 # Pincer CLI Reference
 
-Complete command reference across all sprints (1–13). For the full list of tools the agent itself can call, see [TOOLS_CATALOG.md](TOOLS_CATALOG.md) — **304 first-party tools + unlimited via MCP**.
+Complete command reference across all sprints (1–13). For the full list of tools the agent itself can call, see `docs/TOOLS_CATALOG.md` in the repository — **304 first-party tools + unlimited via MCP**.
 
 ## Global
 
@@ -95,7 +95,7 @@ Complete command reference across all sprints (1–13). For the full list of too
 4. Saves the token with `chmod 0o600`
 5. Reports: `Google Workspace tools enabled (113 tools)`
 
-After setup, the 113 `google__*` tools are auto-registered every time `pincer run` is started — no further configuration needed. Full catalog: [TOOLS_CATALOG.md](TOOLS_CATALOG.md#google-workspace-113-tools).
+After setup, the 113 `google__*` tools are auto-registered every time `pincer run` is started — no further configuration needed. Full catalog: see `docs/TOOLS_CATALOG.md` in the repository.
 
 ### Getting `google_credentials.json`
 
@@ -119,7 +119,7 @@ After setup, the 113 `google__*` tools are auto-registered every time `pincer ru
 5. Appends `[integrations.ms365]` section to `pincer.toml`
 6. Reports: `Microsoft 365 authenticated! … 69 Microsoft 365 tools are now available`
 
-After setup, all 69 tools are auto-registered on every `pincer run`. Full catalog: [TOOLS_CATALOG.md](TOOLS_CATALOG.md#microsoft-365-69-tools).
+After setup, all 69 tools are auto-registered on every `pincer run`. Full catalog: see `docs/TOOLS_CATALOG.md` in the repository.
 
 ## Slack Native
 
@@ -130,7 +130,7 @@ The Slack *channel* (bot that responds to @mentions and DMs) and the Slack *nati
 | `PINCER_SLACK_BOT_TOKEN=xoxb-…` | All 71 Slack tools + channel |
 | `PINCER_SLACK_USER_TOKEN=xoxp-…` (optional) | `slack__search_messages` and `slack__search_files` (full-text search requires a user token per Slack API) |
 
-Full catalog: [TOOLS_CATALOG.md](TOOLS_CATALOG.md#slack-native-71-tools).
+Full catalog: see `docs/TOOLS_CATALOG.md` in the repository.
 
 ## MCP
 
@@ -144,7 +144,7 @@ Full catalog: [TOOLS_CATALOG.md](TOOLS_CATALOG.md#slack-native-71-tools).
 | `pincer mcp oauth init` | Generate Ed25519 signing key + seed OAuth tables |
 | `pincer mcp oauth client add|list` | Register / list OAuth 2.0 clients |
 
-See [mcp-guide.md](mcp-guide.md) for the full MCP client + OAuth 2.0 server documentation.
+See [MCP Guide](../guides/mcp-guide.md) for the full MCP client + OAuth 2.0 server documentation.
 
 ### Getting an Azure App client ID
 
@@ -153,7 +153,7 @@ See [mcp-guide.md](mcp-guide.md) for the full MCP client + OAuth 2.0 server docu
 3. Under **Authentication** → **Advanced settings** → enable **Allow public client flows**
 4. Copy the **Application (client) ID**
 
-See [Microsoft 365 Setup Guide](ms365-setup.md) for the full walkthrough.
+See [Microsoft 365 Setup Guide](../guides/ms365-setup.md) for the full walkthrough.
 
 ## Environment Variables
 
