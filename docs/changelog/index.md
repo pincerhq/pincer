@@ -4,6 +4,69 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ---
 
+## [0.8.0] — Upcoming
+
+### Deprecated
+
+#### Skills system deprecated — replaced by MCP
+
+The `skills/` directory, `pincer skills` CLI commands, skill loader, sandbox, security scanner, and signing infrastructure are **deprecated in 0.8.0** and will be **removed in 0.9.0**.
+
+Skills are superseded by MCP servers, which provide the same extensibility with better isolation (subprocess sandboxing via `MCPSandbox`), language independence (any runtime that speaks JSON-RPC over stdio or HTTP), and ecosystem interoperability (MCP clients like Claude Desktop, Cursor, and VS Code connect directly).
+
+**What still works in 0.8.0:**
+- All existing `skills/` directories continue to load and run unchanged.
+- `pincer skills list/install/remove/scan/verify` commands continue to work.
+- Skill tool registration and execution are unaffected.
+
+**What changes in 0.9.0:**
+- The `skills/` directory is no longer scanned at startup.
+- `pincer skills` subcommands are removed from the CLI.
+- The skill sandbox, security scanner, and signing modules are removed.
+- `pincer.tools.tool` decorator still exists for use in MCP servers.
+
+**Migration path:**
+
+Replace each skill with a FastMCP server:
+
+```python
+# Before (skills/my_skill/main.py)
+from pincer.tools import tool
+
+@tool(name="my_tool", description="Does something")
+async def my_tool(param: str) -> str:
+    return f"Result: {param}"
+```
+
+```python
+# After (my-skill/server.py)
+from fastmcp import FastMCP
+
+mcp = FastMCP(name="my_skill")
+
+@mcp.tool
+async def my_tool(param: str) -> str:
+    """Does something."""
+    return f"Result: {param}"
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
+```
+
+Then add the server to `pincer.toml`:
+
+```toml
+[[mcp.servers]]
+name      = "my_skill"
+transport = "stdio"
+command   = "python"
+args      = ["my-skill/server.py"]
+```
+
+See [MCP Servers](../core-components/mcp-servers.md) for full details on stdio and HTTP deployment options.
+
+---
+
 ## [0.7.6] — 2026-04-19
 
 ### WhatsApp `err-client-outdated` — actionable failure surface

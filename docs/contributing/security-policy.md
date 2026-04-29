@@ -103,7 +103,7 @@ We don't currently have a paid bug bounty program, but we hope to establish one 
 ## Contact
 
 - **Security reports:** security@pincer.sh
-- **General questions about Pincer's security model:** [Discord #security](https://discord.gg/pincer) or [docs/security.md](docs/security.md)
+- **General questions about Pincer's security model:** [Discord #security](https://discord.gg/pincer) or [Security Model](../core-components/security-model.md)
 - **PGP key:** Available upon request for encrypted communication
 
 Thank you for helping keep Pincer and its users safe. 🦜

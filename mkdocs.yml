@@ -15,21 +15,22 @@ nav:
     - Deploy: getting-started/deployment.md
   - Core components:
     - Security model: core-components/security-model.md
+    - MCP servers: core-components/mcp-servers.md
     - Tools: core-components/tools.md
     - Voice calling: core-components/voice-calling.md
-    - MCP Server: core-components/mcp-server.md
+    - Pincer MCP Server: core-components/pincer-mcp-server.md
     - CLI: core-components/cli.md
   - Reference:
     - CLI: reference/cli.md
     - REST API: reference/rest-api.md
   - Guides:
-      - MCP: guides/mcp-guide.md
-      - Migrating from OpenClaw: guides/migration-from-openclaw.md
-      - MCP: guides/ms365-setup.md
-      - MCP: guides/signal-setup.md
-      - MCP: guides/skills-guide.md
-      - MCP: guides/voice-calling-setup.md
-      - MCP: guides/whatsapp-troubleshooting.md
+    - MCP: guides/mcp-guide.md
+    - MS365 setup: guides/ms365-setup.md
+    - Signal setup: guides/signal-setup.md
+    - Skills guide: guides/skills-guide.md
+    - Voice calling setup: guides/voice-calling-setup.md
+    - Whatsapp troubleshooting: guides/whatsapp-troubleshooting.md
+    - Migrating from OpenClaw: guides/migration-from-openclaw.md
   - Contribute:
     - Community: contributing/community.md
     - Security policy: contributing/security-policy.md
@@ -39,7 +40,9 @@ nav:
     - Bugreport: contributing/bug-report.md
     - Feature request: contributing/feature-request.md
     - Pull requesttemplate: contributing/pull-request-template.md
-  - Changelog: pincer-changelog.md
+  - Changelog:
+    - changelog/index.md
+    - 0.8.0: changelog/v0.8.0.md
 extra_css:
   - assets/extra.css
 extra_javascript:

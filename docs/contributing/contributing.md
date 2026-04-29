@@ -62,7 +62,7 @@ You don't have to write code to be a contributor.
 
 ## Development Setup
 
-For a complete development guide including dashboard setup, debugging the agent loop, and adding skills/channels/tools, see **[DEVELOPMENT.md](DEVELOPMENT.md)**.
+For a complete development guide including dashboard setup, debugging the agent loop, and adding skills/channels/tools, see **[Development Guide](../getting-started/development.md)**.
 
 ### Prerequisites
 
@@ -124,7 +124,7 @@ The entire codebase is under 8,000 lines. You can read the whole thing in an aft
 
 ### 🟢 Easy — Great First Contributions
 
-**Build a skill.** Skills are self-contained Python modules, typically 50-150 lines. If you can write a Python function, you can write a skill. See the [Skills Guide](Skills%20guide.md).
+**Build an MCP server.** MCP servers are the recommended extension mechanism as of 0.8.0. See the [MCP Guide](../guides/mcp-guide.md) and [MCP Servers](../core-components/mcp-servers.md). The [Skills Guide](../guides/skills-guide.md) is still available but deprecated — skills are removed in 0.9.0.
 
 Skill ideas we'd love to have:
 
@@ -302,7 +302,7 @@ Every push and PR runs:
 | Security | `uv run bandit -r src/pincer -ll -s B101,B104,B310,B608` | Scan for security issues in sandbox/tools |
 | Coverage | Codecov upload | Track coverage over time |
 
-See [.github/workflows/ci.yml](../.github/workflows/ci.yml) for the full workflow. All steps must pass before merge.
+See `.github/workflows/ci.yml` in repo for the full workflow. All steps must pass before merge.
 
 ### Branch Protection
 
@@ -321,7 +321,7 @@ See [GitHub's branch protection docs](https://docs.github.com/en/repositories/co
 Every contributor gets recognized:
 
 - **All contributors** appear on the [GitHub Contributors page](https://github.com/pincerhq/pincer/graphs/contributors)
-- **Significant contributions** get a shoutout in [release notes](CHANGELOG.md)
+- **Significant contributions** get a shoutout in [release notes](../changelog/index.md)
 - **Skill authors** are credited in the skill registry with a link to their profile
 - **Repeat contributors** get the `@contributor` role in Discord
 
