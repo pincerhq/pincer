@@ -110,7 +110,7 @@ pincer/
 │   ├── security/       # Audit log, firewall, rate limiter — the immune system
 │   ├── scheduler/      # Cron jobs, proactive briefings
 │   └── dashboard/      # FastAPI + HTMX web UI
-├── skills/             # Bundled and community skills
+├── skills/             # Bundled and community skills (deprecated, use MCP instead)
 ├── tests/              # pytest test suite
 ├── docs/               # You are here
 └── pyproject.toml

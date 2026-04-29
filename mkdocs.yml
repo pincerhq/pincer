@@ -1,0 +1,111 @@
+site_name: Pincer
+site_description: Pincer documentation
+#site_url: !ENV [SITE_URL, "http://loclahost:8000"]
+copyright: "Copyright &copy; PincerHQ 2025"
+extra:
+  generator: false
+plugins:
+  - search
+nav:
+  - Getting started:
+    - index.md
+    - Quickstart: getting-started/quickstart.md
+    - Project structure: getting-started/project-structure.md
+    - Development: getting-started/development.md
+    - Deploy: getting-started/deployment.md
+  - Core components:
+    - Security model: core-components/security-model.md
+    - Tools: core-components/tools.md
+    - Voice calling: core-components/voice-calling.md
+    - MCP Server: core-components/mcp-server.md
+    - CLI: core-components/cli.md
+  - Reference:
+    - CLI: reference/cli.md
+    - REST API: reference/rest-api.md
+  - Guides:
+      - MCP: guides/mcp-guide.md
+      - Migrating from OpenClaw: guides/migration-from-openclaw.md
+      - MCP: guides/ms365-setup.md
+      - MCP: guides/signal-setup.md
+      - MCP: guides/skills-guide.md
+      - MCP: guides/voice-calling-setup.md
+      - MCP: guides/whatsapp-troubleshooting.md
+  - Contribute:
+    - Community: contributing/community.md
+    - Security policy: contributing/security-policy.md
+    - Code of conduct: contributing/code-of-conduct.md
+    - Governance: contributing/governance.md
+    - Contributing: contributing/contributing.md
+    - Bugreport: contributing/bug-report.md
+    - Feature request: contributing/feature-request.md
+    - Pull requesttemplate: contributing/pull-request-template.md
+  - Changelog: pincer-changelog.md
+extra_css:
+  - assets/extra.css
+extra_javascript:
+  - assets/extra.js
+theme:
+  name: material
+  logo: assets/logo.png
+  locale: en
+  highlightjs: true
+  features:
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.sections
+    - navigation.expand
+    - navigation.footer
+    - navigation.indexes
+    - navigation.path
+    - navigation.prune
+    - search.highlight
+    - search.suggest
+    - search.share
+    - toc.follow
+  palette:
+    # Light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: pincer-light
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+
+    # Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: pincer-dark
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+markdown_extensions:
+  - admonition
+  - abbr
+  - attr_list
+  - tables
+  - md_in_html
+  - codehilite
+  - footnotes
+  - pymdownx.details
+  - pymdownx.blocks.caption
+  - pymdownx.inlinehilite
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.snippets:
+      base_path: !relative # Relative to the current Markdown file
+      auto_append:
+        - includes/abbreviations.md
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg

@@ -1,0 +1,25 @@
+:root {
+    --md-primary-fg-color: #ee0f0f;
+    --md-primary-fg-color--light: #ecb7b7;
+    --md-primary-fg-color--dark: #90030c;
+    /*#36BEAD*/
+}
+
+[data-md-color-scheme="sitra"] {
+    /*
+    Pincer full palette:
+    #28C864 Bright green
+    #007850 Forest green
+    #006450 Deep teal
+    #00503C Dark teal
+    #F07828 Orange
+    #F0A014 Amber orange
+    #F0B414 Golden yellow
+    #B4C8B4 Cool gray
+    */
+
+    --md-primary-fg-color: #75fd71;
+    /*--md-default-bg-color:        #16a34a;
+  --md-default-bg-color-light:  #ffffff;*/
+    --md-footer-bg-color: #75fd71;
+}
