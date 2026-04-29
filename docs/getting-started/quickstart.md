@@ -6,7 +6,7 @@ Get a personal AI agent running on your machine, answering you on Telegram, in u
 
 ## Prerequisites
 
-- **Python 3.11+** — [install](https://python.org/downloads)
+- **Python 3.12+** — [install](https://python.org/downloads)
 - **A Telegram account** — you'll create a bot via BotFather
 - **An LLM API key** — Anthropic (Claude) recommended, OpenAI also supported
 

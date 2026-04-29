@@ -7,7 +7,7 @@
 **Open-source AI agent that works across WhatsApp, Telegram, Slack, Email, Voice, and 600+ tools — self-hosted, security-first, runs in Docker.**
 
 [![PyPI](https://img.shields.io/pypi/v/pincer-agent?color=FF6B35&style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/pincer-agent/)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![CI](https://img.shields.io/github/actions/workflow/status/pincerhq/pincer/ci.yml?style=for-the-badge&label=CI&logo=github&logoColor=white)](https://github.com/pincerhq/pincer/actions)
 [![codecov](https://img.shields.io/codecov/c/github/pincerhq/pincer?style=for-the-badge&color=22C55E&logo=codecov&logoColor=white)](https://codecov.io/gh/pincerhq/pincer)
 <br>
@@ -110,7 +110,7 @@ So I built it. Pincer is the agent I wanted. If you want the same thing, it's yo
 
 ### Prerequisites
 
-You need three things: **Python 3.11+**, **an LLM API key** (Anthropic, OpenAI, Grok, or free with Ollama), and **a Telegram bot token** (takes 2 min via [@BotFather](https://t.me/BotFather)).
+You need three things: **Python 3.12+**, **an LLM API key** (Anthropic, OpenAI, Grok, or free with Ollama), and **a Telegram bot token** (takes 2 min via [@BotFather](https://t.me/BotFather)).
 
 ### Option 1: pip
 
@@ -558,7 +558,7 @@ pincer/
 └── docs/             includes TOOLS_CATALOG.md (every tool)
 ```
 
-**Stack:** Python 3.11+ / asyncio · `anthropic` + `openai` SDKs · `aiogram` 3.x · `neonize` · `discord.py` · `slack-bolt` · `twilio` · `FastAPI` + `HTMX` · SQLite + FTS5 · `Playwright` · `pydantic-settings` · `typer` + `rich` · `mcp>=1.8.0` · `PyJWT[crypto]>=2.8.0` · `fal-client>=0.13.0`
+**Stack:** Python 3.12+ / asyncio · `anthropic` + `openai` SDKs · `aiogram` 3.x · `neonize` · `discord.py` · `slack-bolt` · `twilio` · `FastAPI` + `HTMX` · SQLite + FTS5 · `Playwright` · `pydantic-settings` · `typer` + `rich` · `mcp>=1.8.0` · `PyJWT[crypto]>=2.8.0` · `fal-client>=0.13.0`
 
 **Optional extras:**
 
