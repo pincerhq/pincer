@@ -409,6 +409,10 @@ def load_mcp_config(config_dir: Path | None = None) -> MCPConfig:
         port=int(os.environ.get("PINCER_MCP_SERVER_EXPORT_PORT", toml_srv.port)),
         path=os.environ.get("PINCER_MCP_SERVER_EXPORT_PATH", toml_srv.path),
         expose_tools=toml_srv.expose_tools,
+        approval_policy=toml_srv.approval_policy,
+        sampling=toml_srv.sampling,
+        webhook_url=toml_srv.webhook_url,
+        auth=toml_srv.auth,
     )
 
     return MCPConfig(
