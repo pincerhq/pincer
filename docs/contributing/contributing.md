@@ -1,0 +1,373 @@
+🦜
+
+> *"We don't need your resume. We need your pull request."*
+
+---
+
+## You Belong Here
+
+Pincer was started by a solo developer — a radiologist who writes Python between reading scans. If that sounds unusual, good. This project was built by someone who doesn't fit the typical open-source founder mold, and we want contributors who don't either.
+
+You don't need to be a senior engineer. You don't need a CS degree. You don't need to have contributed to open source before. If you've ever texted an AI and thought *"this should be able to actually do things for me"* — you understand the mission, and you're qualified to help build it.
+
+**We especially welcome:**
+
+- 🩺 Doctors, lawyers, teachers, and other professionals who code on the side
+- 🌍 Non-English speakers (we need translations and internationalization)
+- 🎨 Designers who can make the dashboard and docs beautiful
+- 🧪 Tinkerers who break things and file good bug reports
+- 🛠️ Hobbyists and self-taught developers — curiosity beats credentials
+- 🐣 First-time open source contributors — we'll help you through your first PR
+
+---
+
+## The 5-Minute Contribution
+
+Not sure where to start? Here are things you can do right now that genuinely help:
+
+1. **Star the repo** — seriously, this matters for discoverability
+2. **Try the quickstart** and report where you got stuck — docs bugs are real bugs
+3. **Fix a typo** — open a PR, no issue needed
+4. **Answer a question in Discord** — helping others is contributing
+5. **Share what you built** — post in #showcase, write a tweet, tell a friend
+
+You don't have to write code to be a contributor.
+
+---
+
+## Where Things Happen
+
+| Place | What Goes On There |
+|-------|--------------------|
+| [**Discord**](https://discord.gg/pincer) | Daily conversations, questions, showing off builds, real-time help |
+| [**GitHub Issues**](https://github.com/pincerhq/pincer/issues) | Bug reports and well-defined feature requests |
+| [**GitHub Discussions**](https://github.com/pincerhq/pincer/discussions) | Architecture ideas, RFCs, roadmap conversations |
+| [**Twitter/X**](https://twitter.com/pincerhq) | Updates, demos, community highlights |
+
+### Discord Channels
+
+| Channel | Purpose |
+|---------|---------|
+| `#general` | Hang out, ask questions, share ideas |
+| `#showcase` | Show what you've built with Pincer |
+| `#skills-dev` | Building custom skills — get help, share patterns |
+| `#channels-dev` | Working on new channel integrations |
+| `#bugs` | Quick bug reports and troubleshooting |
+| `#ideas` | Wild ideas, feature brainstorms, "what if..." |
+| `#off-topic` | Life, memes, other projects, whatever |
+
+**The rule in Discord is simple:** be helpful, be curious, and remember that the person asking the "dumb question" is the brave one. Every expert was once a beginner who felt stupid.
+
+---
+
+## Development Setup
+
+For a complete development guide including dashboard setup, debugging the agent loop, and adding skills/channels/tools, see **[Development Guide](../getting-started/development.md)**.
+
+### Prerequisites
+
+- Python 3.12+ (required)
+- [uv](https://github.com/astral-sh/uv) (strongly recommended) or pip
+- Git
+- A Telegram bot token (fastest channel to test against)
+- At least one LLM API key (Anthropic, OpenAI, or free with Ollama)
+
+### Getting Running
+
+```bash
+# Fork on GitHub, then:
+git clone https://github.com/YOUR_USERNAME/pincer.git
+cd pincer
+
+# Install everything
+uv sync
+# or: pip install -e ".[dev,all]"
+
+# Set up config
+cp .env.example .env
+nano .env  # Add your API keys
+
+# Verify it works
+pytest                        # Tests pass?
+ruff check src/ tests/        # Linting clean?
+pincer run --verbose          # Agent starts?
+```
+
+If you get stuck at any step, that's a documentation bug. [Open an issue](https://github.com/pincerhq/pincer/issues/new?template=bug_report.md) or ask in Discord.
+
+### Project Structure
+
+```
+pincer/
+├── src/pincer/
+│   ├── core/           # Agent loop, sessions, events — the brain
+│   ├── llm/            # LLM providers (Anthropic, OpenAI, Ollama, etc.)
+│   ├── channels/       # Telegram, WhatsApp, Discord — the ears and mouth
+│   ├── memory/         # SQLite + FTS5, entities — the memory
+│   ├── tools/          # Tool registry, sandbox — the hands
+│   ├── skills/         # Skill loader, scanner — the extensibility
+│   ├── voice/          # Twilio voice calling — Sprint 7
+│   ├── security/       # Audit log, firewall, rate limiter — the immune system
+│   ├── scheduler/      # Cron jobs, proactive briefings
+│   └── dashboard/      # FastAPI + HTMX web UI
+├── skills/             # Bundled and community skills (deprecated, use MCP instead)
+├── tests/              # pytest test suite
+├── docs/               # You are here
+└── pyproject.toml
+```
+
+The entire codebase is under 8,000 lines. You can read the whole thing in an afternoon. That's intentional.
+
+---
+
+## Ways to Contribute
+
+### 🟢 Easy — Great First Contributions
+
+**Build an MCP server.** MCP servers are the recommended extension mechanism as of 0.8.0. See the [MCP Guide](../guides/mcp-guide.md) and [MCP Servers](../core-components/mcp-servers.md). The [Skills Guide](../guides/skills-guide.md) is still available but deprecated — skills are removed in 0.9.0.
+
+Skill ideas we'd love to have:
+
+- Home automation (Home Assistant, Philips Hue)
+- Notion sync (read/write pages and databases)
+- Spotify/Apple Music control
+- Fitness tracking (Apple Health, Garmin, Strava)
+- Package tracking (DHL, FedEx, UPS)
+- Language flashcards (Anki integration)
+- Recipe lookup and meal planning
+- News digest from specific RSS feeds
+- Local transit (DB, TfL, MTA) schedules
+- Pomodoro timer with stats
+
+**Improve documentation.** Found something confusing? Fix it. Write a tutorial. Record a video walkthrough. Translate a page. Documentation that prevents one confused user from giving up is more valuable than most code.
+
+**Write tests.** We aim for comprehensive coverage. Pick a module, read the code, write tests for edge cases. Tests are the safety net that lets everyone else move fast.
+
+### 🟡 Medium — Some Context Needed
+
+**Add a new channel integration.** Every messaging platform is a potential channel. Please open a discussion first so we can coordinate, but we'd love:
+
+- Signal (via signal-cli or libsignal)
+- LINE
+- Matrix / Element
+- Microsoft Teams
+- iMessage (macOS only)
+- Zalo (Vietnamese market)
+- Slack (workspace bot)
+
+**Improve the dashboard.** The web UI is functional but basic. If you have frontend skills and an eye for design, there's a lot of room to make it beautiful. The stack is FastAPI + HTMX + Jinja2 — no heavy frontend framework needed.
+
+**Work on memory.** The memory system is the most intellectually interesting part of Pincer. Better entity extraction, smarter summarization, relationship mapping between entities — this is where the agent starts to feel truly personal.
+
+### 🔴 Hard — Deep Architecture Work
+
+- **MCP (Model Context Protocol) support** — integrate with the broader MCP ecosystem
+- **Multi-agent routing** — let users define specialized sub-agents
+- **Voice-to-voice** — direct speech-to-speech without text intermediary
+- **Encrypted memory** — at-rest encryption for the SQLite database
+- **Plugin marketplace** — discovery, ratings, verified publishers
+
+For any of these, please open a GitHub Discussion first. We want to design together before you invest days of work.
+
+---
+
+## The Pull Request Process
+
+### 1. Branch Naming
+
+```
+feat/signal-channel         # New feature
+fix/whatsapp-reconnect      # Bug fix
+docs/skill-tutorial         # Documentation
+skill/notion-sync           # New skill
+test/memory-edge-cases      # More tests
+refactor/memory-store       # Refactoring
+```
+
+### 2. Code Style
+
+We keep it simple:
+
+- **ruff** handles formatting and linting (runs in CI)
+- **120-character** line length (see `[tool.ruff]` in `pyproject.toml`)
+- **Type hints** on all public functions
+- **Docstrings** on all public classes and functions (Google style)
+- **async/await** preferred — the whole codebase is async
+- **Tests** for new functionality (pytest + pytest-asyncio)
+
+**Ruff and mypy settings** are in `pyproject.toml`:
+
+```toml
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
+extend-ignore = ["N814", "N818"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+```
+
+Run locally before pushing:
+
+```bash
+uv run ruff check src/ tests/
+uv run ruff format src/ tests/
+uv run mypy src/
+```
+
+```python
+async def send_notification(
+    self,
+    user_id: str,
+    message: str,
+    *,
+    urgent: bool = False,
+) -> bool:
+    """Send a notification to a user across their preferred channel.
+
+    Args:
+        user_id: The user's identifier.
+        message: Notification content.
+        urgent: If True, send immediately regardless of quiet hours.
+
+    Returns:
+        True if the notification was delivered successfully.
+
+    Raises:
+        ChannelError: If no active channel is available for the user.
+    """
+```
+
+### 3. Commit Messages
+
+[Conventional Commits](https://www.conventionalcommits.org/) format:
+
+```
+feat(channels): add Signal channel integration
+fix(whatsapp): handle reconnection on session timeout
+docs(skills): add tutorial for weather skill
+test(agent): add edge cases for tool approval flow
+chore(deps): bump anthropic SDK to 0.50.0
+```
+
+### 4. Opening the PR
+
+- Use a clear title: `feat(skills): add Notion sync skill`
+- Explain what and why (not just how)
+- Link to the issue if there is one
+- Include screenshots/recordings for UI changes
+- Fill in the PR template checklist
+
+### 5. Review
+
+We aim to review PRs within 48 hours. Often faster. If it's been 3 days and you haven't heard from us, ping in Discord — we might have missed it.
+
+We review for:
+- Correctness and security (does it work? does it stay safe?)
+- Tests (is it tested? will we know if it breaks?)
+- Code clarity (can someone else read this in 6 months?)
+- Architecture fit (does it follow existing patterns?)
+
+We don't review for:
+- Perfection (good enough, shipped, and iterated on > perfect and never merged)
+- Credential gatekeeping (we don't care about your background, we care about the code)
+
+### PR Checklist
+
+```
+- [ ] Tests pass (pytest)
+- [ ] Linting passes (ruff check src/ tests/)
+- [ ] Formatting passes (ruff format --check .)
+- [ ] Type checking passes (mypy src/)
+- [ ] Security scan passes (bandit)
+- [ ] Documentation updated (if behavior changed)
+- [ ] CHANGELOG.md updated (if user-facing)
+```
+
+### CI Testing Matrix
+
+Every push and PR runs:
+
+| Step | Command | Purpose |
+|------|---------|---------|
+| Install | `uv sync --all-extras` | Resolve and install all dependencies |
+| Tests | `uv run pytest --cov=pincer --cov-report=xml` | Run full test suite with coverage |
+| Type check | `uv run mypy src/` | Enforce type correctness |
+| Lint | `uv run ruff check .` | Enforce code style and catch common issues |
+| Format | `uv run ruff format --check .` | Enforce formatting |
+| Security | `uv run bandit -r src/pincer -ll -s B101,B104,B310,B608` | Scan for security issues in sandbox/tools |
+| Coverage | Codecov upload | Track coverage over time |
+
+See `.github/workflows/ci.yml` in repo for the full workflow. All steps must pass before merge.
+
+### Branch Protection
+
+For `main` and `dev` branches, configure branch protection in **GitHub → Settings → Branches → Add branch protection rule** (or edit existing):
+
+- Require a pull request before merging
+- Require status checks to pass (the `test` job must succeed)
+- Optionally: require branches to be up to date before merging
+
+See [GitHub's branch protection docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/managing-a-branch-protection-rule) for details.
+
+---
+
+## Recognition
+
+Every contributor gets recognized:
+
+- **All contributors** appear on the [GitHub Contributors page](https://github.com/pincerhq/pincer/graphs/contributors)
+- **Significant contributions** get a shoutout in [release notes](../changelog/index.md)
+- **Skill authors** are credited in the skill registry with a link to their profile
+- **Repeat contributors** get the `@contributor` role in Discord
+
+We're also planning a contributors page on the website. If you've helped make Pincer better, people should know.
+
+---
+
+## Decision Making
+
+Pincer is currently maintained by a solo developer. As the community grows, so will governance. Here's how decisions work today:
+
+- **Small changes** (bug fixes, docs, simple skills) — merge fast, iterate later
+- **Medium changes** (new features, new skills with external deps) — PR review + brief discussion
+- **Large changes** (new channels, architecture changes, security-critical) — GitHub Discussion first, design together, then implement
+- **Direction and roadmap** — driven by what users actually need, discussed openly in GitHub Discussions
+
+The goal is to be responsive, not bureaucratic. We'd rather merge something good-enough today than debate something perfect for weeks.
+
+---
+
+## Philosophy
+
+A few principles that shape how we build Pincer:
+
+**Simplicity over features.** We'd rather have 10 things that work perfectly than 100 things that kind of work. The codebase should stay under 10K lines for as long as possible.
+
+**Security is not optional.** Every feature gets a threat model. Every tool gets a safety classification. Every skill gets scanned. This is non-negotiable because people trust Pincer with their email, calendar, and files.
+
+**Readability over cleverness.** Write code that a tired developer at 11pm can understand. If you need a comment to explain what the code does, the code should probably be rewritten.
+
+**Ship, then iterate.** A merged PR that works > a perfect PR in draft. We can always improve things in the next release.
+
+**Respect people's time.** Quick reviews. Clear feedback. No PR left hanging for weeks. If we can't merge something, we explain why promptly.
+
+---
+
+## Getting Help
+
+Stuck? Lost? Confused by the codebase? That's normal and it's not your fault.
+
+- **Discord #general** — fastest response, usually within hours
+- **GitHub Discussions** — for longer questions
+- **Direct message the maintainer** on Discord — for sensitive topics
+
+We will never make you feel bad for asking a question. If someone does, that's a Code of Conduct violation and we'll deal with it.
+
+---
+
+Thank you for being here. Every person who contributes — code, docs, bug reports, ideas, encouragement — makes Pincer better for everyone. 🦜

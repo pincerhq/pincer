@@ -63,7 +63,7 @@ class MCPSandbox:
             command="npx",
             args=["-y", "@modelcontextprotocol/server-github"],
             env={"GITHUB_TOKEN": "ghp_..."},
-            memory_limit_mb=256,
+            memory_limit_mb=0,
             server_name="github",
         )
         stdin_pipe, stdout_pipe = sandbox.start()
@@ -212,12 +212,35 @@ class MCPSandbox:
         Build a sanitized environment for the subprocess.
 
         Starts from a minimal base (PATH, HOME=/tmp, LANG), adds safe
-        passthrough vars (PYTHONPATH, NODE_PATH, etc.), then adds the
-        user-declared env vars from config. Blocked prefixes are never
-        included, even if explicitly declared.
+        passthrough vars (PYTHONPATH, NODE_PATH, etc.), then overlays
+        user-declared vars from pincer.toml. User-declared vars always win —
+        _is_blocked only prevents leaking the parent environment, not
+        explicit declarations.
         """
+        import sys
+
+        # Use sys.executable / sys.prefix to locate the active Python — reliable
+        # regardless of whether VIRTUAL_ENV is set (uv run, activated venv, or
+        # system Python all work).
+        python_bin_dir = os.path.dirname(sys.executable)
+        in_venv = sys.prefix != sys.base_prefix
+
+        # Prefer explicit VIRTUAL_ENV; fall back to sys.prefix when inside a venv.
+        venv = (
+            os.environ.get("VIRTUAL_ENV") or os.environ.get("UV_PROJECT_ENVIRONMENT") or (sys.prefix if in_venv else "")
+        )
+
+        # Build PATH: always include the actual Python's bin dir first.
+        path_parts = [python_bin_dir]
+        if venv and os.path.join(venv, "bin") != python_bin_dir:
+            path_parts.append(os.path.join(venv, "bin"))
+        path_parts += ["/usr/local/bin", "/usr/bin", "/bin"]
+        # Deduplicate while preserving order.
+        seen: set[str] = set()
+        unique_parts = [p for p in path_parts if p not in seen and not seen.add(p)]  # type: ignore[func-returns-value]
+
         base: dict[str, str] = {
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PATH": ":".join(unique_parts),
             "HOME": "/tmp",  # nosec B108 — intentional sandbox restriction
             "LANG": "en_US.UTF-8",
             "TMPDIR": "/tmp",  # nosec B108 — intentional sandbox restriction
@@ -225,15 +248,19 @@ class MCPSandbox:
             # are written to the pipe immediately rather than held in a buffer.
             "PYTHONUNBUFFERED": "1",
         }
+        if venv:
+            base["VIRTUAL_ENV"] = venv
 
         # Safe passthrough from current env (runtime paths needed by tools)
-        safe_passthroughs = ("PYTHONPATH", "NODE_PATH", "npm_config_cache", "NVM_DIR")
+        safe_passthroughs = ("PYTHONPATH", "NODE_PATH", "npm_config_cache", "NVM_DIR", "UV_PROJECT_ENVIRONMENT")
         for key in safe_passthroughs:
             val = os.environ.get(key)
             if val:
                 base[key] = val
 
-        # Add user-declared vars, excluding blocked prefixes
+        # User-declared vars (from pincer.toml) win over defaults, but still
+        # filtered through _is_blocked — intentional declarations of blocked
+        # prefixes (e.g. ANTHROPIC_API_KEY) are not passed to the sandbox.
         for key, val in self.user_env.items():
             if not self._is_blocked(key):
                 base[key] = val
@@ -251,15 +278,15 @@ class MCPSandbox:
     @staticmethod
     def _apply_resource_limits(memory_limit_mb: int) -> None:
         """
-        Apply RLIMIT_AS memory limit in the child process.
+        Optionally apply RLIMIT_AS in the child process.
 
-        This is called inside preexec_fn (child process context), so
-        failures are logged but do not abort startup — the server will
-        still run, just without the memory cap.
-        macOS: RLIMIT_AS is accepted by the kernel but not enforced
-        for virtual address space; log a warning.
+        Set memory_limit_mb=0 to skip (the default). RLIMIT_AS caps total virtual
+        address space, which is the wrong limit for modern binaries: Rust, Go, and
+        Node.js routinely map several GB of VA space at startup even when actual RSS
+        is tiny. Setting this too low causes immediate OOM crashes before the server
+        can process a single request. Only set it when you know the binary's VA usage.
         """
-        if sys.platform == "win32":
+        if sys.platform == "win32" or memory_limit_mb == 0:
             return
         try:
             import resource

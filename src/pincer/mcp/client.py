@@ -11,11 +11,12 @@ Wraps the official mcp.ClientSession with:
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import logging
 from contextlib import AsyncExitStack
 from typing import Any
+
+import anyio
 
 from pincer.mcp.config import MCPServerConfig, MCPTransport
 from pincer.mcp.sandbox import MCPSandbox, sandbox_streams
@@ -63,15 +64,28 @@ class MCPClientSession:
         self._exit_stack = AsyncExitStack()
         try:
             if self.config.transport == MCPTransport.STDIO:
-                read_stream, write_stream = await self._connect_stdio(
-                    self._exit_stack, StdioServerParameters, stdio_client
-                )
+                if self.config.sandbox:
+                    # sandbox_streams and ClientSession create persistent task groups —
+                    # enter them outside any fail_after scope to avoid cancel scope ordering errors.
+                    read_stream, write_stream = await self._connect_stdio_sandboxed(self._exit_stack)
+                    # Readiness check is a pure coroutine (sleep + poll), safe to timeout.
+                    with anyio.fail_after(self.config.startup_timeout):
+                        await self._wait_for_sandbox_startup()
+                else:
+                    read_stream, write_stream = await self._connect_stdio(
+                        self._exit_stack, StdioServerParameters, stdio_client
+                    )
             else:
                 read_stream, write_stream = await self._connect_http(self._exit_stack, streamablehttp_client)
 
+            # Enter ClientSession outside fail_after — it spawns background tasks whose
+            # cancel scope must outlive our timeout scope.
             self._session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
-            await self._session.initialize()
-            await self._discover_tools()
+            # Timeout only the pure protocol operations.
+            with anyio.fail_after(self.config.timeout):
+                await self._session.initialize()
+                await self._discover_tools()
+
             self._connected = True
             self._connect_attempts = 0
             logger.info(
@@ -100,22 +114,19 @@ class MCPClientSession:
             raise ConnectionError(f"MCP '{self.name}' is not connected")
 
         try:
-            result = await asyncio.wait_for(
-                self._session.call_tool(tool_name, arguments),
-                timeout=self.config.timeout_seconds,
-            )
+            with anyio.fail_after(self.config.timeout):
+                result = await self._session.call_tool(tool_name, arguments)
             return result
         except TimeoutError:
-            raise TimeoutError(
-                f"MCP '{self.name}' tool '{tool_name}' timed out after {self.config.timeout_seconds}s"
-            ) from None
+            raise TimeoutError(f"MCP '{self.name}' tool '{tool_name}' timed out after {self.config.timeout}s") from None
 
     async def health_check(self) -> bool:
         """Verify the session is still alive via a ping."""
         if not self.connected:
             return False
         try:
-            await asyncio.wait_for(self._session.send_ping(), timeout=5.0)
+            with anyio.fail_after(5.0):
+                await self._session.send_ping()
             return True
         except Exception:
             self._connected = False
@@ -135,6 +146,20 @@ class MCPClientSession:
         )
 
     # ── Private helpers ───────────────────────────────────
+
+    async def _wait_for_sandbox_startup(self) -> None:
+        """Confirm sandbox process is alive before attempting MCP connection.
+
+        Returns as soon as the process is confirmed running — does not wait
+        the full startup_timeout. Raises RuntimeError if the process exited.
+        """
+        if self._sandbox is None:
+            return
+        # Brief delay so the process has time to either crash or stabilise.
+        await anyio.sleep(0.2)
+        if not self._sandbox.alive:
+            stderr = self._sandbox.get_stderr()
+            raise RuntimeError(f"MCP '{self.name}' server exited on startup: {stderr or '(no output)'}")
 
     async def _connect_stdio(self, stack: AsyncExitStack, stdio_params_cls: Any, stdio_client: Any) -> tuple[Any, Any]:
         """Set up stdio transport.
@@ -165,10 +190,11 @@ class MCPClientSession:
 
     async def _connect_stdio_sandboxed(self, stack: AsyncExitStack) -> tuple[Any, Any]:
         """Launch the subprocess inside an MCPSandbox and bridge its pipes."""
+        sanitized_env = self._build_sandbox_env()
         sb = MCPSandbox(
             command=self.config.command,  # type: ignore[arg-type]
             args=list(self.config.args),
-            env=dict(self.config.env),
+            env=sanitized_env,
             memory_limit_mb=self.config.sandbox_memory_mb,
             server_name=self.name,
         )
@@ -218,7 +244,7 @@ class MCPClientSession:
             streamablehttp_client(
                 self.config.url,
                 headers=headers or None,
-                timeout=float(self.config.timeout_seconds),
+                timeout=float(self.config.timeout),
             )
         )
         return read_stream, write_stream
@@ -227,39 +253,71 @@ class MCPClientSession:
         result = await self._session.list_tools()
         self._tools = result.tools
 
-    def _build_sandbox_env(self) -> dict[str, str] | None:
-        """Build a sanitized environment for stdio subprocesses.
+    def _build_sandbox_env(self) -> dict[str, str]:
+        """Build the environment for stdio subprocesses.
 
-        When sandbox=True (default): start from a minimal base and only add
-        declared env vars, preventing PINCER_* secrets from leaking.
-        When sandbox=False: pass user-declared env vars on top of inherited env.
+        Non-sandbox: full inherited env overridden by declared vars.
+        Sandbox: minimal safe base (venv-aware PATH, HOME, LANG …) plus
+                 safe runtime passthroughs, then declared vars on top.
+        Declared vars are already interpolated (${VAR} → value) at
+        config-load time, so no extra resolution is needed here.
         """
-        if not self.config.sandbox:
-            if not self.config.env:
-                return None
-            # Unsandboxed: merge with current env
-            import os
+        import os
+        import re
+        import sys
 
+        def extract_env_var_name(s: str) -> str | None:
+            match = re.search(r"\$\{(\w+)\}", s)
+            return match.group(1) if match else None
+
+        if not self.config.sandbox:
             env = dict(os.environ)
             env.update(self.config.env)
+            if self.config.env:
+                for key, value in self.config.env.items():
+                    if value.startswith("$") and (ev := extract_env_var_name(value)):
+                        value = os.getenv(ev) or ""
+                    if value:
+                        env[key] = value
             return env
+        # ── Sandbox: build minimal, safe base ────────────────────────────
+        python_bin_dir = os.path.dirname(sys.executable)
+        in_venv = sys.prefix != sys.base_prefix
+        venv = (
+            os.environ.get("VIRTUAL_ENV") or os.environ.get("UV_PROJECT_ENVIRONMENT") or (sys.prefix if in_venv else "")
+        )
 
-        # Sandboxed: minimal base + declared vars only
-        import os
+        path_parts = [python_bin_dir]
+        if venv and os.path.join(venv, "bin") != python_bin_dir:
+            path_parts.append(os.path.join(venv, "bin"))
+        path_parts += ["/usr/local/bin", "/usr/bin", "/bin"]
+        seen: set[str] = set()
+        unique_parts = [p for p in path_parts if p not in seen and not seen.add(p)]  # type: ignore[func-returns-value]
 
         base_env: dict[str, str] = {
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "PATH": ":".join(unique_parts),
             "HOME": "/tmp",  # nosec B108 — intentional sandbox restriction
             "LANG": "en_US.UTF-8",
             "TMPDIR": "/tmp",  # nosec B108 — intentional sandbox restriction
+            "PYTHONUNBUFFERED": "1",
         }
-        # Preserve PYTHONPATH / NODE_PATH / similar runtime paths if present
-        for passthrough in ("PYTHONPATH", "NODE_PATH", "npm_config_cache"):
+        if venv:
+            base_env["VIRTUAL_ENV"] = venv
+
+        for passthrough in ("PYTHONPATH", "NODE_PATH", "npm_config_cache", "NVM_DIR", "UV_PROJECT_ENVIRONMENT"):
             val = os.environ.get(passthrough)
             if val:
                 base_env[passthrough] = val
 
-        base_env.update(self.config.env)
+        # Declared vars always win — they are explicitly trusted by the user.
+        if self.config.env:
+            for key, value in self.config.env.items():
+                logger.info(f"MCP server {self.config.name} consumed {key} from env")
+                if value.startswith("$") and (ev := extract_env_var_name(value)):
+                    value = os.getenv(ev) or ""
+                    logger.info(f"{ev}: {value}")
+                if value:
+                    base_env[key] = value
         return base_env
 
     async def _cleanup(self) -> None:

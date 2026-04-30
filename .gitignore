@@ -14,8 +14,9 @@ venv/
 .vscode/
 .idea/
 
-# Cursor
+# AI
 .cursor/
+.claude/
 
 # OS
 .DS_Store
@@ -27,6 +28,7 @@ htmlcov/
 
 # mypy
 .mypy_cache/
+.ruff_cache/
 
 # Google OAuth secrets
 data/google_credentials.json
@@ -36,12 +38,9 @@ data/google_token.json
 pincer-wa*
 data/google_workspace_token.json
 
+# Docker + docker compose
+docker-compose.override.yml
+
 # Internal and required MCP servers
 pincer.local.toml
-mcp_servers/*
-!mcp_servers/pincer-mcps
-!mcp_servers/pincer-mcps/**
-!mcp_servers/pomodoro-mcp
-!mcp_servers/pomodoro-mcp/**
-!mcp_servers/memory-mcp
-!mcp_servers/memory-mcp/**
+mcp-servers/*

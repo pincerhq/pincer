@@ -5,6 +5,20 @@ All notable changes to **Pincer** are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- MCP servers support for pincer better scalability
+
+
+### Changed
+
+- skills became deprecated and will removed in 0.9.0
+- docker compose adopted for run MCP servers as container and as result separated service which not depends on pincer run
+- MCP server could interact with pincer via http and stdio protocols
+
+
 ## [0.7.6] — 2026-04-19
 
 ### Highlights

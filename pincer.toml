@@ -64,3 +64,104 @@ expose_tools = [
 # timeout_seconds   = 60
 #
 # See docs/mcp-guide.md for the full configuration reference.
+# WARNING: run through uv or uvx not supported yet
+
+# Default mcp servers which worked in one container as subprocesses via stdio
+#[[mcp.servers]]
+#name = "memory"
+#transport = "stdio"
+#command = "memory"
+#args = ["server", "--debug"]
+#env = { MCP_MEMORY_STORAGE_BACKEND = "sqlite_vec", MCP_MEMORY_DB_PATH = "/app/data/sqlite_vec.db", MCP_BACKUP_ENABLED = "false", SIMILARITY_THRESHOLD = 0.75, MAX_RESULTS_PER_QUERY = 10}
+#approval_required = ["delete_*", "update_*"]
+#timeout_seconds   = 90
+# memory service should run without sandboxing at the moment
+#sandbox           = false
+
+# IMPORTANT: http transport can't manage command and args at the moment.
+# It means there is not possible to run server in http mode via command locally
+# and connect to it via url. http transport useful for containers inside local
+# docker or for completely remote mcp servers
+
+# Dockerized servers for safe long term run
+# [[mcp.servers]]
+#name      = "memory"
+#transport = "streamable-http"
+#url       = "http://memory-mcp:8000/mcp"
+
+#[[mcp.servers]]
+#name      = "newsapi"
+#transport = "streamable-http"
+#url       = "http://newsapi-mcp:8000/mcp"
+
+#[[mcp.servers]]
+#name      = "openweathermap"
+#transport = "streamable-http"
+#url       = "http://openweathermap-mcp:8000/mcp"
+
+#[[mcp.servers]]
+#name      = "pomodoro"
+#transport = "streamable-http"
+#url       = "http://pomodoro-mcp:8000/mcp"
+
+#[[mcp.servers]]
+#name      = "stock_price"
+#transport = "streamable-http"
+#url       = "http://stock-price-mcp:8000/mcp"
+
+#[[mcp.servers]]
+#name      = "summarize"
+#transport = "streamable-http"
+#url       = "http://summarize-mcp:8000/mcp"
+
+#[[mcp.servers]]
+#name      = "translate"
+#transport = "streamable-http"
+#url       = "http://translate-mcp:8000/mcp"
+
+# In app runtime servers using stdio protocol for fast startup (default)
+[[mcp.servers]]
+name = "memory"
+transport = "stdio"
+command = "python"
+args = ["/app/src/sqlite-vec-memory-mcp/server.py"]
+env = { MEMORY_DB_PATH = "/app/data/sqlite_vec.db" }
+sandbox = true
+
+[[mcp.servers]]
+name      = "newsapi"
+transport = "stdio"
+command = "python"
+args = ["/app/src/pincer-mcps/newsapi_server.py"]
+env = { API_KEY="${PINCER_NEWSAPI_KEY}" }
+
+[[mcp.servers]]
+name      = "openweathermap"
+transport = "stdio"
+command = "python"
+args = ["/app/src/pincer-mcps/openweathermap_server.py"]
+env = { API_KEY="${PINCER_OPENWEATHERMAP_API_KEY}" }
+
+[[mcp.servers]]
+name      = "pomodoro"
+transport = "stdio"
+command = "python"
+args = ["/app/src/pomodoro-mcp/server.py"]
+
+[[mcp.servers]]
+name      = "stock_price"
+transport = "stdio"
+command = "python"
+args = ["/app/src/pincer-mcps/stock_price_server.py"]
+
+[[mcp.servers]]
+name      = "summarize"
+transport = "stdio"
+command = "python"
+args = ["/app/src/pincer-mcps/summarize_server.py"]
+
+[[mcp.servers]]
+name      = "translate"
+transport = "stdio"
+command = "python"
+args = ["/app/src/pincer-mcps/translate_server.py"]

@@ -15,6 +15,7 @@ Environment variable format for a single server:
     PINCER_MCP_SERVER_1_ENV_GITHUB_TOKEN=ghp_xxxxx
     PINCER_MCP_SERVER_1_APPROVAL=*
     PINCER_MCP_SERVER_1_TIMEOUT=30
+    PINCER_MCP_SERVER_1_STARTUP_TIMEOUT=30
     PINCER_MCP_SERVER_1_SANDBOX=true
 """
 
@@ -52,9 +53,10 @@ class MCPServerConfig:
 
     # Security & behavior
     sandbox: bool = True
-    sandbox_memory_mb: int = 256
+    sandbox_memory_mb: int = 0  # 0 = no RLIMIT_AS; set explicitly only for known-safe binaries
     approval_required: list[str] = field(default_factory=lambda: ["*"])
-    timeout_seconds: int = 30
+    timeout: int = 30
+    startup_timeout: int = 30
     max_retries: int = 2
 
     # OAuth 2.1 client-side settings (for HTTP servers that require auth)
@@ -180,9 +182,10 @@ def _parse_server_from_toml(raw: dict[str, Any]) -> MCPServerConfig:
         url=raw.get("url"),
         headers=headers,
         sandbox=raw.get("sandbox", True),
-        sandbox_memory_mb=int(raw.get("sandbox_memory_mb", 256)),
+        sandbox_memory_mb=int(raw.get("sandbox_memory_mb", 0)),
         approval_required=approval,
-        timeout_seconds=int(raw.get("timeout_seconds", 30)),
+        timeout=int(raw.get("timeout", 30)),
+        startup_timeout=int(raw.get("startup_timeout", 30)),
         max_retries=int(raw.get("max_retries", 2)),
     )
 
@@ -304,9 +307,10 @@ def _load_env_servers() -> list[MCPServerConfig]:
                     url=os.environ.get(f"{prefix}URL"),
                     headers={},
                     sandbox=sandbox_str in ("true", "1", "yes"),
-                    sandbox_memory_mb=int(os.environ.get(f"{prefix}SANDBOX_MEMORY_MB", "256")),
+                    sandbox_memory_mb=int(os.environ.get(f"{prefix}SANDBOX_MEMORY_MB", "0")),
                     approval_required=approval,
-                    timeout_seconds=int(os.environ.get(f"{prefix}TIMEOUT", "30")),
+                    timeout=int(os.environ.get(f"{prefix}TIMEOUT", "30")),
+                    startup_timeout=int(os.environ.get(f"{prefix}STARTUP_TIMEOUT", "30")),
                     max_retries=int(os.environ.get(f"{prefix}MAX_RETRIES", "2")),
                 )
             )

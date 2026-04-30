@@ -1,0 +1,519 @@
+/* ============================================================
+   Pincer Theme — MkDocs Material
+   Palette extracted from the Pincer parrot logo
+   ============================================================
+
+   Color tokens:
+     Greens:
+       --pincer-green-bright : #28C864  (bright lime, crest feathers)
+       --pincer-green-forest : #007850  (mid forest green, wings)
+       --pincer-teal-deep    : #006450  (deep teal, body)
+       --pincer-teal-dark    : #00503C  (darkest teal, shadows)
+     Oranges / Yellows:
+       --pincer-orange       : #F07828  (crest flame)
+       --pincer-amber        : #F0A014  (amber transition)
+       --pincer-gold         : #F0B414  (beak / golden yellow)
+     Neutrals:
+       --pincer-gray         : #B4C8B4  (feet / feather tips)
+   ============================================================ */
+
+/* ── Raw tokens ──────────────────────────────────────────── */
+:root {
+  --pincer-green-bright : #28C864;
+  --pincer-green-forest : #007850;
+  --pincer-teal-deep    : #006450;
+  --pincer-teal-dark    : #00503C;
+  --pincer-orange       : #F07828;
+  --pincer-amber        : #F0A014;
+  --pincer-gold         : #F0B414;
+  --pincer-gray         : #B4C8B4;
+
+  /* Derived surface tints */
+  --pincer-teal-10      : #006450;   /* deep teal at full opacity */
+  --pincer-green-10     : #E8FBF0;   /* very light green tint for light bg */
+  --pincer-orange-10    : #FFF4E8;   /* light orange tint */
+}
+
+/* ══════════════════════════════════════════════════════════
+   LIGHT SCHEME
+   ══════════════════════════════════════════════════════════ */
+[data-md-color-scheme="pincer-light"] {
+
+  /* Primary — teal-green family */
+  --md-primary-fg-color              : #006450;
+  --md-primary-fg-color--light       : #007850;
+  --md-primary-fg-color--dark        : #00503C;
+  --md-primary-bg-color              : #ffffff;
+  --md-primary-bg-color--light       : rgba(255,255,255,0.7);
+
+  /* Accent — orange / amber */
+  --md-accent-fg-color               : #F07828;
+  --md-accent-fg-color--transparent  : rgba(240,120,40,0.12);
+  --md-accent-bg-color               : #ffffff;
+  --md-accent-bg-color--light        : rgba(255,255,255,0.7);
+
+  /* Default text */
+  --md-default-fg-color              : #1a1a1a;
+  --md-default-fg-color--light       : #4a4a4a;
+  --md-default-fg-color--lighter     : #767676;
+  --md-default-fg-color--lightest    : #b0b0b0;
+  --md-default-bg-color              : #ffffff;
+  --md-default-bg-color--light       : #f8faf9;
+  --md-default-bg-color--lighter     : #f0f4f2;
+  --md-default-bg-color--lightest    : #e8f0ec;
+
+  /* Code blocks */
+  --md-code-fg-color                 : #1a1a1a;
+  --md-code-bg-color                 : #f0f6f3;
+
+  /* Code highlighting */
+  --md-code-hl-color                 : rgba(240,180,20,0.3);
+  --md-code-hl-number-color          : #F07828;
+  --md-code-hl-special-color         : #006450;
+  --md-code-hl-function-color        : #007850;
+  --md-code-hl-constant-color        : #F0A014;
+  --md-code-hl-keyword-color         : #006450;
+  --md-code-hl-string-color          : #28C864;
+  --md-code-hl-name-color            : #1a1a1a;
+  --md-code-hl-operator-color        : #F07828;
+  --md-code-hl-punctuation-color     : #4a4a4a;
+  --md-code-hl-comment-color         : #7a9a88;
+  --md-code-hl-generic-color         : #4a4a4a;
+  --md-code-hl-variable-color        : #F0A014;
+
+  /* Typeset */
+  --md-typeset-color                 : #1a1a1a;
+  --md-typeset-a-color               : #006450;
+  --md-typeset-mark-color            : rgba(240,180,20,0.35);
+  --md-typeset-del-color             : rgba(240,120,40,0.15);
+  --md-typeset-ins-color             : rgba(40,200,100,0.15);
+  --md-typeset-kbd-color             : #f0f4f2;
+  --md-typeset-kbd-accent-color      : #e4ece8;
+  --md-typeset-kbd-border-color      : #b4c8b4;
+  --md-typeset-table-color           : rgba(0,80,60,0.05);
+
+  /* Admonitions */
+  --md-admonition-fg-color           : var(--md-default-fg-color);
+  --md-admonition-bg-color           : var(--md-default-bg-color);
+
+  /* Footer */
+  --md-footer-bg-color               : #00503C;
+  --md-footer-bg-color--dark         : #003D2D;
+  --md-footer-fg-color               : rgba(255,255,255,0.9);
+  --md-footer-fg-color--light        : rgba(255,255,255,0.65);
+  --md-footer-fg-color--lighter      : rgba(255,255,255,0.45);
+
+  /* Shadows */
+  --md-shadow-z1 : 0 2px 8px rgba(0,80,60,0.10), 0 1px 3px rgba(0,80,60,0.08);
+  --md-shadow-z2 : 0 4px 16px rgba(0,80,60,0.14), 0 2px 6px rgba(0,80,60,0.10);
+  --md-shadow-z3 : 0 8px 32px rgba(0,80,60,0.18), 0 4px 12px rgba(0,80,60,0.12);
+}
+
+/* ══════════════════════════════════════════════════════════
+   DARK SCHEME
+   ══════════════════════════════════════════════════════════ */
+[data-md-color-scheme="pincer-dark"] {
+
+  /* Primary */
+  --md-primary-fg-color              : #28C864;
+  --md-primary-fg-color--light       : #40D878;
+  --md-primary-fg-color--dark        : #007850;
+  --md-primary-bg-color              : #0D1A14;
+  --md-primary-bg-color--light       : rgba(13,26,20,0.7);
+
+  /* Accent */
+  --md-accent-fg-color               : #F0A014;
+  --md-accent-fg-color--transparent  : rgba(240,160,20,0.15);
+  --md-accent-bg-color               : #0D1A14;
+  --md-accent-bg-color--light        : rgba(13,26,20,0.7);
+
+  /* Default text */
+  --md-default-fg-color              : #e8f2ec;
+  --md-default-fg-color--light       : #a8c4b4;
+  --md-default-fg-color--lighter     : #6a9480;
+  --md-default-fg-color--lightest    : #3a5a48;
+  --md-default-bg-color              : #0D1A14;
+  --md-default-bg-color--light       : #132010;  /* nav sidebar */
+  --md-default-bg-color--lighter     : #1a2e1e;
+  --md-default-bg-color--lightest    : #223828;
+
+  /* Code blocks */
+  --md-code-fg-color                 : #c8e8d8;
+  --md-code-bg-color                 : #0a1510;
+
+  /* Code highlighting */
+  --md-code-hl-color                 : rgba(240,160,20,0.2);
+  --md-code-hl-number-color          : #F0A014;
+  --md-code-hl-special-color         : #28C864;
+  --md-code-hl-function-color        : #40D878;
+  --md-code-hl-constant-color        : #F07828;
+  --md-code-hl-keyword-color         : #28C864;
+  --md-code-hl-string-color          : #80E0A0;
+  --md-code-hl-name-color            : #c8e8d8;
+  --md-code-hl-operator-color        : #F0A014;
+  --md-code-hl-punctuation-color     : #8aaa98;
+  --md-code-hl-comment-color         : #4a7a5a;
+  --md-code-hl-generic-color         : #8aaa98;
+  --md-code-hl-variable-color        : #F07828;
+
+  /* Typeset */
+  --md-typeset-color                 : #e8f2ec;
+  --md-typeset-a-color               : #28C864;
+  --md-typeset-mark-color            : rgba(240,160,20,0.25);
+  --md-typeset-del-color             : rgba(240,120,40,0.2);
+  --md-typeset-ins-color             : rgba(40,200,100,0.2);
+  --md-typeset-kbd-color             : #1a2e1e;
+  --md-typeset-kbd-accent-color      : #223828;
+  --md-typeset-kbd-border-color      : #3a5a48;
+  --md-typeset-table-color           : rgba(40,200,100,0.05);
+
+  /* Admonitions */
+  --md-admonition-fg-color           : var(--md-default-fg-color);
+  --md-admonition-bg-color           : var(--md-default-bg-color--light);
+
+  /* Footer */
+  --md-footer-bg-color               : #0a1510;
+  --md-footer-bg-color--dark         : #060e0a;
+  --md-footer-fg-color               : rgba(232,242,236,0.9);
+  --md-footer-fg-color--light        : rgba(232,242,236,0.65);
+  --md-footer-fg-color--lighter      : rgba(232,242,236,0.40);
+
+  /* Shadows */
+  --md-shadow-z1 : 0 2px 8px rgba(0,0,0,0.40);
+  --md-shadow-z2 : 0 4px 16px rgba(0,0,0,0.50);
+  --md-shadow-z3 : 0 8px 32px rgba(0,0,0,0.60);
+}
+
+/* ══════════════════════════════════════════════════════════
+   HEADER
+   ══════════════════════════════════════════════════════════ */
+.md-header {
+  background: linear-gradient(135deg, var(--pincer-teal-dark) 0%, var(--pincer-teal-deep) 100%);
+  box-shadow: 0 2px 12px rgba(0,50,40,0.25);
+}
+
+[data-md-color-scheme="pincer-dark"] .md-header {
+  background: linear-gradient(135deg, #060e0a 0%, #0D1A14 100%);
+  border-bottom: 1px solid rgba(40,200,100,0.12);
+}
+
+.md-header__title {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* ── Navigation tabs ──────────────────────────────────────── */
+.md-tabs {
+  background: var(--pincer-teal-deep);
+}
+
+[data-md-color-scheme="pincer-dark"] .md-tabs {
+  background: #0a1510;
+  border-bottom: 1px solid rgba(40,200,100,0.10);
+}
+
+.md-tabs__link--active,
+.md-tabs__link:hover {
+  color: var(--pincer-gold) !important;
+}
+
+/* ══════════════════════════════════════════════════════════
+   SIDEBAR & NAVIGATION
+   ══════════════════════════════════════════════════════════ */
+.md-nav__link--active,
+.md-nav__link:hover {
+  color: var(--pincer-green-forest);
+}
+
+[data-md-color-scheme="pincer-dark"] .md-nav__link--active,
+[data-md-color-scheme="pincer-dark"] .md-nav__link:hover {
+  color: var(--pincer-green-bright);
+}
+
+.md-nav__link--active {
+  font-weight: 500;
+}
+
+/* Active section indicator */
+.md-nav__item--active > .md-nav__link {
+  border-left: 3px solid var(--pincer-green-bright);
+  padding-left: calc(var(--md-nav-item-indent) - 3px);
+}
+
+/* ══════════════════════════════════════════════════════════
+   SEARCH
+   ══════════════════════════════════════════════════════════ */
+.md-search__form {
+  border-radius: 8px;
+  background: rgba(255,255,255,0.12);
+  transition: background 0.2s;
+}
+
+.md-search__form:hover,
+.md-search__form:focus-within {
+  background: rgba(255,255,255,0.20);
+}
+
+.md-search__input::placeholder {
+  color: rgba(255,255,255,0.55);
+}
+
+/* ══════════════════════════════════════════════════════════
+   TYPESET — LINKS & HEADINGS
+   ══════════════════════════════════════════════════════════ */
+.md-typeset a {
+  color: var(--pincer-green-forest);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.md-typeset a:hover {
+  color: var(--pincer-green-bright);
+  border-bottom-color: var(--pincer-green-bright);
+}
+
+[data-md-color-scheme="pincer-dark"] .md-typeset a {
+  color: var(--pincer-green-bright);
+}
+
+[data-md-color-scheme="pincer-dark"] .md-typeset a:hover {
+  color: #40D878;
+  border-bottom-color: #40D878;
+}
+
+/* Heading accent bar */
+.md-typeset h1 {
+  color: var(--pincer-teal-deep);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  border-bottom: 3px solid var(--pincer-green-bright);
+  padding-bottom: 0.3em;
+  margin-bottom: 0.8em;
+}
+
+[data-md-color-scheme="pincer-dark"] .md-typeset h1 {
+  color: var(--pincer-green-bright);
+}
+
+.md-typeset h2 {
+  color: var(--pincer-teal-deep);
+  font-weight: 600;
+  border-left: 4px solid var(--pincer-orange);
+  padding-left: 0.6em;
+}
+
+[data-md-color-scheme="pincer-dark"] .md-typeset h2 {
+  color: #40D878;
+  border-left-color: var(--pincer-amber);
+}
+
+.md-typeset h3 {
+  color: var(--pincer-green-forest);
+  font-weight: 600;
+}
+
+[data-md-color-scheme="pincer-dark"] .md-typeset h3 {
+  color: var(--pincer-gray);
+}
+
+/* ══════════════════════════════════════════════════════════
+   CODE BLOCKS
+   ══════════════════════════════════════════════════════════ */
+.md-typeset pre,
+.md-typeset code {
+  border-radius: 8px;
+}
+
+.md-typeset code {
+  border-radius: 4px;
+  padding: 0.1em 0.4em;
+  background: var(--md-code-bg-color);
+  color: var(--pincer-green-forest);
+  font-size: 0.88em;
+}
+
+[data-md-color-scheme="pincer-dark"] .md-typeset code {
+  color: var(--pincer-green-bright);
+}
+
+/* Copy button */
+.md-clipboard {
+  color: var(--pincer-gray);
+  transition: color 0.15s;
+}
+
+.md-clipboard:hover {
+  color: var(--pincer-green-bright);
+}
+
+/* ══════════════════════════════════════════════════════════
+   ADMONITIONS — custom Pincer colours
+   ══════════════════════════════════════════════════════════ */
+
+/* note → teal */
+.md-typeset .admonition.note,
+.md-typeset details.note {
+  border-color: var(--pincer-teal-deep);
+}
+.md-typeset .note > .admonition-title,
+.md-typeset .note > summary {
+  background: rgba(0,100,80,0.10);
+  color: var(--pincer-teal-deep);
+}
+.md-typeset .note > .admonition-title::before,
+.md-typeset .note > summary::before {
+  background-color: var(--pincer-teal-deep);
+}
+
+/* tip → bright green */
+.md-typeset .admonition.tip,
+.md-typeset details.tip {
+  border-color: var(--pincer-green-bright);
+}
+.md-typeset .tip > .admonition-title,
+.md-typeset .tip > summary {
+  background: rgba(40,200,100,0.10);
+  color: var(--pincer-green-forest);
+}
+.md-typeset .tip > .admonition-title::before,
+.md-typeset .tip > summary::before {
+  background-color: var(--pincer-green-bright);
+}
+
+/* warning → amber */
+.md-typeset .admonition.warning,
+.md-typeset details.warning {
+  border-color: var(--pincer-amber);
+}
+.md-typeset .warning > .admonition-title,
+.md-typeset .warning > summary {
+  background: rgba(240,160,20,0.10);
+  color: #a06a00;
+}
+.md-typeset .warning > .admonition-title::before,
+.md-typeset .warning > summary::before {
+  background-color: var(--pincer-amber);
+}
+
+/* danger → orange */
+.md-typeset .admonition.danger,
+.md-typeset details.danger {
+  border-color: var(--pincer-orange);
+}
+.md-typeset .danger > .admonition-title,
+.md-typeset .danger > summary {
+  background: rgba(240,120,40,0.10);
+  color: #a04000;
+}
+.md-typeset .danger > .admonition-title::before,
+.md-typeset .danger > summary::before {
+  background-color: var(--pincer-orange);
+}
+
+/* ══════════════════════════════════════════════════════════
+   TABLES
+   ══════════════════════════════════════════════════════════ */
+.md-typeset table:not([class]) {
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: var(--md-shadow-z1);
+}
+
+.md-typeset table:not([class]) th {
+  background: var(--pincer-teal-deep);
+  color: #ffffff;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.md-typeset table:not([class]) tr:hover {
+  background: rgba(40,200,100,0.05);
+}
+
+/* ══════════════════════════════════════════════════════════
+   BUTTONS (md-button)
+   ══════════════════════════════════════════════════════════ */
+.md-typeset .md-button {
+  border-radius: 6px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  transition: all 0.18s;
+}
+
+.md-typeset .md-button--primary {
+  background: var(--pincer-teal-deep);
+  border-color: var(--pincer-teal-deep);
+  color: #ffffff;
+}
+
+.md-typeset .md-button--primary:hover {
+  background: var(--pincer-green-forest);
+  border-color: var(--pincer-green-forest);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,100,80,0.30);
+}
+
+/* ══════════════════════════════════════════════════════════
+   TAGS / BADGES
+   ══════════════════════════════════════════════════════════ */
+.md-tag {
+  background: rgba(0,100,80,0.10);
+  color: var(--pincer-teal-deep);
+  border-radius: 4px;
+  font-size: 0.75em;
+  font-weight: 500;
+  padding: 0.15em 0.5em;
+}
+
+[data-md-color-scheme="pincer-dark"] .md-tag {
+  background: rgba(40,200,100,0.12);
+  color: var(--pincer-green-bright);
+}
+
+/* ══════════════════════════════════════════════════════════
+   TOC (table of contents)
+   ══════════════════════════════════════════════════════════ */
+.md-nav--secondary .md-nav__link--active {
+  color: var(--pincer-orange);
+  border-left: 2px solid var(--pincer-orange);
+  padding-left: 0.5em;
+}
+
+/* ══════════════════════════════════════════════════════════
+   FOOTER
+   ══════════════════════════════════════════════════════════ */
+.md-footer {
+  background: var(--md-footer-bg-color);
+}
+
+.md-footer-meta {
+  background: var(--md-footer-bg-color--dark);
+}
+
+/* ══════════════════════════════════════════════════════════
+   SCROLLBAR (webkit)
+   ══════════════════════════════════════════════════════════ */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--pincer-teal-deep);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--pincer-green-forest); }
+
+/* ══════════════════════════════════════════════════════════
+   SELECTION
+   ══════════════════════════════════════════════════════════ */
+::selection {
+  background: rgba(40,200,100,0.25);
+  color: inherit;
+}
+
+/* ══════════════════════════════════════════════════════════
+   FOCUS rings — accessibility
+   ══════════════════════════════════════════════════════════ */
+:focus-visible {
+  outline: 2px solid var(--pincer-green-bright);
+  outline-offset: 2px;
+}
