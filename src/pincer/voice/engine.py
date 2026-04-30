@@ -85,34 +85,32 @@ class VoiceEngine(ABC):
 
     @abstractmethod
     async def on_call_start(
-        self, call_sid: str, caller: str, direction: CallDirection,
-        target_number: str = "", target_name: str = "", purpose: str = "",
-    ) -> CallState:
-        ...
+        self,
+        call_sid: str,
+        caller: str,
+        direction: CallDirection,
+        target_number: str = "",
+        target_name: str = "",
+        purpose: str = "",
+    ) -> CallState: ...
 
     @abstractmethod
-    async def on_speech_input(self, call_sid: str, text_or_audio: Any) -> None:
-        ...
+    async def on_speech_input(self, call_sid: str, text_or_audio: Any) -> None: ...
 
     @abstractmethod
-    async def send_speech(self, call_sid: str, text_or_audio: Any) -> None:
-        ...
+    async def send_speech(self, call_sid: str, text_or_audio: Any) -> None: ...
 
     @abstractmethod
-    async def interrupt_speech(self, call_sid: str) -> None:
-        ...
+    async def interrupt_speech(self, call_sid: str) -> None: ...
 
     @abstractmethod
-    async def transfer_call(self, call_sid: str, target_number: str) -> None:
-        ...
+    async def transfer_call(self, call_sid: str, target_number: str) -> None: ...
 
     @abstractmethod
-    async def end_call(self, call_sid: str) -> None:
-        ...
+    async def end_call(self, call_sid: str) -> None: ...
 
     @abstractmethod
-    async def send_dtmf(self, call_sid: str, digits: str) -> None:
-        ...
+    async def send_dtmf(self, call_sid: str, digits: str) -> None: ...
 
     def get_call_state(self, call_sid: str) -> CallState | None:
         return self._active_calls.get(call_sid)
@@ -125,8 +123,13 @@ class VoiceEngine(ABC):
         return dict(self._active_calls)
 
     async def _register_call(
-        self, call_sid: str, caller: str, direction: CallDirection,
-        target_number: str = "", target_name: str = "", purpose: str = "",
+        self,
+        call_sid: str,
+        caller: str,
+        direction: CallDirection,
+        target_number: str = "",
+        target_name: str = "",
+        purpose: str = "",
     ) -> CallState:
         state = CallState(
             call_sid=call_sid,
@@ -146,14 +149,15 @@ class VoiceEngine(ABC):
         if state:
             state.ended_at = datetime.now(UTC)
             logger.info(
-                "Call ended: %s duration=%ds", call_sid, state.duration_seconds,
+                "Call ended: %s duration=%ds",
+                call_sid,
+                state.duration_seconds,
             )
         return state
 
     @property
     @abstractmethod
-    def engine_name(self) -> str:
-        ...
+    def engine_name(self) -> str: ...
 
 
 class ConversationRelayEngine(VoiceEngine):
@@ -168,11 +172,21 @@ class ConversationRelayEngine(VoiceEngine):
         return "conversation_relay"
 
     async def on_call_start(
-        self, call_sid: str, caller: str, direction: CallDirection,
-        target_number: str = "", target_name: str = "", purpose: str = "",
+        self,
+        call_sid: str,
+        caller: str,
+        direction: CallDirection,
+        target_number: str = "",
+        target_name: str = "",
+        purpose: str = "",
     ) -> CallState:
         state = await self._register_call(
-            call_sid, caller, direction, target_number, target_name, purpose,
+            call_sid,
+            caller,
+            direction,
+            target_number,
+            target_name,
+            purpose,
         )
         logger.info("ConversationRelay call started: %s", call_sid)
         return state
@@ -216,7 +230,7 @@ class ConversationRelayEngine(VoiceEngine):
                 self._settings.twilio_auth_token.get_secret_value(),
             )
             call = client.calls(call_sid)
-            twiml = f'<Response><Dial>{target_number}</Dial></Response>'
+            twiml = f"<Response><Dial>{target_number}</Dial></Response>"
             call.update(twiml=twiml)
             logger.info("Call %s transferred to %s", call_sid, target_number)
         except Exception:
@@ -295,12 +309,22 @@ class MediaStreamEngine(VoiceEngine):
                 )
 
     async def on_call_start(
-        self, call_sid: str, caller: str, direction: CallDirection,
-        target_number: str = "", target_name: str = "", purpose: str = "",
+        self,
+        call_sid: str,
+        caller: str,
+        direction: CallDirection,
+        target_number: str = "",
+        target_name: str = "",
+        purpose: str = "",
     ) -> CallState:
         await self._ensure_providers()
         state = await self._register_call(
-            call_sid, caller, direction, target_number, target_name, purpose,
+            call_sid,
+            caller,
+            direction,
+            target_number,
+            target_name,
+            purpose,
         )
         logger.info("MediaStream call started: %s", call_sid)
         return state
@@ -354,11 +378,7 @@ class MediaStreamEngine(VoiceEngine):
             return
 
         # Decode base64 payload from Twilio media event
-        raw = (
-            base64.b64decode(text_or_audio)
-            if isinstance(text_or_audio, str)
-            else text_or_audio
-        )
+        raw = base64.b64decode(text_or_audio) if isinstance(text_or_audio, str) else text_or_audio
         if not raw:
             return
 
@@ -388,11 +408,13 @@ class MediaStreamEngine(VoiceEngine):
                 mulaw_data = pcm16k_to_mulaw8k(audio_chunk)
                 if ws and mulaw_data:
                     payload = base64.b64encode(mulaw_data).decode("ascii")
-                    msg = json.dumps({
-                        "event": "media",
-                        "streamSid": stream_sid,
-                        "media": {"payload": payload},
-                    })
+                    msg = json.dumps(
+                        {
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {"payload": payload},
+                        }
+                    )
                     await ws.send_text(msg)
 
         logger.debug("MS speech output [%s]: %s", call_sid, text[:100])
@@ -421,7 +443,7 @@ class MediaStreamEngine(VoiceEngine):
                 self._settings.twilio_account_sid,
                 self._settings.twilio_auth_token.get_secret_value(),
             )
-            twiml = f'<Response><Dial>{target_number}</Dial></Response>'
+            twiml = f"<Response><Dial>{target_number}</Dial></Response>"
             client.calls(call_sid).update(twiml=twiml)
             logger.info("Call %s transferred to %s", call_sid, target_number)
         except Exception:

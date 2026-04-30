@@ -184,9 +184,7 @@ class MemoryStore:
         logger.debug("Stored memory %s for user %s [%s]", mem_id[:8], user_id, category)
         return mem_id
 
-    async def search_text(
-        self, query: str, user_id: str | None = None, limit: int = 5
-    ) -> list[Memory]:
+    async def search_text(self, query: str, user_id: str | None = None, limit: int = 5) -> list[Memory]:
         """Full-text search over memories using FTS5."""
         assert self._db is not None
         # Build FTS5 query: split into words and OR them together for broad matching
@@ -222,19 +220,19 @@ class MemoryStore:
         results: list[Memory] = []
         async with self._db.execute(sql, params) as cursor:
             async for row in cursor:
-                results.append(Memory(
-                    id=row[0],
-                    user_id=row[1],
-                    content=row[2],
-                    category=row[3],
-                    created_at=row[4],
-                    score=abs(float(row[5])) if row[5] else 0.0,
-                ))
+                results.append(
+                    Memory(
+                        id=row[0],
+                        user_id=row[1],
+                        content=row[2],
+                        category=row[3],
+                        created_at=row[4],
+                        score=abs(float(row[5])) if row[5] else 0.0,
+                    )
+                )
         return results
 
-    async def search_similar(
-        self, embedding: list[float], user_id: str | None = None, limit: int = 5
-    ) -> list[Memory]:
+    async def search_similar(self, embedding: list[float], user_id: str | None = None, limit: int = 5) -> list[Memory]:
         """Vector similarity search using cosine similarity on embeddings."""
         assert self._db is not None
 
@@ -256,21 +254,24 @@ class MemoryStore:
             async for row in cursor:
                 stored_emb = _unpack_embedding(row[4])
                 score = _cosine_similarity(embedding, stored_emb)
-                scored.append((score, Memory(
-                    id=row[0],
-                    user_id=row[1],
-                    content=row[2],
-                    category=row[3],
-                    created_at=row[5],
-                    score=score,
-                )))
+                scored.append(
+                    (
+                        score,
+                        Memory(
+                            id=row[0],
+                            user_id=row[1],
+                            content=row[2],
+                            category=row[3],
+                            created_at=row[5],
+                            score=score,
+                        ),
+                    )
+                )
 
         scored.sort(key=lambda x: x[0], reverse=True)
         return [m for _, m in scored[:limit]]
 
-    async def get_recent_memories(
-        self, user_id: str, limit: int = 10, category: str | None = None
-    ) -> list[Memory]:
+    async def get_recent_memories(self, user_id: str, limit: int = 10, category: str | None = None) -> list[Memory]:
         """Get most recent memories for a user."""
         assert self._db is not None
         if category:
@@ -291,10 +292,15 @@ class MemoryStore:
         results: list[Memory] = []
         async with self._db.execute(sql, sql_params) as cursor:
             async for row in cursor:
-                results.append(Memory(
-                    id=row[0], user_id=row[1], content=row[2],
-                    category=row[3], created_at=row[4],
-                ))
+                results.append(
+                    Memory(
+                        id=row[0],
+                        user_id=row[1],
+                        content=row[2],
+                        category=row[3],
+                        created_at=row[4],
+                    )
+                )
         return results
 
     # ── Entities ──────────────────────────────────────────
@@ -327,17 +333,14 @@ class MemoryStore:
         else:
             ent_id = str(uuid.uuid4())
             await self._db.execute(
-                "INSERT INTO entities (id, user_id, name, type, attributes_json, last_seen) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO entities (id, user_id, name, type, attributes_json, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
                 (ent_id, user_id, name, entity_type, attrs_json, now),
             )
 
         await self._db.commit()
         return ent_id
 
-    async def get_entities(
-        self, user_id: str, entity_type: str | None = None
-    ) -> list[Entity]:
+    async def get_entities(self, user_id: str, entity_type: str | None = None) -> list[Entity]:
         """Get all entities for a user, optionally filtered by type."""
         assert self._db is not None
         if entity_type:
@@ -356,17 +359,21 @@ class MemoryStore:
         results: list[Entity] = []
         async with self._db.execute(sql, sql_params) as cursor:
             async for row in cursor:
-                results.append(Entity(
-                    id=row[0], user_id=row[1], name=row[2], type=row[3],
-                    attributes=json.loads(row[4]), last_seen=row[5],
-                ))
+                results.append(
+                    Entity(
+                        id=row[0],
+                        user_id=row[1],
+                        name=row[2],
+                        type=row[3],
+                        attributes=json.loads(row[4]),
+                        last_seen=row[5],
+                    )
+                )
         return results
 
     # ── Conversations ─────────────────────────────────────
 
-    async def store_conversation(
-        self, user_id: str, channel: str, messages_json: str
-    ) -> str:
+    async def store_conversation(self, user_id: str, channel: str, messages_json: str) -> str:
         """Archive a conversation snapshot."""
         assert self._db is not None
         conv_id = str(uuid.uuid4())

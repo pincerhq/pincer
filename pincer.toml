@@ -1,0 +1,66 @@
+# ── Google Workspace Integration ──────────────────────────────────────────────
+# Run 'pincer setup-google' for one-time OAuth consent.
+# Credentials: ~/.pincer/google_credentials.json (OAuth client JSON from Google Cloud Console)
+# Token cache: ~/.pincer/google_workspace_token.json (auto-created after setup)
+#
+# [integrations.google]
+# enabled  = true
+# services = ["gmail", "calendar", "drive", "docs", "sheets", "slides", "tasks", "contacts"]
+
+[mcp]
+enabled     = true
+tool_prefix = true   # Tools prefixed: github__create_issue, filesystem__read_file
+
+# ── MCP Server: expose Pincer tools to Claude Desktop, Cursor, VS Code ────────
+# Controlled by PINCER_MCP_SERVER_EXPORT_ENABLED env var in Docker.
+# Set enabled = true here to activate when running outside Docker.
+[mcp.server]
+enabled      = false       # Set to true to expose Pincer as an MCP server
+host         = "127.0.0.1" # Localhost only; use 0.0.0.0 in Docker (see docker-compose.yml)
+port         = 18800
+path         = "/mcp"
+expose_tools = [
+    "web_search",
+    "email_check",
+    "calendar_today",
+    "memory_search",
+    # Uncomment to expose more tools:
+    # "web_browse",
+    # "file_read",
+    # "email_send",     # requires approval
+    # "shell_exec",     # requires approval
+    # "calendar_create", # requires approval
+]
+
+# ── MCP Client: connect Pincer to external MCP servers ────────────────────────
+# Add [[mcp.servers]] blocks below to connect to external tools.
+# Each server's tools appear in the agent alongside Pincer's built-in tools.
+#
+# Example — GitHub (requires Node.js):
+# [[mcp.servers]]
+# name      = "github"
+# transport = "stdio"
+# command   = "npx"
+# args      = ["-y", "@modelcontextprotocol/server-github"]
+# env       = { GITHUB_PERSONAL_ACCESS_TOKEN = "${GITHUB_TOKEN}" }
+# approval_required = ["create_*", "delete_*", "merge_*", "update_*"]
+#
+# Example — local filesystem:
+# [[mcp.servers]]
+# name      = "filesystem"
+# transport = "stdio"
+# command   = "npx"
+# args      = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# approval_required = ["write_file", "delete_file", "move_file"]
+#
+# Example — PostgreSQL:
+# [[mcp.servers]]
+# name      = "postgres"
+# transport = "stdio"
+# command   = "npx"
+# args      = ["-y", "@modelcontextprotocol/server-postgres", "${DATABASE_URL}"]
+# env       = { DATABASE_URL = "${DATABASE_URL}" }
+# approval_required = ["*"]
+# timeout_seconds   = 60
+#
+# See docs/mcp-guide.md for the full configuration reference.

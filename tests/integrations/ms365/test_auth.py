@@ -1,0 +1,134 @@
+"""Tests for MS365 authentication."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from pincer.integrations.ms365.auth import (
+    ALL_SCOPES,
+    SERVICE_SCOPES,
+    MS365Auth,
+    MS365AuthError,
+    scopes_for_services,
+)
+
+
+def test_scopes_for_all_services():
+    """All scopes are returned when no services specified."""
+    result = scopes_for_services(None)
+    assert result == ALL_SCOPES
+
+
+def test_scopes_for_email_service():
+    """Only email scopes returned for email service."""
+    result = scopes_for_services(["email"])
+    assert "Mail.ReadWrite" in result
+    assert "Mail.Send" in result
+    assert "User.Read" in result  # always included
+    assert "Calendars.ReadWrite" not in result
+
+
+def test_scopes_deduplicated():
+    """Duplicate scopes are removed."""
+    result = scopes_for_services(["email", "email"])
+    count = sum(1 for s in result if s == "Mail.ReadWrite")
+    assert count == 1
+
+
+def test_scopes_complete():
+    """All required scopes are in ALL_SCOPES list."""
+    assert len(ALL_SCOPES) >= 13
+    assert "User.Read" in ALL_SCOPES
+    assert "Mail.ReadWrite" in ALL_SCOPES
+    assert "Mail.Send" in ALL_SCOPES
+    assert "Calendars.ReadWrite" in ALL_SCOPES
+    assert "Files.ReadWrite.All" in ALL_SCOPES
+
+
+def test_tenant_common():
+    """Default tenant is 'common'."""
+    with patch("pincer.integrations.ms365.auth.msal", create=True):
+        auth = MS365Auth(client_id="test-id")
+    assert auth.tenant_id == "common"
+
+
+def test_tenant_custom():
+    """Custom tenant ID stored correctly."""
+    with patch("pincer.integrations.ms365.auth.msal", create=True):
+        auth = MS365Auth(client_id="test-id", tenant_id="my-tenant-id")
+    assert auth.tenant_id == "my-tenant-id"
+
+
+def test_cache_path_default():
+    """Default cache path is ~/.pincer/ms365_token_cache.json."""
+    with patch("pincer.integrations.ms365.auth.msal", create=True):
+        auth = MS365Auth(client_id="test-id")
+    assert auth.cache_path == Path.home() / ".pincer" / "ms365_token_cache.json"
+
+
+def test_cache_path_custom(tmp_path):
+    """Custom cache path resolves correctly."""
+    custom = str(tmp_path / "tokens.json")
+    with patch("pincer.integrations.ms365.auth.msal", create=True):
+        auth = MS365Auth(client_id="test-id", cache_path=custom)
+    assert auth.cache_path == Path(custom)
+
+
+@pytest.mark.asyncio
+async def test_get_token_no_cache_raises():
+    """get_token raises when no cached token exists."""
+    mock_msal = MagicMock()
+    mock_cache = MagicMock()
+    mock_cache.has_state_changed = False
+    mock_app = MagicMock()
+    mock_app.get_accounts.return_value = []
+    mock_msal.SerializableTokenCache.return_value = mock_cache
+    mock_msal.PublicClientApplication.return_value = mock_app
+
+    with patch.dict("sys.modules", {"msal": mock_msal}):
+        auth = MS365Auth.__new__(MS365Auth)
+        auth._client_id = "test-id"
+        auth._tenant_id = "common"
+        auth._cache_path = Path("/tmp/nonexistent_ms365_cache.json")
+        auth._scopes = ["User.Read"]
+        auth._app = None
+        auth._cache = None
+        auth._pending_flow_message = ""
+
+        with pytest.raises(MS365AuthError, match="No valid Microsoft 365 token"):
+            await auth.get_token()
+
+
+@pytest.mark.asyncio
+async def test_get_token_from_cache():
+    """get_token returns cached token when available."""
+    mock_msal = MagicMock()
+    mock_cache = MagicMock()
+    mock_cache.has_state_changed = False
+    mock_app = MagicMock()
+    mock_app.get_accounts.return_value = [{"username": "user@test.com"}]
+    mock_app.acquire_token_silent.return_value = {"access_token": "cached-token"}
+    mock_msal.SerializableTokenCache.return_value = mock_cache
+    mock_msal.PublicClientApplication.return_value = mock_app
+
+    with patch.dict("sys.modules", {"msal": mock_msal}):
+        auth = MS365Auth.__new__(MS365Auth)
+        auth._client_id = "test-id"
+        auth._tenant_id = "common"
+        auth._cache_path = Path("/tmp/nonexistent_ms365_cache.json")
+        auth._scopes = ["User.Read"]
+        auth._app = mock_app
+        auth._cache = mock_cache
+        auth._pending_flow_message = ""
+
+        token = await auth.get_token()
+        assert token == "cached-token"
+
+
+def test_service_scopes_cover_all_services():
+    """SERVICE_SCOPES covers all 7 service types."""
+    expected_services = {"email", "calendar", "onedrive", "todo", "teams", "contacts", "onenote"}
+    assert set(SERVICE_SCOPES.keys()) == expected_services

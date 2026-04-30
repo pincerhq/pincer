@@ -196,9 +196,7 @@ class SignalChannel(BaseChannel):
                         from pincer.tools.builtin.transcribe import transcribe_voice
 
                         openai_key = self._settings.openai_api_key.get_secret_value()
-                        transcribed = await transcribe_voice(
-                            audio_data, att.content_type, openai_key
-                        )
+                        transcribed = await transcribe_voice(audio_data, att.content_type, openai_key)
                         text = f"[Voice note]: {transcribed}" if transcribed else text
                     except Exception as exc:
                         logger.warning("Voice transcription failed: %s", exc)
@@ -208,9 +206,7 @@ class SignalChannel(BaseChannel):
         user_id = msg.source
         if self._identity:
             try:
-                user_id = await self._identity.resolve(
-                    ChannelType.SIGNAL, msg.source, msg.source_name or None
-                )
+                user_id = await self._identity.resolve(ChannelType.SIGNAL, msg.source, msg.source_name or None)
             except Exception as exc:
                 logger.warning("Identity resolution failed: %s", exc)
 

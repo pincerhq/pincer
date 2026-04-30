@@ -26,8 +26,7 @@ def _sandbox_path(path_str: str) -> Path:
     # Security: must be within workspace
     if not str(target).startswith(str(workspace.resolve())):
         raise ValueError(
-            f"Access denied: path '{path_str}' is outside workspace ({workspace}). "
-            "All file operations are sandboxed."
+            f"Access denied: path '{path_str}' is outside workspace ({workspace}). All file operations are sandboxed."
         )
     return target
 

@@ -315,10 +315,27 @@ See `tests/test_tools.py` and `tests/test_sandbox.py` for examples.
 ```bash
 uv run ruff check src/ tests/
 uv run ruff format src/ tests/
+uv run ruff format --check .     # CI: fail if unformatted
 uv run mypy src/
+uv run bandit -r src/pincer -ll -s B101,B104,B310,B608
 ```
 
 CI runs these on every push. See [CONTRIBUTING.md](CONTRIBUTING.md) for full code style guidelines.
+
+---
+
+## CI Pipeline
+
+Every push and pull request triggers the CI workflow (`.github/workflows/ci.yml`):
+
+1. **Tests** — pytest with coverage (XML report for Codecov)
+2. **Type check** — mypy on `src/`
+3. **Lint** — ruff check
+4. **Format** — ruff format --check (fails if code is unformatted)
+5. **Security** — bandit scan on `src/pincer`
+6. **Coverage upload** — Codecov (optional; `CODECOV_TOKEN` secret)
+
+All steps must pass before merge. See [Contributing.md](Contributing.md) for the full CI matrix and branch protection setup.
 
 ---
 
@@ -330,6 +347,8 @@ CI runs these on every push. See [CONTRIBUTING.md](CONTRIBUTING.md) for full cod
 | Run tests | `uv run pytest` |
 | Lint | `uv run ruff check .` |
 | Format | `uv run ruff format .` |
+| Format check | `uv run ruff format --check .` |
 | Type check | `uv run mypy src/` |
+| Security scan | `uv run bandit -r src/pincer -ll -s B101,B104,B310,B608` |
 | Dashboard dev | `cd dashboard && pnpm dev` |
 | Doctor | `uv run pincer doctor` |

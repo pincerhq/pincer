@@ -16,25 +16,59 @@ from pincer.voice.safety_gates import (
 
 
 class TestParseConfirmation:
-    @pytest.mark.parametrize("utterance", [
-        "yes", "Yeah", "yep", "sure", "go ahead", "do it",
-        "correct", "confirmed", "absolutely", "OK", "okay",
-        "sounds good", "perfect", "go for it", "please do",
-    ])
+    @pytest.mark.parametrize(
+        "utterance",
+        [
+            "yes",
+            "Yeah",
+            "yep",
+            "sure",
+            "go ahead",
+            "do it",
+            "correct",
+            "confirmed",
+            "absolutely",
+            "OK",
+            "okay",
+            "sounds good",
+            "perfect",
+            "go for it",
+            "please do",
+        ],
+    )
     def test_affirmative(self, utterance):
         assert parse_confirmation(utterance) == ConfirmationStatus.CONFIRMED
 
-    @pytest.mark.parametrize("utterance", [
-        "no", "nah", "nope", "don't", "stop", "wait",
-        "hold on", "cancel", "never mind", "not yet",
-        "scratch that", "forget it",
-    ])
+    @pytest.mark.parametrize(
+        "utterance",
+        [
+            "no",
+            "nah",
+            "nope",
+            "don't",
+            "stop",
+            "wait",
+            "hold on",
+            "cancel",
+            "never mind",
+            "not yet",
+            "scratch that",
+            "forget it",
+        ],
+    )
     def test_negative(self, utterance):
         assert parse_confirmation(utterance) == ConfirmationStatus.REJECTED
 
-    @pytest.mark.parametrize("utterance", [
-        "", "hmm", "what", "tell me more", "I'm thinking",
-    ])
+    @pytest.mark.parametrize(
+        "utterance",
+        [
+            "",
+            "hmm",
+            "what",
+            "tell me more",
+            "I'm thinking",
+        ],
+    )
     def test_unclear(self, utterance):
         assert parse_confirmation(utterance) == ConfirmationStatus.UNCLEAR
 

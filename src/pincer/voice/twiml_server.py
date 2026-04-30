@@ -50,12 +50,10 @@ def _validate_twilio_signature(request: Request, body: bytes) -> bool:
 
     url = str(request.url)
     try:
-        params = dict(sorted(
-            (k, v) for k, v in
-            ((k, request.query_params.get(k, "")) for k in request.query_params)
-        ))
+        params = dict(sorted((k, v) for k, v in ((k, request.query_params.get(k, "")) for k in request.query_params)))
         if body:
             from urllib.parse import parse_qs
+
             form_data = parse_qs(body.decode("utf-8", errors="replace"))
             for k, v in sorted(form_data.items()):
                 params[k] = v[0] if v else ""
@@ -70,6 +68,7 @@ def _validate_twilio_signature(request: Request, body: bytes) -> bool:
     ).digest()
 
     import base64
+
     expected = base64.b64encode(computed).decode("utf-8")
     return hmac.compare_digest(expected, signature)
 
@@ -95,9 +94,7 @@ async def voice_health() -> dict[str, Any]:
 async def voice_webhook(request: Request) -> Response:
     """Inbound call handler — returns TwiML to start a stream or ConversationRelay."""
     if not _engine or not _settings:
-        return _twiml_response(
-            "<Response><Say>Voice system is not configured.</Say><Hangup/></Response>"
-        )
+        return _twiml_response("<Response><Say>Voice system is not configured.</Say><Hangup/></Response>")
 
     form = await request.form()
     call_sid = str(form.get("CallSid", ""))
@@ -111,11 +108,10 @@ async def voice_webhook(request: Request) -> Response:
         allowed_set = {n.strip() for n in allowed.split(",")}
         if caller not in allowed_set:
             logger.warning("Rejected call from %s (not in allowlist)", caller)
-            return _twiml_response(
-                "<Response><Say>This number is not authorized.</Say><Hangup/></Response>"
-            )
+            return _twiml_response("<Response><Say>This number is not authorized.</Say><Hangup/></Response>")
 
     from pincer.voice.engine import CallDirection
+
     await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
 
     base_url = _settings.voice_webhook_base_url.strip().rstrip("/")
@@ -173,7 +169,9 @@ async def voice_fallback(request: Request) -> Response:
 
     logger.error(
         "Voice fallback triggered: call=%s code=%s msg=%s",
-        call_sid, error_code, error_msg,
+        call_sid,
+        error_code,
+        error_msg,
     )
 
     return _twiml_response(
@@ -208,6 +206,7 @@ async def relay_webhook(request: Request) -> Response:
         caller = str(body.get("from", body.get("From", "")))
         if call_sid and not _engine.get_call_state(call_sid):
             from pincer.voice.engine import CallDirection
+
             await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
 
     elif event_type == "interrupt":
@@ -282,6 +281,6 @@ def _extract_host(base_url: str) -> str:
     host = base_url
     for prefix in ("https://", "http://", "wss://", "ws://"):
         if host.startswith(prefix):
-            host = host[len(prefix):]
+            host = host[len(prefix) :]
             break
     return host.rstrip("/")

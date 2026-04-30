@@ -87,7 +87,9 @@ class IVRNavigator:
             state.dtmf_sent.append(best.digit)
             logger.info(
                 "IVR selection [%s]: press %s for '%s'",
-                call_sid, best.digit, best.description,
+                call_sid,
+                best.digit,
+                best.description,
             )
             await self._engine.send_dtmf(call_sid, best.digit)
             return best.digit
@@ -196,16 +198,27 @@ def _detect_human_speech(transcript: str) -> bool:
         return False
 
     ivr_indicators = [
-        "press", "dial", "menu", "option", "selection",
-        "please hold", "your call is important",
-        "estimated wait time", "remain on the line",
+        "press",
+        "dial",
+        "menu",
+        "option",
+        "selection",
+        "please hold",
+        "your call is important",
+        "estimated wait time",
+        "remain on the line",
     ]
     transcript_lower = transcript.lower()
     ivr_matches = sum(1 for ind in ivr_indicators if ind in transcript_lower)
 
     human_indicators = [
-        "hello", "hi", "how can i help", "speaking",
-        "this is", "good morning", "good afternoon",
+        "hello",
+        "hi",
+        "how can i help",
+        "speaking",
+        "this is",
+        "good morning",
+        "good afternoon",
     ]
     human_matches = sum(1 for ind in human_indicators if ind in transcript_lower)
 

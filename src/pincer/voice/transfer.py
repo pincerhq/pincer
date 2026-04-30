@@ -80,7 +80,7 @@ class WarmTransfer:
             host = base_url
             for prefix in ("https://", "http://"):
                 if host.startswith(prefix):
-                    host = host[len(prefix):]
+                    host = host[len(prefix) :]
                     break
             host = host.rstrip("/")
 
@@ -107,7 +107,9 @@ class WarmTransfer:
 
             logger.info(
                 "Warm transfer initiated: user=%s -> provider=%s (call=%s)",
-                user_call_sid, provider_number, call.sid,
+                user_call_sid,
+                provider_number,
+                call.sid,
             )
 
         except ImportError:
@@ -139,7 +141,7 @@ class WarmTransfer:
             user_twiml = (
                 '<?xml version="1.0" encoding="UTF-8"?>'
                 "<Response>"
-                f'<Dial><Conference>{conf_name}</Conference></Dial>'
+                f"<Dial><Conference>{conf_name}</Conference></Dial>"
                 "</Response>"
             )
             client.calls(user_call_sid).update(twiml=user_twiml)
@@ -147,7 +149,7 @@ class WarmTransfer:
             provider_twiml = (
                 '<?xml version="1.0" encoding="UTF-8"?>'
                 "<Response>"
-                f'<Dial><Conference>{conf_name}</Conference></Dial>'
+                f"<Dial><Conference>{conf_name}</Conference></Dial>"
                 "</Response>"
             )
             client.calls(state.provider_call_sid).update(twiml=provider_twiml)

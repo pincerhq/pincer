@@ -81,6 +81,7 @@ Send these to your bot via Telegram to see what it can do:
 | `What can you do?` | Lists all available tools and skills |
 | `Search for the latest news about AI agents` | Web search + summarization |
 | `What's on my calendar today?` | Reads Google Calendar (after OAuth setup) |
+| `Schedule a meeting tomorrow at 2pm` | Creates calendar event; agent returns direct link for verification |
 | `Summarize my unread emails` | Reads Gmail inbox (after OAuth setup) |
 | `Remind me to call the dentist tomorrow at 9am` | Creates a scheduled reminder |
 | `Run: ls -la` | Executes a shell command (asks for approval first) |
@@ -116,21 +117,44 @@ Connects to your Gmail via OAuth. Pincer can then read, search, draft, and send 
 
 ---
 
-## Step 6: Enable Google Services (Optional)
+## Step 6: Enable Google Workspace (Optional)
 
-To use Gmail and Google Calendar:
+To unlock Gmail, Google Calendar, Drive, Docs, Sheets, Slides, Meet, Tasks, and Contacts — 113 tools total:
 
 ```bash
-pincer google setup
+pincer setup-google
 ```
 
-This opens a browser window for Google OAuth. Grant the requested permissions. Pincer stores tokens locally in `data/google_tokens.json`.
+This opens a browser window for Google OAuth consent. Grant the requested permissions. Pincer stores the token locally at `~/.pincer/google_workspace_token.json` (readable only by you).
 
-Required scopes:
-- `gmail.readonly` — read emails
-- `gmail.send` — send emails
-- `calendar.readonly` — read calendar
-- `calendar.events` — create/edit events
+You'll need a `google_credentials.json` OAuth client file first — see [Google Workspace Setup](CLI_REFERENCE.md#google-workspace) for how to get one from Google Cloud Console.
+
+Required scopes (all requested in a single consent flow):
+- `gmail.readonly` / `gmail.compose` / `gmail.modify` — read, draft, and send emails
+- `calendar.events` — create and edit calendar events
+- `calendar.readonly` — read calendar and event list
+- `drive` — read and write Drive files
+- `documents` — read and write Google Docs
+- `spreadsheets` — read and write Google Sheets
+- `presentations` — read and write Google Slides
+- `tasks` — manage Google Tasks
+- `contacts.readonly` / `directory.readonly` — read People / Contacts
+
+Once configured, all 85 `google__*` tools are available every time `pincer run` starts — no further setup needed.
+
+---
+
+## Step 7: Enable Microsoft 365 (Optional)
+
+To unlock Outlook email, Calendar, OneDrive, To Do, Teams, Contacts, and OneNote — 69 tools total:
+
+```bash
+pincer setup-ms365
+```
+
+You'll need to [register a free Azure app](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) first to get a client ID. The wizard walks you through it. The token is cached locally at `~/.pincer/ms365_token_cache.json` (readable only by you).
+
+See [Microsoft 365 Setup Guide](ms365-setup.md) for detailed instructions.
 
 ---
 

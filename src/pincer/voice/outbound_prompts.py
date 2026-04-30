@@ -32,10 +32,7 @@ class OutboundCallContext:
         )
 
     def build_greeting(self) -> str:
-        return (
-            f"Hi, I'm calling on behalf of {self.user_name} "
-            f"regarding {self.task_description}."
-        )
+        return f"Hi, I'm calling on behalf of {self.user_name} regarding {self.task_description}."
 
 
 OUTBOUND_CALL_PROMPT = """\

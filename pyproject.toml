@@ -1,6 +1,6 @@
 [project]
 name = "pincer-agent"
-version = "0.7.3"
+version = "0.7.6"
 description = "Your personal AI agent. Text it on WhatsApp. It does stuff. 🦀"
 readme = "README.md"
 license = { text = "MIT" }
@@ -27,7 +27,14 @@ dependencies = [
     "rich>=13.9.0",
     "structlog>=24.4.0",
     # Sprint 3: WhatsApp + Proactive Agent
-    "neonize>=0.3.14",
+    # WhatsApp frequently invalidates older protocol versions; keep floor at a
+    # release that carries a known-accepted whatsmeow build. Bump when the
+    # server returns `err-client-outdated` (see docs/whatsapp-troubleshooting.md).
+    "neonize>=0.3.16",
+    # neonize 0.3.16 ships protobuf gencode 7.34.1 without pinning a runtime
+    # floor; older protobuf runtimes raise `incompatible Protobuf Gencode/Runtime
+    # versions` at pairing time. Keep this aligned with neonize's gencode.
+    "protobuf>=7.34.1",
     # Sprint 4: Discord (PyNaCl required for voice)
     "discord.py[voice]>=2.3,<3.0",
     "qrcode[pil]>=8.0",
@@ -58,13 +65,31 @@ voice = [
     "deepgram-sdk>=3.0",
     "elevenlabs>=1.0",
 ]
-all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice]"]
+image = [
+    "fal-client>=0.13.0",
+    "google-genai>=1.0",
+]
+mcp = [
+    "mcp>=1.8.0",
+    "PyJWT[crypto]>=2.8.0",
+]
+ms365 = [
+    "msal>=1.28.0",
+]
+slack = [
+    "slack-sdk>=3.27.0",
+    "slack-bolt>=1.18.0",
+]
+all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp,ms365,slack]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
+    "bandit>=1.7.0",
+    "types-croniter>=1.0.0",
+    "types-qrcode>=8.0.0",
     "httpx>=0.27.0",
 ]
 
@@ -91,6 +116,58 @@ line-length = 120
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
 extend-ignore = ["N814", "N818"]
 
+[tool.ruff.lint.per-file-ignores]
+# FastMCP tool parameters are declared with `Field(...)` in default arguments.
+"mcp_servers/**" = ["B008"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
+ignore_missing_imports = true
+warn_unused_ignores = false
+
+# Voice module uses async iterators and third-party libs without stubs
+[[tool.mypy.overrides]]
+module = [
+    "pincer.voice.*",
+    "pincer.channels.discord_channel",
+    "pincer.channels.telegram",
+    "pincer.channels.signal",
+    "pincer.channels.signal_client",
+    "pincer.channels.whatsapp",
+    "pincer.llm.openai_provider",
+    "pincer.llm.anthropic_provider",
+    "pincer.llm.grok_provider",
+    "pincer.llm._openai_common",
+    "pincer.tools.builtin.email_tool",
+    "pincer.tools.builtin.calendar_tool",
+    "pincer.tools.builtin.image_gen",
+    "pincer.scheduler.proactive",
+    "pincer.scheduler.triggers",
+    "pincer.core.agent",
+    "pincer.core.identity",
+    "pincer.costs.budget",
+    "pincer.security.audit",
+    "pincer.memory.store",
+    "pincer.api.skills",
+    "pincer.cli",
+    "pincer.integrations.ms365.*",
+]
+disable_error_code = [
+    "type-arg",
+    "no-any-return",
+    "union-attr",
+    "override",
+    "assignment",
+    "no-untyped-def",
+    "no-untyped-call",
+    "index",
+    "arg-type",
+    "operator",
+    "return-value",
+    "attr-defined",
+]
+
+[tool.bandit]
+exclude_dirs = ["tests", "dashboard"]
+skips = ["B101", "B104", "B310", "B608"]

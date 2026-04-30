@@ -14,6 +14,9 @@ venv/
 .vscode/
 .idea/
 
+# Cursor
+.cursor/
+
 # OS
 .DS_Store
 
@@ -31,3 +34,14 @@ data/google_token.json
 
 # Neonize WhatsApp session databases
 pincer-wa*
+data/google_workspace_token.json
+
+# Internal and required MCP servers
+pincer.local.toml
+mcp_servers/*
+!mcp_servers/pincer-mcps
+!mcp_servers/pincer-mcps/**
+!mcp_servers/pomodoro-mcp
+!mcp_servers/pomodoro-mcp/**
+!mcp_servers/memory-mcp
+!mcp_servers/memory-mcp/**

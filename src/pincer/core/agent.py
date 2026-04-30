@@ -12,6 +12,7 @@ Flow:
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -32,12 +33,18 @@ from pincer.llm.base import (
 # Signature: (tool_name, arguments, user_id, channel) -> approved?
 ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool]]
 
+# Signature: (phase, tool_name, arguments, user_id, channel) -> None
+# phase is "start" (before execution) or "end" (after execution, success or error).
+ToolEventCallback = Callable[[str, str, dict[str, Any], str, str], Awaitable[None]]
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from pincer.config import Settings
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
+    from pincer.mcp.manager import MCPClientManager
+    from pincer.mcp.server import PincerMCPServer
     from pincer.memory.store import MemoryStore
     from pincer.memory.summarizer import Summarizer
     from pincer.tools.registry import ToolRegistry
@@ -46,6 +53,122 @@ logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_ERRORS = 3
 _MAX_SANITIZE_ATTEMPTS = 2
+
+_GOOGLE_TOOL_CHAIN_HINTS = """
+## Google Workspace Tool Chains
+
+When the user asks to download or save an email attachment:
+1. google__search_messages → find the email (by sender, subject, keywords, "has:attachment")
+2. google__get_message → get full details including attachment metadata (attachment_id)
+3. google__get_attachment → download the file using message_id + attachment_id from step 2
+4. Report the downloaded file to the user
+
+### Searching Google Drive
+Use friendly parameters — do NOT write raw Drive API query syntax:
+  google__search_drive_files(name="budget")
+  google__search_drive_files(name="report", file_type="spreadsheet")
+  google__search_drive_files(name="proposal", file_type="document")
+  google__search_drive_files(name="Projects", file_type="folder")
+
+The results include file type labels and tell you which tool to use next:
+  - Google Sheet → google__get_sheet_values(spreadsheet_id="<ID>")
+  - Google Doc   → google__get_doc_content(file_id="<ID>")
+  - .xlsx / PDF  → google__download_file(file_id="<ID>")
+  - Google Doc/Sheet/Slide (to export) → google__export_google_doc(file_id="<ID>", export_format="pdf")
+
+When the user asks to download or save a file from Google Drive:
+1. google__search_drive_files(name="<filename>") → find the file
+2. Check the type label in the result:
+   - Google Sheet/Doc/Slide → google__export_google_doc(file_id="...", export_format="pdf")
+   - PDF, image, ZIP, .xlsx → google__download_file(file_id="...")
+3. Both tools save the file to disk and return the path — do NOT use python_exec.
+
+When the user says "export as PDF" or "save as DOCX":
+→ google__export_google_doc(file_id="...", export_format="pdf" or "docx")
+
+NEVER use python_exec or shell_exec for Gmail/Google Workspace/Drive operations.
+The google__* tools have proper OAuth credentials.
+The sandbox does NOT have Google credentials or libraries installed.
+
+When searching for emails with attachments, include "has:attachment" in the query.
+
+When the user asks to upload a local file to Google Drive:
+1. If you know the exact path → google__upload_file(file_path="<path>", folder_id="...")
+2. If you don't know the path → google__list_local_files(pattern="<name>") to find it
+3. If the file was just downloaded → it's in ~/.pincer/downloads/ (use that path)
+4. If the file was created by python_exec or file_write → it's in ~/.pincer/workspace/
+5. If still not found → ask the user for the exact file path
+
+To upload into a specific folder:
+1. google__search_drive_files(name="Projects", file_type="folder") → get folder_id
+2. google__upload_file(file_path="...", folder_id="<folder_id>")
+
+NEVER use python_exec or shell_exec for Google Drive uploads.
+The google__upload_file tool has proper OAuth credentials. The sandbox does NOT.
+
+### Google Sheets — Reading Data
+google__get_sheet_values works ONLY on Google Sheets (online). NOT on .xlsx files.
+The search result tells you: "Google Sheet" → use get_sheet_values; "Excel (.xlsx)" → download first.
+
+When the user asks to read, show, or display data from a Google Sheet:
+1. google__search_drive_files(name="<spreadsheet name>", file_type="spreadsheet") → get spreadsheet_id
+2. Optionally: google__list_sheets(spreadsheet_id="...") → get tab/sheet names
+3. google__get_sheet_values(spreadsheet_id="...", sheet_name="Budget", columns="A")
+
+Friendly parameter examples (no A1 notation needed):
+  - "Show column A from Budget tab"  → sheet_name="Budget", columns="A"
+  - "Show columns A through C"       → columns="A:C"
+  - "Show rows 1 to 50"              → rows="1:50"
+  - "Show B2:D20 from Sheet1"        → range_="Sheet1!B2:D20"
+  - "Show all data"                  → just pass spreadsheet_id
+
+If a column returns only 1 row, the data is in OTHER columns — read all columns next:
+  google__get_sheet_values(spreadsheet_id="...")
+
+### Google Sheets — Searching
+When the user asks to find or locate a value in a spreadsheet:
+1. google__search_drive_files(name="<name>", file_type="spreadsheet") → get spreadsheet_id
+2. google__search_sheet_values(spreadsheet_id="...", search_value="SH-05")
+   → returns cell references like "Sheet1!C14" with row context
+
+NEVER use python_exec for Google Sheets operations.
+The sandbox has no gspread, no openpyxl, no pandas Google Sheets support, and no Google credentials.
+"""
+
+_GOOGLE_FALLBACK_PATTERNS = [
+    "gmail",
+    "googleapiclient",
+    "google.auth",
+    "google_auth_oauthlib",
+    "oauth2client",
+    "imap.gmail.com",
+    "smtp.gmail.com",
+    "googleapis.com",
+    "google_tokens.json",
+    # Drive download patterns
+    "drive.google.com",
+    "files().get_media",
+    "files().export",
+    "mediaiobased",
+    "service.files()",
+    # Drive upload patterns
+    "mediafileupload",
+    "files().create(",
+    "media_body",
+    # Sheets patterns
+    "gspread",
+    "openpyxl",
+    "spreadsheets().values()",
+    "spreadsheets().get(",
+    "col_values(",
+    "row_values(",
+    "worksheet(",
+    "open_by_key(",
+    "open_by_url(",
+    # pandas reading Google Sheets or Excel
+    "pd.read_excel",
+    "read_excel(",
+]
 
 
 class StreamEventType(StrEnum):
@@ -88,27 +211,26 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
     clean: list[LLMMessage] = []
     for msg in messages:
         if msg.role == MessageRole.ASSISTANT and msg.tool_calls:
-            orphaned_calls = [
-                tc for tc in msg.tool_calls if tc.id not in all_result_ids
-            ]
+            orphaned_calls = [tc for tc in msg.tool_calls if tc.id not in all_result_ids]
             if orphaned_calls:
                 orphan_ids = [tc.id for tc in orphaned_calls]
                 logger.warning("Stripping orphaned tool_use(s): %s", orphan_ids)
                 surviving = [tc for tc in msg.tool_calls if tc.id in all_result_ids]
                 if surviving:
-                    clean.append(LLMMessage(
-                        role=msg.role,
-                        content=msg.content,
-                        tool_calls=surviving,
-                    ))
+                    clean.append(
+                        LLMMessage(
+                            role=msg.role,
+                            content=msg.content,
+                            tool_calls=surviving,
+                        )
+                    )
                 elif msg.content:
                     clean.append(LLMMessage(role=msg.role, content=msg.content))
                 continue
 
         if msg.role == MessageRole.TOOL_RESULT:
             has_matching_use = any(
-                prev.role == MessageRole.ASSISTANT
-                and any(tc.id == msg.tool_call_id for tc in prev.tool_calls)
+                prev.role == MessageRole.ASSISTANT and any(tc.id == msg.tool_call_id for tc in prev.tool_calls)
                 for prev in clean
             )
             if not has_matching_use:
@@ -132,6 +254,7 @@ class Agent:
         memory_store: MemoryStore | None = None,
         summarizer: Summarizer | None = None,
         approval_callback: ApprovalCallback | None = None,
+        tool_event_callback: ToolEventCallback | None = None,
     ) -> None:
         self._settings = settings
         self._llm = llm
@@ -141,6 +264,34 @@ class Agent:
         self._memory = memory_store
         self._summarizer = summarizer
         self._approval_callback = approval_callback
+        self._tool_event_callback = tool_event_callback
+        self.mcp_manager: MCPClientManager | None = None  # set by cli after startup
+        self.mcp_server: PincerMCPServer | None = None  # set by cli after startup
+        self.mcp_shell: Any = None  # set by EmbeddedMCPShell.start()
+        # (user_id, channel_name) of the most recent message — used by ask_user
+        self._last_active: tuple[str, str] | None = None
+        # Injected by cli.py: (user_id, channel_name, question) -> answer
+        self._ask_user_callback: Callable[[str, str, str], Awaitable[str]] | None = None
+
+    @property
+    def tool_registry(self) -> ToolRegistry:
+        return self._tools
+
+    async def _ask_user_on_active_channel(self, question: str) -> str:
+        """
+        Send a question to the user's most-recently active channel and await their reply.
+
+        Called by the MCP server when an external client invokes `pincer_ask_user`.
+        Returns the user's response, or a descriptive message on timeout / no channel.
+        """
+        if not self._ask_user_callback or not self._last_active:
+            return "[No active messaging channel — user unreachable]"
+        user_id, channel_name = self._last_active
+        try:
+            return await self._ask_user_callback(user_id, channel_name, question)
+        except Exception as e:
+            logger.exception("ask_user callback failed")
+            return f"[Error contacting user: {e}]"
 
     async def handle_message(
         self,
@@ -158,6 +309,7 @@ class Agent:
             text: User's message text
             images: Optional list of (raw_bytes, media_type) tuples
         """
+        self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel)
 
         # Build user message
@@ -243,9 +395,7 @@ class Agent:
                 )
                 total_cost += cost
             except BudgetExceededError as e:
-                final_text = (
-                    f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
-                )
+                final_text = f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
                 break
 
             # If the LLM wants to use tools
@@ -341,6 +491,7 @@ class Agent:
         Tool-call iterations use complete() (non-streaming). Only the final
         text response is streamed token-by-token.
         """
+        self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel)
 
         img_contents: list[ImageContent] = []
@@ -349,7 +500,9 @@ class Agent:
                 img_contents.append(ImageContent.from_bytes(raw, media_type))
 
         user_msg = LLMMessage(
-            role=MessageRole.USER, content=text, images=img_contents,
+            role=MessageRole.USER,
+            content=text,
+            images=img_contents,
         )
         await self._sessions.add_message(session, user_msg)
 
@@ -419,9 +572,7 @@ class Agent:
 
             iteration_had_error = False
             for tool_call in response.tool_calls:
-                yield StreamChunk(
-                    StreamEventType.TOOL_START, f"Using {tool_call.name}..."
-                )
+                yield StreamChunk(StreamEventType.TOOL_START, f"Using {tool_call.name}...")
                 result = await self._execute_tool(tool_call, user_id, channel)
                 result_msg = LLMMessage(
                     role=MessageRole.TOOL_RESULT,
@@ -442,11 +593,7 @@ class Agent:
             else:
                 consecutive_errors = 0
         else:
-            fallback_content = (
-                response.content
-                if response and response.content
-                else "Max iterations reached."
-            )
+            fallback_content = response.content if response and response.content else "Max iterations reached."
             yield StreamChunk(StreamEventType.DONE, fallback_content)
             return
 
@@ -493,6 +640,23 @@ class Agent:
                 "make_phone_call tool. Do not describe or simulate the call in your response — call the tool."
             )
 
+        # Google Workspace tool chain hints when google__ tools are registered
+        if any(t.startswith("google__") for t in self._tools.list_tools()):
+            base_prompt += "\n" + _GOOGLE_TOOL_CHAIN_HINTS
+
+        # Inject connected MCP server info when available
+        if self.mcp_manager:
+            try:
+                servers = await self.mcp_manager.list_servers()
+                connected = [s for s in servers if s["connected"]]
+                if connected:
+                    server_lines = [f"  - {s['name']} ({s['tool_count']} tool(s))" for s in connected]
+                    base_prompt += "\n\n[Connected MCP servers — use their prefixed tools when relevant]\n" + "\n".join(
+                        server_lines
+                    )
+            except Exception:
+                logger.debug("Failed to fetch MCP server list for prompt", exc_info=True)
+
         if not self._memory:
             return base_prompt
 
@@ -503,10 +667,7 @@ class Agent:
 
             memory_lines = [f"- {m.content}" for m in memories]
             memory_block = "\n".join(memory_lines)
-            return (
-                f"{base_prompt}\n\n"
-                f"[Relevant memories about this user]\n{memory_block}"
-            )
+            return f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}"
         except Exception:
             logger.debug("Failed to fetch memories for prompt", exc_info=True)
             return base_prompt
@@ -525,11 +686,45 @@ class Agent:
         """
         logger.info("Tool call: %s(%s)", tool_call.name, tool_call.arguments)
 
+        # Guard: block Google-related code in general-purpose execution tools
+        if tool_call.name in ("python_exec", "shell_exec"):
+            code = tool_call.arguments.get("code", "") or tool_call.arguments.get("command", "")
+            if any(p in code.lower() for p in _GOOGLE_FALLBACK_PATTERNS):
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=json.dumps(
+                        {
+                            "error": (
+                                "Do not use python_exec/shell_exec for Google Workspace operations. "
+                                "The sandbox has no Google credentials or libraries (no gspread, no openpyxl). "
+                                "Use the native google__* tools instead. "
+                                "For Gmail attachments: google__search_messages"
+                                " → google__get_message → google__get_attachment. "
+                                "For Drive regular files: google__download_file(file_id=...). "
+                                "For Drive Google Docs/Sheets/Slides: "
+                                "google__export_google_doc(file_id=..., export_format='pdf'). "
+                                "For Drive uploads: google__upload_file(file_path=...). "
+                                "If you don't know the file path, call google__list_local_files() first. "
+                                "For Sheets: google__get_sheet_values("
+                                "spreadsheet_id=..., sheet_name=..., columns=...). "
+                                "For Sheets search: google__search_sheet_values("
+                                "spreadsheet_id=..., search_value=...). "
+                                "Get spreadsheet_id via google__search_drive_files("
+                                "name='<name>', file_type='spreadsheet')."
+                            )
+                        }
+                    ),
+                    is_error=True,
+                )
+
         if self._tools.requires_approval(tool_call.name):
             if self._approval_callback:
                 try:
                     approved = await self._approval_callback(
-                        tool_call.name, tool_call.arguments, user_id, channel,
+                        tool_call.name,
+                        tool_call.arguments,
+                        user_id,
+                        channel,
                     )
                 except Exception:
                     logger.exception("Approval callback failed for '%s'", tool_call.name)
@@ -546,34 +741,58 @@ class Agent:
                     tool_call.name,
                 )
 
+        await self._fire_tool_event("start", tool_call, user_id, channel)
         try:
-            result_text = await self._tools.execute(
+            try:
+                result_text = await self._tools.execute(
+                    tool_call.name,
+                    tool_call.arguments,
+                    context={"user_id": user_id, "channel": channel},
+                )
+                if tool_call.name == "make_phone_call":
+                    logger.info(
+                        "make_phone_call result: %s",
+                        (result_text[:200] + "..." if len(result_text) > 200 else result_text)
+                        if result_text
+                        else "(empty)",
+                    )
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=result_text,
+                    is_error=False,
+                )
+            except ToolNotFoundError:
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=f"Error: Tool '{tool_call.name}' not found.",
+                    is_error=True,
+                )
+            except Exception as e:
+                logger.exception("Tool '%s' failed", tool_call.name)
+                return ToolResult(
+                    tool_call_id=tool_call.id,
+                    content=f"Error executing {tool_call.name}: {type(e).__name__}: {e}",
+                    is_error=True,
+                )
+        finally:
+            await self._fire_tool_event("end", tool_call, user_id, channel)
+
+    async def _fire_tool_event(
+        self,
+        phase: str,
+        tool_call: ToolCall,
+        user_id: str,
+        channel: str,
+    ) -> None:
+        if not self._tool_event_callback:
+            return
+        try:
+            await self._tool_event_callback(
+                phase,
                 tool_call.name,
                 tool_call.arguments,
-                context={"user_id": user_id, "channel": channel},
+                user_id,
+                channel,
             )
-            if tool_call.name == "make_phone_call":
-                logger.info(
-                    "make_phone_call result: %s",
-                    (result_text[:200] + "..." if len(result_text) > 200 else result_text)
-                    if result_text
-                    else "(empty)",
-                )
-            return ToolResult(
-                tool_call_id=tool_call.id,
-                content=result_text,
-                is_error=False,
-            )
-        except ToolNotFoundError:
-            return ToolResult(
-                tool_call_id=tool_call.id,
-                content=f"Error: Tool '{tool_call.name}' not found.",
-                is_error=True,
-            )
-        except Exception as e:
-            logger.exception("Tool '%s' failed", tool_call.name)
-            return ToolResult(
-                tool_call_id=tool_call.id,
-                content=f"Error executing {tool_call.name}: {type(e).__name__}: {e}",
-                is_error=True,
-            )
+        except Exception:
+            logger.debug("tool_event_callback failed", exc_info=True)

@@ -21,6 +21,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class LLMProvider(StrEnum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
+    GROK = "grok"
 
 
 class LogLevel(StrEnum):
@@ -46,6 +47,7 @@ class Settings(BaseSettings):
     default_provider: LLMProvider = LLMProvider.ANTHROPIC
     anthropic_api_key: SecretStr = Field(default=SecretStr(""), description="Anthropic API key")
     openai_api_key: SecretStr = Field(default=SecretStr(""), description="OpenAI API key")
+    grok_api_key: SecretStr = Field(default=SecretStr(""), description="xAI Grok API key")
 
     default_model: str = Field(
         default="claude-sonnet-4-5-20250929",
@@ -61,6 +63,7 @@ class Settings(BaseSettings):
         default_factory=list,
         description="Telegram user IDs allowed to use the bot (empty = allow all)",
     )
+    # telegram_allowed_users: IntList = []
 
     # ── Agent ────────────────────────────────────────────
     agent_name: str = Field(default="Pincer", description="Agent display name")
@@ -73,7 +76,9 @@ class Settings(BaseSettings):
             "Always respond in the same language the user writes in.\n\n"
             "IMPORTANT: When you have image or GIF URLs, you MUST use the send_image tool "
             "to display them visually in the chat. NEVER paste image/GIF URLs as plain text. "
-            "Call send_image for each image URL so the user sees the actual picture inline."
+            "Call send_image for each image URL so the user sees the actual picture inline.\n\n"
+            "When you create a calendar event, your response MUST include the direct link to the event "
+            "(from the tool result). If the tool returns an error, tell the user exactly what went wrong."
         ),
         description="System prompt (the agent's personality / soul)",
     )
@@ -123,9 +128,7 @@ class Settings(BaseSettings):
         default="claude-haiku-4-5-20251001",
         description="Cheap model for conversation summarization",
     )
-    summary_threshold: int = Field(
-        default=20, ge=5, description="Summarize conversation after N messages"
-    )
+    summary_threshold: int = Field(default=20, ge=5, description="Summarize conversation after N messages")
 
     # ── WhatsApp (Sprint 3) ──────────────────────────────
     whatsapp_enabled: bool = Field(default=False, description="Enable WhatsApp channel")
@@ -140,6 +143,10 @@ class Settings(BaseSettings):
     whatsapp_group_trigger: str = Field(
         default="pincer",
         description="Trigger word for group chat mentions",
+    )
+    whatsapp_show_progress: bool = Field(
+        default=True,
+        description="Edit an in-place status message while tools run (and show typing indicator).",
     )
 
     # ── Cross-Channel Identity (Sprint 3) ────────────────
@@ -162,9 +169,7 @@ class Settings(BaseSettings):
     email_from: str = Field(default="", description="Override sender address")
 
     # ── Proactive Agent (Sprint 3) ───────────────────────
-    openweathermap_api_key: SecretStr = Field(
-        default=SecretStr(""), description="OpenWeatherMap API key"
-    )
+    openweathermap_api_key: SecretStr = Field(default=SecretStr(""), description="OpenWeatherMap API key")
     newsapi_key: SecretStr = Field(default=SecretStr(""), description="NewsAPI key")
     briefing_time: str = Field(default="07:00", description="Morning briefing time HH:MM")
     briefing_timezone: str = Field(default="Europe/Berlin", description="Briefing timezone")
@@ -175,17 +180,38 @@ class Settings(BaseSettings):
     webhook_secret: SecretStr = Field(default=SecretStr(""), description="Webhook HMAC secret")
 
     # ── Dashboard / API (Sprint 5) ───────────────────────
-    dashboard_token: SecretStr = Field(
-        default=SecretStr(""), description="Bearer token for API auth"
-    )
+    dashboard_token: SecretStr = Field(default=SecretStr(""), description="Bearer token for API auth")
     dashboard_host: str = Field(default="127.0.0.1", description="API server bind host")
     dashboard_port: int = Field(default=8080, ge=1, le=65535, description="API server port")
 
+    # ── Image Generation (Sprint 8) ──────────────────────
+    image_provider: str = Field(
+        default="auto",
+        description="Image provider: auto | fal | gemini",
+    )
+    fal_key: SecretStr = Field(default=SecretStr(""), description="fal.ai API key")
+    fal_model: str = Field(default="fal-ai/nano-banana-2", description="fal.ai image model")
+    gemini_api_key: SecretStr = Field(default=SecretStr(""), description="Google Gemini API key")
+    image_model_gemini: str = Field(default="gemini-2.5-flash-image", description="Gemini image generation model")
+    image_max_cost_per_request: float = Field(
+        default=0.10, ge=0.0, description="Max cost per image generation request in USD"
+    )
+    image_daily_limit: int = Field(default=50, ge=0, description="Max image generations per day (0 = unlimited)")
+
+    # ── Slack Channel (Socket Mode) ──────────────────────
+    slack_bot_token: SecretStr = Field(default=SecretStr(""), description="Slack Bot Token (xoxb-...)")
+    slack_app_token: SecretStr = Field(
+        default=SecretStr(""),
+        description="Slack App-Level Token for Socket Mode (xapp-...)",
+    )
+    slack_user_allowlist: list[str] = Field(
+        default_factory=list,
+        description="Optional Slack user IDs allowed to use the bot (empty = allow all)",
+    )
+
     # ── Signal Messenger (Sprint 7.5) ────────────────────
     signal_enabled: bool = Field(default=False, description="Enable Signal channel")
-    signal_api_url: str = Field(
-        default="http://signal-api:8080", description="signal-cli-rest-api base URL"
-    )
+    signal_api_url: str = Field(default="http://signal-api:8080", description="signal-cli-rest-api base URL")
     signal_pair_url: str = Field(
         default="http://127.0.0.1:8081",
         description="URL for browser-based pairing (host-facing); use when signal-api is in Docker",
@@ -243,10 +269,21 @@ class Settings(BaseSettings):
     rate_tools_per_min: int = Field(default=20, ge=1, description="Per-user tool call rate limit")
     max_concurrent_llm: int = Field(default=5, ge=1, description="Max concurrent LLM requests")
 
+    @field_validator("slack_user_allowlist", mode="before")
+    @classmethod
+    def parse_slack_allowlist(cls, v: str | list[str]) -> list[str]:
+        if isinstance(v, str):
+            if not v.strip():
+                return []
+            return [uid.strip() for uid in v.split(",") if uid.strip()]
+        return v
+
     @field_validator("telegram_allowed_users", mode="before")
     @classmethod
-    def parse_allowed_users(cls, v: str | list[int]) -> list[int]:
-        if isinstance(v, str):
+    def parse_allowed_users(cls, v: list[int] | str) -> list[int]:
+        if isinstance(v, int):
+            return [v]
+        elif isinstance(v, str):
             if not v.strip():
                 return []
             return [int(uid.strip()) for uid in v.split(",") if uid.strip()]
@@ -257,21 +294,33 @@ class Settings(BaseSettings):
         """Ensure at least one LLM provider API key is set."""
         anthropic_set = self.anthropic_api_key.get_secret_value() != ""
         openai_set = self.openai_api_key.get_secret_value() != ""
-        if not anthropic_set and not openai_set:
+        grok_set = self.grok_api_key.get_secret_value() != ""
+        if not anthropic_set and not openai_set and not grok_set:
             raise ValueError(
                 "At least one LLM API key required. "
-                "Set PINCER_ANTHROPIC_API_KEY or PINCER_OPENAI_API_KEY."
+                "Set PINCER_ANTHROPIC_API_KEY, PINCER_OPENAI_API_KEY, or PINCER_GROK_API_KEY."
             )
         if self.default_provider == LLMProvider.ANTHROPIC and not anthropic_set:
             if openai_set:
                 object.__setattr__(self, "default_provider", LLMProvider.OPENAI)
+            elif grok_set:
+                object.__setattr__(self, "default_provider", LLMProvider.GROK)
             else:
                 raise ValueError("PINCER_ANTHROPIC_API_KEY required for Anthropic provider.")
         if self.default_provider == LLMProvider.OPENAI and not openai_set:
             if anthropic_set:
                 object.__setattr__(self, "default_provider", LLMProvider.ANTHROPIC)
+            elif grok_set:
+                object.__setattr__(self, "default_provider", LLMProvider.GROK)
             else:
                 raise ValueError("PINCER_OPENAI_API_KEY required for OpenAI provider.")
+        if self.default_provider == LLMProvider.GROK and not grok_set:
+            if anthropic_set:
+                object.__setattr__(self, "default_provider", LLMProvider.ANTHROPIC)
+            elif openai_set:
+                object.__setattr__(self, "default_provider", LLMProvider.OPENAI)
+            else:
+                raise ValueError("PINCER_GROK_API_KEY required for Grok provider.")
         return self
 
     @property

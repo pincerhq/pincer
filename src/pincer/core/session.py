@@ -78,18 +78,17 @@ class SessionManager:
         self._cache.clear()
 
     async def get_or_create(
-        self, user_id: str, channel: str, pincer_user_id: str = "",
+        self,
+        user_id: str,
+        channel: str,
+        pincer_user_id: str = "",
     ) -> Session:
         """Get existing session or create a new one.
 
         If pincer_user_id is provided, it's used as the session key prefix
         for cross-channel continuity; otherwise falls back to channel:user_id.
         """
-        key = (
-            _session_key(pincer_user_id, "unified")
-            if pincer_user_id
-            else _session_key(user_id, channel)
-        )
+        key = _session_key(pincer_user_id, "unified") if pincer_user_id else _session_key(user_id, channel)
 
         if key in self._cache:
             return self._cache[key]

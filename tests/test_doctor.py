@@ -26,7 +26,7 @@ def doctor_env(tmp_path):
 def test_run_all_returns_report(doctor_env):
     report = doctor_env.run_all()
     assert isinstance(report, DoctorReport)
-    assert len(report.checks) == 31
+    assert len(report.checks) == 43  # 31 original + 8 MCP + 3 MCP security + 1 WA neonize
     assert 0 <= report.score <= 100
 
 
@@ -97,9 +97,7 @@ def test_no_hardcoded_secrets_critical(tmp_path):
     config_dir.mkdir()
     src_dir = config_dir / "src"
     src_dir.mkdir()
-    (src_dir / "bad.py").write_text(
-        'api_key = "sk-ant-abc123456789012345678901"\n'
-    )
+    (src_dir / "bad.py").write_text('api_key = "sk-ant-abc123456789012345678901"\n')
 
     doc = SecurityDoctor(config_dir=config_dir, data_dir=tmp_path)
     result = doc._check_no_hardcoded_secrets()
@@ -132,12 +130,8 @@ def test_dashboard_not_exposed_default():
 
 def test_report_score():
     report = DoctorReport()
-    report.checks.append(
-        SecurityDoctor()._check_python_version()
-    )
-    report.checks.append(
-        SecurityDoctor()._check_not_running_as_root()
-    )
+    report.checks.append(SecurityDoctor()._check_python_version())
+    report.checks.append(SecurityDoctor()._check_not_running_as_root())
     assert report.score == 100
     assert report.passed == 2
     assert report.critical == 0
@@ -163,3 +157,169 @@ def test_sqlite_world_readable(tmp_path):
     doc = SecurityDoctor(data_dir=data_dir, config_dir=tmp_path)
     result = doc._check_sqlite_not_world_readable()
     assert result.status in (CheckStatus.PASS, CheckStatus.CRITICAL)
+
+
+# ── New MCP checks (Sprint 3) ─────────────────────────────────────────────────
+
+
+def test_mcp_env_vars_skipped_no_toml(tmp_path):
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_env_vars()
+    assert result.status == CheckStatus.SKIPPED
+
+
+def test_mcp_env_vars_pass_no_refs(tmp_path):
+    toml = tmp_path / "pincer.toml"
+    toml.write_text("[mcp]\nenabled = true\n")
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_env_vars()
+    assert result.status == CheckStatus.PASS
+
+
+def test_mcp_env_vars_pass_all_set(tmp_path, monkeypatch):
+    toml = tmp_path / "pincer.toml"
+    toml.write_text(
+        "[mcp]\nenabled = true\n\n[[mcp.servers]]\n"
+        'name = "s"\ntransport = "stdio"\ncommand = "echo"\n'
+        'env = {TOKEN = "${MY_TOKEN}"}\n'
+    )
+    monkeypatch.setenv("MY_TOKEN", "abc123")
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_env_vars()
+    assert result.status == CheckStatus.PASS
+
+
+def test_mcp_env_vars_warning_unset(tmp_path, monkeypatch):
+    toml = tmp_path / "pincer.toml"
+    toml.write_text(
+        "[mcp]\nenabled = true\n\n[[mcp.servers]]\n"
+        'name = "s"\ntransport = "stdio"\ncommand = "echo"\n'
+        'env = {TOKEN = "${MISSING_VAR_XYZ}"}\n'
+    )
+    monkeypatch.delenv("MISSING_VAR_XYZ", raising=False)
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_env_vars()
+    assert result.status == CheckStatus.WARNING
+    assert "MISSING_VAR_XYZ" in result.message
+
+
+def test_mcp_collisions_skipped_no_servers(tmp_path):
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_collisions()
+    assert result.status == CheckStatus.SKIPPED
+
+
+def test_mcp_collisions_pass_single_server(tmp_path):
+    toml = tmp_path / "pincer.toml"
+    toml.write_text(
+        "[mcp]\nenabled = true\ntool_prefix = false\n\n"
+        '[[mcp.servers]]\nname = "s"\ntransport = "stdio"\ncommand = "echo"\n'
+    )
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_collisions()
+    assert result.status == CheckStatus.PASS
+
+
+def test_mcp_collisions_warning_multi_no_prefix(tmp_path):
+    toml = tmp_path / "pincer.toml"
+    toml.write_text(
+        "[mcp]\nenabled = true\ntool_prefix = false\n\n"
+        '[[mcp.servers]]\nname = "a"\ntransport = "stdio"\ncommand = "echo"\n\n'
+        '[[mcp.servers]]\nname = "b"\ntransport = "stdio"\ncommand = "echo"\n'
+    )
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_collisions()
+    assert result.status == CheckStatus.WARNING
+
+
+def test_mcp_collisions_pass_multi_with_prefix(tmp_path):
+    toml = tmp_path / "pincer.toml"
+    toml.write_text(
+        "[mcp]\nenabled = true\ntool_prefix = true\n\n"
+        '[[mcp.servers]]\nname = "a"\ntransport = "stdio"\ncommand = "echo"\n\n'
+        '[[mcp.servers]]\nname = "b"\ntransport = "stdio"\ncommand = "echo"\n'
+    )
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_collisions()
+    assert result.status == CheckStatus.PASS
+
+
+def test_mcp_servers_skipped_no_servers(tmp_path):
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_servers()
+    assert result.status == CheckStatus.SKIPPED
+
+
+def test_mcp_servers_pass_command_exists(tmp_path):
+    toml = tmp_path / "pincer.toml"
+    toml.write_text('[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = "s"\ntransport = "stdio"\ncommand = "echo"\n')
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_servers()
+    assert result.status == CheckStatus.PASS
+
+
+def test_mcp_servers_warning_command_missing(tmp_path):
+    toml = tmp_path / "pincer.toml"
+    toml.write_text(
+        "[mcp]\nenabled = true\n\n[[mcp.servers]]\n"
+        'name = "s"\ntransport = "stdio"\ncommand = "nonexistent-binary-xyzzy-99"\n'
+    )
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_servers()
+    assert result.status == CheckStatus.WARNING
+    assert "nonexistent-binary-xyzzy-99" in result.message
+
+
+def test_mcp_servers_skips_http_transport(tmp_path):
+    """HTTP servers don't have a local command to check."""
+    toml = tmp_path / "pincer.toml"
+    toml.write_text(
+        "[mcp]\nenabled = true\n\n[[mcp.servers]]\n"
+        'name = "s"\ntransport = "streamable-http"\nurl = "http://localhost:8000"\n'
+    )
+    doc = SecurityDoctor(config_dir=tmp_path)
+    result = doc._check_mcp_servers()
+    assert result.status == CheckStatus.PASS
+
+
+def test_whatsapp_neonize_version_passes_on_recent(monkeypatch):
+    """A neonize version at or above the minimum is a PASS."""
+    import sys
+    from types import ModuleType
+
+    fake = ModuleType("neonize")
+    fake.__version__ = "0.3.16.post0"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "neonize", fake)
+
+    result = SecurityDoctor()._check_whatsapp_neonize_version()
+    assert result.status == CheckStatus.PASS
+    assert "0.3.16" in result.message
+
+
+def test_whatsapp_neonize_version_warns_on_old(monkeypatch):
+    import sys
+    from types import ModuleType
+
+    fake = ModuleType("neonize")
+    fake.__version__ = "0.3.14"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "neonize", fake)
+
+    result = SecurityDoctor()._check_whatsapp_neonize_version()
+    assert result.status == CheckStatus.WARNING
+    assert "err-client-outdated" in result.message
+    assert "neonize" in result.fix_hint
+
+
+def test_whatsapp_neonize_version_skipped_when_missing(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked_import(name, *a, **kw):
+        if name == "neonize":
+            raise ImportError("blocked for test")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", blocked_import)
+    result = SecurityDoctor()._check_whatsapp_neonize_version()
+    assert result.status == CheckStatus.SKIPPED

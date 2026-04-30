@@ -89,10 +89,7 @@ def pomodoro_stats(user_id: str, period: str = "today") -> dict:
             cnt, mins = by_task[task]
             by_task[task] = (cnt + 1, mins + dur)
 
-        tasks = [
-            {"task": t, "count": c, "total_minutes": m}
-            for t, (c, m) in by_task.items()
-        ]
+        tasks = [{"task": t, "count": c, "total_minutes": m} for t, (c, m) in by_task.items()]
         return {
             "period": period,
             "total_sessions": total_sessions,
