@@ -4,7 +4,7 @@
   "description": "Get weather forecasts",
   "author": "pincer",
   "permissions": ["network:api.openweathermap.org"],
-  "env_required": ["OPENWEATHER_API_KEY"],
+  "env_required": [],
   "tools": [
     {
       "name": "get_weather",

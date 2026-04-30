@@ -19,7 +19,6 @@ x-pincer-base: &pincer-base
     - PINCER_MCP_SERVER_EXPORT_PORT=18800
   volumes:
     - pincer-data:/app/data
-    - ./skills:/app/skills:ro
     # Optional: mount pincer.toml to configure MCP client servers
     - ./pincer.toml:/app/data/pincer.toml:ro
   ports:
@@ -118,7 +117,8 @@ services:
     env_file: .env
     volumes:
       - pincer-data:/app/data
-      - ./pincer.local.toml:/app/data/pincer.toml:ro
+      - ./pincer.toml:/app/data/pincer.toml:ro
+      - ./pincer.local.toml:/app/data/pincer.local.toml:ro
     environment:
       - PINCER_DATA_DIR=/app/data
       - PINCER_DASHBOARD_HOST=0.0.0.0

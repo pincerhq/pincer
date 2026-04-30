@@ -6,8 +6,9 @@
 >
 > Skills are replaced by **MCP servers** — a standard, language-agnostic way to extend Pincer with any tool. MCP servers are more secure (sandboxed subprocess isolation), more portable (any language, any runtime), and interoperable with the broader MCP ecosystem (Claude Desktop, Cursor, VS Code, and more).
 >
+> - **MCP disables skills entirely.** When one or more MCP servers are configured in `pincer.toml` (or `pincer.local.toml`) and MCP is enabled, Pincer skips skill loading at startup. Skills and MCP are mutually exclusive — migrate your skills to MCP servers before adding any `[[mcp.servers]]` entries.
 > - **Migration guide:** Replace your `skills/` directory with one or more MCP servers. See the [MCP Guide](mcp-guide.md) and [MCP Servers](../core-components/mcp-servers.md) for how to build and connect them.
-> - **Timeline:** Skills continue to load unchanged through 0.8.x. The `pincer skills` CLI commands, skill loader, sandbox, and signing infrastructure are removed in 0.9.0.
+> - **Timeline:** Skills continue to load unchanged through 0.8.x **unless MCP servers are configured**. The `pincer skills` CLI commands, skill loader, sandbox, and signing infrastructure are removed in 0.9.0.
 
 Skills are how you extend Pincer with new capabilities. A skill is a Python module that registers one or more tools the agent can use.
 

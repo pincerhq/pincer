@@ -55,7 +55,7 @@ RUN groupadd -r pincer && useradd -r -g pincer -m pincer
 COPY --chown=pincer:pincer --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY --chown=pincer:pincer --from=builder /app/src /app/src
 COPY --chown=pincer:pincer --from=builder /app/.venv /app/.venv
-#COPY --chown=pincer:pincer --from=builder /app/skills /app/skills
+COPY --chown=pincer:pincer --from=builder /app/skills /app/skills
 COPY --chown=pincer:pincer --from=builder /app/pyproject.toml /app/
 COPY --chown=pincer:pincer --from=dashboard-builder \
     /app/dist /app/dashboard/dist
