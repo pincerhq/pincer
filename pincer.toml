@@ -85,39 +85,39 @@ expose_tools = [
 
 # Dockerized servers for safe long term run
 # [[mcp.servers]]
-#name      = "memory"
-#transport = "streamable-http"
-#url       = "http://memory-mcp:8000/mcp"
+# name      = "memory"
+# transport = "streamable-http"
+# url       = "http://memory-mcp:8000/mcp"
 
-#[[mcp.servers]]
-#name      = "newsapi"
-#transport = "streamable-http"
-#url       = "http://newsapi-mcp:8000/mcp"
+# [[mcp.servers]]
+# name      = "newsapi"
+# transport = "streamable-http"
+# url       = "http://newsapi-mcp:8000/mcp"
 
-#[[mcp.servers]]
-#name      = "openweathermap"
-#transport = "streamable-http"
-#url       = "http://openweathermap-mcp:8000/mcp"
+# [[mcp.servers]]
+# name      = "openweathermap"
+# transport = "streamable-http"
+# url       = "http://openweathermap-mcp:8000/mcp"
 
-#[[mcp.servers]]
-#name      = "pomodoro"
-#transport = "streamable-http"
-#url       = "http://pomodoro-mcp:8000/mcp"
+# [[mcp.servers]]
+# name      = "pomodoro"
+# transport = "streamable-http"
+# url       = "http://pomodoro-mcp:8000/mcp"
 
-#[[mcp.servers]]
-#name      = "stock_price"
-#transport = "streamable-http"
-#url       = "http://stock-price-mcp:8000/mcp"
+# [[mcp.servers]]
+# name      = "stock_price"
+# transport = "streamable-http"
+# url       = "http://stock-price-mcp:8000/mcp"
 
-#[[mcp.servers]]
-#name      = "summarize"
-#transport = "streamable-http"
-#url       = "http://summarize-mcp:8000/mcp"
+# [[mcp.servers]]
+# name      = "summarize"
+# transport = "streamable-http"
+# url       = "http://summarize-mcp:8000/mcp"
 
-#[[mcp.servers]]
-#name      = "translate"
-#transport = "streamable-http"
-#url       = "http://translate-mcp:8000/mcp"
+# [[mcp.servers]]
+# name      = "translate"
+# transport = "streamable-http"
+# url       = "http://translate-mcp:8000/mcp"
 
 # In app runtime servers using stdio protocol for fast startup (default)
 [[mcp.servers]]

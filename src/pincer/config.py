@@ -108,6 +108,12 @@ class Settings(BaseSettings):
         description="Data directory for database, logs, etc.",
     )
 
+    # ── Skills ──────────────────────────────────────────
+    skills_dir: Path = Field(
+        default=Path.home() / ".pincer/skills",
+        description="Skills directory (deprecated)",
+    )
+
     # ── Logging ──────────────────────────────────────────
     log_level: LogLevel = LogLevel.INFO
 

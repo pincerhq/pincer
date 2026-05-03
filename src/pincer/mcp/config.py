@@ -1,10 +1,16 @@
 """
-MCP server configuration — loaded from pincer.toml and/or environment variables.
+MCP server configuration — loaded from pincer.toml, pincer.local.toml, and/or environment variables.
 
 Priority (highest to lowest):
 1. Environment variable overrides (PINCER_MCP_SERVER_N_*)
-2. pincer.toml [[mcp.servers]] entries
-3. Built-in defaults
+2. pincer.local.toml  (optional — overrides / extends pincer.toml)
+3. pincer.toml
+4. Built-in defaults
+
+pincer.local.toml supports all sections that pincer.toml supports.
+[[mcp.servers]] entries are merged by the 'name' field — a local entry with the
+same name as a base entry replaces it entirely; new names are appended.
+Add pincer.local.toml to .gitignore to keep machine-local overrides out of VCS.
 
 Environment variable format for a single server:
     PINCER_MCP_ENABLED=true
@@ -190,8 +196,8 @@ def _parse_server_from_toml(raw: dict[str, Any]) -> MCPServerConfig:
     )
 
 
-def _load_toml_config(toml_path: Path) -> MCPConfig | None:
-    """Load [mcp] section from pincer.toml. Returns None if file absent or no [mcp]."""
+def _read_toml_raw(toml_path: Path) -> dict[str, Any] | None:
+    """Read a TOML file and return the parsed dict. Returns None if absent or no TOML parser."""
     if not toml_path.exists():
         return None
     try:
@@ -203,12 +209,32 @@ def _load_toml_config(toml_path: Path) -> MCPConfig | None:
             return None
 
     with open(toml_path, "rb") as f:
-        data = tomllib.load(f)
+        return tomllib.load(f)  # type: ignore[return-value]
 
-    mcp_raw = data.get("mcp")
-    if not mcp_raw:
-        return None
 
+def _merge_mcp_raw(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """Merge two raw [mcp] section dicts. override wins for all scalar/mapping keys.
+
+    [[mcp.servers]] entries are merged by 'name': an override entry with the same
+    name as a base entry replaces it entirely; new names are appended in order.
+    [mcp.server] sub-table fields are merged shallowly (override wins per key).
+    """
+    merged: dict[str, Any] = dict(base)
+    for key, val in override.items():
+        if key == "servers":
+            by_name: dict[str, Any] = {s["name"]: s for s in base.get("servers", [])}
+            for srv in val:
+                by_name[srv["name"]] = srv
+            merged["servers"] = list(by_name.values())
+        elif key == "server" and isinstance(val, dict):
+            merged["server"] = {**base.get("server", {}), **val}
+        else:
+            merged[key] = val
+    return merged
+
+
+def _parse_mcp_config(mcp_raw: dict[str, Any]) -> MCPConfig:
+    """Parse a raw [mcp] section dict into an MCPConfig."""
     servers = [_parse_server_from_toml(s) for s in mcp_raw.get("servers", [])]
     srv_raw = mcp_raw.get("server", {})
     # Parse approval_policy sub-table
@@ -322,22 +348,41 @@ def _load_env_servers() -> list[MCPServerConfig]:
 
 def load_mcp_config(config_dir: Path | None = None) -> MCPConfig:
     """
-    Load MCP configuration from pincer.toml and environment variables.
+    Load MCP configuration from pincer.toml, pincer.local.toml, and environment variables.
 
-    Environment variables take precedence over TOML config.
+    Merge order (highest priority last, so it wins):
+      pincer.toml  →  pincer.local.toml  →  environment variables
+
+    pincer.local.toml is optional. When present, its [mcp] section is merged on
+    top of pincer.toml's [mcp] section before env vars are applied.
+    [[mcp.servers]] entries are matched by 'name'; a local entry with the same
+    name replaces the base entry entirely.
+
     Call this at agent startup; invalid config raises ValueError immediately.
     """
-    toml_path = (config_dir or Path.cwd()) / "pincer.toml"
-    toml_cfg = _load_toml_config(toml_path)
+    base_dir = config_dir or Path.cwd()
+
+    # Load raw TOML dicts
+    base_raw = _read_toml_raw(base_dir / "pincer.toml")
+    local_raw = _read_toml_raw(base_dir / "pincer.local.toml")
+
+    # Merge [mcp] sections from both files
+    mcp_raw: dict[str, Any] | None = base_raw.get("mcp") if base_raw else None
+    if local_raw:
+        local_mcp = local_raw.get("mcp")
+        if local_mcp:
+            mcp_raw = _merge_mcp_raw(mcp_raw or {}, local_mcp)
 
     # Global MCP toggle
     enabled_env = os.environ.get("PINCER_MCP_ENABLED", "").lower()
     if enabled_env in ("false", "0", "no"):
         return MCPConfig(enabled=False)
-    if toml_cfg and not toml_cfg.enabled:
+    if mcp_raw and not mcp_raw.get("enabled", True):
         return MCPConfig(enabled=False)
 
-    # Merge: TOML servers + env-defined servers
+    toml_cfg = _parse_mcp_config(mcp_raw) if mcp_raw else None
+
+    # Merge: TOML+local servers + env-defined servers
     toml_servers = toml_cfg.servers if toml_cfg else []
     env_servers = _load_env_servers()
 
@@ -364,6 +409,10 @@ def load_mcp_config(config_dir: Path | None = None) -> MCPConfig:
         port=int(os.environ.get("PINCER_MCP_SERVER_EXPORT_PORT", toml_srv.port)),
         path=os.environ.get("PINCER_MCP_SERVER_EXPORT_PATH", toml_srv.path),
         expose_tools=toml_srv.expose_tools,
+        approval_policy=toml_srv.approval_policy,
+        sampling=toml_srv.sampling,
+        webhook_url=toml_srv.webhook_url,
+        auth=toml_srv.auth,
     )
 
     return MCPConfig(
