@@ -9,13 +9,12 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
-    curl \
+    curl git \
     && rm -rf /var/lib/apt/lists/*
 
 
 COPY pyproject.toml ./
-#RUN uv sync --frozen --no-dev --system
-RUN uv sync --no-dev
+RUN uv sync --no-cache --no-dev --all-extras
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD sh -c 'curl -f http://localhost:${PORT:-8000}/health || exit 1'

@@ -20,6 +20,11 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl git \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 ENV UV_COMPILE_BYTECODE=1 \
@@ -31,7 +36,7 @@ COPY src/ src/
 COPY README.md ./
 # DEPRCATED: skills are deprecated and will removed in 0.9.0 version
 COPY skills/ skills/
-RUN uv sync --frozen --no-dev --extra mcp
+RUN uv sync --frozen --no-cache --no-dev --all-extras
 
 # ============================================
 # Stage 2: Runtime

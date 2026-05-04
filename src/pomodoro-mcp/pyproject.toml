@@ -13,8 +13,16 @@ dependencies = [
     "uvicorn>=0.34.0",
 ]
 
+[project.optional-dependencies]
+telemetry = [
+    "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@main"
+]
+
 [project.scripts]
 pomodoro_server = "pomodoro_server:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

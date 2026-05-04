@@ -129,6 +129,7 @@ async def get_stock_price(params: StockInput) -> str:
 
     Returns ticker, price, previous_close, change, change_percent, currency, and name.
     """
+    logger.info("tool: get_stock_price")
     try:
         async with httpx.AsyncClient(timeout=10.0, headers=_HEADERS) as client:
             r = await client.get(_YAHOO_URL.format(ticker=params.ticker))
@@ -169,6 +170,7 @@ async def get_crypto_price(params: CryptoInput) -> str:
 
     Returns coin, price, change_24h_percent, market_cap, and currency.
     """
+    logger.info("tool: get_crypto_price")
     try:
         async with httpx.AsyncClient(timeout=10.0, headers=_HEADERS) as client:
             r = await client.get(_COINGECKO_URL.format(coin=params.coin, currency=params.currency))
@@ -205,6 +207,19 @@ async def get_crypto_price(params: CryptoInput) -> str:
 
 
 def main() -> None:
+    try:
+        from pincer_telemetry import init as _init_telemetry
+
+        _init_telemetry(project_name="stock_price_mcp", version="0.1.0")
+        logger.info("Telemetry init success")
+    except ImportError:
+        logger.warning(
+            "OTEL_DSN is set but pincer-telemetry is not installed — "
+            'skipping. Install with: pip install "pincer-mcps[telemetry]"'
+        )
+    except Exception as _tel_err:
+        logger.error("Telemetry init failed (non-fatal): %s", _tel_err)
+
     parser = argparse.ArgumentParser(description="Stock & crypto price MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -226,7 +241,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.transport == "http":
-        print(f"Starting stock_price_mcp · HTTP transport · {args.host}:{args.port}/mcp")
+        logger.info("Starting stock_price_mcp · HTTP transport · %s:%s/mcp", args.host, args.port)
         app = mcp.http_app()
         cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
         uvicorn.run(cors_app, host=args.host, port=args.port)

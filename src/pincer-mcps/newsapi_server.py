@@ -461,6 +461,7 @@ async def search_everything(params: SearchEverythingInput) -> str:
         JSON with total_results, returned, offset, has_more, and an articles list.
         Each article has: title, source, source_id, author, description, url, image_url, published_at.
     """
+    logger.info("tool: search_everything")
     try:
         data = await _newsapi_get(
             "everything",
@@ -498,6 +499,7 @@ async def top_headlines(params: TopHeadlinesInput) -> str:
     Returns JSON with: total_results, returned, offset, has_more, and an articles list.
     Each article has: title, source, source_id, author, description, url, image_url, published_at.
     """
+    logger.info("tool: top_headlines")
     try:
         data = await _newsapi_get(
             "top-headlines",
@@ -526,6 +528,7 @@ async def list_sources(params: ListSourcesInput) -> str:
     Returns JSON with count and a sources list.
     Each source has: id, name, description, url, category, language, country.
     """
+    logger.info("tool: list_sources")
     try:
         data = await _newsapi_get(
             "top-headlines/sources",
@@ -558,6 +561,19 @@ async def list_sources(params: ListSourcesInput) -> str:
 
 
 def main() -> None:
+    try:
+        from pincer_telemetry import init as _init_telemetry
+
+        _init_telemetry(project_name="newsapi_mcp", version="0.1.0")
+        logger.info("Telemetry init success")
+    except ImportError:
+        logger.warning(
+            "OTEL_DSN is set but pincer-telemetry is not installed — "
+            'skipping. Install with: pip install "pincer-mcps[telemetry]"'
+        )
+    except Exception as _tel_err:
+        logger.error("Telemetry init failed (non-fatal): %s", _tel_err)
+
     parser = argparse.ArgumentParser(description="NewsAPI.org MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -579,7 +595,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.transport == "http":
-        print(f"Starting newsapi_mcp · HTTP transport · {args.host}:{args.port}/mcp")
+        logger.info("Starting newsapi_mcp · HTTP transport · %s:%s/mcp", args.host, args.port)
         app = mcp.http_app()
         cors_app = CORSMiddleware(
             app=app,

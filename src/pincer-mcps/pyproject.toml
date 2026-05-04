@@ -14,12 +14,20 @@ dependencies = [
     "youtube-transcript-api>=0.6.3",
 ]
 
+[project.optional-dependencies]
+telemetry = [
+    "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@main"
+]
+
 [project.scripts]
 newsapi_server = "newsapi_server:main"
 openweathermap_server = "openweathermap_server:main"
 stock_price_server = "stock_price_server:main"
 summarize_server = "summarize_server:main"
 translate_server = "translate_server:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

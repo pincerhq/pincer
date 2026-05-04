@@ -118,6 +118,7 @@ async def translate_text(params: TranslateInput) -> str:
 
     Returns translated_text, source_language (detected when source='auto'), and target_language.
     """
+    logger.info("tool: translate_text")
     payload: dict[str, str] = {"q": params.text, "source": params.source, "target": params.target}
     if API_KEY:
         payload["api_key"] = API_KEY
@@ -147,6 +148,7 @@ async def list_languages() -> str:
 
     Returns a list of objects with 'code' and 'name' fields.
     """
+    logger.info("tool: list_languages")
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(f"{LIBRETRANSLATE_URL}/languages")
@@ -167,6 +169,19 @@ async def list_languages() -> str:
 
 
 def main() -> None:
+    try:
+        from pincer_telemetry import init as _init_telemetry
+
+        _init_telemetry(project_name="translate_mcp", version="0.1.0")
+        logger.info("Telemetry init success")
+    except ImportError:
+        logger.warning(
+            "OTEL_DSN is set but pincer-telemetry is not installed — "
+            'skipping. Install with: pip install "pincer-mcps[telemetry]"'
+        )
+    except Exception as _tel_err:
+        logger.error("Telemetry init failed (non-fatal): %s", _tel_err)
+
     parser = argparse.ArgumentParser(description="LibreTranslate MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -188,7 +203,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.transport == "http":
-        print(f"Starting translate_mcp · HTTP transport · {args.host}:{args.port}/mcp")
+        logger.info("Starting translate_mcp · HTTP transport · %s:%s/mcp", args.host, args.port)
         app = mcp.http_app()
         cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
         uvicorn.run(cors_app, host=args.host, port=args.port)
