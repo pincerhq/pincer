@@ -1,13 +1,14 @@
 import { PageContainer } from "@/components/layout/PageContainer"
 import { SettingsForm } from "@/components/settings/SettingsForm"
 import { DangerZone } from "@/components/settings/DangerZone"
+import { ApiErrorBanner } from "@/components/ui/ApiErrorBanner"
 import { useSettings, useUpdateSettings } from "@/api/hooks/useSettings"
 import { Skeleton } from "@/components/ui/skeleton"
 import { toast } from "sonner"
 import type { Settings } from "@/api/types"
 
 export function SettingsPage() {
-  const { data, isLoading } = useSettings()
+  const { data, isLoading, isError, error, refetch } = useSettings()
   const updateMutation = useUpdateSettings()
 
   const handleSave = (updated: Partial<Settings>) => {
@@ -33,6 +34,14 @@ export function SettingsPage() {
             <Skeleton key={i} className="h-32 w-full bg-white/[0.06]" />
           ))}
         </div>
+      </PageContainer>
+    )
+  }
+
+  if (isError) {
+    return (
+      <PageContainer title="Settings">
+        <ApiErrorBanner error={error} onRetry={() => refetch()} />
       </PageContainer>
     )
   }

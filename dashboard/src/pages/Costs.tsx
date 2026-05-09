@@ -6,6 +6,7 @@ import { ModelBreakdown } from "@/components/costs/ModelBreakdown"
 import { ToolBreakdown } from "@/components/costs/ToolBreakdown"
 import { CostTable } from "@/components/costs/CostTable"
 import { BudgetAlert } from "@/components/costs/BudgetAlert"
+import { ApiErrorBanner } from "@/components/ui/ApiErrorBanner"
 import {
   useCostsToday,
   useCostsHistory,
@@ -19,13 +20,52 @@ type Period = 7 | 30
 
 export function CostsPage() {
   const [period, setPeriod] = useState<Period>(7)
-  const { data: today, isLoading: todayLoading } = useCostsToday()
-  const { data: history, isLoading: historyLoading } = useCostsHistory(period)
-  const { data: byModel, isLoading: modelLoading } = useCostsByModel(period)
-  const { data: byTool, isLoading: toolLoading } = useCostsByTool(period)
+  const {
+    data: today,
+    isLoading: todayLoading,
+    isError: todayError,
+    error: todayErr,
+    refetch: refetchToday,
+  } = useCostsToday()
+  const {
+    data: history,
+    isLoading: historyLoading,
+    isError: historyError,
+    error: historyErr,
+    refetch: refetchHistory,
+  } = useCostsHistory(period)
+  const {
+    data: byModel,
+    isLoading: modelLoading,
+    isError: modelError,
+    error: modelErr,
+    refetch: refetchModel,
+  } = useCostsByModel(period)
+  const {
+    data: byTool,
+    isLoading: toolLoading,
+    isError: toolError,
+    error: toolErr,
+    refetch: refetchTool,
+  } = useCostsByTool(period)
+
+  const firstError = todayErr ?? historyErr ?? modelErr ?? toolErr
+  const hasError = todayError || historyError || modelError || toolError
 
   return (
     <PageContainer title="Costs">
+      {hasError && (
+        <ApiErrorBanner
+          error={firstError}
+          onRetry={() => {
+            refetchToday()
+            refetchHistory()
+            refetchModel()
+            refetchTool()
+          }}
+          className="mb-4"
+        />
+      )}
       <BudgetAlert budget={today?.budget} />
 
       <div className="flex items-center justify-between mt-2 mb-6">

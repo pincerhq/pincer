@@ -2,6 +2,7 @@ import { useState } from "react"
 import { PageContainer } from "@/components/layout/PageContainer"
 import { SkillGrid } from "@/components/skills/SkillGrid"
 import { InstallModal } from "@/components/skills/InstallModal"
+import { ApiErrorBanner } from "@/components/ui/ApiErrorBanner"
 import { useSkills, useSkillDelete } from "@/api/hooks/useSkills"
 import { Button } from "@/components/ui/button"
 import { Plus, RefreshCw, LayoutGrid, List } from "lucide-react"
@@ -30,7 +31,7 @@ export function SkillsPage() {
   const [filter, setFilter] = useState<Filter>("all")
   const [view, setView] = useState<ViewMode>("grid")
 
-  const { data, isLoading, refetch } = useSkills()
+  const { data, isLoading, isError, error, refetch } = useSkills()
   const deleteMutation = useSkillDelete()
 
   const all = data?.skills ?? []
@@ -59,6 +60,9 @@ export function SkillsPage() {
 
   return (
     <PageContainer title="Extensions">
+      {isError && (
+        <ApiErrorBanner error={error} onRetry={() => refetch()} className="mb-4" />
+      )}
       {/* Toolbar */}
       <div className="flex items-center justify-between mb-5">
         {/* Filter tabs */}

@@ -4,20 +4,51 @@ import { ChannelStatus } from "@/components/dashboard/ChannelStatus"
 import { BudgetGauge } from "@/components/dashboard/BudgetGauge"
 import { ActivityFeed } from "@/components/dashboard/ActivityFeed"
 import { SpendingChart } from "@/components/costs/SpendingChart"
+import { ApiErrorBanner } from "@/components/ui/ApiErrorBanner"
 import { useStatus } from "@/api/hooks/useStatus"
 import { useCostsToday, useCostsHistory } from "@/api/hooks/useCosts"
 import { useAuditStats } from "@/api/hooks/useAudit"
 
 export function DashboardPage() {
   const { data: status, isLoading: statusLoading } = useStatus()
-  const { data: costs, isLoading: costsLoading } = useCostsToday()
-  const { data: history, isLoading: historyLoading } = useCostsHistory(7)
-  const { data: auditStats, isLoading: auditLoading } = useAuditStats()
+  const {
+    data: costs,
+    isLoading: costsLoading,
+    isError: costsError,
+    error: costsErr,
+    refetch: refetchCosts,
+  } = useCostsToday()
+  const {
+    data: history,
+    isLoading: historyLoading,
+    isError: historyError,
+    error: historyErr,
+    refetch: refetchHistory,
+  } = useCostsHistory(7)
+  const {
+    data: auditStats,
+    isLoading: auditLoading,
+    isError: auditError,
+    error: auditErr,
+    refetch: refetchAudit,
+  } = useAuditStats()
 
   const loading = costsLoading || auditLoading
+  const firstError = costsErr ?? historyErr ?? auditErr
 
   return (
     <PageContainer title="Dashboard">
+      {(costsError || historyError || auditError) && (
+        <ApiErrorBanner
+          error={firstError}
+          onRetry={() => {
+            refetchCosts()
+            refetchHistory()
+            refetchAudit()
+          }}
+          className="mb-4"
+        />
+      )}
       <QuickStats costs={costs} auditStats={auditStats} loading={loading} />
 
       <div className="grid grid-cols-3 gap-4 mt-6">

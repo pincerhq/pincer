@@ -11,6 +11,10 @@ const emptyAuditStats = {
   failed_actions: 0,
 }
 
+function is404(err: unknown): boolean {
+  return (err as { response?: { status?: number } })?.response?.status === 404
+}
+
 export function useAudit(params?: Record<string, string>, tailMode = false) {
   return useQuery({
     queryKey: ["audit", params],
@@ -18,10 +22,7 @@ export function useAudit(params?: Record<string, string>, tailMode = false) {
       try {
         return await pincer.audit(params)
       } catch (err) {
-        const res = (err as { response?: { status?: number } })?.response
-        if (res?.status === 404) {
-          return emptyAuditResponse
-        }
+        if (is404(err)) return emptyAuditResponse
         throw err
       }
     },
@@ -35,8 +36,9 @@ export function useAuditStats() {
     queryFn: async () => {
       try {
         return await pincer.auditStats()
-      } catch {
-        return emptyAuditStats
+      } catch (err) {
+        if (is404(err)) return emptyAuditStats
+        throw err
       }
     },
     refetchInterval: REFETCH_INTERVALS.AUDIT,

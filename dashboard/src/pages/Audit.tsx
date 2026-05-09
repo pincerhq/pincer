@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useEffect } from "react"
 import { PageContainer } from "@/components/layout/PageContainer"
 import { AuditTable } from "@/components/audit/AuditTable"
 import { AuditFilters } from "@/components/audit/AuditFilters"
+import { ApiErrorBanner } from "@/components/ui/ApiErrorBanner"
 import { useAudit } from "@/api/hooks/useAudit"
 import { Button } from "@/components/ui/button"
 import { ChevronLeft, ChevronRight } from "lucide-react"
@@ -49,7 +50,7 @@ export function AuditPage() {
     return p
   }, [action, user, page, pageSize])
 
-  const { data, isLoading, refetch } = useAudit(params, tailMode)
+  const { data, isLoading, isError, error, refetch } = useAudit(params, tailMode)
 
   const total = data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
@@ -72,6 +73,9 @@ export function AuditPage() {
 
   return (
     <PageContainer title="Audit Log">
+      {isError && (
+        <ApiErrorBanner error={error} onRetry={() => refetch()} className="mb-4" />
+      )}
       <AuditFilters
         action={action}
         user={user}

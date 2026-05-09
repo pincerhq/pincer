@@ -1,6 +1,11 @@
 import { lazy, Suspense } from "react"
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
+import {
+  QueryClient,
+  QueryClientProvider,
+  QueryCache,
+  MutationCache,
+} from "@tanstack/react-query"
 import { Toaster } from "sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { ErrorBoundary } from "@/components/ErrorBoundary"
@@ -9,6 +14,9 @@ import { ROUTES } from "@/lib/constants"
 import { AppLayout } from "@/components/layout/AppLayout"
 import { LoginPage } from "@/pages/Login"
 import { Skeleton } from "@/components/ui/skeleton"
+import { reportError, initGlobalErrorHandlers } from "@/lib/error-reporter"
+
+initGlobalErrorHandlers()
 
 const DashboardPage = lazy(() =>
   import("@/pages/Dashboard").then((m) => ({ default: m.DashboardPage })),
@@ -38,10 +46,21 @@ const IntegrationDetailPage = lazy(() =>
 )
 
 const queryClient = new QueryClient({
+  queryCache: new QueryCache({
+    onError: (error, query) => {
+      reportError(error, { queryKey: String(query.queryKey) })
+    },
+  }),
+  mutationCache: new MutationCache({
+    onError: (error) => {
+      reportError(error, { type: "mutation" })
+    },
+  }),
   defaultOptions: {
     queries: {
       staleTime: 30_000,
-      retry: 1,
+      retry: 3,
+      retryDelay: (failureCount) => Math.min(1000 * 2 ** failureCount, 30_000),
       refetchOnWindowFocus: false,
     },
   },

@@ -68,7 +68,12 @@ export function createApiClient() {
       ],
     },
     timeout: 30000,
-    retry: { limit: 2, methods: ["get"] },
+    retry: {
+      limit: 3,
+      methods: ["get"],
+      // Exponential backoff: 300ms, 600ms, 1200ms
+      delay: (attemptCount) => 0.3 * 2 ** (attemptCount - 1) * 1000,
+    },
   })
 }
 

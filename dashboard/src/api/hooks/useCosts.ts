@@ -15,14 +15,19 @@ const emptyCostsHistory = { period_days: 0, data: [], totals: { total_usd: 0, to
 const emptyCostsByTool = { period_days: 0, tools: [] }
 const emptyCostsByModel = { period_days: 0, models: [] }
 
+function is404(err: unknown): boolean {
+  return (err as { response?: { status?: number } })?.response?.status === 404
+}
+
 export function useCostsToday() {
   return useQuery({
     queryKey: ["costs-today"],
     queryFn: async () => {
       try {
         return await pincer.costsToday()
-      } catch {
-        return emptyCostsToday
+      } catch (err) {
+        if (is404(err)) return emptyCostsToday
+        throw err
       }
     },
     refetchInterval: REFETCH_INTERVALS.COSTS,
@@ -35,8 +40,9 @@ export function useCostsHistory(days = 30) {
     queryFn: async () => {
       try {
         return await pincer.costsHistory(days)
-      } catch {
-        return emptyCostsHistory
+      } catch (err) {
+        if (is404(err)) return emptyCostsHistory
+        throw err
       }
     },
     refetchInterval: REFETCH_INTERVALS.COSTS,
@@ -49,8 +55,9 @@ export function useCostsByTool(days = 7) {
     queryFn: async () => {
       try {
         return await pincer.costsByTool(days)
-      } catch {
-        return emptyCostsByTool
+      } catch (err) {
+        if (is404(err)) return emptyCostsByTool
+        throw err
       }
     },
     refetchInterval: REFETCH_INTERVALS.COSTS,
@@ -63,8 +70,9 @@ export function useCostsByModel(days = 7) {
     queryFn: async () => {
       try {
         return await pincer.costsByModel(days)
-      } catch {
-        return emptyCostsByModel
+      } catch (err) {
+        if (is404(err)) return emptyCostsByModel
+        throw err
       }
     },
     refetchInterval: REFETCH_INTERVALS.COSTS,

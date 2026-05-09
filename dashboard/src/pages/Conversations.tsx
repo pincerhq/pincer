@@ -2,6 +2,7 @@ import { useState, useMemo } from "react"
 import { PageContainer } from "@/components/layout/PageContainer"
 import { ConversationList } from "@/components/conversations/ConversationList"
 import { ConversationView } from "@/components/conversations/ConversationView"
+import { ApiErrorBanner } from "@/components/ui/ApiErrorBanner"
 import { useConversations, useConversation } from "@/api/hooks/useConversations"
 
 export function ConversationsPage() {
@@ -16,12 +17,21 @@ export function ConversationsPage() {
     return p
   }, [search, channelFilter])
 
-  const { data, isLoading } = useConversations(params)
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    refetch,
+  } = useConversations(params)
   const { data: conversation, isLoading: convLoading } =
     useConversation(selected)
 
   return (
     <PageContainer title="Conversations">
+      {isError && (
+        <ApiErrorBanner error={error} onRetry={() => refetch()} className="mb-4" />
+      )}
       <div className="flex gap-0 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] overflow-hidden h-[calc(100vh-10rem)]">
         <div className="w-80 border-r border-[var(--color-border)] shrink-0">
           <ConversationList

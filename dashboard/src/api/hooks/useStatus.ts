@@ -9,6 +9,7 @@ export function useStatus() {
       try {
         return await pincer.status()
       } catch {
+        // Agent offline is expected — return null without marking as error
         return null
       }
     },

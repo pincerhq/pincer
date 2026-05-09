@@ -6,9 +6,9 @@ import json
 from contextlib import suppress
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 
-from pincer.security.audit import AuditAction, get_audit_logger
+from pincer.security.audit import AuditAction, AuditEntry, get_audit_logger
 
 router = APIRouter(prefix="/api/audit", tags=["audit"])
 
@@ -32,6 +32,33 @@ def _row_to_entry(row: dict[str, Any]) -> dict[str, Any]:
         "duration_ms": row.get("duration_ms"),
         "metadata": metadata,
     }
+
+
+@router.post("/client-errors")
+async def log_client_error(request: Request) -> dict[str, str]:
+    """Accept frontend error reports and write them to the audit trail."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    message = str(body.get("message", ""))[:500]
+    stack = str(body.get("stack", ""))[:2000] if body.get("stack") else None
+    context = body.get("context")
+    context_str = str(context)[:500] if context else None
+
+    audit = await get_audit_logger()
+    await audit.log(
+        AuditEntry(
+            user_id="dashboard",
+            action=AuditAction.ERROR,
+            tool="dashboard-ui",
+            input_summary=message,
+            output_summary=stack or context_str,
+            approved=False,
+        )
+    )
+    return {"ok": "true"}
 
 
 @router.get("")

@@ -2,13 +2,14 @@ import { useCallback } from "react"
 import { PageContainer } from "@/components/layout/PageContainer"
 import { ScoreRing } from "@/components/doctor/ScoreRing"
 import { DoctorReport } from "@/components/doctor/DoctorReport"
+import { ApiErrorBanner } from "@/components/ui/ApiErrorBanner"
 import { useDoctor } from "@/api/hooks/useSettings"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { RefreshCw, Download, Loader2 } from "lucide-react"
 
 export function DoctorPage() {
-  const { data, isLoading, isFetching, refetch } = useDoctor()
+  const { data, isLoading, isFetching, isError, error, refetch } = useDoctor()
 
   const handleExport = useCallback(() => {
     if (!data) return
@@ -57,13 +58,17 @@ export function DoctorPage() {
         </div>
       </div>
 
-      {!data && !isLoading ? (
+      {isError && (
+        <ApiErrorBanner error={error} onRetry={() => refetch()} className="mb-6" />
+      )}
+
+      {!data && !isLoading && !isError ? (
         <div className="flex flex-col items-center justify-center py-20">
           <p className="text-sm text-[var(--color-muted)]">
             Click &quot;Run Check&quot; to scan your agent&apos;s security
           </p>
         </div>
-      ) : isLoading ? (
+      ) : !isError && isLoading ? (
         <div className="flex flex-col items-center gap-6 py-12">
           <Skeleton className="h-40 w-40 rounded-full bg-white/[0.06]" />
           <Skeleton className="h-4 w-48 bg-white/[0.06]" />
