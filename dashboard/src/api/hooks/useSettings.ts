@@ -5,7 +5,16 @@ import type { Settings } from "@/api/types"
 export function useSettings() {
   return useQuery({
     queryKey: ["settings"],
-    queryFn: pincer.settings,
+    queryFn: async () => {
+      try {
+        return await pincer.settings()
+      } catch (err) {
+        const status = (err as { response?: { status?: number } })?.response?.status
+        if (status === 404 || status === 503) return null
+        throw err
+      }
+    },
+    retry: false,
   })
 }
 

@@ -22,7 +22,7 @@ const navigation = [
   { name: "Costs", href: ROUTES.COSTS, icon: DollarSign },
   { name: "Conversations", href: ROUTES.CONVERSATIONS, icon: MessageSquare },
   { name: "Audit Log", href: ROUTES.AUDIT, icon: Shield },
-  { name: "Skills", href: ROUTES.SKILLS, icon: Puzzle },
+  { name: "Extensions", href: ROUTES.SKILLS, icon: Puzzle },
   { name: "Security", href: ROUTES.DOCTOR, icon: Stethoscope },
   { name: "Settings", href: ROUTES.SETTINGS, icon: Settings },
 ]

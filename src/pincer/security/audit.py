@@ -186,6 +186,43 @@ class AuditLogger:
             rows = await cursor.fetchall()
             return [dict(zip(columns, row, strict=False)) for row in rows]
 
+    async def count(
+        self,
+        user_id: str | None = None,
+        action: AuditAction | None = None,
+        tool: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+    ) -> int:
+        """Count audit log entries matching filters."""
+        assert self._db is not None
+
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if user_id:
+            conditions.append("user_id = ?")
+            params.append(user_id)
+        if action:
+            conditions.append("action = ?")
+            params.append(action.value)
+        if tool:
+            conditions.append("tool = ?")
+            params.append(tool)
+        if since:
+            conditions.append("timestamp >= ?")
+            params.append(since)
+        if until:
+            conditions.append("timestamp <= ?")
+            params.append(until)
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT COUNT(*) FROM audit_log {where}"  # noqa: S608
+
+        async with self._db.execute(sql, params) as cursor:
+            row = await cursor.fetchone()
+            return int(row[0]) if row else 0
+
     async def export_json(
         self,
         output_path: str | Path,
@@ -329,10 +366,18 @@ class AuditLogger:
 _audit_logger: AuditLogger | None = None
 
 
-async def get_audit_logger(db_path: str | Path = "data/audit.db") -> AuditLogger:
+async def get_audit_logger(db_path: str | Path | None = None) -> AuditLogger:
     """Singleton accessor for the audit logger."""
     global _audit_logger
-    if _audit_logger is None:
-        _audit_logger = AuditLogger(db_path=db_path)
+    if _audit_logger is None or _audit_logger._db is None:
+        if _audit_logger is None:
+            if db_path is None:
+                try:
+                    from pincer.config import get_settings_relaxed
+
+                    db_path = get_settings_relaxed().data_dir / "audit.db"
+                except Exception:
+                    db_path = Path("data/audit.db")
+            _audit_logger = AuditLogger(db_path=db_path)
         await _audit_logger.initialize()
     return _audit_logger

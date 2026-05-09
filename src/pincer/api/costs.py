@@ -26,6 +26,7 @@ async def get_today_costs() -> dict[str, Any]:
         "request_count": costs["request_count"],
         "budget": {
             "daily_limit": budget["daily_limit"],
+            "spent_today": budget["spent_today"],
             "spent_pct": budget["spent_pct"],
             "remaining": budget["remaining"],
             "is_downgraded": budget["is_downgraded"],

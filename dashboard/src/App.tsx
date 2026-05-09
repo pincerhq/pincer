@@ -33,6 +33,9 @@ const DoctorPage = lazy(() =>
 const SettingsPage = lazy(() =>
   import("@/pages/Settings").then((m) => ({ default: m.SettingsPage })),
 )
+const IntegrationDetailPage = lazy(() =>
+  import("@/pages/IntegrationDetail").then((m) => ({ default: m.IntegrationDetailPage })),
+)
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -45,8 +48,8 @@ const queryClient = new QueryClient({
 })
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
-  const token = useAuthStore((s) => s.token)
-  if (!token) return <Navigate to={ROUTES.LOGIN} replace />
+  const isConnected = useAuthStore((s) => s.isConnected)
+  if (!isConnected) return <Navigate to={ROUTES.LOGIN} replace />
   return <>{children}</>
 }
 
@@ -101,6 +104,10 @@ export default function App() {
               <Route
                 path={ROUTES.SKILLS}
                 element={<PageWrapper><SkillsPage /></PageWrapper>}
+              />
+              <Route
+                path={ROUTES.INTEGRATION}
+                element={<PageWrapper><IntegrationDetailPage /></PageWrapper>}
               />
               <Route
                 path={ROUTES.DOCTOR}
