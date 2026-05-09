@@ -169,6 +169,10 @@ def _interpolate_dict(d: dict[str, str]) -> dict[str, str]:
     return {k: _interpolate_env(v) for k, v in d.items()}
 
 
+def _interpolate_list(values: list[str]) -> list[str]:
+    return [_interpolate_env(v) for v in values]
+
+
 def _parse_server_from_toml(raw: dict[str, Any]) -> MCPServerConfig:
     """Parse a single [[mcp.servers]] TOML entry."""
     transport = MCPTransport(raw.get("transport", "stdio"))
@@ -183,7 +187,7 @@ def _parse_server_from_toml(raw: dict[str, Any]) -> MCPServerConfig:
         transport=transport,
         enabled=raw.get("enabled", True),
         command=raw.get("command"),
-        args=raw.get("args", []),
+        args=_interpolate_list(raw.get("args", [])),
         env=env,
         url=raw.get("url"),
         headers=headers,
@@ -304,7 +308,7 @@ def _load_env_servers() -> list[MCPServerConfig]:
 
         # Parse args: comma-separated
         args_str = os.environ.get(f"{prefix}ARGS", "")
-        args = [a.strip() for a in args_str.split(",") if a.strip()] if args_str else []
+        args = _interpolate_list([a.strip() for a in args_str.split(",") if a.strip()]) if args_str else []
 
         # Parse env: PINCER_MCP_SERVER_N_ENV_VARNAME=value
         env: dict[str, str] = {}

@@ -294,6 +294,36 @@ Authorization = "Bearer ${MY_TOKEN}"
     assert cfg.servers[0].headers["Authorization"] == "Bearer secret123"
 
 
+def test_env_var_in_toml_args_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_SRC_DIR", "/workspace/src")
+    monkeypatch.setenv("NEWSAPI_KEY", "abc123")
+    toml_content = """
+[mcp]
+[[mcp.servers]]
+name = "newsapi"
+transport = "stdio"
+command = "python"
+args = ["${PINCER_SRC_DIR}/pincer-mcps/newsapi_server.py", "--api-key=${NEWSAPI_KEY}", "${MISSING_VAR}"]
+"""
+    (tmp_path / "pincer.toml").write_text(toml_content)
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers[0].args == [
+        "/workspace/src/pincer-mcps/newsapi_server.py",
+        "--api-key=abc123",
+        "${MISSING_VAR}",
+    ]
+
+
+def test_env_server_args_interpolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_SCRIPT", "server.py")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_NAME", "envargs")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_TRANSPORT", "stdio")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_COMMAND", "python")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_ARGS", "${PINCER_SCRIPT},--mode=test")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers[0].args == ["server.py", "--mode=test"]
+
+
 # ── pincer.local.toml merge ───────────────────────────────────────────────────
 
 
