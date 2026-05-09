@@ -143,6 +143,32 @@ export interface SkillInfo {
   status: "active" | "disabled" | "error"
   permissions: string[]
   tools: string[]
+  source?: "file" | "mcp" | "integration"
+  slug?: string
+}
+
+export interface IntegrationTool {
+  name: string
+  description: string
+}
+
+export interface IntegrationCategory {
+  name: string
+  tools: IntegrationTool[]
+}
+
+export interface IntegrationDetail {
+  slug: string
+  name: string
+  author: string
+  description: string
+  status: "active" | "disabled"
+  tool_count: number
+  categories: IntegrationCategory[]
+  usage: {
+    total_calls: number
+    by_tool: Record<string, number>
+  }
 }
 
 export interface SkillsResponse {

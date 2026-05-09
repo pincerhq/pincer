@@ -14,6 +14,7 @@ import type {
   ScanResult,
   Settings,
   DoctorReport,
+  IntegrationDetail,
 } from "./types"
 
 function getStoredAuth(): { token?: string; apiUrl?: string } | null {
@@ -133,4 +134,7 @@ export const pincer = {
     api().patch("api/settings", { json: data }).json<Settings>(),
 
   doctor: () => api().get("api/doctor").json<DoctorReport>(),
+
+  integration: (slug: string) =>
+    api().get(`api/integrations/${slug}`).json<IntegrationDetail>(),
 }

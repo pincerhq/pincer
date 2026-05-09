@@ -16,6 +16,7 @@ from pincer.api.audit import router as audit_router
 from pincer.api.chat import router as chat_router
 from pincer.api.conversations import router as conversations_router
 from pincer.api.costs import router as costs_router
+from pincer.api.integrations import router as integrations_router
 from pincer.api.skills import router as skills_router
 
 # Dashboard static files: use env override (Docker) or project-relative path
@@ -102,6 +103,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_router)
     app.include_router(conversations_router)
     app.include_router(skills_router)
+    app.include_router(integrations_router)
     app.include_router(chat_router)
 
     # Voice routes (Sprint 7) — mounted unconditionally; handlers check engine state

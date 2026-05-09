@@ -428,3 +428,74 @@ Server-specific variables:
 | `pincer-mcps` (`openweathermap`) | `API_KEY` | — | OpenWeatherMap API key |
 | `pincer-mcps` (`newsapi`) | `API_KEY` | — | NewsAPI.org API key |
 | `pincer-mcps` (`translate`) | `LIBRETRANSLATE_URL` | — | LibreTranslate instance URL |
+| All MCP servers | `OTEL_DSN` | — | OpenTelemetry collector DSN (optional, see [Telemetry](#telemetry)) |
+
+---
+
+## Telemetry
+
+All bundled MCP servers can emit OpenTelemetry traces, metrics, and structured
+logs to an [Uptrace](https://uptrace.dev)-compatible OTLP collector. Telemetry is
+**disabled by default** and fully opt-in — no data leaves the process unless you
+set the DSN.
+
+### MCP servers (`pomodoro-mcp`, `pincer-mcps`, `sqlite-vec-memory-mcp`)
+
+Set `OTEL_DSN` to your collector DSN before starting the server:
+
+```bash
+OTEL_DSN=https://<token>@uptrace.dev/<project_id> python -m pomodoro_server
+```
+
+For Docker / docker-compose, add it to the service environment:
+
+```yaml
+environment:
+  - OTEL_DSN=https://<token>@uptrace.dev/<project_id>
+```
+
+When `OTEL_DSN` is set and the `[telemetry]` extra is installed, each server:
+
+- Emits a trace per tool call (tool name logged at entry via `logger.info`)
+- Exports runtime metrics via a periodic OTLP reader
+- Routes Python logging through the OTel log pipeline
+
+When `OTEL_DSN` is unset or the extra is not installed the server starts normally
+— a warning is logged and execution continues without any telemetry.
+
+Install the telemetry extra for each package:
+
+```bash
+pip install "pomodoro-mcp[telemetry]"
+pip install "pincer-mcps[telemetry]"
+pip install "sqlite-vec-memory-mcp[telemetry]"
+```
+
+### Pincer agent
+
+The Pincer agent uses a **different** variable — `PINCER_TELEMETRY_DSN` — which
+can be set via environment or `pincer.toml`:
+
+```bash
+PINCER_TELEMETRY_DSN=https://<token>@uptrace.dev/<project_id> pincer run
+```
+
+```toml
+# pincer.toml
+telemetry_dsn = "https://<token>@uptrace.dev/<project_id>"
+```
+
+Install the telemetry extra:
+
+```bash
+pip install "pincer-agent[telemetry]"
+```
+
+### Variable summary
+
+| Component | Environment variable | `pincer.toml` key |
+|-----------|---------------------|-------------------|
+| `pomodoro-mcp` | `OTEL_DSN` | — |
+| `pincer-mcps` (all servers) | `OTEL_DSN` | — |
+| `sqlite-vec-memory-mcp` | `OTEL_DSN` | — |
+| Pincer agent | `PINCER_TELEMETRY_DSN` | `telemetry_dsn` |

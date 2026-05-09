@@ -20,6 +20,11 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        curl git \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 ENV UV_COMPILE_BYTECODE=1 \
@@ -31,7 +36,7 @@ COPY src/ src/
 COPY README.md ./
 # DEPRCATED: skills are deprecated and will removed in 0.9.0 version
 COPY skills/ skills/
-RUN uv sync --frozen --no-dev --extra mcp
+RUN uv sync --frozen --no-cache --no-dev --all-extras
 
 # ============================================
 # Stage 2: Runtime
@@ -55,7 +60,7 @@ RUN groupadd -r pincer && useradd -r -g pincer -m pincer
 COPY --chown=pincer:pincer --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY --chown=pincer:pincer --from=builder /app/src /app/src
 COPY --chown=pincer:pincer --from=builder /app/.venv /app/.venv
-#COPY --chown=pincer:pincer --from=builder /app/skills /app/skills
+COPY --chown=pincer:pincer --from=builder /app/skills /app/skills
 COPY --chown=pincer:pincer --from=builder /app/pyproject.toml /app/
 COPY --chown=pincer:pincer --from=dashboard-builder \
     /app/dist /app/dashboard/dist

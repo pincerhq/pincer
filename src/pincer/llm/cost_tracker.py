@@ -280,6 +280,7 @@ class CostTracker:
         today_spent = await self.get_today_spend()
         return {
             "daily_limit": self._daily_budget,
+            "spent_today": round(today_spent, 6),
             "spent_pct": round((today_spent / self._daily_budget) * 100, 1) if self._daily_budget > 0 else 0,
             "remaining": round(max(0, self._daily_budget - today_spent), 4),
             "is_downgraded": (today_spent / self._daily_budget >= 0.7 if self._daily_budget > 0 else False),
@@ -299,6 +300,7 @@ async def get_cost_tracker(db_path: Path | None = None, daily_budget: float = 5.
             s = get_settings()
             db_path = s.db_path
             daily_budget = s.daily_budget_usd
-        _cost_tracker = CostTracker(db_path, daily_budget)
-        await _cost_tracker.initialize()
+        tracker = CostTracker(db_path, daily_budget)
+        await tracker.initialize()
+        _cost_tracker = tracker
     return _cost_tracker

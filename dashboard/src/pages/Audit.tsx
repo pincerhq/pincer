@@ -1,9 +1,13 @@
-import { useState, useCallback, useMemo } from "react"
+import { useState, useCallback, useMemo, useEffect } from "react"
 import { PageContainer } from "@/components/layout/PageContainer"
 import { AuditTable } from "@/components/audit/AuditTable"
 import { AuditFilters } from "@/components/audit/AuditFilters"
 import { useAudit } from "@/api/hooks/useAudit"
+import { Button } from "@/components/ui/button"
+import { ChevronLeft, ChevronRight } from "lucide-react"
 import type { AuditEntry } from "@/api/types"
+
+const PAGE_SIZES = [25, 50, 100]
 
 function downloadFile(content: string, filename: string, mime: string) {
   const blob = new Blob([content], { type: mime })
@@ -28,15 +32,29 @@ export function AuditPage() {
   const [action, setAction] = useState("")
   const [user, setUser] = useState("")
   const [tailMode, setTailMode] = useState(false)
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(50)
+
+  useEffect(() => {
+    setPage(1)
+  }, [action, user, tailMode])
 
   const params = useMemo(() => {
-    const p: Record<string, string> = { limit: "100" }
+    const p: Record<string, string> = {
+      limit: String(pageSize),
+      offset: String((page - 1) * pageSize),
+    }
     if (action) p.action = action
-    if (user) p.user = user
+    if (user) p.user_id = user
     return p
-  }, [action, user])
+  }, [action, user, page, pageSize])
 
-  const { data, isLoading, refetch } = useAudit(params)
+  const { data, isLoading, refetch } = useAudit(params, tailMode)
+
+  const total = data?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const rangeStart = total === 0 ? 0 : (page - 1) * pageSize + 1
+  const rangeEnd = Math.min(page * pageSize, total)
 
   const handleExportCSV = useCallback(() => {
     if (!data?.entries) return
@@ -70,11 +88,56 @@ export function AuditPage() {
         <AuditTable entries={data?.entries ?? []} loading={isLoading} />
       </div>
 
-      {data?.total != null && (
-        <p className="mt-3 text-xs text-[var(--color-muted)]">
-          Showing {data.entries.length} of {data.total} entries
-        </p>
-      )}
+      <div className="mt-3 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-[var(--color-muted)]">Rows per page</span>
+          <select
+            value={pageSize}
+            onChange={(e) => {
+              setPageSize(Number(e.target.value))
+              setPage(1)
+            }}
+            className="h-7 rounded-md border border-[var(--color-border)] bg-[var(--color-card)] px-2 text-xs text-[var(--color-foreground)] focus:outline-none focus:border-[var(--color-accent)]"
+          >
+            {PAGE_SIZES.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          {data != null && (
+            <span className="text-xs text-[var(--color-muted)]">
+              {total === 0 ? "0" : `${rangeStart}–${rangeEnd}`} of {total}
+            </span>
+          )}
+        </div>
+
+        {!tailMode && (
+          <div className="flex items-center gap-1">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage((p) => p - 1)}
+              disabled={page <= 1}
+              className="h-7 w-7 p-0 border-[var(--color-border)]"
+            >
+              <ChevronLeft className="h-3.5 w-3.5" />
+            </Button>
+            <span className="text-xs text-[var(--color-muted)] px-2 min-w-[4rem] text-center">
+              {page} / {totalPages}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setPage((p) => p + 1)}
+              disabled={page >= totalPages}
+              className="h-7 w-7 p-0 border-[var(--color-border)]"
+            >
+              <ChevronRight className="h-3.5 w-3.5" />
+            </Button>
+          </div>
+        )}
+      </div>
     </PageContainer>
   )
 }

@@ -180,6 +180,104 @@ command = "original_command"
     assert cfg.servers[0].command == "overridden_command"
 
 
+# ── [mcp] enabled = false — skills gate ─────────────────────────────────────
+
+
+def test_mcp_disabled_servers_not_parsed(tmp_path: Path) -> None:
+    """When enabled=false, servers in the TOML are not parsed and not returned."""
+    toml_content = """
+[mcp]
+enabled = false
+
+[[mcp.servers]]
+name = "myserver"
+transport = "stdio"
+command = "python"
+args = ["server.py"]
+"""
+    (tmp_path / "pincer.toml").write_text(toml_content)
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.enabled is False
+    assert cfg.servers == []
+
+
+def test_mcp_disabled_invalid_server_no_exception(tmp_path: Path) -> None:
+    """enabled=false short-circuits before server validation — no ValueError raised."""
+    # A stdio server without 'command' would fail MCPServerConfig.__post_init__
+    # if parsed, but the early return must fire before that.
+    toml_content = """
+[mcp]
+enabled = false
+
+[[mcp.servers]]
+name = "broken"
+transport = "stdio"
+"""
+    (tmp_path / "pincer.toml").write_text(toml_content)
+    cfg = load_mcp_config(tmp_path)  # must not raise
+    assert cfg.enabled is False
+
+
+def test_mcp_disabled_does_not_block_skills(tmp_path: Path) -> None:
+    """The _mcp_active gate in cli.py must be False when enabled=false."""
+    toml_content = """
+[mcp]
+enabled = false
+
+[[mcp.servers]]
+name = "myserver"
+transport = "stdio"
+command = "python"
+"""
+    (tmp_path / "pincer.toml").write_text(toml_content)
+    cfg = load_mcp_config(tmp_path)
+    # Reproduce the exact condition used in cli._run_agent
+    mcp_active = cfg is not None and cfg.enabled is True and bool(cfg.servers)
+    assert not mcp_active, "Skills must not be blocked when [mcp] enabled = false"
+
+
+def test_mcp_enabled_no_servers_does_not_block_skills(tmp_path: Path) -> None:
+    """enabled=true but no servers: _mcp_active is False, skills load."""
+    toml_content = """
+[mcp]
+enabled = true
+"""
+    (tmp_path / "pincer.toml").write_text(toml_content)
+    cfg = load_mcp_config(tmp_path)
+    mcp_active = cfg is not None and cfg.enabled is True and bool(cfg.servers)
+    assert not mcp_active
+
+
+def test_mcp_active_when_enabled_with_servers(tmp_path: Path) -> None:
+    """enabled=true with servers: _mcp_active is True, skills are skipped."""
+    toml_content = """
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "myserver"
+transport = "stdio"
+command = "python"
+"""
+    (tmp_path / "pincer.toml").write_text(toml_content)
+    cfg = load_mcp_config(tmp_path)
+    mcp_active = cfg is not None and cfg.enabled is True and bool(cfg.servers)
+    assert mcp_active
+
+
+def test_mcp_disabled_via_env_does_not_block_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PINCER_MCP_ENABLED=false must also result in _mcp_active=False."""
+    monkeypatch.setenv("PINCER_MCP_ENABLED", "false")
+    # Even if servers are defined via env vars, the global toggle wins
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_NAME", "srv")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_TRANSPORT", "stdio")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_COMMAND", "python")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.enabled is False
+    mcp_active = cfg is not None and cfg.enabled is True and bool(cfg.servers)
+    assert not mcp_active
+
+
 def test_env_var_in_toml_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MY_TOKEN", "secret123")
     toml_content = """
@@ -194,3 +292,272 @@ Authorization = "Bearer ${MY_TOKEN}"
     (tmp_path / "pincer.toml").write_text(toml_content)
     cfg = load_mcp_config(tmp_path)
     assert cfg.servers[0].headers["Authorization"] == "Bearer secret123"
+
+
+def test_env_var_in_toml_args_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_SRC_DIR", "/workspace/src")
+    monkeypatch.setenv("NEWSAPI_KEY", "abc123")
+    toml_content = """
+[mcp]
+[[mcp.servers]]
+name = "newsapi"
+transport = "stdio"
+command = "python"
+args = ["${PINCER_SRC_DIR}/pincer-mcps/newsapi_server.py", "--api-key=${NEWSAPI_KEY}", "${MISSING_VAR}"]
+"""
+    (tmp_path / "pincer.toml").write_text(toml_content)
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers[0].args == [
+        "/workspace/src/pincer-mcps/newsapi_server.py",
+        "--api-key=abc123",
+        "${MISSING_VAR}",
+    ]
+
+
+def test_env_server_args_interpolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_SCRIPT", "server.py")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_NAME", "envargs")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_TRANSPORT", "stdio")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_COMMAND", "python")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_ARGS", "${PINCER_SCRIPT},--mode=test")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers[0].args == ["server.py", "--mode=test"]
+
+
+# ── pincer.local.toml merge ───────────────────────────────────────────────────
+
+
+def test_local_toml_overrides_server(tmp_path: Path) -> None:
+    """local.toml server with same name replaces the base entry."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "srv"
+transport = "stdio"
+command = "base_cmd"
+""")
+    (tmp_path / "pincer.local.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "srv"
+transport = "stdio"
+command = "local_cmd"
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert len(cfg.servers) == 1
+    assert cfg.servers[0].command == "local_cmd"
+
+
+def test_local_toml_adds_new_server(tmp_path: Path) -> None:
+    """local.toml server with a new name is appended."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "s1"
+transport = "stdio"
+command = "cmd1"
+""")
+    (tmp_path / "pincer.local.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "s2"
+transport = "stdio"
+command = "cmd2"
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert {s.name for s in cfg.servers} == {"s1", "s2"}
+
+
+def test_local_toml_only_no_base(tmp_path: Path) -> None:
+    """local.toml works standalone with no pincer.toml present."""
+    (tmp_path / "pincer.local.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "local_only"
+transport = "stdio"
+command = "echo"
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert len(cfg.servers) == 1
+    assert cfg.servers[0].name == "local_only"
+
+
+# ── _merge_mcp_raw internals ─────────────────────────────────────────────────
+
+
+def test_merge_mcp_raw_server_subtable() -> None:
+    """[mcp.server] sub-table is shallowly merged — override wins per key."""
+    from pincer.mcp.config import _merge_mcp_raw
+
+    base = {"server": {"host": "127.0.0.1", "port": 18800, "enabled": False}}
+    override = {"server": {"port": 9000}}
+    merged = _merge_mcp_raw(base, override)
+    assert merged["server"]["host"] == "127.0.0.1"
+    assert merged["server"]["port"] == 9000
+    assert merged["server"]["enabled"] is False
+
+
+def test_merge_mcp_raw_scalar_override() -> None:
+    """Scalar keys in the override simply replace base values."""
+    from pincer.mcp.config import _merge_mcp_raw
+
+    base = {"enabled": True, "tool_prefix": True, "max_servers": 10}
+    override = {"tool_prefix": False, "max_servers": 5}
+    merged = _merge_mcp_raw(base, override)
+    assert merged["tool_prefix"] is False
+    assert merged["max_servers"] == 5
+    assert merged["enabled"] is True  # untouched
+
+
+# ── MCPApprovalPolicyConfig ───────────────────────────────────────────────────
+
+
+def test_approval_policy_as_dict() -> None:
+    from pincer.mcp.config import MCPApprovalPolicyConfig
+
+    policy = MCPApprovalPolicyConfig(write="approve")
+    d = policy.as_dict()
+    assert d["read"] == "approve"
+    assert d["write"] == "approve"
+    assert d["destructive"] == "deny"
+    assert d["default"] == "deny"
+
+
+# ── _parse_mcp_config — server export sub-sections ───────────────────────────
+
+
+def test_load_mcp_config_server_export_section(tmp_path: Path) -> None:
+    """[mcp.server] fields are parsed into MCPServerExportConfig."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[mcp.server]
+enabled = true
+host = "0.0.0.0"
+port = 9999
+path = "/api/mcp"
+webhook_url = "https://hook.example.com"
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.server.enabled is True
+    assert cfg.server.host == "0.0.0.0"
+    assert cfg.server.port == 9999
+    assert cfg.server.path == "/api/mcp"
+    assert cfg.server.webhook_url == "https://hook.example.com"
+
+
+def test_load_mcp_config_approval_policy_section(tmp_path: Path) -> None:
+    """[mcp.server.approval_policy] is parsed correctly."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[mcp.server.approval_policy]
+read = "approve"
+write = "approve"
+destructive = "deny"
+unknown = "deny"
+default = "deny"
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.server.approval_policy.write == "approve"
+    assert cfg.server.approval_policy.destructive == "deny"
+
+
+def test_load_mcp_config_sampling_section(tmp_path: Path) -> None:
+    """[mcp.server.sampling] is parsed correctly."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[mcp.server.sampling]
+enabled = true
+model = "claude-haiku-4-5"
+budget_per_day = 10.0
+max_tokens = 2048
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.server.sampling.enabled is True
+    assert cfg.server.sampling.model == "claude-haiku-4-5"
+    assert cfg.server.sampling.max_tokens == 2048
+
+
+def test_approval_required_string_in_toml(tmp_path: Path) -> None:
+    """approval_required as a bare string is wrapped in a list."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "srv"
+transport = "stdio"
+command = "python"
+approval_required = "none"
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers[0].approval_required == ["none"]
+
+
+# ── Environment overrides — tool_prefix and server export ─────────────────────
+
+
+def test_tool_prefix_env_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_MCP_TOOL_PREFIX", "false")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.tool_prefix is False
+
+
+def test_tool_prefix_env_true_overrides_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+tool_prefix = false
+""")
+    monkeypatch.setenv("PINCER_MCP_TOOL_PREFIX", "true")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.tool_prefix is True
+
+
+def test_server_export_env_overrides(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_MCP_SERVER_EXPORT_ENABLED", "true")
+    monkeypatch.setenv("PINCER_MCP_SERVER_EXPORT_HOST", "0.0.0.0")
+    monkeypatch.setenv("PINCER_MCP_SERVER_EXPORT_PORT", "9999")
+    monkeypatch.setenv("PINCER_MCP_SERVER_EXPORT_PATH", "/custom")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.server.enabled is True
+    assert cfg.server.host == "0.0.0.0"
+    assert cfg.server.port == 9999
+    assert cfg.server.path == "/custom"
+
+
+# ── _load_env_servers — error / skip paths ────────────────────────────────────
+
+
+def test_env_server_invalid_transport_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unrecognised transport string causes the env server to be silently skipped."""
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_NAME", "badtransport")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_TRANSPORT", "not-a-real-transport")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers == []
+
+
+def test_env_server_invalid_name_skipped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A server name with dashes fails MCPServerConfig validation and is silently skipped."""
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_NAME", "bad-server-name")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_TRANSPORT", "stdio")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_COMMAND", "python")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers == []
+
+
+def test_env_server_env_vars_parsed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PINCER_MCP_SERVER_N_ENV_* values are collected into the server env dict."""
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_NAME", "envserver")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_TRANSPORT", "stdio")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_COMMAND", "python")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_ENV_MY_TOKEN", "secret")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers[0].env.get("MY_TOKEN") == "secret"
+
+
+def test_env_server_disabled_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """PINCER_MCP_SERVER_N_ENABLED=false marks the server as disabled (still in list)."""
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_NAME", "srv")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_TRANSPORT", "stdio")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_COMMAND", "python")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_ENABLED", "false")
+    cfg = load_mcp_config(tmp_path)
+    assert len(cfg.servers) == 1
+    assert cfg.servers[0].enabled is False

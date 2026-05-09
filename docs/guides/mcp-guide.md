@@ -191,6 +191,36 @@ Env var servers are merged with `pincer.toml`. If a server with the same name ex
 
 ---
 
+## Local overrides — `pincer.local.toml`
+
+Place a `pincer.local.toml` file next to `pincer.toml` to override or extend the base config without modifying the committed file. This is useful for machine-specific servers, developer credentials, or staging endpoints that should not be checked into version control.
+
+```toml
+# pincer.local.toml — add to .gitignore
+[mcp]
+max_servers = 20          # raise the cap locally
+
+[[mcp.servers]]
+name      = "filesystem"  # same name as in pincer.toml — replaces that entry
+transport = "stdio"
+command   = "npx"
+args      = ["-y", "@modelcontextprotocol/server-filesystem", "${HOME}"]
+
+[[mcp.servers]]
+name      = "local_db"    # new entry, only on this machine
+transport = "stdio"
+command   = "python"
+args      = ["tools/local_db_server.py"]
+```
+
+Merge rules:
+
+- All scalar and mapping fields (`enabled`, `max_servers`, `tool_prefix`, `[mcp.server]` sub-fields) in `pincer.local.toml` override the corresponding value from `pincer.toml`.
+- `[[mcp.servers]]` entries are matched by `name`. A local entry with the same name as a base entry **replaces** it entirely; entries with new names are appended.
+- Environment variables still take precedence over both files.
+
+File `pincer.local.toml` is already in `.gitignore` and does not part of this repo at any case. It is completely your local config.
+
 ## CLI commands
 
 ### Status and inspection

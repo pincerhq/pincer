@@ -37,9 +37,9 @@ console = Console()
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level),
-        format="%(message)s",
         handlers=[RichHandler(console=console, show_path=False, markup=True)],
     )
+    # format="%(message)s",
 
 
 def _find_env_file() -> str:
@@ -92,12 +92,34 @@ def run() -> None:
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
 
-    _setup_logging(settings.log_level.value)
+    # _setup_logging(settings.log_level.value)
+
+    if settings.telemetry_dsn:
+        try:
+            from pincer_telemetry import init as _init_telemetry
+
+            import pincer as _pincer_pkg
+
+            _init_telemetry(
+                project_name=settings.agent_name,
+                version=_pincer_pkg.__version__,
+                dsn_url=str(settings.telemetry_dsn),
+            )
+            console.print("[green]Telemetry enabled[/green]")
+        except ImportError:
+            console.print(
+                "[yellow]PINCER_TELEMETRY_DSN is set but opentelemetry packages are not installed — "
+                'skipping. Install with: pip install "pincer-agent[telemetry]"[/yellow]'
+            )
+        except Exception as _tel_err:
+            console.print(f"[yellow]Telemetry init failed (non-fatal): {_tel_err}[/yellow]")
+
     console.print(f"[bold green]{settings.agent_name} starting...[/bold green]")
     console.print(f"   Provider: {settings.default_provider.value}")
     console.print(f"   Model: {settings.default_model}")
     console.print(f"   Budget: ${settings.daily_budget_usd:.2f}/day")
     console.print(f"   Data: {settings.data_dir}")
+    console.print(f"   Skills dir(deprecated): {settings.skills_dir}")
     console.print()
 
     asyncio.run(_run_agent(settings))
@@ -286,59 +308,77 @@ async def _run_agent(settings: Settings) -> None:
         },
     )
 
-    # Sprint 4: Load skills and register their tools
-    from pathlib import Path as _SkillPath
+    # Load MCP config early so we can decide whether to skip skills.
+    _mcp_cfg = None
+    try:
+        from pincer.mcp import load_mcp_config as _load_mcp_config
 
-    from pincer.tools.skills.loader import SkillLoader
-    from pincer.tools.skills.scanner import SkillScanner
+        _mcp_cfg = _load_mcp_config()
+    except ImportError:
+        pass  # mcp package not installed
+    except Exception as _mcp_cfg_err:
+        console.print(f"[yellow]MCP config load failed — MCP disabled, skills will load: {_mcp_cfg_err}[/yellow]")
 
-    SkillScanner()
-    skill_loader = SkillLoader(
-        bundled_dir=_SkillPath("skills"),
-        scanner=None,  # bundled skills are trusted, skip scanning
-    )
-    loaded_skills = await skill_loader.discover_and_load()
+    # Skills are disabled only when MCP is explicitly enabled AND has servers configured.
+    # When [mcp] enabled = false, _mcp_cfg.enabled is False → _mcp_active is False → skills load.
+    _mcp_active = _mcp_cfg is not None and _mcp_cfg.enabled is True and bool(_mcp_cfg.servers)
 
-    def _wrap_skill_fn(sync_fn):
-        """Create an async handler wrapping a synchronous skill function."""
-        import functools
-        import inspect
-        import json as _json
+    # Sprint 4: Load skills — skipped when MCP servers are configured (MCP replaces skills).
+    if not _mcp_active:
+        from pathlib import Path as _SkillPath
 
-        async def handler(**kwargs):
-            kwargs.pop("context", None)
-            if inspect.iscoroutinefunction(sync_fn):
-                result = await sync_fn(**kwargs)
-            else:
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, functools.partial(sync_fn, **kwargs))
-            return _json.dumps(result) if isinstance(result, dict) else str(result)
+        from pincer.tools.skills.loader import SkillLoader
+        from pincer.tools.skills.scanner import SkillScanner
 
-        return handler
+        skill_loader = SkillLoader(
+            bundled_dir=_SkillPath(settings.skills_dir),
+            scanner=SkillScanner(),  # bundled skills are trusted, skip scanning
+        )
+        loaded_skills = await skill_loader.discover_and_load()
 
-    all_fns = skill_loader.get_all_tool_functions()
-    for schema in skill_loader.get_all_tool_schemas():
-        fn_key = schema["name"].replace("__", ".", 1)
-        fn = all_fns.get(fn_key)
-        if fn:
-            tools.register(
-                name=schema["name"],
-                description=schema["description"],
-                handler=_wrap_skill_fn(fn),
-                parameters=schema["input_schema"],
-            )
+        def _wrap_skill_fn(sync_fn):
+            import functools
+            import inspect
+            import json as _json
 
-    if loaded_skills:
-        skill_names = [s.manifest.name for s in loaded_skills.values()]
-        console.print(f"[green]Skills loaded: {', '.join(skill_names)}[/green]")
+            async def handler(**kwargs):
+                kwargs.pop("context", None)
+                if inspect.iscoroutinefunction(sync_fn):
+                    result = await sync_fn(**kwargs)
+                else:
+                    loop = asyncio.get_event_loop()
+                    result = await loop.run_in_executor(None, functools.partial(sync_fn, **kwargs))
+                return _json.dumps(result) if isinstance(result, dict) else str(result)
+
+            return handler
+
+        all_fns = skill_loader.get_all_tool_functions()
+        for schema in skill_loader.get_all_tool_schemas():
+            fn_key = schema["name"].replace("__", ".", 1)
+            fn = all_fns.get(fn_key)
+            if fn:
+                tools.register(
+                    name=schema["name"],
+                    description=schema["description"],
+                    handler=_wrap_skill_fn(fn),
+                    parameters=schema["input_schema"],
+                )
+
+        if loaded_skills:
+            skill_names = [s.manifest.name for s in loaded_skills.values()]
+            console.print(f"[green]Skills loaded: {', '.join(skill_names)}[/green]")
+        else:
+            console.print("[dim]Skills: none found (skills/ directory empty or missing)[/dim]")
+    else:
+        console.print("[yellow]Skills disabled: MCP servers are configured[/yellow]")
 
     # MCP client manager (optional — requires mcp package + pincer.toml or env config)
     mcp_manager = None
     try:
-        from pincer.mcp import MCPClientManager, load_mcp_config
+        from pincer.mcp import MCPClientManager
 
-        mcp_cfg = load_mcp_config()
-        if mcp_cfg.enabled and mcp_cfg.servers:
+        mcp_cfg = _mcp_cfg  # already loaded above; avoids re-reading config files
+        if mcp_cfg is not None and mcp_cfg.enabled and mcp_cfg.servers:
             mcp_manager = MCPClientManager(
                 config=mcp_cfg,
                 tool_registry=tools,

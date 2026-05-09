@@ -282,6 +282,7 @@ async def summarize_url(params: SummarizeInput) -> str:
     Returns url, title, text (up to max_length characters), and length.
     The agent is responsible for summarizing the returned text.
     """
+    logger.info("tool: summarize_url")
     try:
         async with httpx.AsyncClient(timeout=10.0, headers=_HEADERS, follow_redirects=True) as client:
             r = await client.get(params.url)
@@ -313,6 +314,7 @@ async def get_youtube_transcript(params: YoutubeInput) -> str:
     scraping the YouTube innertube API and watch page.
     Returns video_id, title, transcript (up to max_length characters), and language.
     """
+    logger.info("tool: get_youtube_transcript")
     video_id = _extract_video_id(params.url)
     if not video_id:
         return json.dumps({"error": "Invalid YouTube URL"})
@@ -357,6 +359,19 @@ async def get_youtube_transcript(params: YoutubeInput) -> str:
 
 
 def main() -> None:
+    try:
+        from pincer_telemetry import init as _init_telemetry
+
+        _init_telemetry(project_name="summarize_mcp", version="0.1.0")
+        logger.info("Telemetry init success")
+    except ImportError:
+        logger.warning(
+            "OTEL_DSN is set but pincer-telemetry is not installed — "
+            'skipping. Install with: pip install "pincer-mcps[telemetry]"'
+        )
+    except Exception as _tel_err:
+        logger.error("Telemetry init failed (non-fatal): %s", _tel_err)
+
     parser = argparse.ArgumentParser(description="Summarize MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -378,7 +393,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.transport == "http":
-        print(f"Starting summarize_mcp · HTTP transport · {args.host}:{args.port}/mcp")
+        logger.info("Starting summarize_mcp · HTTP transport · %s:%s/mcp", args.host, args.port)
         app = mcp.http_app()
         cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
         uvicorn.run(cors_app, host=args.host, port=args.port)

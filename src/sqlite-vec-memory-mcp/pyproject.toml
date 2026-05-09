@@ -15,8 +15,16 @@ dependencies = [
     "sqlite-vec>=0.1.6",
 ]
 
+[project.optional-dependencies]
+telemetry = [
+    "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@main"
+]
+
 [project.scripts]
 memory_server = "memory_server:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

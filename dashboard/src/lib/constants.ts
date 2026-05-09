@@ -4,6 +4,7 @@ export const ROUTES = {
   CONVERSATIONS: "/conversations",
   AUDIT: "/audit",
   SKILLS: "/skills",
+  INTEGRATION: "/skills/integrations/:slug",
   DOCTOR: "/doctor",
   SETTINGS: "/settings",
   LOGIN: "/login",

@@ -77,7 +77,7 @@ export function LoginPage() {
 
           <Button
             type="submit"
-            disabled={loading || !token}
+            disabled={loading}
             className="w-full bg-[var(--color-accent)] text-[var(--color-accent-foreground)] hover:opacity-90 transition-opacity"
           >
             {loading ? "Connecting..." : "Connect"}
