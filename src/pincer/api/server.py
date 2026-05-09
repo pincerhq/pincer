@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+_SERVER_START = time.time()
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,15 +36,9 @@ DASHBOARD_TOKEN = os.environ.get("PINCER_DASHBOARD_TOKEN", "")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    from pincer.config import get_settings_relaxed
     from pincer.security.audit import get_audit_logger
 
-    try:
-        settings = get_settings_relaxed()
-        audit_db = settings.data_dir / "audit.db"
-    except Exception:
-        audit_db = Path("data/audit.db")
-    audit = await get_audit_logger(audit_db)
+    audit = await get_audit_logger()
     yield
     await audit.shutdown()
 
@@ -92,15 +89,78 @@ def create_app() -> FastAPI:
 
     @app.get("/api/status")
     async def status() -> dict[str, object]:
+        channels = [
+            {
+                "name": "telegram",
+                "type": "telegram",
+                "connected": bool(os.environ.get("PINCER_TELEGRAM_BOT_TOKEN")),
+            },
+            {
+                "name": "whatsapp",
+                "type": "whatsapp",
+                "connected": os.environ.get("PINCER_WHATSAPP_ENABLED", "").lower() == "true",
+            },
+            {
+                "name": "discord",
+                "type": "discord",
+                "connected": bool(os.environ.get("PINCER_DISCORD_BOT_TOKEN")),
+            },
+        ]
         return {
             "agent_running": True,
             "version": "0.5.0",
-            "channels": {
-                "telegram": bool(os.environ.get("PINCER_TELEGRAM_BOT_TOKEN")),
-                "whatsapp": os.environ.get("PINCER_WHATSAPP_ENABLED", "").lower()
-                == "true",
-                "discord": bool(os.environ.get("PINCER_DISCORD_BOT_TOKEN")),
+            "uptime_seconds": int(time.time() - _SERVER_START),
+            "active_sessions": 0,
+            "channels": channels,
+        }
+
+    @app.get("/api/settings")
+    async def get_settings_api() -> dict[str, object]:
+        from pincer.config import get_settings_relaxed
+        try:
+            s = get_settings_relaxed()
+        except Exception:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=503, detail="Settings unavailable")
+        telegram_set = bool(s.telegram_bot_token.get_secret_value())
+        discord_set = bool(s.discord_bot_token.get_secret_value())
+        api_key_set = bool(
+            s.anthropic_api_key.get_secret_value()
+            or s.openai_api_key.get_secret_value()
+        )
+        return {
+            "llm": {
+                "provider": s.default_provider.value,
+                "model": s.default_model,
+                "api_key_set": api_key_set,
+                "max_tokens": s.max_tokens,
+                "temperature": s.temperature,
             },
+            "channels": {
+                "telegram_enabled": telegram_set,
+                "telegram_token_set": telegram_set,
+                "whatsapp_enabled": s.whatsapp_enabled,
+                "discord_enabled": discord_set,
+                "discord_token_set": discord_set,
+                "web_enabled": False,
+            },
+            "budget": {
+                "daily_limit": s.daily_budget_usd,
+                "per_conversation_limit": 0,
+                "per_tool_limit": 0,
+                "auto_downgrade": False,
+            },
+            "security": {
+                "allowed_users": [str(u) for u in s.telegram_allowed_users],
+                "require_approval_for": (
+                    ["shell"] if getattr(s, "shell_require_approval", False) else []
+                ),
+                "audit_enabled": True,
+                "rate_limit_messages": 0,
+                "rate_limit_tools": 0,
+            },
+            "system_prompt": s.system_prompt,
+            "timezone": "UTC",
         }
 
     @app.get("/api/doctor")

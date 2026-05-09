@@ -52,6 +52,12 @@ async def get_audit(
         except ValueError:
             pass
     logger = await get_audit_logger()
+    total = await logger.count(
+        user_id=user,
+        action=audit_action,
+        since=since,
+        until=until,
+    )
     rows = await logger.query(
         user_id=user,
         action=audit_action,
@@ -61,7 +67,7 @@ async def get_audit(
         offset=offset,
     )
     entries = [_row_to_entry(row) for row in rows]
-    return {"entries": entries, "total": len(entries)}
+    return {"entries": entries, "total": total}
 
 
 @router.get("/stats")

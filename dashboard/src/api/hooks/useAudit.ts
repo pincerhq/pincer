@@ -11,7 +11,7 @@ const emptyAuditStats = {
   failed_actions: 0,
 }
 
-export function useAudit(params?: Record<string, string>) {
+export function useAudit(params?: Record<string, string>, tailMode = false) {
   return useQuery({
     queryKey: ["audit", params],
     queryFn: async () => {
@@ -25,7 +25,7 @@ export function useAudit(params?: Record<string, string>) {
         throw err
       }
     },
-    refetchInterval: REFETCH_INTERVALS.AUDIT,
+    refetchInterval: tailMode ? 3_000 : REFETCH_INTERVALS.AUDIT,
   })
 }
 
@@ -35,13 +35,10 @@ export function useAuditStats() {
     queryFn: async () => {
       try {
         return await pincer.auditStats()
-      } catch (err) {
-        const res = (err as { response?: { status?: number } })?.response
-        if (res?.status === 404) {
-          return emptyAuditStats
-        }
-        throw err
+      } catch {
+        return emptyAuditStats
       }
     },
+    refetchInterval: REFETCH_INTERVALS.AUDIT,
   })
 }

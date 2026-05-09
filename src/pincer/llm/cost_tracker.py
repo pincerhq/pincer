@@ -253,6 +253,7 @@ class CostTracker:
         today_spent = await self.get_today_spend()
         return {
             "daily_limit": self._daily_budget,
+            "spent_today": round(today_spent, 6),
             "spent_pct": round(
                 (today_spent / self._daily_budget) * 100, 1
             )
@@ -277,12 +278,13 @@ async def get_cost_tracker(
 ) -> CostTracker:
     """Singleton accessor for the cost tracker."""
     global _cost_tracker
-    if _cost_tracker is None:
+    if _cost_tracker is None or _cost_tracker._db is None:
         if db_path is None:
             from pincer.config import get_settings
             s = get_settings()
             db_path = s.db_path
             daily_budget = s.daily_budget_usd
-        _cost_tracker = CostTracker(db_path, daily_budget)
+        if _cost_tracker is None:
+            _cost_tracker = CostTracker(db_path, daily_budget)
         await _cost_tracker.initialize()
     return _cost_tracker

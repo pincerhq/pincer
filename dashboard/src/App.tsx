@@ -45,8 +45,8 @@ const queryClient = new QueryClient({
 })
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
-  const token = useAuthStore((s) => s.token)
-  if (!token) return <Navigate to={ROUTES.LOGIN} replace />
+  const isConnected = useAuthStore((s) => s.isConnected)
+  if (!isConnected) return <Navigate to={ROUTES.LOGIN} replace />
   return <>{children}</>
 }
 

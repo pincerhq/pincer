@@ -63,40 +63,43 @@ async def list_conversations(
     params.append(limit)
 
     conversations: list[dict[str, Any]] = []
-    async with aiosqlite.connect(str(db_path)) as db:
-        db.row_factory = aiosqlite.Row
-        sql = f"""
-            SELECT id, user_id, channel, messages_json, created_at, updated_at
-            FROM conversations {where}
-            ORDER BY updated_at DESC LIMIT ?
-        """
-        async with db.execute(sql, params) as cursor:
-            async for row in cursor:
-                msgs = []
-                try:
-                    msgs = json.loads(row["messages_json"] or "[]")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                last_msg = ""
-                if msgs:
-                    last = msgs[-1]
-                    content = last.get("content", "")
-                    if isinstance(content, list):
-                        content = " ".join(
-                            p.get("text", str(p))
-                            for p in content
-                            if isinstance(p, dict)
-                        )
-                    last_msg = str(content)[:200]
-                conversations.append({
-                    "id": row["id"],
-                    "user_id": row["user_id"],
-                    "channel": row["channel"],
-                    "last_message": last_msg,
-                    "message_count": len(msgs),
-                    "created_at": _ts_to_iso(row["created_at"]),
-                    "updated_at": _ts_to_iso(row["updated_at"]),
-                })
+    try:
+        async with aiosqlite.connect(str(db_path)) as db:
+            db.row_factory = aiosqlite.Row
+            sql = f"""
+                SELECT id, user_id, channel, messages_json, created_at, updated_at
+                FROM conversations {where}
+                ORDER BY updated_at DESC LIMIT ?
+            """
+            async with db.execute(sql, params) as cursor:
+                async for row in cursor:
+                    msgs = []
+                    try:
+                        msgs = json.loads(row["messages_json"] or "[]")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    last_msg = ""
+                    if msgs:
+                        last = msgs[-1]
+                        content = last.get("content", "")
+                        if isinstance(content, list):
+                            content = " ".join(
+                                p.get("text", str(p))
+                                for p in content
+                                if isinstance(p, dict)
+                            )
+                        last_msg = str(content)[:200]
+                    conversations.append({
+                        "id": row["id"],
+                        "user_id": row["user_id"],
+                        "channel": row["channel"],
+                        "last_message": last_msg,
+                        "message_count": len(msgs),
+                        "created_at": _ts_to_iso(row["created_at"]),
+                        "updated_at": _ts_to_iso(row["updated_at"]),
+                    })
+    except Exception:
+        return {"conversations": [], "total": 0}
 
     return {"conversations": conversations, "total": len(conversations)}
 
