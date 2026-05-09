@@ -531,3 +531,97 @@ def test_env_server_disabled_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     cfg = load_mcp_config(tmp_path)
     assert len(cfg.servers) == 1
     assert cfg.servers[0].enabled is False
+
+
+# ── Relative path resolution in args ─────────────────────────────────────────
+
+
+def test_relative_arg_resolved_to_base_dir(tmp_path: Path) -> None:
+    """Relative path in args is resolved against the config directory."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "memory"
+transport = "stdio"
+command = "python"
+args = ["src/sqlite-vec-memory-mcp/memory_server.py"]
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers[0].args == [str(tmp_path / "src/sqlite-vec-memory-mcp/memory_server.py")]
+
+
+def test_absolute_arg_unchanged(tmp_path: Path) -> None:
+    """Absolute path in args is not modified."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "node"
+transport = "stdio"
+command = "node"
+args = ["/usr/local/lib/server/index.js"]
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers[0].args == ["/usr/local/lib/server/index.js"]
+
+
+def test_non_path_args_unchanged(tmp_path: Path) -> None:
+    """Flags, npm scopes, and env-var refs in args are not modified."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "github"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github", "${GITHUB_TOKEN}"]
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers[0].args == ["-y", "@modelcontextprotocol/server-github", "${GITHUB_TOKEN}"]
+
+
+def test_relative_arg_in_local_toml_resolved(tmp_path: Path) -> None:
+    """Relative path in pincer.local.toml args is resolved against the same base_dir."""
+    (tmp_path / "pincer.local.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "pomodoro"
+transport = "stdio"
+command = "python"
+args = ["src/pomodoro-mcp/pomodoro_server.py"]
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers[0].args == [str(tmp_path / "src/pomodoro-mcp/pomodoro_server.py")]
+
+
+def test_pincer_toml_relative_paths_load_without_error(tmp_path: Path) -> None:
+    """The corrected pincer.toml layout (relative paths, fixed filenames) loads cleanly."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "memory"
+transport = "stdio"
+command = "python"
+args = ["src/sqlite-vec-memory-mcp/memory_server.py"]
+
+[[mcp.servers]]
+name = "pomodoro"
+transport = "stdio"
+command = "python"
+args = ["src/pomodoro-mcp/pomodoro_server.py"]
+
+[[mcp.servers]]
+name = "newsapi"
+transport = "stdio"
+command = "python"
+args = ["src/pincer-mcps/newsapi_server.py"]
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.enabled is True
+    assert len(cfg.servers) == 3
+    names = {s.name for s in cfg.servers}
+    assert names == {"memory", "pomodoro", "newsapi"}
+    memory = next(s for s in cfg.servers if s.name == "memory")
+    assert memory.args == [str(tmp_path / "src/sqlite-vec-memory-mcp/memory_server.py")]
+    pomodoro = next(s for s in cfg.servers if s.name == "pomodoro")
+    assert pomodoro.args == [str(tmp_path / "src/pomodoro-mcp/pomodoro_server.py")]

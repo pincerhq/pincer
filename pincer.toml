@@ -124,7 +124,7 @@ expose_tools = [
 name = "memory"
 transport = "stdio"
 command = "python"
-args = ["/app/src/sqlite-vec-memory-mcp/server.py"]
+args = ["src/sqlite-vec-memory-mcp/memory_server.py"]
 env = { MEMORY_DB_PATH = "/app/data/sqlite_vec.db" }
 sandbox = true
 
@@ -132,36 +132,36 @@ sandbox = true
 name      = "newsapi"
 transport = "stdio"
 command = "python"
-args = ["/app/src/pincer-mcps/newsapi_server.py"]
+args = ["src/pincer-mcps/newsapi_server.py"]
 env = { API_KEY="${PINCER_NEWSAPI_KEY}" }
 
 [[mcp.servers]]
 name      = "openweathermap"
 transport = "stdio"
 command = "python"
-args = ["/app/src/pincer-mcps/openweathermap_server.py"]
+args = ["src/pincer-mcps/openweathermap_server.py"]
 env = { API_KEY="${PINCER_OPENWEATHERMAP_API_KEY}" }
 
 [[mcp.servers]]
 name      = "pomodoro"
 transport = "stdio"
 command = "python"
-args = ["/app/src/pomodoro-mcp/server.py"]
+args = ["src/pomodoro-mcp/pomodoro_server.py"]
 
 [[mcp.servers]]
 name      = "stock_price"
 transport = "stdio"
 command = "python"
-args = ["/app/src/pincer-mcps/stock_price_server.py"]
+args = ["src/pincer-mcps/stock_price_server.py"]
 
 [[mcp.servers]]
 name      = "summarize"
 transport = "stdio"
 command = "python"
-args = ["/app/src/pincer-mcps/summarize_server.py"]
+args = ["src/pincer-mcps/summarize_server.py"]
 
 [[mcp.servers]]
 name      = "translate"
 transport = "stdio"
 command = "python"
-args = ["/app/src/pincer-mcps/translate_server.py"]
+args = ["src/pincer-mcps/translate_server.py"]

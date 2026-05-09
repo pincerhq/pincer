@@ -169,7 +169,14 @@ def _interpolate_dict(d: dict[str, str]) -> dict[str, str]:
     return {k: _interpolate_env(v) for k, v in d.items()}
 
 
-def _parse_server_from_toml(raw: dict[str, Any]) -> MCPServerConfig:
+def _resolve_path_arg(arg: str, base_dir: Path) -> str:
+    """Prepend base_dir to arg if it looks like a relative file path."""
+    if "/" in arg and not arg.startswith(("/", "-", "@", "$")):
+        return str(base_dir / arg)
+    return arg
+
+
+def _parse_server_from_toml(raw: dict[str, Any], base_dir: Path) -> MCPServerConfig:
     """Parse a single [[mcp.servers]] TOML entry."""
     transport = MCPTransport(raw.get("transport", "stdio"))
     env = _interpolate_dict(raw.get("env", {}))
@@ -183,7 +190,7 @@ def _parse_server_from_toml(raw: dict[str, Any]) -> MCPServerConfig:
         transport=transport,
         enabled=raw.get("enabled", True),
         command=raw.get("command"),
-        args=raw.get("args", []),
+        args=[_resolve_path_arg(a, base_dir) for a in raw.get("args", [])],
         env=env,
         url=raw.get("url"),
         headers=headers,
@@ -233,9 +240,9 @@ def _merge_mcp_raw(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
     return merged
 
 
-def _parse_mcp_config(mcp_raw: dict[str, Any]) -> MCPConfig:
+def _parse_mcp_config(mcp_raw: dict[str, Any], base_dir: Path) -> MCPConfig:
     """Parse a raw [mcp] section dict into an MCPConfig."""
-    servers = [_parse_server_from_toml(s) for s in mcp_raw.get("servers", [])]
+    servers = [_parse_server_from_toml(s, base_dir) for s in mcp_raw.get("servers", [])]
     srv_raw = mcp_raw.get("server", {})
     # Parse approval_policy sub-table
     ap_raw = srv_raw.get("approval_policy", {})
@@ -380,7 +387,7 @@ def load_mcp_config(config_dir: Path | None = None) -> MCPConfig:
     if mcp_raw and not mcp_raw.get("enabled", True):
         return MCPConfig(enabled=False)
 
-    toml_cfg = _parse_mcp_config(mcp_raw) if mcp_raw else None
+    toml_cfg = _parse_mcp_config(mcp_raw, base_dir) if mcp_raw else None
 
     # Merge: TOML+local servers + env-defined servers
     toml_servers = toml_cfg.servers if toml_cfg else []
