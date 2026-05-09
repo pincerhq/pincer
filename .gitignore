@@ -31,3 +31,4 @@ data/google_token.json
 
 # Neonize WhatsApp session databases
 pincer-wa*
+data/google_workspace_token.json
