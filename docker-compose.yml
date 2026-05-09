@@ -17,6 +17,7 @@ x-pincer-base: &pincer-base
     - PINCER_MCP_SERVER_EXPORT_ENABLED=true
     - PINCER_MCP_SERVER_EXPORT_HOST=0.0.0.0
     - PINCER_MCP_SERVER_EXPORT_PORT=18800
+    - PINCER_TELEMETRY_DSN=${OTEL_DSN}
   volumes:
     - pincer-data:/app/data
     # Optional: mount pincer.toml to configure MCP client servers
@@ -45,6 +46,7 @@ services:
     image: pincer/newsapi-mcp:latest
     profiles:
       - http
+    env_file: .env
     environment:
       API_KEY: ${PINCER_NEWSAPI_KEY:-}
 
@@ -55,6 +57,7 @@ services:
     image: pincer/openweathermap-mcp:latest
     profiles:
       - http
+    env_file: .env
     environment:
       API_KEY: ${PINCER_OPENWEATHERMAP_API_KEY:-}
 
@@ -65,6 +68,7 @@ services:
     image: pincer/pomodoro-mcp:latest
     profiles:
       - http
+    env_file: .env
 
   stock-price-mcp:
     extends:
@@ -73,6 +77,7 @@ services:
     image: pincer/stock-price-mcp:latest
     profiles:
       - http
+    env_file: .env
 
   summarize-mcp:
     extends:
@@ -81,6 +86,7 @@ services:
     image: pincer/summarize-mcp:latest
     profiles:
       - http
+    env_file: .env
 
   translate-mcp:
     extends:
@@ -89,6 +95,7 @@ services:
     image: pincer/translate-mcp:latest
     profiles:
       - http
+    env_file: .env
 
   memory-mcp:
     extends:
@@ -97,6 +104,7 @@ services:
     image: pincer/memory-mcp:latest
     profiles:
       - http
+    env_file: .env
 
   pincer-stdio:
     <<: *pincer-base
@@ -119,11 +127,6 @@ services:
       - pincer-data:/app/data
       - ./pincer.toml:/app/data/pincer.toml:ro
       - ./pincer.local.toml:/app/data/pincer.local.toml:ro
-    environment:
-      - PINCER_DATA_DIR=/app/data
-      - PINCER_DASHBOARD_HOST=0.0.0.0
-      - PINCER_DASHBOARD_PORT=8080
-      - PINCER_DASHBOARD_DIST=/app/dashboard/dist
     depends_on:
       memory-mcp:
         condition: service_healthy

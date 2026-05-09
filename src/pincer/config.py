@@ -14,7 +14,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -267,6 +267,12 @@ class Settings(BaseSettings):
     voice_filler_phrases: str = Field(
         default="",
         description="Custom filler phrases JSON array (empty = built-in)",
+    )
+
+    # ── Telemetry ────────────────────────────────────────────
+    telemetry_dsn: AnyHttpUrl | None = Field(
+        None,
+        description="OpenTelemetry DSN url with token sent as uptrace-dsn header (None = telemetry disabled)",
     )
 
     # ── Security (Sprint 5) ──────────────────────────────

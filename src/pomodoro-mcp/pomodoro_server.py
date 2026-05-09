@@ -5,6 +5,7 @@ A Model Context Protocol server for managing Pomodoro sessions.
 
 import argparse
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -16,6 +17,8 @@ from pydantic import Field
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from state import BreakType, PomodoroStore, Session, SessionStatus
+
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP(
     name="pomodoro_mcp",
@@ -112,6 +115,7 @@ async def pomodoro_start(
     Creates and immediately starts a timed work session. Only one session
     can be active at a time; finish or cancel the current one first.
     """
+    logger.info("tool: pomodoro_start")
     if store.active_session:
         return json.dumps(
             {
@@ -151,6 +155,7 @@ async def pomodoro_status(ctx: Context | None = None) -> str:
     Returns time elapsed, time remaining, and session metadata.
     Returns a message if no session is active.
     """
+    logger.info("tool: pomodoro_status")
     if not store.active_session:
         return json.dumps(
             {
@@ -177,6 +182,7 @@ async def pomodoro_pause(ctx: Context | None = None) -> str:
 
     Freezes the timer; resume with pomodoro_resume.
     """
+    logger.info("tool: pomodoro_pause")
     session = store.active_session
 
     if not session:
@@ -205,6 +211,7 @@ async def pomodoro_resume(ctx: Context | None = None) -> str:
 
     Continues the timer from where it was paused.
     """
+    logger.info("tool: pomodoro_resume")
     session = store.active_session
 
     if not session:
@@ -238,6 +245,7 @@ async def pomodoro_finish(ctx: Context | None = None) -> str:
     Records it in history and clears the active slot.
     Suggests whether to take a short or long break next.
     """
+    logger.info("tool: pomodoro_finish")
     session = store.active_session
 
     if not session:
@@ -272,6 +280,7 @@ async def pomodoro_cancel(ctx: Context | None = None) -> str:
 
     Use when you were interrupted and don't want to count this session.
     """
+    logger.info("tool: pomodoro_cancel")
     session = store.active_session
 
     if not session:
@@ -315,6 +324,7 @@ async def pomodoro_break(
     Short breaks are 5 minutes; long breaks are 15 minutes.
     Use duration_minutes to override. A break counts as an active session.
     """
+    logger.info("tool: pomodoro_break")
     if store.active_session:
         return json.dumps(
             {
@@ -371,6 +381,7 @@ async def pomodoro_amend(
 
     Useful when the task changed mid-session.
     """
+    logger.info("tool: pomodoro_amend")
     session = store.active_session
 
     if not session:
@@ -397,6 +408,7 @@ async def pomodoro_repeat(ctx: Context | None = None) -> str:
     Copies the description, duration, and tags from the most recent
     completed Pomodoro session.
     """
+    logger.info("tool: pomodoro_repeat")
     if store.active_session:
         return json.dumps(
             {
@@ -454,6 +466,7 @@ async def pomodoro_history(
     ctx: Context | None = None,
 ) -> str:
     """List past Pomodoro and break sessions with optional filters."""
+    logger.info("tool: pomodoro_history")
     sessions = store.history(limit=limit, session_type=session_type, tag=tag)
 
     return json.dumps(
@@ -469,6 +482,7 @@ async def pomodoro_history(
 @mcp.tool
 async def pomodoro_settings(ctx: Context | None = None) -> str:
     """Return the current default settings and today's progress summary."""
+    logger.info("tool: pomodoro_settings")
     return json.dumps(
         {
             "defaults": {
@@ -491,28 +505,41 @@ async def pomodoro_settings(ctx: Context | None = None) -> str:
 def main() -> None:
     import os
 
+    try:
+        from pincer_telemetry import init as _init_telemetry
+
+        _init_telemetry(project_name="pomodoro_mcp", version="0.1.0")
+        logger.info("Telemetry init success")
+    except ImportError:
+        logger.warning(
+            "OTEL_DSN is set but pincer-telemetry is not installed — "
+            'skipping. Install with: pip install "pomodoro-mcp[telemetry]"'
+        )
+    except Exception as _tel_err:
+        logger.error("Telemetry init failed (non-fatal): %s", _tel_err)
+
     parser = argparse.ArgumentParser(description="Pomodoro MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
         choices=["http", "stdio"],
-        default=os.environ.get("TRANSPORT", "stdio"),
+        default=os.getenv("TRANSPORT", "stdio"),
         help="Transport: 'http' (streamable HTTP) or 'stdio' (default)",
     )
     parser.add_argument(
         "--host",
-        default=os.environ.get("HOST", "0.0.0.0"),
+        default=os.getenv("HOST", "0.0.0.0"),
         help="Bind host for HTTP transport (default: 0.0.0.0)",
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=os.environ.get("PORT", 8000),
+        default=os.getenv("PORT", 8000),
         help="Bind port for HTTP transport (default: 8000)",
     )
     args = parser.parse_args()
 
     if args.transport == "http":
-        print(f"Starting pomodoro_mcp · HTTP transport · {args.host}:{args.port}/mcp")
+        logger.info("Starting pomodoro_mcp · HTTP transport · %s:%s/mcp", args.host, args.port)
         app = mcp.http_app()
         cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
         uvicorn.run(cors_app, host=args.host, port=args.port)

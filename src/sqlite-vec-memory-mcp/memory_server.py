@@ -17,6 +17,7 @@ Environment variables:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import struct
@@ -31,6 +32,8 @@ from starlette.middleware.cors import CORSMiddleware
 
 if TYPE_CHECKING:
     from starlette.requests import Request
+
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP(name="sqlite_vec_memory", instructions="Long-term memory with semantic search.")
 
@@ -120,6 +123,7 @@ async def health_check(request: Request) -> JSONResponse:
 @mcp.tool()
 def memory_store(content: str, tags: list[str] | None = None) -> str:
     """Store a memory and index it for semantic search. Returns the memory ID."""
+    logger.info("tool: memory_store")
     vec = _embed(content)
     db = _connect()
     cur = db.execute(
@@ -139,6 +143,7 @@ def memory_store(content: str, tags: list[str] | None = None) -> str:
 @mcp.tool()
 def memory_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
     """Search memories by semantic similarity. Returns closest matches first."""
+    logger.info("tool: memory_search")
     vec = _embed(query)
     db = _connect()
     rows = db.execute(
@@ -168,6 +173,7 @@ def memory_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
 @mcp.tool()
 def memory_list(limit: int = 20, tag: str | None = None) -> list[dict[str, Any]]:
     """List recent memories, optionally filtered by tag."""
+    logger.info("tool: memory_list")
     db = _connect()
     if tag:
         rows = db.execute(
@@ -199,6 +205,7 @@ def memory_list(limit: int = 20, tag: str | None = None) -> list[dict[str, Any]]
 @mcp.tool()
 def memory_delete(memory_id: int) -> str:
     """Delete a memory by ID."""
+    logger.info("tool: memory_delete")
     db = _connect()
     db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
     db.execute("DELETE FROM memory_vecs WHERE rowid = ?", (memory_id,))
@@ -210,6 +217,7 @@ def memory_delete(memory_id: int) -> str:
 @mcp.tool()
 def memory_update(memory_id: int, content: str, tags: list[str] | None = None) -> str:
     """Replace a memory's content and re-index it with a fresh embedding."""
+    logger.info("tool: memory_update")
     vec = _embed(content)
     db = _connect()
     db.execute(
@@ -235,6 +243,19 @@ def main() -> None:
 
     _init_db()
 
+    try:
+        from pincer_telemetry import init as _init_telemetry
+
+        _init_telemetry(project_name="sqlite_vec_memory_mcp", version="0.1.0")
+        logger.info("Telemetry init success")
+    except ImportError:
+        logger.warning(
+            "OTEL_DSN is set but pincer-telemetry is not installed — "
+            'skipping. Install with: pip install "sqlite-vec-memory-mcp[telemetry]"'
+        )
+    except Exception as _tel_err:
+        logger.error("Telemetry init failed (non-fatal): %s", _tel_err)
+
     parser = argparse.ArgumentParser(description="Memory MCP server (fastmcp)")
     parser.add_argument(
         "--transport",
@@ -256,7 +277,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.transport == "http":
-        print(f"Starting sqlite_vec_memory_mcp · HTTP transport · {args.host}:{args.port}/mcp")
+        logger.info("Starting sqlite_vec_memory_mcp · HTTP transport · %s:%s/mcp", args.host, args.port)
         app = mcp.http_app()
         cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
         uvicorn.run(cors_app, host=args.host, port=args.port)

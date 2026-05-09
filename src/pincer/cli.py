@@ -37,9 +37,9 @@ console = Console()
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level),
-        format="%(message)s",
         handlers=[RichHandler(console=console, show_path=False, markup=True)],
     )
+    # format="%(message)s",
 
 
 def _find_env_file() -> str:
@@ -92,7 +92,28 @@ def run() -> None:
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
 
-    _setup_logging(settings.log_level.value)
+    # _setup_logging(settings.log_level.value)
+
+    if settings.telemetry_dsn:
+        try:
+            from pincer_telemetry import init as _init_telemetry
+
+            import pincer as _pincer_pkg
+
+            _init_telemetry(
+                project_name=settings.agent_name,
+                version=_pincer_pkg.__version__,
+                dsn_url=str(settings.telemetry_dsn),
+            )
+            console.print("[green]Telemetry enabled[/green]")
+        except ImportError:
+            console.print(
+                "[yellow]PINCER_TELEMETRY_DSN is set but opentelemetry packages are not installed — "
+                'skipping. Install with: pip install "pincer-agent[telemetry]"[/yellow]'
+            )
+        except Exception as _tel_err:
+            console.print(f"[yellow]Telemetry init failed (non-fatal): {_tel_err}[/yellow]")
+
     console.print(f"[bold green]{settings.agent_name} starting...[/bold green]")
     console.print(f"   Provider: {settings.default_provider.value}")
     console.print(f"   Model: {settings.default_model}")

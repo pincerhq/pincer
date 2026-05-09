@@ -6,7 +6,7 @@ LABEL org.opencontainers.image.source="https://github.com/your-org/pomodoro-mcp"
 
 # ── System deps ───────────────────────────────────────────────────────────────
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl \
+        curl git \
     && rm -rf /var/lib/apt/lists/*
 
 # ── App user (non-root) ───────────────────────────────────────────────────────
@@ -21,7 +21,7 @@ WORKDIR /app
 
 # ── Python deps ───────────────────────────────────────────────────────────────
 COPY pyproject.toml ./
-RUN uv sync --no-dev
+RUN uv sync --no-cache --no-dev --all-extras
 
 # ── Application code ──────────────────────────────────────────────────────────
 COPY --chown=pomodoro:pomodoro state.py ./
