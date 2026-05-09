@@ -374,6 +374,7 @@ async def get_audit_logger(db_path: str | Path | None = None) -> AuditLogger:
             if db_path is None:
                 try:
                     from pincer.config import get_settings_relaxed
+
                     db_path = get_settings_relaxed().data_dir / "audit.db"
                 except Exception:
                     db_path = Path("data/audit.db")

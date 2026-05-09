@@ -76,6 +76,7 @@ def _slack_categories() -> list[dict[str, Any]]:
 def _google_active() -> bool:
     try:
         from pincer.config import get_settings_relaxed
+
         s = get_settings_relaxed()
         d = s.google_oauth_dir()
         return (d / "google_credentials.json").exists() and (
@@ -88,6 +89,7 @@ def _google_active() -> bool:
 def _ms365_active() -> bool:
     try:
         from pincer.integrations.ms365.config import load_config, resolve_cache_path
+
         cfg = load_config()
         return bool(cfg.enabled and cfg.client_id and resolve_cache_path(cfg).exists())
     except Exception:
@@ -97,6 +99,7 @@ def _ms365_active() -> bool:
 def _slack_active() -> bool:
     try:
         from pincer.integrations.slack.auth import load_tokens
+
         return bool(load_tokens().bot_token)
     except Exception:
         return False
@@ -133,6 +136,7 @@ _CATALOG: dict[str, dict[str, Any]] = {
 async def _tool_usage(prefix: str) -> dict[str, int]:
     try:
         from pincer.security.audit import get_audit_logger
+
         logger = await get_audit_logger()
         stats = await logger.get_stats()
         by_tool: dict[str, int] = stats.get("by_tool", {})
