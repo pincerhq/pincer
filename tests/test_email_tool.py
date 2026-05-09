@@ -32,17 +32,14 @@ class TestEmailCheck:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_check
+
             result = await email_check()
             assert "No unread" in result
 
     async def test_returns_uids(self):
         mock_client = _make_imap_client()
 
-        header_bytes = (
-            b"From: alice@example.com\r\n"
-            b"Subject: Hello\r\n"
-            b"Date: Thu, 27 Feb 2026 10:00:00 +0000\r\n"
-        )
+        header_bytes = b"From: alice@example.com\r\nSubject: Hello\r\nDate: Thu, 27 Feb 2026 10:00:00 +0000\r\n"
 
         mock_client.uid_search = AsyncMock(return_value=("OK", [b"100 200"]))
 
@@ -55,6 +52,7 @@ class TestEmailCheck:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_check
+
             result = await email_check()
             assert "UID: 200" in result or "UID: 100" in result
             assert "alice@example.com" in result
@@ -62,11 +60,7 @@ class TestEmailCheck:
     async def test_check_all_status(self):
         mock_client = _make_imap_client()
 
-        header_bytes = (
-            b"From: spam@example.com\r\n"
-            b"Subject: Buy now\r\n"
-            b"Date: Thu, 27 Feb 2026 10:00:00 +0000\r\n"
-        )
+        header_bytes = b"From: spam@example.com\r\nSubject: Buy now\r\nDate: Thu, 27 Feb 2026 10:00:00 +0000\r\n"
 
         mock_client.uid_search = AsyncMock(return_value=("OK", [b"10 20 30"]))
 
@@ -79,6 +73,7 @@ class TestEmailCheck:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_check
+
             result = await email_check(folder="[Gmail]/Spam", status="ALL")
             mock_client.uid_search.assert_called_once_with("ALL")
             mock_client.select.assert_called_once_with('"[Gmail]/Spam"')
@@ -91,6 +86,7 @@ class TestEmailCheck:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_check
+
             result = await email_check(folder="[Gmail]/Trash", status="ALL")
             assert "No emails" in result
             assert "ALL" in result
@@ -101,6 +97,7 @@ class TestEmailCheck:
             side_effect=Exception("Connection failed"),
         ):
             from pincer.tools.builtin.email_tool import email_check
+
             result = await email_check()
             assert "Error" in result
 
@@ -111,8 +108,10 @@ class TestEmailCheck:
 @pytest.mark.asyncio
 class TestEmailSend:
     async def test_send_success(self):
-        with patch("pincer.tools.builtin.email_tool.get_settings") as mock_settings, \
-             patch("aiosmtplib.send", new_callable=AsyncMock) as mock_send:
+        with (
+            patch("pincer.tools.builtin.email_tool.get_settings") as mock_settings,
+            patch("aiosmtplib.send", new_callable=AsyncMock) as mock_send,
+        ):
             s = MagicMock()
             s.email_from = "test@example.com"
             s.email_username = "test@example.com"
@@ -122,13 +121,16 @@ class TestEmailSend:
             mock_settings.return_value = s
 
             from pincer.tools.builtin.email_tool import email_send
+
             result = await email_send("user@example.com", "Test", "Hello")
             assert "sent" in result.lower()
             mock_send.assert_called_once()
 
     async def test_send_error(self):
-        with patch("pincer.tools.builtin.email_tool.get_settings") as mock_settings, \
-             patch("aiosmtplib.send", side_effect=Exception("SMTP error")):
+        with (
+            patch("pincer.tools.builtin.email_tool.get_settings") as mock_settings,
+            patch("aiosmtplib.send", side_effect=Exception("SMTP error")),
+        ):
             s = MagicMock()
             s.email_from = "test@example.com"
             s.email_username = "test@example.com"
@@ -138,6 +140,7 @@ class TestEmailSend:
             mock_settings.return_value = s
 
             from pincer.tools.builtin.email_tool import email_send
+
             result = await email_send("user@example.com", "Test", "Hello")
             assert "Error" in result
 
@@ -153,17 +156,14 @@ class TestEmailSearch:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_search
+
             result = await email_search("test query")
             assert "No emails" in result
 
     async def test_search_returns_uids(self):
         mock_client = _make_imap_client()
 
-        header_bytes = (
-            b"From: bob@example.com\r\n"
-            b"Subject: Report Q1\r\n"
-            b"Date: Thu, 27 Feb 2026 10:00:00 +0000\r\n"
-        )
+        header_bytes = b"From: bob@example.com\r\nSubject: Report Q1\r\nDate: Thu, 27 Feb 2026 10:00:00 +0000\r\n"
 
         mock_client.uid_search = AsyncMock(return_value=("OK", [b"500"]))
 
@@ -176,6 +176,7 @@ class TestEmailSearch:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_search
+
             result = await email_search("Report")
             assert "UID: 500" in result
             assert "bob@example.com" in result
@@ -183,11 +184,7 @@ class TestEmailSearch:
     async def test_search_custom_folder(self):
         mock_client = _make_imap_client()
 
-        header_bytes = (
-            b"From: spammer@example.com\r\n"
-            b"Subject: Win a prize\r\n"
-            b"Date: Thu, 27 Feb 2026 10:00:00 +0000\r\n"
-        )
+        header_bytes = b"From: spammer@example.com\r\nSubject: Win a prize\r\nDate: Thu, 27 Feb 2026 10:00:00 +0000\r\n"
 
         mock_client.uid_search = AsyncMock(return_value=("OK", [b"777"]))
 
@@ -200,6 +197,7 @@ class TestEmailSearch:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_search
+
             result = await email_search("prize", folder="[Gmail]/Spam")
             mock_client.select.assert_called_once_with('"[Gmail]/Spam"')
             assert "UID: 777" in result
@@ -235,6 +233,7 @@ class TestEmailRead:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_read
+
             result = await email_read("12345")
             assert "UID: 12345" in result
             assert "alice@example.com" in result
@@ -251,6 +250,7 @@ class TestEmailRead:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_read
+
             result = await email_read("99999")
             assert "not found" in result.lower() or "empty" in result.lower()
 
@@ -260,6 +260,7 @@ class TestEmailRead:
             side_effect=Exception("IMAP error"),
         ):
             from pincer.tools.builtin.email_tool import email_read
+
             result = await email_read("12345")
             assert "Error" in result
 
@@ -270,8 +271,7 @@ class TestEmailRead:
             b"Subject: Long\r\n"
             b"MIME-Version: 1.0\r\n"
             b"Content-Type: text/plain\r\n"
-            b"\r\n"
-            + long_body.encode()
+            b"\r\n" + long_body.encode()
         )
 
         mock_client = _make_imap_client()
@@ -285,6 +285,7 @@ class TestEmailRead:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_read
+
             result = await email_read("1", max_chars=100)
             assert "..." in result
             assert len(result) < 5000
@@ -306,6 +307,7 @@ class TestEmailListFolders:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_list_folders
+
             result = await email_list_folders()
             assert "INBOX" in result
             assert "[Gmail]/Trash" in result
@@ -318,6 +320,7 @@ class TestEmailListFolders:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_list_folders
+
             result = await email_list_folders()
             assert "No folders" in result
 
@@ -327,6 +330,7 @@ class TestEmailListFolders:
             side_effect=Exception("Connection failed"),
         ):
             from pincer.tools.builtin.email_tool import email_list_folders
+
             result = await email_list_folders()
             assert "Error" in result
 
@@ -351,6 +355,7 @@ class TestEmailMark:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_mark
+
             result = await email_mark("100,200", "read")
             assert "2/2" in result
             assert "read" in result
@@ -373,6 +378,7 @@ class TestEmailMark:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_mark
+
             result = await email_mark("100", "unread")
             assert "1/1" in result
             assert store_calls[0][1] == "-FLAGS"
@@ -392,12 +398,14 @@ class TestEmailMark:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_mark
+
             result = await email_mark("300", "flag")
             assert "1/1" in result
             assert "\\Flagged" in store_calls[0][2]
 
     async def test_mark_invalid_action(self):
         from pincer.tools.builtin.email_tool import email_mark
+
         result = await email_mark("100", "delete")
         assert "Invalid action" in result
 
@@ -407,6 +415,7 @@ class TestEmailMark:
             side_effect=Exception("IMAP error"),
         ):
             from pincer.tools.builtin.email_tool import email_mark
+
             result = await email_mark("100", "read")
             assert "Error" in result
 
@@ -429,6 +438,7 @@ class TestEmailMove:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_move
+
             result = await email_move("100", "Archive")
             assert "1/1" in result
             assert "Archive" in result
@@ -449,6 +459,7 @@ class TestEmailMove:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_move
+
             result = await email_move("100,200,300", "Archive")
             assert "3/3" in result
 
@@ -458,6 +469,7 @@ class TestEmailMove:
             side_effect=Exception("IMAP error"),
         ):
             from pincer.tools.builtin.email_tool import email_move
+
             result = await email_move("100", "Archive")
             assert "Error" in result
 
@@ -483,6 +495,7 @@ class TestEmailTrash:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_trash
+
             result = await email_trash("100")
             assert "1/1" in result
             assert "[Gmail]/Trash" in result
@@ -503,6 +516,7 @@ class TestEmailTrash:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_trash
+
             result = await email_trash("100")
             assert "Trash" in result
 
@@ -512,6 +526,7 @@ class TestEmailTrash:
             side_effect=Exception("IMAP error"),
         ):
             from pincer.tools.builtin.email_tool import email_trash
+
             result = await email_trash("100")
             assert "Error" in result
 
@@ -535,6 +550,7 @@ class TestEmailEmptyFolder:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_empty_folder
+
             result = await email_empty_folder("[Gmail]/Spam")
             assert "3/3 message(s)" in result
             assert "deleted" in result
@@ -550,16 +566,19 @@ class TestEmailEmptyFolder:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_empty_folder
+
             result = await email_empty_folder("[Gmail]/Trash")
             assert "already empty" in result
 
     async def test_empty_inbox_refused(self):
         from pincer.tools.builtin.email_tool import email_empty_folder
+
         result = await email_empty_folder("INBOX")
         assert "Refusing" in result
 
     async def test_empty_inbox_case_insensitive(self):
         from pincer.tools.builtin.email_tool import email_empty_folder
+
         result = await email_empty_folder("inbox")
         assert "Refusing" in result
 
@@ -569,6 +588,7 @@ class TestEmailEmptyFolder:
 
         with patch("pincer.tools.builtin.email_tool._get_imap_client", return_value=mock_client):
             from pincer.tools.builtin.email_tool import email_empty_folder
+
             result = await email_empty_folder("NonExistent")
             assert "Could not select" in result
 
@@ -578,6 +598,7 @@ class TestEmailEmptyFolder:
             side_effect=Exception("IMAP error"),
         ):
             from pincer.tools.builtin.email_tool import email_empty_folder
+
             result = await email_empty_folder("[Gmail]/Spam")
             assert "Error" in result
 
@@ -588,6 +609,7 @@ class TestEmailEmptyFolder:
 class TestParseListResponse:
     def test_parse_gmail_folders(self):
         from pincer.tools.builtin.email_tool import _parse_list_response
+
         data = [
             b'(\\HasNoChildren) "/" "INBOX"',
             b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Trash"',
@@ -601,21 +623,24 @@ class TestParseListResponse:
 
     def test_parse_empty_data(self):
         from pincer.tools.builtin.email_tool import _parse_list_response
+
         assert _parse_list_response([]) == []
         assert _parse_list_response([b""]) == []
 
     def test_parse_non_bytes_skipped(self):
         from pincer.tools.builtin.email_tool import _parse_list_response
+
         result = _parse_list_response(["not bytes", 42, None])  # type: ignore[list-item]
         assert result == []
 
     def test_parse_list_literal_folder_name(self):
         """LIST response with folder name as LITERAL+ (line ending {n}, next element bytearray)."""
         from pincer.tools.builtin.email_tool import _parse_list_response
+
         data = [
             b'(\\HasNoChildren) "/" "INBOX"',
             b'(\\HasNoChildren \\Junk) "/" {12}',
-            bytearray(b'[Gmail]/Spam'),
+            bytearray(b"[Gmail]/Spam"),
         ]
         parsed = _parse_list_response(data)
         assert len(parsed) == 2
@@ -626,6 +651,7 @@ class TestParseListResponse:
     def test_parse_list_standalone_bytearray(self):
         """Standalone bytearray (no LIST line) treated as folder name with empty attrs."""
         from pincer.tools.builtin.email_tool import _parse_list_response
+
         data = [bytearray(b"Spam")]
         parsed = _parse_list_response(data)
         assert len(parsed) == 1
@@ -638,21 +664,25 @@ class TestParseListResponse:
 class TestParseSearchUids:
     def test_numeric_tokens_only(self):
         from pincer.tools.builtin.email_tool import _parse_search_uids
+
         # Full * SEARCH line (robust parsing)
         result = _parse_search_uids([b"* SEARCH 1 2 3 4 5"])
         assert result == ["1", "2", "3", "4", "5"]
 
     def test_uid_only_line(self):
         from pincer.tools.builtin.email_tool import _parse_search_uids
+
         result = _parse_search_uids([b"100 200 300"])
         assert result == ["100", "200", "300"]
 
     def test_empty_data(self):
         from pincer.tools.builtin.email_tool import _parse_search_uids
+
         assert _parse_search_uids([]) == []
 
     def test_bytearray_first_line(self):
         from pincer.tools.builtin.email_tool import _parse_search_uids
+
         result = _parse_search_uids([bytearray(b"7 8 9")])
         assert result == ["7", "8", "9"]
 
@@ -663,10 +693,12 @@ class TestParseSearchUids:
 class TestQuoteMailbox:
     def test_simple_folder_unquoted(self):
         from pincer.tools.builtin.email_tool import _quote_mailbox
+
         assert _quote_mailbox("INBOX") == "INBOX"
 
     def test_folder_with_special_chars_quoted(self):
         from pincer.tools.builtin.email_tool import _quote_mailbox
+
         assert _quote_mailbox("[Gmail]/Spam") == '"[Gmail]/Spam"'
 
 
@@ -681,11 +713,17 @@ class TestFindFolderByAttr:
             _TRASH_FALLBACKS,
             _find_folder_by_attr,
         )
+
         mock_client = AsyncMock()
-        mock_client.list = AsyncMock(return_value=("OK", [
-            b'(\\HasNoChildren) "/" "INBOX"',
-            b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Trash"',
-        ]))
+        mock_client.list = AsyncMock(
+            return_value=(
+                "OK",
+                [
+                    b'(\\HasNoChildren) "/" "INBOX"',
+                    b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Trash"',
+                ],
+            )
+        )
         result = await _find_folder_by_attr(mock_client, _TRASH_ATTRS, _TRASH_FALLBACKS)
         assert result == "[Gmail]/Trash"
 
@@ -695,11 +733,17 @@ class TestFindFolderByAttr:
             _TRASH_FALLBACKS,
             _find_folder_by_attr,
         )
+
         mock_client = AsyncMock()
-        mock_client.list = AsyncMock(return_value=("OK", [
-            b'(\\HasNoChildren) "/" "INBOX"',
-            b'(\\HasNoChildren) "/" "Trash"',
-        ]))
+        mock_client.list = AsyncMock(
+            return_value=(
+                "OK",
+                [
+                    b'(\\HasNoChildren) "/" "INBOX"',
+                    b'(\\HasNoChildren) "/" "Trash"',
+                ],
+            )
+        )
         result = await _find_folder_by_attr(mock_client, _TRASH_ATTRS, _TRASH_FALLBACKS)
         assert result == "Trash"
 
@@ -709,9 +753,15 @@ class TestFindFolderByAttr:
             _TRASH_FALLBACKS,
             _find_folder_by_attr,
         )
+
         mock_client = AsyncMock()
-        mock_client.list = AsyncMock(return_value=("OK", [
-            b'(\\HasNoChildren) "/" "INBOX"',
-        ]))
+        mock_client.list = AsyncMock(
+            return_value=(
+                "OK",
+                [
+                    b'(\\HasNoChildren) "/" "INBOX"',
+                ],
+            )
+        )
         result = await _find_folder_by_attr(mock_client, _TRASH_ATTRS, _TRASH_FALLBACKS)
         assert result == _TRASH_FALLBACKS[0]

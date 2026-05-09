@@ -1,42 +1,163 @@
+x-pincer-base: &pincer-base
+  restart: unless-stopped
+  image: pincer/pincer:latest
+  build:
+    context: .
+    target: runtime
+  working_dir: /app/data
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    - PINCER_DATA_DIR=/app/data
+    - PINCER_DASHBOARD_HOST=0.0.0.0
+    - PINCER_DASHBOARD_PORT=8080
+    - PINCER_DASHBOARD_DIST=/app/dashboard/dist
+    # MCP server — expose Pincer tools to Claude Desktop, Cursor, and other MCP clients
+    - PINCER_MCP_SERVER_EXPORT_ENABLED=true
+    - PINCER_MCP_SERVER_EXPORT_HOST=0.0.0.0
+    - PINCER_MCP_SERVER_EXPORT_PORT=18800
+  volumes:
+    - pincer-data:/app/data
+    - ./skills:/app/skills:ro
+    # Optional: mount pincer.toml to configure MCP client servers
+    - ./pincer.toml:/app/data/pincer.toml:ro
+  ports:
+    - "${PINCER_PORT:-8080}:8080"
+    # MCP endpoint for Claude Desktop, Cursor, VS Code, etc.
+    - "${PINCER_MCP_PORT:-18800}:18800"
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 15s
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
-  pincer:
-    build:
-      context: .
-      target: runtime
+  newsapi-mcp:
+    extends:
+      file: ./src/pincer-mcps/docker-compose.yml
+      service: newsapi-mcp
+    image: pincer/newsapi-mcp:latest
+    profiles:
+      - http
+    environment:
+      API_KEY: ${PINCER_NEWSAPI_KEY:-}
+
+  openweathermap-mcp:
+    extends:
+      file: ./src/pincer-mcps/docker-compose.yml
+      service: openweathermap-mcp
+    image: pincer/openweathermap-mcp:latest
+    profiles:
+      - http
+    environment:
+      API_KEY: ${PINCER_OPENWEATHERMAP_API_KEY:-}
+
+  pomodoro-mcp:
+    extends:
+      file: ./src/pomodoro-mcp/docker-compose.yml
+      service: pomodoro-mcp
+    image: pincer/pomodoro-mcp:latest
+    profiles:
+      - http
+
+  stock-price-mcp:
+    extends:
+      file: ./src/pincer-mcps/docker-compose.yml
+      service: stock-price-mcp
+    image: pincer/stock-price-mcp:latest
+    profiles:
+      - http
+
+  summarize-mcp:
+    extends:
+      file: ./src/pincer-mcps/docker-compose.yml
+      service: summarize-mcp
+    image: pincer/summarize-mcp:latest
+    profiles:
+      - http
+
+  translate-mcp:
+    extends:
+      file: ./src/pincer-mcps/docker-compose.yml
+      service: translate-mcp
+    image: pincer/translate-mcp:latest
+    profiles:
+      - http
+
+  memory-mcp:
+    extends:
+      file: ./src/sqlite-vec-memory-mcp/docker-compose.yml
+      service: sqlite-vec-memory-mcp
+    image: pincer/memory-mcp:latest
+    profiles:
+      - http
+
+  pincer-stdio:
+    <<: *pincer-base
     container_name: pincer
-    env_file:
-      - path: .env
-        required: false
-      - path: ../.env
-        required: false
+    profiles:
+      - stdio
+    deploy:
+      resources:
+        limits:
+          # Increased from 512M — Node.js MCP subprocess each use ~150-250MB
+          memory: 2G
+          cpus: "2"
+
+  pincer-http:
+    <<: *pincer-base
+    profiles:
+      - http
+    env_file: .env
+    volumes:
+      - pincer-data:/app/data
+      - ./pincer.local.toml:/app/data/pincer.toml:ro
     environment:
       - PINCER_DATA_DIR=/app/data
       - PINCER_DASHBOARD_HOST=0.0.0.0
       - PINCER_DASHBOARD_PORT=8080
       - PINCER_DASHBOARD_DIST=/app/dashboard/dist
-    volumes:
-      - pincer-data:/app/data
-      - ./skills:/app/skills:ro
-    ports:
-      - "${PINCER_PORT:-8080}:8080"
+    depends_on:
+      memory-mcp:
+        condition: service_healthy
+      newsapi-mcp:
+        condition: service_healthy
+      openweathermap-mcp:
+        condition: service_healthy
+      pomodoro-mcp:
+        condition: service_healthy
+      stock-price-mcp:
+        condition: service_healthy
+      summarize-mcp:
+        condition: service_healthy
+      translate-mcp:
+        condition: service_healthy
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: pincer-ngrok
+    profiles:
+      - ngrok
+    command: ["http", "pincer:8080"]
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    depends_on:
+      pincer:
+        condition: service_healthy
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "1.0"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
 
 volumes:
   pincer-data:
-    name: pincer-data
+  memory-data:
+  model-cache:
+
+networks:
+  pincer-net:
+    name: pincer-net

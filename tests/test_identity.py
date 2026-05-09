@@ -38,7 +38,9 @@ class TestIdentityResolver:
 
     async def test_display_name_stored(self, resolver):
         uid = await resolver.resolve(
-            ChannelType.TELEGRAM, 99999, display_name="Test User",
+            ChannelType.TELEGRAM,
+            99999,
+            display_name="Test User",
         )
         async with resolver._get_db() as db:
             cursor = await db.execute(
@@ -146,10 +148,7 @@ class TestIdentityResolver:
         db_path = tmp_path / "seed_multi.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config=(
-                "telegram:11111=whatsapp:490000000001,"
-                "telegram:22222=whatsapp:490000000002"
-            ),
+            identity_map_config=("telegram:11111=whatsapp:490000000001,telegram:22222=whatsapp:490000000002"),
         )
         await r.ensure_table()
         await r.seed_from_config()

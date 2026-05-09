@@ -76,15 +76,22 @@ class ToolRegistry:
         )
         logger.info("Registered tool: %s", name)
 
+    def deregister(self, name: str) -> None:
+        """Remove a tool from the registry by name. No-op if not found."""
+        self._tools.pop(name, None)
+        logger.info("Deregistered tool: %s", name)
+
     def get_schemas(self) -> list[dict[str, Any]]:
         """Get all tool schemas in Anthropic tool format."""
         schemas: list[dict[str, Any]] = []
         for tool in self._tools.values():
-            schemas.append({
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": tool.parameters,
-            })
+            schemas.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                }
+            )
         return schemas
 
     def requires_approval(self, name: str) -> bool:
@@ -100,9 +107,7 @@ class ToolRegistry:
     ) -> str:
         """Execute a tool by name with given arguments."""
         if name not in self._tools:
-            raise ToolNotFoundError(
-                f"Tool '{name}' not found. Available: {list(self._tools.keys())}"
-            )
+            raise ToolNotFoundError(f"Tool '{name}' not found. Available: {list(self._tools.keys())}")
 
         tool = self._tools[name]
 

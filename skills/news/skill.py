@@ -27,12 +27,14 @@ def get_headlines(
     if not api_key:
         return {"error": "NewsAPI requires NEWSAPI_KEY or PINCER_NEWSAPI_KEY to be set"}
 
-    params = urllib.parse.urlencode({
-        "country": country,
-        "category": category,
-        "pageSize": min(count, 100),
-        "apiKey": api_key,
-    })
+    params = urllib.parse.urlencode(
+        {
+            "country": country,
+            "category": category,
+            "pageSize": min(count, 100),
+            "apiKey": api_key,
+        }
+    )
     url = f"https://newsapi.org/v2/top-headlines?{params}"
     try:
         req = urllib.request.Request(url)
@@ -42,12 +44,14 @@ def get_headlines(
                 return {"error": data.get("message", "NewsAPI error")}
             articles = []
             for a in data.get("articles", [])[:count]:
-                articles.append({
-                    "title": a.get("title", ""),
-                    "source": a.get("source", {}).get("name", ""),
-                    "description": _truncate(a.get("description") or "", 200),
-                    "url": a.get("url", ""),
-                })
+                articles.append(
+                    {
+                        "title": a.get("title", ""),
+                        "source": a.get("source", {}).get("name", ""),
+                        "description": _truncate(a.get("description") or "", 200),
+                        "url": a.get("url", ""),
+                    }
+                )
             return {"articles": articles}
     except urllib.error.HTTPError as e:
         body = e.read().decode() if e.fp else ""
@@ -62,11 +66,13 @@ def search_news(query: str, count: int = 5) -> dict:
     if not api_key:
         return {"error": "NewsAPI requires NEWSAPI_KEY or PINCER_NEWSAPI_KEY to be set"}
 
-    params = urllib.parse.urlencode({
-        "q": query,
-        "pageSize": min(count, 100),
-        "apiKey": api_key,
-    })
+    params = urllib.parse.urlencode(
+        {
+            "q": query,
+            "pageSize": min(count, 100),
+            "apiKey": api_key,
+        }
+    )
     url = f"https://newsapi.org/v2/everything?{params}"
     try:
         req = urllib.request.Request(url)
@@ -76,12 +82,14 @@ def search_news(query: str, count: int = 5) -> dict:
                 return {"error": data.get("message", "NewsAPI error")}
             articles = []
             for a in data.get("articles", [])[:count]:
-                articles.append({
-                    "title": a.get("title", ""),
-                    "source": a.get("source", {}).get("name", ""),
-                    "description": _truncate(a.get("description") or "", 200),
-                    "url": a.get("url", ""),
-                })
+                articles.append(
+                    {
+                        "title": a.get("title", ""),
+                        "source": a.get("source", {}).get("name", ""),
+                        "description": _truncate(a.get("description") or "", 200),
+                        "url": a.get("url", ""),
+                    }
+                )
             return {"articles": articles}
     except urllib.error.HTTPError as e:
         body = e.read().decode() if e.fp else ""
@@ -153,11 +161,13 @@ def read_rss(url: str, count: int = 5) -> dict:
                 title = _text(item, "title")
                 link = _text(item, "link")
                 desc = _text(item, "description") or _text(item, "content") or _text(item, ns("dc:description"))
-                items.append({
-                    "title": title,
-                    "link": link,
-                    "description": _truncate(desc, 200),
-                })
+                items.append(
+                    {
+                        "title": title,
+                        "link": link,
+                        "description": _truncate(desc, 200),
+                    }
+                )
         else:
             for entry in root.iter("{http://www.w3.org/2005/Atom}entry"):
                 if len(items) >= count:
@@ -167,11 +177,15 @@ def read_rss(url: str, count: int = 5) -> dict:
                 if link_el is None:
                     link_el = entry.find("{http://www.w3.org/2005/Atom}link")
                 link = link_el.get("href", "") if link_el is not None else ""
-                desc = _text(entry, "{http://www.w3.org/2005/Atom}summary") or _text(entry, "{http://www.w3.org/2005/Atom}content")
-                items.append({
-                    "title": title,
-                    "link": link,
-                    "description": _truncate(desc, 200),
-                })
+                desc = _text(entry, "{http://www.w3.org/2005/Atom}summary") or _text(
+                    entry, "{http://www.w3.org/2005/Atom}content"
+                )
+                items.append(
+                    {
+                        "title": title,
+                        "link": link,
+                        "description": _truncate(desc, 200),
+                    }
+                )
 
     return {"feed_title": feed_title, "items": items}

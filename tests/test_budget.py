@@ -47,9 +47,7 @@ async def test_model_downgrade():
         auto_downgrade_threshold_pct=0.70,
     )
     await enforcer.record_cost("u1", 8.0)
-    model = await enforcer.get_model_for_budget(
-        "u1", "claude-sonnet-4-5-20250929"
-    )
+    model = await enforcer.get_model_for_budget("u1", "claude-sonnet-4-5-20250929")
     assert model == "claude-haiku-4-5-20251001"
 
 
@@ -60,9 +58,7 @@ async def test_no_downgrade_under_threshold():
         auto_downgrade_threshold_pct=0.70,
     )
     await enforcer.record_cost("u1", 3.0)
-    model = await enforcer.get_model_for_budget(
-        "u1", "claude-sonnet-4-5-20250929"
-    )
+    model = await enforcer.get_model_for_budget("u1", "claude-sonnet-4-5-20250929")
     assert model == "claude-sonnet-4-5-20250929"
 
 

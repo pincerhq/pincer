@@ -51,9 +51,7 @@ class Schedule:
         self.pincer_user_id: str = row["pincer_user_id"]
         self.name: str = row["name"]
         self.cron_expr: str = row["cron_expr"]
-        self.action: dict[str, Any] = (
-            json.loads(row["action"]) if isinstance(row["action"], str) else row["action"]
-        )
+        self.action: dict[str, Any] = json.loads(row["action"]) if isinstance(row["action"], str) else row["action"]
         self.channel: str = row["channel"]
         self.tz: str = row["timezone"]
         self.enabled: bool = bool(row["enabled"])
@@ -241,7 +239,9 @@ class CronScheduler:
             if result and isinstance(result, str):
                 channel_type = ChannelType(schedule.channel)
                 await self._router.send_to_user(
-                    schedule.pincer_user_id, result, prefer=channel_type,
+                    schedule.pincer_user_id,
+                    result,
+                    prefer=channel_type,
                 )
         except Exception:
             logger.exception("Schedule action failed: %s", schedule.name)

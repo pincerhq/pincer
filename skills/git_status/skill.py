@@ -69,12 +69,14 @@ def recent_commits(path: str = ".", count: int = 5) -> dict:
                 continue
             parts = line.split("|", 3)
             if len(parts) >= 4:
-                commits.append({
-                    "hash": parts[0],
-                    "author": parts[1],
-                    "message": parts[2],
-                    "date": parts[3],
-                })
+                commits.append(
+                    {
+                        "hash": parts[0],
+                        "author": parts[1],
+                        "message": parts[2],
+                        "date": parts[3],
+                    }
+                )
         return {"commits": commits}
     except subprocess.TimeoutExpired:
         return {"error": "command timed out"}

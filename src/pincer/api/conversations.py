@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from contextlib import suppress
+from datetime import UTC, datetime
 from typing import Any
 
 import aiosqlite
@@ -18,7 +19,7 @@ def _ts_to_iso(ts: float | None) -> str:
     """Convert Unix timestamp to ISO string."""
     if ts is None:
         return ""
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    dt = datetime.fromtimestamp(ts, tz=UTC)
     return dt.isoformat()
 
 
@@ -26,9 +27,7 @@ def _msg_to_frontend(msg: dict[str, Any]) -> dict[str, Any]:
     """Map stored message to frontend Message shape."""
     content = msg.get("content", "")
     if isinstance(content, list):
-        content = " ".join(
-            p.get("text", str(p)) for p in content if isinstance(p, dict)
-        )
+        content = " ".join(p.get("text", str(p)) for p in content if isinstance(p, dict))
     return {
         "role": msg.get("role", "user"),
         "content": str(content),
@@ -63,33 +62,27 @@ async def list_conversations(
     params.append(limit)
 
     conversations: list[dict[str, Any]] = []
-    try:
-        async with aiosqlite.connect(str(db_path)) as db:
-            db.row_factory = aiosqlite.Row
-            sql = f"""
-                SELECT id, user_id, channel, messages_json, created_at, updated_at
-                FROM conversations {where}
-                ORDER BY updated_at DESC LIMIT ?
-            """
-            async with db.execute(sql, params) as cursor:
-                async for row in cursor:
-                    msgs = []
-                    try:
-                        msgs = json.loads(row["messages_json"] or "[]")
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                    last_msg = ""
-                    if msgs:
-                        last = msgs[-1]
-                        content = last.get("content", "")
-                        if isinstance(content, list):
-                            content = " ".join(
-                                p.get("text", str(p))
-                                for p in content
-                                if isinstance(p, dict)
-                            )
-                        last_msg = str(content)[:200]
-                    conversations.append({
+    async with aiosqlite.connect(str(db_path)) as db:
+        db.row_factory = aiosqlite.Row
+        sql = f"""
+            SELECT id, user_id, channel, messages_json, created_at, updated_at
+            FROM conversations {where}
+            ORDER BY updated_at DESC LIMIT ?
+        """
+        async with db.execute(sql, params) as cursor:
+            async for row in cursor:
+                msgs = []
+                with suppress(json.JSONDecodeError, TypeError):
+                    msgs = json.loads(row["messages_json"] or "[]")
+                last_msg = ""
+                if msgs:
+                    last = msgs[-1]
+                    content = last.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(p.get("text", str(p)) for p in content if isinstance(p, dict))
+                    last_msg = str(content)[:200]
+                conversations.append(
+                    {
                         "id": row["id"],
                         "user_id": row["user_id"],
                         "channel": row["channel"],
@@ -97,9 +90,8 @@ async def list_conversations(
                         "message_count": len(msgs),
                         "created_at": _ts_to_iso(row["created_at"]),
                         "updated_at": _ts_to_iso(row["updated_at"]),
-                    })
-    except Exception:
-        return {"conversations": [], "total": 0}
+                    }
+                )
 
     return {"conversations": conversations, "total": len(conversations)}
 
@@ -111,13 +103,12 @@ async def get_conversation(conv_id: str) -> dict[str, Any]:
         settings = get_settings_relaxed()
         db_path = settings.db_path
     except Exception:
-        raise HTTPException(status_code=503, detail="Database unavailable")
+        raise HTTPException(status_code=503, detail="Database unavailable") from None
 
     async with aiosqlite.connect(str(db_path)) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, user_id, channel, messages_json, created_at, updated_at "
-            "FROM conversations WHERE id = ?",
+            "SELECT id, user_id, channel, messages_json, created_at, updated_at FROM conversations WHERE id = ?",
             (conv_id,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -126,10 +117,8 @@ async def get_conversation(conv_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     msgs = []
-    try:
+    with suppress(json.JSONDecodeError, TypeError):
         msgs = json.loads(row["messages_json"] or "[]")
-    except (json.JSONDecodeError, TypeError):
-        pass
 
     return {
         "id": row["id"],

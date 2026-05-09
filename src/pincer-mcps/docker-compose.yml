@@ -1,0 +1,58 @@
+x-env-base: &env-base
+  FASTMCP_SHOW_SERVER_BANNER: false
+  TRANSPORT: http
+  HOST: 0.0.0.0
+  PORT: 8000
+
+x-service-base: &service-base
+  restart: unless-stopped
+  build: .
+  environment:
+    <<: *env-base
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+    interval: 30s
+    timeout: 10s
+    start_period: 15s
+    retries: 3
+
+services:
+  newsapi-mcp:
+    <<: *service-base
+    build:
+      context: .
+      target: newsapi-mcp
+    environment:
+      <<: *env-base
+      API_KEY: ${NEWSAPI_API_KEY:-}
+
+  openweathermap-mcp:
+    <<: *service-base
+    build:
+      context: .
+      target: openweathermap-mcp
+    environment:
+      <<: *env-base
+      API_KEY: ${OPENWEATHERMAP_API_KEY:-}
+
+  stock-price-mcp:
+    <<: *service-base
+    build:
+      context: .
+      target: stock-price-mcp
+
+  summarize-mcp:
+    <<: *service-base
+    build:
+      context: .
+      target: summarize-mcp
+
+  translate-mcp:
+    <<: *service-base
+    build:
+      context: .
+      target: translate-mcp
+    environment:
+      <<: *env-base
+      LIBRETRANSLATE_URL: ${LIBRETRANSLATE_URL:-https://libretranslate.com}
+      API_KEY: ${LIBRETRANSLATE_API_KEY:-}
