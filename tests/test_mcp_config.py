@@ -97,7 +97,53 @@ def test_env_interpolation_no_vars() -> None:
     assert result == "plain string"
 
 
+def test_env_interpolation_fallback_primary_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MY_VAR", "primary")
+    monkeypatch.setenv("MY_FALLBACK", "fallback")
+    result = _interpolate_env("${MY_VAR:-$MY_FALLBACK}/path")
+    assert result == "primary/path"
+
+
+def test_env_interpolation_fallback_used_when_primary_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MY_VAR", raising=False)
+    monkeypatch.setenv("MY_FALLBACK", "/resolved")
+    result = _interpolate_env("${MY_VAR:-$MY_FALLBACK}/src/server.py")
+    assert result == "/resolved/src/server.py"
+
+
+def test_env_interpolation_fallback_passthrough_when_both_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MY_VAR", raising=False)
+    monkeypatch.delenv("MY_FALLBACK", raising=False)
+    result = _interpolate_env("${MY_VAR:-$MY_FALLBACK}/src")
+    assert result == "${MY_VAR:-$MY_FALLBACK}/src"
+
+
+def test_env_interpolation_fallback_primary_takes_precedence_over_set_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MY_VAR", "/override")
+    monkeypatch.setenv("MY_FALLBACK", "/should-not-appear")
+    result = _interpolate_env("${MY_VAR:-$MY_FALLBACK}")
+    assert result == "/override"
+
+
 # ── TOML loading ─────────────────────────────────────────────────────────────
+
+
+def test_fallback_interpolation_in_toml_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PINCER_SRC_DIR", raising=False)
+    monkeypatch.setenv("PWD", "/home/user/pincer")
+    toml_content = """
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "memory"
+transport = "stdio"
+command = "python"
+args = ["${PINCER_SRC_DIR:-$PWD}/src/sqlite-vec-memory-mcp/memory_server.py"]
+"""
+    (tmp_path / "pincer.toml").write_text(toml_content)
+    cfg = load_mcp_config(tmp_path)
+    assert cfg.servers[0].args[0] == "/home/user/pincer/src/sqlite-vec-memory-mcp/memory_server.py"
 
 
 def test_load_mcp_config_no_file(tmp_path: Path) -> None:
