@@ -575,7 +575,11 @@ class TelegramChannel(BaseChannel):
 
             user_id = str(message.from_user.id)
 
+            '''
             # Use streaming if agent is available
+            # TODO: streaming process should reviewed and reworked
+            # main problem is telegram streaming bypass memory and
+            # sessions management.
             if self._stream_agent is not None:
                 from pincer.core.agent import StreamEventType
 
@@ -592,6 +596,7 @@ class TelegramChannel(BaseChannel):
 
                 await self.send_streaming(user_id, text_chunks())
                 return
+            '''
 
             pincer_uid = await self._resolve_identity(
                 message.from_user.id,

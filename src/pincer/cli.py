@@ -125,11 +125,22 @@ def run() -> None:
     asyncio.run(_run_agent(settings))
 
 
+def _create_memory_backend(settings: Settings):  # type: ignore[return]
+    """Factory: select and construct the configured memory backend."""
+    if settings.memory_backend == "mcp":
+        from pincer.memory.mcp import MCPMemoryBackend
+
+        return MCPMemoryBackend(server_name=settings.memory_mcp_server)
+    from pincer.memory.sqlite import SQLiteMemoryBackend
+
+    return SQLiteMemoryBackend(settings.db_path)
+
+
 async def _run_agent(settings: Settings) -> None:
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.base import BaseMemoryBackend
     from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import AuditAction, AuditEntry, get_audit_logger
     from pincer.security.rate_limiter import get_rate_limiter
@@ -158,7 +169,7 @@ async def _run_agent(settings: Settings) -> None:
     )
 
     # Initialize memory system
-    memory_store: MemoryStore | None = None
+    memory_store: BaseMemoryBackend | None = None
     summarizer: Summarizer | None = None
 
     # Create LLM provider
@@ -176,7 +187,7 @@ async def _run_agent(settings: Settings) -> None:
         llm = OpenAIProvider(settings)
 
     if settings.memory_enabled:
-        memory_store = MemoryStore(settings.db_path)
+        memory_store = _create_memory_backend(settings)
         await memory_store.initialize()
         summarizer = Summarizer(
             llm=llm,
@@ -416,6 +427,9 @@ async def _run_agent(settings: Settings) -> None:
     )
     if mcp_manager:
         agent.mcp_manager = mcp_manager
+        from pincer.memory.mcp import MCPMemoryBackend
+        if isinstance(memory_store, MCPMemoryBackend):
+            memory_store.set_mcp_manager(mcp_manager)
 
     # MCP server export (optional — exposes Pincer tools to external MCP clients)
     mcp_server = None
@@ -1399,7 +1413,7 @@ async def _chat_loop() -> None:
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.base import BaseMemoryBackend
     from pincer.memory.summarizer import Summarizer
     from pincer.tools.builtin.files import file_list, file_read, file_write
     from pincer.tools.builtin.web_search import web_search
@@ -1423,10 +1437,10 @@ async def _chat_loop() -> None:
 
         llm = OpenAIProvider(settings)
 
-    memory_store: MemoryStore | None = None
+    memory_store: BaseMemoryBackend | None = None
     summarizer: Summarizer | None = None
     if settings.memory_enabled:
-        memory_store = MemoryStore(settings.db_path)
+        memory_store = _create_memory_backend(settings)
         await memory_store.initialize()
         summarizer = Summarizer(
             llm=llm,
@@ -1934,10 +1948,10 @@ def memory_search(query: str = typer.Argument(help="Search query")) -> None:
 
 async def _memory_search(query: str) -> None:
     from pincer.config import get_settings_relaxed
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.sqlite import SQLiteMemoryBackend
 
     settings = get_settings_relaxed()
-    store = MemoryStore(settings.db_path)
+    store = SQLiteMemoryBackend(settings.db_path)
     await store.initialize()
     results = await store.search_text(query, limit=10)
     if not results:
@@ -1956,21 +1970,18 @@ def memory_stats() -> None:
 
 async def _memory_stats() -> None:
     from pincer.config import get_settings_relaxed
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.sqlite import SQLiteMemoryBackend
 
     settings = get_settings_relaxed()
-    store = MemoryStore(settings.db_path)
+    store = SQLiteMemoryBackend(settings.db_path)
     await store.initialize()
 
-    async with store._db.execute("SELECT COUNT(*) FROM memories") as cur:  # type: ignore[union-attr]
-        row = await cur.fetchone()
-        total = row[0] if row else 0
-    async with store._db.execute("SELECT COUNT(DISTINCT user_id) FROM memories") as cur:  # type: ignore[union-attr]
+    total = await store.count()
+    assert store._db is not None
+    async with store._db.execute("SELECT COUNT(DISTINCT user_id) FROM memories") as cur:
         row = await cur.fetchone()
         users = row[0] if row else 0
-    async with store._db.execute(  # type: ignore[union-attr]
-        "SELECT category, COUNT(*) FROM memories GROUP BY category"
-    ) as cur:
+    async with store._db.execute("SELECT category, COUNT(*) FROM memories GROUP BY category") as cur:
         categories = {r[0]: r[1] async for r in cur}
 
     console.print("[bold]Memory Stats[/bold]")
@@ -1991,13 +2002,12 @@ def memory_clear(
 
 async def _memory_clear(user_id: str) -> None:
     from pincer.config import get_settings_relaxed
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.sqlite import SQLiteMemoryBackend
 
     settings = get_settings_relaxed()
-    store = MemoryStore(settings.db_path)
+    store = SQLiteMemoryBackend(settings.db_path)
     await store.initialize()
-    await store._db.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))  # type: ignore[union-attr]
-    await store._db.commit()  # type: ignore[union-attr]
+    await store.delete_user_memories(user_id)
     console.print(f"[green]Cleared memories for {user_id}[/green]")
     await store.close()
 
@@ -2013,21 +2023,17 @@ def memory_export(
 
 async def _memory_export(user_id: str, output: str) -> None:
     import json as _json
+    from pathlib import Path as _P
 
     from pincer.config import get_settings_relaxed
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.sqlite import SQLiteMemoryBackend
 
     settings = get_settings_relaxed()
-    store = MemoryStore(settings.db_path)
+    store = SQLiteMemoryBackend(settings.db_path)
     await store.initialize()
 
-    async with store._db.execute(  # type: ignore[union-attr]
-        "SELECT content, category, created_at FROM memories WHERE user_id = ? ORDER BY created_at",
-        (user_id,),
-    ) as cur:
-        records = [{"content": r[0], "category": r[1], "created_at": r[2]} async for r in cur]
-
-    from pathlib import Path as _P
+    memories = await store.list_memories(user_id=user_id, limit=100_000)
+    records = [{"content": m.content, "category": m.category, "created_at": m.created_at} for m in memories]
 
     _P(output).write_text(_json.dumps(records, indent=2))
     console.print(f"[green]Exported {len(records)} memories to {output}[/green]")

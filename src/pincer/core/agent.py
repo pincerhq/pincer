@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     from pincer.llm.cost_tracker import CostTracker
     from pincer.mcp.manager import MCPClientManager
     from pincer.mcp.server import PincerMCPServer
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.base import BaseMemoryBackend
     from pincer.memory.summarizer import Summarizer
     from pincer.tools.registry import ToolRegistry
 
@@ -278,7 +278,7 @@ class Agent:
         session_manager: SessionManager,
         cost_tracker: CostTracker,
         tool_registry: ToolRegistry,
-        memory_store: MemoryStore | None = None,
+        memory_store: BaseMemoryBackend | None = None,
         summarizer: Summarizer | None = None,
         approval_callback: ApprovalCallback | None = None,
         tool_event_callback: ToolEventCallback | None = None,

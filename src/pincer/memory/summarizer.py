@@ -17,7 +17,7 @@ from pincer.llm.base import LLMMessage, LLMResponse, MessageRole
 if TYPE_CHECKING:
     from pincer.core.session import Session, SessionManager
     from pincer.llm.base import BaseLLMProvider
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.base import BaseMemoryBackend
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,7 @@ class Summarizer:
     def __init__(
         self,
         llm: BaseLLMProvider,
-        memory_store: MemoryStore,
+        memory_store: BaseMemoryBackend,
         session_manager: SessionManager,
         summary_model: str = "claude-haiku-4-5-20251001",
         threshold: int = 20,
