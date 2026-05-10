@@ -120,19 +120,21 @@ class MCPMemoryBackend(BaseMemoryBackend):
         category: str | None = None,
     ) -> list[Memory]:
         args: dict[str, Any] = {"limit": limit}
+        filter_tags: list[str] = []
         if user_id:
-            args["tag"] = f"{_USER_TAG_PREFIX}{user_id}"
-        elif category:
-            args["tag"] = f"{_CATEGORY_TAG_PREFIX}{category}"
+            filter_tags.append(f"{_USER_TAG_PREFIX}{user_id}")
+        if category:
+            filter_tags.append(f"{_CATEGORY_TAG_PREFIX}{category}")
+        if filter_tags:
+            args["tags"] = filter_tags
 
         rows = await self._call_json("memory_list", args)
         memories = [_row_to_memory(r) for r in rows]
 
-        if category and user_id:
-            cat_tag = f"{_CATEGORY_TAG_PREFIX}{category}"
-            memories = [m for m in memories if m.category == category]
-        elif category and not user_id:
-            pass  # already filtered by tag above
+        # When both user_id and category are given the server returns records
+        # matching EITHER tag (OR logic); keep only those with both.
+        if user_id and category:
+            memories = [m for m in memories if m.user_id == user_id and m.category == category]
 
         return memories[:limit]
 
@@ -156,7 +158,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
 
     async def delete_user_memories(self, user_id: str) -> None:
         tag = f"{_USER_TAG_PREFIX}{user_id}"
-        rows = await self._call_json("memory_list", {"limit": _COUNT_FETCH_LIMIT, "tag": tag})
+        rows = await self._call_json("memory_list", {"limit": _COUNT_FETCH_LIMIT, "tags": tag})
         for r in rows:
             try:
                 await self._call("memory_delete", {"memory_id": r["id"]})
@@ -166,7 +168,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
     async def count(self, user_id: str | None = None) -> int:
         args: dict[str, Any] = {"limit": _COUNT_FETCH_LIMIT}
         if user_id:
-            args["tag"] = f"{_USER_TAG_PREFIX}{user_id}"
+            args["tags"] = f"{_USER_TAG_PREFIX}{user_id}"
         rows = await self._call_json("memory_list", args)
         return len(rows)
 
@@ -178,19 +180,13 @@ class MCPMemoryBackend(BaseMemoryBackend):
         user_id: str | None = None,
         limit: int = 5,
     ) -> list[Memory]:
-        # MCP server uses semantic (vector) search — no FTS5 available.
-        # Fetch extra results to allow client-side filtering by user_id.
-        fetch_limit = limit * 4 if user_id else limit
-        rows = await self._call_json("memory_search", {"query": query, "limit": fetch_limit})
-
-        memories: list[Memory] = []
-        for r in rows:
-            tags = r.get("tags", [])
-            r_user = _user_from_tags(tags)
-            if user_id and r_user != user_id:
-                continue
-            distance = r.get("distance", 0.0)
-            memories.append(_row_to_memory(r, score=max(0.0, 1.0 - distance)))
-            if len(memories) >= limit:
-                break
-        return memories
+        # Tag filtering is done server-side; pass user tag so the server
+        # fetches extra KNN candidates and filters before returning.
+        args: dict[str, Any] = {"query": query, "limit": limit}
+        if user_id:
+            args["tags"] = f"{_USER_TAG_PREFIX}{user_id}"
+        rows = await self._call_json("memory_search", args)
+        return [
+            _row_to_memory(r, score=max(0.0, 1.0 - r.get("distance", 0.0)))
+            for r in rows
+        ]

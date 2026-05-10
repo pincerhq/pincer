@@ -145,10 +145,28 @@ def memory_store(content: str, tags: list[str] | None = None) -> str:
     return f"stored:{mid}"
 
 
+def _normalize_tags(tags: str | list[str] | None) -> list[str]:
+    """Accept a single tag string or a list of tags; always return a list."""
+    if tags is None:
+        return []
+    if isinstance(tags, str):
+        return [tags]
+    return list(tags)
+
+
 @mcp.tool()
-def memory_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
-    """Search memories by semantic similarity. Returns closest matches first."""
-    logger.info("tool: memory_search")
+def memory_search(
+    query: str,
+    limit: int = 5,
+    tags: str | list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Search memories by semantic similarity, with optional tag filtering (OR logic).
+
+    tags: a single tag string or a list of tags — returns records matching ANY tag.
+    Fetch extra candidates from KNN when filtering so the result set stays full.
+    """
+    tag_list = _normalize_tags(tags)
+    fetch_k = limit * 4 if tag_list else limit
     vec = _embed(query)
     db = _connect()
     rows = db.execute(
@@ -160,35 +178,49 @@ def memory_search(query: str, limit: int = 5) -> list[dict[str, Any]]:
           AND k = ?
         ORDER BY v.distance
         """,
-        (vec, limit),
+        (vec, fetch_k),
     ).fetchall()
     db.close()
-    return [
-        {
+
+    results = []
+    tag_set = set(tag_list)
+    for r in rows:
+        record_tags = json.loads(r["tags"]) if r["tags"] else []
+        if tag_set and not tag_set.intersection(record_tags):
+            continue
+        results.append({
             "id": r["id"],
             "content": r["content"],
-            "tags": json.loads(r["tags"]),
+            "tags": record_tags,
             "created_at": r["created_at"],
             "distance": round(r["distance"], 6),
-        }
-        for r in rows
-    ]
+        })
+        if len(results) >= limit:
+            break
+    return results
 
 
 @mcp.tool()
-def memory_list(limit: int = 20, tag: str | None = None) -> list[dict[str, Any]]:
-    """List recent memories, optionally filtered by tag."""
-    logger.info("tool: memory_list")
+def memory_list(
+    limit: int = 20,
+    tags: str | list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """List recent memories, optionally filtered by tags (OR logic).
+
+    tags: a single tag string or a list of tags — returns records matching ANY tag.
+    """
+    tag_list = _normalize_tags(tags)
     db = _connect()
-    if tag:
+    if tag_list:
+        placeholders = ",".join("?" * len(tag_list))
         rows = db.execute(
-            """
+            f"""
             SELECT DISTINCT m.id, m.content, m.tags, m.created_at
             FROM memories m, json_each(m.tags) t
-            WHERE t.value = ?
+            WHERE t.value IN ({placeholders})
             ORDER BY m.created_at DESC LIMIT ?
-            """,
-            (tag, limit),
+            """,  # noqa: S608
+            (*tag_list, limit),
         ).fetchall()
     else:
         rows = db.execute(
