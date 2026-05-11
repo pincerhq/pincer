@@ -156,13 +156,17 @@ class MCPConfig:
 
 
 def _interpolate_env(value: str) -> str:
-    """Resolve ${VAR} references in config values using os.environ."""
+    """Resolve ${VAR} and ${VAR:-$FALLBACK} references in config values using os.environ."""
 
     def _replace(m: re.Match[str]) -> str:
-        var = m.group(1)
-        return os.environ.get(var, m.group(0))
+        var, fallback_var = m.group(1), m.group(2)
+        if var in os.environ:
+            return os.environ[var]
+        if fallback_var is not None:
+            return os.environ.get(fallback_var, m.group(0))
+        return m.group(0)
 
-    return re.sub(r"\$\{([^}]+)\}", _replace, value)
+    return re.sub(r"\$\{([^}:]+)(?::-\$([^}]+))?\}", _replace, value)
 
 
 def _interpolate_dict(d: dict[str, str]) -> dict[str, str]:
