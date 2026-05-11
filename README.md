@@ -9,11 +9,12 @@
 [![PyPI](https://img.shields.io/pypi/v/pincer-agent?color=FF6B35&style=for-the-badge&logo=pypi&logoColor=white)](https://pypi.org/project/pincer-agent/)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![CI](https://img.shields.io/github/actions/workflow/status/pincerhq/pincer/ci.yml?style=for-the-badge&label=CI&logo=github&logoColor=white)](https://github.com/pincerhq/pincer/actions)
-[![codecov](https://img.shields.io/codecov/c/github/pincerhq/pincer?style=for-the-badge&color=22C55E&logo=codecov&logoColor=white)](https://codecov.io/gh/pincerhq/pincer)
+[![Codecov](https://img.shields.io/codecov/c/github/pincerhq/pincer?style=for-the-badge&color=22C55E&logo=codecov&logoColor=white)](https://codecov.io/gh/pincerhq/pincer)
 <br>
-[![License: MIT](https://img.shields.io/badge/license-MIT-22C55E?style=for-the-badge)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
 [![Discord](https://img.shields.io/discord/1475920441792266477?color=5865F2&style=for-the-badge&logo=discord&logoColor=white&label=Discord)](https://discord.gg/eM9Y6utd)
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/pincer-agent?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/pincer-agent)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/pincer-agent?color=22C55E&style=for-the-badge&logo=pypi&logoColor=white&label=Downloads)](https://pepy.tech/projects/pincer-agent)
+
 ![Pincer demo — agent checking email and scheduling a meeting via WhatsApp](docs/assets/demo.gif)
 
 </div>
