@@ -13,7 +13,7 @@
 <br>
 [![License: MIT](https://img.shields.io/badge/License-MIT-22C55E?style=for-the-badge&logo=opensourceinitiative&logoColor=white)](LICENSE)
 [![Discord](https://img.shields.io/discord/1475920441792266477?color=5865F2&style=for-the-badge&logo=discord&logoColor=white&label=Discord)](https://discord.gg/eM9Y6utd)
-[![PyPI Downloads](https://img.shields.io/pypi/dm/pincer-agent?color=22C55E&style=for-the-badge&logo=pypi&logoColor=white&label=Downloads)](https://pepy.tech/projects/pincer-agent)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/pincer-agent?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/pincer-agent)
 
 ![Pincer demo — agent checking email and scheduling a meeting via WhatsApp](docs/assets/demo.gif)
 
