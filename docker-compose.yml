@@ -4,7 +4,6 @@ x-pincer-base: &pincer-base
   build:
     context: .
     target: runtime
-  working_dir: /app/data
   env_file:
     - path: .env
       required: false
