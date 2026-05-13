@@ -96,6 +96,7 @@ class SecurityDoctor:
     def _cfg(self, cfg: Settings | None) -> Settings:
         if cfg is None:
             from pincer.config import get_settings_relaxed
+
             return get_settings_relaxed()
         return cfg
 

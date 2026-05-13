@@ -85,30 +85,35 @@ def test_domain_classes_importable() -> None:
 
 def test_llm_settings_zero_fields() -> None:
     from pincer.config import LLMSettings
+
     s = LLMSettings()
     assert s.default_model != ""
 
 
 def test_channel_settings_zero_fields() -> None:
     from pincer.config import ChannelSettings
+
     s = ChannelSettings()
     assert s.telegram_bot_token.get_secret_value() == ""
 
 
 def test_tool_settings_zero_fields() -> None:
     from pincer.config import ToolSettings
+
     s = ToolSettings()
     assert s.shell_enabled is True
 
 
 def test_api_settings_zero_fields() -> None:
     from pincer.config import APISettings
+
     s = APISettings()
     assert s.dashboard_port == 8080
 
 
 def test_core_settings_zero_fields() -> None:
     from pincer.config import CoreSettings
+
     s = CoreSettings()
     assert s.log_level is not None
 

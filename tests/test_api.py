@@ -120,10 +120,7 @@ def test_status_channels_from_dotenv_only(tmp_path, monkeypatch):
     """Channel flags in /api/status must reflect .env, not just shell env."""
     from pincer.config import get_settings_relaxed
 
-    (tmp_path / ".env").write_text(
-        "PINCER_TELEGRAM_BOT_TOKEN=123456:TEST\n"
-        "PINCER_DISCORD_BOT_TOKEN=discord-token\n"
-    )
+    (tmp_path / ".env").write_text("PINCER_TELEGRAM_BOT_TOKEN=123456:TEST\nPINCER_DISCORD_BOT_TOKEN=discord-token\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PINCER_TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("PINCER_DISCORD_BOT_TOKEN", raising=False)
