@@ -57,9 +57,9 @@ def load_tokens() -> SlackTokens:
     try:
         from pincer.integrations.slack.config import load_config
 
-        cfg = load_config()
-        if cfg.bot_token:
-            return SlackTokens(bot_token=cfg.bot_token, user_token=cfg.user_token)
+        toml_cfg = load_config()
+        if toml_cfg.bot_token:
+            return SlackTokens(bot_token=toml_cfg.bot_token, user_token=toml_cfg.user_token)
     except Exception as exc:
         logger.debug("Could not load Slack config from toml: %s", exc)
 
