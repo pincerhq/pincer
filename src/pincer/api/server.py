@@ -6,8 +6,6 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from pincer.config import get_settings_relaxed
-
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -19,6 +17,7 @@ from pincer.api.conversations import router as conversations_router
 from pincer.api.costs import router as costs_router
 from pincer.api.integrations import router as integrations_router
 from pincer.api.skills import router as skills_router
+from pincer.config import get_settings_relaxed
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

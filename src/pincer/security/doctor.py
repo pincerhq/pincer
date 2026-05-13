@@ -93,7 +93,7 @@ class SecurityDoctor:
         self.config_dir = config_dir or Path(".")
         self.skills_dir = skills_dir or Path.home() / ".pincer" / "skills"
 
-    def _cfg(self, cfg: "Settings | None") -> "Settings":
+    def _cfg(self, cfg: Settings | None) -> Settings:
         if cfg is None:
             from pincer.config import get_settings_relaxed
             return get_settings_relaxed()
@@ -343,7 +343,7 @@ class SecurityDoctor:
 
     # ── Access Control ────────────────────────────────────
 
-    def _check_telegram_allowlist(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_telegram_allowlist(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         al = cfg.telegram_allowed_users
         if al:
@@ -368,7 +368,7 @@ class SecurityDoctor:
             category="access",
         )
 
-    def _check_whatsapp_dm_policy(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_whatsapp_dm_policy(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if cfg.whatsapp_dm_allowlist.strip():
             return CheckResult(
@@ -429,7 +429,7 @@ class SecurityDoctor:
             category="access",
         )
 
-    def _check_discord_allowlist(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_discord_allowlist(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if cfg.discord_guild_allowlist.strip():
             return CheckResult(
@@ -453,7 +453,7 @@ class SecurityDoctor:
             category="access",
         )
 
-    def _check_dashboard_auth_token(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_dashboard_auth_token(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         token = cfg.dashboard_token.get_secret_value()
         if token and len(token) >= 16:
@@ -481,7 +481,7 @@ class SecurityDoctor:
 
     # ── Budget ────────────────────────────────────────────
 
-    def _check_budget_limits(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_budget_limits(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if cfg.daily_budget_usd > 0:
             return CheckResult(
@@ -498,7 +498,7 @@ class SecurityDoctor:
             category="budget",
         )
 
-    def _check_rate_limits(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_rate_limits(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         return CheckResult(
             "rate_limits",
@@ -507,7 +507,7 @@ class SecurityDoctor:
             category="budget",
         )
 
-    def _check_tool_call_limits(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_tool_call_limits(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         return CheckResult(
             "tool_call_limits",
@@ -617,7 +617,7 @@ class SecurityDoctor:
 
     # ── Network ───────────────────────────────────────────
 
-    def _check_dashboard_not_exposed(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_dashboard_not_exposed(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         host = cfg.dashboard_host
         if host in ("127.0.0.1", "localhost", "::1"):
@@ -635,7 +635,7 @@ class SecurityDoctor:
             category="network",
         )
 
-    def _check_no_debug_mode(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_no_debug_mode(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if cfg.debug:
             return CheckResult(
@@ -708,7 +708,7 @@ class SecurityDoctor:
 
     # ── Voice (Sprint 7) ─────────────────────────────────
 
-    def _check_voice_twilio_credentials(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_voice_twilio_credentials(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if not cfg.voice_enabled:
             return CheckResult(
@@ -739,7 +739,7 @@ class SecurityDoctor:
             category="voice",
         )
 
-    def _check_voice_webhook_url(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_voice_webhook_url(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if not cfg.voice_enabled:
             return CheckResult(
@@ -772,7 +772,7 @@ class SecurityDoctor:
             category="voice",
         )
 
-    def _check_voice_recording_consent(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_voice_recording_consent(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if not cfg.voice_enabled:
             return CheckResult(
@@ -807,7 +807,7 @@ class SecurityDoctor:
 
     # ── Signal (Sprint 7.5) ───────────────────────────────
 
-    def _check_signal_phone_set(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_signal_phone_set(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if not cfg.signal_enabled:
             return CheckResult(
@@ -832,7 +832,7 @@ class SecurityDoctor:
             category="signal",
         )
 
-    def _check_signal_api_local(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_signal_api_local(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if not cfg.signal_enabled:
             return CheckResult(
@@ -864,7 +864,7 @@ class SecurityDoctor:
             category="signal",
         )
 
-    def _check_signal_allowlist(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_signal_allowlist(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if not cfg.signal_enabled:
             return CheckResult(
@@ -907,7 +907,7 @@ class SecurityDoctor:
             category="runtime",
         )
 
-    def _check_audit_logging_enabled(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_audit_logging_enabled(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if cfg.audit_disabled:
             return CheckResult(
@@ -924,7 +924,7 @@ class SecurityDoctor:
             category="runtime",
         )
 
-    def _check_skill_sandbox_enabled(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_skill_sandbox_enabled(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if cfg.skill_sandbox_disabled:
             return CheckResult(
@@ -1125,7 +1125,7 @@ class SecurityDoctor:
                 category="mcp",
             )
 
-    def _check_tool_approval_mode(self, cfg: "Settings | None" = None) -> CheckResult:
+    def _check_tool_approval_mode(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         mode = cfg.tool_approval
         if mode in ("manual", "allowlist"):

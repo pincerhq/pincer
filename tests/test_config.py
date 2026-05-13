@@ -80,7 +80,7 @@ def test_settings_loads_var_from_dotenv_only(tmp_path: Path, monkeypatch: pytest
 
 
 def test_domain_classes_importable() -> None:
-    from pincer.config import LLMSettings, ChannelSettings, ToolSettings, APISettings, CoreSettings  # noqa: F401
+    from pincer.config import APISettings, ChannelSettings, CoreSettings, LLMSettings, ToolSettings  # noqa: F401
 
 
 def test_llm_settings_zero_fields() -> None:
@@ -118,11 +118,11 @@ def test_core_settings_zero_fields() -> None:
 
 def test_public_api_importable() -> None:
     from pincer.config import (  # noqa: F401
-        get_settings,
-        get_settings_relaxed,
-        Settings,
         LLMProvider,
         LogLevel,
+        Settings,
+        get_settings,
+        get_settings_relaxed,
     )
 
 
