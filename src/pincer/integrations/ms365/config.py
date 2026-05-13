@@ -28,11 +28,13 @@ class MS365IntegrationConfig:
     token_cache_path: str = ""  # empty → auto-detect
 
     def __post_init__(self) -> None:
-        # Environment variable overrides
+        from pincer.config import get_settings_relaxed
+
+        cfg = get_settings_relaxed()
         if not self.client_id:
-            self.client_id = os.environ.get("PINCER_MS365_CLIENT_ID", "")
-        if self.tenant_id == "common":
-            self.tenant_id = os.environ.get("PINCER_MS365_TENANT_ID", "common")
+            self.client_id = cfg.ms365_client_id
+        if self.tenant_id == "common" and cfg.ms365_tenant_id != "common":
+            self.tenant_id = cfg.ms365_tenant_id
 
 
 def load_config() -> MS365IntegrationConfig:

@@ -16,7 +16,10 @@ import sys
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pincer.config import Settings
 
 
 class CheckStatus(StrEnum):
@@ -90,7 +93,16 @@ class SecurityDoctor:
         self.config_dir = config_dir or Path(".")
         self.skills_dir = skills_dir or Path.home() / ".pincer" / "skills"
 
+    def _cfg(self, cfg: "Settings | None") -> "Settings":
+        if cfg is None:
+            from pincer.config import get_settings_relaxed
+            return get_settings_relaxed()
+        return cfg
+
     def run_all(self) -> DoctorReport:
+        from pincer.config import get_settings_relaxed
+
+        cfg = get_settings_relaxed()
         report = DoctorReport()
         # Secrets (6 checks)
         report.checks.append(self._check_env_file_permissions())
@@ -100,39 +112,39 @@ class SecurityDoctor:
         report.checks.append(self._check_gitignore_has_env())
         report.checks.append(self._check_no_hardcoded_secrets())
         # Access Control (4 checks)
-        report.checks.append(self._check_telegram_allowlist())
-        report.checks.append(self._check_whatsapp_dm_policy())
+        report.checks.append(self._check_telegram_allowlist(cfg))
+        report.checks.append(self._check_whatsapp_dm_policy(cfg))
         report.checks.append(self._check_whatsapp_neonize_version())
-        report.checks.append(self._check_discord_allowlist())
-        report.checks.append(self._check_dashboard_auth_token())
+        report.checks.append(self._check_discord_allowlist(cfg))
+        report.checks.append(self._check_dashboard_auth_token(cfg))
         # Budget (3 checks)
-        report.checks.append(self._check_budget_limits())
-        report.checks.append(self._check_rate_limits())
-        report.checks.append(self._check_tool_call_limits())
+        report.checks.append(self._check_budget_limits(cfg))
+        report.checks.append(self._check_rate_limits(cfg))
+        report.checks.append(self._check_tool_call_limits(cfg))
         # Filesystem (4 checks)
         report.checks.append(self._check_data_dir_permissions())
         report.checks.append(self._check_skills_dir_permissions())
         report.checks.append(self._check_no_world_readable_secrets())
         report.checks.append(self._check_sqlite_not_world_readable())
         # Network (2 checks)
-        report.checks.append(self._check_dashboard_not_exposed())
-        report.checks.append(self._check_no_debug_mode())
+        report.checks.append(self._check_dashboard_not_exposed(cfg))
+        report.checks.append(self._check_no_debug_mode(cfg))
         # Deps (2 checks)
         report.checks.append(self._check_python_version())
         report.checks.append(self._check_dependencies_up_to_date())
         # Voice (3 checks, Sprint 7)
-        report.checks.append(self._check_voice_twilio_credentials())
-        report.checks.append(self._check_voice_webhook_url())
-        report.checks.append(self._check_voice_recording_consent())
+        report.checks.append(self._check_voice_twilio_credentials(cfg))
+        report.checks.append(self._check_voice_webhook_url(cfg))
+        report.checks.append(self._check_voice_recording_consent(cfg))
         # Signal (3 checks, Sprint 7.5)
-        report.checks.append(self._check_signal_phone_set())
-        report.checks.append(self._check_signal_api_local())
-        report.checks.append(self._check_signal_allowlist())
+        report.checks.append(self._check_signal_phone_set(cfg))
+        report.checks.append(self._check_signal_api_local(cfg))
+        report.checks.append(self._check_signal_allowlist(cfg))
         # Runtime (4 checks)
         report.checks.append(self._check_not_running_as_root())
-        report.checks.append(self._check_audit_logging_enabled())
-        report.checks.append(self._check_skill_sandbox_enabled())
-        report.checks.append(self._check_tool_approval_mode())
+        report.checks.append(self._check_audit_logging_enabled(cfg))
+        report.checks.append(self._check_skill_sandbox_enabled(cfg))
+        report.checks.append(self._check_tool_approval_mode(cfg))
         # MCP (8 checks, Sprint 8)
         report.checks.append(self._check_mcp_config_valid())
         report.checks.append(self._check_mcp_sandbox_enabled())
@@ -331,16 +343,17 @@ class SecurityDoctor:
 
     # ── Access Control ────────────────────────────────────
 
-    def _check_telegram_allowlist(self) -> CheckResult:
-        al = os.environ.get("PINCER_TELEGRAM_ALLOWED_USERS", "")
-        if al.strip():
+    def _check_telegram_allowlist(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        al = cfg.telegram_allowed_users
+        if al:
             return CheckResult(
                 "telegram_allowlist",
                 CheckStatus.PASS,
-                f"Telegram allowlist configured ({len(al.split(','))} users)",
+                f"Telegram allowlist configured ({len(al)} users)",
                 category="access",
             )
-        if os.environ.get("PINCER_TELEGRAM_BOT_TOKEN"):
+        if cfg.telegram_bot_token.get_secret_value():
             return CheckResult(
                 "telegram_allowlist",
                 CheckStatus.CRITICAL,
@@ -355,16 +368,16 @@ class SecurityDoctor:
             category="access",
         )
 
-    def _check_whatsapp_dm_policy(self) -> CheckResult:
-        allowlist = os.environ.get("PINCER_WHATSAPP_DM_ALLOWLIST", "")
-        if allowlist.strip():
+    def _check_whatsapp_dm_policy(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if cfg.whatsapp_dm_allowlist.strip():
             return CheckResult(
                 "whatsapp_dm_policy",
                 CheckStatus.PASS,
                 "WhatsApp DM allowlist configured",
                 category="access",
             )
-        if os.environ.get("PINCER_WHATSAPP_ENABLED", "").lower() == "true":
+        if cfg.whatsapp_enabled:
             return CheckResult(
                 "whatsapp_dm_policy",
                 CheckStatus.PASS,
@@ -416,15 +429,16 @@ class SecurityDoctor:
             category="access",
         )
 
-    def _check_discord_allowlist(self) -> CheckResult:
-        if os.environ.get("PINCER_DISCORD_GUILD_ALLOWLIST"):
+    def _check_discord_allowlist(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if cfg.discord_guild_allowlist.strip():
             return CheckResult(
                 "discord_allowlist",
                 CheckStatus.PASS,
                 "Discord guild allowlist configured",
                 category="access",
             )
-        if os.environ.get("PINCER_DISCORD_BOT_TOKEN"):
+        if cfg.discord_bot_token.get_secret_value():
             return CheckResult(
                 "discord_allowlist",
                 CheckStatus.WARNING,
@@ -439,8 +453,9 @@ class SecurityDoctor:
             category="access",
         )
 
-    def _check_dashboard_auth_token(self) -> CheckResult:
-        token = os.environ.get("PINCER_DASHBOARD_TOKEN", "")
+    def _check_dashboard_auth_token(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        token = cfg.dashboard_token.get_secret_value()
         if token and len(token) >= 16:
             return CheckResult(
                 "dashboard_auth_token",
@@ -466,51 +481,38 @@ class SecurityDoctor:
 
     # ── Budget ────────────────────────────────────────────
 
-    def _check_budget_limits(self) -> CheckResult:
-        daily = os.environ.get("PINCER_DAILY_BUDGET_USD")
-        if daily:
+    def _check_budget_limits(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if cfg.daily_budget_usd > 0:
             return CheckResult(
                 "budget_limits",
                 CheckStatus.PASS,
-                f"Daily budget: ${float(daily):.2f}",
+                f"Daily budget: ${cfg.daily_budget_usd:.2f}",
                 category="budget",
             )
         return CheckResult(
             "budget_limits",
             CheckStatus.WARNING,
-            "No daily budget (default $5)",
+            "Daily budget is 0 (unlimited spend)",
             fix_hint="Set PINCER_DAILY_BUDGET_USD=5",
             category="budget",
         )
 
-    def _check_rate_limits(self) -> CheckResult:
-        if os.environ.get("PINCER_RATE_MESSAGES_PER_MIN"):
-            return CheckResult(
-                "rate_limits",
-                CheckStatus.PASS,
-                "Message rate limit configured",
-                category="budget",
-            )
+    def _check_rate_limits(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
         return CheckResult(
             "rate_limits",
-            CheckStatus.WARNING,
-            "Using default rate limits (30/min)",
+            CheckStatus.PASS,
+            f"Message rate limit: {cfg.rate_messages_per_min}/min",
             category="budget",
         )
 
-    def _check_tool_call_limits(self) -> CheckResult:
-        configured = sum(1 for k in ["PINCER_RATE_TOOLS_PER_MIN", "PINCER_MAX_CONCURRENT_LLM"] if os.environ.get(k))
-        if configured == 2:
-            return CheckResult(
-                "tool_call_limits",
-                CheckStatus.PASS,
-                "Tool + concurrency limits configured",
-                category="budget",
-            )
+    def _check_tool_call_limits(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
         return CheckResult(
             "tool_call_limits",
-            CheckStatus.WARNING,
-            "Not all limits explicitly configured",
+            CheckStatus.PASS,
+            f"Tool limit: {cfg.rate_tools_per_min}/min, concurrent LLM: {cfg.max_concurrent_llm}",
             category="budget",
         )
 
@@ -615,8 +617,9 @@ class SecurityDoctor:
 
     # ── Network ───────────────────────────────────────────
 
-    def _check_dashboard_not_exposed(self) -> CheckResult:
-        host = os.environ.get("PINCER_DASHBOARD_HOST", "127.0.0.1")
+    def _check_dashboard_not_exposed(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        host = cfg.dashboard_host
         if host in ("127.0.0.1", "localhost", "::1"):
             return CheckResult(
                 "dashboard_not_exposed",
@@ -632,8 +635,9 @@ class SecurityDoctor:
             category="network",
         )
 
-    def _check_no_debug_mode(self) -> CheckResult:
-        if os.environ.get("PINCER_DEBUG", "").lower() in ("true", "1"):
+    def _check_no_debug_mode(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if cfg.debug:
             return CheckResult(
                 "no_debug_mode",
                 CheckStatus.WARNING,
@@ -704,16 +708,17 @@ class SecurityDoctor:
 
     # ── Voice (Sprint 7) ─────────────────────────────────
 
-    def _check_voice_twilio_credentials(self) -> CheckResult:
-        if os.environ.get("PINCER_VOICE_ENABLED", "").lower() != "true":
+    def _check_voice_twilio_credentials(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.voice_enabled:
             return CheckResult(
                 "voice_twilio_credentials",
                 CheckStatus.SKIPPED,
                 "Voice not enabled",
                 category="voice",
             )
-        sid = os.environ.get("PINCER_TWILIO_ACCOUNT_SID", "")
-        token = os.environ.get("PINCER_TWILIO_AUTH_TOKEN", "")
+        sid = cfg.twilio_account_sid
+        token = cfg.twilio_auth_token.get_secret_value()
         if sid and token:
             return CheckResult(
                 "voice_twilio_credentials",
@@ -734,15 +739,16 @@ class SecurityDoctor:
             category="voice",
         )
 
-    def _check_voice_webhook_url(self) -> CheckResult:
-        if os.environ.get("PINCER_VOICE_ENABLED", "").lower() != "true":
+    def _check_voice_webhook_url(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.voice_enabled:
             return CheckResult(
                 "voice_webhook_url",
                 CheckStatus.SKIPPED,
                 "Voice not enabled",
                 category="voice",
             )
-        url = os.environ.get("PINCER_VOICE_WEBHOOK_BASE_URL", "")
+        url = cfg.voice_webhook_base_url
         if url and url.startswith("https://"):
             return CheckResult(
                 "voice_webhook_url",
@@ -766,17 +772,18 @@ class SecurityDoctor:
             category="voice",
         )
 
-    def _check_voice_recording_consent(self) -> CheckResult:
-        if os.environ.get("PINCER_VOICE_ENABLED", "").lower() != "true":
+    def _check_voice_recording_consent(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.voice_enabled:
             return CheckResult(
                 "voice_recording_consent",
                 CheckStatus.SKIPPED,
                 "Voice not enabled",
                 category="voice",
             )
-        recording = os.environ.get("PINCER_VOICE_RECORDING_ENABLED", "").lower()
-        consent = os.environ.get("PINCER_VOICE_CONSENT_MODE", "one_party")
-        if recording == "true" and consent == "none":
+        recording = cfg.voice_recording_enabled
+        consent = cfg.voice_consent_mode
+        if recording and consent == "none":
             return CheckResult(
                 "voice_recording_consent",
                 CheckStatus.CRITICAL,
@@ -784,7 +791,7 @@ class SecurityDoctor:
                 fix_hint="Set PINCER_VOICE_CONSENT_MODE=one_party or two_party",
                 category="voice",
             )
-        if recording == "true":
+        if recording:
             return CheckResult(
                 "voice_recording_consent",
                 CheckStatus.PASS,
@@ -800,15 +807,16 @@ class SecurityDoctor:
 
     # ── Signal (Sprint 7.5) ───────────────────────────────
 
-    def _check_signal_phone_set(self) -> CheckResult:
-        if os.environ.get("PINCER_SIGNAL_ENABLED", "").lower() != "true":
+    def _check_signal_phone_set(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.signal_enabled:
             return CheckResult(
                 "signal_phone_set",
                 CheckStatus.SKIPPED,
                 "Signal not enabled",
                 category="signal",
             )
-        phone = os.environ.get("PINCER_SIGNAL_PHONE_NUMBER", "")
+        phone = cfg.signal_phone_number
         if phone:
             return CheckResult(
                 "signal_phone_set",
@@ -824,15 +832,16 @@ class SecurityDoctor:
             category="signal",
         )
 
-    def _check_signal_api_local(self) -> CheckResult:
-        if os.environ.get("PINCER_SIGNAL_ENABLED", "").lower() != "true":
+    def _check_signal_api_local(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.signal_enabled:
             return CheckResult(
                 "signal_api_local",
                 CheckStatus.SKIPPED,
                 "Signal not enabled",
                 category="signal",
             )
-        url = os.environ.get("PINCER_SIGNAL_API_URL", "http://signal-api:8080")
+        url = cfg.signal_api_url
         local_hosts = ("localhost", "127.0.0.1", "signal-api", "::1")
         try:
             from urllib.parse import urlparse
@@ -855,15 +864,16 @@ class SecurityDoctor:
             category="signal",
         )
 
-    def _check_signal_allowlist(self) -> CheckResult:
-        if os.environ.get("PINCER_SIGNAL_ENABLED", "").lower() != "true":
+    def _check_signal_allowlist(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.signal_enabled:
             return CheckResult(
                 "signal_allowlist",
                 CheckStatus.SKIPPED,
                 "Signal not enabled",
                 category="signal",
             )
-        allowlist = os.environ.get("PINCER_SIGNAL_ALLOWLIST", "")
+        allowlist = cfg.signal_allowlist
         if allowlist.strip():
             return CheckResult(
                 "signal_allowlist",
@@ -897,8 +907,9 @@ class SecurityDoctor:
             category="runtime",
         )
 
-    def _check_audit_logging_enabled(self) -> CheckResult:
-        if os.environ.get("PINCER_AUDIT_DISABLED", "").lower() in ("true", "1"):
+    def _check_audit_logging_enabled(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if cfg.audit_disabled:
             return CheckResult(
                 "audit_logging_enabled",
                 CheckStatus.WARNING,
@@ -913,11 +924,9 @@ class SecurityDoctor:
             category="runtime",
         )
 
-    def _check_skill_sandbox_enabled(self) -> CheckResult:
-        if os.environ.get("PINCER_SKILL_SANDBOX_DISABLED", "").lower() in (
-            "true",
-            "1",
-        ):
+    def _check_skill_sandbox_enabled(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if cfg.skill_sandbox_disabled:
             return CheckResult(
                 "skill_sandbox_enabled",
                 CheckStatus.CRITICAL,
@@ -1116,8 +1125,9 @@ class SecurityDoctor:
                 category="mcp",
             )
 
-    def _check_tool_approval_mode(self) -> CheckResult:
-        mode = os.environ.get("PINCER_TOOL_APPROVAL", "auto")
+    def _check_tool_approval_mode(self, cfg: "Settings | None" = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        mode = cfg.tool_approval
         if mode in ("manual", "allowlist"):
             return CheckResult(
                 "tool_approval_mode",

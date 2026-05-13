@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from unittest.mock import AsyncMock, MagicMock
 
 os.environ.setdefault("PINCER_ANTHROPIC_API_KEY", "sk-ant-test-key")
@@ -10,7 +12,6 @@ os.environ.setdefault("PINCER_DATA_DIR", "/tmp/pincer-test")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from pincer.api import server  # noqa: E402
 from pincer.api.server import create_app  # noqa: E402
 from pincer.core.agent import AgentResponse, StreamChunk, StreamEventType  # noqa: E402
 
@@ -24,9 +25,30 @@ def _make_client(*, token: str = "", web_chat_token: str = "") -> TestClient:
     context manager, so build_agent_from_settings is not called and we
     attach our mock directly to app.state.agent.
     """
-    server.DASHBOARD_TOKEN = token
-    server.WEB_CHAT_TOKEN = web_chat_token
-    app = create_app()
+    from pincer.config import get_settings_relaxed
+
+    # Isolate from the developer's .env so only the tokens we pass here take effect
+    old_cwd = os.getcwd()
+    tmpdir = tempfile.mkdtemp()
+
+    if token:
+        os.environ["PINCER_DASHBOARD_TOKEN"] = token
+    else:
+        os.environ.pop("PINCER_DASHBOARD_TOKEN", None)
+
+    if web_chat_token:
+        os.environ["PINCER_WEB_CHAT_TOKEN"] = web_chat_token
+    else:
+        os.environ.pop("PINCER_WEB_CHAT_TOKEN", None)
+
+    os.chdir(tmpdir)
+    get_settings_relaxed.cache_clear()
+    try:
+        app = create_app()
+    finally:
+        os.chdir(old_cwd)
+        get_settings_relaxed.cache_clear()
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     agent = MagicMock()
     agent.handle_message = AsyncMock(return_value=AgentResponse(text="hi back", cost_usd=0.01, model="test-model"))
@@ -107,11 +129,8 @@ def test_chat_stream_ok():
 
 
 def test_chat_returns_503_without_agent():
-    server.DASHBOARD_TOKEN = ""
-    server.WEB_CHAT_TOKEN = ""
-    app = create_app()
-    app.state.agent = None
-    client = TestClient(app)
+    client = _make_client()
+    client.app.state.agent = None
     r = client.post(
         "/api/chat/message",
         json={"text": "hi"},

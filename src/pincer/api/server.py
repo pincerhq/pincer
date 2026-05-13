@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from pincer.config import get_settings_relaxed
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,19 +20,17 @@ from pincer.api.costs import router as costs_router
 from pincer.api.integrations import router as integrations_router
 from pincer.api.skills import router as skills_router
 
-# Dashboard static files: use env override (Docker) or project-relative path
-_DASHBOARD_DIST_ENV = os.environ.get("PINCER_DASHBOARD_DIST")
-if _DASHBOARD_DIST_ENV:
-    _DASHBOARD_DIST = Path(_DASHBOARD_DIST_ENV)
-else:
-    _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-    _DASHBOARD_DIST = _PROJECT_ROOT / "dashboard" / "dist"
-
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-DASHBOARD_TOKEN = os.environ.get("PINCER_DASHBOARD_TOKEN", "")
-WEB_CHAT_TOKEN = os.environ.get("PINCER_WEB_CHAT_TOKEN", "")
+
+def _dashboard_dist() -> Path:
+    """Dashboard static files path: settings override (Docker) or project-relative."""
+    override = get_settings_relaxed().dashboard_dist
+    if override:
+        return Path(override)
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
+    return project_root / "dashboard" / "dist"
 
 
 @asynccontextmanager
@@ -62,10 +61,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    cfg = get_settings_relaxed()
     app = FastAPI(
         title="Pincer API",
         version="0.5.0",
-        docs_url="/api/docs" if os.environ.get("PINCER_DEBUG") else None,
+        docs_url="/api/docs" if cfg.debug else None,
         redoc_url=None,
         lifespan=lifespan,
     )
@@ -76,13 +76,16 @@ def create_app() -> FastAPI:
             "http://localhost:3000",
             "http://localhost:5173",
             "http://localhost:8080",  # 3Days.ai dev
-            os.environ.get("PINCER_DASHBOARD_URL", ""),
-            os.environ.get("PINCER_WEB_CHAT_URL", ""),
+            cfg.dashboard_url,
+            cfg.web_chat_url,
         ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    _dashboard_token = cfg.dashboard_token.get_secret_value()
+    _web_chat_token = cfg.web_chat_token.get_secret_value()
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -91,10 +94,10 @@ def create_app() -> FastAPI:
             return await call_next(request)
         if not request.url.path.startswith("/api/"):
             return await call_next(request)  # dashboard static files
-        if not DASHBOARD_TOKEN and not WEB_CHAT_TOKEN:
+        if not _dashboard_token and not _web_chat_token:
             return await call_next(request)  # no token configured: allow (dev/tests)
         auth = request.headers.get("Authorization", "")
-        allowed = {f"Bearer {t}" for t in (DASHBOARD_TOKEN, WEB_CHAT_TOKEN) if t}
+        allowed = {f"Bearer {t}" for t in (_dashboard_token, _web_chat_token) if t}
         if auth in allowed:
             return await call_next(request)
         return JSONResponse(status_code=401, content={"error": "Invalid token"})
@@ -117,15 +120,16 @@ def create_app() -> FastAPI:
 
     @app.get("/api/status")
     async def status() -> dict[str, object]:
+        _cfg = get_settings_relaxed()
         return {
             "agent_running": True,
             "version": "0.7.6",
             "channels": {
-                "telegram": bool(os.environ.get("PINCER_TELEGRAM_BOT_TOKEN")),
-                "whatsapp": os.environ.get("PINCER_WHATSAPP_ENABLED", "").lower() == "true",
-                "discord": bool(os.environ.get("PINCER_DISCORD_BOT_TOKEN")),
-                "voice": os.environ.get("PINCER_VOICE_ENABLED", "").lower() == "true",
-                "signal": os.environ.get("PINCER_SIGNAL_ENABLED", "").lower() == "true",
+                "telegram": bool(_cfg.telegram_bot_token.get_secret_value()),
+                "whatsapp": _cfg.whatsapp_enabled,
+                "discord": bool(_cfg.discord_bot_token.get_secret_value()),
+                "voice": _cfg.voice_enabled,
+                "signal": _cfg.signal_enabled,
             },
         }
 
@@ -136,7 +140,8 @@ def create_app() -> FastAPI:
         doc = SecurityDoctor()
         return doc.run_all().to_dict()
 
-    if _DASHBOARD_DIST.is_dir():
-        app.mount("/", StaticFiles(directory=str(_DASHBOARD_DIST), html=True))
+    dist = _dashboard_dist()
+    if dist.is_dir():
+        app.mount("/", StaticFiles(directory=str(dist), html=True))
 
     return app

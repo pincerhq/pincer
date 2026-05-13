@@ -14,9 +14,17 @@ from pincer.api.server import create_app
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch, tmp_path):
+    from pincer.config import get_settings_relaxed
+
+    # Isolate from the developer's .env so no dashboard token is loaded
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
+    get_settings_relaxed.cache_clear()
     app = create_app()
-    return TestClient(app)
+    yield TestClient(app)
+    get_settings_relaxed.cache_clear()
 
 
 def test_health(client):
@@ -44,42 +52,30 @@ def test_doctor_endpoint(client):
     assert isinstance(data["checks"], list)
 
 
-def test_auth_required_with_token():
-    os.environ["PINCER_DASHBOARD_TOKEN"] = "test-secret-token-1234"
+def test_auth_required_with_token(monkeypatch, tmp_path):
+    from pincer.config import get_settings_relaxed
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "test-secret-token-1234")
+    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
+    get_settings_relaxed.cache_clear()
     try:
-        # Need to reimport to pick up new token
-        from pincer.api import server
-
-        old_token = server.DASHBOARD_TOKEN
-        server.DASHBOARD_TOKEN = "test-secret-token-1234"
-
         app = create_app()
-        client = TestClient(app)
+        c = TestClient(app)
 
         # Health is always public
-        assert client.get("/api/health").status_code == 200
+        assert c.get("/api/health").status_code == 200
 
         # Protected endpoint without token
-        resp = client.get("/api/status")
-        assert resp.status_code == 401
+        assert c.get("/api/status").status_code == 401
 
         # With correct token
-        resp = client.get(
-            "/api/status",
-            headers={"Authorization": "Bearer test-secret-token-1234"},
-        )
-        assert resp.status_code == 200
+        assert c.get("/api/status", headers={"Authorization": "Bearer test-secret-token-1234"}).status_code == 200
 
         # With wrong token
-        resp = client.get(
-            "/api/status",
-            headers={"Authorization": "Bearer wrong-token"},
-        )
-        assert resp.status_code == 401
-
-        server.DASHBOARD_TOKEN = old_token
+        assert c.get("/api/status", headers={"Authorization": "Bearer wrong-token"}).status_code == 401
     finally:
-        os.environ.pop("PINCER_DASHBOARD_TOKEN", None)
+        get_settings_relaxed.cache_clear()
 
 
 def test_costs_today(client):
@@ -115,3 +111,35 @@ def test_costs_by_tool(client):
     data = response.json()
     assert "period_days" in data
     assert "tools" in data
+
+
+# ── Regression: #117 — /api/status channel flags read from .env ──────────────
+
+
+def test_status_channels_from_dotenv_only(tmp_path, monkeypatch):
+    """Channel flags in /api/status must reflect .env, not just shell env."""
+    from pincer.config import get_settings_relaxed
+
+    (tmp_path / ".env").write_text(
+        "PINCER_TELEGRAM_BOT_TOKEN=123456:TEST\n"
+        "PINCER_DISCORD_BOT_TOKEN=discord-token\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PINCER_TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("PINCER_DISCORD_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("PINCER_WHATSAPP_ENABLED", raising=False)
+    monkeypatch.delenv("PINCER_VOICE_ENABLED", raising=False)
+    monkeypatch.delenv("PINCER_SIGNAL_ENABLED", raising=False)
+
+    get_settings_relaxed.cache_clear()
+    try:
+        app = create_app()
+        c = TestClient(app)
+        resp = c.get("/api/status")
+        assert resp.status_code == 200
+        channels = resp.json()["channels"]
+        assert channels["telegram"] is True
+        assert channels["discord"] is True
+        assert channels["whatsapp"] is False
+    finally:
+        get_settings_relaxed.cache_clear()
