@@ -60,11 +60,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
-    cfg = get_settings_relaxed()
+    settings = get_settings_relaxed()
     app = FastAPI(
         title="Pincer API",
         version="0.5.0",
-        docs_url="/api/docs" if cfg.debug else None,
+        docs_url="/api/docs" if settings.debug else None,
         redoc_url=None,
         lifespan=lifespan,
     )
@@ -75,19 +75,18 @@ def create_app() -> FastAPI:
             "http://localhost:3000",
             "http://localhost:5173",
             "http://localhost:8080",  # 3Days.ai dev
-            cfg.dashboard_url,
-            cfg.web_chat_url,
+            settings.dashboard_url,
+            settings.web_chat_url,
         ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    _dashboard_token = cfg.dashboard_token.get_secret_value()
-    _web_chat_token = cfg.web_chat_token.get_secret_value()
-
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+        _dashboard_token = settings.dashboard_token.get_secret_value()
+        _web_chat_token = settings.web_chat_token.get_secret_value()
         public_paths = ("/api/health", "/api/docs", "/api/openapi.json")
         if request.url.path in public_paths:
             return await call_next(request)
@@ -119,16 +118,16 @@ def create_app() -> FastAPI:
 
     @app.get("/api/status")
     async def status() -> dict[str, object]:
-        _cfg = get_settings_relaxed()
+        settings = get_settings_relaxed()
         return {
             "agent_running": True,
             "version": "0.7.6",
             "channels": {
-                "telegram": bool(_cfg.telegram_bot_token.get_secret_value()),
-                "whatsapp": _cfg.whatsapp_enabled,
-                "discord": bool(_cfg.discord_bot_token.get_secret_value()),
-                "voice": _cfg.voice_enabled,
-                "signal": _cfg.signal_enabled,
+                "telegram": bool(settings.telegram_bot_token.get_secret_value()),
+                "whatsapp": settings.whatsapp_enabled,
+                "discord": bool(settings.discord_bot_token.get_secret_value()),
+                "voice": settings.voice_enabled,
+                "signal": settings.signal_enabled,
             },
         }
 

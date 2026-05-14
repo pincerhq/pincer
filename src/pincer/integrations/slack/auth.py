@@ -46,9 +46,9 @@ def load_tokens() -> SlackTokens:
     """
     from pincer.config import get_settings_relaxed
 
-    cfg = get_settings_relaxed()
+    settings = get_settings_relaxed()
     # 1. Settings (reads PINCER_SLACK_BOT_TOKEN from .env or shell)
-    bot = cfg.slack_bot_token.get_secret_value() or os.environ.get("SLACK_BOT_TOKEN", "")
+    bot = settings.slack_bot_token.get_secret_value() or os.environ.get("SLACK_BOT_TOKEN", "")
     user = os.environ.get("SLACK_USER_TOKEN", "")
     if bot:
         return SlackTokens(bot_token=bot, user_token=user)

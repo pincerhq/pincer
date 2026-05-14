@@ -989,17 +989,17 @@ def config() -> None:
     from pincer.config import get_settings
 
     try:
-        s = get_settings()
+        settings = get_settings()
         console.print("[bold]Pincer Configuration[/bold]\n")
-        console.print(f"  Provider:     {s.default_provider.value}")
-        console.print(f"  Model:        {s.default_model}")
-        console.print(f"  Anthropic:    {'set' if s.anthropic_api_key.get_secret_value() else 'not set'}")
-        console.print(f"  OpenAI:       {'set' if s.openai_api_key.get_secret_value() else 'not set'}")
-        console.print(f"  Telegram:     {'set' if s.telegram_bot_token.get_secret_value() else 'not set'}")
-        console.print(f"  Budget:       ${s.daily_budget_usd:.2f}/day")
-        console.print(f"  Data dir:     {s.data_dir}")
-        console.print(f"  Shell:        {'enabled' if s.shell_enabled else 'disabled'}")
-        console.print(f"  Log level:    {s.log_level.value}")
+        console.print(f"  Provider:     {settings.default_provider.value}")
+        console.print(f"  Model:        {settings.default_model}")
+        console.print(f"  Anthropic:    {'set' if settings.anthropic_api_key.get_secret_value() else 'not set'}")
+        console.print(f"  OpenAI:       {'set' if settings.openai_api_key.get_secret_value() else 'not set'}")
+        console.print(f"  Telegram:     {'set' if settings.telegram_bot_token.get_secret_value() else 'not set'}")
+        console.print(f"  Budget:       ${settings.daily_budget_usd:.2f}/day")
+        console.print(f"  Data dir:     {settings.data_dir}")
+        console.print(f"  Shell:        {'enabled' if settings.shell_enabled else 'disabled'}")
+        console.print(f"  Log level:    {settings.log_level.value}")
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
 
@@ -1023,15 +1023,15 @@ async def _show_cost(days: int = 0, by_model: bool = False, by_tool: bool = Fals
     from pincer.config import get_settings_relaxed
     from pincer.llm.cost_tracker import CostTracker
 
-    s = get_settings_relaxed()
-    tracker = CostTracker(s.db_path, s.daily_budget_usd)
+    settings = get_settings_relaxed()
+    tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
     await tracker.initialize()
 
     today = await tracker.get_today_spend()
     summary = await tracker.get_summary()
 
     console.print("[bold]Pincer Cost Report[/bold]\n")
-    console.print(f"  Today:   ${today:.4f} / ${s.daily_budget_usd:.2f}")
+    console.print(f"  Today:   ${today:.4f} / ${settings.daily_budget_usd:.2f}")
     console.print(f"  Total:   ${summary.total_usd:.4f} ({summary.total_calls} calls)")
     console.print(f"  Tokens:  {summary.total_input_tokens:,} in / {summary.total_output_tokens:,} out")
 
@@ -1851,8 +1851,8 @@ async def _show_audit(
     from pincer.config import get_settings_relaxed
     from pincer.security.audit import AuditAction, AuditLogger
 
-    s = get_settings_relaxed()
-    audit_db = s.data_dir / "audit.db"
+    settings = get_settings_relaxed()
+    audit_db = settings.data_dir / "audit.db"
     logger = AuditLogger(db_path=audit_db)
     await logger.initialize()
 
@@ -1936,8 +1936,8 @@ async def _memory_search(query: str) -> None:
     from pincer.config import get_settings_relaxed
     from pincer.memory.store import MemoryStore
 
-    s = get_settings_relaxed()
-    store = MemoryStore(s.db_path)
+    settings = get_settings_relaxed()
+    store = MemoryStore(settings.db_path)
     await store.initialize()
     results = await store.search_text(query, limit=10)
     if not results:
@@ -1958,8 +1958,8 @@ async def _memory_stats() -> None:
     from pincer.config import get_settings_relaxed
     from pincer.memory.store import MemoryStore
 
-    s = get_settings_relaxed()
-    store = MemoryStore(s.db_path)
+    settings = get_settings_relaxed()
+    store = MemoryStore(settings.db_path)
     await store.initialize()
 
     async with store._db.execute("SELECT COUNT(*) FROM memories") as cur:  # type: ignore[union-attr]
@@ -1993,8 +1993,8 @@ async def _memory_clear(user_id: str) -> None:
     from pincer.config import get_settings_relaxed
     from pincer.memory.store import MemoryStore
 
-    s = get_settings_relaxed()
-    store = MemoryStore(s.db_path)
+    settings = get_settings_relaxed()
+    store = MemoryStore(settings.db_path)
     await store.initialize()
     await store._db.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))  # type: ignore[union-attr]
     await store._db.commit()  # type: ignore[union-attr]
@@ -2017,8 +2017,8 @@ async def _memory_export(user_id: str, output: str) -> None:
     from pincer.config import get_settings_relaxed
     from pincer.memory.store import MemoryStore
 
-    s = get_settings_relaxed()
-    store = MemoryStore(s.db_path)
+    settings = get_settings_relaxed()
+    store = MemoryStore(settings.db_path)
     await store.initialize()
 
     async with store._db.execute(  # type: ignore[union-attr]
@@ -2052,8 +2052,8 @@ async def _schedule_list() -> None:
 
     from pincer.config import get_settings_relaxed
 
-    s = get_settings_relaxed()
-    async with _aiosqlite.connect(str(s.db_path)) as db:
+    settings = get_settings_relaxed()
+    async with _aiosqlite.connect(str(settings.db_path)) as db:
         try:
             async with db.execute(
                 "SELECT name, cron_expr, pincer_user_id, timezone, enabled FROM schedules ORDER BY name"

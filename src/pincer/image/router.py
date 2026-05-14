@@ -44,18 +44,19 @@ def build_router_from_settings() -> ImageProviderRouter:
     from pincer.image.provider_fal import FalImageProvider
     from pincer.image.provider_gemini import GeminiImageProvider
 
-    s = get_settings()
+    settings = get_settings()
     providers: list[BaseImageProvider] = []
 
-    fal_key = s.fal_key.get_secret_value() if hasattr(s, "fal_key") else ""
-    gemini_key = s.gemini_api_key.get_secret_value()
-    image_provider = getattr(s, "image_provider", "auto")
+    fal_key = settings.fal_key.get_secret_value() if hasattr(settings, "fal_key") else ""
+    gemini_key = settings.gemini_api_key.get_secret_value()
+    image_provider = getattr(settings, "image_provider", "auto")
 
     if image_provider in ("fal", "auto") and fal_key:
-        providers.append(FalImageProvider(api_key=fal_key, model=getattr(s, "fal_model", "fal-ai/nano-banana-2")))
+        fal_model = getattr(settings, "fal_model", "fal-ai/nano-banana-2")
+        providers.append(FalImageProvider(api_key=fal_key, model=fal_model))
 
     if image_provider in ("gemini", "auto") and gemini_key:
-        gemini_model = getattr(s, "image_model_gemini", "gemini-2.5-flash-image")
+        gemini_model = getattr(settings, "image_model_gemini", "gemini-2.5-flash-image")
         providers.append(GeminiImageProvider(api_key=gemini_key, model=gemini_model))
 
     return ImageProviderRouter(providers)

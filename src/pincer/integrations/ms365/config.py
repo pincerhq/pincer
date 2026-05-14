@@ -30,11 +30,11 @@ class MS365IntegrationConfig:
     def __post_init__(self) -> None:
         from pincer.config import get_settings_relaxed
 
-        cfg = get_settings_relaxed()
+        settings = get_settings_relaxed()
         if not self.client_id:
-            self.client_id = cfg.ms365_client_id
-        if self.tenant_id == "common" and cfg.ms365_tenant_id != "common":
-            self.tenant_id = cfg.ms365_tenant_id
+            self.client_id = settings.ms365_client_id
+        if self.tenant_id == "common" and settings.ms365_tenant_id != "common":
+            self.tenant_id = settings.ms365_tenant_id
 
 
 def load_config() -> MS365IntegrationConfig:
