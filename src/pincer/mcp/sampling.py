@@ -102,9 +102,9 @@ class StandaloneLLMBackend(LLMBackend):
         api_key: str | None = None,
         default_model: str = "claude-sonnet-4-20250514",
     ) -> None:
-        import os
+        from pincer.config import get_settings_relaxed
 
-        self._api_key = api_key or os.environ.get("PINCER_LLM_API_KEY") or os.environ.get("ANTHROPIC_API_KEY") or ""
+        self._api_key = api_key or get_settings_relaxed().anthropic_api_key.get_secret_value() or ""
         self._default_model = default_model
 
     async def complete(

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
+import tempfile
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,7 +19,7 @@ os.environ.setdefault("PINCER_DATA_DIR", "/tmp/pincer-test")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from pincer.api import approvals, server  # noqa: E402
+from pincer.api import approvals  # noqa: E402
 from pincer.api.approvals import (  # noqa: E402
     pending_count,
     request_web_approval,
@@ -33,9 +35,30 @@ OTHER_UUID = "22222222-2222-4222-8222-222222222222"
 
 
 def _make_client(*, agent=None, token: str = "", web_chat_token: str = "") -> TestClient:
-    server.DASHBOARD_TOKEN = token
-    server.WEB_CHAT_TOKEN = web_chat_token
-    app = create_app()
+    from pincer.config import get_settings_relaxed
+
+    old_cwd = os.getcwd()
+    tmpdir = tempfile.mkdtemp()
+
+    if token:
+        os.environ["PINCER_DASHBOARD_TOKEN"] = token
+    else:
+        os.environ.pop("PINCER_DASHBOARD_TOKEN", None)
+
+    if web_chat_token:
+        os.environ["PINCER_WEB_CHAT_TOKEN"] = web_chat_token
+    else:
+        os.environ.pop("PINCER_WEB_CHAT_TOKEN", None)
+
+    os.chdir(tmpdir)
+    get_settings_relaxed.cache_clear()
+    try:
+        app = create_app()
+    finally:
+        os.chdir(old_cwd)
+        get_settings_relaxed.cache_clear()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
     if agent is None:
         agent = MagicMock()
     app.state.agent = agent

@@ -39,9 +39,16 @@ def _token_path() -> Path:
 
 
 def load_tokens() -> SlackTokens:
-    """Load tokens: env vars > pincer.toml > token file."""
-    # 1. Environment variables (highest priority)
-    bot = os.environ.get("SLACK_BOT_TOKEN", "")
+    """Load tokens: env vars > pincer.toml > token file.
+
+    Checks PINCER_SLACK_BOT_TOKEN (via settings, reads .env) first,
+    then falls back to the bare SLACK_BOT_TOKEN shell var for compatibility.
+    """
+    from pincer.config import get_settings_relaxed
+
+    settings = get_settings_relaxed()
+    # 1. Settings (reads PINCER_SLACK_BOT_TOKEN from .env or shell)
+    bot = settings.slack_bot_token.get_secret_value() or os.environ.get("SLACK_BOT_TOKEN", "")
     user = os.environ.get("SLACK_USER_TOKEN", "")
     if bot:
         return SlackTokens(bot_token=bot, user_token=user)
@@ -50,9 +57,9 @@ def load_tokens() -> SlackTokens:
     try:
         from pincer.integrations.slack.config import load_config
 
-        cfg = load_config()
-        if cfg.bot_token:
-            return SlackTokens(bot_token=cfg.bot_token, user_token=cfg.user_token)
+        toml_cfg = load_config()
+        if toml_cfg.bot_token:
+            return SlackTokens(bot_token=toml_cfg.bot_token, user_token=toml_cfg.user_token)
     except Exception as exc:
         logger.debug("Could not load Slack config from toml: %s", exc)
 

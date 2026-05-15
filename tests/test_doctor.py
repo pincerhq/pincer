@@ -323,3 +323,45 @@ def test_whatsapp_neonize_version_skipped_when_missing(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", blocked_import)
     result = SecurityDoctor()._check_whatsapp_neonize_version()
     assert result.status == CheckStatus.SKIPPED
+
+
+# ── Regression: #117 — doctor reads .env via settings, not os.environ ────────
+
+
+def test_dashboard_auth_token_pass_from_dotenv_only(tmp_path, monkeypatch):
+    """Root-cause regression for #117.
+
+    PINCER_DASHBOARD_TOKEN set only in .env (not in shell) must make
+    _check_dashboard_auth_token return PASS, not CRITICAL.
+    """
+    from pincer.config import get_settings_relaxed
+
+    (tmp_path / ".env").write_text("PINCER_DASHBOARD_TOKEN=a-secure-32-char-token-for-test\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
+
+    get_settings_relaxed.cache_clear()
+    try:
+        doc = SecurityDoctor(config_dir=tmp_path, data_dir=tmp_path)
+        result = doc._check_dashboard_auth_token()
+        assert result.status == CheckStatus.PASS
+    finally:
+        get_settings_relaxed.cache_clear()
+
+
+def test_telegram_allowlist_pass_from_dotenv_only(tmp_path, monkeypatch):
+    """Telegram allowlist configured only in .env must show as configured."""
+    from pincer.config import get_settings_relaxed
+
+    (tmp_path / ".env").write_text("PINCER_TELEGRAM_BOT_TOKEN=123456:TEST\nPINCER_TELEGRAM_ALLOWED_USERS=[111,222]\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PINCER_TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("PINCER_TELEGRAM_ALLOWED_USERS", raising=False)
+
+    get_settings_relaxed.cache_clear()
+    try:
+        doc = SecurityDoctor(config_dir=tmp_path, data_dir=tmp_path)
+        result = doc._check_telegram_allowlist()
+        assert result.status == CheckStatus.PASS
+    finally:
+        get_settings_relaxed.cache_clear()

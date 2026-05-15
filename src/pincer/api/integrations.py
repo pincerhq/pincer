@@ -77,8 +77,8 @@ def _google_active() -> bool:
     try:
         from pincer.config import get_settings_relaxed
 
-        s = get_settings_relaxed()
-        d = s.google_oauth_dir()
+        settings = get_settings_relaxed()
+        d = settings.google_oauth_dir()
         return (d / "google_credentials.json").exists() and (
             (d / "google_workspace_token.json").exists() or (d / "google_token.json").exists()
         )

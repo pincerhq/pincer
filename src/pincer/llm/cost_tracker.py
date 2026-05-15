@@ -297,9 +297,9 @@ async def get_cost_tracker(db_path: Path | None = None, daily_budget: float = 5.
         if db_path is None:
             from pincer.config import get_settings
 
-            s = get_settings()
-            db_path = s.db_path
-            daily_budget = s.daily_budget_usd
+            settings = get_settings()
+            db_path = settings.db_path
+            daily_budget = settings.daily_budget_usd
         tracker = CostTracker(db_path, daily_budget)
         await tracker.initialize()
         _cost_tracker = tracker
