@@ -16,11 +16,15 @@ Environment variables:
 
 from __future__ import annotations
 
+import functools
+import html as _html
+import inspect
 import json
 import logging
 import os
 import sqlite3
 import struct
+import time as _time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -92,6 +96,17 @@ def _init_db() -> None:
         CREATE VIRTUAL TABLE IF NOT EXISTS memory_vecs USING vec0(
             embedding float[{_EMBED_DIM}]
         );
+        CREATE TABLE IF NOT EXISTS tool_call_logs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            tool_name   TEXT    NOT NULL,
+            arguments   TEXT,
+            result      TEXT,
+            duration_ms REAL,
+            error       TEXT,
+            called_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_logs_tool ON tool_call_logs(tool_name);
+        CREATE INDEX IF NOT EXISTS idx_logs_called_at ON tool_call_logs(called_at DESC);
     """)
     db.commit()
     db.close()
@@ -121,11 +136,68 @@ async def root_redirect(request: Request) -> RedirectResponse:
 
 
 # ---------------------------------------------------------------------------
+# Tool-call logging
+# ---------------------------------------------------------------------------
+
+
+def _logged(fn: Any) -> Any:
+    """Decorator: records every tool invocation to tool_call_logs."""
+    sig = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        log_args: dict[str, Any] = {}
+        for k, v in bound.arguments.items():
+            if isinstance(v, str):
+                log_args[k] = v[:300] + ("…" if len(v) > 300 else "")
+            elif isinstance(v, list):
+                log_args[k] = [
+                    (i[:100] + "…" if isinstance(i, str) and len(i) > 100 else i)
+                    for i in v[:10]
+                ]
+            else:
+                log_args[k] = v
+
+        start = _time.monotonic()
+        error: str | None = None
+        result: Any = None
+        try:
+            result = fn(*args, **kwargs)
+            return result
+        except Exception as exc:
+            error = str(exc)
+            raise
+        finally:
+            duration_ms = round((_time.monotonic() - start) * 1000, 2)
+            if result is not None:
+                raw = json.dumps(result) if isinstance(result, (dict, list)) else str(result)
+                result_str: str | None = raw[:500] + ("…" if len(raw) > 500 else "")
+            else:
+                result_str = None
+            try:
+                db = _connect()
+                db.execute(
+                    "INSERT INTO tool_call_logs (tool_name, arguments, result, duration_ms, error)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (fn.__name__, json.dumps(log_args)[:2000], result_str, duration_ms, error),
+                )
+                db.commit()
+                db.close()
+            except Exception:
+                pass  # never fail the tool call because of a logging error
+
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
 # Tools
 # ---------------------------------------------------------------------------
 
 
 @mcp.tool()
+@_logged
 def memory_store(content: str, tags: list[str] | None = None) -> str:
     """Store a memory and index it for semantic search. Returns the memory ID."""
     logger.info("tool: memory_store")
@@ -155,6 +227,7 @@ def _normalize_tags(tags: str | list[str] | None) -> list[str]:
 
 
 @mcp.tool()
+@_logged
 def memory_search(
     query: str,
     limit: int = 5,
@@ -201,6 +274,7 @@ def memory_search(
 
 
 @mcp.tool()
+@_logged
 def memory_list(
     limit: int = 20,
     tags: str | list[str] | None = None,
@@ -240,6 +314,7 @@ def memory_list(
 
 
 @mcp.tool()
+@_logged
 def memory_delete(memory_id: int) -> str:
     """Delete a memory by ID."""
     logger.info("tool: memory_delete")
@@ -252,6 +327,7 @@ def memory_delete(memory_id: int) -> str:
 
 
 @mcp.tool()
+@_logged
 def memory_update(memory_id: int, content: str, tags: list[str] | None = None) -> str:
     """Replace a memory's content and re-index it with a fresh embedding."""
     logger.info("tool: memory_update")
@@ -323,23 +399,121 @@ tr:hover td { background: #f9fafb; }
 .value { word-break: break-word; line-height: 1.6; }
 .empty { text-align: center; color: #9ca3af; padding: 40px; }
 .count { color: #6b7280; font-size: 13px; }
+.nav { display: flex; gap: 4px; margin-bottom: 24px; border-bottom: 1px solid #e5e7eb; padding-bottom: 0; }
+.nav a { padding: 8px 16px; border-radius: 6px 6px 0 0; font-size: 13px; font-weight: 500;
+          color: #6b7280; border: 1px solid transparent; border-bottom: none; margin-bottom: -1px; }
+.nav a:hover { color: #111; text-decoration: none; background: #f9fafb; }
+.nav a.active { background: #fff; color: #111; border-color: #e5e7eb; }
+.ok { color: #16a34a; font-weight: 600; }
+.err { color: #dc2626; font-weight: 600; }
+.mono { font-family: ui-monospace, monospace; font-size: 12px; }
+.pager-info { color: #6b7280; font-size: 12px; margin-right: 4px; }
+details summary { cursor: pointer; list-style: none; }
+details summary::-webkit-details-marker { display: none; }
+details summary::marker { display: none; }
+details summary::before { content: "▶ "; font-size: 10px; color: #9ca3af; }
+details[open] summary::before { content: "▼ "; }
+.args-full { margin-top: 6px; background: #f9fafb; border: 1px solid #e5e7eb;
+             border-radius: 4px; padding: 8px 10px; font-size: 11px;
+             overflow-x: auto; white-space: pre; max-height: 260px;
+             overflow-y: auto; }
+/* modal */
+.modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.45);
+                  z-index:100; align-items:center; justify-content:center; }
+.modal-backdrop.open { display:flex; }
+.modal { background:#fff; border-radius:10px; padding:28px 28px 20px;
+         max-width:420px; width:100%; box-shadow:0 8px 32px rgba(0,0,0,.18); }
+.modal h3 { font-size:16px; font-weight:600; margin-bottom:10px; }
+.modal p  { color:#6b7280; font-size:13px; line-height:1.6; margin-bottom:20px; }
+.modal-actions { display:flex; gap:8px; justify-content:flex-end; }
 """
 
+_MODAL_JS = """
+<div class="modal-backdrop" id="deleteAllModal">
+  <div class="modal">
+    <h3>Delete all memories?</h3>
+    <p>This will permanently remove every memory record from the database.
+       This action cannot be undone.</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <form method="post" action="/ui/delete-all" style="display:inline">
+        <button class="btn btn-danger" type="submit">Yes, delete all</button>
+      </form>
+    </div>
+  </div>
+</div>
+<script>
+function openDeleteAll() { document.getElementById('deleteAllModal').classList.add('open'); }
+function closeModal()    { document.getElementById('deleteAllModal').classList.remove('open'); }
+document.getElementById('deleteAllModal').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
+});
+</script>
+"""
 
-def _page(title: str, body: str) -> HTMLResponse:
+_NAV = """<nav class="nav">
+  <a href="/ui"{mem_active}>Memories</a>
+  <a href="/ui/logs"{log_active}>Logs</a>
+</nav>"""
+
+
+def _page(title: str, body: str, active: str = "memories") -> HTMLResponse:
+    nav = _NAV.format(
+        mem_active=' class="active"' if active == "memories" else "",
+        log_active=' class="active"' if active == "logs" else "",
+    )
+    extra = _MODAL_JS if active == "memories" else ""
     html = f"""<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{title} — Memory</title>
 <style>{_CSS}</style>
 </head>
-<body><div class="wrap">{body}</div></body>
+<body><div class="wrap">{nav}{body}</div>{extra}</body>
 </html>"""
     return HTMLResponse(html)
 
 
 def _fmt_ts(ts: str) -> str:
     return ts[:19] if ts else "—"
+
+
+def _build_pager(
+    page: int,
+    total_pages: int,
+    total: int,
+    per_page: int,
+    base_url: str,
+    extra_params: str = "",
+) -> str:
+    """Return a pager div with 'Showing X–Y of Z' info and prev/next/page links."""
+    if total == 0:
+        return ""
+    start = (page - 1) * per_page + 1
+    end = min(page * per_page, total)
+    info = f'<span class="pager-info">Showing {start}–{end} of {total}</span>'
+
+    if total_pages <= 1:
+        return f'<div class="pager">{info}</div>'
+
+    def _link(p: int, label: str | None = None) -> str:
+        lbl = label or str(p)
+        params = f"page={p}" + (f"&{extra_params}" if extra_params else "")
+        if p == page:
+            return f'<span class="cur">{lbl}</span>'
+        return f'<a href="{base_url}?{params}">{lbl}</a>'
+
+    links: list[str] = [info]
+    if page > 1:
+        links.append(_link(page - 1, "← Prev"))
+    for p in range(1, total_pages + 1):
+        if p == 1 or p == total_pages or abs(p - page) <= 2:
+            links.append(_link(p))
+        elif links[-1] != '<span class="dots">…</span>':
+            links.append('<span class="dots">…</span>')
+    if page < total_pages:
+        links.append(_link(page + 1, "Next →"))
+    return f'<div class="pager">{"".join(links)}</div>'
 
 
 def _tags_html(tags_json: str) -> str:
@@ -379,6 +553,11 @@ async def ui_list(request: Request) -> HTMLResponse:
     db.close()
 
     q_enc = q.replace('"', "&quot;")
+    delete_all_btn = (
+        f'<button class="btn btn-danger" type="button" onclick="openDeleteAll()"'
+        f' title="Delete all {total} records">Delete all</button>'
+        if total > 0 else ""
+    )
     search_bar = f"""
 <div class="bar">
   <form method="get" action="/ui">
@@ -387,6 +566,7 @@ async def ui_list(request: Request) -> HTMLResponse:
     {"<a class='btn btn-ghost' href='/ui'>Clear</a>" if q else ""}
   </form>
   <span class="count">{total} record{"s" if total != 1 else ""}</span>
+  {delete_all_btn}
 </div>"""
 
     if rows:
@@ -418,31 +598,12 @@ async def ui_list(request: Request) -> HTMLResponse:
     else:
         table = '<div class="empty">No records found.</div>'
 
-    # Pagination
     total_pages = max(1, (total + per_page - 1) // per_page)
-    pager = ""
-    if total_pages > 1:
-        def _page_link(p: int, label: str | None = None) -> str:
-            lbl = label or str(p)
-            params = f"page={p}" + (f"&q={q_enc}" if q else "")
-            if p == page:
-                return f'<span class="cur">{lbl}</span>'
-            return f'<a href="/ui?{params}">{lbl}</a>'
-
-        links = []
-        if page > 1:
-            links.append(_page_link(page - 1, "← Prev"))
-        for p in range(1, total_pages + 1):
-            if p == 1 or p == total_pages or abs(p - page) <= 2:
-                links.append(_page_link(p))
-            elif links and links[-1] != '<span class="dots">…</span>':
-                links.append('<span class="dots">…</span>')
-        if page < total_pages:
-            links.append(_page_link(page + 1, "Next →"))
-        pager = f'<div class="pager">{"".join(links)}</div>'
+    extra = f"q={q_enc}" if q else ""
+    pager = _build_pager(page, total_pages, total, per_page, "/ui", extra)
 
     body = f'<h1>Memory Records</h1>{search_bar}{table}{pager}'
-    return _page("List", body)
+    return _page("List", body, active="memories")
 
 
 @mcp.custom_route("/ui/detail", methods=["GET"])
@@ -459,7 +620,7 @@ async def ui_detail(request: Request) -> HTMLResponse:
 
     if not row:
         body = f'<a class="btn btn-ghost" href="/ui">← Back</a><div class="empty" style="margin-top:24px">Memory #{mem_id} not found.</div>'
-        return _page("Not found", body)
+        return _page("Not found", body, active="memories")
 
     body = f"""
 <div style="margin-bottom:16px"><a class="btn btn-ghost" href="/ui">← Back to list</a></div>
@@ -486,7 +647,7 @@ async def ui_detail(request: Request) -> HTMLResponse:
     <button class="btn btn-danger" type="submit">Delete this memory</button>
   </form>
 </div>"""
-    return _page(f"Memory #{row['id']}", body)
+    return _page(f"Memory #{row['id']}", body, active="memories")
 
 
 @mcp.custom_route("/ui/delete", methods=["POST"])
@@ -503,6 +664,123 @@ async def ui_delete(request: Request) -> RedirectResponse:
         db.close()
     params = f"page={page}" + (f"&q={q}" if q else "")
     return RedirectResponse(f"/ui?{params}", status_code=303)
+
+
+@mcp.custom_route("/ui/delete-all", methods=["POST"])
+async def ui_delete_all(request: Request) -> RedirectResponse:
+    db = _connect()
+    db.execute("DELETE FROM memories")
+    db.execute("DELETE FROM memory_vecs")
+    db.commit()
+    db.close()
+    return RedirectResponse("/ui", status_code=303)
+
+
+@mcp.custom_route("/ui/logs", methods=["GET"])
+async def ui_logs(request: Request) -> HTMLResponse:
+    tool_filter = request.query_params.get("tool", "").strip()
+    try:
+        page = max(1, int(request.query_params.get("page", "1")))
+    except ValueError:
+        page = 1
+    per_page = 50
+    offset = (page - 1) * per_page
+
+    db = _connect()
+
+    # Distinct tool names for filter dropdown
+    tool_names = [r[0] for r in db.execute(
+        "SELECT DISTINCT tool_name FROM tool_call_logs ORDER BY tool_name"
+    ).fetchall()]
+
+    if tool_filter:
+        rows = db.execute(
+            "SELECT id, tool_name, arguments, result, duration_ms, error, called_at"
+            " FROM tool_call_logs WHERE tool_name = ?"
+            " ORDER BY called_at DESC LIMIT ? OFFSET ?",
+            (tool_filter, per_page, offset),
+        ).fetchall()
+        total = db.execute(
+            "SELECT COUNT(*) FROM tool_call_logs WHERE tool_name = ?", (tool_filter,)
+        ).fetchone()[0]
+    else:
+        rows = db.execute(
+            "SELECT id, tool_name, arguments, result, duration_ms, error, called_at"
+            " FROM tool_call_logs ORDER BY called_at DESC LIMIT ? OFFSET ?",
+            (per_page, offset),
+        ).fetchall()
+        total = db.execute("SELECT COUNT(*) FROM tool_call_logs").fetchone()[0]
+    db.close()
+
+    # Filter bar
+    tool_opts = "".join(
+        f'<option value="{t}"{"selected" if t == tool_filter else ""}>{t}</option>'
+        for t in tool_names
+    )
+    filter_bar = f"""
+<div class="bar">
+  <form method="get" action="/ui/logs" style="display:flex;gap:6px;flex:1">
+    <select name="tool" style="border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:13px">
+      <option value="">All tools</option>{tool_opts}
+    </select>
+    <button class="btn btn-primary" type="submit">Filter</button>
+    {"<a class='btn btn-ghost' href='/ui/logs'>Clear</a>" if tool_filter else ""}
+  </form>
+  <span class="count">{total} call{"s" if total != 1 else ""}</span>
+</div>"""
+
+    if rows:
+        rows_html = ""
+        for r in rows:
+            status = '<span class="err">✗ error</span>' if r["error"] else '<span class="ok">✓</span>'
+            dur = f'{r["duration_ms"]:.1f} ms' if r["duration_ms"] is not None else "—"
+            try:
+                args_obj = json.loads(r["arguments"] or "{}")
+                # Summary: first two params, values truncated to 60 chars each
+                summary_parts = []
+                for k, v in list(args_obj.items())[:2]:
+                    v_str = json.dumps(v, ensure_ascii=False)
+                    if len(v_str) > 60:
+                        v_str = v_str[:60] + "…"
+                    summary_parts.append(f"{k}={v_str}")
+                if len(args_obj) > 2:
+                    summary_parts.append(f"… +{len(args_obj) - 2} more")
+                summary = _html.escape(", ".join(summary_parts))
+                full_json = _html.escape(json.dumps(args_obj, indent=2, ensure_ascii=False))
+                args_cell = (
+                    f'<details><summary class="mono">{summary}</summary>'
+                    f'<pre class="args-full">{full_json}</pre></details>'
+                )
+            except Exception:
+                args_cell = f'<span class="mono">{_html.escape((r["arguments"] or "")[:300])}</span>'
+            rows_html += f"""<tr>
+  <td class="ts">{r["id"]}</td>
+  <td><code class="mono">{r["tool_name"]}</code></td>
+  <td class="content-cell">{args_cell}</td>
+  <td class="ts">{dur}</td>
+  <td>{status}</td>
+  <td class="ts">{_fmt_ts(r["called_at"])}</td>
+</tr>"""
+        table = f"""<table>
+<thead><tr>
+  <th style="width:60px">ID</th>
+  <th style="width:140px">Tool</th>
+  <th>Arguments</th>
+  <th style="width:90px">Duration</th>
+  <th style="width:80px">Status</th>
+  <th style="width:150px">Called at</th>
+</tr></thead>
+<tbody>{rows_html}</tbody>
+</table>"""
+    else:
+        table = '<div class="empty">No tool calls logged yet.</div>'
+
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    extra = f"tool={tool_filter}" if tool_filter else ""
+    pager = _build_pager(page, total_pages, total, per_page, "/ui/logs", extra)
+
+    body = f'<h1>Tool Call Logs</h1>{filter_bar}{table}{pager}'
+    return _page("Logs", body, active="logs")
 
 
 # ---------------------------------------------------------------------------
