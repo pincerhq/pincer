@@ -534,9 +534,8 @@ async def test_allowlist_permits_known_user() -> None:
 
 
 @pytest.mark.asyncio
-async def test_identity_resolution_called() -> None:
-    """_process_message resolves Slack user → pincer_user_id via identity resolver."""
-    mock_identity = make_identity("usr_pincer_123")
+async def test_user_id_is_raw_slack_id() -> None:
+    """IncomingMessage.user_id should be the raw Slack user ID (identity resolved by middleware)."""
     received: list[IncomingMessage] = []
 
     async def handler(msg: IncomingMessage) -> str:
@@ -548,7 +547,6 @@ async def test_identity_resolution_called() -> None:
     ch._app.client = AsyncMock()
     ch._bot_user_id = "U_BOT"
     ch._handler = handler
-    ch._identity = mock_identity
 
     mock_client = AsyncMock()
     mock_client.users_info = AsyncMock(
@@ -563,12 +561,8 @@ async def test_identity_resolution_called() -> None:
     }
     await ch._process_message(event, mock_client)
 
-    mock_identity.resolve.assert_awaited_once_with(
-        channel=ChannelType.SLACK,
-        channel_user_id="U_CAROL",
-        display_name="Carol",
-    )
-    assert received[0].pincer_user_id == "usr_pincer_123"
+    assert received[0].user_id == "U_CAROL"
+    assert received[0].pincer_user_id == ""  # middleware sets this, not the adapter
 
 
 # ── Thread session keys ───────────────────────────────────────────────────────

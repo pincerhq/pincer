@@ -36,9 +36,12 @@ class IncomingMessage:
     reply_to_message_id: str | None = None
     raw: Any = None
 
-    # Sprint 3: cross-channel identity
+    # Cross-channel identity — populated by IdentityMiddleware, not by adapters.
     pincer_user_id: str = ""
     channel_type: ChannelType = ChannelType.TELEGRAM
+    # Alternative raw IDs for the same sender (e.g. WhatsApp LID + phone number).
+    # IdentityMiddleware tries these in order after user_id.
+    alt_user_ids: list[str] = field(default_factory=list)
 
     # Sprint 3: generic media fields (used by WhatsApp)
     media_type: str | None = None  # "image", "audio", "document", None

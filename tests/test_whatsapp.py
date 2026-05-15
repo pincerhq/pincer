@@ -338,23 +338,6 @@ class TestWhatsAppMediaAndApproval:
         assert wa_channel._parse_yes_no("maybe") is None
         assert wa_channel._parse_yes_no("") is None
 
-    @pytest.mark.asyncio
-    async def test_set_identity_resolver(self, wa_channel):
-        resolver = MagicMock()
-        resolver.resolve = AsyncMock(return_value="pincer_user_42")
-
-        wa_channel.set_identity_resolver(resolver)
-        assert wa_channel._identity is resolver
-
-        result = await wa_channel._resolve_identity("491234567890")
-        assert result == "pincer_user_42"
-        resolver.resolve.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_resolve_identity_without_resolver_returns_empty(self, wa_channel):
-        assert wa_channel._identity is None
-        assert await wa_channel._resolve_identity("491234567890") == ""
-
 
 class TestWhatsAppLoginFailure:
     """Login-failure handlers must surface actionable errors and unblock start()."""

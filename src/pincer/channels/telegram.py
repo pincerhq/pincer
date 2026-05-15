@@ -32,7 +32,6 @@ if TYPE_CHECKING:
     from aiogram.types import Message
 
     from pincer.config import Settings
-    from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +83,7 @@ class TelegramChannel(BaseChannel):
         self._stream_agent: Any = None
         self._allowed_users = set(settings.telegram_allowed_users)
         self._polling_task: asyncio.Task[None] | None = None
-        self._identity: IdentityResolver | None = None
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
-
-    def set_identity_resolver(self, identity: IdentityResolver) -> None:
-        """Set the identity resolver for cross-channel user mapping."""
-        self._identity = identity
 
     def set_stream_agent(self, agent: Any) -> None:
         """Set the Agent instance for streaming support."""
@@ -347,19 +341,6 @@ class TelegramChannel(BaseChannel):
             return True  # Empty = allow all
         return user_id in self._allowed_users
 
-    async def _resolve_identity(self, tg_user_id: int, full_name: str = "") -> str:
-        """Resolve Telegram user ID to pincer_user_id. Falls back to channel-scoped ID."""
-        if self._identity:
-            try:
-                return await self._identity.resolve(
-                    ChannelType.TELEGRAM,
-                    tg_user_id,
-                    display_name=full_name or None,
-                )
-            except Exception:
-                logger.debug("Identity resolution failed for %s", tg_user_id, exc_info=True)
-        return ""
-
     def _register_handlers(self, router: Router) -> None:
         """Register all message handlers on the router."""
 
@@ -458,10 +439,6 @@ class TelegramChannel(BaseChannel):
             data = io.BytesIO()
             await self._bot.download_file(file.file_path, data)
 
-            pincer_uid = await self._resolve_identity(
-                message.from_user.id,
-                message.from_user.full_name,
-            )
             incoming = IncomingMessage(
                 user_id=str(message.from_user.id),
                 channel="telegram",
@@ -469,7 +446,6 @@ class TelegramChannel(BaseChannel):
                 voice_data=data.getvalue(),
                 voice_mime=voice.mime_type or "audio/ogg",
                 raw=message,
-                pincer_user_id=pincer_uid,
                 channel_type=ChannelType.TELEGRAM,
             )
 
@@ -494,17 +470,12 @@ class TelegramChannel(BaseChannel):
             data = io.BytesIO()
             await self._bot.download_file(file.file_path, data)
 
-            pincer_uid = await self._resolve_identity(
-                message.from_user.id,
-                message.from_user.full_name,
-            )
             incoming = IncomingMessage(
                 user_id=str(message.from_user.id),
                 channel="telegram",
                 text=message.caption or "What's in this image?",
                 images=[(data.getvalue(), "image/jpeg")],
                 raw=message,
-                pincer_user_id=pincer_uid,
                 channel_type=ChannelType.TELEGRAM,
             )
 
@@ -533,10 +504,6 @@ class TelegramChannel(BaseChannel):
             filename = doc.file_name or "unknown"
             mime = doc.mime_type or "application/octet-stream"
 
-            pincer_uid = await self._resolve_identity(
-                message.from_user.id,
-                message.from_user.full_name,
-            )
             image_mimes = {"image/jpeg", "image/png", "image/gif", "image/webp"}
             if mime in image_mimes:
                 incoming = IncomingMessage(
@@ -545,7 +512,6 @@ class TelegramChannel(BaseChannel):
                     text=message.caption or "What's in this image?",
                     images=[(raw_bytes, mime)],
                     raw=message,
-                    pincer_user_id=pincer_uid,
                     channel_type=ChannelType.TELEGRAM,
                 )
             else:
@@ -555,7 +521,6 @@ class TelegramChannel(BaseChannel):
                     text=message.caption or "",
                     files=[(raw_bytes, mime, filename)],
                     raw=message,
-                    pincer_user_id=pincer_uid,
                     channel_type=ChannelType.TELEGRAM,
                 )
 
@@ -598,16 +563,11 @@ class TelegramChannel(BaseChannel):
                 return
             '''
 
-            pincer_uid = await self._resolve_identity(
-                message.from_user.id,
-                message.from_user.full_name,
-            )
             incoming = IncomingMessage(
                 user_id=user_id,
                 channel="telegram",
                 text=message.text,
                 raw=message,
-                pincer_user_id=pincer_uid,
                 channel_type=ChannelType.TELEGRAM,
             )
 

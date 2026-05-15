@@ -438,9 +438,11 @@ async def _run_agent(settings: Settings) -> None:
     async def on_message(incoming: IncomingMessage) -> str:
         from pincer.exceptions import RateLimitExceeded
 
+        canonical_id = incoming.pincer_user_id or incoming.user_id
+
         # Special commands
         if incoming.text == "/clear":
-            session = await session_mgr.get_or_create(incoming.user_id, incoming.channel)
+            session = await session_mgr.get_or_create(canonical_id, incoming.channel)
             await session_mgr.clear(session)
             return "Conversation cleared."
 
@@ -459,12 +461,12 @@ async def _run_agent(settings: Settings) -> None:
 
         # Sprint 5: Rate limit check
         try:
-            await rate_limiter.check_message(incoming.user_id)
+            await rate_limiter.check_message(canonical_id)
         except RateLimitExceeded as e:
             if audit_logger:
                 await audit_logger.log(
                     AuditEntry(
-                        user_id=incoming.user_id,
+                        user_id=canonical_id,
                         action=AuditAction.RATE_LIMIT_HIT,
                         channel=incoming.channel,
                         input_summary=e.message,
@@ -476,7 +478,7 @@ async def _run_agent(settings: Settings) -> None:
         if audit_logger:
             await audit_logger.log(
                 AuditEntry(
-                    user_id=incoming.user_id,
+                    user_id=canonical_id,
                     action=AuditAction.MESSAGE_RECEIVED,
                     channel=incoming.channel,
                     input_summary=(incoming.text or "")[:500],
@@ -595,7 +597,7 @@ async def _run_agent(settings: Settings) -> None:
             text = f"{file_context}\n\n{text}" if text else file_context
 
         response = await agent.handle_message(
-            user_id=incoming.user_id,
+            user_id=canonical_id,
             channel=incoming.channel,
             text=text,
             images=incoming.images if incoming.images else None,
@@ -605,11 +607,14 @@ async def _run_agent(settings: Settings) -> None:
         return response.text + cost_str
 
     # Sprint 3: Identity resolver
+    from pincer.channels.middleware import IdentityMiddleware, build_pipeline
     from pincer.core.identity import IdentityResolver
 
     identity = IdentityResolver(settings.db_path, settings.identity_map)
     await identity.ensure_table()
     await identity.seed_from_config()
+
+    _identity_pipeline = build_pipeline(IdentityMiddleware(identity))
 
     # Pending ask_user futures per user_id — populated by channels that route
     # ask_user responses back through on_message (WhatsApp).  Telegram uses
@@ -619,7 +624,8 @@ async def _run_agent(settings: Settings) -> None:
     _orig_on_message_fn = on_message
 
     async def on_message(incoming: IncomingMessage) -> str:  # type: ignore[no-redef]
-        fut = _pending_ask.get(incoming.user_id)
+        incoming = await _identity_pipeline(incoming)
+        fut = _pending_ask.get(incoming.pincer_user_id or incoming.user_id)
         if fut and not fut.done():
             fut.set_result(incoming.text)
             return ""
@@ -633,7 +639,6 @@ async def _run_agent(settings: Settings) -> None:
 
         tg = TelegramChannel(settings)
         tg.set_stream_agent(agent)
-        tg.set_identity_resolver(identity)
         await tg.start(on_message)
         channels.append(tg)
         channel_map[tg.name] = tg
@@ -655,7 +660,6 @@ async def _run_agent(settings: Settings) -> None:
             from pincer.channels.whatsapp import WhatsAppChannel
 
             wa = WhatsAppChannel(settings)
-            wa.set_identity_resolver(identity)
             await wa.start(on_message)
             channels.append(wa)
             channel_map[wa.name] = wa
@@ -665,6 +669,27 @@ async def _run_agent(settings: Settings) -> None:
             console.print(f"[yellow]WhatsApp failed: {e}[/yellow]")
 
     # Wire approval + ask_user callbacks across all interactive channels.
+
+    async def _raw_id(canonical_id: str, ch_name: str) -> str:
+        """Resolve a canonical pincer_user_id back to the raw channel user ID.
+
+        Handles both real pincer_user_ids (usr_...) and the fallback
+        channel-scoped form ("{channel}:{raw_id}").
+        """
+        prefix = f"{ch_name}:"
+        if canonical_id.startswith(prefix):
+            return canonical_id[len(prefix):]
+        if canonical_id.startswith("usr_"):
+            try:
+                from pincer.channels.base import ChannelType as _CT
+                all_ch = await identity.get_all_channels(canonical_id)
+                raw = all_ch.get(_CT(ch_name))
+                if raw:
+                    return raw
+            except Exception:
+                logger.debug("Failed to resolve raw id for %s/%s", ch_name, canonical_id)
+        return canonical_id
+
     async def _channel_approval(
         tool_name: str,
         arguments: dict,
@@ -672,9 +697,11 @@ async def _run_agent(settings: Settings) -> None:
         channel: str,
     ) -> bool:
         if channel == "telegram" and tg is not None:
-            return await tg.request_approval(user_id, tool_name, arguments)
+            raw_id = await _raw_id(user_id, "telegram")
+            return await tg.request_approval(raw_id, tool_name, arguments)
         if channel == "whatsapp" and wa is not None:
-            return await wa.request_approval(user_id, tool_name, arguments)
+            raw_id = await _raw_id(user_id, "whatsapp")
+            return await wa.request_approval(raw_id, tool_name, arguments)
         logger.warning(
             "No approval UI for channel %s; denying %s",
             channel,
@@ -684,16 +711,18 @@ async def _run_agent(settings: Settings) -> None:
 
     async def _channel_ask_user(user_id: str, channel: str, question: str) -> str:
         if channel == "whatsapp" and wa is not None:
+            raw_id = await _raw_id(user_id, "whatsapp")
             return await wa.request_input(
-                user_id,
+                raw_id,
                 f"🔌 *MCP Client* asks:\n\n{question}\n\n_Reply with your answer:_",
             )
         if channel == "telegram" and tg is not None:
+            raw_id = await _raw_id(user_id, "telegram")
             fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
-            _pending_ask[user_id] = fut
+            _pending_ask[user_id] = fut  # keyed on canonical so on_message lookup works
             try:
                 await tg.send(
-                    user_id,
+                    raw_id,
                     f"🔌 **MCP Client** asks:\n\n{question}\n\n_Reply with your answer:_",
                 )
                 return await asyncio.wait_for(fut, timeout=120)
@@ -712,7 +741,8 @@ async def _run_agent(settings: Settings) -> None:
     ) -> None:
         if channel == "whatsapp" and wa is not None and settings.whatsapp_show_progress:
             try:
-                await wa.notify_tool_event(phase, tool_name, arguments, user_id)
+                raw_id = await _raw_id(user_id, "whatsapp")
+                await wa.notify_tool_event(phase, tool_name, arguments, raw_id)
             except Exception:
                 logger.debug("WA tool_event notify failed", exc_info=True)
 
@@ -734,7 +764,6 @@ async def _run_agent(settings: Settings) -> None:
             voice_engine = get_voice_engine(settings)
             vc = VoiceChannel(settings)
             vc.set_engine(voice_engine)
-            vc.set_identity_resolver(identity)
             await vc.start(on_message)
             channels.append(vc)
             channel_map[vc.name] = vc
@@ -801,7 +830,6 @@ async def _run_agent(settings: Settings) -> None:
             from pincer.channels.discord_channel import DiscordChannel
 
             dc = DiscordChannel(settings)
-            dc.set_identity_resolver(identity)
             dc.set_agent(agent)
             await dc.start(on_message)
             channels.append(dc)
@@ -821,7 +849,6 @@ async def _run_agent(settings: Settings) -> None:
                 from pincer.channels.signal import SignalChannel
 
                 sig = SignalChannel(settings)
-                sig.set_identity_resolver(identity)
                 await sig.start(on_message)
                 channels.append(sig)
                 channel_map[sig.name] = sig
@@ -839,7 +866,6 @@ async def _run_agent(settings: Settings) -> None:
             from pincer.channels.slack import SlackChannel
 
             slk = SlackChannel(settings)
-            slk.set_identity_resolver(identity)
             await slk.start(on_message)
             if slk._app is not None:  # start() may bail silently if import fails
                 channels.append(slk)

@@ -62,7 +62,6 @@ if TYPE_CHECKING:
     )
 
     from pincer.config import Settings
-    from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +155,6 @@ class WhatsAppChannel(BaseChannel):
         # Set by login-failure handlers. Consumed by start() to turn silent
         # upstream rejections (err-client-outdated etc.) into loud errors.
         self._login_error: str | None = None
-        self._identity: IdentityResolver | None = None
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
         self._pending_inputs: dict[str, asyncio.Future[str]] = {}
         # message_id of approval prompt → user_id; used to accept 👍/👎 reactions.
@@ -184,22 +182,6 @@ class WhatsAppChannel(BaseChannel):
     @property
     def name(self) -> str:
         return "whatsapp"
-
-    def set_identity_resolver(self, identity: IdentityResolver) -> None:
-        """Set the identity resolver for cross-channel user mapping."""
-        self._identity = identity
-
-    async def _resolve_identity(self, sender_phone: str) -> str:
-        if not self._identity:
-            return ""
-        try:
-            return await self._identity.resolve(
-                ChannelType.WHATSAPP,
-                sender_phone,
-            )
-        except Exception:
-            logger.debug("Identity resolution failed for %s", sender_phone, exc_info=True)
-            return ""
 
     # ── Interactive prompts (approval / ask_user) ────
 
@@ -836,8 +818,11 @@ class WhatsAppChannel(BaseChannel):
                 input_fut.set_result(incoming.text)
                 return
 
-            # Populate cross-channel identity for tools that depend on it.
-            incoming.pincer_user_id = await self._resolve_identity(sender_phone)
+            # Expose both sender JID user and chat JID user as candidates.
+            # On LID-based accounts sender_phone is a LID; chat_user may be
+            # the phone-number JID. IdentityMiddleware tries both in order.
+            if chat_user and chat_user != sender_phone:
+                incoming.alt_user_ids = [chat_user]
 
             logger.info(
                 "WhatsApp message from %s (media=%s, self_chat=%s, text=%.60r)",

@@ -44,7 +44,7 @@ class TestIdentityResolver:
         )
         async with resolver._get_db() as db:
             cursor = await db.execute(
-                "SELECT display_name FROM identity_map WHERE pincer_user_id = ?",
+                "SELECT display_name FROM identity_meta WHERE pincer_user_id = ?",
                 (uid,),
             )
             row = await cursor.fetchone()
@@ -85,8 +85,47 @@ class TestIdentityResolver:
         id2 = IdentityResolver._generate_user_id(ChannelType.TELEGRAM, 12345)
         assert id1 == id2
 
-    async def test_seed_from_config_creates_identity(self, tmp_path):
-        """seed_from_config() should pre-create identity rows from config."""
+    async def test_whatsapp_plus_stripped(self, resolver):
+        """Leading + is stripped so +491234 and 491234 resolve to same identity."""
+        uid_with = await resolver.resolve(ChannelType.WHATSAPP, "+491234567890")
+        uid_without = await resolver.resolve(ChannelType.WHATSAPP, "491234567890")
+        assert uid_with == uid_without
+
+    async def test_link_if_new_back_links(self, tmp_path):
+        """link_if_new should add a second channel_user_id for the same user."""
+        db_path = tmp_path / "link.db"
+        r = IdentityResolver(db_path)
+        await r.ensure_table()
+
+        # User identified by phone first
+        uid = await r.resolve(ChannelType.WHATSAPP, "491234567890")
+
+        # Their LID is not yet in the DB
+        async with r._get_db() as db:
+            cursor = await db.execute(
+                "SELECT pincer_user_id FROM channel_identities "
+                "WHERE channel = 'whatsapp' AND channel_user_id = '35240793874528'",
+            )
+            assert await cursor.fetchone() is None
+
+        # Back-link the LID
+        await r.link_if_new(uid, ChannelType.WHATSAPP, "35240793874528")
+
+        # Now both IDs resolve to the same user
+        lid_uid = await r.resolve(ChannelType.WHATSAPP, "35240793874528")
+        assert lid_uid == uid
+
+    async def test_link_if_new_idempotent(self, resolver):
+        """link_if_new on an already-linked ID should be a no-op."""
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 12345)
+        await resolver.link_if_new(uid, ChannelType.TELEGRAM, 12345)
+        uid2 = await resolver.resolve(ChannelType.TELEGRAM, 12345)
+        assert uid2 == uid
+
+
+@pytest.mark.asyncio
+class TestSeedFromConfig:
+    async def test_creates_identity(self, tmp_path):
         db_path = tmp_path / "seed_test.db"
         r = IdentityResolver(
             db_path,
@@ -105,8 +144,7 @@ class TestIdentityResolver:
         assert ChannelType.WHATSAPP in channels
         assert channels[ChannelType.WHATSAPP] == "491234567890"
 
-    async def test_seed_from_config_idempotent(self, tmp_path):
-        """Running seed_from_config() twice should not duplicate or error."""
+    async def test_idempotent(self, tmp_path):
         db_path = tmp_path / "seed_idem.db"
         r = IdentityResolver(
             db_path,
@@ -121,8 +159,8 @@ class TestIdentityResolver:
         assert ChannelType.TELEGRAM in channels
         assert ChannelType.WHATSAPP in channels
 
-    async def test_seed_from_config_updates_existing(self, tmp_path):
-        """seed_from_config() should add missing channel to existing identity."""
+    async def test_updates_existing(self, tmp_path):
+        """seed_from_config should add the missing channel to an existing identity."""
         db_path = tmp_path / "seed_update.db"
         r = IdentityResolver(
             db_path,
@@ -139,16 +177,18 @@ class TestIdentityResolver:
         assert ChannelType.WHATSAPP in channels_after
         assert channels_after[ChannelType.WHATSAPP] == "492222222222"
 
-    async def test_seed_from_config_empty(self, resolver):
-        """seed_from_config() with empty config should be a no-op."""
+    async def test_empty_config(self, resolver):
+        """seed_from_config with empty config should be a no-op."""
         await resolver.seed_from_config()
 
-    async def test_seed_from_config_multiple_mappings(self, tmp_path):
-        """seed_from_config() should handle multiple comma-separated mappings."""
+    async def test_multiple_mappings(self, tmp_path):
         db_path = tmp_path / "seed_multi.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config=("telegram:11111=whatsapp:490000000001,telegram:22222=whatsapp:490000000002"),
+            identity_map_config=(
+                "telegram:11111=whatsapp:490000000001,"
+                "telegram:22222=whatsapp:490000000002"
+            ),
         )
         await r.ensure_table()
         await r.seed_from_config()
@@ -161,3 +201,64 @@ class TestIdentityResolver:
         ch2 = await r.get_all_channels(uid2)
         assert ch1[ChannelType.WHATSAPP] == "490000000001"
         assert ch2[ChannelType.WHATSAPP] == "490000000002"
+
+    async def test_right_side_existing_linked_to_left(self, tmp_path):
+        """When right-side identity exists but left doesn't, left gets linked to right."""
+        db_path = tmp_path / "seed_right.db"
+        r = IdentityResolver(
+            db_path,
+            identity_map_config="telegram:12345=whatsapp:491234567890",
+        )
+        await r.ensure_table()
+
+        # Create the WA identity first
+        wa_uid = await r.resolve(ChannelType.WHATSAPP, "491234567890")
+
+        await r.seed_from_config()
+
+        # Telegram should now be linked to the same identity
+        tg_uid = await r.resolve(ChannelType.TELEGRAM, 12345)
+        assert tg_uid == wa_uid
+
+
+@pytest.mark.asyncio
+class TestLegacyMigration:
+    async def test_migrates_old_schema(self, tmp_path):
+        """Data in the old identity_map table should be accessible after migration."""
+        import aiosqlite
+
+        db_path = tmp_path / "legacy.db"
+
+        # Build old schema manually
+        async with aiosqlite.connect(str(db_path)) as db:
+            await db.execute("""
+                CREATE TABLE identity_map (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pincer_user_id TEXT NOT NULL UNIQUE,
+                    telegram_user_id INTEGER,
+                    whatsapp_phone TEXT,
+                    discord_user_id TEXT,
+                    display_name TEXT,
+                    preferred_channel TEXT DEFAULT 'telegram',
+                    created_at TEXT DEFAULT (datetime('now')),
+                    updated_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            await db.execute(
+                "INSERT INTO identity_map (pincer_user_id, telegram_user_id, whatsapp_phone, preferred_channel) "
+                "VALUES ('usr_legacy01', 12345, '491234567890', 'telegram')"
+            )
+            await db.commit()
+
+        r = IdentityResolver(db_path)
+        await r.ensure_table()  # triggers migration
+
+        # Both IDs should resolve to the migrated pincer_user_id
+        tg_uid = await r.resolve(ChannelType.TELEGRAM, 12345)
+        wa_uid = await r.resolve(ChannelType.WHATSAPP, "491234567890")
+        assert tg_uid == "usr_legacy01"
+        assert wa_uid == "usr_legacy01"
+
+        channels = await r.get_all_channels("usr_legacy01")
+        assert ChannelType.TELEGRAM in channels
+        assert ChannelType.WHATSAPP in channels

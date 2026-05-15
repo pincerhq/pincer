@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     import asyncio
 
     from pincer.config import Settings
-    from pincer.core.identity import IdentityResolver
     from pincer.voice.engine import CallState, VoiceEngine
     from pincer.voice.state_machine import CallStateMachine
 
@@ -33,7 +32,6 @@ class VoiceChannel(BaseChannel):
         self._settings = settings
         self._handler: MessageHandler | None = None
         self._engine: VoiceEngine | None = None
-        self._identity: IdentityResolver | None = None
         self._state_machines: dict[str, CallStateMachine] = {}
         self._response_queues: dict[str, asyncio.Queue[str]] = {}
 
@@ -45,9 +43,6 @@ class VoiceChannel(BaseChannel):
         self._engine = engine
         engine.set_on_speech(self._handle_speech)
         engine.set_on_call_end(self._handle_call_end)
-
-    def set_identity_resolver(self, identity: IdentityResolver) -> None:
-        self._identity = identity
 
     async def start(self, handler: MessageHandler) -> None:
         self._handler = handler
@@ -85,23 +80,10 @@ class VoiceChannel(BaseChannel):
         if not state:
             return
 
-        user_id = state.caller_number
-        pincer_user_id = ""
-
-        if self._identity:
-            try:
-                pincer_user_id = await self._identity.resolve(
-                    ChannelType.VOICE,
-                    state.caller_number,
-                )
-            except Exception:
-                logger.debug("Could not resolve identity for %s", state.caller_number)
-
         incoming = IncomingMessage(
-            user_id=user_id,
+            user_id=state.caller_number,
             channel="voice",
             text=text,
-            pincer_user_id=pincer_user_id,
             channel_type=ChannelType.VOICE,
         )
 
