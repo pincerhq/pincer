@@ -169,6 +169,7 @@ class MemoryStore:
         content: str,
         category: str = "general",
         embedding: list[float] | None = None,
+        extra_tags: list[str] | None = None,
     ) -> str:
         """Store a memory entry. Returns the new memory ID."""
         assert self._db is not None

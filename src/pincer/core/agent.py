@@ -326,15 +326,20 @@ class Agent:
         channel: str,
         text: str,
         images: list[tuple[bytes, str]] | None = None,
+        channel_user_id: str | None = None,
     ) -> AgentResponse:
         """
         Main entry point: process a user message and return agent's response.
 
         Args:
-            user_id: Unique user identifier
+            user_id: Canonical pincer_user_id
             channel: Channel name (telegram, whatsapp, etc.)
             text: User's message text
             images: Optional list of (raw_bytes, media_type) tuples
+            channel_user_id: Stable channel-specific user ID (e.g. phone number,
+                Telegram numeric ID).  Used to tag memories with both
+                ``user:{user_id}`` and ``user:{channel}:{channel_user_id}`` so
+                records are findable by either identifier.
         """
         self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel)
@@ -506,10 +511,12 @@ class Agent:
         # Store the final exchange as a memory for future retrieval
         if self._memory and final_text:
             try:
+                extra_tags = [f"user:{channel}:{channel_user_id}"] if channel_user_id else None
                 await self._memory.store_memory(
                     user_id=user_id,
                     content=f"User asked: {text[:200]}\nAssistant replied: {final_text[:300]}",
                     category="exchange",
+                    extra_tags=extra_tags,
                 )
             except Exception:
                 logger.debug("Failed to store exchange memory", exc_info=True)
@@ -527,6 +534,7 @@ class Agent:
         channel: str,
         text: str,
         images: list[tuple[bytes, str]] | None = None,
+        channel_user_id: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """
         Process a user message, yielding StreamChunks as the response is generated.

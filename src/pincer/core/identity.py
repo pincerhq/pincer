@@ -12,9 +12,19 @@ channel_identities — many-to-many: (channel, channel_user_id) → pincer_user_
 
 Config mapping (.env)
 ---------------------
+Named canonical ID (recommended — human-readable, stable across environments):
+    PINCER_IDENTITY_MAP=john@telegram:12345=whatsapp:491234567890
+
+Auto-generated hash ID (backward-compatible, opaque):
     PINCER_IDENTITY_MAP=telegram:12345=whatsapp:491234567890
+
 Multiple entries separated by commas:
-    PINCER_IDENTITY_MAP=telegram:12345=whatsapp:491234567890,telegram:67890=whatsapp:491111111111
+    PINCER_IDENTITY_MAP=john@telegram:12345=whatsapp:491234567890,jane@telegram:67890=whatsapp:491111111111
+
+The optional name prefix sets the pincer_user_id directly (e.g. "user:john" in
+memory tags) instead of the auto-generated "user:usr_abc123..." hash.
+Memory stored under a named ID is portable across DB rebuilds as long as the
+config entry stays the same.
 """
 
 from __future__ import annotations
@@ -42,6 +52,10 @@ class IdentityResolver:
     def __init__(self, db_path: Path, identity_map_config: str = "") -> None:
         self._db_path = str(db_path)
         self._identity_map_config = identity_map_config
+
+    @property
+    def has_config(self) -> bool:
+        return bool(self._identity_map_config)
 
     def _get_db(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self._db_path)
@@ -133,6 +147,23 @@ class IdentityResolver:
 
         await db.commit()
         logger.info("Migrated %d legacy identity rows to new schema", migrated)
+
+    async def find(
+        self,
+        channel: ChannelType,
+        channel_user_id: str | int,
+    ) -> str | None:
+        """Look up an existing identity without creating one.
+
+        Returns the pincer_user_id if found via DB or config mapping, else None.
+        Unlike resolve(), this never writes to the database.
+        """
+        normalized = self._normalize_id(channel, channel_user_id)
+        async with self._get_db() as db:
+            existing = await self._find_existing(db, channel, normalized)
+            if existing:
+                return existing
+            return await self._check_config_mapping(db, channel, normalized)
 
     async def resolve(
         self,
@@ -228,6 +259,48 @@ class IdentityResolver:
             "Identity linked: %s ← %s:%s", pincer_user_id, channel.value, normalized_id
         )
 
+    async def _rename_identity(
+        self,
+        db: aiosqlite.Connection,
+        old_id: str,
+        new_id: str,
+    ) -> None:
+        """Rename a pincer_user_id across identity_meta, channel_identities, and sessions.
+
+        Only called for auto-generated hash IDs (usr_...) to avoid overwriting
+        intentionally-named identities.
+        """
+        await db.execute(
+            "INSERT OR IGNORE INTO identity_meta "
+            "(pincer_user_id, preferred_channel, display_name) "
+            "SELECT ?, preferred_channel, display_name FROM identity_meta "
+            "WHERE pincer_user_id = ?",
+            (new_id, old_id),
+        )
+        await db.execute(
+            "UPDATE channel_identities SET pincer_user_id = ? WHERE pincer_user_id = ?",
+            (new_id, old_id),
+        )
+        await db.execute("DELETE FROM identity_meta WHERE pincer_user_id = ?", (old_id,))
+        # Migrate sessions if the sessions table exists in the same DB
+        try:
+            await db.execute(
+                "UPDATE sessions SET user_id = ? WHERE user_id = ?",
+                (new_id, old_id),
+            )
+            await db.execute(
+                "UPDATE sessions SET session_id = replace(session_id, ?, ?) "
+                "WHERE session_id LIKE ?",
+                (old_id, new_id, f"%{old_id}%"),
+            )
+        except Exception:
+            pass  # sessions table may not exist yet
+        logger.info(
+            "Identity renamed: %s → %s "
+            "(memory tags in MCP server still use %s — run 'pincer migrate-memories' to update)",
+            old_id, new_id, old_id,
+        )
+
     async def _check_config_mapping(
         self,
         db: aiosqlite.Connection,
@@ -240,14 +313,13 @@ class IdentityResolver:
 
         current_key = f"{channel.value}:{normalized_id}"
 
-        for mapping in self._identity_map_config.split(","):
-            mapping = mapping.strip()
-            if "=" not in mapping:
+        for raw_entry in self._identity_map_config.split(","):
+            if "=" not in raw_entry:
                 continue
             try:
-                left_part, right_part = mapping.split("=", 1)
-                left_channel, left_id = left_part.strip().split(":", 1)
-                right_channel, right_id = right_part.strip().split(":", 1)
+                name, left_channel, left_id, right_channel, right_id = self._parse_mapping(
+                    raw_entry
+                )
             except ValueError:
                 continue
 
@@ -264,12 +336,83 @@ class IdentityResolver:
             if other_channel is None:
                 continue
 
+            # Prefer the other side's existing identity (cross-channel link)
             other_uid = await self._find_existing(db, ChannelType(other_channel), other_norm)
             if other_uid:
                 await self._link_channel(db, other_uid, channel, normalized_id)
                 return other_uid
 
+            # Other side doesn't exist yet — if a name is configured, establish
+            # the named identity now so both sides share it from the first message.
+            if name:
+                await self._create_identity(db, name, channel, normalized_id)
+                return name
+
         return None
+
+    async def cleanup(self) -> None:
+        """Remove stale rows from the identity tables.
+
+        If PINCER_IDENTITY_MAP is configured, every channel pair mentioned in
+        the config is considered the authoritative whitelist.  Any
+        channel_identities row whose (channel, channel_user_id) is NOT in the
+        whitelist is deleted, and any identity_meta row left with no channels is
+        deleted with it.
+
+        When no config is set the method is a no-op (nothing to enforce).
+        """
+        if not self._identity_map_config:
+            return
+
+        # Build the whitelist of (channel, normalized_id) pairs from config.
+        allowed: set[tuple[str, str]] = set()
+        for raw_entry in self._identity_map_config.split(","):
+            if "=" not in raw_entry:
+                continue
+            try:
+                _, left_channel, left_id, right_channel, right_id = self._parse_mapping(raw_entry)
+            except ValueError:
+                continue
+            allowed.add((left_channel, self._normalize_id(ChannelType(left_channel), left_id)))
+            allowed.add((right_channel, self._normalize_id(ChannelType(right_channel), right_id)))
+
+        async with self._get_db() as db:
+            cursor = await db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='identity_meta'"
+            )
+            if not await cursor.fetchone():
+                return
+
+            cursor = await db.execute(
+                "SELECT channel, channel_user_id FROM channel_identities"
+            )
+            rows = await cursor.fetchall()
+
+            to_delete = [
+                (ch, cid) for ch, cid in rows if (ch, cid) not in allowed
+            ]
+            for ch, cid in to_delete:
+                await db.execute(
+                    "DELETE FROM channel_identities WHERE channel = ? AND channel_user_id = ?",
+                    (ch, cid),
+                )
+
+            cursor = await db.execute(
+                """
+                DELETE FROM identity_meta
+                WHERE pincer_user_id NOT IN (SELECT pincer_user_id FROM channel_identities)
+                """
+            )
+            channelless = cursor.rowcount
+
+            await db.commit()
+
+        if to_delete or channelless:
+            logger.info(
+                "Identity cleanup: removed %d unlisted channel link(s), %d channelless identity/identities",
+                len(to_delete),
+                channelless,
+            )
 
     async def seed_from_config(self) -> None:
         """Pre-create identity rows from PINCER_IDENTITY_MAP on startup."""
@@ -278,36 +421,65 @@ class IdentityResolver:
 
         async with self._get_db() as db:
             db.row_factory = aiosqlite.Row
-            for mapping in self._identity_map_config.split(","):
-                mapping = mapping.strip()
-                if "=" not in mapping:
+            for raw_entry in self._identity_map_config.split(","):
+                if "=" not in raw_entry:
                     continue
                 try:
-                    left_part, right_part = mapping.split("=", 1)
-                    left_channel, left_id = left_part.strip().split(":", 1)
-                    right_channel, right_id = right_part.strip().split(":", 1)
+                    name, left_channel, left_id, right_channel, right_id = self._parse_mapping(
+                        raw_entry
+                    )
                 except ValueError:
-                    logger.warning("Invalid identity map entry: %r", mapping)
+                    logger.warning("Invalid identity map entry: %r", raw_entry.strip())
                     continue
 
                 left_norm = self._normalize_id(ChannelType(left_channel), left_id)
                 right_norm = self._normalize_id(ChannelType(right_channel), right_id)
 
-                # Prefer an existing identity on either side; otherwise create from left
                 left_uid = await self._find_existing(db, ChannelType(left_channel), left_norm)
                 right_uid = await self._find_existing(db, ChannelType(right_channel), right_norm)
 
                 if left_uid and right_uid and left_uid != right_uid:
-                    logger.warning(
-                        "Identity conflict: %s:%s (%s) and %s:%s (%s) both exist — skipping merge",
-                        left_channel, left_norm, left_uid,
-                        right_channel, right_norm, right_uid,
+                    if name:
+                        # Merge both separate identities into the configured name
+                        logger.info(
+                            "Identity conflict resolved by merge: %s + %s → %s",
+                            left_uid, right_uid, name,
+                        )
+                        await self._rename_identity(db, left_uid, name)
+                        await self._rename_identity(db, right_uid, name)
+                        existing_uid = name
+                    else:
+                        # No name configured — merge right into left as canonical
+                        logger.info(
+                            "Identity conflict resolved: merging %s into %s",
+                            right_uid, left_uid,
+                        )
+                        await self._rename_identity(db, right_uid, left_uid)
+                        existing_uid = left_uid
+                else:
+                    existing_uid = left_uid or right_uid
+                if name:
+                    if not existing_uid:
+                        # Fresh identity — use the name directly
+                        pincer_uid = name
+                    elif existing_uid == name:
+                        # Already named correctly — nothing to do
+                        pincer_uid = name
+                    elif existing_uid.startswith("usr_"):
+                        # Auto-generated hash — rename it to the configured name
+                        await self._rename_identity(db, existing_uid, name)
+                        pincer_uid = name
+                    else:
+                        # Already has a different explicit name — don't override
+                        logger.warning(
+                            "Named canonical ID %r ignored: identity already has name %r",
+                            name, existing_uid,
+                        )
+                        pincer_uid = existing_uid
+                else:
+                    pincer_uid = existing_uid or self._generate_user_id(
+                        ChannelType(left_channel), left_norm
                     )
-                    continue
-
-                pincer_uid = left_uid or right_uid or self._generate_user_id(
-                    ChannelType(left_channel), left_norm
-                )
 
                 await db.execute(
                     "INSERT OR IGNORE INTO identity_meta "
@@ -369,6 +541,33 @@ class IdentityResolver:
             if row[0] not in result:
                 result[row[0]] = row[1]
         return result
+
+    @staticmethod
+    def _parse_mapping(
+        entry: str,
+    ) -> tuple[str | None, str, str, str, str]:
+        """Parse one config entry into (name, left_channel, left_id, right_channel, right_id).
+
+        Formats accepted:
+            name@left_channel:left_id=right_channel:right_id   (named canonical ID)
+            left_channel:left_id=right_channel:right_id         (hash-based, backward compat)
+        """
+        entry = entry.strip()
+        name: str | None = None
+
+        eq_pos = entry.find("=")
+        at_pos = entry.find("@")
+        # @ must appear before the first = to be a name prefix
+        if 0 < at_pos < (eq_pos if eq_pos >= 0 else len(entry)):
+            raw_name = entry[:at_pos].strip()
+            if raw_name:
+                name = raw_name
+            entry = entry[at_pos + 1:]
+
+        left_part, right_part = entry.split("=", 1)
+        left_channel, left_id = left_part.strip().split(":", 1)
+        right_channel, right_id = right_part.strip().split(":", 1)
+        return name, left_channel, left_id.strip(), right_channel, right_id.strip()
 
     @staticmethod
     def _generate_user_id(channel: ChannelType, channel_user_id: str | int) -> str:

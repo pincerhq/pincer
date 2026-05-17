@@ -46,43 +46,54 @@ class IdentityMiddleware:
         self._identity = identity
 
     async def __call__(self, msg: IncomingMessage) -> IncomingMessage:
-        candidates = [msg.user_id, *msg.alt_user_ids]
-        for candidate in dict.fromkeys(filter(None, candidates)):
+        candidates = list(dict.fromkeys(filter(None, [msg.user_id, *msg.alt_user_ids])))
+
+        # Phase 1: look up each candidate without creating anything.
+        # This ensures a LID tried first never shadow a phone number that
+        # IS already mapped (e.g. via PINCER_IDENTITY_MAP).
+        matched_candidate: str | None = None
+        owner: str | None = None
+        for candidate in candidates:
             try:
-                owner = await self._identity.resolve(msg.channel_type, candidate)
-                if owner:
-                    msg.pincer_user_id = owner
-                    logger.debug(
-                        "Identity resolved: %s/%s → %s",
-                        msg.channel,
-                        candidate,
-                        owner,
-                    )
-                    # If we matched via an alt_user_id, back-link the primary
-                    # so it resolves directly on the next message.
-                    if candidate != msg.user_id and msg.user_id:
-                        try:
-                            await self._identity.link_if_new(
-                                owner, msg.channel_type, msg.user_id
-                            )
-                        except Exception:
-                            logger.debug(
-                                "Failed to back-link %s/%s",
-                                msg.channel,
-                                msg.user_id,
-                                exc_info=True,
-                            )
-                    return msg
+                owner = await self._identity.find(msg.channel_type, candidate)
             except Exception:
                 logger.debug(
-                    "Identity resolution error for %s/%s",
-                    msg.channel,
-                    candidate,
-                    exc_info=True,
+                    "Identity find error for %s/%s", msg.channel, candidate, exc_info=True
+                )
+                owner = None
+            if owner:
+                matched_candidate = candidate
+                break
+
+        # Phase 2: create a new identity only when no config is set.
+        # With a config, startup (seed_from_config + cleanup) is authoritative —
+        # unknown IDs must NOT produce new DB rows at runtime.
+        if owner is None and msg.user_id and not self._identity.has_config:
+            try:
+                owner = await self._identity.resolve(msg.channel_type, msg.user_id)
+                matched_candidate = msg.user_id
+            except Exception:
+                logger.debug(
+                    "Identity resolve error for %s/%s", msg.channel, msg.user_id, exc_info=True
                 )
 
-        # Fallback: channel-scoped canonical ID so the agent never sees ""
-        msg.pincer_user_id = f"{msg.channel}:{msg.user_id}"
+        if owner:
+            msg.pincer_user_id = owner
+            logger.debug("Identity resolved: %s/%s → %s", msg.channel, matched_candidate, owner)
+            # Back-link any candidate that resolved via an alt so it maps
+            # directly on the next message without needing the alt path.
+            for candidate in candidates:
+                if candidate != matched_candidate:
+                    try:
+                        await self._identity.link_if_new(owner, msg.channel_type, candidate)
+                    except Exception:
+                        logger.debug(
+                            "Failed to back-link %s/%s", msg.channel, candidate, exc_info=True
+                        )
+        else:
+            # Fallback: channel-scoped canonical ID so the agent never sees ""
+            msg.pincer_user_id = f"{msg.channel}:{msg.user_id}"
+
         return msg
 
 

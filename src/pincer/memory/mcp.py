@@ -107,8 +107,11 @@ class MCPMemoryBackend(BaseMemoryBackend):
         content: str,
         category: str = "general",
         embedding: list[float] | None = None,
+        extra_tags: list[str] | None = None,
     ) -> str:
         tags = _tags_for(user_id, category)
+        if extra_tags:
+            tags.extend(extra_tags)
         raw = await self._call("memory_store", {"content": content, "tags": tags})
         # response: "stored:{id}"
         return raw.split(":", 1)[-1].strip()

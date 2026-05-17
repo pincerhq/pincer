@@ -596,11 +596,22 @@ async def _run_agent(settings: Settings) -> None:
             file_context = "\n\n".join(file_parts)
             text = f"{file_context}\n\n{text}" if text else file_context
 
+        # Look up the stable (configured) channel ID for this user so memories
+        # get tagged with both user:{canonical_id} and user:{channel}:{id}.
+        ch_user_id: str | None = None
+        try:
+            from pincer.channels.base import ChannelType as _CT
+            all_ch = await identity.get_all_channels(canonical_id)
+            ch_user_id = all_ch.get(_CT(incoming.channel))
+        except Exception:
+            pass
+
         response = await agent.handle_message(
             user_id=canonical_id,
             channel=incoming.channel,
             text=text,
             images=incoming.images if incoming.images else None,
+            channel_user_id=ch_user_id,
         )
 
         cost_str = f"\n\n`${response.cost_usd:.4f}`" if response.cost_usd > 0 else ""
@@ -613,6 +624,7 @@ async def _run_agent(settings: Settings) -> None:
     identity = IdentityResolver(settings.db_path, settings.identity_map)
     await identity.ensure_table()
     await identity.seed_from_config()
+    await identity.cleanup()
 
     _identity_pipeline = build_pipeline(IdentityMiddleware(identity))
 
@@ -621,11 +633,20 @@ async def _run_agent(settings: Settings) -> None:
     # inline buttons so it owns its own pending state.
     _pending_ask: dict[str, asyncio.Future[str]] = {}
 
+    # Maps "{canonical_id}:{channel}" → raw channel user_id seen in the most
+    # recent inbound message.  Used by _raw_id so approval/input prompts are
+    # sent back to the exact JID (e.g. LID) the user is currently messaging
+    # from, rather than the first-linked ID stored in the DB.
+    _active_sender: dict[str, str] = {}
+
     _orig_on_message_fn = on_message
 
     async def on_message(incoming: IncomingMessage) -> str:  # type: ignore[no-redef]
+        raw_user_id = incoming.user_id  # preserve before pipeline rewrites it
         incoming = await _identity_pipeline(incoming)
-        fut = _pending_ask.get(incoming.pincer_user_id or incoming.user_id)
+        canonical_id = incoming.pincer_user_id or incoming.user_id
+        _active_sender[f"{canonical_id}:{incoming.channel}"] = raw_user_id
+        fut = _pending_ask.get(canonical_id)
         if fut and not fut.done():
             fut.set_result(incoming.text)
             return ""
@@ -673,21 +694,29 @@ async def _run_agent(settings: Settings) -> None:
     async def _raw_id(canonical_id: str, ch_name: str) -> str:
         """Resolve a canonical pincer_user_id back to the raw channel user ID.
 
-        Handles both real pincer_user_ids (usr_...) and the fallback
-        channel-scoped form ("{channel}:{raw_id}").
+        Priority:
+        1. Exact channel-scoped fallback form ("{channel}:{raw_id}").
+        2. Most recently seen raw sender for this user/channel (_active_sender).
+           This ensures approval/input prompts go back to the exact JID
+           (LID or phone) the user is currently messaging from.
+        3. First linked channel ID in the identity DB (fallback for proactive).
         """
         prefix = f"{ch_name}:"
         if canonical_id.startswith(prefix):
             return canonical_id[len(prefix):]
-        if canonical_id.startswith("usr_"):
-            try:
-                from pincer.channels.base import ChannelType as _CT
-                all_ch = await identity.get_all_channels(canonical_id)
-                raw = all_ch.get(_CT(ch_name))
-                if raw:
-                    return raw
-            except Exception:
-                logger.debug("Failed to resolve raw id for %s/%s", ch_name, canonical_id)
+        # Prefer the raw sender from the most recent inbound message so that
+        # LID-based WhatsApp accounts route approvals back to the correct JID.
+        active = _active_sender.get(f"{canonical_id}:{ch_name}")
+        if active:
+            return active
+        try:
+            from pincer.channels.base import ChannelType as _CT
+            all_ch = await identity.get_all_channels(canonical_id)
+            raw = all_ch.get(_CT(ch_name))
+            if raw:
+                return raw
+        except Exception:
+            logger.debug("Failed to resolve raw id for %s/%s", ch_name, canonical_id)
         return canonical_id
 
     async def _channel_approval(

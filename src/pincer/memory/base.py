@@ -42,8 +42,14 @@ class BaseMemoryBackend(ABC):
         content: str,
         category: str = "general",
         embedding: list[float] | None = None,
+        extra_tags: list[str] | None = None,
     ) -> str:
-        """Persist a memory entry. Returns the new memory ID."""
+        """Persist a memory entry. Returns the new memory ID.
+
+        extra_tags are merged into the tag list alongside the default
+        user:{user_id} and category:{category} tags.  Backends that do not
+        use a tag model (e.g. SQLite column-based) may ignore this parameter.
+        """
 
     async def get_memory(self, memory_id: str) -> Memory | None:
         """Fetch a single memory by ID. Returns None if not supported or not found."""
