@@ -38,9 +38,7 @@ def _llm_text(content: str) -> LLMResponse:
 
 
 @pytest.mark.asyncio
-async def test_fresh_session_appends_question(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry
-):
+async def test_fresh_session_appends_question(settings, mock_llm, session_manager, cost_tracker, tool_registry):
     """First message in a fresh session: response must end with the question."""
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
     result = await agent.handle_message("user-fresh", "test", "Hi!")
@@ -61,18 +59,12 @@ async def test_second_message_closes_gate_and_extracts_fields(
     llm.complete.side_effect = [
         _llm_text("Hello!"),  # turn 1 normal reply
         _llm_text("Nice to meet you, Alice."),  # turn 2 normal reply
-        _llm_text(
-            '{"name": "Alice", "use_case": "drafting marketing emails", "language": "en"}'
-        ),  # extraction
+        _llm_text('{"name": "Alice", "use_case": "drafting marketing emails", "language": "en"}'),  # extraction
     ]
-    agent = Agent(
-        settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store
-    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
 
     await agent.handle_message("user-2", "test", "Hi!")
-    await agent.handle_message(
-        "user-2", "test", "I'm Alice, I want help drafting marketing emails, in English."
-    )
+    await agent.handle_message("user-2", "test", "I'm Alice, I want help drafting marketing emails, in English.")
 
     session = await session_manager.get_or_create("user-2", "test")
     assert session.metadata[ONBOARDING_COMPLETE_KEY] == "true"
@@ -96,9 +88,7 @@ async def test_second_message_gibberish_still_closes_gate(
         _llm_text("Got it."),
         _llm_text("not json"),  # extraction returns garbage
     ]
-    agent = Agent(
-        settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store
-    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
 
     await agent.handle_message("user-3", "test", "hello")
     await agent.handle_message("user-3", "test", "asdf")
@@ -113,9 +103,7 @@ async def test_second_message_gibberish_still_closes_gate(
 
 
 @pytest.mark.asyncio
-async def test_third_message_no_question_appended(
-    settings, session_manager, cost_tracker, tool_registry, memory_store
-):
+async def test_third_message_no_question_appended(settings, session_manager, cost_tracker, tool_registry, memory_store):
     llm = AsyncMock()
     llm.complete.side_effect = [
         _llm_text("Hi!"),
@@ -123,9 +111,7 @@ async def test_third_message_no_question_appended(
         _llm_text('{"name": "Bob", "use_case": null, "language": "en"}'),
         _llm_text("Sure thing."),
     ]
-    agent = Agent(
-        settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store
-    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
 
     await agent.handle_message("user-4", "test", "hi")
     await agent.handle_message("user-4", "test", "I'm Bob")
@@ -135,19 +121,13 @@ async def test_third_message_no_question_appended(
 
 
 @pytest.mark.asyncio
-async def test_preexisting_session_never_prompts(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry
-):
+async def test_preexisting_session_never_prompts(settings, mock_llm, session_manager, cost_tracker, tool_registry):
     """Users with prior messages never see the onboarding question."""
     from pincer.llm.base import LLMMessage, MessageRole
 
     session = await session_manager.get_or_create("user-old", "test")
-    await session_manager.add_message(
-        session, LLMMessage(role=MessageRole.USER, content="earlier message")
-    )
-    await session_manager.add_message(
-        session, LLMMessage(role=MessageRole.ASSISTANT, content="earlier reply")
-    )
+    await session_manager.add_message(session, LLMMessage(role=MessageRole.USER, content="earlier message"))
+    await session_manager.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content="earlier reply"))
 
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
     result = await agent.handle_message("user-old", "test", "hello again")
@@ -159,9 +139,7 @@ async def test_preexisting_session_never_prompts(
 
 
 @pytest.mark.asyncio
-async def test_extraction_failure_closes_gate(
-    settings, session_manager, cost_tracker, tool_registry, memory_store
-):
+async def test_extraction_failure_closes_gate(settings, session_manager, cost_tracker, tool_registry, memory_store):
     """If extraction call raises, the gate still closes."""
     llm = AsyncMock()
     llm.complete.side_effect = [
@@ -169,9 +147,7 @@ async def test_extraction_failure_closes_gate(
         _llm_text("Got it."),
         RuntimeError("LLM down"),
     ]
-    agent = Agent(
-        settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store
-    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
 
     await agent.handle_message("user-5", "test", "hi")
     await agent.handle_message("user-5", "test", "I'm Carol")
@@ -182,12 +158,8 @@ async def test_extraction_failure_closes_gate(
 
 @pytest.mark.asyncio
 async def test_add_profile_replaces_existing(memory_store):
-    await memory_store.add_profile(
-        user_id="u1", name="Alice", use_case="emails", language="en"
-    )
-    await memory_store.add_profile(
-        user_id="u1", name="Alice S.", use_case="cooking", language="en"
-    )
+    await memory_store.add_profile(user_id="u1", name="Alice", use_case="emails", language="en")
+    await memory_store.add_profile(user_id="u1", name="Alice S.", use_case="cooking", language="en")
 
     profiles = await memory_store.get_recent_memories("u1", category="profile")
     assert len(profiles) == 1
@@ -197,9 +169,7 @@ async def test_add_profile_replaces_existing(memory_store):
 
 @pytest.mark.asyncio
 async def test_add_profile_no_fields_is_noop(memory_store):
-    result = await memory_store.add_profile(
-        user_id="u2", name=None, use_case=None, language=None
-    )
+    result = await memory_store.add_profile(user_id="u2", name=None, use_case=None, language=None)
     assert result is None
     profiles = await memory_store.get_recent_memories("u2", category="profile")
     assert profiles == []

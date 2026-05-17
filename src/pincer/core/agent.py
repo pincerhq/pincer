@@ -341,9 +341,7 @@ class Agent:
 
         # Snapshot onboarding state BEFORE the user message is appended.
         was_fresh = session.is_fresh()
-        awaiting_onboarding_reply = (
-            session.onboarding_prompt_already_sent() and not session.is_onboarded()
-        )
+        awaiting_onboarding_reply = session.onboarding_prompt_already_sent() and not session.is_onboarded()
 
         # Build user message
         img_contents: list[ImageContent] = []
@@ -365,9 +363,7 @@ class Agent:
         # Build system prompt with relevant memories — inject the onboarding
         # followup instruction only on the turn that handles the user's reply.
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if awaiting_onboarding_reply else None
-        system_prompt = await self._build_system_prompt(
-            user_id, text, extra_system=extra_system
-        )
+        system_prompt = await self._build_system_prompt(user_id, text, extra_system=extra_system)
 
         # Get tool schemas
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
@@ -493,17 +489,10 @@ class Agent:
             )
 
         # ── Onboarding: append warm question on a fresh session ────────────
-        if (
-            was_fresh
-            and not session.is_onboarded()
-            and not session.onboarding_prompt_already_sent()
-            and final_text
-        ):
+        if was_fresh and not session.is_onboarded() and not session.onboarding_prompt_already_sent() and final_text:
             final_text = final_text.rstrip() + "\n\n" + ONBOARDING_QUESTION_EN
             session.mark_onboarding_prompt_sent()
-            logger.info(
-                "onboarding.prompt_sent user=%s channel=%s", user_id, channel
-            )
+            logger.info("onboarding.prompt_sent user=%s channel=%s", user_id, channel)
 
         # Save final assistant message
         if final_text:
@@ -549,9 +538,7 @@ class Agent:
         session = await self._sessions.get_or_create(user_id, channel)
 
         was_fresh = session.is_fresh()
-        awaiting_onboarding_reply = (
-            session.onboarding_prompt_already_sent() and not session.is_onboarded()
-        )
+        awaiting_onboarding_reply = session.onboarding_prompt_already_sent() and not session.is_onboarded()
 
         img_contents: list[ImageContent] = []
         if images:
@@ -569,9 +556,7 @@ class Agent:
             await self._summarizer.maybe_summarize(session)
 
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if awaiting_onboarding_reply else None
-        system_prompt = await self._build_system_prompt(
-            user_id, text, extra_system=extra_system
-        )
+        system_prompt = await self._build_system_prompt(user_id, text, extra_system=extra_system)
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
         logger.debug(
             "Tools available: %s",
@@ -686,18 +671,11 @@ class Agent:
                 full_text = response.content if response else ""
 
         # ── Onboarding: append warm question on a fresh session ────────────
-        if (
-            was_fresh
-            and not session.is_onboarded()
-            and not session.onboarding_prompt_already_sent()
-            and full_text
-        ):
+        if was_fresh and not session.is_onboarded() and not session.onboarding_prompt_already_sent() and full_text:
             tail = "\n\n" + ONBOARDING_QUESTION_EN
             full_text = full_text.rstrip() + tail
             session.mark_onboarding_prompt_sent()
-            logger.info(
-                "onboarding.prompt_sent user=%s channel=%s", user_id, channel
-            )
+            logger.info("onboarding.prompt_sent user=%s channel=%s", user_id, channel)
             yield StreamChunk(StreamEventType.TEXT, tail)
 
         if full_text:
@@ -757,9 +735,7 @@ class Agent:
 
             memory_lines = [f"- {m.content}" for m in memories]
             memory_block = "\n".join(memory_lines)
-            return _with_extra(
-                f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}"
-            )
+            return _with_extra(f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}")
         except Exception:
             logger.debug("Failed to fetch memories for prompt", exc_info=True)
             return _with_extra(base_prompt)
