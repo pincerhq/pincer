@@ -9,14 +9,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- MCP servers support for pincer better scalability
+#### First-session onboarding
 
+- **One-question onboarding flow** on a brand-new session: the bot answers the user's first real message normally, then appends a single warm question — *"By the way — what's your name, and what will you mainly use me for? Feel free to also mention your preferred language."*
+- The user's next message — whatever it is — closes the gate (`session.metadata["onboarding_complete"] = "true"`); a low-token LLM extraction call pulls `name`, `use_case`, and `language` out of the reply.
+- Captured fields are written to **both** `session.metadata` (structured, fast lookup) and `MemoryStore` as a single `profile` category entry (semantic, auto-surfaces via the existing memory injection on later turns).
+- Works identically on **all channels** (Telegram, WhatsApp, Signal, Slack, Discord, web, voice) because it lives at the agent layer beneath them.
+- **Backward compatible** — pre-existing users (any session with prior messages) never see the prompt; no migration needed.
+- **Idempotent under retries** — the `onboarding_prompt_sent` flag prevents the question being appended twice, and the gate always closes even on extraction-call failure so the user never sees the prompt a second time.
+- New module `src/pincer/core/onboarding.py` centralizes the question text, the one-turn followup instruction, the always-on profile-usage instruction, and the JSON extraction prompt.
+- New `MemoryStore.add_profile()` upserts the `profile` entry (deletes any prior one for the same user before inserting fresh).
+- 10 new unit tests in `tests/test_onboarding.py` covering the full state machine + edge cases (gibberish reply, extraction failure, retry idempotency, pre-existing session no-op, streaming path).
+
+---
+
+## [0.8.0] — 2026-05-09
+
+### Highlights
+
+- **Skills deprecated** — Skills are disabled when any `[[mcp.servers]]` entry is configured in `pincer.toml`. They continue to load and run unchanged through all 0.8.x releases when MCP is not configured. **Removal in 0.9.0.**
+- **MCP servers as Docker Compose services** — new `docker-compose` profiles (`stdio`, `http`) run each MCP server as an isolated container, independent of the Pincer agent process.
+- **MCP stdio + HTTP transport** — MCP servers can now run as persistent HTTP services or per-request stdio subprocesses; `make up PROFILE=http` switches modes.
+- **Three bundled MCP servers** — `pomodoro-mcp`, `pincer-mcps` (translate / summarize / stocks / weather / news), `sqlite-vec-memory-mcp` (semantic memory via sqlite-vec + ONNX embeddings) ship in the `src/` workspace, installable as uv workspace packages.
+- **OpenTelemetry telemetry** — optional Uptrace integration for distributed traces and spans across the agent loop and MCP server calls.
+- **Dashboard data improvements** — fixed data fetch, format errors, and endpoint consistency.
+
+### Added
+
+#### Bundled MCP servers (`src/` workspace)
+
+| Package | What it does |
+|---------|--------------|
+| `pomodoro-mcp` | Pomodoro timer — sessions, stats, history |
+| `pincer-mcps` | Translation, summarization, stock prices, weather, news (5 servers) |
+| `sqlite-vec-memory-mcp` | Semantic memory via sqlite-vec + ONNX embeddings |
+
+Each server supports both `stdio` (default) and `HTTP` transport and ships its own `Dockerfile`.
+
+#### Docker Compose MCP integration
+
+- `docker-compose.yml` extended with `stdio` and `http` profiles for running MCP servers as containers.
+- `make up PROFILE=stdio` (default) / `make up PROFILE=http` switches transport mode.
+- MCP servers run as independent services — they do not depend on the Pincer container lifecycle.
+
+#### OpenTelemetry telemetry
+
+- Optional `[telemetry]` dep group: `pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry`
+- Uptrace integration: distributed traces for agent loop iterations, LLM calls, MCP tool invocations.
+- Enable via `PINCER_TELEMETRY_ENABLED=true` + `PINCER_UPTRACE_DSN=<dsn>`.
+- Install: `uv pip install "pincer-agent[telemetry]"`.
+
+#### MCP server arg env-var interpolation (PR #109, contributor: @looooown2006)
+
+- `pincer.toml` `[[mcp.servers]] args` values now support `${ENV_VAR}` references.
+- Env vars are interpolated at server start time from the process environment.
+
+#### `pincer.toml` local config override (PR #105)
+
+- `pincer.local.toml` is loaded after `pincer.toml` and its values take precedence.
+- `make setup` creates `pincer.local.toml` from the template automatically.
+- Useful for per-developer overrides without touching the committed `pincer.toml`.
+
+#### Documentation
+
+- `docs/core-components/mcp-servers.md` — new guide: stdio vs HTTP transport, Docker Compose deployment, sandboxing.
+- `docs/changelog/v0.8.0.md` — full migration guide from Skills to MCP with before/after code examples.
+- `docs/guides/mcp-guide.md` — updated with local-config and env-var interpolation sections.
+- `mkdocs.yml` added; `docs/` restructured for mkdocs build.
 
 ### Changed
 
-- skills became deprecated and will removed in 0.9.0
-- docker compose adopted for run MCP servers as container and as result separated service which not depends on pincer run
-- MCP server could interact with pincer via http and stdio protocols
+- **Skills disabled when MCP configured** — skill loading is skipped at startup when any `[[mcp.servers]]` entry is present and MCP is enabled. Skills and MCP are mutually exclusive starting in 0.8.0.
+- **`pincer.toml`** — updated with MCP server transport profiles and Docker Compose service names.
+- `pyproject.toml` version bumped `0.7.6 → 0.8.0`; `telemetry` optional dep group added; `[all]` extended to include `telemetry`.
+
+### Fixed
+
+- Dashboard: fixed data fetch endpoint returning stale data; corrected format errors in API response serialization (PRs #111, #112, #113).
+
+### Deprecated
+
+- **Skills system** — deprecated in 0.8.0, removed in 0.9.0. See [migration guide](docs/changelog/v0.8.0.md) for converting skills to FastMCP servers.
+
+---
+
 
 
 ## [0.7.6] — 2026-04-19
@@ -246,6 +322,7 @@ Replaces Sprints 8–9 from the original roadmap. Delivers a layered architectur
 
 - Initial scaffold
 
+[0.8.0]: https://github.com/pincerhq/pincer/releases/tag/v0.8.0
 [0.7.6]: https://github.com/pincerhq/pincer/releases/tag/v0.7.6
 [0.7.5]: https://github.com/pincerhq/pincer/releases/tag/v0.7.5
 [0.7.4]: https://github.com/pincerhq/pincer/releases/tag/v0.7.4

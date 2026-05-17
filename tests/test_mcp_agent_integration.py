@@ -112,7 +112,8 @@ async def test_build_system_prompt_mcp_list_servers_error_is_silent():
     agent.mcp_manager = manager
 
     prompt = await agent._build_system_prompt("user1", "hello")
-    assert prompt == agent._settings.system_prompt
+    assert agent._settings.system_prompt in prompt
+    assert "[Connected MCP servers" not in prompt
 
 
 async def test_build_system_prompt_shows_tool_count():

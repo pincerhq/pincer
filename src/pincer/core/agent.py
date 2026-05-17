@@ -19,6 +19,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from pincer.core.onboarding import (
+    EXTRACTION_PROMPT_TEMPLATE,
+    ONBOARDING_FOLLOWUP_INSTRUCTION,
+    ONBOARDING_QUESTION_EN,
+    PROFILE_USAGE_INSTRUCTION,
+)
 from pincer.exceptions import BudgetExceededError, LLMError, ToolNotFoundError
 from pincer.llm.base import (
     BaseLLMProvider,
@@ -41,7 +47,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from pincer.config import Settings
-    from pincer.core.session import SessionManager
+    from pincer.core.session import Session, SessionManager
     from pincer.llm.cost_tracker import CostTracker
     from pincer.mcp.manager import MCPClientManager
     from pincer.mcp.server import PincerMCPServer
@@ -196,6 +202,27 @@ class AgentResponse:
     model: str = ""
 
 
+def _clean_profile_value(v: Any) -> str | None:
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s.lower() in {"null", "none", "n/a", "unknown"}:
+        return None
+    return s
+
+
+def _safe_json_loads(raw: str) -> Any:
+    """Parse JSON tolerantly — strip stray markdown fences a model might add."""
+    import re
+
+    s = raw.strip()
+    s = re.sub(r"^```(?:json)?\s*|\s*```$", "", s, flags=re.MULTILINE).strip()
+    try:
+        return json.loads(s)
+    except Exception:
+        return None
+
+
 def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
     """Remove orphaned tool_use and tool_result messages.
 
@@ -312,6 +339,12 @@ class Agent:
         self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel)
 
+        # Snapshot onboarding state BEFORE the user message is appended.
+        was_fresh = session.is_fresh()
+        awaiting_onboarding_reply = (
+            session.onboarding_prompt_already_sent() and not session.is_onboarded()
+        )
+
         # Build user message
         img_contents: list[ImageContent] = []
         if images:
@@ -329,8 +362,12 @@ class Agent:
         if self._summarizer:
             await self._summarizer.maybe_summarize(session)
 
-        # Build system prompt with relevant memories
-        system_prompt = await self._build_system_prompt(user_id, text)
+        # Build system prompt with relevant memories — inject the onboarding
+        # followup instruction only on the turn that handles the user's reply.
+        extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if awaiting_onboarding_reply else None
+        system_prompt = await self._build_system_prompt(
+            user_id, text, extra_system=extra_system
+        )
 
         # Get tool schemas
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
@@ -455,10 +492,27 @@ class Agent:
                 else "I seem to be going in circles. Let me give you what I have so far."
             )
 
+        # ── Onboarding: append warm question on a fresh session ────────────
+        if (
+            was_fresh
+            and not session.is_onboarded()
+            and not session.onboarding_prompt_already_sent()
+            and final_text
+        ):
+            final_text = final_text.rstrip() + "\n\n" + ONBOARDING_QUESTION_EN
+            session.mark_onboarding_prompt_sent()
+            logger.info(
+                "onboarding.prompt_sent user=%s channel=%s", user_id, channel
+            )
+
         # Save final assistant message
         if final_text:
             final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=final_text)
             await self._sessions.add_message(session, final_msg)
+
+        # ── Onboarding: parse the user's reply and close the gate ─────────
+        if awaiting_onboarding_reply:
+            await self._ingest_onboarding_reply(session, text, user_id, channel)
 
         # Store the final exchange as a memory for future retrieval
         if self._memory and final_text:
@@ -494,6 +548,11 @@ class Agent:
         self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel)
 
+        was_fresh = session.is_fresh()
+        awaiting_onboarding_reply = (
+            session.onboarding_prompt_already_sent() and not session.is_onboarded()
+        )
+
         img_contents: list[ImageContent] = []
         if images:
             for raw, media_type in images:
@@ -509,7 +568,10 @@ class Agent:
         if self._summarizer:
             await self._summarizer.maybe_summarize(session)
 
-        system_prompt = await self._build_system_prompt(user_id, text)
+        extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if awaiting_onboarding_reply else None
+        system_prompt = await self._build_system_prompt(
+            user_id, text, extra_system=extra_system
+        )
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
         logger.debug(
             "Tools available: %s",
@@ -623,15 +685,40 @@ class Agent:
             if not full_text:
                 full_text = response.content if response else ""
 
+        # ── Onboarding: append warm question on a fresh session ────────────
+        if (
+            was_fresh
+            and not session.is_onboarded()
+            and not session.onboarding_prompt_already_sent()
+            and full_text
+        ):
+            tail = "\n\n" + ONBOARDING_QUESTION_EN
+            full_text = full_text.rstrip() + tail
+            session.mark_onboarding_prompt_sent()
+            logger.info(
+                "onboarding.prompt_sent user=%s channel=%s", user_id, channel
+            )
+            yield StreamChunk(StreamEventType.TEXT, tail)
+
         if full_text:
             final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=full_text)
             await self._sessions.add_message(session, final_msg)
 
+        # ── Onboarding: parse the user's reply and close the gate ─────────
+        if awaiting_onboarding_reply:
+            await self._ingest_onboarding_reply(session, text, user_id, channel)
+
         yield StreamChunk(StreamEventType.DONE, full_text)
 
-    async def _build_system_prompt(self, user_id: str, user_text: str) -> str:
+    async def _build_system_prompt(
+        self,
+        user_id: str,
+        user_text: str,
+        *,
+        extra_system: str | None = None,
+    ) -> str:
         """Build system prompt, injecting relevant memories if available."""
-        base_prompt = self._settings.system_prompt
+        base_prompt = self._settings.system_prompt + "\n\n" + PROFILE_USAGE_INSTRUCTION
 
         # Phone-call guidance when make_phone_call tool is available
         if "make_phone_call" in self._tools.list_tools():
@@ -657,20 +744,81 @@ class Agent:
             except Exception:
                 logger.debug("Failed to fetch MCP server list for prompt", exc_info=True)
 
+        def _with_extra(prompt: str) -> str:
+            return f"{prompt}\n\n{extra_system}" if extra_system else prompt
+
         if not self._memory:
-            return base_prompt
+            return _with_extra(base_prompt)
 
         try:
             memories = await self._memory.search_text(user_text, user_id=user_id, limit=3)
             if not memories:
-                return base_prompt
+                return _with_extra(base_prompt)
 
             memory_lines = [f"- {m.content}" for m in memories]
             memory_block = "\n".join(memory_lines)
-            return f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}"
+            return _with_extra(
+                f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}"
+            )
         except Exception:
             logger.debug("Failed to fetch memories for prompt", exc_info=True)
-            return base_prompt
+            return _with_extra(base_prompt)
+
+    async def _ingest_onboarding_reply(
+        self,
+        session: Session,
+        reply_text: str,
+        user_id: str,
+        channel: str,
+    ) -> None:
+        """Parse name / use_case / language from the user's reply and persist.
+
+        The onboarding gate is ALWAYS closed afterward, even on parse failure,
+        so the user never sees the onboarding question a second time.
+        """
+        name: str | None = None
+        use_case: str | None = None
+        language: str | None = None
+
+        try:
+            extraction_msg = LLMMessage(
+                role=MessageRole.USER,
+                content=EXTRACTION_PROMPT_TEMPLATE.format(reply=reply_text[:2000]),
+            )
+            response = await self._llm.complete(
+                messages=[extraction_msg],
+                max_tokens=200,
+                temperature=0,
+            )
+            data = _safe_json_loads(response.content or "")
+            if isinstance(data, dict):
+                name = _clean_profile_value(data.get("name"))
+                use_case = _clean_profile_value(data.get("use_case"))
+                language = _clean_profile_value(data.get("language"))
+        except Exception as e:
+            logger.warning("Onboarding extraction failed (closing gate anyway): %s", e)
+
+        # ALWAYS close the gate, even with no captured fields.
+        session.mark_onboarded(name=name, use_case=use_case, language=language)
+        await self._sessions._persist(session)  # noqa: SLF001
+
+        logger.info(
+            "onboarding.completed user=%s channel=%s fields=%s",
+            user_id,
+            channel,
+            [k for k, v in (("name", name), ("use_case", use_case), ("language", language)) if v],
+        )
+
+        if self._memory and any([name, use_case, language]):
+            try:
+                await self._memory.add_profile(
+                    user_id=user_id,
+                    name=name,
+                    use_case=use_case,
+                    language=language,
+                )
+            except Exception:
+                logger.debug("Failed to write profile memory", exc_info=True)
 
     async def _execute_tool(
         self,
