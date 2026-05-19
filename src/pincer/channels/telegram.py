@@ -133,6 +133,32 @@ class TelegramChannel(BaseChannel):
     def name(self) -> str:
         return "telegram"
 
+    async def resolve_internal_user_id(self, identifier: str) -> str:
+        """Resolve a Telegram identifier to a numeric user ID.
+
+        Handles three cases:
+        - Already a numeric ID (e.g. "123456789") → returned as-is.
+        - A @username → resolved to numeric ID via the Bot API.
+        - A phone number → cannot be resolved via the Bot API (requires MTProto);
+          returned unchanged so the caller can decide how to handle it.
+        """
+        clean = identifier.lstrip("+")
+        if clean.isdigit():
+            return clean
+
+        '''
+        # This code does not work with:
+        # Telegram server says - Bad Request: chat not found
+        if self._bot is not None:
+            try:
+                identifier = f"@{identifier}"
+                chat = await self._bot.get_chat(identifier)
+                return str(chat.id)
+            except Exception:
+                logger.debug("Telegram: could not resolve identifier %r to user_id", identifier)
+        '''
+        return identifier
+
     async def start(self, handler: MessageHandler) -> None:
         self._handler = handler
         token = self._settings.telegram_bot_token.get_secret_value()

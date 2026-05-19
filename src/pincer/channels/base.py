@@ -119,3 +119,18 @@ class BaseChannel(ABC):
             full += chunk
         if full:
             await self.send(user_id, full)
+
+    async def resolve_internal_user_id(self, identifier: str) -> str:
+        """Resolve a human-readable identifier to the channel's internal user ID.
+
+        Called by the identity layer to translate config-provided values (e.g. a
+        phone number or email) to the real ID the service uses at runtime (e.g. a
+        WhatsApp LID or a Telegram numeric user ID).
+
+        Returns the internal ID string on success, or the original identifier
+        if the channel does not support this resolution or cannot translate it
+        yet (e.g. because the session hasn't received the necessary data).
+
+        Override in channel subclasses that can perform the translation.
+        """
+        return identifier

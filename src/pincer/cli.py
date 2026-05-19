@@ -216,6 +216,7 @@ async def _run_agent(settings: Settings) -> None:
     # send_file / send_image are channel-bound — they need the channel_map
     # populated by channel startup below, so they stay in cli.py rather than
     # in pincer.tools.bootstrap.
+    # TODO: channel_map should replaced by router.channels in future but keep stay as is due send_file resolve
     channel_map: dict[str, BaseChannel] = {}
 
     async def send_file(path: str, caption: str = "", context: dict | None = None) -> str:
@@ -623,8 +624,6 @@ async def _run_agent(settings: Settings) -> None:
 
     identity = IdentityResolver(settings.db_path, settings.identity_map)
     await identity.ensure_table()
-    await identity.seed_from_config()
-    await identity.cleanup()
 
     _identity_pipeline = build_pipeline(IdentityMiddleware(identity))
 
@@ -652,8 +651,13 @@ async def _run_agent(settings: Settings) -> None:
             return ""
         return await _orig_on_message_fn(incoming)
 
+    # Init channels router for proactive delivery
+    from pincer.channels.router import ChannelRouter
+    router = ChannelRouter(identity)
+
     # Start channels
-    channels: list[BaseChannel] = []
+    from pincer.channels.base import ChannelType
+
     tg = None
     if settings.telegram_bot_token.get_secret_value():
         from pincer.channels.telegram import TelegramChannel
@@ -661,20 +665,11 @@ async def _run_agent(settings: Settings) -> None:
         tg = TelegramChannel(settings)
         tg.set_stream_agent(agent)
         await tg.start(on_message)
-        channels.append(tg)
         channel_map[tg.name] = tg
-
         console.print("[green]Telegram connected (streaming enabled)[/green]")
-
-    # Sprint 3: Channel router for proactive delivery
-    from pincer.channels.base import ChannelType
-    from pincer.channels.router import ChannelRouter
-
-    router = ChannelRouter(identity)
     if tg:
         router.register(ChannelType.TELEGRAM, tg)
 
-    # Sprint 3: WhatsApp channel (optional)
     wa = None
     if settings.whatsapp_enabled:
         try:
@@ -682,7 +677,6 @@ async def _run_agent(settings: Settings) -> None:
 
             wa = WhatsAppChannel(settings)
             await wa.start(on_message)
-            channels.append(wa)
             channel_map[wa.name] = wa
             router.register(ChannelType.WHATSAPP, wa)
             console.print("[green]WhatsApp connected[/green]")
@@ -794,7 +788,6 @@ async def _run_agent(settings: Settings) -> None:
             vc = VoiceChannel(settings)
             vc.set_engine(voice_engine)
             await vc.start(on_message)
-            channels.append(vc)
             channel_map[vc.name] = vc
             router.register(ChannelType.VOICE, vc)
             init_voice_routes(voice_engine, settings)
@@ -861,7 +854,6 @@ async def _run_agent(settings: Settings) -> None:
             dc = DiscordChannel(settings)
             dc.set_agent(agent)
             await dc.start(on_message)
-            channels.append(dc)
             channel_map[dc.name] = dc
             router.register(ChannelType.DISCORD, dc)
             console.print("[green]Discord connected[/green]")
@@ -879,7 +871,6 @@ async def _run_agent(settings: Settings) -> None:
 
                 sig = SignalChannel(settings)
                 await sig.start(on_message)
-                channels.append(sig)
                 channel_map[sig.name] = sig
                 router.register(ChannelType.SIGNAL, sig)
                 console.print("[green]Signal connected[/green]")
@@ -897,7 +888,6 @@ async def _run_agent(settings: Settings) -> None:
             slk = SlackChannel(settings)
             await slk.start(on_message)
             if slk._app is not None:  # start() may bail silently if import fails
-                channels.append(slk)
                 channel_map[slk.name] = slk
                 router.register(ChannelType.SLACK, slk)
                 console.print("[green]Slack connected (Socket Mode)[/green]")
@@ -908,9 +898,12 @@ async def _run_agent(settings: Settings) -> None:
     else:
         console.print("[dim]Slack skipped (no PINCER_SLACK_BOT_TOKEN / PINCER_SLACK_APP_TOKEN)[/dim]")
 
-    if not channels:
+    if not router.channels:
         console.print("[yellow]No channels configured. Set PINCER_TELEGRAM_BOT_TOKEN.[/yellow]")
         return
+
+    # normalize identity map in through router
+    await router.rebuild_identity_map()
 
     # Sprint 3: Scheduler + Proactive Agent
     from pincer.scheduler import CronScheduler, EventTriggerManager, ProactiveAgent
@@ -1001,7 +994,7 @@ async def _run_agent(settings: Settings) -> None:
         except Exception as e:
             console.print(f"[yellow]API server failed to start: {e}[/yellow]")
 
-    active = [ch.name for ch in channels]
+    active = [ch.name for ch in router.channels.values()]
     console.print(
         f"\n[bold green]{settings.agent_name} is running![/bold green] "
         f"Channels: {', '.join(active)}. Press Ctrl+C to stop.\n"
@@ -1028,7 +1021,7 @@ async def _run_agent(settings: Settings) -> None:
         await triggers.stop()
         await scheduler.stop()
         await proactive.close()
-        for ch in channels:
+        for ch in router.channels.values():
             await ch.stop()
         try:
             from pincer.tools.builtin.browser import close_browser

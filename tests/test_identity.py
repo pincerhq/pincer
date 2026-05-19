@@ -242,6 +242,26 @@ class TestSeedFromConfig:
         assert ch1[ChannelType.WHATSAPP] == "490000000001"
         assert ch2[ChannelType.WHATSAPP] == "490000000002"
 
+    async def test_three_channel_entry(self, tmp_path):
+        """A single identity entry with three channels links all three."""
+        db_path = tmp_path / "three_ch.db"
+        r = IdentityResolver(
+            db_path,
+            identity_map_config="john@telegram:12345=whatsapp:491234567890=signal:491234567890",
+        )
+        await r.ensure_table()
+        await r.seed_from_config()
+
+        tg_uid = await r.resolve(ChannelType.TELEGRAM, 12345)
+        wa_uid = await r.resolve(ChannelType.WHATSAPP, "491234567890")
+        sig_uid = await r.resolve(ChannelType.SIGNAL, "491234567890")
+        assert tg_uid == wa_uid == sig_uid == "john"
+
+        channels = await r.get_all_channels("john")
+        assert ChannelType.TELEGRAM in channels
+        assert ChannelType.WHATSAPP in channels
+        assert ChannelType.SIGNAL in channels
+
     async def test_right_side_existing_linked_to_left(self, tmp_path):
         """When right-side identity exists but left doesn't, left gets linked to right."""
         db_path = tmp_path / "seed_right.db"
@@ -356,19 +376,29 @@ class TestNamedCanonicalId:
         assert tg_uid == expected
 
     async def test_parse_mapping_named(self):
-        name, lc, li, rc, ri = IdentityResolver._parse_mapping(
+        name, pairs = IdentityResolver._parse_mapping(
             "john@telegram:12345=whatsapp:491234567890"
         )
         assert name == "john"
-        assert lc == "telegram" and li == "12345"
-        assert rc == "whatsapp" and ri == "491234567890"
+        assert pairs[0] == ("telegram", "12345")
+        assert pairs[1] == ("whatsapp", "491234567890")
 
     async def test_parse_mapping_unnamed(self):
-        name, lc, li, rc, ri = IdentityResolver._parse_mapping(
+        name, pairs = IdentityResolver._parse_mapping(
             "telegram:12345=whatsapp:491234567890"
         )
         assert name is None
-        assert lc == "telegram" and li == "12345"
+        assert pairs[0] == ("telegram", "12345")
+
+    async def test_parse_mapping_three_channels(self):
+        name, pairs = IdentityResolver._parse_mapping(
+            "john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890"
+        )
+        assert name == "john"
+        assert len(pairs) == 3
+        assert pairs[0] == ("telegram", "johnDoe")
+        assert pairs[1] == ("whatsapp", "491234567890")
+        assert pairs[2] == ("signal", "491234567890")
 
     async def test_mixed_named_and_unnamed(self, tmp_path):
         """Config can mix named and unnamed entries."""

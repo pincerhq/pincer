@@ -110,6 +110,26 @@ class SlackChannel(BaseChannel):
     def name(self) -> str:
         return "slack"
 
+    async def resolve_internal_user_id(self, identifier: str) -> str:
+        """Resolve a Slack identifier to an internal user ID (U...).
+
+        Handles two cases:
+        - Already a Slack user ID (starts with "U") → returned as-is.
+        - An email address → resolved via users.lookupByEmail (requires the
+          users:read.email scope on the bot token).
+
+        Any other format (display name, etc.) is returned unchanged.
+        """
+        if identifier.startswith("U"):
+            return identifier
+        if "@" in identifier and self._app is not None:
+            try:
+                result = await self._app.client.users_lookupByEmail(email=identifier)
+                return result["user"]["id"]
+            except Exception:
+                logger.debug("Slack: could not resolve email %r to user_id", identifier)
+        return identifier
+
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
     async def start(self, handler: MessageHandler) -> None:

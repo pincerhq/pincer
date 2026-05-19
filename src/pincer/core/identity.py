@@ -13,13 +13,13 @@ channel_identities — many-to-many: (channel, channel_user_id) → pincer_user_
 Config mapping (.env)
 ---------------------
 Named canonical ID (recommended — human-readable, stable across environments):
-    PINCER_IDENTITY_MAP=john@telegram:12345=whatsapp:491234567890
+    PINCER_IDENTITY_MAP=john@telegram:johnDoe=whatsapp:491234567890
 
 Auto-generated hash ID (backward-compatible, opaque):
-    PINCER_IDENTITY_MAP=telegram:12345=whatsapp:491234567890
+    PINCER_IDENTITY_MAP=telegram:johnDoe=whatsapp:491234567890
 
-Multiple entries separated by commas:
-    PINCER_IDENTITY_MAP=john@telegram:12345=whatsapp:491234567890,jane@telegram:67890=whatsapp:491111111111
+Multiple channels per identity and multiple identities separated by commas:
+    PINCER_IDENTITY_MAP=john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890,jane@telegram:janeAustin=whatsapp:491111111111
 
 The optional name prefix sets the pincer_user_id directly (e.g. "user:john" in
 memory tags) instead of the auto-generated "user:usr_abc123..." hash.
@@ -39,6 +39,8 @@ from pincer.channels.base import ChannelType
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from pincer.channels.base import BaseChannel
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +105,6 @@ class IdentityResolver:
         if not await cursor.fetchone():
             return
 
-        # Introspect which columns are present (older DBs lack sprint-added columns)
         cursor = await db.execute("PRAGMA table_info(identity_map)")
         col_names = {row[1] for row in await cursor.fetchall()}
 
@@ -282,7 +283,6 @@ class IdentityResolver:
             (new_id, old_id),
         )
         await db.execute("DELETE FROM identity_meta WHERE pincer_user_id = ?", (old_id,))
-        # Migrate sessions if the sessions table exists in the same DB
         try:
             await db.execute(
                 "UPDATE sessions SET user_id = ? WHERE user_id = ?",
@@ -317,64 +317,92 @@ class IdentityResolver:
             if "=" not in raw_entry:
                 continue
             try:
-                name, left_channel, left_id, right_channel, right_id = self._parse_mapping(
-                    raw_entry
-                )
+                name, pairs = self._parse_mapping(raw_entry)
             except ValueError:
                 continue
 
-            left_norm = self._normalize_id(ChannelType(left_channel), left_id)
-            right_norm = self._normalize_id(ChannelType(right_channel), right_id)
+            norm_pairs = [
+                (ch, self._normalize_id(ChannelType(ch), cid))
+                for ch, cid in pairs
+            ]
 
-            other_channel: str | None = None
-            other_norm: str | None = None
-            if f"{left_channel}:{left_norm}" == current_key:
-                other_channel, other_norm = right_channel, right_norm
-            elif f"{right_channel}:{right_norm}" == current_key:
-                other_channel, other_norm = left_channel, left_norm
-
-            if other_channel is None:
+            # Check if the incoming channel:id is in this entry
+            entry_keys = {f"{ch}:{cid}" for ch, cid in norm_pairs}
+            if current_key not in entry_keys:
                 continue
 
-            # Prefer the other side's existing identity (cross-channel link)
-            other_uid = await self._find_existing(db, ChannelType(other_channel), other_norm)
-            if other_uid:
-                await self._link_channel(db, other_uid, channel, normalized_id)
-                return other_uid
+            # Look for an existing identity among the other channels in this entry
+            for ch, cid in norm_pairs:
+                if f"{ch}:{cid}" == current_key:
+                    continue
+                uid = await self._find_existing(db, ChannelType(ch), cid)
+                if uid:
+                    await self._link_channel(db, uid, channel, normalized_id)
+                    return uid
 
-            # Other side doesn't exist yet — if a name is configured, establish
-            # the named identity now so both sides share it from the first message.
+            # No other side exists yet — establish a named identity now if configured
             if name:
                 await self._create_identity(db, name, channel, normalized_id)
                 return name
 
         return None
 
-    async def cleanup(self) -> None:
+    async def _resolve_via_channel(
+        self,
+        ch_type: ChannelType,
+        normalized_id: str,
+        channels: dict[ChannelType, BaseChannel],
+    ) -> str:
+        """Ask a channel to translate a normalized config ID to its internal ID."""
+        channel = channels.get(ch_type)
+        if channel is None:
+            return normalized_id
+        #try:
+        resolved = await channel.resolve_internal_user_id(normalized_id)
+        logger.info(
+            "Channel %s: resolve_internal_user_id success %r -> %r",
+            ch_type.value, normalized_id, resolved
+        )
+        return self._normalize_id(ch_type, resolved)
+        #except Exception:
+        #    logger.error(
+        #        "Channel %s: resolve_internal_user_id failed for %r - %s",
+        #        ch_type.value, normalized_id, str(e)
+        #    )
+        return normalized_id
+
+    async def cleanup(
+        self,
+        channels: dict[ChannelType, BaseChannel] | None = None,
+    ) -> None:
         """Remove stale rows from the identity tables.
 
-        If PINCER_IDENTITY_MAP is configured, every channel pair mentioned in
-        the config is considered the authoritative whitelist.  Any
+        If PINCER_IDENTITY_MAP is configured, the resolved internal IDs for
+        every channel pair are the authoritative whitelist. Any
         channel_identities row whose (channel, channel_user_id) is NOT in the
         whitelist is deleted, and any identity_meta row left with no channels is
-        deleted with it.
+        deleted with it. Passing ``channels`` allows config IDs to be translated
+        to real internal IDs before the whitelist is built.
 
         When no config is set the method is a no-op (nothing to enforce).
         """
         if not self._identity_map_config:
             return
 
-        # Build the whitelist of (channel, normalized_id) pairs from config.
         allowed: set[tuple[str, str]] = set()
         for raw_entry in self._identity_map_config.split(","):
             if "=" not in raw_entry:
                 continue
             try:
-                _, left_channel, left_id, right_channel, right_id = self._parse_mapping(raw_entry)
+                _, pairs = self._parse_mapping(raw_entry)
             except ValueError:
                 continue
-            allowed.add((left_channel, self._normalize_id(ChannelType(left_channel), left_id)))
-            allowed.add((right_channel, self._normalize_id(ChannelType(right_channel), right_id)))
+            for ch, cid in pairs:
+                ch_type = ChannelType(ch)
+                norm = self._normalize_id(ch_type, cid)
+                if channels:
+                    norm = await self._resolve_via_channel(ch_type, norm, channels)
+                allowed.add((ch, norm))
 
         async with self._get_db() as db:
             cursor = await db.execute(
@@ -414,8 +442,18 @@ class IdentityResolver:
                 channelless,
             )
 
-    async def seed_from_config(self) -> None:
-        """Pre-create identity rows from PINCER_IDENTITY_MAP on startup."""
+    async def seed_from_config(
+        self,
+        channels: dict[ChannelType, BaseChannel] | None = None,
+    ) -> None:
+        """Pre-create identity rows from PINCER_IDENTITY_MAP on startup.
+
+        Each config entry may contain N channel:id pairs separated by '='.
+        All pairs in one entry share a single pincer_user_id. Passing
+        ``channels`` causes each config ID to be translated to the channel's
+        real internal ID (e.g. WhatsApp phone → LID, Telegram @username →
+        numeric user_id) before being stored.
+        """
         if not self._identity_map_config:
             return
 
@@ -425,72 +463,81 @@ class IdentityResolver:
                 if "=" not in raw_entry:
                     continue
                 try:
-                    name, left_channel, left_id, right_channel, right_id = self._parse_mapping(
-                        raw_entry
-                    )
+                    name, pairs = self._parse_mapping(raw_entry)
                 except ValueError:
                     logger.warning("Invalid identity map entry: %r", raw_entry.strip())
                     continue
 
-                left_norm = self._normalize_id(ChannelType(left_channel), left_id)
-                right_norm = self._normalize_id(ChannelType(right_channel), right_id)
+                # Resolve each pair's ID through the channel (phone → LID, etc.)
+                resolved: list[tuple[str, ChannelType, str]] = []
+                for ch_str, cid in pairs:
+                    try:
+                        ch_type = ChannelType(ch_str)
+                    except ValueError:
+                        logger.warning("Unknown channel %r in identity map entry %r", ch_str, raw_entry.strip())
+                        continue
+                    norm = self._normalize_id(ch_type, cid)
+                    if channels:
+                        norm = await self._resolve_via_channel(ch_type, norm, channels)
+                    resolved.append((ch_str, ch_type, norm))
 
-                left_uid = await self._find_existing(db, ChannelType(left_channel), left_norm)
-                right_uid = await self._find_existing(db, ChannelType(right_channel), right_norm)
+                if not resolved:
+                    continue
 
-                if left_uid and right_uid and left_uid != right_uid:
+                # Collect all existing identities for the channels in this entry
+                existing_uids: list[str] = []
+                for ch_str, ch_type, norm in resolved:
+                    uid = await self._find_existing(db, ch_type, norm)
+                    if uid and uid not in existing_uids:
+                        existing_uids.append(uid)
+
+                # Determine or create the canonical pincer_user_id
+                if len(existing_uids) > 1:
+                    # Multiple distinct identities — merge them all into one
                     if name:
-                        # Merge both separate identities into the configured name
-                        logger.info(
-                            "Identity conflict resolved by merge: %s + %s → %s",
-                            left_uid, right_uid, name,
-                        )
-                        await self._rename_identity(db, left_uid, name)
-                        await self._rename_identity(db, right_uid, name)
-                        existing_uid = name
+                        target_uid = name
                     else:
-                        # No name configured — merge right into left as canonical
-                        logger.info(
-                            "Identity conflict resolved: merging %s into %s",
-                            right_uid, left_uid,
-                        )
-                        await self._rename_identity(db, right_uid, left_uid)
-                        existing_uid = left_uid
-                else:
-                    existing_uid = left_uid or right_uid
-                if name:
-                    if not existing_uid:
-                        # Fresh identity — use the name directly
-                        pincer_uid = name
-                    elif existing_uid == name:
-                        # Already named correctly — nothing to do
-                        pincer_uid = name
-                    elif existing_uid.startswith("usr_"):
-                        # Auto-generated hash — rename it to the configured name
-                        await self._rename_identity(db, existing_uid, name)
-                        pincer_uid = name
+                        target_uid = existing_uids[0]
+                    for uid in existing_uids:
+                        if uid != target_uid:
+                            logger.info("Identity conflict resolved: merging %s into %s", uid, target_uid)
+                            await self._rename_identity(db, uid, target_uid)
+                    pincer_uid = target_uid
+                elif len(existing_uids) == 1:
+                    existing_uid = existing_uids[0]
+                    if name:
+                        if existing_uid == name:
+                            pincer_uid = name
+                        elif existing_uid.startswith("usr_"):
+                            await self._rename_identity(db, existing_uid, name)
+                            pincer_uid = name
+                        else:
+                            logger.warning(
+                                "Named canonical ID %r ignored: identity already has name %r",
+                                name, existing_uid,
+                            )
+                            pincer_uid = existing_uid
                     else:
-                        # Already has a different explicit name — don't override
-                        logger.warning(
-                            "Named canonical ID %r ignored: identity already has name %r",
-                            name, existing_uid,
-                        )
                         pincer_uid = existing_uid
                 else:
-                    pincer_uid = existing_uid or self._generate_user_id(
-                        ChannelType(left_channel), left_norm
-                    )
+                    # No existing identity — create fresh
+                    if name:
+                        pincer_uid = name
+                    else:
+                        first_ch_str, first_ch_type, first_norm = resolved[0]
+                        pincer_uid = self._generate_user_id(first_ch_type, first_norm)
 
+                first_channel = resolved[0][0]
                 await db.execute(
                     "INSERT OR IGNORE INTO identity_meta "
                     "(pincer_user_id, preferred_channel) VALUES (?, ?)",
-                    (pincer_uid, left_channel),
+                    (pincer_uid, first_channel),
                 )
-                for ch, cid in ((left_channel, left_norm), (right_channel, right_norm)):
+                for ch_str, ch_type, norm in resolved:
                     await db.execute(
                         "INSERT OR IGNORE INTO channel_identities "
                         "(channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
-                        (ch, cid, pincer_uid),
+                        (ch_str, norm, pincer_uid),
                     )
 
             await db.commit()
@@ -545,29 +592,41 @@ class IdentityResolver:
     @staticmethod
     def _parse_mapping(
         entry: str,
-    ) -> tuple[str | None, str, str, str, str]:
-        """Parse one config entry into (name, left_channel, left_id, right_channel, right_id).
+    ) -> tuple[str | None, list[tuple[str, str]]]:
+        """Parse one config entry into (name, [(channel, id), ...]).
 
         Formats accepted:
-            name@left_channel:left_id=right_channel:right_id   (named canonical ID)
-            left_channel:left_id=right_channel:right_id         (hash-based, backward compat)
+            name@ch1:id1=ch2:id2=ch3:id3   (named canonical ID, N channels)
+            ch1:id1=ch2:id2                 (hash-based, backward compat)
+
+        Raises ValueError if fewer than 2 channel:id pairs are found.
         """
         entry = entry.strip()
         name: str | None = None
 
         eq_pos = entry.find("=")
         at_pos = entry.find("@")
-        # @ must appear before the first = to be a name prefix
         if 0 < at_pos < (eq_pos if eq_pos >= 0 else len(entry)):
             raw_name = entry[:at_pos].strip()
             if raw_name:
                 name = raw_name
             entry = entry[at_pos + 1:]
 
-        left_part, right_part = entry.split("=", 1)
-        left_channel, left_id = left_part.strip().split(":", 1)
-        right_channel, right_id = right_part.strip().split(":", 1)
-        return name, left_channel, left_id.strip(), right_channel, right_id.strip()
+        pairs: list[tuple[str, str]] = []
+        for part in entry.split("="):
+            part = part.strip()
+            if not part or ":" not in part:
+                continue
+            ch, cid = part.split(":", 1)
+            ch = ch.strip()
+            cid = cid.strip()
+            if ch and cid:
+                pairs.append((ch, cid))
+
+        if len(pairs) < 2:
+            raise ValueError(f"Entry must have at least 2 channel:id pairs: {entry!r}")
+
+        return name, pairs
 
     @staticmethod
     def _generate_user_id(channel: ChannelType, channel_user_id: str | int) -> str:

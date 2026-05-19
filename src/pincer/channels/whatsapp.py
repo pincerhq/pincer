@@ -183,6 +183,24 @@ class WhatsAppChannel(BaseChannel):
     def name(self) -> str:
         return "whatsapp"
 
+    async def resolve_internal_user_id(self, identifier: str) -> str:
+        """Resolve a WhatsApp phone JID (without +) to the account's internal LID.
+
+        Only the bot owner's own phone can be resolved this way: the LID is
+        learned from the first is_from_me message after connection.  For any
+        other phone number the LID is unknown until that contact sends a message,
+        so the identifier is returned unchanged.
+        """
+        identifier = identifier.removeprefix("+").removeprefix("@")
+        from neonize.utils.jid import build_jid
+        try:
+            _jid = build_jid(identifier)
+            lid_jid = await self._client.get_lid_from_pn(_jid)
+            return lid_jid.User
+        except Exception:
+            logger.error("Whatsapp: could not resolve identifier %r to user_id", identifier)
+        return identifier
+
     # ── Interactive prompts (approval / ask_user) ────
 
     # Shaped like Telegram's approval: returns True/False. On WhatsApp there

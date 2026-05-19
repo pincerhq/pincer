@@ -28,9 +28,17 @@ class ChannelRouter:
         self._channels: dict[ChannelType, BaseChannel] = {}
         self._identity = identity
 
+    @property
+    def channels(self) -> dict[ChannelType, BaseChannel]:
+        return self._channels
+
     def register(self, channel_type: ChannelType, channel_instance: BaseChannel) -> None:
         self._channels[channel_type] = channel_instance
         logger.info("Router registered channel: %s", channel_type.value)
+
+    async def rebuild_identity_map(self) -> None:
+        await self._identity.seed_from_config(self._channels)
+        await self._identity.cleanup(self._channels)
 
     async def send(self, channel_type: ChannelType, chat_id: str, text: str) -> bool:
         """Send a message via the specified channel. Returns True on success."""
