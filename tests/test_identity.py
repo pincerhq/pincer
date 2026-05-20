@@ -225,10 +225,7 @@ class TestSeedFromConfig:
         db_path = tmp_path / "seed_multi.db"
         r = IdentityResolver(
             db_path,
-            identity_map_config=(
-                "telegram:11111=whatsapp:490000000001,"
-                "telegram:22222=whatsapp:490000000002"
-            ),
+            identity_map_config=("telegram:11111=whatsapp:490000000001,telegram:22222=whatsapp:490000000002"),
         )
         await r.ensure_table()
         await r.seed_from_config()
@@ -332,9 +329,7 @@ class TestNamedCanonicalId:
         assert original_uid.startswith("usr_")
 
         # Later: admin adds a name to the config and restarts (seed is called on startup)
-        r_with_name = IdentityResolver(
-            db_path, identity_map_config="carol@telegram:222=whatsapp:491000000003"
-        )
+        r_with_name = IdentityResolver(db_path, identity_map_config="carol@telegram:222=whatsapp:491000000003")
         await r_with_name.seed_from_config()
 
         # Hash identity should now be renamed to "carol"
@@ -376,24 +371,18 @@ class TestNamedCanonicalId:
         assert tg_uid == expected
 
     async def test_parse_mapping_named(self):
-        name, pairs = IdentityResolver._parse_mapping(
-            "john@telegram:12345=whatsapp:491234567890"
-        )
+        name, pairs = IdentityResolver._parse_mapping("john@telegram:12345=whatsapp:491234567890")
         assert name == "john"
         assert pairs[0] == ("telegram", "12345")
         assert pairs[1] == ("whatsapp", "491234567890")
 
     async def test_parse_mapping_unnamed(self):
-        name, pairs = IdentityResolver._parse_mapping(
-            "telegram:12345=whatsapp:491234567890"
-        )
+        name, pairs = IdentityResolver._parse_mapping("telegram:12345=whatsapp:491234567890")
         assert name is None
         assert pairs[0] == ("telegram", "12345")
 
     async def test_parse_mapping_three_channels(self):
-        name, pairs = IdentityResolver._parse_mapping(
-            "john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890"
-        )
+        name, pairs = IdentityResolver._parse_mapping("john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890")
         assert name == "john"
         assert len(pairs) == 3
         assert pairs[0] == ("telegram", "johnDoe")
@@ -430,11 +419,11 @@ class TestCleanup:
         await r.cleanup()
 
         # Row must still exist
-        async with aiosqlite.connect(str(db_path)) as db:
-            async with db.execute(
-                "SELECT COUNT(*) FROM channel_identities WHERE channel_user_id = '12345'"
-            ) as cur:
-                assert (await cur.fetchone())[0] == 1
+        async with (
+            aiosqlite.connect(str(db_path)) as db,
+            db.execute("SELECT COUNT(*) FROM channel_identities WHERE channel_user_id = '12345'") as cur,
+        ):
+            assert (await cur.fetchone())[0] == 1
         assert await r.resolve(ChannelType.TELEGRAM, 12345) == uid
 
     async def test_cleanup_removes_unlisted_channel_links(self, tmp_path):
@@ -464,9 +453,7 @@ class TestCleanup:
             ) as cur:
                 assert (await cur.fetchone())[0] == 0
             # Listed channels survive
-            async with db.execute(
-                "SELECT COUNT(*) FROM channel_identities WHERE channel_user_id = '12345'"
-            ) as cur:
+            async with db.execute("SELECT COUNT(*) FROM channel_identities WHERE channel_user_id = '12345'") as cur:
                 assert (await cur.fetchone())[0] == 1
 
     async def test_cleanup_removes_channelless_identity_after_purge(self, tmp_path):
@@ -491,11 +478,11 @@ class TestCleanup:
 
         await r.cleanup()
 
-        async with aiosqlite.connect(str(db_path)) as db:
-            async with db.execute(
-                "SELECT COUNT(*) FROM identity_meta WHERE pincer_user_id = 'ghost'"
-            ) as cur:
-                assert (await cur.fetchone())[0] == 0
+        async with (
+            aiosqlite.connect(str(db_path)) as db,
+            db.execute("SELECT COUNT(*) FROM identity_meta WHERE pincer_user_id = 'ghost'") as cur,
+        ):
+            assert (await cur.fetchone())[0] == 0
 
     async def test_cleanup_no_op_when_tables_absent(self, tmp_path):
         """cleanup() on a DB without the new schema tables should not raise."""

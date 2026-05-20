@@ -43,11 +43,14 @@
 - Comprehensive diagnostic logging on every message routing decision
 
 ### Cross-Channel Identity (`core/identity.py`)
-- Unified `pincer_user_id` across Telegram and WhatsApp
-- Deterministic hash-based ID generation from channel-specific identifiers
-- SQLite-backed `identity_map` table
-- Config-driven identity seeding at startup via `PINCER_IDENTITY_MAP`
-- Enables proactive messages to reach users on any connected channel
+- Unified `pincer_user_id` across all channels — tell the agent something on WhatsApp, ask about it on Telegram, it remembers
+- Two-table normalized schema: `identity_meta` (one row per user) + `channel_identities` (many-to-many channel links)
+- Config-driven identity seeding at startup via `PINCER_IDENTITY_MAP`; supports N channels per identity: `name@ch1:id1=ch2:id2=ch3:id3`
+- Named canonical IDs (`john@telegram:...`) make memory tags human-readable and portable across DB rebuilds
+- Hash-based fallback ID (`usr_abc123...`) auto-generated when no name is configured — backward-compatible
+- Per-channel ID resolution: phone numbers, email addresses, and @usernames in config are resolved to the channel's real internal ID by each channel driver before being stored (`resolve_internal_user_id()` on `BaseChannel`)
+- Automatic conflict merging when multiple identities are unified by a new config entry
+- Legacy `identity_map` table automatically migrated to the new schema on first boot
 
 ### Channel Router (`channels/router.py`)
 - Routes proactive/scheduled messages to the correct channel for each user
@@ -439,7 +442,7 @@ pincer/
 - **ReAct Loop** — The agent reasons about what tool to use, acts (executes the tool), observes the result, and repeats until it has a final answer.
 - **Provider Abstraction** — All LLM providers implement `BaseLLMProvider`, making it trivial to swap between Anthropic/OpenAI.
 - **Channel Abstraction** — All communication channels implement `BaseChannel`, decoupling the agent from any specific messaging platform.
-- **Cross-Channel Identity** — A unified `pincer_user_id` maps Telegram user IDs and WhatsApp phone numbers to a single identity, enabling seamless cross-channel experiences.
+- **Cross-Channel Identity** — A unified `pincer_user_id` maps every channel-specific ID to a single identity. N channels can share one identity (`name@ch1:id1=ch2:id2=ch3:id3`). Each channel driver resolves human-readable config values (phone numbers, emails, @usernames) to internal IDs at startup via `resolve_internal_user_id()`.
 - **Tool Registry** — Tools are registered with JSON schemas auto-generated from Python type hints. The LLM picks tools, the registry dispatches.
 - **Persistent Memory** — SQLite with FTS5 full-text search for long-term recall across sessions.
 - **Cost Controls** — Per-model token pricing with daily budget limits to prevent runaway API costs.
@@ -492,7 +495,9 @@ All configuration via environment variables with `PINCER_` prefix. See `.env.exa
 |----------|---------|
 | `PINCER_EMAIL_USERNAME` | Gmail address |
 | `PINCER_EMAIL_PASSWORD` | Gmail App Password (not regular password) |
-| `PINCER_IDENTITY_MAP` | Cross-channel identity mapping |
+| `PINCER_IDENTITY_MAP` | Cross-channel identity mapping — format: `[name@]ch1:id1=ch2:id2[=ch3:id3]`, multiple entries comma-separated |
+| `PINCER_MEMORY_BACKEND` | Memory storage engine: `sqlite` (default, local DB) or `mcp` (external MCP server) |
+| `PINCER_MEMORY_MCP_SERVER` | MCP server name when `PINCER_MEMORY_BACKEND=mcp` (default: `sqlite-vec-memory`) |
 | `PINCER_OPENWEATHERMAP_API_KEY` | Weather for morning briefings |
 | `PINCER_NEWSAPI_KEY` | News for morning briefings |
 

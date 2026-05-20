@@ -75,6 +75,41 @@ Complete command reference across all sprints (1–13). For the full list of too
 | `pincer memory clear --user USER_ID` | Clear memory for a user | 5 |
 | `pincer memory export --user USER_ID` | Export user memories to JSON | 5 |
 
+Each command prints a `Backend:` line showing which storage engine is active for the current run:
+
+```
+Backend: sqlite  path=/path/to/pincer.db
+```
+or
+```
+Backend: mcp  server=sqlite-vec-memory
+```
+
+When `PINCER_MEMORY_BACKEND=mcp`, the command connects directly to the configured MCP memory server (same process as `pincer run`). The MCP server must be reachable — if it is not found in `pincer.toml` or fails to connect, the command exits with an error.
+
+### Memory backend configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PINCER_MEMORY_BACKEND` | `sqlite` | Storage engine: `sqlite` (local DB file) or `mcp` (external MCP server) |
+| `PINCER_MEMORY_MCP_SERVER` | `sqlite-vec-memory` | MCP server name used when `PINCER_MEMORY_BACKEND=mcp` |
+
+The `sqlite-vec-memory` MCP server ships bundled with Pincer (see `src/sqlite-vec-memory-mcp/`). To enable it, add it to your `pincer.toml`:
+
+```toml
+[[mcp.servers]]
+name      = "sqlite-vec-memory"
+transport = "stdio"
+command   = "uv"
+args      = ["run", "--project", "src/sqlite-vec-memory-mcp", "memory-server"]
+```
+
+Then switch the memory backend:
+
+```bash
+PINCER_MEMORY_BACKEND=mcp pincer run
+```
+
 ## Proactive Agent
 
 | Command | Description | Sprint |
@@ -169,6 +204,30 @@ complete list. Key variables added in Sprint 5:
 | `PINCER_RATE_MESSAGES_PER_MIN` | `30` | Per-user message rate limit |
 | `PINCER_RATE_TOOLS_PER_MIN` | `20` | Per-user tool call rate limit |
 | `PINCER_MAX_CONCURRENT_LLM` | `5` | Max concurrent LLM requests |
+
+### Identity map
+
+| Variable | Format | Description |
+|----------|--------|-------------|
+| `PINCER_IDENTITY_MAP` | See below | Cross-channel user identity mappings |
+
+**Format:** `[name@]channel1:id1=channel2:id2[=channel3:id3...]` — multiple identities separated by commas.
+
+```bash
+# Two channels, named canonical ID (recommended)
+PINCER_IDENTITY_MAP=john@telegram:johnDoe=whatsapp:491234567890
+
+# Three channels in one identity
+PINCER_IDENTITY_MAP=john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890
+
+# Multiple people
+PINCER_IDENTITY_MAP=john@telegram:johnDoe=whatsapp:491234567890,jane@telegram:janeAustin=whatsapp:491111111111
+
+# Hash-based ID (auto-generated, backward-compatible)
+PINCER_IDENTITY_MAP=telegram:12345=whatsapp:491234567890
+```
+
+The optional `name@` prefix sets the `pincer_user_id` used as the memory tag (e.g. `user:john`). Named IDs are stable across DB rebuilds; hash IDs (`usr_abc123...`) are auto-generated and opaque. Channel-specific identifiers (email addresses for Slack, phone numbers for WhatsApp, @usernames for Telegram) are resolved to internal IDs by each channel driver at startup before being stored.
 
 ## API Endpoints
 

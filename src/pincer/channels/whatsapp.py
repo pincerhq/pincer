@@ -193,6 +193,7 @@ class WhatsAppChannel(BaseChannel):
         """
         identifier = identifier.removeprefix("+").removeprefix("@")
         from neonize.utils.jid import build_jid
+
         try:
             _jid = build_jid(identifier)
             lid_jid = await self._client.get_lid_from_pn(_jid)

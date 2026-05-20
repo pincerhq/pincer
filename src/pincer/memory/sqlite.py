@@ -6,6 +6,7 @@ Tables:
 - memories: searchable memory entries (facts, summaries, etc.)
 - entities: named entities extracted from conversations
 """
+
 from __future__ import annotations
 
 import json
@@ -361,7 +362,7 @@ class SQLiteMemoryBackend:
             row = await cursor.fetchone()
 
         if row:
-            ent_id = row[0]
+            ent_id = str(row[0])
             await self._db.execute(
                 "UPDATE entities SET attributes_json = ?, last_seen = ? WHERE id = ?",
                 (attrs_json, now, ent_id),

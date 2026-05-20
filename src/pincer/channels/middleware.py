@@ -57,9 +57,7 @@ class IdentityMiddleware:
             try:
                 owner = await self._identity.find(msg.channel_type, candidate)
             except Exception:
-                logger.debug(
-                    "Identity find error for %s/%s", msg.channel, candidate, exc_info=True
-                )
+                logger.debug("Identity find error for %s/%s", msg.channel, candidate, exc_info=True)
                 owner = None
             if owner:
                 matched_candidate = candidate
@@ -73,9 +71,7 @@ class IdentityMiddleware:
                 owner = await self._identity.resolve(msg.channel_type, msg.user_id)
                 matched_candidate = msg.user_id
             except Exception:
-                logger.debug(
-                    "Identity resolve error for %s/%s", msg.channel, msg.user_id, exc_info=True
-                )
+                logger.debug("Identity resolve error for %s/%s", msg.channel, msg.user_id, exc_info=True)
 
         if owner:
             msg.pincer_user_id = owner
@@ -87,9 +83,7 @@ class IdentityMiddleware:
                     try:
                         await self._identity.link_if_new(owner, msg.channel_type, candidate)
                     except Exception:
-                        logger.debug(
-                            "Failed to back-link %s/%s", msg.channel, candidate, exc_info=True
-                        )
+                        logger.debug("Failed to back-link %s/%s", msg.channel, candidate, exc_info=True)
         else:
             # Fallback: channel-scoped canonical ID so the agent never sees ""
             msg.pincer_user_id = f"{msg.channel}:{msg.user_id}"

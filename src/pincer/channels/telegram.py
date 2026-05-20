@@ -146,7 +146,7 @@ class TelegramChannel(BaseChannel):
         if clean.isdigit():
             return clean
 
-        '''
+        """
         # This code does not work with:
         # Telegram server says - Bad Request: chat not found
         if self._bot is not None:
@@ -156,7 +156,7 @@ class TelegramChannel(BaseChannel):
                 return str(chat.id)
             except Exception:
                 logger.debug("Telegram: could not resolve identifier %r to user_id", identifier)
-        '''
+        """
         return identifier
 
     async def start(self, handler: MessageHandler) -> None:
@@ -566,7 +566,7 @@ class TelegramChannel(BaseChannel):
 
             user_id = str(message.from_user.id)
 
-            '''
+            """
             # Use streaming if agent is available
             # TODO: streaming process should reviewed and reworked
             # main problem is telegram streaming bypass memory and
@@ -587,7 +587,7 @@ class TelegramChannel(BaseChannel):
 
                 await self.send_streaming(user_id, text_chunks())
                 return
-            '''
+            """
 
             incoming = IncomingMessage(
                 user_id=user_id,

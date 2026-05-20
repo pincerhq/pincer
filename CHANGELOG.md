@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Cross-channel identity overhaul
+
+- **N-channel identity format** — `PINCER_IDENTITY_MAP` now supports any number of channels per identity: `john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890`. Old two-channel format (`telegram:12345=whatsapp:491234567890`) is fully backward-compatible.
+- **Named canonical IDs** — The optional `name@` prefix sets the `pincer_user_id` used for memory tagging (e.g. `user:john`). Named IDs survive DB rebuilds; hash-based IDs (`usr_abc123...`) auto-generated when no name is given.
+- **New schema** — `identity_meta` (one row per user) + `channel_identities` (many-to-many) replaces the old monolithic `identity_map` table. Automatic migration on first boot preserves all existing rows.
+- **Per-channel ID resolution** — `BaseChannel` gains `resolve_internal_user_id(identifier)` (default: passthrough). Channel implementations translate config values to real internal IDs at startup before storing them:
+  - **Slack** — email address → Slack user ID via `users_lookupByEmail` (requires `users:read.email` scope)
+  - **Telegram** — `@username` → numeric user ID via `bot.get_chat()`; numeric IDs passed through
+  - **WhatsApp** — phone number → LID (Linked Device ID) when available
+- **Conflict merging** — when `seed_from_config` finds multiple existing identities that the config maps together, they are automatically merged into one.
+
+#### CLI memory backend detection
+
+- **`pincer memory` subcommands** now detect and use the configured memory backend (`sqlite` or `mcp`) instead of always connecting to SQLite.
+- Each command prints `Backend: sqlite  path=…` or `Backend: mcp  server=…` so the active engine is always visible.
+- When `PINCER_MEMORY_BACKEND=mcp`, commands connect directly to the configured MCP server (same as the agent's runtime connection). Clear error output if the server is missing from `pincer.toml` or unreachable.
+- `memory stats` with MCP backend computes user/category breakdown from listed records (client-side), since raw SQL is unavailable.
+
 #### First-session onboarding
 
 - **One-question onboarding flow** on a brand-new session: the bot answers the user's first real message normally, then appends a single warm question — *"By the way — what's your name, and what will you mainly use me for? Feel free to also mention your preferred language."*

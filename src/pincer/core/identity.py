@@ -99,9 +99,7 @@ class IdentityResolver:
 
     async def _migrate_legacy(self, db: aiosqlite.Connection) -> None:
         """Migrate old identity_map rows into the new schema (no-op if absent)."""
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='identity_map'"
-        )
+        cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='identity_map'")
         if not await cursor.fetchone():
             return
 
@@ -215,8 +213,7 @@ class IdentityResolver:
         normalized_id: str,
     ) -> str | None:
         cursor = await db.execute(
-            "SELECT pincer_user_id FROM channel_identities "
-            "WHERE channel = ? AND channel_user_id = ?",
+            "SELECT pincer_user_id FROM channel_identities WHERE channel = ? AND channel_user_id = ?",
             (channel.value, normalized_id),
         )
         row = await cursor.fetchone()
@@ -231,13 +228,11 @@ class IdentityResolver:
         display_name: str | None = None,
     ) -> None:
         await db.execute(
-            "INSERT OR IGNORE INTO identity_meta "
-            "(pincer_user_id, preferred_channel, display_name) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO identity_meta (pincer_user_id, preferred_channel, display_name) VALUES (?, ?, ?)",
             (pincer_user_id, channel.value, display_name),
         )
         await db.execute(
-            "INSERT OR IGNORE INTO channel_identities "
-            "(channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO channel_identities (channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
             (channel.value, normalized_id, pincer_user_id),
         )
         await db.commit()
@@ -251,14 +246,11 @@ class IdentityResolver:
         normalized_id: str,
     ) -> None:
         await db.execute(
-            "INSERT OR IGNORE INTO channel_identities "
-            "(channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO channel_identities (channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
             (channel.value, normalized_id, pincer_user_id),
         )
         await db.commit()
-        logger.info(
-            "Identity linked: %s ← %s:%s", pincer_user_id, channel.value, normalized_id
-        )
+        logger.info("Identity linked: %s ← %s:%s", pincer_user_id, channel.value, normalized_id)
 
     async def _rename_identity(
         self,
@@ -289,8 +281,7 @@ class IdentityResolver:
                 (new_id, old_id),
             )
             await db.execute(
-                "UPDATE sessions SET session_id = replace(session_id, ?, ?) "
-                "WHERE session_id LIKE ?",
+                "UPDATE sessions SET session_id = replace(session_id, ?, ?) WHERE session_id LIKE ?",
                 (old_id, new_id, f"%{old_id}%"),
             )
         except Exception:
@@ -298,7 +289,9 @@ class IdentityResolver:
         logger.info(
             "Identity renamed: %s → %s "
             "(memory tags in MCP server still use %s — run 'pincer migrate-memories' to update)",
-            old_id, new_id, old_id,
+            old_id,
+            new_id,
+            old_id,
         )
 
     async def _check_config_mapping(
@@ -321,10 +314,7 @@ class IdentityResolver:
             except ValueError:
                 continue
 
-            norm_pairs = [
-                (ch, self._normalize_id(ChannelType(ch), cid))
-                for ch, cid in pairs
-            ]
+            norm_pairs = [(ch, self._normalize_id(ChannelType(ch), cid)) for ch, cid in pairs]
 
             # Check if the incoming channel:id is in this entry
             entry_keys = {f"{ch}:{cid}" for ch, cid in norm_pairs}
@@ -359,15 +349,14 @@ class IdentityResolver:
             return normalized_id
         try:
             resolved = await channel.resolve_internal_user_id(normalized_id)
-            logger.info(
-                "Channel %s: resolve_internal_user_id success %r -> %r",
-                ch_type.value, normalized_id, resolved
-            )
+            logger.info("Channel %s: resolve_internal_user_id success %r -> %r", ch_type.value, normalized_id, resolved)
             return self._normalize_id(ch_type, resolved)
-        except Exception:
+        except Exception as e:
             logger.error(
-                "Channel %s: resolve_internal_user_id failed for %r - %s",
-                ch_type.value, normalized_id, str(e)
+                "Channel %s: resolve_internal_user_id failed for %r: %s",
+                ch_type.value,
+                normalized_id,
+                e,
             )
             return normalized_id
 
@@ -405,20 +394,14 @@ class IdentityResolver:
                 allowed.add((ch, norm))
 
         async with self._get_db() as db:
-            cursor = await db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='identity_meta'"
-            )
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='identity_meta'")
             if not await cursor.fetchone():
                 return
 
-            cursor = await db.execute(
-                "SELECT channel, channel_user_id FROM channel_identities"
-            )
+            cursor = await db.execute("SELECT channel, channel_user_id FROM channel_identities")
             rows = await cursor.fetchall()
 
-            to_delete = [
-                (ch, cid) for ch, cid in rows if (ch, cid) not in allowed
-            ]
+            to_delete = [(ch, cid) for ch, cid in rows if (ch, cid) not in allowed]
             for ch, cid in to_delete:
                 await db.execute(
                     "DELETE FROM channel_identities WHERE channel = ? AND channel_user_id = ?",
@@ -486,7 +469,7 @@ class IdentityResolver:
 
                 # Collect all existing identities for the channels in this entry
                 existing_uids: list[str] = []
-                for ch_str, ch_type, norm in resolved:
+                for _ch_str, ch_type, norm in resolved:
                     uid = await self._find_existing(db, ch_type, norm)
                     if uid and uid not in existing_uids:
                         existing_uids.append(uid)
@@ -494,10 +477,7 @@ class IdentityResolver:
                 # Determine or create the canonical pincer_user_id
                 if len(existing_uids) > 1:
                     # Multiple distinct identities — merge them all into one
-                    if name:
-                        target_uid = name
-                    else:
-                        target_uid = existing_uids[0]
+                    target_uid = name or existing_uids[0]
                     for uid in existing_uids:
                         if uid != target_uid:
                             logger.info("Identity conflict resolved: merging %s into %s", uid, target_uid)
@@ -514,7 +494,8 @@ class IdentityResolver:
                         else:
                             logger.warning(
                                 "Named canonical ID %r ignored: identity already has name %r",
-                                name, existing_uid,
+                                name,
+                                existing_uid,
                             )
                             pincer_uid = existing_uid
                     else:
@@ -529,11 +510,10 @@ class IdentityResolver:
 
                 first_channel = resolved[0][0]
                 await db.execute(
-                    "INSERT OR IGNORE INTO identity_meta "
-                    "(pincer_user_id, preferred_channel) VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO identity_meta (pincer_user_id, preferred_channel) VALUES (?, ?)",
                     (pincer_uid, first_channel),
                 )
-                for ch_str, ch_type, norm in resolved:
+                for ch_str, _ch_type, norm in resolved:
                     await db.execute(
                         "INSERT OR IGNORE INTO channel_identities "
                         "(channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
@@ -579,8 +559,7 @@ class IdentityResolver:
     ) -> dict[str, str]:
         """Return first seen channel_user_id per channel for this user."""
         cursor = await db.execute(
-            "SELECT channel, channel_user_id FROM channel_identities "
-            "WHERE pincer_user_id = ? ORDER BY created_at",
+            "SELECT channel, channel_user_id FROM channel_identities WHERE pincer_user_id = ? ORDER BY created_at",
             (pincer_user_id,),
         )
         result: dict[str, str] = {}
@@ -610,7 +589,7 @@ class IdentityResolver:
             raw_name = entry[:at_pos].strip()
             if raw_name:
                 name = raw_name
-            entry = entry[at_pos + 1:]
+            entry = entry[at_pos + 1 :]
 
         pairs: list[tuple[str, str]] = []
         for part in entry.split("="):

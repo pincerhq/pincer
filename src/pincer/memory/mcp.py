@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from pincer.memory.base import BaseMemoryBackend, Memory
@@ -31,7 +31,7 @@ _COUNT_FETCH_LIMIT = 10_000
 
 def _parse_timestamp(s: str) -> float:
     try:
-        return datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp()
+        return datetime.fromisoformat(s).replace(tzinfo=UTC).timestamp()
     except Exception:
         return 0.0
 
@@ -41,11 +41,11 @@ def _tags_for(user_id: str, category: str) -> list[str]:
 
 
 def _user_from_tags(tags: list[str]) -> str:
-    return next((t[len(_USER_TAG_PREFIX):] for t in tags if t.startswith(_USER_TAG_PREFIX)), "")
+    return next((t[len(_USER_TAG_PREFIX) :] for t in tags if t.startswith(_USER_TAG_PREFIX)), "")
 
 
 def _category_from_tags(tags: list[str]) -> str:
-    return next((t[len(_CATEGORY_TAG_PREFIX):] for t in tags if t.startswith(_CATEGORY_TAG_PREFIX)), "general")
+    return next((t[len(_CATEGORY_TAG_PREFIX) :] for t in tags if t.startswith(_CATEGORY_TAG_PREFIX)), "general")
 
 
 def _row_to_memory(r: dict[str, Any], score: float = 0.0) -> Memory:
@@ -82,15 +82,12 @@ class MCPMemoryBackend(BaseMemoryBackend):
     async def _call(self, tool_name: str, args: dict[str, Any]) -> str:
         if not self._mcp_manager:
             raise RuntimeError(
-                "MCPMemoryBackend: MCP manager not set. "
-                "Call set_mcp_manager() after MCP servers have started."
+                "MCPMemoryBackend: MCP manager not set. Call set_mcp_manager() after MCP servers have started."
             )
         try:
             session = await self._mcp_manager.get_session(self._server_name)
         except ValueError as e:
-            raise RuntimeError(
-                f"MCPMemoryBackend: memory server '{self._server_name}' is not connected"
-            ) from e
+            raise RuntimeError(f"MCPMemoryBackend: memory server '{self._server_name}' is not connected") from e
         result = await session.call_tool(tool_name, args)
         content = getattr(result, "content", [])
         return content[0].text if content else ""
@@ -189,7 +186,4 @@ class MCPMemoryBackend(BaseMemoryBackend):
         if user_id:
             args["tags"] = f"{_USER_TAG_PREFIX}{user_id}"
         rows = await self._call_json("memory_search", args)
-        return [
-            _row_to_memory(r, score=max(0.0, 1.0 - r.get("distance", 0.0)))
-            for r in rows
-        ]
+        return [_row_to_memory(r, score=max(0.0, 1.0 - r.get("distance", 0.0))) for r in rows]

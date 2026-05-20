@@ -125,7 +125,7 @@ class SlackChannel(BaseChannel):
         if "@" in identifier and self._app is not None:
             try:
                 result = await self._app.client.users_lookupByEmail(email=identifier)
-                return result["user"]["id"]
+                return str(result["user"]["id"])
             except Exception:
                 logger.debug("Slack: could not resolve email %r to user_id", identifier)
         return identifier

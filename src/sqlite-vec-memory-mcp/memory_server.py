@@ -12,6 +12,7 @@ Environment variables:
     TRANSPORT           stdio | http (default: stdio)
     HOST                HTTP host (default: 127.0.0.1)
     PORT                HTTP port (default: 8000)
+    SERVER_UI           Enable the web UI in HTTP mode (default: 0 — disabled)
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ mcp = FastMCP(name="sqlite_vec_memory", instructions="Long-term memory with sema
 _DB_PATH = Path(os.environ.get("MEMORY_DB_PATH", Path.home() / "memory.db"))
 _EMBED_MODEL = os.environ.get("EMBED_MODEL", "BAAI/bge-small-en-v1.5")  # ex. all-MiniLM-L6-v2
 _EMBED_DIM = int(os.environ.get("EMBED_DIM", "384"))
+_UI_ENABLED: bool = os.environ.get("SERVER_UI", "0").lower() in ("1", "true", "yes")
 
 # Lazy singleton — loaded once on first embedding call.
 _embed_model: Any = None
@@ -125,13 +127,15 @@ async def health_check(request: Request) -> JSONResponse:
             "service": "sqlite-vec-memory-mcp",
             "version": "0.1.0",
             "transport": "http",
-            "ui": "/ui",
+            "ui": "/ui" if _UI_ENABLED else None,
         }
     )
 
 
 @mcp.custom_route("/", methods=["GET"])
-async def root_redirect(request: Request) -> RedirectResponse:
+async def root_redirect(request: Request) -> RedirectResponse | JSONResponse:
+    if not _UI_ENABLED:
+        return JSONResponse({"error": "UI is disabled. Start with --ui or SERVER_UI=1 (HTTP mode only)."}, status_code=404)
     return RedirectResponse("/ui")
 
 
@@ -153,10 +157,7 @@ def _logged(fn: Any) -> Any:
             if isinstance(v, str):
                 log_args[k] = v[:300] + ("…" if len(v) > 300 else "")
             elif isinstance(v, list):
-                log_args[k] = [
-                    (i[:100] + "…" if isinstance(i, str) and len(i) > 100 else i)
-                    for i in v[:10]
-                ]
+                log_args[k] = [(i[:100] + "…" if isinstance(i, str) and len(i) > 100 else i) for i in v[:10]]
             else:
                 log_args[k] = v
 
@@ -261,13 +262,15 @@ def memory_search(
         record_tags = json.loads(r["tags"]) if r["tags"] else []
         if tag_set and not tag_set.intersection(record_tags):
             continue
-        results.append({
-            "id": r["id"],
-            "content": r["content"],
-            "tags": record_tags,
-            "created_at": r["created_at"],
-            "distance": round(r["distance"], 6),
-        })
+        results.append(
+            {
+                "id": r["id"],
+                "content": r["content"],
+                "tags": record_tags,
+                "created_at": r["created_at"],
+                "distance": round(r["distance"], 6),
+            }
+        )
         if len(results) >= limit:
             break
     return results
@@ -524,8 +527,13 @@ def _tags_html(tags_json: str) -> str:
     return "".join(f'<span class="badge">{t}</span>' for t in tags) or '<span class="ts">—</span>'
 
 
+_UI_404 = JSONResponse({"error": "UI is disabled. Start with --ui or SERVER_UI=1 (HTTP mode only)."}, status_code=404)
+
+
 @mcp.custom_route("/ui", methods=["GET"])
-async def ui_list(request: Request) -> HTMLResponse:
+async def ui_list(request: Request) -> HTMLResponse | JSONResponse:
+    if not _UI_ENABLED:
+        return _UI_404
     q = request.query_params.get("q", "").strip()
     try:
         page = max(1, int(request.query_params.get("page", "1")))
@@ -541,9 +549,7 @@ async def ui_list(request: Request) -> HTMLResponse:
             " WHERE content LIKE ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (f"%{q}%", per_page, offset),
         ).fetchall()
-        total = db.execute(
-            "SELECT COUNT(*) FROM memories WHERE content LIKE ?", (f"%{q}%",)
-        ).fetchone()[0]
+        total = db.execute("SELECT COUNT(*) FROM memories WHERE content LIKE ?", (f"%{q}%",)).fetchone()[0]
     else:
         rows = db.execute(
             "SELECT id, content, tags, created_at FROM memories ORDER BY created_at DESC LIMIT ? OFFSET ?",
@@ -556,7 +562,8 @@ async def ui_list(request: Request) -> HTMLResponse:
     delete_all_btn = (
         f'<button class="btn btn-danger" type="button" onclick="openDeleteAll()"'
         f' title="Delete all {total} records">Delete all</button>'
-        if total > 0 else ""
+        if total > 0
+        else ""
     )
     search_bar = f"""
 <div class="bar">
@@ -602,24 +609,27 @@ async def ui_list(request: Request) -> HTMLResponse:
     extra = f"q={q_enc}" if q else ""
     pager = _build_pager(page, total_pages, total, per_page, "/ui", extra)
 
-    body = f'<h1>Memory Records</h1>{search_bar}{table}{pager}'
+    body = f"<h1>Memory Records</h1>{search_bar}{table}{pager}"
     return _page("List", body, active="memories")
 
 
 @mcp.custom_route("/ui/detail", methods=["GET"])
-async def ui_detail(request: Request) -> HTMLResponse:
+async def ui_detail(request: Request) -> HTMLResponse | JSONResponse:
+    if not _UI_ENABLED:
+        return _UI_404
     mem_id = request.query_params.get("id", "").strip()
     if not mem_id:
         return RedirectResponse("/ui")  # type: ignore[return-value]
 
     db = _connect()
-    row = db.execute(
-        "SELECT id, content, tags, created_at FROM memories WHERE id = ?", (int(mem_id),)
-    ).fetchone()
+    row = db.execute("SELECT id, content, tags, created_at FROM memories WHERE id = ?", (int(mem_id),)).fetchone()
     db.close()
 
     if not row:
-        body = f'<a class="btn btn-ghost" href="/ui">← Back</a><div class="empty" style="margin-top:24px">Memory #{mem_id} not found.</div>'
+        body = (
+            '<a class="btn btn-ghost" href="/ui">← Back</a><div class="empty" style="margin-top:24px">'
+            f"Memory #{mem_id} not found.</div>"
+        )
         return _page("Not found", body, active="memories")
 
     body = f"""
@@ -651,15 +661,17 @@ async def ui_detail(request: Request) -> HTMLResponse:
 
 
 @mcp.custom_route("/ui/delete", methods=["POST"])
-async def ui_delete(request: Request) -> RedirectResponse:
+async def ui_delete(request: Request) -> RedirectResponse | JSONResponse:
+    if not _UI_ENABLED:
+        return _UI_404
     form = await request.form()
     mem_id = form.get("id", "")
     q = form.get("q", "")
     page = form.get("page", "1")
     if mem_id:
         db = _connect()
-        db.execute("DELETE FROM memories WHERE id = ?", (int(mem_id),))
-        db.execute("DELETE FROM memory_vecs WHERE rowid = ?", (int(mem_id),))
+        db.execute("DELETE FROM memories WHERE id = ?", (int(str(mem_id)),))
+        db.execute("DELETE FROM memory_vecs WHERE rowid = ?", (int(str(mem_id)),))
         db.commit()
         db.close()
     params = f"page={page}" + (f"&q={q}" if q else "")
@@ -667,7 +679,9 @@ async def ui_delete(request: Request) -> RedirectResponse:
 
 
 @mcp.custom_route("/ui/delete-all", methods=["POST"])
-async def ui_delete_all(request: Request) -> RedirectResponse:
+async def ui_delete_all(request: Request) -> RedirectResponse | JSONResponse:
+    if not _UI_ENABLED:
+        return _UI_404
     db = _connect()
     db.execute("DELETE FROM memories")
     db.execute("DELETE FROM memory_vecs")
@@ -677,7 +691,9 @@ async def ui_delete_all(request: Request) -> RedirectResponse:
 
 
 @mcp.custom_route("/ui/logs", methods=["GET"])
-async def ui_logs(request: Request) -> HTMLResponse:
+async def ui_logs(request: Request) -> HTMLResponse | JSONResponse:
+    if not _UI_ENABLED:
+        return _UI_404
     tool_filter = request.query_params.get("tool", "").strip()
     try:
         page = max(1, int(request.query_params.get("page", "1")))
@@ -689,9 +705,9 @@ async def ui_logs(request: Request) -> HTMLResponse:
     db = _connect()
 
     # Distinct tool names for filter dropdown
-    tool_names = [r[0] for r in db.execute(
-        "SELECT DISTINCT tool_name FROM tool_call_logs ORDER BY tool_name"
-    ).fetchall()]
+    tool_names = [
+        r[0] for r in db.execute("SELECT DISTINCT tool_name FROM tool_call_logs ORDER BY tool_name").fetchall()
+    ]
 
     if tool_filter:
         rows = db.execute(
@@ -700,9 +716,7 @@ async def ui_logs(request: Request) -> HTMLResponse:
             " ORDER BY called_at DESC LIMIT ? OFFSET ?",
             (tool_filter, per_page, offset),
         ).fetchall()
-        total = db.execute(
-            "SELECT COUNT(*) FROM tool_call_logs WHERE tool_name = ?", (tool_filter,)
-        ).fetchone()[0]
+        total = db.execute("SELECT COUNT(*) FROM tool_call_logs WHERE tool_name = ?", (tool_filter,)).fetchone()[0]
     else:
         rows = db.execute(
             "SELECT id, tool_name, arguments, result, duration_ms, error, called_at"
@@ -713,10 +727,7 @@ async def ui_logs(request: Request) -> HTMLResponse:
     db.close()
 
     # Filter bar
-    tool_opts = "".join(
-        f'<option value="{t}"{"selected" if t == tool_filter else ""}>{t}</option>'
-        for t in tool_names
-    )
+    tool_opts = "".join(f'<option value="{t}"{"selected" if t == tool_filter else ""}>{t}</option>' for t in tool_names)
     filter_bar = f"""
 <div class="bar">
   <form method="get" action="/ui/logs" style="display:flex;gap:6px;flex:1">
@@ -733,7 +744,7 @@ async def ui_logs(request: Request) -> HTMLResponse:
         rows_html = ""
         for r in rows:
             status = '<span class="err">✗ error</span>' if r["error"] else '<span class="ok">✓</span>'
-            dur = f'{r["duration_ms"]:.1f} ms' if r["duration_ms"] is not None else "—"
+            dur = f"{r['duration_ms']:.1f} ms" if r["duration_ms"] is not None else "—"
             try:
                 args_obj = json.loads(r["arguments"] or "{}")
                 # Summary: first two params, values truncated to 60 chars each
@@ -779,7 +790,7 @@ async def ui_logs(request: Request) -> HTMLResponse:
     extra = f"tool={tool_filter}" if tool_filter else ""
     pager = _build_pager(page, total_pages, total, per_page, "/ui/logs", extra)
 
-    body = f'<h1>Tool Call Logs</h1>{filter_bar}{table}{pager}'
+    body = f"<h1>Tool Call Logs</h1>{filter_bar}{table}{pager}"
     return _page("Logs", body, active="logs")
 
 
@@ -790,6 +801,8 @@ async def ui_logs(request: Request) -> HTMLResponse:
 
 def main() -> None:
     import argparse
+
+    global _UI_ENABLED
 
     _init_db()
 
@@ -824,7 +837,22 @@ def main() -> None:
         default=os.environ.get("PORT", 8000),
         help="Bind port for HTTP transport (default: 8000)",
     )
+    parser.add_argument(
+        "--ui",
+        action="store_true",
+        default=_UI_ENABLED,
+        help="Enable the web UI at /ui — HTTP mode only (default: off; also set via SERVER_UI=1)",
+    )
+    parser.add_argument(
+        "--no-ui",
+        dest="ui",
+        action="store_false",
+        help="Disable the web UI (overrides --ui and SERVER_UI)",
+    )
     args = parser.parse_args()
+
+    # UI is only meaningful in HTTP mode; force it off for stdio regardless of flags/env.
+    _UI_ENABLED = args.ui and args.transport == "http"
 
     if args.transport == "http":
         logger.info("Starting sqlite_vec_memory_mcp · HTTP transport · %s:%s/mcp", args.host, args.port)

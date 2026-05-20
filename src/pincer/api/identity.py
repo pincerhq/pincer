@@ -29,9 +29,7 @@ async def list_identities(
             db.row_factory = aiosqlite.Row
 
             # Check that the new schema exists
-            async with db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='identity_meta'"
-            ) as cur:
+            async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='identity_meta'") as cur:
                 if not await cur.fetchone():
                     return {"identities": [], "total": 0}
 

@@ -24,6 +24,7 @@ from rich.logging import RichHandler
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
     from pincer.config import Settings
+    from pincer.memory.base import BaseMemoryBackend
 
 logger = logging.getLogger(__name__)
 app = typer.Typer(
@@ -140,7 +141,6 @@ async def _run_agent(settings: Settings) -> None:
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
-    from pincer.memory.base import BaseMemoryBackend
     from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import AuditAction, AuditEntry, get_audit_logger
     from pincer.security.rate_limiter import get_rate_limiter
@@ -429,6 +429,7 @@ async def _run_agent(settings: Settings) -> None:
     if mcp_manager:
         agent.mcp_manager = mcp_manager
         from pincer.memory.mcp import MCPMemoryBackend
+
         if isinstance(memory_store, MCPMemoryBackend):
             memory_store.set_mcp_manager(mcp_manager)
 
@@ -652,6 +653,7 @@ async def _run_agent(settings: Settings) -> None:
 
     # Init channels router for proactive delivery
     from pincer.channels.router import ChannelRouter
+
     router = ChannelRouter(identity)
 
     # Start channels
@@ -696,7 +698,7 @@ async def _run_agent(settings: Settings) -> None:
         """
         prefix = f"{ch_name}:"
         if canonical_id.startswith(prefix):
-            return canonical_id[len(prefix):]
+            return canonical_id[len(prefix) :]
         # Prefer the raw sender from the most recent inbound message so that
         # LID-based WhatsApp accounts route approvals back to the correct JID.
         active = _active_sender.get(f"{canonical_id}:{ch_name}")
@@ -704,6 +706,7 @@ async def _run_agent(settings: Settings) -> None:
             return active
         try:
             from pincer.channels.base import ChannelType as _CT
+
             all_ch = await identity.get_all_channels(canonical_id)
             raw = all_ch.get(_CT(ch_name))
             if raw:
@@ -1460,7 +1463,6 @@ async def _chat_loop() -> None:
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
-    from pincer.memory.base import BaseMemoryBackend
     from pincer.memory.summarizer import Summarizer
     from pincer.tools.builtin.files import file_list, file_read, file_write
     from pincer.tools.builtin.web_search import web_search
