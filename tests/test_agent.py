@@ -11,7 +11,7 @@ async def test_simple_response(settings, mock_llm, session_manager, cost_tracker
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
     result = await agent.handle_message("user1", "test", "Hello!")
     assert isinstance(result, AgentResponse)
-    assert result.text == "Hello! I'm Pincer."
+    assert "Hello! I'm Pincer." in result.text
     assert result.tool_calls_made == 0
 
 
@@ -68,4 +68,4 @@ async def test_tool_not_found(settings, mock_llm, session_manager, cost_tracker,
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
     result = await agent.handle_message("user1", "test", "Use nonexistent tool")
     # Agent should handle gracefully — the LLM gets an error and responds
-    assert result.text == "Sorry, that tool isn't available."
+    assert "Sorry, that tool isn't available." in result.text

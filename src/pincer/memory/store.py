@@ -184,6 +184,42 @@ class MemoryStore:
         logger.debug("Stored memory %s for user %s [%s]", mem_id[:8], user_id, category)
         return mem_id
 
+    async def add_profile(
+        self,
+        *,
+        user_id: str,
+        name: str | None,
+        use_case: str | None,
+        language: str | None,
+    ) -> str | None:
+        """Upsert a single 'profile' memory entry for a user.
+
+        Replaces any prior profile entry so the latest information wins.
+        Returns the new memory id, or None if no fields were provided.
+        """
+        assert self._db is not None
+        parts: list[str] = []
+        if name:
+            parts.append(f"The user's name is {name}.")
+        if use_case:
+            parts.append(f"They mainly use Pincer for {use_case}.")
+        if language:
+            parts.append(f"Preferred language: {language}.")
+        if not parts:
+            return None
+
+        await self._db.execute(
+            "DELETE FROM memories WHERE user_id = ? AND category = 'profile'",
+            (user_id,),
+        )
+        await self._db.commit()
+
+        return await self.store_memory(
+            user_id=user_id,
+            content=" ".join(parts),
+            category="profile",
+        )
+
     async def search_text(self, query: str, user_id: str | None = None, limit: int = 5) -> list[Memory]:
         """Full-text search over memories using FTS5."""
         assert self._db is not None

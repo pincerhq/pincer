@@ -27,6 +27,14 @@ def _session_key(user_id: str, channel: str) -> str:
     return f"{channel}:{user_id}"
 
 
+# Metadata keys used by the first-session onboarding flow.
+ONBOARDING_COMPLETE_KEY = "onboarding_complete"
+ONBOARDING_PROMPT_SENT_KEY = "onboarding_prompt_sent"
+PROFILE_NAME_KEY = "name"
+PROFILE_USE_CASE_KEY = "use_case"
+PROFILE_LANGUAGE_KEY = "language"
+
+
 @dataclass
 class Session:
     """In-memory representation of a conversation session."""
@@ -39,6 +47,36 @@ class Session:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     pincer_user_id: str = ""
+
+    # ── Onboarding helpers ──────────────────────────────
+
+    def is_fresh(self) -> bool:
+        """True when the session has no non-system messages yet."""
+        return not any(m.role != MessageRole.SYSTEM for m in self.messages)
+
+    def is_onboarded(self) -> bool:
+        return self.metadata.get(ONBOARDING_COMPLETE_KEY) == "true"
+
+    def onboarding_prompt_already_sent(self) -> bool:
+        return self.metadata.get(ONBOARDING_PROMPT_SENT_KEY) == "true"
+
+    def mark_onboarding_prompt_sent(self) -> None:
+        self.metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"
+
+    def mark_onboarded(
+        self,
+        *,
+        name: str | None = None,
+        use_case: str | None = None,
+        language: str | None = None,
+    ) -> None:
+        self.metadata[ONBOARDING_COMPLETE_KEY] = "true"
+        if name:
+            self.metadata[PROFILE_NAME_KEY] = name.strip()[:100]
+        if use_case:
+            self.metadata[PROFILE_USE_CASE_KEY] = use_case.strip()[:300]
+        if language:
+            self.metadata[PROFILE_LANGUAGE_KEY] = language.strip()[:20]
 
 
 class SessionManager:

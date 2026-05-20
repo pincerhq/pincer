@@ -268,10 +268,11 @@ async def test_agent_stream_simple(settings, session_manager, cost_tracker, tool
     text_chunks = [c for c in chunks if c.type == StreamEventType.TEXT]
     done_chunks = [c for c in chunks if c.type == StreamEventType.DONE]
 
-    assert len(text_chunks) == 4
+    # 4 streamed tokens + 1 appended onboarding-question chunk on fresh session
+    assert len(text_chunks) == 5
     assert text_chunks[0].content == "Hello"
     assert len(done_chunks) == 1
-    assert done_chunks[0].content == "Hello world!"
+    assert done_chunks[0].content.startswith("Hello world!")
 
 
 @pytest.mark.asyncio
@@ -312,7 +313,8 @@ async def test_agent_stream_with_tools(settings, session_manager, cost_tracker, 
     assert "greet" in tool_starts[0].content
 
     text_chunks = [c for c in chunks if c.type == StreamEventType.TEXT]
-    assert len(text_chunks) == 3
+    # 3 streamed tokens + 1 appended onboarding-question chunk on fresh session
+    assert len(text_chunks) == 4
 
 
 # ── Full Agent + Memory Integration Tests ─────────────────────

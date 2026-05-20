@@ -1,6 +1,6 @@
 [project]
 name = "pincer-agent"
-version = "0.7.6"
+version = "0.8.0"
 description = "Your personal AI agent. Text it on WhatsApp. It does stuff. 🦜"
 readme = "README.md"
 license = { text = "MIT" }
@@ -112,6 +112,17 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pincer"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "dashboard/node_modules",
+    "coverage.xml",
+    "costs.json",
+    "data/",
+    ".venv",
+    "dist/",
+    "pincer-wa/",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
