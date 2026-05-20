@@ -66,7 +66,7 @@ def _unpack_embedding(blob: bytes) -> list[float]:
     return list(struct.unpack(f"{count}f", blob))
 
 
-class MemoryStore:
+class SQLiteMemoryBackend:
     """Async SQLite-backed memory store with full-text and vector search."""
 
     def __init__(self, db_path: Path) -> None:
