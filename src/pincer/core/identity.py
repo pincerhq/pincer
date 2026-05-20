@@ -357,19 +357,19 @@ class IdentityResolver:
         channel = channels.get(ch_type)
         if channel is None:
             return normalized_id
-        #try:
-        resolved = await channel.resolve_internal_user_id(normalized_id)
-        logger.info(
-            "Channel %s: resolve_internal_user_id success %r -> %r",
-            ch_type.value, normalized_id, resolved
-        )
-        return self._normalize_id(ch_type, resolved)
-        #except Exception:
-        #    logger.error(
-        #        "Channel %s: resolve_internal_user_id failed for %r - %s",
-        #        ch_type.value, normalized_id, str(e)
-        #    )
-        return normalized_id
+        try:
+            resolved = await channel.resolve_internal_user_id(normalized_id)
+            logger.info(
+                "Channel %s: resolve_internal_user_id success %r -> %r",
+                ch_type.value, normalized_id, resolved
+            )
+            return self._normalize_id(ch_type, resolved)
+        except Exception:
+            logger.error(
+                "Channel %s: resolve_internal_user_id failed for %r - %s",
+                ch_type.value, normalized_id, str(e)
+            )
+            return normalized_id
 
     async def cleanup(
         self,

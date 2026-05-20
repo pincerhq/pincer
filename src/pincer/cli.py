@@ -601,9 +601,8 @@ async def _run_agent(settings: Settings) -> None:
         # get tagged with both user:{canonical_id} and user:{channel}:{id}.
         ch_user_id: str | None = None
         try:
-            from pincer.channels.base import ChannelType as _CT
             all_ch = await identity.get_all_channels(canonical_id)
-            ch_user_id = all_ch.get(_CT(incoming.channel))
+            ch_user_id = all_ch.get(incoming.channel_type)
         except Exception:
             pass
 
