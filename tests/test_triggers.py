@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -186,7 +185,7 @@ class TestCheckNewEmails:
 
         trigger_mgr._router.send_to_user.assert_awaited_once()
         call_args = trigger_mgr._router.send_to_user.call_args
-        assert "u1" == call_args[0][0]
+        assert call_args[0][0] == "u1"
         assert "1 new email" in call_args[0][1]
 
 
@@ -235,7 +234,7 @@ class TestCheckUpcoming:
 
         trigger_mgr._router.send_to_user.assert_awaited_once()
         args = trigger_mgr._router.send_to_user.call_args[0]
-        assert "u1" == args[0]
+        assert args[0] == "u1"
         assert "reminder" in args[1].lower()
 
     async def test_same_hour_not_sent_twice(self, trigger_mgr):
