@@ -65,7 +65,9 @@ COPY --chown=pincer:pincer --from=builder /app/pyproject.toml /app/
 COPY --chown=pincer:pincer --from=dashboard-builder \
     /app/dist /app/dashboard/dist
 
-#RUN mkdir -p /app/data/backups && chown -R pincer:pincer /app/data
+RUN mkdir -p /app/data/logs
+VOLUME /app/data
+RUN chown -R pincer:pincer /app/data
 
 # npm cache goes inside the data volume so it persists and is writable by pincer user
 ENV PATH="/app/.venv/bin:/usr/local/bin:$PATH" \

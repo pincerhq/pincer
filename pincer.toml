@@ -121,7 +121,7 @@ expose_tools = [
 
 # In app runtime servers using stdio protocol for fast startup (default)
 [[mcp.servers]]
-name = "memory"
+name = "sqlite_vec_memory"
 transport = "stdio"
 command = "python"
 args = ["${PINCER_SRC_DIR:-$PWD}/src/sqlite-vec-memory-mcp/memory_server.py"]

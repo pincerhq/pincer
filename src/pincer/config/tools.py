@@ -22,7 +22,7 @@ class ToolSettings(BaseModel):
         description="Memory backend: 'sqlite' (local DB) or 'mcp' (external MCP server)",
     )
     memory_mcp_server: str = Field(
-        default="sqlite-vec-memory",
+        default="sqlite_vec_memory",
         description=(
             "MCP server name used when memory_backend='mcp'. "
             "Connection to MCP server will taken from existing MCP servers pool"
