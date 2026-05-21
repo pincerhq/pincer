@@ -328,9 +328,7 @@ async def test_new_middleware_invalid_token_returns_401():
     from pincer.mcp.auth.errors import OAuthError
 
     token_service = MagicMock()
-    token_service.validate_access_token = MagicMock(
-        side_effect=OAuthError("invalid_token", "Token expired", 401)
-    )
+    token_service.validate_access_token = MagicMock(side_effect=OAuthError("invalid_token", "Token expired", 401))
     middleware = _make_new_middleware(token_service=token_service, localhost_bypass=False)
     request = _make_mock_request("10.0.0.1", path="/mcp", headers={"Authorization": "Bearer badtoken"})
     call_next = AsyncMock()

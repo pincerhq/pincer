@@ -996,8 +996,7 @@ def test_mcp_no_plaintext_secrets_skipped_no_toml(tmp_path):
 
 def test_mcp_no_plaintext_secrets_pass(tmp_path):
     (tmp_path / "pincer.toml").write_text(
-        "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"s\"\n"
-        'env = {TOKEN = "${GITHUB_TOKEN}"}\n'
+        '[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = "s"\nenv = {TOKEN = "${GITHUB_TOKEN}"}\n'
     )
     doc = SecurityDoctor(config_dir=tmp_path)
     result = doc._check_mcp_no_plaintext_secrets()
@@ -1006,8 +1005,7 @@ def test_mcp_no_plaintext_secrets_pass(tmp_path):
 
 def test_mcp_no_plaintext_secrets_warning(tmp_path):
     (tmp_path / "pincer.toml").write_text(
-        "[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = \"s\"\n"
-        'env = {token = "abcdefghijklmnopqrstuvwxyz"}\n'
+        '[mcp]\nenabled = true\n\n[[mcp.servers]]\nname = "s"\nenv = {token = "abcdefghijklmnopqrstuvwxyz"}\n'
     )
     doc = SecurityDoctor(config_dir=tmp_path)
     result = doc._check_mcp_no_plaintext_secrets()

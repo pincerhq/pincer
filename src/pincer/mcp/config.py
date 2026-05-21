@@ -37,6 +37,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
 class MCPTransport(StrEnum):
     STDIO = "stdio"
     STREAMABLE_HTTP = "streamable-http"

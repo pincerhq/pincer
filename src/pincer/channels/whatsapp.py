@@ -443,9 +443,7 @@ class WhatsAppChannel(BaseChannel):
             WhatsAppChannel._loop_started = True
             logger.debug("Started neonize event_global_loop in daemon thread")
 
-        self._client = NewAClient(name=
-            str(self._settings.data_dir / "pincer-wa.db")
-        )
+        self._client = NewAClient(name=str(self._settings.data_dir / "pincer-wa.db"))
 
         self._client.event.qr(self._on_qr)
 

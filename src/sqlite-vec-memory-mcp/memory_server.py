@@ -136,8 +136,7 @@ async def health_check(request: Request) -> JSONResponse:
 async def root_redirect(request: Request) -> RedirectResponse | JSONResponse:
     if not _UI_ENABLED:
         return JSONResponse(
-            {"error": "UI is disabled. Start with --ui or SERVER_UI=1 (HTTP mode only)."},
-            status_code=404
+            {"error": "UI is disabled. Start with --ui or SERVER_UI=1 (HTTP mode only)."}, status_code=404
         )
     return RedirectResponse("/ui")
 
