@@ -71,6 +71,7 @@ class MCPClientManager:
 
         enabled_servers = [s for s in self.config.servers if s.enabled]
         if not enabled_servers:
+            logger.warning("No configured MCP servers.")
             return {}
 
         results: dict[str, bool] = {}

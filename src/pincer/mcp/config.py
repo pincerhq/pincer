@@ -27,6 +27,7 @@ Environment variable format for a single server:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
 
 class MCPTransport(StrEnum):
     STDIO = "stdio"
@@ -207,6 +209,7 @@ def _parse_server_from_toml(raw: dict[str, Any]) -> MCPServerConfig:
 def _read_toml_raw(toml_path: Path) -> dict[str, Any] | None:
     """Read a TOML file and return the parsed dict. Returns None if absent or no TOML parser."""
     if not toml_path.exists():
+        logger.warning(f"Pincer {toml_path} not found. Ommit it")
         return None
     try:
         import tomllib  # Python 3.11+
