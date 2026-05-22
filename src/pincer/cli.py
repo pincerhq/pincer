@@ -324,8 +324,9 @@ async def _run_agent(settings: Settings) -> None:
     _mcp_cfg = None
     try:
         from pincer.mcp import load_mcp_config as _load_mcp_config
+        from pincer.mcp.config import _pincer_config_vars
 
-        _mcp_cfg = _load_mcp_config()
+        _mcp_cfg = _load_mcp_config(pincer_vars=_pincer_config_vars(settings))
     except ImportError:
         pass  # mcp package not installed
     except Exception as _mcp_cfg_err:
@@ -946,8 +947,9 @@ async def _run_agent(settings: Settings) -> None:
     try:
         from pincer.mcp import PincerMCPServer
         from pincer.mcp import load_mcp_config as _load_mcp_cfg
+        from pincer.mcp.config import _pincer_config_vars
 
-        _mcp_full_cfg = _load_mcp_cfg()
+        _mcp_full_cfg = _load_mcp_cfg(pincer_vars=_pincer_config_vars(settings))
         if _mcp_full_cfg.server.enabled:
             _acb = agent._approval_callback
             mcp_server = PincerMCPServer(

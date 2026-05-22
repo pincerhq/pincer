@@ -6,11 +6,13 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from pincer.config.core import CoreSettings
 from pincer.mcp.config import (
     MCPConfig,
     MCPServerConfig,
     MCPTransport,
     _interpolate_env,
+    _pincer_config_vars,
     load_mcp_config,
 )
 
@@ -125,6 +127,59 @@ def test_env_interpolation_fallback_primary_takes_precedence_over_set_fallback(m
     assert result == "/override"
 
 
+# ── _pincer_config_vars ───────────────────────────────────────────────────────
+
+
+def test_pincer_config_vars_data_dir() -> None:
+    settings = CoreSettings(data_dir="/tmp/pincer_test")
+    result = _pincer_config_vars(settings)
+    assert result["PINCER_DATA_DIR"] == "/tmp/pincer_test"
+
+
+def test_pincer_config_vars_all_fields() -> None:
+    settings = CoreSettings(
+        data_dir="/tmp/data",
+        log_level="DEBUG",
+        daily_budget_usd=10.0,
+        ms365_client_id="client-abc",
+        ms365_tenant_id="tenant-xyz",
+        openweathermap_api_key="weather-secret",
+        newsapi_key="news-secret",
+        briefing_time="08:00",
+        briefing_timezone="UTC",
+        timezone="UTC",
+    )
+    result = _pincer_config_vars(settings)
+    assert result["PINCER_DATA_DIR"] == "/tmp/data"
+    assert result["PINCER_LOG_LEVEL"] == "DEBUG"
+    assert result["PINCER_DAILY_BUDGET_USD"] == "10.0"
+    assert result["PINCER_MS365_CLIENT_ID"] == "client-abc"
+    assert result["PINCER_MS365_TENANT_ID"] == "tenant-xyz"
+    assert result["PINCER_OPENWEATHERMAP_API_KEY"] == "weather-secret"
+    assert result["PINCER_NEWSAPI_KEY"] == "news-secret"
+    assert result["PINCER_BRIEFING_TIME"] == "08:00"
+    assert result["PINCER_BRIEFING_TIMEZONE"] == "UTC"
+    assert result["PINCER_TIMEZONE"] == "UTC"
+
+
+def test_interpolate_env_extra_wins_over_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_DATA_DIR", "/from/os/environ")
+    result = _interpolate_env("${PINCER_DATA_DIR}/db", extra={"PINCER_DATA_DIR": "/from/settings"})
+    assert result == "/from/settings/db"
+
+
+def test_interpolate_env_extra_fallback_to_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_test")
+    result = _interpolate_env("Bearer ${GITHUB_TOKEN}", extra={"PINCER_DATA_DIR": "/x"})
+    assert result == "Bearer ghp_test"
+
+
+def test_interpolate_env_unresolved_returns_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NONEXISTENT_VAR_12345", raising=False)
+    result = _interpolate_env("${NONEXISTENT_VAR_12345}", extra={})
+    assert result == ""
+
+
 # ── TOML loading ─────────────────────────────────────────────────────────────
 
 
@@ -144,6 +199,22 @@ args = ["${PINCER_SRC_DIR:-$PWD}/src/sqlite-vec-memory-mcp/memory_server.py"]
     (tmp_path / "pincer.toml").write_text(toml_content)
     cfg = load_mcp_config(tmp_path)
     assert cfg.servers[0].args[0] == "/home/user/pincer/src/sqlite-vec-memory-mcp/memory_server.py"
+
+
+def test_load_mcp_config_pincer_vars_resolves_toml_env(tmp_path: Path) -> None:
+    toml_content = """
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "memory"
+transport = "stdio"
+command = "python"
+env = { MEMORY_DB_PATH = "${PINCER_DATA_DIR}/sqlite_vec.db" }
+"""
+    (tmp_path / "pincer.toml").write_text(toml_content)
+    cfg = load_mcp_config(tmp_path, pincer_vars={"PINCER_DATA_DIR": "/tmp/pincer_test"})
+    assert cfg.servers[0].env["MEMORY_DB_PATH"] == "/tmp/pincer_test/sqlite_vec.db"
 
 
 def test_load_mcp_config_no_file(tmp_path: Path) -> None:
@@ -199,6 +270,16 @@ def test_load_mcp_config_env_server(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert srv.name == "testserver"
     assert srv.command == "echo"
     assert srv.args == ["hello", "world"]
+
+
+def test_load_mcp_config_pincer_vars_resolves_env_server_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_NAME", "memory")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_TRANSPORT", "stdio")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_COMMAND", "python")
+    monkeypatch.setenv("PINCER_MCP_SERVER_1_ENV_MEMORY_DB_PATH", "${PINCER_DATA_DIR}/sqlite_vec.db")
+
+    cfg = load_mcp_config(tmp_path, pincer_vars={"PINCER_DATA_DIR": "/tmp/envtest"})
+    assert cfg.servers[0].env["MEMORY_DB_PATH"] == "/tmp/envtest/sqlite_vec.db"
 
 
 def test_mcp_disabled_via_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

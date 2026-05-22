@@ -33,7 +33,10 @@ import re
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from pincer.config.core import CoreSettings
 
 logger = logging.getLogger(__name__)
 
@@ -158,33 +161,63 @@ class MCPConfig:
             raise ValueError("Duplicate MCP server names detected")
 
 
-def _interpolate_env(value: str) -> str:
-    """Resolve ${VAR} and ${VAR:-$FALLBACK} references in config values using os.environ."""
+def _pincer_config_vars(settings: CoreSettings) -> dict[str, str]:
+    """Build an explicit PINCER_* → value mapping from a CoreSettings instance."""
+    from pydantic import SecretStr
 
+    def _str(v: object) -> str:
+        if isinstance(v, SecretStr):
+            return v.get_secret_value()
+        return str(v)
+
+    return {
+        "PINCER_DATA_DIR": _str(settings.data_dir),
+        "PINCER_LOG_LEVEL": _str(settings.log_level),
+        "PINCER_DAILY_BUDGET_USD": _str(settings.daily_budget_usd),
+        "PINCER_MS365_CLIENT_ID": _str(settings.ms365_client_id),
+        "PINCER_MS365_TENANT_ID": _str(settings.ms365_tenant_id),
+        "PINCER_OPENWEATHERMAP_API_KEY": _str(settings.openweathermap_api_key),
+        "PINCER_NEWSAPI_KEY": _str(settings.newsapi_key),
+        "PINCER_BRIEFING_TIME": _str(settings.briefing_time),
+        "PINCER_BRIEFING_TIMEZONE": _str(settings.briefing_timezone),
+        "PINCER_TIMEZONE": _str(settings.timezone),
+    }
+
+
+def _interpolate_env(value: str, extra: dict[str, str] | None = None) -> str:
+    """Resolve ${VAR} and ${VAR:-$FALLBACK} references.
+
+    Lookup order when extra is provided: extra (Pincer config) → os.environ → "".
+    When extra is None (legacy callers): unresolved placeholders pass through unchanged.
+    """
     def _replace(m: re.Match[str]) -> str:
         var, fallback_var = m.group(1), m.group(2)
+        if extra is not None and var in extra:
+            return extra[var]
         if var in os.environ:
             return os.environ[var]
         if fallback_var is not None:
-            return os.environ.get(fallback_var, m.group(0))
-        return m.group(0)
+            if extra is not None and fallback_var in extra:
+                return extra[fallback_var]
+            return os.environ.get(fallback_var, "" if extra is not None else m.group(0))
+        return "" if extra is not None else m.group(0)
 
     return re.sub(r"\$\{([^}:]+)(?::-\$([^}]+))?\}", _replace, value)
 
 
-def _interpolate_dict(d: dict[str, str]) -> dict[str, str]:
-    return {k: _interpolate_env(v) for k, v in d.items()}
+def _interpolate_dict(d: dict[str, str], extra: dict[str, str] | None = None) -> dict[str, str]:
+    return {k: _interpolate_env(v, extra) for k, v in d.items()}
 
 
-def _interpolate_list(values: list[str]) -> list[str]:
-    return [_interpolate_env(v) for v in values]
+def _interpolate_list(values: list[str], extra: dict[str, str] | None = None) -> list[str]:
+    return [_interpolate_env(v, extra) for v in values]
 
 
-def _parse_server_from_toml(raw: dict[str, Any]) -> MCPServerConfig:
+def _parse_server_from_toml(raw: dict[str, Any], pincer_vars: dict[str, str] | None = None) -> MCPServerConfig:
     """Parse a single [[mcp.servers]] TOML entry."""
     transport = MCPTransport(raw.get("transport", "stdio"))
-    env = _interpolate_dict(raw.get("env", {}))
-    headers = _interpolate_dict(raw.get("headers", {}))
+    env = _interpolate_dict(raw.get("env", {}), pincer_vars)
+    headers = _interpolate_dict(raw.get("headers", {}), pincer_vars)
     approval = raw.get("approval_required", ["*"])
     if isinstance(approval, str):
         approval = [approval]
@@ -194,7 +227,7 @@ def _parse_server_from_toml(raw: dict[str, Any]) -> MCPServerConfig:
         transport=transport,
         enabled=raw.get("enabled", True),
         command=raw.get("command"),
-        args=_interpolate_list(raw.get("args", [])),
+        args=_interpolate_list(raw.get("args", []), pincer_vars),
         env=env,
         url=raw.get("url"),
         headers=headers,
@@ -245,9 +278,9 @@ def _merge_mcp_raw(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
     return merged
 
 
-def _parse_mcp_config(mcp_raw: dict[str, Any]) -> MCPConfig:
+def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | None = None) -> MCPConfig:
     """Parse a raw [mcp] section dict into an MCPConfig."""
-    servers = [_parse_server_from_toml(s) for s in mcp_raw.get("servers", [])]
+    servers = [_parse_server_from_toml(s, pincer_vars) for s in mcp_raw.get("servers", [])]
     srv_raw = mcp_raw.get("server", {})
     # Parse approval_policy sub-table
     ap_raw = srv_raw.get("approval_policy", {})
@@ -293,7 +326,7 @@ def _parse_mcp_config(mcp_raw: dict[str, Any]) -> MCPConfig:
     )
 
 
-def _load_env_servers() -> list[MCPServerConfig]:
+def _load_env_servers(pincer_vars: dict[str, str] | None = None) -> list[MCPServerConfig]:
     """Build server configs from PINCER_MCP_SERVER_N_* env vars."""
     servers: list[MCPServerConfig] = []
     # Find all defined server indices: PINCER_MCP_SERVER_1_NAME, PINCER_MCP_SERVER_2_NAME, ...
@@ -316,15 +349,15 @@ def _load_env_servers() -> list[MCPServerConfig]:
 
         # Parse args: comma-separated
         args_str = os.environ.get(f"{prefix}ARGS", "")
-        args = _interpolate_list([a.strip() for a in args_str.split(",") if a.strip()]) if args_str else []
+        args = _interpolate_list([a.strip() for a in args_str.split(",") if a.strip()], pincer_vars) if args_str else []
 
         # Parse env: PINCER_MCP_SERVER_N_ENV_VARNAME=value
         env: dict[str, str] = {}
         env_prefix = f"{prefix}ENV_"
         for key, val in os.environ.items():
             if key.upper().startswith(env_prefix):
-                env_key = key[len(env_prefix) :]
-                env[env_key] = val
+                env_key = key[len(env_prefix):]
+                env[env_key] = _interpolate_env(val, pincer_vars)
 
         # Approval patterns
         approval_str = os.environ.get(f"{prefix}APPROVAL", "*")
@@ -358,7 +391,7 @@ def _load_env_servers() -> list[MCPServerConfig]:
     return servers
 
 
-def load_mcp_config(config_dir: Path | None = None) -> MCPConfig:
+def load_mcp_config(config_dir: Path | None = None, pincer_vars: dict[str, str] | None = None) -> MCPConfig:
     """
     Load MCP configuration from pincer.toml, pincer.local.toml, and environment variables.
 
@@ -369,6 +402,9 @@ def load_mcp_config(config_dir: Path | None = None) -> MCPConfig:
     top of pincer.toml's [mcp] section before env vars are applied.
     [[mcp.servers]] entries are matched by 'name'; a local entry with the same
     name replaces the base entry entirely.
+
+    Pass pincer_vars (built from get_settings() via _pincer_config_vars) to resolve
+    ${PINCER_*} placeholders in server env/args/headers from Pincer's own config.
 
     Call this at agent startup; invalid config raises ValueError immediately.
     """
@@ -392,11 +428,11 @@ def load_mcp_config(config_dir: Path | None = None) -> MCPConfig:
     if mcp_raw and not mcp_raw.get("enabled", True):
         return MCPConfig(enabled=False)
 
-    toml_cfg = _parse_mcp_config(mcp_raw) if mcp_raw else None
+    toml_cfg = _parse_mcp_config(mcp_raw, pincer_vars) if mcp_raw else None
 
     # Merge: TOML+local servers + env-defined servers
     toml_servers = toml_cfg.servers if toml_cfg else []
-    env_servers = _load_env_servers()
+    env_servers = _load_env_servers(pincer_vars)
 
     # Env servers override TOML servers with the same name
     toml_by_name = {s.name: s for s in toml_servers}
