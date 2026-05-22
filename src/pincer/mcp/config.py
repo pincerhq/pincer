@@ -190,6 +190,7 @@ def _interpolate_env(value: str, extra: dict[str, str] | None = None) -> str:
     Lookup order when extra is provided: extra (Pincer config) → os.environ → "".
     When extra is None (legacy callers): unresolved placeholders pass through unchanged.
     """
+
     def _replace(m: re.Match[str]) -> str:
         var, fallback_var = m.group(1), m.group(2)
         if extra is not None and var in extra:
@@ -356,7 +357,7 @@ def _load_env_servers(pincer_vars: dict[str, str] | None = None) -> list[MCPServ
         env_prefix = f"{prefix}ENV_"
         for key, val in os.environ.items():
             if key.upper().startswith(env_prefix):
-                env_key = key[len(env_prefix):]
+                env_key = key[len(env_prefix) :]
                 env[env_key] = _interpolate_env(val, pincer_vars)
 
         # Approval patterns
