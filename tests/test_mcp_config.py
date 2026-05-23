@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from pydantic import SecretStr
 
-from pincer.config.core import CoreSettings
 from pincer.mcp.config import (
     MCPConfig,
     MCPServerConfig,
@@ -15,9 +16,6 @@ from pincer.mcp.config import (
     _pincer_config_vars,
     load_mcp_config,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 # ── MCPServerConfig validation ──────────────────────────────────────────────
 
@@ -130,36 +128,69 @@ def test_env_interpolation_fallback_primary_takes_precedence_over_set_fallback(m
 # ── _pincer_config_vars ───────────────────────────────────────────────────────
 
 
+def _make_settings(**overrides: object) -> SimpleNamespace:
+    defaults: dict[str, object] = dict(
+        data_dir=Path("/tmp/pincer_test"),
+        log_level="INFO",
+        timezone="UTC",
+        shell_enabled=True,
+        shell_timeout=30,
+        shell_require_approval=True,
+        email_imap_host="",
+        email_imap_port=993,
+        email_smtp_host="",
+        email_smtp_port=587,
+        email_username="",
+        email_password=SecretStr(""),
+        email_from="",
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
 def test_pincer_config_vars_data_dir() -> None:
-    settings = CoreSettings(data_dir="/tmp/pincer_test")
-    result = _pincer_config_vars(settings)
+    result = _pincer_config_vars(_make_settings(data_dir=Path("/tmp/pincer_test")))
     assert result["PINCER_DATA_DIR"] == "/tmp/pincer_test"
 
 
 def test_pincer_config_vars_all_fields() -> None:
-    settings = CoreSettings(
-        data_dir="/tmp/data",
+    from pincer.config.channels import ChannelSettings
+    from pincer.config.tools import ToolSettings
+
+    settings = _make_settings(
+        data_dir=Path("/tmp/data"),
         log_level="DEBUG",
-        daily_budget_usd=10.0,
-        ms365_client_id="client-abc",
-        ms365_tenant_id="tenant-xyz",
-        openweathermap_api_key="weather-secret",
-        newsapi_key="news-secret",
-        briefing_time="08:00",
-        briefing_timezone="UTC",
         timezone="UTC",
+        shell_enabled=False,
+        shell_timeout=60,
+        shell_require_approval=False,
+        email_imap_host="imap.example.com",
+        email_smtp_host="smtp.example.com",
+        email_username="user@example.com",
+        email_password=SecretStr("s3cr3t"),
     )
     result = _pincer_config_vars(settings)
     assert result["PINCER_DATA_DIR"] == "/tmp/data"
     assert result["PINCER_LOG_LEVEL"] == "DEBUG"
-    assert result["PINCER_DAILY_BUDGET_USD"] == "10.0"
-    assert result["PINCER_MS365_CLIENT_ID"] == "client-abc"
-    assert result["PINCER_MS365_TENANT_ID"] == "tenant-xyz"
-    assert result["PINCER_OPENWEATHERMAP_API_KEY"] == "weather-secret"
-    assert result["PINCER_NEWSAPI_KEY"] == "news-secret"
-    assert result["PINCER_BRIEFING_TIME"] == "08:00"
-    assert result["PINCER_BRIEFING_TIMEZONE"] == "UTC"
     assert result["PINCER_TIMEZONE"] == "UTC"
+    assert result["PINCER_SHELL_ENABLED"] == "False"
+    assert result["PINCER_SHELL_TIMEOUT"] == "60"
+    assert result["PINCER_EMAIL_IMAP_HOST"] == "imap.example.com"
+    assert result["PINCER_EMAIL_PASSWORD"] == "s3cr3t"
+    # All shell_* and email_* fields must be present (mirrors model_fields)
+    for field_name in ToolSettings.model_fields:
+        if field_name.startswith("shell_"):
+            assert f"PINCER_{field_name.upper()}" in result
+    for field_name in ChannelSettings.model_fields:
+        if field_name.startswith("email_"):
+            assert f"PINCER_{field_name.upper()}" in result
+    # Service-specific vars must not be broadcast to every MCP server
+    assert "PINCER_DAILY_BUDGET_USD" not in result
+    assert "PINCER_MS365_CLIENT_ID" not in result
+    assert "PINCER_OPENWEATHERMAP_API_KEY" not in result
+    assert "PINCER_NEWSAPI_KEY" not in result
+    assert "PINCER_BRIEFING_TIME" not in result
+    assert "PINCER_BRIEFING_TIMEZONE" not in result
 
 
 def test_interpolate_env_extra_wins_over_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:

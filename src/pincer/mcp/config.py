@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from pincer.config.core import CoreSettings
+    from pincer.config.main import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -161,27 +161,30 @@ class MCPConfig:
             raise ValueError("Duplicate MCP server names detected")
 
 
-def _pincer_config_vars(settings: CoreSettings) -> dict[str, str]:
-    """Build an explicit PINCER_* → value mapping from a CoreSettings instance."""
+def _pincer_config_vars(settings: Settings) -> dict[str, str]:
+    """Build an explicit PINCER_* → value mapping from a Settings instance."""
     from pydantic import SecretStr
+
+    from pincer.config.channels import ChannelSettings
+    from pincer.config.tools import ToolSettings
 
     def _str(v: object) -> str:
         if isinstance(v, SecretStr):
             return v.get_secret_value()
         return str(v)
 
-    return {
+    result: dict[str, str] = {
         "PINCER_DATA_DIR": _str(settings.data_dir),
         "PINCER_LOG_LEVEL": _str(settings.log_level),
-        "PINCER_DAILY_BUDGET_USD": _str(settings.daily_budget_usd),
-        "PINCER_MS365_CLIENT_ID": _str(settings.ms365_client_id),
-        "PINCER_MS365_TENANT_ID": _str(settings.ms365_tenant_id),
-        "PINCER_OPENWEATHERMAP_API_KEY": _str(settings.openweathermap_api_key),
-        "PINCER_NEWSAPI_KEY": _str(settings.newsapi_key),
-        "PINCER_BRIEFING_TIME": _str(settings.briefing_time),
-        "PINCER_BRIEFING_TIMEZONE": _str(settings.briefing_timezone),
         "PINCER_TIMEZONE": _str(settings.timezone),
     }
+    for field_name in ToolSettings.model_fields:
+        if field_name.startswith("shell_"):
+            result[f"PINCER_{field_name.upper()}"] = _str(getattr(settings, field_name))
+    for field_name in ChannelSettings.model_fields:
+        if field_name.startswith("email_"):
+            result[f"PINCER_{field_name.upper()}"] = _str(getattr(settings, field_name))
+    return result
 
 
 def _interpolate_env(value: str, extra: dict[str, str] | None = None) -> str:
