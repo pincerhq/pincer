@@ -124,8 +124,8 @@ services:
     env_file: .env
     volumes:
       - pincer-data:/app/data
-      - ./pincer.toml:/app/data/pincer.toml:ro
-      - ./pincer.local.toml:/app/data/pincer.local.toml:ro
+      # - ./skills:app/skils # uncomment if you want continue to work with skills instead of MCP
+      # - ./pincer.local.toml:/app/pincer.local.toml:ro - uncomment this line if you want to override default pincer config
     depends_on:
       memory-mcp:
         condition: service_healthy

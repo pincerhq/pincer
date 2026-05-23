@@ -22,7 +22,6 @@ from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, Mess
 
 if TYPE_CHECKING:
     from pincer.config import Settings
-    from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -222,16 +221,11 @@ class DiscordChannel(BaseChannel):
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._handler: MessageHandler | None = None
-        self._identity: IdentityResolver | None = None
         self._bot: Any = None  # commands.Bot
         self._tree: Any = None  # app_commands.CommandTree
         self._ready = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
         self._agent: Any = None
-
-    def set_identity_resolver(self, identity: IdentityResolver) -> None:
-        """Set the identity resolver for cross-channel user mapping."""
-        self._identity = identity
 
     def set_agent(self, agent: Any) -> None:
         """Set the agent for /status command access."""
@@ -458,24 +452,15 @@ class DiscordChannel(BaseChannel):
         text: str,
         session_channel: str,
     ) -> str:
-        """Dispatch a message through the identity resolver and handler."""
+        """Dispatch a message through the handler."""
         if not self._handler:
             return "\u26a0\ufe0f Agent not ready."
 
-        pincer_user_id = ""
-        if self._identity:
-            pincer_user_id = await self._identity.resolve(
-                channel=ChannelType.DISCORD,
-                channel_user_id=user_id,
-                display_name=display_name,
-            )
-
         incoming = IncomingMessage(
-            user_id=pincer_user_id or user_id,
+            user_id=user_id,
             channel=session_channel,
             text=text,
             channel_type=ChannelType.DISCORD,
-            pincer_user_id=pincer_user_id,
         )
 
         try:

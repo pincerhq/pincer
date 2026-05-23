@@ -300,6 +300,74 @@ See [MCP Server guide](../core-components/pincer-mcp-server.md) for the full ser
 
 ---
 
+## sqlite-vec-memory — Semantic Memory Backend
+
+Pincer ships a bundled MCP server (`src/sqlite-vec-memory-mcp/`) that stores conversation memory as vector embeddings using `sqlite-vec` and ONNX. It can be used as a drop-in replacement for the default SQLite memory backend — with semantic (nearest-neighbour) search instead of FTS5.
+
+### When to use MCP memory
+
+| | SQLite (default) | MCP (`sqlite-vec-memory`) |
+|---|---|---|
+| Setup | Zero config | Requires `pincer.toml` entry |
+| Search | FTS5 full-text | Semantic vector similarity |
+| CLI commands | Full stats (SQL) | Approximate stats (list-based) |
+| Portability | Local file | Can point at a remote server |
+
+### Enable
+
+Add the server to `pincer.toml`:
+
+```toml
+[[mcp.servers]]
+name      = "sqlite-vec-memory"
+transport = "stdio"
+command   = "uv"
+args      = ["run", "--project", "src/sqlite-vec-memory-mcp", "memory-server"]
+```
+
+Switch the backend:
+
+```bash
+# .env or environment
+PINCER_MEMORY_BACKEND=mcp
+PINCER_MEMORY_MCP_SERVER=sqlite-vec-memory   # default, can be omitted
+```
+
+Start Pincer — memory is now stored and retrieved via the MCP server:
+
+```bash
+pincer run
+```
+
+### CLI memory commands with MCP
+
+All `pincer memory` subcommands detect the active backend and connect to it automatically:
+
+```
+$ pincer memory stats
+Backend: mcp  server=sqlite-vec-memory
+Memory Stats
+  Total memories: 142
+  Users:          3
+  general: 89
+  profile: 53
+```
+
+If the MCP server is not running or not in `pincer.toml`, the command exits with a clear error.
+
+### Memory tagging
+
+Memories are stored with two tags so the server can filter by user or category independently:
+
+| Tag | Example |
+|-----|---------|
+| `user:{pincer_user_id}` | `user:john` |
+| `category:{category}` | `category:profile` |
+
+The `pincer_user_id` is the unified cross-channel identity — the same ID regardless of whether the user wrote from Telegram, WhatsApp, or Slack.
+
+---
+
 ## OAuth 2.0 Authorization Server
 
 When running Pincer as an MCP server, it exposes a full OAuth 2.0 Authorization Server so external MCP clients can authenticate and access a scoped subset of Pincer's 304 first-party tools. Implementation lives in `src/pincer/mcp/auth/`.

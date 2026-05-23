@@ -27,7 +27,6 @@ from pincer.channels.slack_formatters import build_approval_blocks, markdown_to_
 
 if TYPE_CHECKING:
     from pincer.config import Settings
-    from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +99,6 @@ class SlackChannel(BaseChannel):
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self._identity: IdentityResolver | None = None
         self._handler: MessageHandler | None = None
         self._app: Any = None  # slack_bolt.app.async_app.AsyncApp
         self._socket_handler: Any = None  # AsyncSocketModeHandler
@@ -108,12 +106,29 @@ class SlackChannel(BaseChannel):
         # Map approval_id → asyncio.Future[bool] for button interactions
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
 
-    def set_identity_resolver(self, identity: IdentityResolver) -> None:
-        self._identity = identity
-
     @property
     def name(self) -> str:
         return "slack"
+
+    async def resolve_internal_user_id(self, identifier: str) -> str:
+        """Resolve a Slack identifier to an internal user ID (U...).
+
+        Handles two cases:
+        - Already a Slack user ID (starts with "U") → returned as-is.
+        - An email address → resolved via users.lookupByEmail (requires the
+          users:read.email scope on the bot token).
+
+        Any other format (display name, etc.) is returned unchanged.
+        """
+        if identifier.startswith("U"):
+            return identifier
+        if "@" in identifier and self._app is not None:
+            try:
+                result = await self._app.client.users_lookupByEmail(email=identifier)
+                return str(result["user"]["id"])
+            except Exception:
+                logger.debug("Slack: could not resolve email %r to user_id", identifier)
+        return identifier
 
     # ── Lifecycle ────────────────────────────────────────────────────────────
 
@@ -316,16 +331,6 @@ class SlackChannel(BaseChannel):
             session_key = f"slack-thread-{msg_ts}"
             reply_thread_ts = msg_ts
 
-        # Resolve identity
-        display_name = await self._get_display_name(slack_user_id, client)
-        pincer_user_id = ""
-        if self._identity:
-            pincer_user_id = await self._identity.resolve(
-                channel=ChannelType.SLACK,
-                channel_user_id=slack_user_id,
-                display_name=display_name,
-            )
-
         # Process image attachments
         images: list[tuple[bytes, str]] = []
         for f in files:
@@ -336,12 +341,11 @@ class SlackChannel(BaseChannel):
                     images.append((data, mime))
 
         incoming = IncomingMessage(
-            user_id=pincer_user_id or slack_user_id,
+            user_id=slack_user_id,
             channel=session_key,
             text=text,
             images=images,
             channel_type=ChannelType.SLACK,
-            pincer_user_id=pincer_user_id,
             raw=event,
         )
 

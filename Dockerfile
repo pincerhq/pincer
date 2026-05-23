@@ -31,11 +31,10 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/app/.venv
 
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock pincer.toml README.md ./
 COPY src/ src/
-COPY README.md ./
 # DEPRCATED: skills are deprecated and will removed in 0.9.0 version
-COPY skills/ skills/
+# COPY skills/ skills/
 RUN uv sync --frozen --no-cache --no-dev --all-extras
 
 # ============================================
@@ -60,12 +59,16 @@ RUN groupadd -r pincer && useradd -r -g pincer -m pincer
 COPY --chown=pincer:pincer --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY --chown=pincer:pincer --from=builder /app/src /app/src
 COPY --chown=pincer:pincer --from=builder /app/.venv /app/.venv
-COPY --chown=pincer:pincer --from=builder /app/skills /app/skills
+# DEPRCATED: skills are deprecated and will removed in 0.9.0 version
+#COPY --chown=pincer:pincer --from=builder /app/skills /app/skills
 COPY --chown=pincer:pincer --from=builder /app/pyproject.toml /app/
+COPY --chown=pincer:pincer --from=builder /app/pincer.toml /app/
 COPY --chown=pincer:pincer --from=dashboard-builder \
     /app/dist /app/dashboard/dist
 
-#RUN mkdir -p /app/data/backups && chown -R pincer:pincer /app/data
+RUN mkdir -p /app/data/logs
+VOLUME /app/data
+RUN chown -R pincer:pincer /app/data
 
 # npm cache goes inside the data volume so it persists and is writable by pincer user
 ENV PATH="/app/.venv/bin:/usr/local/bin:$PATH" \

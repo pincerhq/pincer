@@ -24,6 +24,7 @@ from rich.logging import RichHandler
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
     from pincer.config import Settings
+    from pincer.memory.base import BaseMemoryBackend
 
 logger = logging.getLogger(__name__)
 app = typer.Typer(
@@ -125,11 +126,21 @@ def run() -> None:
     asyncio.run(_run_agent(settings))
 
 
+def _create_memory_backend(settings: Settings):  # type: ignore[return]
+    """Factory: select and construct the configured memory backend."""
+    if settings.memory_backend == "mcp":
+        from pincer.memory.mcp import MCPMemoryBackend
+
+        return MCPMemoryBackend(server_name=settings.memory_mcp_server)
+    from pincer.memory.sqlite import SQLiteMemoryBackend
+
+    return SQLiteMemoryBackend(settings.db_path)
+
+
 async def _run_agent(settings: Settings) -> None:
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
-    from pincer.memory.store import MemoryStore
     from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import AuditAction, AuditEntry, get_audit_logger
     from pincer.security.rate_limiter import get_rate_limiter
@@ -158,7 +169,7 @@ async def _run_agent(settings: Settings) -> None:
     )
 
     # Initialize memory system
-    memory_store: MemoryStore | None = None
+    memory_store: BaseMemoryBackend | None = None
     summarizer: Summarizer | None = None
 
     # Create LLM provider
@@ -176,7 +187,7 @@ async def _run_agent(settings: Settings) -> None:
         llm = OpenAIProvider(settings)
 
     if settings.memory_enabled:
-        memory_store = MemoryStore(settings.db_path)
+        memory_store = _create_memory_backend(settings)
         await memory_store.initialize()
         summarizer = Summarizer(
             llm=llm,
@@ -205,6 +216,7 @@ async def _run_agent(settings: Settings) -> None:
     # send_file / send_image are channel-bound — they need the channel_map
     # populated by channel startup below, so they stay in cli.py rather than
     # in pincer.tools.bootstrap.
+    # TODO: channel_map should replaced by router.channels in future but keep stay as is due send_file resolve
     channel_map: dict[str, BaseChannel] = {}
 
     async def send_file(path: str, caption: str = "", context: dict | None = None) -> str:
@@ -312,8 +324,9 @@ async def _run_agent(settings: Settings) -> None:
     _mcp_cfg = None
     try:
         from pincer.mcp import load_mcp_config as _load_mcp_config
+        from pincer.mcp.config import _pincer_config_vars
 
-        _mcp_cfg = _load_mcp_config()
+        _mcp_cfg = _load_mcp_config(pincer_vars=_pincer_config_vars(settings))
     except ImportError:
         pass  # mcp package not installed
     except Exception as _mcp_cfg_err:
@@ -416,6 +429,10 @@ async def _run_agent(settings: Settings) -> None:
     )
     if mcp_manager:
         agent.mcp_manager = mcp_manager
+        from pincer.memory.mcp import MCPMemoryBackend
+
+        if isinstance(memory_store, MCPMemoryBackend):
+            memory_store.set_mcp_manager(mcp_manager)
 
     # MCP server export (optional — exposes Pincer tools to external MCP clients)
     mcp_server = None
@@ -424,9 +441,11 @@ async def _run_agent(settings: Settings) -> None:
     async def on_message(incoming: IncomingMessage) -> str:
         from pincer.exceptions import RateLimitExceeded
 
+        canonical_id = incoming.pincer_user_id or incoming.user_id
+
         # Special commands
         if incoming.text == "/clear":
-            session = await session_mgr.get_or_create(incoming.user_id, incoming.channel)
+            session = await session_mgr.get_or_create(canonical_id, incoming.channel)
             await session_mgr.clear(session)
             return "Conversation cleared."
 
@@ -445,12 +464,12 @@ async def _run_agent(settings: Settings) -> None:
 
         # Sprint 5: Rate limit check
         try:
-            await rate_limiter.check_message(incoming.user_id)
+            await rate_limiter.check_message(canonical_id)
         except RateLimitExceeded as e:
             if audit_logger:
                 await audit_logger.log(
                     AuditEntry(
-                        user_id=incoming.user_id,
+                        user_id=canonical_id,
                         action=AuditAction.RATE_LIMIT_HIT,
                         channel=incoming.channel,
                         input_summary=e.message,
@@ -462,7 +481,7 @@ async def _run_agent(settings: Settings) -> None:
         if audit_logger:
             await audit_logger.log(
                 AuditEntry(
-                    user_id=incoming.user_id,
+                    user_id=canonical_id,
                     action=AuditAction.MESSAGE_RECEIVED,
                     channel=incoming.channel,
                     input_summary=(incoming.text or "")[:500],
@@ -580,70 +599,86 @@ async def _run_agent(settings: Settings) -> None:
             file_context = "\n\n".join(file_parts)
             text = f"{file_context}\n\n{text}" if text else file_context
 
+        # Look up the stable (configured) channel ID for this user so memories
+        # get tagged with both user:{canonical_id} and user:{channel}:{id}.
+        ch_user_id: str | None = None
+        try:
+            all_ch = await identity.get_all_channels(canonical_id)
+            ch_user_id = all_ch.get(incoming.channel_type)
+        except Exception:
+            pass
+
         response = await agent.handle_message(
-            user_id=incoming.user_id,
+            user_id=canonical_id,
             channel=incoming.channel,
             text=text,
             images=incoming.images if incoming.images else None,
+            channel_user_id=ch_user_id,
         )
 
         cost_str = f"\n\n`${response.cost_usd:.4f}`" if response.cost_usd > 0 else ""
         return response.text + cost_str
 
     # Sprint 3: Identity resolver
+    from pincer.channels.middleware import IdentityMiddleware, build_pipeline
     from pincer.core.identity import IdentityResolver
 
     identity = IdentityResolver(settings.db_path, settings.identity_map)
     await identity.ensure_table()
-    await identity.seed_from_config()
+
+    _identity_pipeline = build_pipeline(IdentityMiddleware(identity))
 
     # Pending ask_user futures per user_id — populated by channels that route
     # ask_user responses back through on_message (WhatsApp).  Telegram uses
     # inline buttons so it owns its own pending state.
     _pending_ask: dict[str, asyncio.Future[str]] = {}
 
+    # Maps "{canonical_id}:{channel}" → raw channel user_id seen in the most
+    # recent inbound message.  Used by _raw_id so approval/input prompts are
+    # sent back to the exact JID (e.g. LID) the user is currently messaging
+    # from, rather than the first-linked ID stored in the DB.
+    _active_sender: dict[str, str] = {}
+
     _orig_on_message_fn = on_message
 
     async def on_message(incoming: IncomingMessage) -> str:  # type: ignore[no-redef]
-        fut = _pending_ask.get(incoming.user_id)
+        raw_user_id = incoming.user_id  # preserve before pipeline rewrites it
+        incoming = await _identity_pipeline(incoming)
+        canonical_id = incoming.pincer_user_id or incoming.user_id
+        _active_sender[f"{canonical_id}:{incoming.channel}"] = raw_user_id
+        fut = _pending_ask.get(canonical_id)
         if fut and not fut.done():
             fut.set_result(incoming.text)
             return ""
         return await _orig_on_message_fn(incoming)
 
+    # Init channels router for proactive delivery
+    from pincer.channels.router import ChannelRouter
+
+    router = ChannelRouter(identity)
+
     # Start channels
-    channels: list[BaseChannel] = []
+    from pincer.channels.base import ChannelType
+
     tg = None
     if settings.telegram_bot_token.get_secret_value():
         from pincer.channels.telegram import TelegramChannel
 
         tg = TelegramChannel(settings)
         tg.set_stream_agent(agent)
-        tg.set_identity_resolver(identity)
         await tg.start(on_message)
-        channels.append(tg)
         channel_map[tg.name] = tg
-
         console.print("[green]Telegram connected (streaming enabled)[/green]")
-
-    # Sprint 3: Channel router for proactive delivery
-    from pincer.channels.base import ChannelType
-    from pincer.channels.router import ChannelRouter
-
-    router = ChannelRouter(identity)
     if tg:
         router.register(ChannelType.TELEGRAM, tg)
 
-    # Sprint 3: WhatsApp channel (optional)
     wa = None
     if settings.whatsapp_enabled:
         try:
             from pincer.channels.whatsapp import WhatsAppChannel
 
             wa = WhatsAppChannel(settings)
-            wa.set_identity_resolver(identity)
             await wa.start(on_message)
-            channels.append(wa)
             channel_map[wa.name] = wa
             router.register(ChannelType.WHATSAPP, wa)
             console.print("[green]WhatsApp connected[/green]")
@@ -651,6 +686,36 @@ async def _run_agent(settings: Settings) -> None:
             console.print(f"[yellow]WhatsApp failed: {e}[/yellow]")
 
     # Wire approval + ask_user callbacks across all interactive channels.
+
+    async def _raw_id(canonical_id: str, ch_name: str) -> str:
+        """Resolve a canonical pincer_user_id back to the raw channel user ID.
+
+        Priority:
+        1. Exact channel-scoped fallback form ("{channel}:{raw_id}").
+        2. Most recently seen raw sender for this user/channel (_active_sender).
+           This ensures approval/input prompts go back to the exact JID
+           (LID or phone) the user is currently messaging from.
+        3. First linked channel ID in the identity DB (fallback for proactive).
+        """
+        prefix = f"{ch_name}:"
+        if canonical_id.startswith(prefix):
+            return canonical_id[len(prefix) :]
+        # Prefer the raw sender from the most recent inbound message so that
+        # LID-based WhatsApp accounts route approvals back to the correct JID.
+        active = _active_sender.get(f"{canonical_id}:{ch_name}")
+        if active:
+            return active
+        try:
+            from pincer.channels.base import ChannelType as _CT
+
+            all_ch = await identity.get_all_channels(canonical_id)
+            raw = all_ch.get(_CT(ch_name))
+            if raw:
+                return raw
+        except Exception:
+            logger.debug("Failed to resolve raw id for %s/%s", ch_name, canonical_id)
+        return canonical_id
+
     async def _channel_approval(
         tool_name: str,
         arguments: dict,
@@ -658,9 +723,11 @@ async def _run_agent(settings: Settings) -> None:
         channel: str,
     ) -> bool:
         if channel == "telegram" and tg is not None:
-            return await tg.request_approval(user_id, tool_name, arguments)
+            raw_id = await _raw_id(user_id, "telegram")
+            return await tg.request_approval(raw_id, tool_name, arguments)
         if channel == "whatsapp" and wa is not None:
-            return await wa.request_approval(user_id, tool_name, arguments)
+            raw_id = await _raw_id(user_id, "whatsapp")
+            return await wa.request_approval(raw_id, tool_name, arguments)
         logger.warning(
             "No approval UI for channel %s; denying %s",
             channel,
@@ -670,16 +737,18 @@ async def _run_agent(settings: Settings) -> None:
 
     async def _channel_ask_user(user_id: str, channel: str, question: str) -> str:
         if channel == "whatsapp" and wa is not None:
+            raw_id = await _raw_id(user_id, "whatsapp")
             return await wa.request_input(
-                user_id,
+                raw_id,
                 f"🔌 *MCP Client* asks:\n\n{question}\n\n_Reply with your answer:_",
             )
         if channel == "telegram" and tg is not None:
+            raw_id = await _raw_id(user_id, "telegram")
             fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
-            _pending_ask[user_id] = fut
+            _pending_ask[user_id] = fut  # keyed on canonical so on_message lookup works
             try:
                 await tg.send(
-                    user_id,
+                    raw_id,
                     f"🔌 **MCP Client** asks:\n\n{question}\n\n_Reply with your answer:_",
                 )
                 return await asyncio.wait_for(fut, timeout=120)
@@ -698,7 +767,8 @@ async def _run_agent(settings: Settings) -> None:
     ) -> None:
         if channel == "whatsapp" and wa is not None and settings.whatsapp_show_progress:
             try:
-                await wa.notify_tool_event(phase, tool_name, arguments, user_id)
+                raw_id = await _raw_id(user_id, "whatsapp")
+                await wa.notify_tool_event(phase, tool_name, arguments, raw_id)
             except Exception:
                 logger.debug("WA tool_event notify failed", exc_info=True)
 
@@ -720,9 +790,7 @@ async def _run_agent(settings: Settings) -> None:
             voice_engine = get_voice_engine(settings)
             vc = VoiceChannel(settings)
             vc.set_engine(voice_engine)
-            vc.set_identity_resolver(identity)
             await vc.start(on_message)
-            channels.append(vc)
             channel_map[vc.name] = vc
             router.register(ChannelType.VOICE, vc)
             init_voice_routes(voice_engine, settings)
@@ -787,10 +855,8 @@ async def _run_agent(settings: Settings) -> None:
             from pincer.channels.discord_channel import DiscordChannel
 
             dc = DiscordChannel(settings)
-            dc.set_identity_resolver(identity)
             dc.set_agent(agent)
             await dc.start(on_message)
-            channels.append(dc)
             channel_map[dc.name] = dc
             router.register(ChannelType.DISCORD, dc)
             console.print("[green]Discord connected[/green]")
@@ -807,9 +873,7 @@ async def _run_agent(settings: Settings) -> None:
                 from pincer.channels.signal import SignalChannel
 
                 sig = SignalChannel(settings)
-                sig.set_identity_resolver(identity)
                 await sig.start(on_message)
-                channels.append(sig)
                 channel_map[sig.name] = sig
                 router.register(ChannelType.SIGNAL, sig)
                 console.print("[green]Signal connected[/green]")
@@ -825,10 +889,8 @@ async def _run_agent(settings: Settings) -> None:
             from pincer.channels.slack import SlackChannel
 
             slk = SlackChannel(settings)
-            slk.set_identity_resolver(identity)
             await slk.start(on_message)
             if slk._app is not None:  # start() may bail silently if import fails
-                channels.append(slk)
                 channel_map[slk.name] = slk
                 router.register(ChannelType.SLACK, slk)
                 console.print("[green]Slack connected (Socket Mode)[/green]")
@@ -839,9 +901,12 @@ async def _run_agent(settings: Settings) -> None:
     else:
         console.print("[dim]Slack skipped (no PINCER_SLACK_BOT_TOKEN / PINCER_SLACK_APP_TOKEN)[/dim]")
 
-    if not channels:
+    if not router.channels:
         console.print("[yellow]No channels configured. Set PINCER_TELEGRAM_BOT_TOKEN.[/yellow]")
         return
+
+    # normalize identity map in through router
+    await router.rebuild_identity_map()
 
     # Sprint 3: Scheduler + Proactive Agent
     from pincer.scheduler import CronScheduler, EventTriggerManager, ProactiveAgent
@@ -882,8 +947,9 @@ async def _run_agent(settings: Settings) -> None:
     try:
         from pincer.mcp import PincerMCPServer
         from pincer.mcp import load_mcp_config as _load_mcp_cfg
+        from pincer.mcp.config import _pincer_config_vars
 
-        _mcp_full_cfg = _load_mcp_cfg()
+        _mcp_full_cfg = _load_mcp_cfg(pincer_vars=_pincer_config_vars(settings))
         if _mcp_full_cfg.server.enabled:
             _acb = agent._approval_callback
             mcp_server = PincerMCPServer(
@@ -932,7 +998,7 @@ async def _run_agent(settings: Settings) -> None:
         except Exception as e:
             console.print(f"[yellow]API server failed to start: {e}[/yellow]")
 
-    active = [ch.name for ch in channels]
+    active = [ch.name for ch in router.channels.values()]
     console.print(
         f"\n[bold green]{settings.agent_name} is running![/bold green] "
         f"Channels: {', '.join(active)}. Press Ctrl+C to stop.\n"
@@ -959,7 +1025,7 @@ async def _run_agent(settings: Settings) -> None:
         await triggers.stop()
         await scheduler.stop()
         await proactive.close()
-        for ch in channels:
+        for ch in router.channels.values():
             await ch.stop()
         try:
             from pincer.tools.builtin.browser import close_browser
@@ -1399,7 +1465,6 @@ async def _chat_loop() -> None:
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
-    from pincer.memory.store import MemoryStore
     from pincer.memory.summarizer import Summarizer
     from pincer.tools.builtin.files import file_list, file_read, file_write
     from pincer.tools.builtin.web_search import web_search
@@ -1423,10 +1488,10 @@ async def _chat_loop() -> None:
 
         llm = OpenAIProvider(settings)
 
-    memory_store: MemoryStore | None = None
+    memory_store: BaseMemoryBackend | None = None
     summarizer: Summarizer | None = None
     if settings.memory_enabled:
-        memory_store = MemoryStore(settings.db_path)
+        memory_store = _create_memory_backend(settings)
         await memory_store.initialize()
         summarizer = Summarizer(
             llm=llm,
@@ -1934,10 +1999,10 @@ def memory_search(query: str = typer.Argument(help="Search query")) -> None:
 
 async def _memory_search(query: str) -> None:
     from pincer.config import get_settings_relaxed
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.sqlite import SQLiteMemoryBackend
 
     settings = get_settings_relaxed()
-    store = MemoryStore(settings.db_path)
+    store = SQLiteMemoryBackend(settings.db_path)
     await store.initialize()
     results = await store.search_text(query, limit=10)
     if not results:
@@ -1956,21 +2021,18 @@ def memory_stats() -> None:
 
 async def _memory_stats() -> None:
     from pincer.config import get_settings_relaxed
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.sqlite import SQLiteMemoryBackend
 
     settings = get_settings_relaxed()
-    store = MemoryStore(settings.db_path)
+    store = SQLiteMemoryBackend(settings.db_path)
     await store.initialize()
 
-    async with store._db.execute("SELECT COUNT(*) FROM memories") as cur:  # type: ignore[union-attr]
-        row = await cur.fetchone()
-        total = row[0] if row else 0
-    async with store._db.execute("SELECT COUNT(DISTINCT user_id) FROM memories") as cur:  # type: ignore[union-attr]
+    total = await store.count()
+    assert store._db is not None
+    async with store._db.execute("SELECT COUNT(DISTINCT user_id) FROM memories") as cur:
         row = await cur.fetchone()
         users = row[0] if row else 0
-    async with store._db.execute(  # type: ignore[union-attr]
-        "SELECT category, COUNT(*) FROM memories GROUP BY category"
-    ) as cur:
+    async with store._db.execute("SELECT category, COUNT(*) FROM memories GROUP BY category") as cur:
         categories = {r[0]: r[1] async for r in cur}
 
     console.print("[bold]Memory Stats[/bold]")
@@ -1991,13 +2053,12 @@ def memory_clear(
 
 async def _memory_clear(user_id: str) -> None:
     from pincer.config import get_settings_relaxed
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.sqlite import SQLiteMemoryBackend
 
     settings = get_settings_relaxed()
-    store = MemoryStore(settings.db_path)
+    store = SQLiteMemoryBackend(settings.db_path)
     await store.initialize()
-    await store._db.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))  # type: ignore[union-attr]
-    await store._db.commit()  # type: ignore[union-attr]
+    await store.delete_user_memories(user_id)
     console.print(f"[green]Cleared memories for {user_id}[/green]")
     await store.close()
 
@@ -2013,21 +2074,17 @@ def memory_export(
 
 async def _memory_export(user_id: str, output: str) -> None:
     import json as _json
+    from pathlib import Path as _P
 
     from pincer.config import get_settings_relaxed
-    from pincer.memory.store import MemoryStore
+    from pincer.memory.sqlite import SQLiteMemoryBackend
 
     settings = get_settings_relaxed()
-    store = MemoryStore(settings.db_path)
+    store = SQLiteMemoryBackend(settings.db_path)
     await store.initialize()
 
-    async with store._db.execute(  # type: ignore[union-attr]
-        "SELECT content, category, created_at FROM memories WHERE user_id = ? ORDER BY created_at",
-        (user_id,),
-    ) as cur:
-        records = [{"content": r[0], "category": r[1], "created_at": r[2]} async for r in cur]
-
-    from pathlib import Path as _P
+    memories = await store.list_memories(user_id=user_id, limit=100_000)
+    records = [{"content": m.content, "category": m.category, "created_at": m.created_at} for m in memories]
 
     _P(output).write_text(_json.dumps(records, indent=2))
     console.print(f"[green]Exported {len(records)} memories to {output}[/green]")

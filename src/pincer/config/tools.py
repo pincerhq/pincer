@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator
 
 
 class ToolSettings(BaseModel):
@@ -17,6 +17,17 @@ class ToolSettings(BaseModel):
 
     # ── Memory ────────────────────────────────────────────
     memory_enabled: bool = Field(default=True, description="Enable memory system")
+    memory_backend: str = Field(
+        default="sqlite",
+        description="Memory backend: 'sqlite' (local DB) or 'mcp' (external MCP server)",
+    )
+    memory_mcp_server: str = Field(
+        default="sqlite_vec_memory",
+        description=(
+            "MCP server name used when memory_backend='mcp'. "
+            "Connection to MCP server will taken from existing MCP servers pool"
+        ),
+    )
     summary_model: str = Field(
         default="claude-haiku-4-5-20251001",
         description="Cheap model for conversation summarization",
@@ -36,3 +47,10 @@ class ToolSettings(BaseModel):
         default=0.10, ge=0.0, description="Max cost per image generation request in USD"
     )
     image_daily_limit: int = Field(default=50, ge=0, description="Max image generations per day (0 = unlimited)")
+
+    @field_validator("memory_backend", mode="before")
+    @classmethod
+    def check_value_allowed(cls, v: str) -> str:
+        if v not in ["sqlite", "mcp"]:
+            raise ValidationError("Provided value not in allowed list: sqlite, mcp")
+        return v

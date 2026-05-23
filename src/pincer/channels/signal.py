@@ -13,7 +13,6 @@ if TYPE_CHECKING:
     from pincer.channels.base import MessageHandler
     from pincer.channels.signal_client import SignalClient
     from pincer.config import Settings
-    from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -40,16 +39,12 @@ class SignalChannel(BaseChannel):
         self._settings = settings
         self._client: SignalClient | None = None
         self._handler: MessageHandler | None = None
-        self._identity: IdentityResolver | None = None
         self._tasks: list[asyncio.Task[Any]] = []
         self._seen: set[int] = set()  # deduplicate by timestamp
 
     @property
     def name(self) -> str:
         return "signal"
-
-    def set_identity_resolver(self, resolver: IdentityResolver) -> None:
-        self._identity = resolver
 
     async def start(self, handler: MessageHandler) -> None:
         from pincer.channels.signal_client import SignalAPIError, SignalClient
@@ -202,19 +197,10 @@ class SignalChannel(BaseChannel):
                         logger.warning("Voice transcription failed: %s", exc)
                     break
 
-        # Identity resolution
-        user_id = msg.source
-        if self._identity:
-            try:
-                user_id = await self._identity.resolve(ChannelType.SIGNAL, msg.source, msg.source_name or None)
-            except Exception as exc:
-                logger.warning("Identity resolution failed: %s", exc)
-
         incoming = IncomingMessage(
-            user_id=user_id,
+            user_id=msg.source,
             channel=self.name,
             text=text,
-            pincer_user_id=user_id,
             channel_type=ChannelType.SIGNAL,
             raw=msg,
         )

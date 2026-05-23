@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +15,7 @@ from pincer.api.audit import router as audit_router
 from pincer.api.chat import router as chat_router
 from pincer.api.conversations import router as conversations_router
 from pincer.api.costs import router as costs_router
+from pincer.api.identity import router as identity_router
 from pincer.api.integrations import router as integrations_router
 from pincer.api.skills import router as skills_router
 from pincer.config import get_settings_relaxed
@@ -69,6 +70,27 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Add Bearer token security scheme so the Swagger UI shows an Authorize button.
+    from fastapi.openapi.utils import get_openapi
+
+    def _custom_openapi() -> dict[str, Any]:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            routes=app.routes,
+        )
+        schema.setdefault("components", {}).setdefault("securitySchemes", {})["BearerAuth"] = {
+            "type": "http",
+            "scheme": "bearer",
+        }
+        schema["security"] = [{"BearerAuth": []}]
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = _custom_openapi  # type: ignore[method-assign]
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -103,6 +125,7 @@ def create_app() -> FastAPI:
     app.include_router(costs_router)
     app.include_router(audit_router)
     app.include_router(conversations_router)
+    app.include_router(identity_router)
     app.include_router(skills_router)
     app.include_router(integrations_router)
     app.include_router(chat_router)

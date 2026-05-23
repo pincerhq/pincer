@@ -36,9 +36,12 @@ class IncomingMessage:
     reply_to_message_id: str | None = None
     raw: Any = None
 
-    # Sprint 3: cross-channel identity
+    # Cross-channel identity — populated by IdentityMiddleware, not by adapters.
     pincer_user_id: str = ""
     channel_type: ChannelType = ChannelType.TELEGRAM
+    # Alternative raw IDs for the same sender (e.g. WhatsApp LID + phone number).
+    # IdentityMiddleware tries these in order after user_id.
+    alt_user_ids: list[str] = field(default_factory=list)
 
     # Sprint 3: generic media fields (used by WhatsApp)
     media_type: str | None = None  # "image", "audio", "document", None
@@ -116,3 +119,18 @@ class BaseChannel(ABC):
             full += chunk
         if full:
             await self.send(user_id, full)
+
+    async def resolve_internal_user_id(self, identifier: str) -> str:
+        """Resolve a human-readable identifier to the channel's internal user ID.
+
+        Called by the identity layer to translate config-provided values (e.g. a
+        phone number or email) to the real ID the service uses at runtime (e.g. a
+        WhatsApp LID or a Telegram numeric user ID).
+
+        Returns the internal ID string on success, or the original identifier
+        if the channel does not support this resolution or cannot translate it
+        yet (e.g. because the session hasn't received the necessary data).
+
+        Override in channel subclasses that can perform the translation.
+        """
+        return identifier

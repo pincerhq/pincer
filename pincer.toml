@@ -121,12 +121,13 @@ expose_tools = [
 
 # In app runtime servers using stdio protocol for fast startup (default)
 [[mcp.servers]]
-name = "memory"
+name = "sqlite_vec_memory"
 transport = "stdio"
 command = "python"
 args = ["${PINCER_SRC_DIR:-$PWD}/src/sqlite-vec-memory-mcp/memory_server.py"]
 env = { MEMORY_DB_PATH = "${PINCER_DATA_DIR}/sqlite_vec.db" }
 sandbox = true
+approval_required = ["*"]
 
 [[mcp.servers]]
 name      = "newsapi"
@@ -134,6 +135,7 @@ transport = "stdio"
 command = "python"
 args = ["${PINCER_SRC_DIR:-$PWD}/src/pincer-mcps/newsapi_server.py"]
 env = { API_KEY="${PINCER_NEWSAPI_KEY}" }
+approval_required = ["*"]
 
 [[mcp.servers]]
 name      = "openweathermap"
@@ -141,6 +143,7 @@ transport = "stdio"
 command = "python"
 args = ["${PINCER_SRC_DIR:-$PWD}/src/pincer-mcps/openweathermap_server.py"]
 env = { API_KEY="${PINCER_OPENWEATHERMAP_API_KEY}" }
+approval_required = ["*"]
 
 [[mcp.servers]]
 name      = "pomodoro"
