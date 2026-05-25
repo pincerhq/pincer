@@ -20,21 +20,18 @@ from typing import TYPE_CHECKING
 
 import aiosqlite
 
+from pincer.memory.base import (
+    BaseMemoryBackend,
+    Memory,
+    PINCER_MEMORY_USER_TAG_PREFIX,
+    PINCER_MEMORY_CATEGORY_TAG_PREFIX,
+    PINCER_MEMORY_COUNT_FETCH_LIMIT
+)
+
 if TYPE_CHECKING:
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class Memory:
-    id: str
-    user_id: str
-    content: str
-    category: str
-    created_at: float
-    score: float = 0.0
-    tags: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +65,7 @@ def _unpack_embedding(blob: bytes) -> list[float]:
     return list(struct.unpack(f"{count}f", blob))
 
 
-class SQLiteMemoryBackend:
+class SQLiteMemoryBackend(BaseMemoryBackend):
     """Async SQLite-backed memory store with full-text and vector search."""
 
     def __init__(self, db_path: Path) -> None:
@@ -188,7 +185,7 @@ class SQLiteMemoryBackend:
         mem_id = str(uuid.uuid4())
         blob = _pack_embedding(embedding) if embedding else None
 
-        tags = [f"user:{user_id}", f"category:{category}"]
+        tags = [f"{PINCER_MEMORY_USER_TAG_PREFIX}{user_id}", f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}{category}"]
         if extra_tags and isinstance(extra_tags, list):
             tags += extra_tags
         await self._db.execute(
@@ -240,7 +237,7 @@ class SQLiteMemoryBackend:
         self,
         query: str,
         user_id: str | None = None,
-        limit: int = 5,
+        limit: int = PINCER_MEMORY_COUNT_FETCH_LIMIT,
         tags: list[str] | None = None,
     ) -> list[Memory]:
         """Full-text search over memories using FTS5, with optional tag filtering (OR logic)."""
@@ -296,7 +293,7 @@ class SQLiteMemoryBackend:
         self,
         embedding: list[float],
         user_id: str | None = None,
-        limit: int = 5,
+        limit: int = PINCER_MEMORY_COUNT_FETCH_LIMIT,
         tags: list[str] | None = None,
     ) -> list[Memory]:
         """Vector similarity search using cosine similarity on embeddings, with optional tag filtering (OR logic)."""
@@ -343,7 +340,42 @@ class SQLiteMemoryBackend:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [m for _, m in scored[:limit]]
 
-    async def count_memories(self, user_id: str | None = None) -> int:
+    async def update_memory(
+        self,
+        memory_id: str,
+        content: str | None = None,
+        category: str | None = None,
+        tags: list[str] | None = None,
+    ) -> None:
+        """Update an existing memory in place. Only non-None fields are changed."""
+        assert self._db is not None
+        updates: list[str] = []
+        params: list[object] = []
+        if content is not None:
+            updates.append("content = ?")
+            params.append(content)
+        if category is not None:
+            updates.append("category = ?")
+            params.append(category)
+        if tags is not None:
+            updates.append("tags = ?")
+            params.append(json.dumps(tags))
+        if not updates:
+            return
+        params.append(memory_id)
+        await self._db.execute(
+            f"UPDATE memories SET {', '.join(updates)} WHERE id = ?",
+            params,
+        )
+        await self._db.commit()
+
+    async def delete_memory(self, memory_id: str) -> None:
+        """Delete a single memory by ID."""
+        assert self._db is not None
+        await self._db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+        await self._db.commit()
+
+    async def count(self, user_id: str | None = None) -> int:
         """Return total number of memory records, optionally scoped to a user."""
         assert self._db is not None
         if user_id:
@@ -372,7 +404,7 @@ class SQLiteMemoryBackend:
     async def list_memories(
         self,
         user_id: str | None = None,
-        limit: int = 100,
+        limit: int = PINCER_MEMORY_COUNT_FETCH_LIMIT,
         offset: int = 0,
         category: str | None = None,
         tags: list[str] | None = None,
@@ -405,54 +437,6 @@ class SQLiteMemoryBackend:
             f"FROM memories m{tag_join} "
             f"{where_clause}"
             f"ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
-        )
-
-        results: list[Memory] = []
-        async with self._db.execute(sql, sql_params) as cursor:
-            async for row in cursor:
-                results.append(
-                    Memory(
-                        id=row[0],
-                        user_id=row[1],
-                        content=row[2],
-                        category=row[3],
-                        created_at=row[4],
-                        tags=json.loads(row[5]) if row[5] else [],
-                    )
-                )
-        return results
-
-    async def get_recent_memories(
-        self,
-        user_id: str,
-        limit: int = 10,
-        category: str | None = None,
-        tags: list[str] | None = None,
-    ) -> list[Memory]:
-        """Get most recent memories for a user, optionally filtered by category or tags (OR logic)."""
-        assert self._db is not None
-
-        conditions = ["m.user_id = ?"]
-        sql_params: list[object] = [user_id]
-        tag_join = ""
-
-        if category:
-            conditions.append("m.category = ?")
-            sql_params.append(category)
-
-        if tags:
-            tag_join = ", json_each(m.tags) t"
-            conditions.append(f"t.value IN ({','.join('?' * len(tags))})")
-            sql_params.extend(tags)
-
-        where = " AND ".join(conditions)
-        sql_params.append(limit)
-
-        sql = (
-            f"SELECT DISTINCT m.id, m.user_id, m.content, m.category, m.created_at, m.tags "
-            f"FROM memories m{tag_join} "
-            f"WHERE {where} "
-            f"ORDER BY m.created_at DESC LIMIT ?"
         )
 
         results: list[Memory] = []

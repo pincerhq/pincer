@@ -2027,7 +2027,7 @@ async def _memory_stats() -> None:
     store = SQLiteMemoryBackend(settings.db_path)
     await store.initialize()
 
-    total = await store.count_memories()
+    total = await store.count()
     assert store._db is not None
     async with store._db.execute("SELECT COUNT(DISTINCT user_id) FROM memories") as cur:
         row = await cur.fetchone()
