@@ -67,14 +67,16 @@ def _make_audit():
 # ── Approval logic ────────────────────────────────────────────────────────────
 
 
-def test_wildcard_requires_all() -> None:
+def test_wildcard_glob_requires_all() -> None:
+    """["*"] matches every tool name via glob — all tools require approval."""
     tool = FakeTool("create_issue")
     assert _requires_approval(tool, ["*"]) is True
 
 
-def test_none_skips_all() -> None:
+def test_non_matching_allowlist_auto_approves() -> None:
+    """A pattern list where nothing matches acts as an empty allowlist → auto-approve."""
     tool = FakeTool("create_issue")
-    assert _requires_approval(tool, ["none"]) is False
+    assert _requires_approval(tool, ["read_*"]) is False
 
 
 def test_glob_pattern_match() -> None:
@@ -83,9 +85,9 @@ def test_glob_pattern_match() -> None:
 
 
 def test_glob_pattern_no_match() -> None:
-    """When no pattern matches and no annotations, fail-safe is True (require approval)."""
+    """When patterns are set but none match, tool is not in the allowlist → auto-approve."""
     tool = FakeTool("read_file")
-    assert _requires_approval(tool, ["create_*"]) is True  # No match → fail-safe True
+    assert _requires_approval(tool, ["create_*"]) is False  # Not in allowlist → auto-approve
 
 
 def test_negative_pattern_excludes() -> None:

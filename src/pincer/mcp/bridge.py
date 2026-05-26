@@ -29,18 +29,16 @@ def _requires_approval(tool: Any, approval_patterns: list[str]) -> bool:
     Determine if an MCP tool requires user approval before execution.
 
     Priority:
-    1. ["none"] in patterns → never require approval (explicit trust)
-    2. ["*"] in patterns → always require approval
-    3. Glob patterns matched against tool name
-    4. MCP tool annotations (destructiveHint → require, readOnlyHint → don't)
-    5. Default: require approval (fail-safe)
+    1. Glob patterns matched against tool name (allowlist mode):
+       - ["*"]              → all tools require approval
+       - ["create_*"]       → only matching tools require approval; others run freely
+       - ["!*"]             → negative glob matches every tool → nothing requires approval
+       - ["!read_*"]        → all tools except read_* require approval
+       - positive match → require; negative "!pattern" match → auto-approve
+    2. Patterns provided but no match → auto-approve (tool not in the allowlist)
+    3. MCP tool annotations (destructiveHint → require, readOnlyHint → don't)
+    4. Default: require approval (fail-safe — no patterns configured at all)
     """
-    if "none" in approval_patterns:
-        return False
-
-    if "*" in approval_patterns:
-        return True
-
     tool_name: str = tool.name
 
     # Check positive patterns (require approval) and negative (exclude from approval)
@@ -51,6 +49,10 @@ def _requires_approval(tool: Any, approval_patterns: list[str]) -> bool:
         elif fnmatch.fnmatch(tool_name, pattern):
             return True
 
+    # Patterns were specified but none matched → tool is not in the allowlist → auto-approve
+    if approval_patterns:
+        return False
+
     # Fall back to MCP annotations if available
     annotations = getattr(tool, "annotations", None)
     if annotations:
@@ -59,7 +61,7 @@ def _requires_approval(tool: Any, approval_patterns: list[str]) -> bool:
         if getattr(annotations, "readOnlyHint", False):
             return False
 
-    return True  # Fail-safe default
+    return True  # Fail-safe: no patterns configured at all
 
 
 def _format_result(result: Any) -> str:

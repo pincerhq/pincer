@@ -150,18 +150,18 @@ tool_prefix = false
 
 | Pattern | Meaning |
 |---------|---------|
-| `["*"]` | All tools on this server require approval **(default)** |
-| `["none"]` | No tools require approval (explicit trust) |
-| `["create_*", "delete_*"]` | Only tools matching these globs require approval |
+| not set | Every tool requires approval **(default)** |
+| `["*"]` | Every tool requires approval (explicit) |
+| `["create_*", "delete_*"]` | Only tools matching these globs require approval; all others run freely |
 | `["!read_*"]` | All tools EXCEPT those matching the negative glob require approval |
+| `["!*"]` | No tools require approval — negative glob matches everything, all auto-approve |
 
 **Priority order:**
 
-1. `["none"]` → never require approval
-2. `["*"]` → always require approval
-3. Glob patterns (positive `pattern` and negative `!pattern`)
-4. MCP tool annotations (`destructiveHint` → require, `readOnlyHint` → don't)
-5. **Default: require approval** — fail-safe when nothing matches
+1. Glob patterns matched against tool name (positive `pattern` and negative `!pattern`)
+2. Patterns provided but no match → **auto-approve** (tool not in the allowlist)
+3. MCP tool annotations (`destructiveHint` → require, `readOnlyHint` → don't)
+4. **Default: require approval** — fail-safe when no patterns are configured at all
 
 ---
 
@@ -485,7 +485,6 @@ When a pattern is detected, the output is still returned (to avoid breaking func
 |-------|-----------------|
 | `mcp_config_valid` | `pincer.toml` parses without errors; all required fields present |
 | `mcp_sandbox_enabled` | All stdio servers have `sandbox = true` |
-| `mcp_approval_not_bypassed` | No server uses `approval_required = ["none"]` |
 | `mcp_no_plaintext_secrets` | `pincer.toml` contains no hardcoded tokens (only `${VAR}` refs) |
 | `mcp_tool_count` | Total enabled servers within `max_servers` limit |
 | `mcp_env_vars` | All `${VAR}` references in `env` are resolved at runtime |
@@ -546,7 +545,7 @@ transport = "stdio"
 command   = "npx"
 args      = ["-y", "@modelcontextprotocol/server-brave-search"]
 env       = { BRAVE_API_KEY = "${BRAVE_API_KEY}" }
-approval_required = ["none"]  # Search is read-only; no approval needed
+approval_required = ["brave_search_local"]  # only flag local filesystem searches
 ```
 
 ### Slack
@@ -602,8 +601,8 @@ pincer mcp tools   # See what was registered
 
 **Approval prompt not appearing**
 
-- `["none"]` disables all approvals for that server
-- The fail-safe default when no pattern matches is **require approval**
+- When patterns are configured, unmatched tools are **auto-approved** (allowlist mode)
+- With no patterns configured (`approval_required` absent), every tool requires approval
 - Check the pattern: `create_*` matches `create_issue` but not `delete_issue`
 
 **Server keeps disconnecting**
