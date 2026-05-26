@@ -9,9 +9,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
-PINCER_MEMORY_USER_TAG_PREFIX = "user:"
-PINCER_MEMORY_CATEGORY_TAG_PREFIX = "category:"
-PINCER_MEMORY_COUNT_FETCH_LIMIT = 10_000
+PINCER_MEMORY_USER_TAG_PREFIX = "user"
+PINCER_MEMORY_CATEGORY_TAG_PREFIX = "category"
+PINCER_MEMORY_COUNT_FETCH_LIMIT = 50
+PINCER_MEMORY_USER_REQUEST_PREFIX = "User asked"
+PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX = "Assistant replied"
+
 
 @dataclass(frozen=True, slots=True)
 class Memory:
@@ -54,9 +57,9 @@ class BaseMemoryBackend(ABC):
         user:{user_id} and category:{category} tags.
         """
 
+    @abstractmethod
     async def get_memory(self, memory_id: str) -> Memory | None:
-        """Fetch a single memory by ID. Returns None if not supported or not found."""
-        return None
+        """Fetch a single memory by ID. Returns None if not found."""
 
     @abstractmethod
     async def list_memories(
@@ -66,11 +69,13 @@ class BaseMemoryBackend(ABC):
         offset: int = 0,
         category: str | None = None,
         tags: list[str] | None = None,
+        match_all_tags: bool = False,
     ) -> list[Memory]:
         """List memories, newest first, with optional filtering and offset pagination.
 
         If user_id is None, list across all users.
-        tags filters use OR logic: any record matching at least one tag is included.
+        tags with match_all_tags=False (default) returns records matching ANY tag (OR logic).
+        tags with match_all_tags=True returns only records matching ALL tags (AND logic).
         Backends that do not support offset (e.g. MCP) may silently ignore it.
         """
 

@@ -282,29 +282,48 @@ def memory_search(
 @_logged
 def memory_list(
     limit: int = 20,
+    offset: int = 0,
     tags: str | list[str] | None = None,
+    match_all_tags: bool = False,
 ) -> list[dict[str, Any]]:
-    """List recent memories, optionally filtered by tags (OR logic).
+    """List recent memories, optionally filtered by tags.
 
-    tags: a single tag string or a list of tags — returns records matching ANY tag.
+    tags: a single tag string or a list of tags.
+    match_all: when False (default) returns records matching ANY tag (OR logic); when True returns only records matching ALL provided tags (AND logic).
+    offset: number of records to skip for pagination.
     """
     tag_list = _normalize_tags(tags)
     db = _connect()
     if tag_list:
-        placeholders = ",".join("?" * len(tag_list))
-        rows = db.execute(
-            f"""
-            SELECT DISTINCT m.id, m.content, m.tags, m.created_at
-            FROM memories m, json_each(m.tags) t
-            WHERE t.value IN ({placeholders})
-            ORDER BY m.created_at DESC LIMIT ?
-            """,  # noqa: S608
-            (*tag_list, limit),
-        ).fetchall()
+        if match_all_tags:
+            # AND logic: one json_each join per required tag via GROUP BY + COUNT
+            placeholders = ",".join("?" * len(tag_list))
+            rows = db.execute(
+                f"""
+                SELECT m.id, m.content, m.tags, m.created_at
+                FROM memories m, json_each(m.tags) t
+                WHERE t.value IN ({placeholders})
+                GROUP BY m.id
+                HAVING COUNT(DISTINCT t.value) = ?
+                ORDER BY m.created_at DESC LIMIT ? OFFSET ?
+                """,  # noqa: S608
+                (*tag_list, len(tag_list), limit, offset),
+            ).fetchall()
+        else:
+            placeholders = ",".join("?" * len(tag_list))
+            rows = db.execute(
+                f"""
+                SELECT DISTINCT m.id, m.content, m.tags, m.created_at
+                FROM memories m, json_each(m.tags) t
+                WHERE t.value IN ({placeholders})
+                ORDER BY m.created_at DESC LIMIT ? OFFSET ?
+                """,  # noqa: S608
+                (*tag_list, limit, offset),
+            ).fetchall()
     else:
         rows = db.execute(
-            "SELECT id, content, tags, created_at FROM memories ORDER BY created_at DESC LIMIT ?",
-            (limit,),
+            "SELECT id, content, tags, created_at FROM memories ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
     db.close()
     return [
@@ -316,6 +335,27 @@ def memory_list(
         }
         for r in rows
     ]
+
+
+@mcp.tool()
+@_logged
+def memory_get(memory_id: int) -> dict[str, Any] | None:
+    """Fetch a single memory record by ID. Returns null if not found."""
+    logger.info("tool: memory_get")
+    db = _connect()
+    row = db.execute(
+        "SELECT id, content, tags, created_at FROM memories WHERE id = ?",
+        (memory_id,),
+    ).fetchone()
+    db.close()
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "content": row["content"],
+        "tags": json.loads(row["tags"]),
+        "created_at": row["created_at"],
+    }
 
 
 @mcp.tool()

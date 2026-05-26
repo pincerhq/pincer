@@ -48,13 +48,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         audit_db = Path("data/audit.db")
     audit = await get_audit_logger(audit_db)
 
-    try:
-        app.state.agent = await build_agent_from_settings()
-    except Exception as e:
-        # Allow the server to start without the agent (e.g. in tests) — chat
-        # endpoints will return 503 until the agent is attached.
-        logging.getLogger(__name__).warning("Agent not built at startup: %s", e)
-        app.state.agent = None
+    if not getattr(app.state, "agent", None):
+        # When started via `pincer run` the CLI pre-injects the fully-built
+        # agent (with MCP, memory backend, etc.) before uvicorn starts.
+        # Only build a standalone agent when running the API server directly.
+        try:
+            app.state.agent = await build_agent_from_settings()
+        except Exception as e:
+            logging.getLogger(__name__).warning("Agent not built at startup: %s", e)
+            app.state.agent = None
 
     yield
     await audit.shutdown()
