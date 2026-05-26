@@ -271,7 +271,6 @@ MCP tools go through the same approval system as built-in tools. Use `approval_r
 ```toml
 approval_required = ["create_*", "delete_*"]  # ask for destructive ops only
 approval_required = ["*"]                       # ask for everything
-approval_required = ["none"]                    # ⚠️  never ask (avoid this)
 ```
 
 When specific patterns are listed, only matching tools require approval (allowlist mode); unmatched tools run freely. With no patterns configured at all, every tool requires approval (fail-safe).
@@ -308,7 +307,6 @@ pincer audit --user mcp:github
 |-------|-----------------|
 | `mcp_config_valid` | `pincer.toml` parses without errors |
 | `mcp_sandbox_enabled` | All stdio servers have `sandbox = true` |
-| `mcp_approval_not_bypassed` | No server uses `approval_required = ["none"]` |
 | `mcp_no_plaintext_secrets` | `pincer.toml` contains no hardcoded tokens |
 | `mcp_tool_count` | Enabled server count is within configured limits |
 

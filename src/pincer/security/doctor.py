@@ -149,7 +149,6 @@ class SecurityDoctor:
         # MCP (8 checks, Sprint 8)
         report.checks.append(self._check_mcp_config_valid())
         report.checks.append(self._check_mcp_sandbox_enabled())
-        report.checks.append(self._check_mcp_approval_not_bypassed())
         report.checks.append(self._check_mcp_no_plaintext_secrets())
         report.checks.append(self._check_mcp_tool_count())
         report.checks.append(self._check_mcp_env_vars())
@@ -1023,42 +1022,6 @@ class SecurityDoctor:
         except Exception:
             return CheckResult(
                 "mcp_sandbox_enabled",
-                CheckStatus.SKIPPED,
-                "Could not load MCP config",
-                category="mcp",
-            )
-
-    def _check_mcp_approval_not_bypassed(self) -> CheckResult:
-        """Warn if any MCP server uses approval_required=['none']."""
-        try:
-            from pincer.mcp.config import load_mcp_config
-
-            cfg = load_mcp_config(self.config_dir)
-            if not cfg.enabled or not cfg.servers:
-                return CheckResult(
-                    "mcp_approval_not_bypassed",
-                    CheckStatus.SKIPPED,
-                    "No MCP servers configured",
-                    category="mcp",
-                )
-            bypassed = [s.name for s in cfg.servers if s.enabled and "none" in s.approval_required]
-            if not bypassed:
-                return CheckResult(
-                    "mcp_approval_not_bypassed",
-                    CheckStatus.PASS,
-                    "No MCP servers bypass approval",
-                    category="mcp",
-                )
-            return CheckResult(
-                "mcp_approval_not_bypassed",
-                CheckStatus.WARNING,
-                f"Approval bypassed for: {', '.join(bypassed)}",
-                fix_hint="Remove 'none' from approval_required; use specific tool patterns instead",
-                category="mcp",
-            )
-        except Exception:
-            return CheckResult(
-                "mcp_approval_not_bypassed",
                 CheckStatus.SKIPPED,
                 "Could not load MCP config",
                 category="mcp",

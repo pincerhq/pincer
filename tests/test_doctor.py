@@ -24,7 +24,7 @@ def doctor_env(tmp_path):
 def test_run_all_returns_report(doctor_env):
     report = doctor_env.run_all()
     assert isinstance(report, DoctorReport)
-    assert len(report.checks) == 43  # 31 original + 8 MCP + 3 MCP security + 1 WA neonize
+    assert len(report.checks) == 42  # 31 original + 7 MCP + 3 MCP security + 1 WA neonize
     assert 0 <= report.score <= 100
 
 

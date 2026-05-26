@@ -279,7 +279,7 @@ You can run multiple Pincer instances and have one delegate to another via MCP.
 name      = "research_agent"
 transport = "streamable-http"
 url       = "http://192.168.1.100:18800/mcp"  # Machine B's IP
-approval_required = ["none"]  # Trust the other Pincer instance
+approval_required = ["*"]  # Approve all cross-agent tool calls
 ```
 
 **Instance B** (the "specialist" — running on another machine or in Docker):

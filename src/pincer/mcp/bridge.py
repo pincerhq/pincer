@@ -29,19 +29,14 @@ def _requires_approval(tool: Any, approval_patterns: list[str]) -> bool:
     Determine if an MCP tool requires user approval before execution.
 
     Priority:
-    1. ["none"] in patterns → never require approval (explicit trust)
-    2. ["*"] in patterns → always require approval
-    3. Glob patterns matched against tool name
-    4. Patterns provided but no match → auto-approve (tool not in the allowlist)
-    5. MCP tool annotations (destructiveHint → require, readOnlyHint → don't)
-    6. Default: require approval (fail-safe — no patterns configured at all)
+    1. Glob patterns matched against tool name (allowlist mode):
+       - ["*"] matches every tool → all require approval
+       - ["create_*", "delete_*"] → only matching tools require approval
+       - positive pattern match → require; negative "!pattern" match → auto-approve
+    2. Patterns provided but no match → auto-approve (tool not in the allowlist)
+    3. MCP tool annotations (destructiveHint → require, readOnlyHint → don't)
+    4. Default: require approval (fail-safe — no patterns configured at all)
     """
-    if "none" in approval_patterns:
-        return False
-
-    if "*" in approval_patterns:
-        return True
-
     tool_name: str = tool.name
 
     # Check positive patterns (require approval) and negative (exclude from approval)
