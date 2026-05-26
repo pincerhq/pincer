@@ -591,6 +591,33 @@ Found 3 memories:
 
 ---
 
+### `pincer memory list`
+
+List memory records, newest first. Supports optional user, tag, and offset-based pagination filters.
+
+```bash
+pincer memory list [--user USER_ID] [--tags TAG1,TAG2] [--limit N] [--offset N]
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--user` | all users | Filter by Pincer user ID |
+| `--tags` | none | Comma-separated tag filter (OR logic: any matching tag is included) |
+| `--limit` | `20` | Records per page |
+| `--offset` | `0` | Skip first N records |
+
+**Example:**
+```bash
+$ pincer memory list --user 123456789 --tags category:exchange --limit 5
+  [exchange] [user:123456789, category:exchange] What is the weather like today?
+  [exchange] [user:123456789, category:exchange] Remind me to call the dentist...
+  [exchange] [user:123456789, category:exchange] Set a timer for 10 minutes
+
+Showing 3 records (offset=0)
+```
+
+---
+
 ### `pincer memory stats`
 
 Show memory storage statistics.

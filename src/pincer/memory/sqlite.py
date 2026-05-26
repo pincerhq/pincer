@@ -21,11 +21,11 @@ from typing import TYPE_CHECKING
 import aiosqlite
 
 from pincer.memory.base import (
+    PINCER_MEMORY_CATEGORY_TAG_PREFIX,
+    PINCER_MEMORY_COUNT_FETCH_LIMIT,
+    PINCER_MEMORY_USER_TAG_PREFIX,
     BaseMemoryBackend,
     Memory,
-    PINCER_MEMORY_USER_TAG_PREFIX,
-    PINCER_MEMORY_CATEGORY_TAG_PREFIX,
-    PINCER_MEMORY_COUNT_FETCH_LIMIT
 )
 
 if TYPE_CHECKING:
@@ -111,9 +111,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         async with self._db.execute("PRAGMA table_info(memories)") as cur:
             existing_columns = {row[1] async for row in cur}
         if "tags" not in existing_columns:
-            await self._db.execute(
-                "ALTER TABLE memories ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'"
-            )
+            await self._db.execute("ALTER TABLE memories ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
             logger.info("Migrated memories table: added tags column")
 
         # FTS5 index for full-text search on memories
@@ -397,9 +395,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         """Return total number of memory records, optionally scoped to a user."""
         assert self._db is not None
         if user_id:
-            async with self._db.execute(
-                "SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,)
-            ) as cur:
+            async with self._db.execute("SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,)) as cur:
                 row = await cur.fetchone()
         else:
             async with self._db.execute("SELECT COUNT(*) FROM memories") as cur:
@@ -409,9 +405,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
     async def delete_user_memories(self, user_id: str) -> int:
         """Delete all memory records for a user. Returns the number of deleted rows."""
         assert self._db is not None
-        async with self._db.execute(
-            "SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,)
-        ) as cur:
+        async with self._db.execute("SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,)) as cur:
             row = await cur.fetchone()
         deleted = int(row[0]) if row else 0
         await self._db.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))

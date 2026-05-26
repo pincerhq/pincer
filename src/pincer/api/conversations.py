@@ -6,17 +6,20 @@ import json
 import logging
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
-from typing import Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from pincer.memory.base import (
+    PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX,
+    PINCER_MEMORY_USER_REQUEST_PREFIX,
+    PINCER_MEMORY_USER_TAG_PREFIX,
     BaseMemoryBackend,
     Memory,
-    PINCER_MEMORY_USER_TAG_PREFIX,
-    PINCER_MEMORY_USER_REQUEST_PREFIX,
-    PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -29,7 +32,7 @@ def _ts_to_iso(ts: float | None) -> str:
 
 
 def _channel_tag(channel: str, channel_user_id: str) -> str:
-    f"""Build the compound channel tag: {PINCER_MEMORY_USER_TAG_PREFIX}:{channel}:{channel_user_id}."""
+    """Build the compound channel tag: {PINCER_MEMORY_USER_TAG_PREFIX}:{channel}:{channel_user_id}."""
     return f"{PINCER_MEMORY_USER_TAG_PREFIX}:{channel}:{channel_user_id}"
 
 
@@ -63,9 +66,9 @@ def _parse_messages(content: str) -> list[dict[str, Any]]:
     messages = []
     if user_idx != -1:
         user_end = assistant_idx if assistant_idx > user_idx else len(content)
-        messages.append({"role": "user", "content": content[user_idx + len(user_prefix):user_end].strip()})
+        messages.append({"role": "user", "content": content[user_idx + len(user_prefix) : user_end].strip()})
     if assistant_idx != -1:
-        messages.append({"role": "assistant", "content": content[assistant_idx + len(assistant_prefix):].strip()})
+        messages.append({"role": "assistant", "content": content[assistant_idx + len(assistant_prefix) :].strip()})
     if messages:
         return messages
 
@@ -123,7 +126,7 @@ async def list_conversations(
     limit: int = Query(default=20, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
-    f"""List memory records for a user with optional offset pagination.
+    """List memory records for a user with optional offset pagination.
 
     When both *channel* and *channel_user_id* are provided, results are
     narrowed to the tag ``{PINCER_MEMORY_USER_TAG_PREFIX}{channel}:{channel_user_id}``.

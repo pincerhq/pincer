@@ -35,6 +35,10 @@ from pincer.llm.base import (
     ToolCall,
     ToolResult,
 )
+from pincer.memory.base import (
+    PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX,
+    PINCER_MEMORY_USER_REQUEST_PREFIX,
+)
 
 # Signature: (tool_name, arguments, user_id, channel) -> approved?
 ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool]]
@@ -51,11 +55,7 @@ if TYPE_CHECKING:
     from pincer.llm.cost_tracker import CostTracker
     from pincer.mcp.manager import MCPClientManager
     from pincer.mcp.server import PincerMCPServer
-    from pincer.memory.base import (
-        BaseMemoryBackend,
-        PINCER_MEMORY_USER_REQUEST_PREFIX,
-        PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX
-    )
+    from pincer.memory.base import BaseMemoryBackend
     from pincer.memory.summarizer import Summarizer
     from pincer.tools.registry import ToolRegistry
 
@@ -519,7 +519,10 @@ class Agent:
                 extra_tags = [f"user:{channel}:{channel_user_id}"] if channel_user_id else None
                 await self._memory.store_memory(
                     user_id=user_id,
-                    content=f"{PINCER_MEMORY_USER_REQUEST_PREFIX}: {text}\n{PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX}: {final_text}",
+                    content=(
+                        f"{PINCER_MEMORY_USER_REQUEST_PREFIX}: {text}\n"
+                        f"{PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX}: {final_text}"
+                    ),
                     category="exchange",
                     extra_tags=extra_tags,
                 )

@@ -72,7 +72,7 @@ async def test_second_message_closes_gate_and_extracts_fields(
     assert "marketing" in session.metadata[PROFILE_USE_CASE_KEY]
     assert session.metadata[PROFILE_LANGUAGE_KEY] == "en"
 
-    profiles = await memory_store.get_recent_memories("user-2", category="profile")
+    profiles = await memory_store.list_memories(user_id="user-2", category="profile")
     assert len(profiles) == 1
     assert "Alice" in profiles[0].content
 
@@ -98,7 +98,7 @@ async def test_second_message_gibberish_still_closes_gate(
     assert PROFILE_NAME_KEY not in session.metadata
 
     # No profile memory written when nothing was extracted.
-    profiles = await memory_store.get_recent_memories("user-3", category="profile")
+    profiles = await memory_store.list_memories(user_id="user-3", category="profile")
     assert profiles == []
 
 
@@ -161,7 +161,7 @@ async def test_add_profile_replaces_existing(memory_store):
     await memory_store.add_profile(user_id="u1", name="Alice", use_case="emails", language="en")
     await memory_store.add_profile(user_id="u1", name="Alice S.", use_case="cooking", language="en")
 
-    profiles = await memory_store.get_recent_memories("u1", category="profile")
+    profiles = await memory_store.list_memories(user_id="u1", category="profile")
     assert len(profiles) == 1
     assert "Alice S." in profiles[0].content
     assert "cooking" in profiles[0].content
@@ -171,7 +171,7 @@ async def test_add_profile_replaces_existing(memory_store):
 async def test_add_profile_no_fields_is_noop(memory_store):
     result = await memory_store.add_profile(user_id="u2", name=None, use_case=None, language=None)
     assert result is None
-    profiles = await memory_store.get_recent_memories("u2", category="profile")
+    profiles = await memory_store.list_memories(user_id="u2", category="profile")
     assert profiles == []
 
 

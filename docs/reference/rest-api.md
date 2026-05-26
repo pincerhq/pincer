@@ -100,36 +100,99 @@ Spending breakdown by model.
 
 ## Conversations
 
-### `GET /api/conversations?limit=20&offset=0`
+The conversations API is backed by the active memory backend (SQLite or MCP,
+configured via `PINCER_MEMORY_BACKEND`). Records in this endpoint are scoped to
+the `exchange` category — only exchanges stored by the agent during real
+user interactions are returned.
 
-List recent conversations.
+### `GET /api/conversations`
+
+List memory records for a user. `user_id` is required. All active filters are
+AND-combined: the response contains only records that satisfy every provided
+constraint simultaneously.
+
+**Query parameters**
+
+| Parameter | Required | Default | Description |
+|---|---|---|---|
+| `user_id` | Yes | — | Pincer user ID to filter by |
+| `channel` | No | — | Channel type: `telegram`, `whatsapp`, `discord`, etc. |
+| `channel_user_id` | No | — | Channel-specific user or chat identifier |
+| `limit` | No | `20` | Records per page (1–200) |
+| `offset` | No | `0` | Pagination offset |
+
+When both `channel` and `channel_user_id` are provided, results are narrowed to
+records tagged `user:{channel}:{channel_user_id}`. Providing only one of the two
+disables the channel filter.
+
+**Response**
 
 ```json
 {
   "conversations": [
     {
-      "id": "conv_abc123",
+      "id": "a1b2c3d4-...",
       "user_id": "123456789",
-      "channel": "telegram",
-      "message_count": 15,
-      "last_message_at": "2026-02-26T10:30:00Z",
-      "cost_usd": 0.12,
-      "summary": "Discussed rescheduling dentist appointment"
+      "category": "exchange",
+      "tags": ["user:123456789", "category:exchange", "user:telegram:123456789"],
+      "preview": "What is the weather like today?",
+      "messages": [
+        { "role": "user",      "content": "What is the weather like today?" },
+        { "role": "assistant", "content": "It's 22 °C and sunny in Kyiv." }
+      ],
+      "created_at": "2026-05-25T10:30:00+00:00"
     }
   ],
-  "total": 342,
+  "total": 12,
   "limit": 20,
   "offset": 0
 }
 ```
 
+Each item includes a `messages` array with the exchange already split into a
+`user` message and an `assistant` message. The `preview` field contains the
+first 200 characters of the user turn for quick display.
+
 ### `GET /api/conversations/:id`
 
-Full conversation with messages.
+Fetch a single memory record by ID.
 
-### `DELETE /api/conversations/:id`
+Returns `404` if the record does not exist or does not belong to the `exchange`
+category.
 
-Delete a conversation and its memory.
+**Response**
+
+```json
+{
+  "id": "a1b2c3d4-...",
+  "user_id": "123456789",
+  "category": "exchange",
+  "tags": ["user:123456789", "category:exchange", "user:telegram:123456789"],
+  "messages": [
+    { "role": "user",      "content": "Remind me to call the dentist tomorrow." },
+    { "role": "assistant", "content": "Reminder set for tomorrow at 09:00." }
+  ],
+  "created_at": "2026-05-25T11:15:00+00:00"
+}
+```
+
+### Content format
+
+The agent stores each exchange as a single memory record whose `content` field
+holds the pair as JSON:
+
+```json
+{"user": "user message text", "assistant": "agent reply text"}
+```
+
+The API parser handles two formats automatically:
+
+1. **JSON** — `{"user": "...", "assistant": "..."}` (primary format)
+2. **Prefixed plain text** — lines starting with `User asked:` /
+   `Assistant replied:` (legacy / plain-text fallback)
+
+If neither format is detected the entire content is returned as a single
+`user` message.
 
 ---
 

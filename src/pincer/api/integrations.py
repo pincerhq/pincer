@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import importlib
 import json
-from fastapi import APIRouter, HTTPException
 from pathlib import Path
 from typing import Any
 
+from fastapi import APIRouter, HTTPException
+
 from pincer.tools.skills.loader import SkillManifest
 from pincer.tools.skills.scanner import SkillScanner
-
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
@@ -22,6 +22,7 @@ _USER_SKILLS = Path.home() / ".pincer" / "skills"
 _SKIP_DIRS = {"__pycache__", ".git", ".venv", "node_modules"}
 
 # ── List integrations ────────────────────────────────────────────
+
 
 def _discover_skill_dirs() -> list[Path]:
     """Find all skill directories in bundled and user locations."""
@@ -39,9 +40,9 @@ def _discover_skill_dirs() -> list[Path]:
     return dirs
 
 
-def _integration_entries() -> list[dict]:
+def _integration_entries() -> list[dict[str, Any]]:
     """Return Google Workspace, MS365, and Slack as skill-like entries."""
-    entries: list[dict] = []
+    entries: list[dict[str, Any]] = []
 
     # ── Google Workspace ─────────────────────────────────────────────────────
     try:
@@ -123,7 +124,7 @@ def _integration_entries() -> list[dict]:
     return entries
 
 
-def _mcp_skill_entries() -> list[dict]:
+def _mcp_skill_entries() -> list[dict[str, Any]]:
     """Return MCP servers from config as skill-like entries."""
     try:
         from pincer.mcp.config import load_mcp_config
@@ -138,7 +139,7 @@ def _mcp_skill_entries() -> list[dict]:
     if not mcp_config.enabled:
         return []
 
-    entries: list[dict] = []
+    entries: list[dict[str, Any]] = []
     for srv in mcp_config.servers:
         if srv.command:
             cmd_desc = f"{srv.command} {' '.join(srv.args)}".strip()
@@ -162,11 +163,12 @@ def _mcp_skill_entries() -> list[dict]:
         )
     return entries
 
+
 @router.get("")
-async def list_integrations() -> dict[str, list[dict]]:
+async def list_integrations() -> dict[str, list[dict[str, Any]]]:
     """List installed skills and configured MCP servers."""
     scanner = SkillScanner(pass_threshold=50)
-    integrations: list[dict] = []
+    integrations: list[dict[str, Any]] = []
 
     for skill_dir in _discover_skill_dirs():
         manifest_path = skill_dir / "manifest.json"
@@ -199,6 +201,7 @@ async def list_integrations() -> dict[str, list[dict]]:
 
 
 # ── Get integration ──────────────────────────────────────────────
+
 
 class _ToolCollector:
     """Drop-in ToolRegistry that records registrations without executing them."""

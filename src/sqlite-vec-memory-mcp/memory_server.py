@@ -26,6 +26,7 @@ import os
 import sqlite3
 import struct
 import time as _time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -86,13 +87,45 @@ def _connect() -> sqlite3.Connection:
     return db
 
 
+def _migrate_id_to_uuid(db: sqlite3.Connection) -> None:
+    """Migrate memories.id from INTEGER AUTOINCREMENT to UUID TEXT if needed."""
+    col_info = db.execute("PRAGMA table_info(memories)").fetchall()
+    id_col = next((c for c in col_info if c["name"] == "id"), None)
+    if id_col is None or id_col["type"].upper() != "INTEGER":
+        return
+
+    logger.info("Migrating memories.id from INTEGER to UUID TEXT …")
+    db.execute("ALTER TABLE memories RENAME TO memories_v1")
+    db.execute("""
+        CREATE TABLE memories (
+            id         TEXT      PRIMARY KEY,
+            content    TEXT      NOT NULL,
+            tags       TEXT      NOT NULL DEFAULT '[]',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    old_rows = db.execute("SELECT content, tags, created_at FROM memories_v1").fetchall()
+    for row in old_rows:
+        db.execute(
+            "INSERT INTO memories (id, content, tags, created_at) VALUES (?, ?, ?, ?)",
+            (str(uuid.uuid4()), row["content"], row["tags"], row["created_at"]),
+        )
+    db.execute("DROP TABLE memories_v1")
+    # Embeddings cannot be preserved without re-embedding; recreate the vector table clean.
+    db.execute("DROP TABLE IF EXISTS memory_vecs")
+    db.execute(f"CREATE VIRTUAL TABLE memory_vecs USING vec0(embedding float[{_EMBED_DIM}])")
+    db.commit()
+    logger.info("Migration complete: %d memories assigned new UUID ids", len(old_rows))
+
+
 def _init_db() -> None:
     db = _connect()
+    _migrate_id_to_uuid(db)
     db.executescript(f"""
         CREATE TABLE IF NOT EXISTS memories (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            content    TEXT    NOT NULL,
-            tags       TEXT    NOT NULL DEFAULT '[]',
+            id         TEXT      PRIMARY KEY,
+            content    TEXT      NOT NULL,
+            tags       TEXT      NOT NULL DEFAULT '[]',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS memory_vecs USING vec0(
@@ -205,19 +238,20 @@ def memory_store(content: str, tags: list[str] | None = None) -> str:
     """Store a memory and index it for semantic search. Returns the memory ID."""
     logger.info("tool: memory_store")
     vec = _embed(content)
+    mem_id = str(uuid.uuid4())
     db = _connect()
     cur = db.execute(
-        "INSERT INTO memories (content, tags) VALUES (?, ?)",
-        (content, json.dumps(tags or [])),
+        "INSERT INTO memories (id, content, tags) VALUES (?, ?, ?)",
+        (mem_id, content, json.dumps(tags or [])),
     )
-    mid = cur.lastrowid
+    # memory_vecs is a rowid table; use the internal integer rowid for the vec link.
     db.execute(
         "INSERT INTO memory_vecs (rowid, embedding) VALUES (?, ?)",
-        (mid, vec),
+        (cur.lastrowid, vec),
     )
     db.commit()
     db.close()
-    return f"stored:{mid}"
+    return f"stored:{mem_id}"
 
 
 def _normalize_tags(tags: str | list[str] | None) -> list[str]:
@@ -249,7 +283,7 @@ def memory_search(
         """
         SELECT m.id, m.content, m.tags, m.created_at, v.distance
         FROM memory_vecs v
-        JOIN memories m ON m.id = v.rowid
+        JOIN memories m ON m.rowid = v.rowid
         WHERE v.embedding MATCH ?
           AND k = ?
         ORDER BY v.distance
@@ -289,7 +323,9 @@ def memory_list(
     """List recent memories, optionally filtered by tags.
 
     tags: a single tag string or a list of tags.
-    match_all: when False (default) returns records matching ANY tag (OR logic); when True returns only records matching ALL provided tags (AND logic).
+    match_all:
+        when False (default) returns records matching ANY tag (OR logic);
+        when True returns only records matching ALL provided tags (AND logic).
     offset: number of records to skip for pagination.
     """
     tag_list = _normalize_tags(tags)
@@ -339,8 +375,8 @@ def memory_list(
 
 @mcp.tool()
 @_logged
-def memory_get(memory_id: int) -> dict[str, Any] | None:
-    """Fetch a single memory record by ID. Returns null if not found."""
+def memory_get(memory_id: str) -> dict[str, Any] | None:
+    """Fetch a single memory record by UUID. Returns null if not found."""
     logger.info("tool: memory_get")
     db = _connect()
     row = db.execute(
@@ -360,12 +396,14 @@ def memory_get(memory_id: int) -> dict[str, Any] | None:
 
 @mcp.tool()
 @_logged
-def memory_delete(memory_id: int) -> str:
-    """Delete a memory by ID."""
+def memory_delete(memory_id: str) -> str:
+    """Delete a memory by UUID."""
     logger.info("tool: memory_delete")
     db = _connect()
+    row = db.execute("SELECT rowid FROM memories WHERE id = ?", (memory_id,)).fetchone()
     db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-    db.execute("DELETE FROM memory_vecs WHERE rowid = ?", (memory_id,))
+    if row:
+        db.execute("DELETE FROM memory_vecs WHERE rowid = ?", (row[0],))
     db.commit()
     db.close()
     return f"deleted:{memory_id}"
@@ -373,19 +411,21 @@ def memory_delete(memory_id: int) -> str:
 
 @mcp.tool()
 @_logged
-def memory_update(memory_id: int, content: str, tags: list[str] | None = None) -> str:
+def memory_update(memory_id: str, content: str, tags: list[str] | None = None) -> str:
     """Replace a memory's content and re-index it with a fresh embedding."""
     logger.info("tool: memory_update")
     vec = _embed(content)
     db = _connect()
+    row = db.execute("SELECT rowid FROM memories WHERE id = ?", (memory_id,)).fetchone()
     db.execute(
         "UPDATE memories SET content = ?, tags = ? WHERE id = ?",
         (content, json.dumps(tags or []), memory_id),
     )
-    db.execute(
-        "UPDATE memory_vecs SET embedding = ? WHERE rowid = ?",
-        (vec, memory_id),
-    )
+    if row:
+        db.execute(
+            "UPDATE memory_vecs SET embedding = ? WHERE rowid = ?",
+            (vec, row[0]),
+        )
     db.commit()
     db.close()
     return f"updated:{memory_id}"
@@ -664,7 +704,7 @@ async def ui_detail(request: Request) -> HTMLResponse | JSONResponse:
         return RedirectResponse("/ui")  # type: ignore[return-value]
 
     db = _connect()
-    row = db.execute("SELECT id, content, tags, created_at FROM memories WHERE id = ?", (int(mem_id),)).fetchone()
+    row = db.execute("SELECT id, content, tags, created_at FROM memories WHERE id = ?", (mem_id,)).fetchone()
     db.close()
 
     if not row:
@@ -712,8 +752,10 @@ async def ui_delete(request: Request) -> RedirectResponse | JSONResponse:
     page = form.get("page", "1")
     if mem_id:
         db = _connect()
-        db.execute("DELETE FROM memories WHERE id = ?", (int(str(mem_id)),))
-        db.execute("DELETE FROM memory_vecs WHERE rowid = ?", (int(str(mem_id)),))
+        row = db.execute("SELECT rowid FROM memories WHERE id = ?", (str(mem_id),)).fetchone()
+        db.execute("DELETE FROM memories WHERE id = ?", (str(mem_id),))
+        if row:
+            db.execute("DELETE FROM memory_vecs WHERE rowid = ?", (row[0],))
         db.commit()
         db.close()
     params = f"page={page}" + (f"&q={q}" if q else "")

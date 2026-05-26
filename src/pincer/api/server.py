@@ -67,7 +67,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Pincer API",
         version="0.8.0",
-        docs_url="/api/docs", # if settings.debug else None,
+        docs_url="/api/docs",  # if settings.debug else None,
         redoc_url=None,
         lifespan=lifespan,
     )

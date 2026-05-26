@@ -104,7 +104,7 @@ async def test_get_recent_memories(memory_store: MemoryStore) -> None:
     for i in range(5):
         await memory_store.store_memory("user1", f"Memory {i}", "general")
 
-    recent = await memory_store.get_recent_memories("user1", limit=3)
+    recent = await memory_store.list_memories(user_id="user1", limit=3)
     assert len(recent) == 3
 
 
@@ -426,7 +426,7 @@ async def test_full_flow_message_to_response(settings, session_manager, cost_tra
     assert MessageRole.TOOL_RESULT in roles
 
     # Verify memory was stored
-    memories = await mem_store.get_recent_memories("user1")
+    memories = await mem_store.list_memories(user_id="user1")
     assert len(memories) >= 1
 
     await mem_store.close()

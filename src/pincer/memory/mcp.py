@@ -17,17 +17,17 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from pincer.memory.base import (
-    BaseMemoryBackend,
-    Memory,
-    PINCER_MEMORY_USER_TAG_PREFIX,
     PINCER_MEMORY_CATEGORY_TAG_PREFIX,
     PINCER_MEMORY_COUNT_FETCH_LIMIT,
+    PINCER_MEMORY_USER_TAG_PREFIX,
+    BaseMemoryBackend,
+    Memory,
 )
+
 if TYPE_CHECKING:
     from pincer.mcp.manager import MCPClientManager
 
 logger = logging.getLogger(__name__)
-
 
 
 def _parse_timestamp(s: str) -> float:
@@ -38,20 +38,29 @@ def _parse_timestamp(s: str) -> float:
 
 
 def _tags_for(user_id: str, category: str) -> list[str]:
-    return [f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}",
-        f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:{category}"]
+    return [f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}", f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:{category}"]
 
 
 def _user_from_tags(tags: list[str]) -> str:
-    return next((t[len(f"{PINCER_MEMORY_USER_TAG_PREFIX}:") :]
-        for t in tags
-        if t.startswith(f"{PINCER_MEMORY_USER_TAG_PREFIX}:")), "")
+    return next(
+        (
+            t[len(f"{PINCER_MEMORY_USER_TAG_PREFIX}:") :]
+            for t in tags
+            if t.startswith(f"{PINCER_MEMORY_USER_TAG_PREFIX}:")
+        ),
+        "",
+    )
 
 
 def _category_from_tags(tags: list[str]) -> str:
-    return next((t[len(f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:") :]
-        for t in tags
-        if t.startswith(f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:")), "general")
+    return next(
+        (
+            t[len(f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:") :]
+            for t in tags
+            if t.startswith(f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:")
+        ),
+        "general",
+    )
 
 
 def _row_to_memory(r: dict[str, Any], score: float = 0.0) -> Memory:
@@ -123,7 +132,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
 
     async def get_memory(self, memory_id: str) -> Memory | None:
         try:
-            row = await self._call_json("memory_get", {"memory_id": int(memory_id)})
+            row = await self._call_json("memory_get", {"memory_id": memory_id})
         except (ValueError, RuntimeError):
             return None
         if not row:
@@ -171,10 +180,10 @@ class MCPMemoryBackend(BaseMemoryBackend):
         updated_tags: list[str] | None = tags
         if updated_tags is None and category is not None:
             updated_tags = [f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:{category}"]
-        await self._call("memory_update", {"memory_id": int(memory_id), "content": content, "tags": updated_tags})
+        await self._call("memory_update", {"memory_id": memory_id, "content": content, "tags": updated_tags})
 
     async def delete_memory(self, memory_id: str) -> None:
-        await self._call("memory_delete", {"memory_id": int(memory_id)})
+        await self._call("memory_delete", {"memory_id": memory_id})
 
     async def delete_user_memories(self, user_id: str) -> int:
         tag = f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}"
@@ -189,11 +198,9 @@ class MCPMemoryBackend(BaseMemoryBackend):
         return deleted
 
     async def count(self, user_id: str | None = None) -> int:
-        args: dict[str, Any] = {
-            "limit": PINCER_MEMORY_COUNT_FETCH_LIMIT
-        }
+        args: dict[str, Any] = {"limit": PINCER_MEMORY_COUNT_FETCH_LIMIT}
         if user_id:
-            args["tags"] = f"{PINCER_MEMORY_USER_TAG_PREFIX}{user_id}"
+            args["tags"] = f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}"
         rows = await self._call_json("memory_list", args)
         return len(rows)
 
@@ -211,7 +218,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
         args: dict[str, Any] = {"query": query, "limit": limit}
         filter_tags: list[str] = []
         if user_id:
-            filter_tags.append(f"{_USER_TAG_PREFIX}{user_id}")
+            filter_tags.append(f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}")
         if tags:
             filter_tags.extend(tags)
         if filter_tags:

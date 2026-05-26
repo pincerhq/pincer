@@ -1991,7 +1991,9 @@ async def _show_audit(
 
 # ── Memory subcommands ────────────────────────
 
-memory_app = typer.Typer(name="memory", help="Manage local sqlite based conversation memory. MCP servers are not supported yet!")
+memory_app = typer.Typer(
+    name="memory", help="Manage local sqlite based conversation memory. MCP servers are not supported yet!"
+)
 app.add_typer(memory_app, name="memory")
 
 
