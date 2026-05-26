@@ -30,9 +30,11 @@ def _requires_approval(tool: Any, approval_patterns: list[str]) -> bool:
 
     Priority:
     1. Glob patterns matched against tool name (allowlist mode):
-       - ["*"] matches every tool → all require approval
-       - ["create_*", "delete_*"] → only matching tools require approval
-       - positive pattern match → require; negative "!pattern" match → auto-approve
+       - ["*"]              → all tools require approval
+       - ["create_*"]       → only matching tools require approval; others run freely
+       - ["!*"]             → negative glob matches every tool → nothing requires approval
+       - ["!read_*"]        → all tools except read_* require approval
+       - positive match → require; negative "!pattern" match → auto-approve
     2. Patterns provided but no match → auto-approve (tool not in the allowlist)
     3. MCP tool annotations (destructiveHint → require, readOnlyHint → don't)
     4. Default: require approval (fail-safe — no patterns configured at all)
