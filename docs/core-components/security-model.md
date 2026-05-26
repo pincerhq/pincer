@@ -271,6 +271,7 @@ MCP tools go through the same approval system as built-in tools. Use `approval_r
 ```toml
 approval_required = ["create_*", "delete_*"]  # ask for destructive ops only
 approval_required = ["*"]                       # ask for everything
+approval_required = ["!*"]                      # never ask (negative glob matches all)
 ```
 
 When specific patterns are listed, only matching tools require approval (allowlist mode); unmatched tools run freely. With no patterns configured at all, every tool requires approval (fail-safe).

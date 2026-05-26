@@ -154,6 +154,7 @@ tool_prefix = false
 | `["*"]` | Every tool requires approval (explicit) |
 | `["create_*", "delete_*"]` | Only tools matching these globs require approval; all others run freely |
 | `["!read_*"]` | All tools EXCEPT those matching the negative glob require approval |
+| `["!*"]` | No tools require approval — negative glob matches everything, all auto-approve |
 
 **Priority order:**
 
