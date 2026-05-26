@@ -64,8 +64,8 @@ def create_app() -> FastAPI:
     settings = get_settings_relaxed()
     app = FastAPI(
         title="Pincer API",
-        version="0.5.0",
-        docs_url="/api/docs" if settings.debug else None,
+        version="0.8.0",
+        docs_url="/api/docs", # if settings.debug else None,
         redoc_url=None,
         lifespan=lifespan,
     )
@@ -137,7 +137,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok", "version": "0.5.0"}
+        return {"status": "ok", "version": "0.8.0"}
 
     @app.get("/api/status")
     async def status() -> dict[str, object]:
