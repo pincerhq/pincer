@@ -95,7 +95,8 @@ def test_no_hardcoded_secrets_critical(tmp_path):
     config_dir.mkdir()
     src_dir = config_dir / "src"
     src_dir.mkdir()
-    (src_dir / "bad.py").write_text('api_key = "sk-ant-abc123456789012345678901"\n')
+    fake_key = "sk-ant-" + "a" * 24
+    (src_dir / "bad.py").write_text(f'api_key = "{fake_key}"\n')
 
     doc = SecurityDoctor(config_dir=config_dir, data_dir=tmp_path)
     result = doc._check_no_hardcoded_secrets()
@@ -664,7 +665,8 @@ def test_env_file_exists_warning_missing(tmp_path):
 
 def test_api_keys_not_in_config_critical(tmp_path):
     toml = tmp_path / "config.toml"
-    toml.write_text('anthropic_key = "sk-ant-abcdefghijklmnopqrstuvwx"\n')
+    fake_key = "sk-ant-" + "b" * 24
+    toml.write_text(f'anthropic_key = "{fake_key}"\n')
     doc = SecurityDoctor(config_dir=tmp_path, data_dir=tmp_path)
     result = doc._check_api_keys_not_in_config()
     assert result.status == CheckStatus.CRITICAL

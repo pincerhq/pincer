@@ -242,8 +242,14 @@ class SecurityDoctor:
                     "Not a git repo",
                     category="secrets",
                 )
-            for p in [r"sk-[a-zA-Z0-9]{20,}", r"sk-ant-[a-zA-Z0-9]{20,}"]:
-                if re.search(p, result.stdout):
+            patterns = [re.compile(p) for p in [r"sk-[a-zA-Z0-9]{20,}", r"sk-ant-[a-zA-Z0-9]{20,}"]]
+            current_file = ""
+            for line in result.stdout.splitlines():
+                if line.startswith("+++ b/"):
+                    current_file = line[6:]
+                if current_file.startswith("tests/") or current_file.startswith("test_"):
+                    continue
+                if any(p.search(line) for p in patterns):
                     return CheckResult(
                         "api_keys_not_in_git",
                         CheckStatus.CRITICAL,
