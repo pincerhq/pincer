@@ -160,8 +160,9 @@ tool_prefix = false
 1. `["none"]` → never require approval
 2. `["*"]` → always require approval
 3. Glob patterns (positive `pattern` and negative `!pattern`)
-4. MCP tool annotations (`destructiveHint` → require, `readOnlyHint` → don't)
-5. **Default: require approval** — fail-safe when nothing matches
+4. Patterns specified but no match → **auto-approve** (tool not in the allowlist)
+5. MCP tool annotations (`destructiveHint` → require, `readOnlyHint` → don't)
+6. **Default: require approval** — fail-safe when no patterns are configured at all
 
 ---
 
@@ -603,7 +604,8 @@ pincer mcp tools   # See what was registered
 **Approval prompt not appearing**
 
 - `["none"]` disables all approvals for that server
-- The fail-safe default when no pattern matches is **require approval**
+- When patterns are configured, unmatched tools are **auto-approved** (allowlist mode)
+- With no patterns at all (`approval_required` absent), every tool requires approval
 - Check the pattern: `create_*` matches `create_issue` but not `delete_issue`
 
 **Server keeps disconnecting**

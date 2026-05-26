@@ -32,8 +32,9 @@ def _requires_approval(tool: Any, approval_patterns: list[str]) -> bool:
     1. ["none"] in patterns → never require approval (explicit trust)
     2. ["*"] in patterns → always require approval
     3. Glob patterns matched against tool name
-    4. MCP tool annotations (destructiveHint → require, readOnlyHint → don't)
-    5. Default: require approval (fail-safe)
+    4. Patterns provided but no match → auto-approve (tool not in the allowlist)
+    5. MCP tool annotations (destructiveHint → require, readOnlyHint → don't)
+    6. Default: require approval (fail-safe — no patterns configured at all)
     """
     if "none" in approval_patterns:
         return False
@@ -51,6 +52,10 @@ def _requires_approval(tool: Any, approval_patterns: list[str]) -> bool:
         elif fnmatch.fnmatch(tool_name, pattern):
             return True
 
+    # Patterns were specified but none matched → tool is not in the allowlist → auto-approve
+    if approval_patterns:
+        return False
+
     # Fall back to MCP annotations if available
     annotations = getattr(tool, "annotations", None)
     if annotations:
@@ -59,7 +64,7 @@ def _requires_approval(tool: Any, approval_patterns: list[str]) -> bool:
         if getattr(annotations, "readOnlyHint", False):
             return False
 
-    return True  # Fail-safe default
+    return True  # Fail-safe: no patterns configured at all
 
 
 def _format_result(result: Any) -> str:

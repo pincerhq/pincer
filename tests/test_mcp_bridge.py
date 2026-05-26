@@ -83,9 +83,9 @@ def test_glob_pattern_match() -> None:
 
 
 def test_glob_pattern_no_match() -> None:
-    """When no pattern matches and no annotations, fail-safe is True (require approval)."""
+    """When patterns are set but none match, tool is not in the allowlist → auto-approve."""
     tool = FakeTool("read_file")
-    assert _requires_approval(tool, ["create_*"]) is True  # No match → fail-safe True
+    assert _requires_approval(tool, ["create_*"]) is False  # Not in allowlist → auto-approve
 
 
 def test_negative_pattern_excludes() -> None:

@@ -274,7 +274,7 @@ approval_required = ["*"]                       # ask for everything
 approval_required = ["none"]                    # ⚠️  never ask (avoid this)
 ```
 
-The fail-safe default is **approval required** — if a tool name doesn't match any pattern, it will ask.
+When specific patterns are listed, only matching tools require approval (allowlist mode); unmatched tools run freely. With no patterns configured at all, every tool requires approval (fail-safe).
 
 ### Audit trail
 
