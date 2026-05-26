@@ -1987,7 +1987,7 @@ async def _show_audit(
 
 # ── Memory subcommands ────────────────────────
 
-memory_app = typer.Typer(name="memory", help="Manage conversation memory")
+memory_app = typer.Typer(name="memory", help="Manage local sqlite based conversation memory. MCP servers are not supported yet!")
 app.add_typer(memory_app, name="memory")
 
 
@@ -2060,6 +2060,39 @@ async def _memory_clear(user_id: str) -> None:
     await store.initialize()
     await store.delete_user_memories(user_id)
     console.print(f"[green]Cleared memories for {user_id}[/green]")
+    await store.close()
+
+
+@memory_app.command(name="list")
+def memory_list(
+    user_id: str = typer.Option(None, "--user", help="Filter by user ID"),
+    tags: str = typer.Option(None, "--tags", help="Comma-separated tag filter (OR logic)"),
+    limit: int = typer.Option(20, "--limit", help="Records per page"),
+    offset: int = typer.Option(0, "--offset", help="Pagination offset"),
+) -> None:
+    """List memories, newest first, with optional user, tag, and pagination filters."""
+    asyncio.run(_memory_list(user_id, tags, limit, offset))
+
+
+async def _memory_list(user_id: str | None, tags_str: str | None, limit: int, offset: int) -> None:
+    from pincer.config import get_settings_relaxed
+    from pincer.memory.sqlite import SQLiteMemoryBackend
+
+    settings = get_settings_relaxed()
+    store = SQLiteMemoryBackend(settings.db_path)
+    await store.initialize()
+
+    tag_list = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else None
+    memories = await store.list_memories(user_id=user_id, limit=limit, offset=offset, tags=tag_list)
+
+    if not memories:
+        console.print("[dim]No memories found.[/dim]")
+    else:
+        for mem in memories:
+            tag_str = f" {mem.tags}" if mem.tags else ""
+            console.print(f"  [{mem.category}]{tag_str} {mem.content[:200]}")
+        console.print(f"\n[dim]Showing {len(memories)} records (offset={offset})[/dim]")
+
     await store.close()
 
 
