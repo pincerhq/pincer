@@ -6,6 +6,6 @@ class MockIntersectionObserver {
   observe = vi.fn()
   unobserve = vi.fn()
   disconnect = vi.fn()
-  constructor(_callback: IntersectionObserverCallback) {}
+  constructor(_: IntersectionObserverCallback) {}
 }
 vi.stubGlobal("IntersectionObserver", MockIntersectionObserver)
