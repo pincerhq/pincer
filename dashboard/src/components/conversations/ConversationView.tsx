@@ -7,9 +7,10 @@ import { Wrench } from "lucide-react"
 interface ConversationViewProps {
   messages: Message[]
   loading?: boolean
+  createdAt?: string
 }
 
-export function ConversationView({ messages, loading }: ConversationViewProps) {
+export function ConversationView({ messages, loading, createdAt }: ConversationViewProps) {
   if (loading) {
     return (
       <div className="p-6 space-y-4">
@@ -32,6 +33,11 @@ export function ConversationView({ messages, loading }: ConversationViewProps) {
 
   return (
     <div className="p-6 space-y-3 overflow-y-auto">
+      {createdAt && (
+        <p className="text-center text-[10px] text-[var(--color-muted)] font-mono pb-2">
+          {formatDateTime(createdAt)}
+        </p>
+      )}
       {messages.map((msg, i) => {
         if (msg.role === "tool") {
           return (
@@ -64,14 +70,6 @@ export function ConversationView({ messages, loading }: ConversationViewProps) {
             >
               <p className="text-sm whitespace-pre-wrap break-words">
                 {msg.content}
-              </p>
-              <p
-                className={cn(
-                  "text-[10px] mt-1 font-mono",
-                  isUser ? "text-black/40" : "text-[var(--color-muted)]",
-                )}
-              >
-                {formatDateTime(msg.timestamp)}
               </p>
             </div>
           </div>

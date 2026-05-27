@@ -309,7 +309,7 @@ See `.github/workflows/ci.yml` in repo for the full workflow. All steps must pas
 For `main` and `dev` branches, configure branch protection in **GitHub → Settings → Branches → Add branch protection rule** (or edit existing):
 
 - Require a pull request before merging
-- Require status checks to pass (the `test` job must succeed)
+- Require status checks to pass (the `pincer` and `dashboard` jobs must succeed)
 - Optionally: require branches to be up to date before merging
 
 See [GitHub's branch protection docs](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-branches-in-your-repository/managing-a-branch-protection-rule) for details.
