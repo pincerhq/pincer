@@ -160,7 +160,19 @@ async def list_conversations(
         }
         for mem in memories
     ]
-    return {"conversations": items, "total": len(items), "limit": limit, "offset": offset}
+
+    response = {"conversations": items, "limit": limit, "offset": offset}
+    try:
+        async with _open_backend(request) as store:
+            response["total"] = await store.count(
+                user_id=user_id,
+                category="exchange",
+                tags=tags,
+                match_all_tags=True,
+            )
+    except Exception as e:
+        logger.error(str(e))
+    return response
 
 
 @router.get("/{conv_id}")

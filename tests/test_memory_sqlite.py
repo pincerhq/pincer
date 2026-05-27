@@ -129,6 +129,70 @@ async def test_count_per_user(store: SQLiteMemoryBackend) -> None:
     assert await store.count("user2") == 1
 
 
+@pytest.mark.asyncio
+async def test_count_by_category(store: SQLiteMemoryBackend) -> None:
+    await store.store_memory("user1", "a", category="exchange")
+    await store.store_memory("user1", "b", category="exchange")
+    await store.store_memory("user1", "c", category="profile")
+    assert await store.count(category="exchange") == 2
+    assert await store.count(category="profile") == 1
+
+
+@pytest.mark.asyncio
+async def test_count_user_and_category(store: SQLiteMemoryBackend) -> None:
+    await store.store_memory("user1", "a", category="exchange")
+    await store.store_memory("user1", "b", category="profile")
+    await store.store_memory("user2", "c", category="exchange")
+    assert await store.count(user_id="user1", category="exchange") == 1
+    assert await store.count(user_id="user2", category="exchange") == 1
+
+
+@pytest.mark.asyncio
+async def test_count_tags_or_logic(store: SQLiteMemoryBackend) -> None:
+    await store.store_memory("user1", "tg", extra_tags=["user:telegram:111"])
+    await store.store_memory("user1", "wa", extra_tags=["user:whatsapp:222"])
+    await store.store_memory("user1", "plain")
+    # OR: either tag matches — should count 2
+    assert await store.count(tags=["user:telegram:111", "user:whatsapp:222"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_count_tags_and_logic(store: SQLiteMemoryBackend) -> None:
+    await store.store_memory("user1", "both tags", category="exchange", extra_tags=["user:telegram:123"])
+    await store.store_memory("user1", "only category", category="exchange")
+
+    # AND: record must have user:user1, category:exchange AND user:telegram:123
+    assert (
+        await store.count(
+            user_id="user1",
+            category="exchange",
+            tags=["user:telegram:123"],
+            match_all_tags=True,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_count_tags_and_logic_no_match(store: SQLiteMemoryBackend) -> None:
+    await store.store_memory("user1", "wrong channel", category="exchange", extra_tags=["user:whatsapp:999"])
+    assert (
+        await store.count(
+            user_id="user1",
+            category="exchange",
+            tags=["user:telegram:123"],
+            match_all_tags=True,
+        )
+        == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_count_unknown_tag_returns_zero(store: SQLiteMemoryBackend) -> None:
+    await store.store_memory("user1", "something")
+    assert await store.count(tags=["nonexistent:tag"]) == 0
+
+
 # ── delete_user_memories ──────────────────────────────────────────────────────
 
 

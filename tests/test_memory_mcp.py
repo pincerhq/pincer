@@ -237,6 +237,70 @@ async def test_count_empty_returns_zero(backend: MCPMemoryBackend) -> None:
     assert await backend.count() == 0
 
 
+def _capturing_manager(rows: list, captured: list[dict]) -> MagicMock:
+    session = AsyncMock()
+
+    async def call_tool(name: str, args: dict) -> MagicMock:
+        captured.append(args)
+        result = MagicMock()
+        result.content = [MagicMock(text=json.dumps(rows))]
+        return result
+
+    session.call_tool.side_effect = call_tool
+    manager = AsyncMock()
+    manager.get_session.return_value = session
+    return manager
+
+
+@pytest.mark.asyncio
+async def test_count_user_encodes_user_tag(backend: MCPMemoryBackend) -> None:
+    captured: list[dict] = []
+    backend.set_mcp_manager(_capturing_manager([], captured))
+    await backend.count(user_id="u1")
+    assert f"{PINCER_MEMORY_USER_TAG_PREFIX}:u1" in captured[0]["tags"]
+
+
+@pytest.mark.asyncio
+async def test_count_category_encodes_category_tag(backend: MCPMemoryBackend) -> None:
+    captured: list[dict] = []
+    backend.set_mcp_manager(_capturing_manager([], captured))
+    await backend.count(category="exchange")
+    assert f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:exchange" in captured[0]["tags"]
+
+
+@pytest.mark.asyncio
+async def test_count_user_and_category_sets_match_all(backend: MCPMemoryBackend) -> None:
+    captured: list[dict] = []
+    backend.set_mcp_manager(_capturing_manager([], captured))
+    await backend.count(user_id="u1", category="exchange")
+    assert captured[0].get("match_all_tags") is True
+
+
+@pytest.mark.asyncio
+async def test_count_extra_tags_forwarded(backend: MCPMemoryBackend) -> None:
+    captured: list[dict] = []
+    backend.set_mcp_manager(_capturing_manager([], captured))
+    await backend.count(user_id="u1", tags=["user:telegram:123"])
+    tags_sent = captured[0]["tags"]
+    assert f"{PINCER_MEMORY_USER_TAG_PREFIX}:u1" in tags_sent
+    assert "user:telegram:123" in tags_sent
+
+
+@pytest.mark.asyncio
+async def test_count_match_all_tags_explicit(backend: MCPMemoryBackend) -> None:
+    captured: list[dict] = []
+    backend.set_mcp_manager(_capturing_manager([], captured))
+    await backend.count(user_id="u1", tags=["user:telegram:123"], match_all_tags=True)
+    assert captured[0].get("match_all_tags") is True
+
+
+@pytest.mark.asyncio
+async def test_count_returns_row_count_with_filters(backend: MCPMemoryBackend) -> None:
+    rows = [_row(id=i) for i in range(3)]
+    backend.set_mcp_manager(_mock_manager({"memory_list": json.dumps(rows)}))
+    assert await backend.count(user_id="u1", category="exchange") == 3
+
+
 # ── store_memory ──────────────────────────────────────────────────────────────
 
 

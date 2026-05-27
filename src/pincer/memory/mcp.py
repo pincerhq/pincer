@@ -197,10 +197,25 @@ class MCPMemoryBackend(BaseMemoryBackend):
                 logger.warning("Failed to delete memory %s for user %s", r["id"], user_id, exc_info=True)
         return deleted
 
-    async def count(self, user_id: str | None = None) -> int:
+    async def count(
+        self,
+        user_id: str | None = None,
+        category: str | None = None,
+        tags: list[str] | None = None,
+        match_all_tags: bool = False,
+    ) -> int:
         args: dict[str, Any] = {"limit": PINCER_MEMORY_COUNT_FETCH_LIMIT}
+        filter_tags: list[str] = []
         if user_id:
-            args["tags"] = f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}"
+            filter_tags.append(f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}")
+        if category:
+            filter_tags.append(f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:{category}")
+        if tags:
+            filter_tags.extend(tags)
+        if filter_tags:
+            args["tags"] = filter_tags
+            if match_all_tags or len(filter_tags) > 1:
+                args["match_all_tags"] = True
         rows = await self._call_json("memory_list", args)
         return len(rows)
 

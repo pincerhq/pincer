@@ -103,8 +103,18 @@ class BaseMemoryBackend(ABC):
         """Delete all memories belonging to a user. Returns the number of deleted records."""
 
     @abstractmethod
-    async def count(self, user_id: str | None = None) -> int:
-        """Return the total number of stored memories, optionally scoped to one user."""
+    async def count(
+        self,
+        user_id: str | None = None,
+        category: str | None = None,
+        tags: list[str] | None = None,
+        match_all_tags: bool = False,
+    ) -> int:
+        """Return the total number of stored memories with optional filtering.
+
+        Mirrors list_memories() filter semantics: user_id, category, and tags
+        can be combined freely; match_all_tags controls AND vs OR tag logic.
+        """
 
     # ── Search ────────────────────────────────────────────
 
