@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from pincer.api.audit import router as audit_router
 from pincer.api.chat import router as chat_router
@@ -165,6 +164,13 @@ def create_app() -> FastAPI:
 
     dist = _dashboard_dist()
     if dist.is_dir():
-        app.mount("/", StaticFiles(directory=str(dist), html=True))
+        from fastapi.responses import FileResponse
+
+        @app.get("/{full_path:path}")
+        async def _spa(full_path: str) -> FileResponse:
+            candidate = dist / full_path
+            if candidate.is_file():
+                return FileResponse(str(candidate))
+            return FileResponse(str(dist / "index.html"))
 
     return app
