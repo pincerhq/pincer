@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 
 from pincer.api.audit import router as audit_router
 from pincer.api.chat import router as chat_router
@@ -48,13 +47,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         audit_db = Path("data/audit.db")
     audit = await get_audit_logger(audit_db)
 
-    try:
-        app.state.agent = await build_agent_from_settings()
-    except Exception as e:
-        # Allow the server to start without the agent (e.g. in tests) — chat
-        # endpoints will return 503 until the agent is attached.
-        logging.getLogger(__name__).warning("Agent not built at startup: %s", e)
-        app.state.agent = None
+    if not getattr(app.state, "agent", None):
+        # When started via `pincer run` the CLI pre-injects the fully-built
+        # agent (with MCP, memory backend, etc.) before uvicorn starts.
+        # Only build a standalone agent when running the API server directly.
+        try:
+            app.state.agent = await build_agent_from_settings()
+        except Exception as e:
+            logging.getLogger(__name__).warning("Agent not built at startup: %s", e)
+            app.state.agent = None
 
     yield
     await audit.shutdown()
@@ -64,8 +65,8 @@ def create_app() -> FastAPI:
     settings = get_settings_relaxed()
     app = FastAPI(
         title="Pincer API",
-        version="0.5.0",
-        docs_url="/api/docs" if settings.debug else None,
+        version="0.8.0",
+        docs_url="/api/docs",  # if settings.debug else None,
         redoc_url=None,
         lifespan=lifespan,
     )
@@ -137,7 +138,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok", "version": "0.5.0"}
+        return {"status": "ok", "version": "0.8.0"}
 
     @app.get("/api/status")
     async def status() -> dict[str, object]:
@@ -163,6 +164,13 @@ def create_app() -> FastAPI:
 
     dist = _dashboard_dist()
     if dist.is_dir():
-        app.mount("/", StaticFiles(directory=str(dist), html=True))
+        from fastapi.responses import FileResponse
+
+        @app.get("/{full_path:path}")
+        async def _spa(full_path: str) -> FileResponse:
+            candidate = dist / full_path
+            if candidate.is_file():
+                return FileResponse(str(candidate))
+            return FileResponse(str(dist / "index.html"))
 
     return app

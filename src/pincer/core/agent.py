@@ -35,6 +35,10 @@ from pincer.llm.base import (
     ToolCall,
     ToolResult,
 )
+from pincer.memory.base import (
+    PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX,
+    PINCER_MEMORY_USER_REQUEST_PREFIX,
+)
 
 # Signature: (tool_name, arguments, user_id, channel) -> approved?
 ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool]]
@@ -56,6 +60,7 @@ if TYPE_CHECKING:
     from pincer.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
 
 _MAX_CONSECUTIVE_ERRORS = 3
 _MAX_SANITIZE_ATTEMPTS = 2
@@ -514,7 +519,10 @@ class Agent:
                 extra_tags = [f"user:{channel}:{channel_user_id}"] if channel_user_id else None
                 await self._memory.store_memory(
                     user_id=user_id,
-                    content=f"User asked: {text[:200]}\nAssistant replied: {final_text[:300]}",
+                    content=(
+                        f"{PINCER_MEMORY_USER_REQUEST_PREFIX}: {text}\n"
+                        f"{PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX}: {final_text}"
+                    ),
                     category="exchange",
                     extra_tags=extra_tags,
                 )

@@ -15,6 +15,8 @@ import type {
   Settings,
   DoctorReport,
   IntegrationDetail,
+  Identity,
+  IdentityListResponse,
 } from "./types"
 
 function getStoredAuth(): { token?: string; apiUrl?: string } | null {
@@ -116,6 +118,12 @@ export const pincer = {
   },
   conversation: (id: string) =>
     api().get(`api/conversations/${id}`).json<Conversation>(),
+
+  identities: (params?: Record<string, string>) => {
+    const query = params ? `?${new URLSearchParams(params).toString()}` : ""
+    return api().get(`api/identity${query}`).json<IdentityListResponse>()
+  },
+  identity: (id: string) => api().get(`api/identity/${id}`).json<Identity>(),
 
   skills: () => api().get("api/skills").json<SkillsResponse>(),
   skillScan: (path: string) =>

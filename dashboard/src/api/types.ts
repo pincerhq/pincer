@@ -101,37 +101,38 @@ export interface AuditStats {
   failed_actions: number
 }
 
-export interface ConversationPreview {
-  id: string
-  user_id: string
-  channel: string
-  last_message: string
-  message_count: number
-  created_at: string
-  updated_at: string
-}
-
 export interface Message {
   role: "user" | "assistant" | "system" | "tool"
   content: string
-  timestamp: string
+  timestamp?: string
   tool_name?: string
   tool_input?: Record<string, unknown>
   images?: string[]
 }
 
+export interface ConversationPreview {
+  id: string
+  user_id: string
+  preview: string
+  tags: string[]
+  messages: Message[]
+  created_at: string
+}
+
 export interface Conversation {
   id: string
   user_id: string
-  channel: string
+  category: string
+  tags: string[]
   messages: Message[]
   created_at: string
-  updated_at: string
 }
 
 export interface ConversationsResponse {
   conversations: ConversationPreview[]
   total: number
+  limit: number
+  offset: number
 }
 
 export interface SkillInfo {
@@ -244,4 +245,23 @@ export interface DoctorReport {
   warnings: number
   critical: number
   checks: DoctorCheck[]
+}
+
+export interface IdentityChannel {
+  channel: string
+  channel_user_id: string
+  linked_at: string
+}
+
+export interface Identity {
+  pincer_user_id: string
+  preferred_channel: string
+  display_name: string
+  created_at: string
+  channels: IdentityChannel[]
+}
+
+export interface IdentityListResponse {
+  identities: Identity[]
+  total: number
 }

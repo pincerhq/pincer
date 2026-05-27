@@ -984,6 +984,10 @@ async def _run_agent(settings: Settings) -> None:
             from pincer.api.server import create_app
 
             api_app = create_app()
+            # Share the fully-built CLI agent (with MCP manager and memory
+            # backend already wired) so the API server doesn't create a second
+            # disconnected instance.
+            api_app.state.agent = agent
             api_config = uvicorn.Config(
                 api_app,
                 host=settings.dashboard_host,
@@ -1987,7 +1991,9 @@ async def _show_audit(
 
 # ── Memory subcommands ────────────────────────
 
-memory_app = typer.Typer(name="memory", help="Manage local sqlite based conversation memory. MCP servers are not supported yet!")
+memory_app = typer.Typer(
+    name="memory", help="Manage local sqlite based conversation memory. MCP servers are not supported yet!"
+)
 app.add_typer(memory_app, name="memory")
 
 

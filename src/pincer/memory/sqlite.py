@@ -21,11 +21,10 @@ from typing import TYPE_CHECKING
 import aiosqlite
 
 from pincer.memory.base import (
+    PINCER_MEMORY_CATEGORY_TAG_PREFIX,
+    PINCER_MEMORY_USER_TAG_PREFIX,
     BaseMemoryBackend,
     Memory,
-    PINCER_MEMORY_USER_TAG_PREFIX,
-    PINCER_MEMORY_CATEGORY_TAG_PREFIX,
-    PINCER_MEMORY_COUNT_FETCH_LIMIT
 )
 
 if TYPE_CHECKING:
@@ -111,9 +110,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         async with self._db.execute("PRAGMA table_info(memories)") as cur:
             existing_columns = {row[1] async for row in cur}
         if "tags" not in existing_columns:
-            await self._db.execute(
-                "ALTER TABLE memories ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'"
-            )
+            await self._db.execute("ALTER TABLE memories ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
             logger.info("Migrated memories table: added tags column")
 
         # FTS5 index for full-text search on memories
@@ -172,6 +169,24 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
 
     # ── Memories ──────────────────────────────────────────
 
+    async def get_memory(self, memory_id: str) -> Memory | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT id, user_id, content, category, created_at, tags FROM memories WHERE id = ?",
+            (memory_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return Memory(
+            id=row[0],
+            user_id=row[1],
+            content=row[2],
+            category=row[3],
+            created_at=row[4],
+            tags=json.loads(row[5]) if row[5] else [],
+        )
+
     async def store_memory(
         self,
         user_id: str,
@@ -185,7 +200,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         mem_id = str(uuid.uuid4())
         blob = _pack_embedding(embedding) if embedding else None
 
-        tags = [f"{PINCER_MEMORY_USER_TAG_PREFIX}{user_id}", f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}{category}"]
+        tags = [f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}", f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:{category}"]
         if extra_tags and isinstance(extra_tags, list):
             tags += extra_tags
         await self._db.execute(
@@ -237,7 +252,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         self,
         query: str,
         user_id: str | None = None,
-        limit: int = PINCER_MEMORY_COUNT_FETCH_LIMIT,
+        limit: int = 20,
         tags: list[str] | None = None,
     ) -> list[Memory]:
         """Full-text search over memories using FTS5, with optional tag filtering (OR logic)."""
@@ -293,7 +308,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         self,
         embedding: list[float],
         user_id: str | None = None,
-        limit: int = PINCER_MEMORY_COUNT_FETCH_LIMIT,
+        limit: int = 20,
         tags: list[str] | None = None,
     ) -> list[Memory]:
         """Vector similarity search using cosine similarity on embeddings, with optional tag filtering (OR logic)."""
@@ -375,25 +390,58 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         await self._db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
         await self._db.commit()
 
-    async def count(self, user_id: str | None = None) -> int:
-        """Return total number of memory records, optionally scoped to a user."""
+    async def count(
+        self,
+        user_id: str | None = None,
+        category: str | None = None,
+        tags: list[str] | None = None,
+        match_all_tags: bool = False,
+    ) -> int:
+        """Return total number of memory records matching the given filters."""
         assert self._db is not None
-        if user_id:
-            async with self._db.execute(
-                "SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,)
-            ) as cur:
-                row = await cur.fetchone()
+
+        conditions: list[str] = []
+        sql_params: list[object] = []
+
+        if user_id is not None:
+            conditions.append("m.user_id = ?")
+            sql_params.append(user_id)
+        if category:
+            conditions.append("m.category = ?")
+            sql_params.append(category)
+
+        if tags and match_all_tags:
+            placeholders = ",".join("?" * len(tags))
+            tag_join = ", json_each(m.tags) t"
+            conditions.append(f"t.value IN ({placeholders})")
+            sql_params.extend(tags)
+            where = f"WHERE {' AND '.join(conditions)} " if conditions else ""
+            sql_params.append(len(tags))
+            sql = (
+                f"SELECT COUNT(*) FROM ("
+                f"SELECT m.id FROM memories m{tag_join} {where}"
+                f"GROUP BY m.id HAVING COUNT(DISTINCT t.value) = ?"
+                f")"
+            )
+        elif tags:
+            placeholders = ",".join("?" * len(tags))
+            tag_join = ", json_each(m.tags) t"
+            conditions.append(f"t.value IN ({placeholders})")
+            sql_params.extend(tags)
+            where = f"WHERE {' AND '.join(conditions)} " if conditions else ""
+            sql = f"SELECT COUNT(DISTINCT m.id) FROM memories m{tag_join} {where}"
         else:
-            async with self._db.execute("SELECT COUNT(*) FROM memories") as cur:
-                row = await cur.fetchone()
+            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            sql = f"SELECT COUNT(*) FROM memories m {where}"
+
+        async with self._db.execute(sql, sql_params) as cur:
+            row = await cur.fetchone()
         return int(row[0]) if row else 0
 
     async def delete_user_memories(self, user_id: str) -> int:
         """Delete all memory records for a user. Returns the number of deleted rows."""
         assert self._db is not None
-        async with self._db.execute(
-            "SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,)
-        ) as cur:
+        async with self._db.execute("SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,)) as cur:
             row = await cur.fetchone()
         deleted = int(row[0]) if row else 0
         await self._db.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
@@ -404,17 +452,17 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
     async def list_memories(
         self,
         user_id: str | None = None,
-        limit: int = PINCER_MEMORY_COUNT_FETCH_LIMIT,
+        limit: int = 20,
         offset: int = 0,
         category: str | None = None,
         tags: list[str] | None = None,
+        match_all_tags: bool = False,
     ) -> list[Memory]:
         """List memories, newest first, with optional filtering and pagination."""
         assert self._db is not None
 
         conditions: list[str] = []
         sql_params: list[object] = []
-        tag_join = ""
 
         if user_id is not None:
             conditions.append("m.user_id = ?")
@@ -424,20 +472,45 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
             conditions.append("m.category = ?")
             sql_params.append(category)
 
-        if tags:
+        if tags and match_all_tags:
+            # AND logic: every tag must appear — use GROUP BY + HAVING COUNT
+            placeholders = ",".join("?" * len(tags))
             tag_join = ", json_each(m.tags) t"
-            conditions.append(f"t.value IN ({','.join('?' * len(tags))})")
+            conditions.append(f"t.value IN ({placeholders})")
             sql_params.extend(tags)
-
-        where_clause = f"WHERE {' AND '.join(conditions)} " if conditions else ""
-        sql_params.extend([limit, offset])
-
-        sql = (
-            f"SELECT DISTINCT m.id, m.user_id, m.content, m.category, m.created_at, m.tags "
-            f"FROM memories m{tag_join} "
-            f"{where_clause}"
-            f"ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
-        )
+            where_clause = f"WHERE {' AND '.join(conditions)} " if conditions else ""
+            sql_params.extend([len(tags), limit, offset])
+            sql = (
+                f"SELECT m.id, m.user_id, m.content, m.category, m.created_at, m.tags "
+                f"FROM memories m{tag_join} "
+                f"{where_clause}"
+                f"GROUP BY m.id "
+                f"HAVING COUNT(DISTINCT t.value) = ? "
+                f"ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
+            )
+        elif tags:
+            # OR logic (default): any matching tag is sufficient
+            placeholders = ",".join("?" * len(tags))
+            tag_join = ", json_each(m.tags) t"
+            conditions.append(f"t.value IN ({placeholders})")
+            sql_params.extend(tags)
+            where_clause = f"WHERE {' AND '.join(conditions)} " if conditions else ""
+            sql_params.extend([limit, offset])
+            sql = (
+                f"SELECT DISTINCT m.id, m.user_id, m.content, m.category, m.created_at, m.tags "
+                f"FROM memories m{tag_join} "
+                f"{where_clause}"
+                f"ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
+            )
+        else:
+            where_clause = f"WHERE {' AND '.join(conditions)} " if conditions else ""
+            sql_params.extend([limit, offset])
+            sql = (
+                f"SELECT m.id, m.user_id, m.content, m.category, m.created_at, m.tags "
+                f"FROM memories m "
+                f"{where_clause}"
+                f"ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
+            )
 
         results: list[Memory] = []
         async with self._db.execute(sql, sql_params) as cursor:
