@@ -42,6 +42,10 @@ def _build_llm(settings: Settings) -> BaseLLMProvider:
         from pincer.llm.grok_provider import GrokProvider
 
         return GrokProvider(settings)
+    if provider == "ollama":
+        from pincer.llm.ollama_provider import OllamaProvider
+
+        return OllamaProvider(settings)
     from pincer.llm.openai_provider import OpenAIProvider
 
     return OpenAIProvider(settings)

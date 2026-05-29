@@ -9,6 +9,7 @@ class LLMProvider(StrEnum):
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
     GROK = "grok"
+    OLLAMA = "ollama"
 
 
 class LLMSettings(BaseModel):
@@ -16,6 +17,7 @@ class LLMSettings(BaseModel):
     anthropic_api_key: SecretStr = Field(default=SecretStr(""), description="Anthropic API key")
     openai_api_key: SecretStr = Field(default=SecretStr(""), description="OpenAI API key")
     grok_api_key: SecretStr = Field(default=SecretStr(""), description="xAI Grok API key")
+    ollama_base_url: str = Field(default="http://localhost:11434/v1", description="Ollama API base URL")
 
     default_model: str = Field(
         default="claude-sonnet-4-5-20250929",

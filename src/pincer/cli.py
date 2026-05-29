@@ -181,6 +181,10 @@ async def _run_agent(settings: Settings) -> None:
         from pincer.llm.grok_provider import GrokProvider
 
         llm = GrokProvider(settings)
+    elif settings.default_provider.value == "ollama":
+        from pincer.llm.ollama_provider import OllamaProvider
+
+        llm = OllamaProvider(settings)
     else:
         from pincer.llm.openai_provider import OpenAIProvider
 
@@ -1487,6 +1491,10 @@ async def _chat_loop() -> None:
         from pincer.llm.grok_provider import GrokProvider
 
         llm = GrokProvider(settings)
+    elif settings.default_provider.value == "ollama":
+        from pincer.llm.ollama_provider import OllamaProvider
+
+        llm = OllamaProvider(settings)
     else:
         from pincer.llm.openai_provider import OpenAIProvider
 

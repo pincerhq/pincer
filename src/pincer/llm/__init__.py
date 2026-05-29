@@ -7,6 +7,8 @@ from pincer.llm.base import (
     ToolCall,
     ToolResult,
 )
+from pincer.llm.ollama_provider import OllamaProvider
+from pincer.llm.openai_compatible_provider import OpenAICompatibleProvider
 
 __all__ = [
     "BaseLLMProvider",
@@ -14,6 +16,8 @@ __all__ = [
     "LLMMessage",
     "LLMResponse",
     "MessageRole",
+    "OllamaProvider",
+    "OpenAICompatibleProvider",
     "ToolCall",
     "ToolResult",
 ]
