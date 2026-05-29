@@ -28,6 +28,8 @@ class Settings(BaseSettings, LLMSettings, ChannelSettings, ToolSettings, APISett
     @model_validator(mode="after")
     def validate_api_keys(self) -> Settings:
         """Ensure at least one LLM provider API key is set."""
+        if self.default_provider == LLMProvider.OLLAMA:
+            return self
         anthropic_set = self.anthropic_api_key.get_secret_value() != ""
         openai_set = self.openai_api_key.get_secret_value() != ""
         grok_set = self.grok_api_key.get_secret_value() != ""

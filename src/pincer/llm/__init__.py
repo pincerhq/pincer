@@ -1,3 +1,4 @@
+from pincer.llm._openai_common import OpenAICompatibleProvider
 from pincer.llm.base import (
     BaseLLMProvider,
     ImageContent,
@@ -14,6 +15,7 @@ __all__ = [
     "LLMMessage",
     "LLMResponse",
     "MessageRole",
+    "OpenAICompatibleProvider",
     "ToolCall",
     "ToolResult",
 ]

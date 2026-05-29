@@ -40,6 +40,9 @@ PRICING: dict[str, tuple[float, float]] = {
 
 DEFAULT_PRICING = (3.0, 15.0)
 
+# Providers that run locally and incur no API cost.
+FREE_PROVIDERS: frozenset[str] = frozenset({"ollama"})
+
 
 def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     """Calculate cost in USD for a single API call."""
@@ -111,9 +114,9 @@ class CostTracker:
         """Record a cost entry and return the cost. Raises BudgetExceededError if over limit."""
         assert self._db is not None, "CostTracker not initialized"
 
-        cost = calculate_cost(model, input_tokens, output_tokens)
+        cost = 0.0 if provider in FREE_PROVIDERS else calculate_cost(model, input_tokens, output_tokens)
 
-        if self._daily_budget > 0:
+        if cost > 0 and self._daily_budget > 0:
             today_spent = await self.get_today_spend()
             if today_spent + cost > self._daily_budget:
                 raise BudgetExceededError(spent=today_spent + cost, limit=self._daily_budget)

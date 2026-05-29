@@ -177,14 +177,10 @@ async def _run_agent(settings: Settings) -> None:
         from pincer.llm.anthropic_provider import AnthropicProvider
 
         llm = AnthropicProvider(settings)
-    elif settings.default_provider.value == "grok":
-        from pincer.llm.grok_provider import GrokProvider
-
-        llm = GrokProvider(settings)
     else:
-        from pincer.llm.openai_provider import OpenAIProvider
+        from pincer.llm._openai_common import OpenAICompatibleProvider
 
-        llm = OpenAIProvider(settings)
+        llm = OpenAICompatibleProvider(settings)
 
     if settings.memory_enabled:
         memory_store = _create_memory_backend(settings)
@@ -1483,14 +1479,10 @@ async def _chat_loop() -> None:
         from pincer.llm.anthropic_provider import AnthropicProvider
 
         llm = AnthropicProvider(settings)
-    elif settings.default_provider.value == "grok":
-        from pincer.llm.grok_provider import GrokProvider
-
-        llm = GrokProvider(settings)
     else:
-        from pincer.llm.openai_provider import OpenAIProvider
+        from pincer.llm._openai_common import OpenAICompatibleProvider
 
-        llm = OpenAIProvider(settings)
+        llm = OpenAICompatibleProvider(settings)
 
     memory_store: BaseMemoryBackend | None = None
     summarizer: Summarizer | None = None
