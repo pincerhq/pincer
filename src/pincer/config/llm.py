@@ -17,6 +17,8 @@ class LLMSettings(BaseModel):
     anthropic_api_key: SecretStr = Field(default=SecretStr(""), description="Anthropic API key")
     openai_api_key: SecretStr = Field(default=SecretStr(""), description="OpenAI API key")
     grok_api_key: SecretStr = Field(default=SecretStr(""), description="xAI Grok API key")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", description="OpenAI API base URL")
+    grok_base_url: str = Field(default="https://api.x.ai/v1", description="Grok API base URL")
     ollama_base_url: str = Field(default="http://localhost:11434/v1", description="Ollama API base URL")
 
     default_model: str = Field(

@@ -1,4 +1,4 @@
-"""Tests for OllamaProvider."""
+"""Tests for OpenAICompatibleProvider configured with Ollama."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def ollama_settings():
 
 @pytest.mark.asyncio
 async def test_complete_returns_content(ollama_settings):
-    from pincer.llm.ollama_provider import OllamaProvider
+    from pincer.llm._openai_common import OpenAICompatibleProvider
 
     fake_response = _make_chat_completion("Hi from Ollama!")
 
@@ -55,7 +55,7 @@ async def test_complete_returns_content(ollama_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OllamaProvider(ollama_settings)
+        provider = OpenAICompatibleProvider(ollama_settings)
         messages = [LLMMessage(role=MessageRole.USER, content="Say hi")]
         response = await provider.complete(messages)
 
@@ -79,7 +79,7 @@ def _make_stream_chunk(content: str | None):
 
 @pytest.mark.asyncio
 async def test_stream_yields_text_chunks(ollama_settings):
-    from pincer.llm.ollama_provider import OllamaProvider
+    from pincer.llm._openai_common import OpenAICompatibleProvider
 
     chunks = [_make_stream_chunk("Hello"), _make_stream_chunk(" world"), _make_stream_chunk(None)]
 
@@ -93,7 +93,7 @@ async def test_stream_yields_text_chunks(ollama_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OllamaProvider(ollama_settings)
+        provider = OpenAICompatibleProvider(ollama_settings)
         messages = [LLMMessage(role=MessageRole.USER, content="Say hi")]
         result = [token async for token in provider.stream(messages)]
 
@@ -102,7 +102,7 @@ async def test_stream_yields_text_chunks(ollama_settings):
 
 @pytest.mark.asyncio
 async def test_complete_passes_tools_in_openai_format(ollama_settings):
-    from pincer.llm.ollama_provider import OllamaProvider
+    from pincer.llm._openai_common import OpenAICompatibleProvider
 
     fake_response = _make_chat_completion()
 
@@ -112,7 +112,7 @@ async def test_complete_passes_tools_in_openai_format(ollama_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OllamaProvider(ollama_settings)
+        provider = OpenAICompatibleProvider(ollama_settings)
         messages = [LLMMessage(role=MessageRole.USER, content="Use a tool")]
         tools = [{"name": "search", "description": "Search the web", "input_schema": {"type": "object"}}]
         await provider.complete(messages, tools=tools)
@@ -128,7 +128,7 @@ async def test_complete_wraps_connection_error(ollama_settings):
     import openai
 
     from pincer.exceptions import LLMError
-    from pincer.llm.ollama_provider import OllamaProvider
+    from pincer.llm._openai_common import OpenAICompatibleProvider
 
     with patch("pincer.llm._openai_common.AsyncOpenAI") as mock_cls:
         mock_client = MagicMock()
@@ -138,7 +138,7 @@ async def test_complete_wraps_connection_error(ollama_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OllamaProvider(ollama_settings)
+        provider = OpenAICompatibleProvider(ollama_settings)
         messages = [LLMMessage(role=MessageRole.USER, content="hello")]
 
         with pytest.raises(LLMError, match="Ollama connection error"):

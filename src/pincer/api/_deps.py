@@ -38,17 +38,9 @@ def _build_llm(settings: Settings) -> BaseLLMProvider:
         from pincer.llm.anthropic_provider import AnthropicProvider
 
         return AnthropicProvider(settings)
-    if provider == "grok":
-        from pincer.llm.grok_provider import GrokProvider
+    from pincer.llm._openai_common import OpenAICompatibleProvider
 
-        return GrokProvider(settings)
-    if provider == "ollama":
-        from pincer.llm.ollama_provider import OllamaProvider
-
-        return OllamaProvider(settings)
-    from pincer.llm.openai_provider import OpenAIProvider
-
-    return OpenAIProvider(settings)
+    return OpenAICompatibleProvider(settings)
 
 
 async def build_agent_from_settings() -> Agent:

@@ -32,11 +32,20 @@ def test_settings_fallback_to_openai(tmp_path: Path) -> None:
 def test_settings_no_keys_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="At least one LLM API key"):
         Settings(
+            default_provider=LLMProvider.ANTHROPIC,  # type: ignore[arg-type]
             anthropic_api_key="",  # type: ignore[arg-type]
             openai_api_key="",  # type: ignore[arg-type]
             grok_api_key="",  # type: ignore[arg-type]
             data_dir=tmp_path,
         )
+
+
+def test_ollama_requires_no_api_key(tmp_path: Path) -> None:
+    s = Settings(
+        default_provider=LLMProvider.OLLAMA,  # type: ignore[arg-type]
+        data_dir=tmp_path,
+    )
+    assert s.default_provider == LLMProvider.OLLAMA
 
 
 def test_parse_allowed_users() -> None:

@@ -2,7 +2,7 @@
 Shared helpers and base class for OpenAI-compatible providers.
 
 Helpers: convert_messages_to_openai, convert_tools_to_openai, parse_openai_response.
-Base class: OpenAICompatibleProvider — subclasses supply MODEL_MAP and __init__.
+Base class: OpenAICompatibleProvider — reads all config from Settings directly.
 """
 
 from __future__ import annotations
@@ -132,30 +132,62 @@ def parse_openai_response(response: ChatCompletion) -> LLMResponse:
     )
 
 
+_MODEL_MAPS: dict[str, dict[str, str]] = {
+    "openai": {
+        "claude-sonnet-4-5-20250929": "gpt-4o",
+        "claude-haiku-4-5-20251001": "gpt-4o-mini",
+    },
+    "grok": {
+        "claude-sonnet-4-5-20250929": "grok-3",
+        "claude-haiku-4-5-20251001": "grok-3-mini",
+        "gpt-4o": "grok-3",
+        "gpt-4o-mini": "grok-3-mini",
+    },
+    "ollama": {
+        "claude-sonnet-4-5-20250929": "llama3.2",
+        "claude-haiku-4-5-20251001": "llama3.2",
+        "gpt-4o": "llama3.2",
+        "gpt-4o-mini": "llama3.2",
+    },
+}
+
+_PROVIDER_DISPLAY_NAMES: dict[str, str] = {
+    "openai": "OpenAI",
+    "grok": "Grok",
+    "ollama": "Ollama",
+}
+
+
 # ── Base class ────────────────────────────────────────────────────────────────
 
 
 class OpenAICompatibleProvider(BaseLLMProvider):
-    """Base for any OpenAI-compatible provider. Subclasses set MODEL_MAP and __init__."""
+    """Single class for all OpenAI-compatible providers (OpenAI, Grok, Ollama)."""
 
-    MODEL_MAP: dict[str, str] = {}
+    def __init__(self, settings: Settings) -> None:
+        provider = settings.default_provider.value
+        self._provider_name = _PROVIDER_DISPLAY_NAMES.get(provider, provider.capitalize())
 
-    def __init__(self, api_key: str, base_url: str | None, settings: Settings) -> None:
-        self._client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            max_retries=2,
-        )
-        self._default_model = self._resolve_model(settings.default_model)
+        if provider == "openai":
+            api_key = settings.openai_api_key.get_secret_value()
+            base_url = settings.openai_base_url
+        elif provider == "grok":
+            api_key = settings.grok_api_key.get_secret_value()
+            base_url = settings.grok_base_url
+        elif provider == "ollama":
+            api_key = "ollama"
+            base_url = settings.ollama_base_url
+        else:
+            raise ValueError(f"Unsupported OpenAI-compatible provider: {provider!r}")
+
+        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=2)
+        self._model_map = _MODEL_MAPS.get(provider, {})
+        self._default_model = self._model_map.get(settings.default_model, settings.default_model)
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
 
     def _resolve_model(self, model: str) -> str:
-        return self.MODEL_MAP.get(model, model)
-
-    @property
-    def _provider_name(self) -> str:
-        return type(self).__name__.replace("Provider", "")
+        return self._model_map.get(model, model)
 
     async def complete(
         self,

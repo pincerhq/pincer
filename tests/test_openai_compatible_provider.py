@@ -1,4 +1,4 @@
-"""Tests for OpenAICompatibleProvider base class."""
+"""Tests for OpenAICompatibleProvider."""
 
 from __future__ import annotations
 
@@ -42,24 +42,20 @@ def _make_stream_chunk(content: str | None):
 
 
 @pytest.fixture
-def base_settings():
+def openai_settings():
     from pincer.config import Settings
 
     return Settings(
-        anthropic_api_key="sk-ant-test",  # type: ignore[arg-type]
+        openai_api_key="sk-test",  # type: ignore[arg-type]
         telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
+        default_provider="openai",  # type: ignore[arg-type]
         default_model="my-model",
-        ollama_base_url="http://localhost:11434/v1",
     )
 
 
 @pytest.mark.asyncio
-async def test_complete_returns_content(base_settings):
+async def test_complete_returns_content(openai_settings):
     from pincer.llm._openai_common import OpenAICompatibleProvider
-
-    class StubProvider(OpenAICompatibleProvider):
-        def __init__(self, settings):
-            super().__init__("key", None, settings)
 
     fake_response = _make_chat_completion("Hi!")
 
@@ -69,7 +65,7 @@ async def test_complete_returns_content(base_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = StubProvider(base_settings)
+        provider = OpenAICompatibleProvider(openai_settings)
         result = await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
 
     assert result.content == "Hi!"
@@ -78,15 +74,16 @@ async def test_complete_returns_content(base_settings):
 
 
 @pytest.mark.asyncio
-async def test_model_map_remaps_model_name(base_settings):
+async def test_model_map_remaps_model_name(openai_settings):
+    from pincer.config import Settings
     from pincer.llm._openai_common import OpenAICompatibleProvider
 
-    class MappedProvider(OpenAICompatibleProvider):
-        MODEL_MAP = {"claude-sonnet-4-5-20250929": "gpt-4o"}
-
-        def __init__(self, settings):
-            super().__init__("key", None, settings)
-
+    settings = Settings(
+        openai_api_key="sk-test",  # type: ignore[arg-type]
+        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
+        default_provider="openai",  # type: ignore[arg-type]
+        default_model="claude-sonnet-4-5-20250929",
+    )
     fake_response = _make_chat_completion(model="gpt-4o")
 
     with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
@@ -95,9 +92,7 @@ async def test_model_map_remaps_model_name(base_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        settings = base_settings
-        settings.__dict__["default_model"] = "claude-sonnet-4-5-20250929"
-        provider = MappedProvider(settings)
+        provider = OpenAICompatibleProvider(settings)
         await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
 
     call_kwargs = mock_client.chat.completions.create.call_args.kwargs
@@ -105,15 +100,11 @@ async def test_model_map_remaps_model_name(base_settings):
 
 
 @pytest.mark.asyncio
-async def test_connection_error_includes_provider_name(base_settings):
+async def test_connection_error_includes_provider_name(openai_settings):
     import openai
 
     from pincer.exceptions import LLMError
     from pincer.llm._openai_common import OpenAICompatibleProvider
-
-    class AcmeProvider(OpenAICompatibleProvider):
-        def __init__(self, settings):
-            super().__init__("key", None, settings)
 
     with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
         mock_client = MagicMock()
@@ -123,6 +114,6 @@ async def test_connection_error_includes_provider_name(base_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = AcmeProvider(base_settings)
-        with pytest.raises(LLMError, match="Acme connection error"):
+        provider = OpenAICompatibleProvider(openai_settings)
+        with pytest.raises(LLMError, match="OpenAI connection error"):
             await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
