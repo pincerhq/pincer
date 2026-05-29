@@ -49,7 +49,7 @@ async def test_complete_returns_content(ollama_settings):
 
     fake_response = _make_chat_completion("Hi from Ollama!")
 
-    with patch("pincer.llm.openai_compatible_provider.AsyncOpenAI") as mock_cls:
+    with patch("pincer.llm._openai_common.AsyncOpenAI") as mock_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create = AsyncMock(return_value=fake_response)
         mock_client.close = AsyncMock()
@@ -87,7 +87,7 @@ async def test_stream_yields_text_chunks(ollama_settings):
         for chunk in chunks:
             yield chunk
 
-    with patch("pincer.llm.openai_compatible_provider.AsyncOpenAI") as mock_cls:
+    with patch("pincer.llm._openai_common.AsyncOpenAI") as mock_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create = AsyncMock(return_value=_aiter())
         mock_client.close = AsyncMock()
@@ -106,7 +106,7 @@ async def test_complete_passes_tools_in_openai_format(ollama_settings):
 
     fake_response = _make_chat_completion()
 
-    with patch("pincer.llm.openai_compatible_provider.AsyncOpenAI") as mock_cls:
+    with patch("pincer.llm._openai_common.AsyncOpenAI") as mock_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create = AsyncMock(return_value=fake_response)
         mock_client.close = AsyncMock()
@@ -130,7 +130,7 @@ async def test_complete_wraps_connection_error(ollama_settings):
     from pincer.exceptions import LLMError
     from pincer.llm.ollama_provider import OllamaProvider
 
-    with patch("pincer.llm.openai_compatible_provider.AsyncOpenAI") as mock_cls:
+    with patch("pincer.llm._openai_common.AsyncOpenAI") as mock_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create = AsyncMock(
             side_effect=openai.APIConnectionError(request=MagicMock())

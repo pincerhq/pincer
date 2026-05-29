@@ -8,7 +8,7 @@ import pytest
 
 from pincer.llm.base import LLMMessage, MessageRole
 
-MODULE = "pincer.llm.openai_compatible_provider"
+MODULE = "pincer.llm._openai_common"
 
 
 def _make_chat_completion(content: str = "Hello!", model: str = "test-model"):
@@ -55,7 +55,7 @@ def base_settings():
 
 @pytest.mark.asyncio
 async def test_complete_returns_content(base_settings):
-    from pincer.llm.openai_compatible_provider import OpenAICompatibleProvider
+    from pincer.llm._openai_common import OpenAICompatibleProvider
 
     class StubProvider(OpenAICompatibleProvider):
         def __init__(self, settings):
@@ -79,7 +79,7 @@ async def test_complete_returns_content(base_settings):
 
 @pytest.mark.asyncio
 async def test_model_map_remaps_model_name(base_settings):
-    from pincer.llm.openai_compatible_provider import OpenAICompatibleProvider
+    from pincer.llm._openai_common import OpenAICompatibleProvider
 
     class MappedProvider(OpenAICompatibleProvider):
         MODEL_MAP = {"claude-sonnet-4-5-20250929": "gpt-4o"}
@@ -109,7 +109,7 @@ async def test_connection_error_includes_provider_name(base_settings):
     import openai
 
     from pincer.exceptions import LLMError
-    from pincer.llm.openai_compatible_provider import OpenAICompatibleProvider
+    from pincer.llm._openai_common import OpenAICompatibleProvider
 
     class AcmeProvider(OpenAICompatibleProvider):
         def __init__(self, settings):

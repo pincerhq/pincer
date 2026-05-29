@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pincer.llm.openai_compatible_provider import OpenAICompatibleProvider
+from pincer.llm._openai_common import OpenAICompatibleProvider
 
 if TYPE_CHECKING:
     from pincer.config import Settings
