@@ -132,9 +132,7 @@ async def test_complete_wraps_connection_error(ollama_settings):
 
     with patch("pincer.llm._openai_common.AsyncOpenAI") as mock_cls:
         mock_client = MagicMock()
-        mock_client.chat.completions.create = AsyncMock(
-            side_effect=openai.APIConnectionError(request=MagicMock())
-        )
+        mock_client.chat.completions.create = AsyncMock(side_effect=openai.APIConnectionError(request=MagicMock()))
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 

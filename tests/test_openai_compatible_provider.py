@@ -108,9 +108,7 @@ async def test_connection_error_includes_provider_name(openai_settings):
 
     with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
         mock_client = MagicMock()
-        mock_client.chat.completions.create = AsyncMock(
-            side_effect=openai.APIConnectionError(request=MagicMock())
-        )
+        mock_client.chat.completions.create = AsyncMock(side_effect=openai.APIConnectionError(request=MagicMock()))
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
