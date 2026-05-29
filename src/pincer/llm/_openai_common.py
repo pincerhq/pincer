@@ -185,7 +185,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
         return parse_openai_response(response)
 
-    async def stream(  # type: ignore[override]
+    async def stream(
         self,
         messages: list[LLMMessage],
         tools: list[dict[str, Any]] | None = None,
