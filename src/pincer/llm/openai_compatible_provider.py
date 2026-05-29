@@ -82,7 +82,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
         return parse_openai_response(response)
 
-    async def stream(
+    async def stream(  # type: ignore[override]
         self,
         messages: list[LLMMessage],
         tools: list[dict[str, Any]] | None = None,
@@ -123,7 +123,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
     ) -> ChatCompletion:
         for attempt in range(max_retries):
             try:
-                return await self._client.chat.completions.create(**kwargs)
+                result: ChatCompletion = await self._client.chat.completions.create(**kwargs)
+                return result
             except openai.RateLimitError as e:
                 if attempt == max_retries - 1:
                     raise LLMRateLimitError(retry_after=5.0) from e
