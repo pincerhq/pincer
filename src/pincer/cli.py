@@ -411,6 +411,19 @@ async def _run_agent(settings: Settings) -> None:
     except Exception as e:
         console.print(f"[yellow]MCP startup error: {e}[/yellow]")
 
+    # If memory is backed by MCP but MCP never started, degrade to no-memory
+    # rather than letting the agent start with a broken backend that crashes on first write.
+    if mcp_manager is None and memory_store is not None:
+        from pincer.memory.mcp import MCPMemoryBackend
+
+        if isinstance(memory_store, MCPMemoryBackend):
+            console.print(
+                "[yellow]Warning: memory_backend=mcp but MCP manager did not start — memory disabled.[/yellow]"
+            )
+            await memory_store.close()
+            memory_store = None
+            summarizer = None
+
     # Create agent
     agent = Agent(
         settings=settings,
@@ -1487,13 +1500,20 @@ async def _chat_loop() -> None:
     if settings.memory_enabled:
         memory_store = _create_memory_backend(settings)
         await memory_store.initialize()
-        summarizer = Summarizer(
-            llm=llm,
-            memory_store=memory_store,
-            session_manager=session_mgr,
-            summary_model=settings.summary_model,
-            threshold=settings.summary_threshold,
-        )
+        from pincer.memory.mcp import MCPMemoryBackend
+
+        if isinstance(memory_store, MCPMemoryBackend):
+            console.print("[yellow]Warning: memory_backend=mcp is not supported in interactive CLI mode — memory disabled.[/yellow]")
+            await memory_store.close()
+            memory_store = None
+        else:
+            summarizer = Summarizer(
+                llm=llm,
+                memory_store=memory_store,
+                session_manager=session_mgr,
+                summary_model=settings.summary_model,
+                threshold=settings.summary_threshold,
+            )
 
     tools = ToolRegistry()
     tools.register(
