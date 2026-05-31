@@ -102,6 +102,7 @@ dev = [
 
 [project.scripts]
 pincer = "pincer.cli:app"
+pincer-ms365-mcp = "pincer.integrations.ms365.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]
