@@ -105,6 +105,15 @@ services:
       - http
     env_file: .env
 
+  ms365-mcp:
+    extends:
+      file: ./src/ms365-mcp/docker-compose.yml
+      service: ms365-mcp
+    image: pincer/ms365-mcp:latest
+    profiles:
+      - http
+    env_file: .env
+
   pincer-stdio:
     <<: *pincer-base
     container_name: pincer
@@ -141,6 +150,8 @@ services:
         condition: service_healthy
       translate-mcp:
         condition: service_healthy
+      ms365-mcp:
+        condition: service_healthy
 
   ngrok:
     image: ngrok/ngrok:latest
@@ -158,6 +169,7 @@ services:
 volumes:
   pincer-data:
   memory-data:
+  ms365-data:
   model-cache:
 
 networks:

@@ -77,9 +77,6 @@ mcp = [
     "pincer-mcps",
     "sqlite-vec-memory-mcp",
 ]
-ms365 = [
-    "msal>=1.28.0",
-]
 slack = [
     "slack-sdk>=3.27.0",
     "slack-bolt>=1.18.0",
@@ -87,7 +84,7 @@ slack = [
 telemetry = [
     "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@main"
 ]
-all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp,ms365,slack,telemetry]"]
+all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,telemetry]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
@@ -102,7 +99,6 @@ dev = [
 
 [project.scripts]
 pincer = "pincer.cli:app"
-pincer-ms365-mcp = "pincer.integrations.ms365.mcp_server:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -173,7 +169,6 @@ module = [
     "pincer.memory.store",
     "pincer.api.skills",
     "pincer.cli",
-    "pincer.integrations.ms365.*",
 ]
 disable_error_code = [
     "type-arg",
@@ -199,9 +194,11 @@ members = [
     "src/pincer-mcps",
     "src/pomodoro-mcp",
     "src/sqlite-vec-memory-mcp",
+    "src/ms365-mcp",
 ]
 
 [tool.uv.sources]
 pomodoro-mcp = { workspace = true }
 pincer-mcps = { workspace = true }
 sqlite-vec-memory-mcp = { workspace = true }
+ms365-mcp = { workspace = true }

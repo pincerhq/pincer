@@ -34,10 +34,6 @@ class CoreSettings(BaseModel):
         description="Daily spend limit in USD (0 = unlimited)",
     )
 
-    # ── MS365 Integration ─────────────────────────────────
-    ms365_client_id: str = Field(default="", description="Microsoft 365 app client ID")
-    ms365_tenant_id: str = Field(default="common", description="Microsoft 365 tenant ID")
-
     # ── Scheduler / Proactive ─────────────────────────────
     openweathermap_api_key: SecretStr = Field(default=SecretStr(""), description="OpenWeatherMap API key")
     newsapi_key: SecretStr = Field(default=SecretStr(""), description="NewsAPI key")

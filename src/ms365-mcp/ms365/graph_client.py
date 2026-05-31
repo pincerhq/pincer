@@ -11,12 +11,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 
 if TYPE_CHECKING:
-    from pincer.integrations.ms365.auth import MS365Auth
+    from ms365.auth import MS365Auth
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ class GraphClient:
 
         if resp.status_code == 204 or not resp.content:
             return {}
-        return resp.json()
+        return cast("dict[str, Any]", resp.json())
 
     async def get_binary(self, path: str) -> bytes:
         """GET request returning raw bytes (for file downloads)."""
@@ -164,7 +164,7 @@ class GraphClient:
         if resp.status_code == 204 or not resp.content:
             return {}
 
-        return resp.json()
+        return cast("dict[str, Any]", resp.json())
 
     async def paginate(
         self,

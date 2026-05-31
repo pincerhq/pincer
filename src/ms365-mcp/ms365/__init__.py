@@ -1,0 +1,15 @@
+"""
+Microsoft 365 standalone package.
+
+Provides 69 tools across Outlook email, Calendar, OneDrive, To Do,
+Teams, Contacts, and OneNote using Microsoft Graph REST API.
+
+Quick start — run as MCP server::
+
+    pincer-ms365-mcp --transport stdio
+    pincer-ms365-mcp --transport http --host 127.0.0.1 --port 8000
+
+Setup (one-time device code auth)::
+
+    ms365-mcp-setup
+"""

@@ -202,8 +202,6 @@ async def _run_agent(settings: Settings) -> None:
     bootstrap_report = register_default_tools(tools, settings)
     if "google" in bootstrap_report:
         console.print(f"[green]Google Workspace tools enabled ({bootstrap_report['google']} tools)[/green]")
-    if "ms365" in bootstrap_report:
-        console.print(f"[green]Microsoft 365 tools enabled ({bootstrap_report['ms365']} tools)[/green]")
     if "slack" in bootstrap_report:
         console.print(f"[green]Slack tools enabled ({bootstrap_report['slack']} tools)[/green]")
     if "image_gen" in bootstrap_report:
@@ -2912,102 +2910,6 @@ def setup_google() -> None:
     console.print(f"  Scopes granted: {len(ALL_SCOPES)}")
     console.print("\n85 Google Workspace tools are now available in Pincer.")
     console.print("Start the agent:  [bold]pincer run[/bold]")
-
-
-@app.command(name="setup-ms365")
-def setup_ms365() -> None:
-    """One-time Microsoft 365 setup (device code auth flow)."""
-    import asyncio
-
-    console.print("[bold]Microsoft 365 Setup[/bold]\n")
-    console.print("This sets up all Microsoft 365 tools: Outlook email, Calendar, OneDrive,")
-    console.print("To Do, Teams, Contacts, and OneNote (69 tools total).\n")
-
-    try:
-        import msal  # noqa: F401
-    except ImportError:
-        console.print("[red]msal not installed.[/red]\nRun:  uv pip install msal")
-        raise typer.Exit(1) from None
-
-    console.print("[bold]Step 1: Azure App Registration[/bold]\n")
-    console.print("If you haven't registered an app yet:\n")
-    console.print("  1. Go to https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade")
-    console.print("  2. Click 'New registration'")
-    console.print("  3. Name: 'Pincer Agent'")
-    console.print("  4. Supported account types: choose based on your account type:")
-    console.print("     - 'Personal Microsoft accounts only' for personal Outlook/OneDrive")
-    console.print("     - 'Accounts in any org directory + personal' for work + personal")
-    console.print("  5. Redirect URI: leave empty (we use device code flow)")
-    console.print("  6. Click 'Register'")
-    console.print("  7. Under 'Authentication', enable 'Allow public client flows'")
-    console.print("  8. Copy the Application (client) ID\n")
-
-    client_id = typer.prompt("Paste your Application (client) ID")
-    if not client_id or len(client_id) < 10:
-        console.print("[red]Invalid client ID.[/red]")
-        raise typer.Exit(1)
-
-    tenant_id = typer.prompt("Tenant ID (press Enter for 'common')", default="common")
-
-    from pincer.integrations.ms365.auth import MS365Auth
-    from pincer.integrations.ms365.config import MS365IntegrationConfig, resolve_cache_path
-
-    cfg = MS365IntegrationConfig(client_id=client_id, tenant_id=tenant_id)
-    cache_path = resolve_cache_path(cfg)
-
-    if cache_path.exists():
-        console.print(f"[yellow]Token cache already exists: {cache_path}[/yellow]")
-        if not typer.confirm("Re-authenticate (overwrites existing token)?"):
-            raise typer.Exit(0)
-
-    auth = MS365Auth(
-        client_id=client_id,
-        tenant_id=tenant_id,
-        cache_path=str(cache_path),
-    )
-
-    console.print(f"\nRequesting {len(auth.scopes)} permission scope(s)...")
-    console.print("Starting device code authentication...\n")
-
-    try:
-        result = asyncio.run(auth.device_code_flow())
-    except Exception as exc:
-        console.print(f"[red]Authentication failed: {exc}[/red]")
-        raise typer.Exit(1) from exc
-
-    # Show the device code message (it was set during the flow)
-    if auth._pending_flow_message:
-        console.print(f"[bold cyan]{auth._pending_flow_message}[/bold cyan]\n")
-
-    account = auth.authenticated_account() or result.get("id_token_claims", {}).get("preferred_username", "unknown")
-    console.print("\n[green]Microsoft 365 authenticated![/green]")
-    console.print(f"  Account:      {account}")
-    console.print(f"  Token cached: {cache_path}")
-    console.print(f"  Scopes:       {len(auth.scopes)}")
-
-    # Save config to pincer.toml
-    _save_ms365_config(client_id, tenant_id)
-
-    console.print("\n69 Microsoft 365 tools are now available in Pincer.")
-    console.print("Start the agent:  [bold]pincer run[/bold]")
-
-
-def _save_ms365_config(client_id: str, tenant_id: str) -> None:
-    """Append MS365 config to pincer.toml if not already present."""
-    from pathlib import Path
-
-    toml_path = Path.cwd() / "pincer.toml"
-
-    if toml_path.exists():
-        content = toml_path.read_text()
-        if "[integrations.ms365]" in content:
-            return  # already configured
-    else:
-        content = ""
-
-    section = f'\n[integrations.ms365]\nenabled = true\nclient_id = "{client_id}"\ntenant_id = "{tenant_id}"\n'
-    toml_path.write_text(content + section)
-    console.print(f"  Config saved:  {toml_path}")
 
 
 # ═══════════════════════════════════════════════

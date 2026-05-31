@@ -23,8 +23,6 @@ from pincer.api.integrations import (
     _integration_entries,
     _load_category,
     _mcp_skill_entries,
-    _ms365_active,
-    _ms365_categories,
     _slack_active,
     _slack_categories,
     _ToolCollector,
@@ -154,46 +152,6 @@ def test_google_active_false_on_exception() -> None:
         assert _google_active() is False
 
 
-# ── _ms365_active ─────────────────────────────────────────────────────────────
-
-
-def test_ms365_active_true_when_fully_configured(tmp_path: Path) -> None:
-    token = tmp_path / "ms365_token.json"
-    token.write_text("{}")
-    cfg = MagicMock(enabled=True, client_id="client-id-123")
-    with (
-        patch("pincer.integrations.ms365.config.load_config", return_value=cfg),
-        patch("pincer.integrations.ms365.config.resolve_cache_path", return_value=token),
-    ):
-        assert _ms365_active() is True
-
-
-def test_ms365_active_false_when_token_file_missing(tmp_path: Path) -> None:
-    token = tmp_path / "missing.json"  # does not exist
-    cfg = MagicMock(enabled=True, client_id="client-id-123")
-    with (
-        patch("pincer.integrations.ms365.config.load_config", return_value=cfg),
-        patch("pincer.integrations.ms365.config.resolve_cache_path", return_value=token),
-    ):
-        assert _ms365_active() is False
-
-
-def test_ms365_active_false_when_disabled(tmp_path: Path) -> None:
-    token = tmp_path / "token.json"
-    token.write_text("{}")
-    cfg = MagicMock(enabled=False, client_id="client-id-123")
-    with (
-        patch("pincer.integrations.ms365.config.load_config", return_value=cfg),
-        patch("pincer.integrations.ms365.config.resolve_cache_path", return_value=token),
-    ):
-        assert _ms365_active() is False
-
-
-def test_ms365_active_false_on_exception() -> None:
-    with patch("pincer.integrations.ms365.config.load_config", side_effect=Exception("fail")):
-        assert _ms365_active() is False
-
-
 # ── _slack_active ─────────────────────────────────────────────────────────────
 
 
@@ -221,10 +179,6 @@ def test_google_categories_returns_list() -> None:
     assert isinstance(_google_categories(), list)
 
 
-def test_ms365_categories_returns_list() -> None:
-    assert isinstance(_ms365_categories(), list)
-
-
 def test_slack_categories_returns_list() -> None:
     assert isinstance(_slack_categories(), list)
 
@@ -243,14 +197,6 @@ def test_slack_categories_includes_channels_when_load_succeeds() -> None:
     with patch("importlib.import_module", return_value=mod):
         result = _slack_categories()
     assert any(c["name"] == "Channels" for c in result)
-
-
-def test_ms365_categories_includes_email_when_load_succeeds() -> None:
-    mod = types.ModuleType("fake_ms365_email")
-    mod.register_email_tools = lambda reg, _: reg.register("send_email", "Send email")  # type: ignore[attr-defined]
-    with patch("importlib.import_module", return_value=mod):
-        result = _ms365_categories()
-    assert any(c["name"] == "Email" for c in result)
 
 
 # ── _mcp_skill_entries ────────────────────────────────────────────────────────
@@ -335,8 +281,8 @@ def test_mcp_skill_entries_disabled_server_shows_disabled_status() -> None:
 # ── _integration_entries ──────────────────────────────────────────────────────
 
 
-def test_integration_entries_returns_exactly_three() -> None:
-    assert len(_integration_entries()) == 3
+def test_integration_entries_returns_exactly_two() -> None:
+    assert len(_integration_entries()) == 2
 
 
 def test_integration_entries_has_required_fields() -> None:
@@ -381,7 +327,6 @@ def test_list_integrations_includes_builtin_names(client: TestClient) -> None:
     resp = client.get("/api/integrations")
     names = {e["name"] for e in resp.json()["integrations"]}
     assert "Google Workspace" in names
-    assert "Microsoft 365" in names
     assert "Slack" in names
 
 
@@ -405,10 +350,8 @@ def test_get_integration_google_shape(client: TestClient) -> None:
     assert "by_tool" in data["usage"]
 
 
-def test_get_integration_ms365_shape(client: TestClient) -> None:
-    resp = client.get("/api/integrations/ms365")
-    assert resp.status_code == 200
-    assert resp.json()["name"] == "Microsoft 365"
+def test_get_integration_ms365_returns_404(client: TestClient) -> None:
+    assert client.get("/api/integrations/ms365").status_code == 404
 
 
 def test_get_integration_slack_shape(client: TestClient) -> None:

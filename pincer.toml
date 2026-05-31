@@ -168,3 +168,11 @@ name      = "translate"
 transport = "stdio"
 command = "python"
 args = ["${PINCER_SRC_DIR:-$PWD}/src/pincer-mcps/translate_server.py"]
+
+[[mcp.servers]]
+name      = "ms365"
+transport = "stdio"
+command = "python"
+args = ["${PINCER_SRC_DIR:-$PWD}/src/ms365-mcp/ms365/ms365_server.py"]
+env = { PINCER_MS365_CLIENT_ID="${PINCER_MS365_CLIENT_ID}", PINCER_MS365_TENANT_ID="${PINCER_MS365_TENANT_ID}" }
+approval_required = ["*"]

@@ -8,7 +8,7 @@ Supports:
 Token cache: ~/.pincer/ms365_token_cache.json
 MSAL handles refresh tokens automatically.
 
-Run ``pincer setup-ms365`` to perform the one-time device code auth flow.
+Run ``ms365-mcp-setup`` to perform the one-time device code auth flow.
 """
 
 from __future__ import annotations
@@ -129,7 +129,7 @@ class MS365Auth:
         result = self._app.acquire_token_silent(self._scopes, account=accounts[0])
         if result and "access_token" in result:
             self._save_cache()
-            return result["access_token"]
+            return str(result["access_token"])
         return None
 
     async def get_token(self) -> str:
@@ -141,7 +141,7 @@ class MS365Auth:
         if token:
             return token
 
-        raise MS365AuthError("No valid Microsoft 365 token found. Run 'pincer setup-ms365' to authenticate.")
+        raise MS365AuthError("No valid Microsoft 365 token found. Run 'ms365-mcp-setup' to authenticate.")
 
     async def device_code_flow(self) -> dict[str, Any]:
         """Run device code flow: user enters code in browser. Returns MSAL result."""
@@ -162,7 +162,7 @@ class MS365Auth:
             raise MS365AuthError(f"Auth failed: {result.get('error_description', 'unknown error')}")
 
         self._save_cache()
-        return result
+        return dict(result)
 
     async def interactive_flow(self) -> dict[str, Any]:
         """Run interactive browser flow. Returns MSAL result."""
@@ -177,7 +177,7 @@ class MS365Auth:
             raise MS365AuthError(f"Auth failed: {result.get('error_description', 'unknown error')}")
 
         self._save_cache()
-        return result
+        return dict(result)
 
     def has_cached_token(self) -> bool:
         """Check if there's any cached account."""
@@ -189,7 +189,8 @@ class MS365Auth:
         self._ensure_app()
         accounts = self._app.get_accounts()
         if accounts:
-            return accounts[0].get("username")
+            username = accounts[0].get("username")
+            return str(username) if username is not None else None
         return None
 
     @property

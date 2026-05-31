@@ -5,20 +5,16 @@ Exposes all 69 Microsoft 365 tools (Outlook email, Calendar, OneDrive, To Do,
 Teams, Contacts, OneNote) as an MCP server so any MCP host — Claude Desktop,
 Cursor, or Pincer's own MCP client — can drive Microsoft Graph.
 
-The tool implementations, JSON schemas, descriptions, and approval flags are
-reused verbatim from the in-agent integration: this module simply collects the
-existing ``register_*_tools`` output via a registry-compatible shim and serves
-it through the low-level MCP SDK ``Server``.
-
 Transports::
 
     pincer-ms365-mcp --transport stdio                         # default
-    pincer-ms365-mcp --transport http --host 127.0.0.1 --port 18820
-        MCP endpoint → http://127.0.0.1:18820/mcp
+    pincer-ms365-mcp --transport http --host 127.0.0.1 --port 8000
+        MCP endpoint → http://127.0.0.1:8000/mcp
 
-Authentication reuses the cached MSAL token written by ``pincer setup-ms365``
-(``~/.pincer/ms365_token_cache.json``). Set ``PINCER_MS365_CLIENT_ID`` /
-``PINCER_MS365_TENANT_ID`` or ``[integrations.ms365]`` in ``pincer.toml``.
+Authentication: run ``ms365-mcp-setup`` once to complete the device code flow.
+Token is cached at ``~/.pincer/ms365_token_cache.json``.
+Set ``PINCER_MS365_CLIENT_ID`` / ``PINCER_MS365_TENANT_ID`` or
+``[integrations.ms365]`` in ``pincer.toml``.
 """
 
 from __future__ import annotations
@@ -32,24 +28,24 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from pincer.integrations.ms365.graph_client import GraphClient
+    from ms365.graph_client import GraphClient
 
-logger = logging.getLogger("pincer.integrations.ms365.mcp_server")
+logger = logging.getLogger("ms365.ms365_server")
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 18820
+DEFAULT_PORT = 8000
 SERVICES = ("email", "calendar", "onedrive", "todo", "teams", "contacts", "onenote")
 
 
 def _registrars() -> dict[str, Callable[..., int]]:
     """Map each service to the register function that emits its tools."""
-    from pincer.integrations.ms365.tools_calendar import register_calendar_tools
-    from pincer.integrations.ms365.tools_contacts import register_contacts_tools
-    from pincer.integrations.ms365.tools_email import register_email_tools
-    from pincer.integrations.ms365.tools_onedrive import register_onedrive_tools
-    from pincer.integrations.ms365.tools_onenote import register_onenote_tools
-    from pincer.integrations.ms365.tools_teams import register_teams_tools
-    from pincer.integrations.ms365.tools_todo import register_todo_tools
+    from ms365.tools_calendar import register_calendar_tools
+    from ms365.tools_contacts import register_contacts_tools
+    from ms365.tools_email import register_email_tools
+    from ms365.tools_onedrive import register_onedrive_tools
+    from ms365.tools_onenote import register_onenote_tools
+    from ms365.tools_teams import register_teams_tools
+    from ms365.tools_todo import register_todo_tools
 
     return {
         "email": register_email_tools,
@@ -146,7 +142,7 @@ def build_server(
 
     server: Server = Server("pincer-ms365")
 
-    @server.list_tools()
+    @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
     async def list_tools() -> list[types.Tool]:
         return [
             types.Tool(
@@ -161,7 +157,7 @@ def build_server(
             for s in specs
         ]
 
-    @server.call_tool()
+    @server.call_tool()  # type: ignore[no-untyped-call,untyped-decorator]
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
         spec = by_name.get(name)
         if spec is None:
@@ -242,9 +238,9 @@ def _build_client_or_exit(tenant_override: str | None) -> GraphClient:
     """Build an authenticated GraphClient or exit with a helpful message."""
     import sys
 
-    from pincer.integrations.ms365.auth import MS365Auth
-    from pincer.integrations.ms365.config import load_config, resolve_cache_path
-    from pincer.integrations.ms365.graph_client import GraphClient
+    from ms365.auth import MS365Auth
+    from ms365.config import load_config, resolve_cache_path
+    from ms365.graph_client import GraphClient
 
     cfg = load_config()
     if tenant_override:
@@ -263,7 +259,7 @@ def _build_client_or_exit(tenant_override: str | None) -> GraphClient:
         services=cfg.services,
     )
     if not auth.has_cached_token():
-        sys.exit("No cached Microsoft 365 token. Run 'pincer setup-ms365' to authenticate first.")
+        sys.exit("No cached Microsoft 365 token. Run 'ms365-mcp-setup' to authenticate first.")
 
     return GraphClient(auth)
 

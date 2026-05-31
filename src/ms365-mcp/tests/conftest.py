@@ -1,22 +1,16 @@
-"""
-Shared fixtures for Microsoft 365 integration tests.
-
-All tests mock the GraphClient HTTP methods so no real Microsoft APIs are hit.
-"""
+"""Shared fixtures for ms365-mcp tests. No real Microsoft API calls are made."""
 
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from pincer.integrations.ms365.auth import MS365Auth
-from pincer.integrations.ms365.graph_client import GraphClient
+from ms365.auth import MS365Auth
+from ms365.graph_client import GraphClient
 
 
 @pytest.fixture
-def mock_auth():
-    """Mock MS365Auth that returns a fake token."""
+def mock_auth() -> MagicMock:
     auth = MagicMock(spec=MS365Auth)
     auth.get_token = AsyncMock(return_value="fake-access-token")
     auth.has_cached_token.return_value = True
@@ -28,9 +22,8 @@ def mock_auth():
 
 
 @pytest.fixture
-def mock_client(mock_auth):
-    """GraphClient with all HTTP methods mocked."""
-    client = GraphClient(mock_auth)
+def mock_client(mock_auth: MagicMock) -> MagicMock:
+    client: MagicMock = MagicMock(spec=GraphClient)
     client.get = AsyncMock(return_value={"value": []})
     client.post = AsyncMock(return_value={})
     client.patch = AsyncMock(return_value={})

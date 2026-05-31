@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
+from typing import TYPE_CHECKING
 
-from pincer.integrations.ms365.tools_calendar import (
+import pytest
+from ms365.tools_calendar import (
     outlook__accept_event,
     outlook__check_availability,
     outlook__create_event,
@@ -19,21 +20,20 @@ from pincer.integrations.ms365.tools_calendar import (
     outlook__update_event,
 )
 
+if TYPE_CHECKING:
+    from unittest.mock import MagicMock
+
 
 @pytest.mark.asyncio
-async def test_list_calendars(mock_client):
-    mock_client.get.return_value = {
-        "value": [
-            {"id": "cal-1", "name": "My Calendar", "color": "auto"},
-        ]
-    }
+async def test_list_calendars(mock_client: MagicMock) -> None:
+    mock_client.get.return_value = {"value": [{"id": "cal-1", "name": "My Calendar", "color": "auto"}]}
     result = await outlook__list_calendars(mock_client)
     assert "My Calendar" in result
     assert "1 calendar(s)" in result
 
 
 @pytest.mark.asyncio
-async def test_list_events(mock_client):
+async def test_list_events(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "value": [
             {
@@ -53,7 +53,7 @@ async def test_list_events(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_get_event(mock_client):
+async def test_get_event(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "id": "evt-1",
         "subject": "Budget Review",
@@ -65,10 +65,7 @@ async def test_get_event(mock_client):
         "organizer": {"emailAddress": {"name": "Bob", "address": "bob@example.com"}},
         "isOnlineMeeting": False,
         "attendees": [
-            {
-                "emailAddress": {"name": "Carol", "address": "carol@example.com"},
-                "status": {"response": "accepted"},
-            }
+            {"emailAddress": {"name": "Carol", "address": "carol@example.com"}, "status": {"response": "accepted"}}
         ],
     }
     result = await outlook__get_event(mock_client, event_id="evt-1")
@@ -78,7 +75,7 @@ async def test_get_event(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_search_events(mock_client):
+async def test_search_events(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "value": [
             {
@@ -96,7 +93,7 @@ async def test_search_events(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_check_availability(mock_client):
+async def test_check_availability(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {
         "value": [
             {
@@ -118,13 +115,10 @@ async def test_check_availability(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_create_event(mock_client):
+async def test_create_event(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {"id": "new-evt", "onlineMeeting": None}
     result = await outlook__create_event(
-        mock_client,
-        subject="Review Meeting",
-        start="2026-03-28T14:00:00",
-        end="2026-03-28T15:00:00",
+        mock_client, subject="Review Meeting", start="2026-03-28T14:00:00", end="2026-03-28T15:00:00"
     )
     assert "Event created" in result
     assert "Review Meeting" in result
@@ -132,42 +126,42 @@ async def test_create_event(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_update_event(mock_client):
+async def test_update_event(mock_client: MagicMock) -> None:
     mock_client.patch.return_value = {}
     result = await outlook__update_event(mock_client, event_id="evt-1", subject="Updated Meeting")
     assert "updated" in result
 
 
 @pytest.mark.asyncio
-async def test_delete_event(mock_client):
+async def test_delete_event(mock_client: MagicMock) -> None:
     mock_client.delete.return_value = {}
     result = await outlook__delete_event(mock_client, event_id="evt-1")
     assert "deleted" in result
 
 
 @pytest.mark.asyncio
-async def test_accept_event(mock_client):
+async def test_accept_event(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {}
     result = await outlook__accept_event(mock_client, event_id="evt-1")
     assert "accepted" in result
 
 
 @pytest.mark.asyncio
-async def test_decline_event(mock_client):
+async def test_decline_event(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {}
     result = await outlook__decline_event(mock_client, event_id="evt-1")
     assert "declined" in result
 
 
 @pytest.mark.asyncio
-async def test_tentative_event(mock_client):
+async def test_tentative_event(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {}
     result = await outlook__tentative_event(mock_client, event_id="evt-1")
     assert "tentatively accepted" in result
 
 
 @pytest.mark.asyncio
-async def test_create_online_meeting(mock_client):
+async def test_create_online_meeting(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {
         "id": "meeting-1",
         "joinWebUrl": "https://teams.microsoft.com/l/meetup-join/123",

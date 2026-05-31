@@ -41,7 +41,7 @@ def _discover_skill_dirs() -> list[Path]:
 
 
 def _integration_entries() -> list[dict[str, Any]]:
-    """Return Google Workspace, MS365, and Slack as skill-like entries."""
+    """Return Google Workspace and Slack as skill-like entries."""
     entries: list[dict[str, Any]] = []
 
     # ── Google Workspace ─────────────────────────────────────────────────────
@@ -69,31 +69,6 @@ def _integration_entries() -> list[dict[str, Any]]:
             "tools": ["gmail", "calendar", "drive", "docs", "sheets", "slides", "tasks", "contacts", "meet"],
             "source": "integration",
             "slug": "google",
-        }
-    )
-
-    # ── Microsoft 365 ────────────────────────────────────────────────────────
-    try:
-        from pincer.integrations.ms365.config import load_config, resolve_cache_path
-
-        ms_cfg = load_config()
-        ms_token = resolve_cache_path(ms_cfg)
-        ms_active = bool(ms_cfg.enabled and ms_cfg.client_id and ms_token.exists())
-    except Exception:
-        ms_active = False
-
-    entries.append(
-        {
-            "name": "Microsoft 365",
-            "version": "69 tools",
-            "description": "Outlook · Calendar · OneDrive · To Do · Teams · Contacts · OneNote",
-            "author": "Microsoft",
-            "safety_score": 100,
-            "status": "active" if ms_active else "disabled",
-            "permissions": [],
-            "tools": ["email", "calendar", "onedrive", "todo", "teams", "contacts", "onenote"],
-            "source": "integration",
-            "slug": "ms365",
         }
     )
 
@@ -239,20 +214,6 @@ def _google_categories() -> list[dict[str, Any]]:
     return [{"name": n, "tools": t} for n, m, f in specs if (t := _load_category(pkg, m, f))]
 
 
-def _ms365_categories() -> list[dict[str, Any]]:
-    pkg = "pincer.integrations.ms365"
-    specs = [
-        ("Email", "tools_email", "register_email_tools"),
-        ("Calendar", "tools_calendar", "register_calendar_tools"),
-        ("OneDrive", "tools_onedrive", "register_onedrive_tools"),
-        ("To Do", "tools_todo", "register_todo_tools"),
-        ("Teams", "tools_teams", "register_teams_tools"),
-        ("Contacts", "tools_contacts", "register_contacts_tools"),
-        ("OneNote", "tools_onenote", "register_onenote_tools"),
-    ]
-    return [{"name": n, "tools": t} for n, m, f in specs if (t := _load_category(pkg, m, f))]
-
-
 def _slack_categories() -> list[dict[str, Any]]:
     pkg = "pincer.integrations.slack"
     specs = [
@@ -279,16 +240,6 @@ def _google_active() -> bool:
         return False
 
 
-def _ms365_active() -> bool:
-    try:
-        from pincer.integrations.ms365.config import load_config, resolve_cache_path
-
-        cfg = load_config()
-        return bool(cfg.enabled and cfg.client_id and resolve_cache_path(cfg).exists())
-    except Exception:
-        return False
-
-
 def _slack_active() -> bool:
     try:
         from pincer.integrations.slack.auth import load_tokens
@@ -306,14 +257,6 @@ _CATALOG: dict[str, dict[str, Any]] = {
         "prefix": "google__",
         "categories_fn": _google_categories,
         "active_fn": _google_active,
-    },
-    "ms365": {
-        "name": "Microsoft 365",
-        "author": "Microsoft",
-        "description": "Outlook · Calendar · OneDrive · To Do · Teams · Contacts · OneNote",
-        "prefix": "ms365__",
-        "categories_fn": _ms365_categories,
-        "active_fn": _ms365_active,
     },
     "slack": {
         "name": "Slack",

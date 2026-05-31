@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ms365-mcp"
+version = "0.8.0"
+requires-python = ">=3.12"
+dependencies = [
+    "msal>=1.28.0",
+    "mcp>=1.8.0",
+    "httpx>=0.27.0",
+    "starlette>=0.41.0",
+    "uvicorn[standard]>=0.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+]
+
+[project.scripts]
+pincer-ms365-mcp = "ms365.ms365_server:main"
+ms365-mcp-setup  = "ms365.setup_cli:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.hatch.build.targets.wheel]
+packages = ["ms365"]

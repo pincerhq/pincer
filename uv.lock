@@ -18,6 +18,7 @@ resolution-markers = [
 
 [manifest]
 members = [
+    "ms365-mcp",
     "pincer-agent",
     "pincer-mcps",
     "pomodoro-mcp",
@@ -2099,6 +2100,38 @@ wheels = [
 ]
 
 [[package]]
+name = "ms365-mcp"
+version = "0.8.0"
+source = { editable = "src/ms365-mcp" }
+dependencies = [
+    { name = "httpx" },
+    { name = "mcp" },
+    { name = "msal" },
+    { name = "starlette" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "mcp", specifier = ">=1.8.0" },
+    { name = "msal", specifier = ">=1.28.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
+    { name = "starlette", specifier = ">=0.41.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
+]
+provides-extras = ["dev"]
+
+[[package]]
 name = "msal"
 version = "1.36.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2744,7 +2777,6 @@ all = [
     { name = "fpdf2" },
     { name = "google-genai" },
     { name = "mcp" },
-    { name = "msal" },
     { name = "pincer-mcps" },
     { name = "pincer-telemetry" },
     { name = "playwright" },
@@ -2787,9 +2819,6 @@ mcp = [
 ]
 memory = [
     { name = "sqlite-vec" },
-]
-ms365 = [
-    { name = "msal" },
 ]
 pdf = [
     { name = "pymupdf" },
@@ -2846,11 +2875,10 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.8.0" },
-    { name = "msal", marker = "extra == 'ms365'", specifier = ">=1.28.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13.0" },
     { name = "neonize", specifier = ">=0.3.17" },
     { name = "openai", specifier = ">=1.60.0" },
-    { name = "pincer-agent", extras = ["search", "tavily", "browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "ms365", "slack", "telemetry"], marker = "extra == 'all'" },
+    { name = "pincer-agent", extras = ["search", "tavily", "browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "telemetry"], marker = "extra == 'all'" },
     { name = "pincer-mcps", marker = "extra == 'mcp'", editable = "src/pincer-mcps" },
     { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?rev=main" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.40.0" },
@@ -2881,7 +2909,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=12.0" },
     { name = "youtube-transcript-api", marker = "extra == 'skills'" },
 ]
-provides-extras = ["search", "tavily", "browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "ms365", "slack", "telemetry", "all", "dev"]
+provides-extras = ["search", "tavily", "browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "telemetry", "all", "dev"]
 
 [[package]]
 name = "pincer-mcps"

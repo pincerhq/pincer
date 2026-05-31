@@ -1,0 +1,15 @@
+services:
+  ms365-mcp:
+    build: .
+    restart: unless-stopped
+    #ports:
+    #  - "8000:8000"
+    volumes:
+      - ms365-data:/app/data
+    environment:
+      PINCER_MS365_CLIENT_ID: "${PINCER_MS365_CLIENT_ID}"
+      PINCER_MS365_TENANT_ID: "${PINCER_MS365_TENANT_ID:-common}"
+      TRANSPORT: http
+
+volumes:
+  ms365-data:
