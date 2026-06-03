@@ -12,14 +12,13 @@ if TYPE_CHECKING:
 
 _EXPECTED_COUNTS = {
     "email": 17,
-    "calendar": 12,
+    "calendar": 11,
     "onedrive": 14,
     "todo": 8,
-    "teams": 7,
     "contacts": 6,
     "onenote": 5,
 }
-_TOTAL = sum(_EXPECTED_COUNTS.values())  # 69
+_TOTAL = sum(_EXPECTED_COUNTS.values())  # 61
 
 
 # ── collect_tools ─────────────────────────────────────────────────────────────
@@ -79,7 +78,6 @@ def test_write_tools_have_approval_flag(mock_client: MagicMock) -> None:
         "outlook__accept_event",
         "outlook__decline_event",
         "outlook__tentative_event",
-        "outlook__create_online_meeting",
         "onedrive__upload_file",
         "onedrive__create_folder",
         "onedrive__move_file",
@@ -92,8 +90,6 @@ def test_write_tools_have_approval_flag(mock_client: MagicMock) -> None:
         "ms_todo__complete_task",
         "ms_todo__delete_task",
         "ms_todo__create_task_list",
-        "teams__send_channel_message",
-        "teams__send_chat_message",
         "outlook__create_contact",
         "outlook__update_contact",
         "outlook__delete_contact",
@@ -128,11 +124,6 @@ def test_read_tools_no_approval_flag(mock_client: MagicMock) -> None:
         "ms_todo__list_task_lists",
         "ms_todo__list_tasks",
         "ms_todo__get_task",
-        "teams__list_teams",
-        "teams__list_channels",
-        "teams__list_channel_messages",
-        "teams__get_channel_message",
-        "teams__list_chats",
         "outlook__list_contacts",
         "outlook__search_contacts",
         "outlook__get_contact",
@@ -205,29 +196,23 @@ async def test_call_unknown_tool_returns_error(mock_client: MagicMock) -> None:
     assert "Unknown tool" in result.root.content[0].text
 
 
-# ── _build_client_or_exit ─────────────────────────────────────────────────────
+# ── _build_client ─────────────────────────────────────────────────────────────
 
 
-def test_build_client_exits_without_client_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ms365.config import MS365IntegrationConfig
-
-    def fake_load_config() -> MS365IntegrationConfig:
-        c = MS365IntegrationConfig()
-        c.client_id = ""
-        return c
-
-    monkeypatch.setattr("ms365.config.load_config", fake_load_config)
+@pytest.mark.asyncio
+async def test_build_client_exits_without_client_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PINCER_MS365_CLIENT_ID", raising=False)
     with pytest.raises(SystemExit):
-        ms365_server._build_client_or_exit(None)
+        await ms365_server._build_client(None)
 
 
-def test_build_client_exits_without_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    from ms365.config import MS365IntegrationConfig
+@pytest.mark.asyncio
+async def test_build_client_runs_device_flow_when_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
 
-    def fake_load_config() -> MS365IntegrationConfig:
-        c = MS365IntegrationConfig()
-        c.client_id = "test-client-id"
-        return c
+    monkeypatch.setenv("PINCER_MS365_CLIENT_ID", "test-client-id")
+
+    flow_called: list[bool] = []
 
     class _NoTokenAuth:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -236,7 +221,34 @@ def test_build_client_exits_without_token(monkeypatch: pytest.MonkeyPatch) -> No
         def has_cached_token(self) -> bool:
             return False
 
-    monkeypatch.setattr("ms365.config.load_config", fake_load_config)
+        async def device_code_flow(self) -> dict[str, object]:
+            flow_called.append(True)
+            return {"access_token": "new-token"}
+
+    mock_graph = MagicMock()
     monkeypatch.setattr("ms365.auth.MS365Auth", _NoTokenAuth)
+    monkeypatch.setattr("ms365.graph_client.GraphClient", mock_graph)
+    await ms365_server._build_client(None)
+
+    assert flow_called == [True]
+
+
+@pytest.mark.asyncio
+async def test_build_client_exits_when_device_flow_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ms365.auth import MS365AuthError
+
+    monkeypatch.setenv("PINCER_MS365_CLIENT_ID", "test-client-id")
+
+    class _FailingAuth:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def has_cached_token(self) -> bool:
+            return False
+
+        async def device_code_flow(self) -> dict[str, object]:
+            raise MS365AuthError("bad credentials")
+
+    monkeypatch.setattr("ms365.auth.MS365Auth", _FailingAuth)
     with pytest.raises(SystemExit):
-        ms365_server._build_client_or_exit(None)
+        await ms365_server._build_client(None)

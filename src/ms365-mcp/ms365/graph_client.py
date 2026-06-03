@@ -134,7 +134,7 @@ class GraphClient:
 
         if resp.status_code >= 400:
             raise GraphAPIError(resp.status_code, resp.text, dict(resp.headers))
-        return resp.content
+        return bytes(resp.content)
 
     async def _request(
         self,

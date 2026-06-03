@@ -485,19 +485,4 @@ def register_calendar_tools(registry: ToolRegistry, client: GraphClient) -> int:
         },
         require_approval=True,
     )
-    registry.register(
-        name="outlook__create_online_meeting",
-        description="Create a Microsoft Teams online meeting link.",
-        handler=_h(outlook__create_online_meeting),
-        parameters={
-            "type": "object",
-            "properties": {
-                "subject": {"type": "string"},
-                "start": {"type": "string", "description": "Start ISO 8601"},
-                "end": {"type": "string", "description": "End ISO 8601"},
-            },
-            "required": ["subject", "start", "end"],
-        },
-        require_approval=True,
-    )
-    return 12
+    return 11

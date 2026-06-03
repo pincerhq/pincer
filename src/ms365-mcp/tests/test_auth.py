@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from ms365.auth import (
-    ALL_SCOPES,
     SERVICE_SCOPES,
     MS365Auth,
     MS365AuthError,
@@ -17,7 +16,10 @@ from ms365.auth import (
 
 def test_scopes_for_all_services() -> None:
     result = scopes_for_services(None)
-    assert result == ALL_SCOPES
+    assert "User.Read" in result
+    for scopes in SERVICE_SCOPES.values():
+        for scope in scopes:
+            assert scope in result
 
 
 def test_scopes_for_email_service() -> None:
@@ -34,16 +36,16 @@ def test_scopes_deduplicated() -> None:
 
 
 def test_scopes_complete() -> None:
-    assert len(ALL_SCOPES) >= 13
-    assert "User.Read" in ALL_SCOPES
-    assert "Mail.ReadWrite" in ALL_SCOPES
-    assert "Mail.Send" in ALL_SCOPES
-    assert "Calendars.ReadWrite" in ALL_SCOPES
-    assert "Files.ReadWrite.All" in ALL_SCOPES
+    result = scopes_for_services(None)
+    assert "User.Read" in result
+    assert "Mail.ReadWrite" in result
+    assert "Mail.Send" in result
+    assert "Calendars.ReadWrite" in result
+    assert "Files.ReadWrite.All" in result
 
 
 def test_service_scopes_cover_all_services() -> None:
-    expected = {"email", "calendar", "onedrive", "todo", "teams", "contacts", "onenote"}
+    expected = {"email", "calendar", "onedrive", "todo", "contacts", "onenote"}
     assert set(SERVICE_SCOPES.keys()) == expected
 
 

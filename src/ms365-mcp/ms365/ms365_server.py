@@ -1,8 +1,8 @@
 """
 Standalone Microsoft 365 MCP server.
 
-Exposes all 69 Microsoft 365 tools (Outlook email, Calendar, OneDrive, To Do,
-Teams, Contacts, OneNote) as an MCP server so any MCP host — Claude Desktop,
+Exposes Microsoft 365 tools (Outlook email, Calendar, OneDrive, To Do,
+Contacts, OneNote) as an MCP server so any MCP host — Claude Desktop,
 Cursor, or Pincer's own MCP client — can drive Microsoft Graph.
 
 Transports::
@@ -11,10 +11,11 @@ Transports::
     pincer-ms365-mcp --transport http --host 127.0.0.1 --port 8000
         MCP endpoint → http://127.0.0.1:8000/mcp
 
-Authentication: run ``ms365-mcp-setup`` once to complete the device code flow.
-Token is cached at ``~/.pincer/ms365_token_cache.json``.
-Set ``PINCER_MS365_CLIENT_ID`` / ``PINCER_MS365_TENANT_ID`` or
-``[integrations.ms365]`` in ``pincer.toml``.
+Authentication: set ``PINCER_MS365_CLIENT_ID`` (and optionally
+``PINCER_MS365_TENANT_ID``) then start the server.  If no cached token exists
+the server runs the device code flow at boot — instructions are printed to
+stderr so they are visible without corrupting the MCP stdio stream.
+Token is cached at ``~/.pincer/ms365_token_cache.json`` for subsequent starts.
 """
 
 from __future__ import annotations
@@ -30,11 +31,12 @@ if TYPE_CHECKING:
 
     from ms365.graph_client import GraphClient
 
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger("ms365.ms365_server")
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
-SERVICES = ("email", "calendar", "onedrive", "todo", "teams", "contacts", "onenote")
+SERVICES = ("email", "calendar", "onedrive", "todo", "contacts", "onenote")
 
 
 def _registrars() -> dict[str, Callable[..., int]]:
@@ -44,7 +46,6 @@ def _registrars() -> dict[str, Callable[..., int]]:
     from ms365.tools_email import register_email_tools
     from ms365.tools_onedrive import register_onedrive_tools
     from ms365.tools_onenote import register_onenote_tools
-    from ms365.tools_teams import register_teams_tools
     from ms365.tools_todo import register_todo_tools
 
     return {
@@ -52,7 +53,6 @@ def _registrars() -> dict[str, Callable[..., int]]:
         "calendar": register_calendar_tools,
         "onedrive": register_onedrive_tools,
         "todo": register_todo_tools,
-        "teams": register_teams_tools,
         "contacts": register_contacts_tools,
         "onenote": register_onenote_tools,
     }
@@ -223,56 +223,52 @@ def build_http_app(server: Any) -> Any:
     )
 
 
-def run_http(server: Any, host: str, port: int) -> None:
+async def run_http(server: Any, host: str, port: int) -> None:
     """Serve the MCP server over streamable HTTP via uvicorn."""
     import uvicorn
 
     logger.info("Starting pincer-ms365-mcp · HTTP · %s:%s/mcp", host, port)
-    uvicorn.run(build_http_app(server), host=host, port=port)
+    config = uvicorn.Config(build_http_app(server), host=host, port=port)
+    await uvicorn.Server(config).serve()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
-def _build_client_or_exit(tenant_override: str | None) -> GraphClient:
-    """Build an authenticated GraphClient or exit with a helpful message."""
+async def _build_client(tenant_override: str | None) -> GraphClient:
+    """Build an authenticated GraphClient, running device code flow at boot if needed."""
     import sys
 
-    from ms365.auth import MS365Auth
-    from ms365.config import load_config, resolve_cache_path
+    from ms365.auth import MS365Auth, MS365AuthError
+    from ms365.config import get_settings
     from ms365.graph_client import GraphClient
 
-    cfg = load_config()
-    if tenant_override:
-        cfg.tenant_id = tenant_override
+    cfg = get_settings()
+    tenant_id = tenant_override or cfg.tenant_id
 
     if not cfg.client_id:
         sys.exit(
-            "Microsoft 365 client_id is not configured. Set PINCER_MS365_CLIENT_ID "
-            "or [integrations.ms365] client_id in pincer.toml."
+            "Microsoft 365 client_id is not configured. Set PINCER_MS365_CLIENT_ID."
         )
 
     auth = MS365Auth(
         client_id=cfg.client_id,
-        tenant_id=cfg.tenant_id,
-        cache_path=str(resolve_cache_path(cfg)),
+        tenant_id=tenant_id,
+        cache_path=str(cfg.cache_path),
         services=cfg.services,
     )
+
     if not auth.has_cached_token():
-        sys.exit("No cached Microsoft 365 token. Run 'ms365-mcp-setup' to authenticate first.")
+        logger.info("No cached token — starting device code flow...")
+        try:
+            await auth.device_code_flow()
+        except MS365AuthError as exc:
+            sys.exit(f"Microsoft 365 authentication failed: {exc}")
 
     return GraphClient(auth)
 
 
-def main() -> None:
-    """CLI entry point for the standalone MS365 MCP server."""
-    import asyncio
-
-    logging.basicConfig(
-        level=os.environ.get("LOG_LEVEL", "INFO"),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
-
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Microsoft 365 MCP server (Pincer)")
     parser.add_argument(
         "--transport",
@@ -306,17 +302,71 @@ def main() -> None:
         action="store_true",
         help="Expose only read tools; hide tools that modify data (send/delete/etc.).",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+async def _async_main(client: GraphClient, args: argparse.Namespace) -> None:
+    """Async entry point: serve the already-authenticated client."""
     services = [s.strip() for s in args.services.split(",") if s.strip()] or None
-    client = _build_client_or_exit(args.tenant or None)
     server, specs = build_server(client, services=services, read_only=args.read_only)
     logger.info("Exposing %d Microsoft 365 tool(s) over %s", len(specs), args.transport)
 
     if args.transport == "http":
-        run_http(server, args.host, args.port)
+        await run_http(server, args.host, args.port)
     else:
-        asyncio.run(run_stdio(server))
+        await run_stdio(server)
+
+
+def _build_client_sync(tenant_override: str | None) -> GraphClient:
+    """Build an authenticated GraphClient synchronously (blocking).
+
+    Runs the device code flow in the calling thread — no event loop involved.
+    Call this before asyncio.run() so MSAL never crosses thread boundaries.
+    """
+    import sys
+
+    from ms365.auth import MS365Auth, MS365AuthError
+    from ms365.config import get_settings
+    from ms365.graph_client import GraphClient
+
+    cfg = get_settings()
+    tenant_id = tenant_override or cfg.tenant_id
+
+    if not cfg.client_id:
+        sys.exit(
+            "Microsoft 365 client_id is not configured. Set PINCER_MS365_CLIENT_ID."
+        )
+
+    auth = MS365Auth(
+        client_id=cfg.client_id,
+        tenant_id=tenant_id,
+        cache_path=str(cfg.cache_path),
+        services=cfg.services,
+    )
+
+    if not auth.has_cached_token():
+        logger.info("No cached token — starting device code flow...")
+        try:
+            auth.device_code_flow_sync()
+        except MS365AuthError as exc:
+            sys.exit(f"Microsoft 365 authentication failed: {exc}")
+
+    return GraphClient(auth)
+
+
+def main() -> None:
+    """CLI entry point for the standalone MS365 MCP server."""
+    import asyncio
+
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO"),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    args = _parse_args()
+    # Authenticate synchronously before starting the event loop so MSAL's
+    # device code flow runs in a single thread with no async indirection.
+    client = _build_client_sync(args.tenant or None)
+    asyncio.run(_async_main(client, args))
 
 
 if __name__ == "__main__":

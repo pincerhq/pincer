@@ -9,6 +9,14 @@ from ms365.auth import MS365Auth
 from ms365.graph_client import GraphClient
 
 
+@pytest.fixture(autouse=True)
+def _clear_settings_cache() -> None:
+    """Ensure each test gets a fresh MS365Settings instance from the environment."""
+    from ms365.config import get_settings
+
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def mock_auth() -> MagicMock:
     auth = MagicMock(spec=MS365Auth)

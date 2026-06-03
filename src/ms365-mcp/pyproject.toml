@@ -10,6 +10,7 @@ dependencies = [
     "msal>=1.28.0",
     "mcp>=1.8.0",
     "httpx>=0.27.0",
+    "pydantic-settings>=2.0.0",
     "starlette>=0.41.0",
     "uvicorn[standard]>=0.34.0",
 ]
@@ -32,3 +33,10 @@ pythonpath = ["."]
 
 [tool.hatch.build.targets.wheel]
 packages = ["ms365"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.1.0",
+]

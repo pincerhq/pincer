@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -24,7 +23,7 @@ def main() -> None:
     """CLI entry point: ms365-mcp-setup"""
     print("Microsoft 365 Setup\n")
     print("This sets up all Microsoft 365 tools: Outlook email, Calendar, OneDrive,")
-    print("To Do, Teams, Contacts, and OneNote (69 tools total).\n")
+    print("To Do, Contacts, and OneNote (61 tools total).\n")
 
     print("Step 1: Azure App Registration\n")
     print("If you haven't registered an app yet:")
@@ -47,10 +46,9 @@ def main() -> None:
     tenant_id = input("Tenant ID (press Enter for 'common'): ").strip() or "common"
 
     from ms365.auth import MS365Auth
-    from ms365.config import MS365IntegrationConfig, resolve_cache_path
+    from ms365.config import get_settings
 
-    cfg = MS365IntegrationConfig(client_id=client_id, tenant_id=tenant_id)
-    cache_path = resolve_cache_path(cfg)
+    cache_path = get_settings().cache_path
 
     if cache_path.exists():
         print(f"Token cache already exists: {cache_path}")
@@ -61,16 +59,14 @@ def main() -> None:
     auth = MS365Auth(client_id=client_id, tenant_id=tenant_id, cache_path=str(cache_path))
 
     print(f"\nRequesting {len(auth.scopes)} permission scope(s)...")
-    print("Starting device code authentication...\n")
+    print("Starting device code authentication...")
+    print("(The sign-in URL and code will appear below)\n")
 
     try:
-        result = asyncio.run(auth.device_code_flow())
+        result = auth.device_code_flow_sync()
     except Exception as exc:
-        print(f"Authentication failed: {exc}")
+        print(f"\nAuthentication failed: {exc}")
         sys.exit(1)
-
-    if auth._pending_flow_message:
-        print(f"\n{auth._pending_flow_message}\n")
 
     account = auth.authenticated_account() or result.get("id_token_claims", {}).get("preferred_username", "unknown")
     print("\nMicrosoft 365 authenticated!")

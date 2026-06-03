@@ -1,80 +1,63 @@
-"""
-Configuration for the Microsoft 365 integration.
-
-Reads ``[integrations.ms365]`` from pincer.toml and environment variables.
-"""
+"""Configuration for the Microsoft 365 MCP server via environment variables."""
 
 from __future__ import annotations
 
-import logging
-import os
-from dataclasses import dataclass, field
+import json
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
-logger = logging.getLogger(__name__)
+from pydantic.fields import FieldInfo
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings.sources import EnvSettingsSource, PydanticBaseSettingsSource
 
-_DEFAULT_SERVICES = ["email", "calendar", "onedrive", "todo", "teams", "contacts", "onenote"]
+_DEFAULT_SERVICES = ["email", "calendar", "onedrive", "todo", "contacts", "onenote"]
 
 
-@dataclass
-class MS365IntegrationConfig:
-    """Parsed configuration for the Microsoft 365 integration."""
+class _CommaAwareEnvSource(EnvSettingsSource):  # type: ignore[misc]
+    """Env source that accepts comma-separated strings for list[str] fields."""
+
+    def decode_complex_value(self, field_name: str, field: FieldInfo, value: Any) -> Any:
+        try:
+            return super().decode_complex_value(field_name, field, value)
+        except (ValueError, json.JSONDecodeError):
+            if isinstance(value, str):
+                return [s.strip() for s in value.split(",") if s.strip()]
+            raise
+
+
+class MS365Settings(BaseSettings):  # type: ignore[misc]
+    model_config = SettingsConfigDict(
+        env_prefix="PINCER_MS365_",
+        env_ignore_empty=True,
+        extra="ignore",
+    )
 
     enabled: bool = True
     client_id: str = ""
     tenant_id: str = "common"
-    auth_method: str = "device_code"  # "device_code" or "interactive"
-    services: list[str] = field(default_factory=lambda: list(_DEFAULT_SERVICES))
-    token_cache_path: str = ""  # empty → auto-detect
+    auth_method: str = "device_code"
+    services: list[str] = list(_DEFAULT_SERVICES)
+    token_cache_path: str = ""
 
-    def __post_init__(self) -> None:
-        if not self.client_id:
-            self.client_id = os.environ.get("PINCER_MS365_CLIENT_ID", "")
-        if self.tenant_id == "common":
-            env_tid = os.environ.get("PINCER_MS365_TENANT_ID", "")
-            if env_tid and env_tid != "common":
-                self.tenant_id = env_tid
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (init_settings, _CommaAwareEnvSource(settings_cls))
 
-
-def load_config() -> MS365IntegrationConfig:
-    """Load MS365 integration config from pincer.toml if present."""
-    try:
-        import tomllib
-    except ImportError:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            return MS365IntegrationConfig()
-
-    toml_path = Path.cwd() / "pincer.toml"
-    if not toml_path.exists():
-        return MS365IntegrationConfig()
-
-    try:
-        data = tomllib.loads(toml_path.read_text())
-    except Exception as exc:
-        logger.warning("Could not parse pincer.toml: %s", exc)
-        return MS365IntegrationConfig()
-
-    section = data.get("integrations", {}).get("ms365", {})
-    # Resolve ${VAR} references in client_id
-    client_id = section.get("client_id", "")
-    if isinstance(client_id, str) and client_id.startswith("${") and client_id.endswith("}"):
-        env_var = client_id[2:-1]
-        client_id = os.environ.get(env_var, "")
-
-    return MS365IntegrationConfig(
-        enabled=section.get("enabled", True),
-        client_id=client_id,
-        tenant_id=section.get("tenant_id", "common"),
-        auth_method=section.get("auth_method", "device_code"),
-        services=section.get("services", list(_DEFAULT_SERVICES)),
-        token_cache_path=section.get("token_cache_path", ""),
-    )
+    @property
+    def cache_path(self) -> Path:
+        if self.token_cache_path:
+            return Path(self.token_cache_path).expanduser()
+        return Path.home() / ".pincer" / "ms365_token_cache.json"
 
 
-def resolve_cache_path(cfg: MS365IntegrationConfig) -> Path:
-    """Return the token cache path, resolving blanks to ~/.pincer/."""
-    if cfg.token_cache_path:
-        return Path(os.path.expanduser(cfg.token_cache_path))
-    return Path.home() / ".pincer" / "ms365_token_cache.json"
+@lru_cache(maxsize=None)
+def get_settings() -> MS365Settings:
+    return MS365Settings()

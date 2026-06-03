@@ -104,6 +104,8 @@ services:
     profiles:
       - http
     env_file: .env
+    #volumes:
+    #  - /etc/localtime:/etc/localtime:ro
 
   ms365-mcp:
     extends:

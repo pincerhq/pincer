@@ -2,7 +2,7 @@
 Microsoft 365 standalone package.
 
 Provides 69 tools across Outlook email, Calendar, OneDrive, To Do,
-Teams, Contacts, and OneNote using Microsoft Graph REST API.
+Contacts, and OneNote using Microsoft Graph REST API.
 
 Quick start — run as MCP server::
 
