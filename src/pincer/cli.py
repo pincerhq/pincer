@@ -1503,7 +1503,10 @@ async def _chat_loop() -> None:
         from pincer.memory.mcp import MCPMemoryBackend
 
         if isinstance(memory_store, MCPMemoryBackend):
-            console.print("[yellow]Warning: memory_backend=mcp is not supported in interactive CLI mode — memory disabled.[/yellow]")
+            console.print(
+                "[yellow]Warning: memory_backend=mcp is not supported "
+                "in interactive CLI mode — memory disabled.[/yellow]"
+            )
             await memory_store.close()
             memory_store = None
         else:
