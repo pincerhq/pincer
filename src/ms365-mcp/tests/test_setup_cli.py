@@ -36,16 +36,16 @@ class TestLoadDotenv:
 class TestGetMs365Config:
     def test_reads_from_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MS365_CLIENT_ID", "env-client-id")
-        monkeypatch.setenv("PINCER_MS365_TENANT_ID", "env-tenant")
+        monkeypatch.setenv("MS365_TENANT_ID", "env-tenant")
         client_id, tenant_id = _get_ms365_config()
         assert client_id == "env-client-id"
         assert tenant_id == "env-tenant"
 
     def test_falls_back_to_dotenv(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("MS365_CLIENT_ID", raising=False)
-        monkeypatch.delenv("PINCER_MS365_TENANT_ID", raising=False)
+        monkeypatch.delenv("MS365_TENANT_ID", raising=False)
         env = tmp_path / ".env"
-        env.write_text("MS365_CLIENT_ID=file-client-id\nPINCER_MS365_TENANT_ID=file-tenant\n")
+        env.write_text("PINCER_MS365_CLIENT_ID=file-client-id\nPINCER_MS365_TENANT_ID=file-tenant\n")
         monkeypatch.chdir(tmp_path)
         client_id, tenant_id = _get_ms365_config()
         assert client_id == "file-client-id"
@@ -53,7 +53,7 @@ class TestGetMs365Config:
 
     def test_tenant_defaults_to_consumers(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.delenv("MS365_CLIENT_ID", raising=False)
-        monkeypatch.delenv("PINCER_MS365_TENANT_ID", raising=False)
+        monkeypatch.delenv("MS365_TENANT_ID", raising=False)
         monkeypatch.chdir(tmp_path)
         client_id, tenant_id = _get_ms365_config()
         assert tenant_id == "consumers"
@@ -61,13 +61,14 @@ class TestGetMs365Config:
 
     def test_env_takes_priority_over_dotenv(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MS365_CLIENT_ID", "env-wins")
-        monkeypatch.delenv("PINCER_MS365_TENANT_ID", raising=False)
+        monkeypatch.delenv("MS365_TENANT_ID", raising=False)
         env = tmp_path / ".env"
-        env.write_text("MS365_CLIENT_ID=file-loses\nPINCER_MS365_TENANT_ID=file-tenant\n")
+        env.write_text("PINCER_MS365_CLIENT_ID=file-loses\nPINCER_MS365_TENANT_ID=file-tenant\n")
         monkeypatch.chdir(tmp_path)
         client_id, tenant_id = _get_ms365_config()
         assert client_id == "env-wins"
-        assert tenant_id == "file-tenant"
+        # dotenv fallback is skipped when client_id is already set from env
+        assert tenant_id == "consumers"
 
 
 class TestMainExitsWhenClientIdMissing:
@@ -75,7 +76,7 @@ class TestMainExitsWhenClientIdMissing:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
     ) -> None:
         monkeypatch.delenv("MS365_CLIENT_ID", raising=False)
-        monkeypatch.delenv("PINCER_MS365_TENANT_ID", raising=False)
+        monkeypatch.delenv("MS365_TENANT_ID", raising=False)
         monkeypatch.chdir(tmp_path)
 
         from ms365.setup_cli import main

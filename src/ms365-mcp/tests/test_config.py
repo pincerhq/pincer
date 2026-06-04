@@ -52,31 +52,31 @@ def test_explicit_client_id_not_overwritten_by_env(monkeypatch: pytest.MonkeyPat
 
 
 def test_tenant_id_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PINCER_MS365_TENANT_ID", "my-tenant")
+    monkeypatch.setenv("MS365_TENANT_ID", "my-tenant")
     cfg = MS365Settings()
     assert cfg.tenant_id == "my-tenant"
 
 
 def test_token_cache_path_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PINCER_MS365_TOKEN_CACHE_PATH", "/tmp/env_tokens.json")
+    monkeypatch.setenv("MS365_TOKEN_CACHE_PATH", "/tmp/env_tokens.json")
     cfg = MS365Settings()
     assert cfg.cache_path == Path("/tmp/env_tokens.json")
 
 
 def test_services_csv_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PINCER_MS365_SERVICES", "email,calendar")
+    monkeypatch.setenv("MS365_SERVICES", "email,calendar")
     cfg = MS365Settings()
     assert cfg.services == ["email", "calendar"]
 
 
 def test_services_csv_strips_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PINCER_MS365_SERVICES", " email , calendar ")
+    monkeypatch.setenv("MS365_SERVICES", " email , calendar ")
     cfg = MS365Settings()
     assert cfg.services == ["email", "calendar"]
 
 
 def test_services_json_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PINCER_MS365_SERVICES", '["email","todo"]')
+    monkeypatch.setenv("MS365_SERVICES", '["email","todo"]')
     cfg = MS365Settings()
     assert cfg.services == ["email", "todo"]
 

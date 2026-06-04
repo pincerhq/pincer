@@ -54,7 +54,7 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        return (init_settings, _CommaAwareEnvSource(settings_cls), dotenv_settings, env_settings, file_secret_settings)
+        return (init_settings, _CommaAwareEnvSource(settings_cls), dotenv_settings, file_secret_settings)
 
     @property
     def cache_path(self) -> Path:
