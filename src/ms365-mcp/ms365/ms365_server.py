@@ -7,12 +7,12 @@ Cursor, or Pincer's own MCP client — can drive Microsoft Graph.
 
 Transports::
 
-    pincer-ms365-mcp --transport stdio                         # default
-    pincer-ms365-mcp --transport http --host 127.0.0.1 --port 8000
+    ms365-mcp-run --transport stdio                         # default
+    ms365-mcp-run --transport http --host 127.0.0.1 --port 8000
         MCP endpoint → http://127.0.0.1:8000/mcp
 
-Authentication: set ``PINCER_MS365_CLIENT_ID`` (and optionally
-``PINCER_MS365_TENANT_ID``) then start the server.  If no cached token exists
+Authentication: set ``MS365_CLIENT_ID`` (and optionally
+``MS365_TENANT_ID``) then start the server.  If no cached token exists
 the server runs the device code flow at boot — instructions are printed to
 stderr so they are visible without corrupting the MCP stdio stream.
 Token is cached at ``~/.pincer/ms365_token_cache.json`` for subsequent starts.
@@ -206,7 +206,7 @@ def build_http_app(server: Any) -> Any:
         await session_manager.handle_request(scope, receive, send)
 
     async def health(_request: Any) -> JSONResponse:
-        return JSONResponse({"status": "healthy", "service": "pincer-ms365-mcp"})
+        return JSONResponse({"status": "healthy", "service": "ms365-mcp"})
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette) -> Any:
@@ -227,7 +227,7 @@ async def run_http(server: Any, host: str, port: int) -> None:
     """Serve the MCP server over streamable HTTP via uvicorn."""
     import uvicorn
 
-    logger.info("Starting pincer-ms365-mcp · HTTP · %s:%s/mcp", host, port)
+    logger.info("Starting s365-mcp · HTTP · %s:%s/mcp", host, port)
     config = uvicorn.Config(build_http_app(server), host=host, port=port)
     await uvicorn.Server(config).serve()
 
@@ -334,7 +334,8 @@ def _build_client_sync(tenant_override: str | None) -> GraphClient:
 
     if not cfg.client_id:
         sys.exit(
-            "Microsoft 365 client_id is not configured. Set PINCER_MS365_CLIENT_ID."
+            "Microsoft 365 client_id is not configured. "
+            "Set MS365_CLIENT_ID (standalone) or PINCER_MS365_CLIENT_ID in .env (pincer run)."
         )
 
     auth = MS365Auth(

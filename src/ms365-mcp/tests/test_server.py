@@ -201,7 +201,7 @@ async def test_call_unknown_tool_returns_error(mock_client: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_build_client_exits_without_client_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("PINCER_MS365_CLIENT_ID", raising=False)
+    monkeypatch.delenv("MS365_CLIENT_ID", raising=False)
     with pytest.raises(SystemExit):
         await ms365_server._build_client(None)
 
@@ -210,7 +210,7 @@ async def test_build_client_exits_without_client_id(monkeypatch: pytest.MonkeyPa
 async def test_build_client_runs_device_flow_when_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
     from unittest.mock import MagicMock
 
-    monkeypatch.setenv("PINCER_MS365_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("MS365_CLIENT_ID", "test-client-id")
 
     flow_called: list[bool] = []
 
@@ -237,7 +237,7 @@ async def test_build_client_runs_device_flow_when_no_token(monkeypatch: pytest.M
 async def test_build_client_exits_when_device_flow_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     from ms365.auth import MS365AuthError
 
-    monkeypatch.setenv("PINCER_MS365_CLIENT_ID", "test-client-id")
+    monkeypatch.setenv("MS365_CLIENT_ID", "test-client-id")
 
     class _FailingAuth:
         def __init__(self, *args: object, **kwargs: object) -> None:

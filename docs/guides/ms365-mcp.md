@@ -6,10 +6,7 @@ standalone [Model Context Protocol](https://modelcontextprotocol.io) (MCP)
 server. Any MCP host can connect to it: Claude Desktop, Cursor, VS Code, or
 Pincer's own MCP client.
 
-It is built on Microsoft Graph and reuses the exact tool implementations, JSON
-schemas, descriptions, and approval flags from Pincer's in-agent integration
-(`src/pincer/integrations/ms365/`). The in-agent integration is unchanged — this
-server is additive.
+It is built on Microsoft Graph and lives in `src/ms365-mcp/ms365/`.
 
 ---
 
@@ -59,7 +56,7 @@ Microsoft Graph API (https://graph.microsoft.com/v1.0)
 - **Auth.** The server consumes a cached MSAL token; it does not perform the
   interactive login itself.
 
-Source: [`src/pincer/integrations/ms365/mcp_server.py`](../../src/pincer/integrations/ms365/mcp_server.py)
+Source: [`src/ms365-mcp/ms365/ms365_server.py`](../../src/ms365-mcp/ms365/ms365_server.py)
 
 ---
 
@@ -71,7 +68,7 @@ Source: [`src/pincer/integrations/ms365/mcp_server.py`](../../src/pincer/integra
 | `mcp` SDK | Installed by the `[mcp]` extra. |
 | `msal` | Installed by the `[ms365]` extra. |
 | Azure app registration | A public client with delegated Graph permissions (below). |
-| A signed-in token cache | Created once by `pincer setup-ms365`. |
+| A signed-in token cache | Created once by `ms365-mcp-setup`. |
 
 Install the extras:
 
@@ -79,6 +76,8 @@ Install the extras:
 uv pip install "pincer-agent[mcp,ms365]"
 # or everything:
 uv pip install "pincer-agent[all]"
+# or 
+uv sync --all-extras 
 ```
 
 `starlette` and `uvicorn` (needed for the HTTP transport) ship with Pincer's
@@ -94,9 +93,10 @@ a public client app registration. One-time setup in the
 registrations** → **New registration**:
 
 1. **Name:** anything (e.g. `pincer-ms365`).
-2. **Supported account types:** "Accounts in any organizational directory and
-   personal Microsoft accounts" for `tenant_id = common`, or single-tenant for a
-   specific tenant.
+2. **Supported account types:** "Personal Microsoft accounts only" for
+   `PINCER_MS365_TENANT_ID=consumers` (recommended), or "Accounts in any
+   organizational directory and personal Microsoft accounts" for `common`,
+   or single-tenant for a specific org tenant.
 3. **Redirect URI:** none needed for device code. (For the interactive flow,
    add a "Mobile and desktop applications" platform with
    `http://localhost`.)
@@ -128,14 +128,24 @@ scopes plus `User.Read`.
 
 ## Authentication
 
-Authentication is MSAL's **device-code flow**, run once on the host:
+### Step 1 — Set credentials in `.env`
+
+Add these to your `.env` file before running the setup wizard:
 
 ```bash
-pincer setup-ms365
+PINCER_MS365_CLIENT_ID=<your-azure-app-client-id>
+PINCER_MS365_TENANT_ID=consumers   # or "common" / your org tenant GUID
 ```
 
-This prints a code and a URL (`https://microsoft.com/devicelogin`); after you
-sign in, the token is written to:
+### Step 2 — Run the setup wizard
+
+```bash
+ms365-mcp-setup
+```
+
+The wizard reads the credentials from `.env` (or the shell environment) and
+runs MSAL's **device-code flow**: it prints a code and a URL
+(`https://microsoft.com/devicelogin`); after you sign in, the token is written to:
 
 ```
 ~/.pincer/ms365_token_cache.json   (file mode 0600)
@@ -144,41 +154,31 @@ sign in, the token is written to:
 - **Refresh** is automatic — MSAL uses the cached refresh token to mint new
   access tokens silently and rewrites the cache. The server never prompts.
 - **The server only reads/refreshes** this cache. If it is missing or empty, the
-  server exits with a message telling you to run `pincer setup-ms365`.
-- The cache path can be overridden with `token_cache_path` in
-  `pincer.toml` (see below).
+  server exits with a message telling you to run `ms365-mcp-setup`.
+- The cache path can be overridden with `MS365_TOKEN_CACHE_PATH` (standalone server) or
+  `PINCER_MS365_TOKEN_CACHE_PATH` in `.env` (when running via `pincer run`).
 
 ---
 
 ## Configuration
-
-Credentials resolve in this order: `pincer.toml` → environment variables →
-Pincer settings defaults.
 
 ### Environment variables
 
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PINCER_MS365_CLIENT_ID` | — | Azure app (client) ID. **Required.** |
-| `PINCER_MS365_TENANT_ID` | `common` | Tenant GUID, or `common` / `organizations` / `consumers`. |
+| `PINCER_MS365_TENANT_ID` | `consumers` | `consumers` for personal accounts, `common`, `organizations`, or your tenant GUID. |
 | `TRANSPORT` | `stdio` | `stdio` or `http` (overridden by `--transport`). |
 | `HOST` | `127.0.0.1` | HTTP bind host (overridden by `--host`). |
 | `PORT` | `18820` | HTTP bind port (overridden by `--port`). |
 | `LOG_LEVEL` | `INFO` | Python logging level. |
 
-### `pincer.toml`
+Set these in your `.env` file:
 
-```toml
-[integrations.ms365]
-enabled = true
-client_id = "00000000-0000-0000-0000-000000000000"   # or "${AZURE_CLIENT_ID}"
-tenant_id = "common"
-auth_method = "device_code"                            # or "interactive"
-services = ["email", "calendar", "onedrive", "todo", "teams", "contacts", "onenote"]
-token_cache_path = ""                                  # blank → ~/.pincer/ms365_token_cache.json
+```bash
+PINCER_MS365_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+PINCER_MS365_TENANT_ID=consumers
 ```
-
-`client_id` supports `${ENV_VAR}` interpolation.
 
 ---
 
@@ -232,12 +232,38 @@ config:
       "args": ["--transport", "stdio"],
       "env": {
         "PINCER_MS365_CLIENT_ID": "00000000-0000-0000-0000-000000000000",
-        "PINCER_MS365_TENANT_ID": "common"
+        "PINCER_MS365_TENANT_ID": "consumers"
       }
     }
   }
 }
 ```
+
+### Pincer's own MCP client (stdio — default)
+
+The `pincer.toml` shipped in the repo uses stdio transport. Pincer spawns the
+server as a sandboxed subprocess, so credentials and the token cache path must
+be declared explicitly in the `env` dict — the sandbox intentionally restricts
+`HOME` and does not inherit your shell environment:
+
+```toml
+[[mcp.servers]]
+name      = "ms365"
+transport = "stdio"
+command   = "python"
+args      = ["${PINCER_SRC_DIR:-$PWD}/src/ms365-mcp/ms365/ms365_server.py"]
+env       = {
+  MS365_CLIENT_ID         = "${PINCER_MS365_CLIENT_ID}",
+  MS365_CLIENT_SECRET     = "${PINCER_MS365_CLIENT_SECRET}",
+  MS365_TENANT_ID         = "${PINCER_MS365_TENANT_ID}",
+  MS365_TOKEN_CACHE_PATH  = "${HOME}/.pincer/ms365_token_cache.json"
+}
+approval_required = ["*"]
+```
+
+`${PINCER_MS365_*}` values are interpolated from your `.env` file at startup.
+`${HOME}` resolves from the parent process so the subprocess can find the token
+cache even though the sandbox sets `HOME=/tmp`.
 
 ### Pincer's own MCP client (HTTP)
 
@@ -264,19 +290,18 @@ provided at
 [`docker-compose.ms365-mcp.yml`](../../docker-compose.ms365-mcp.yml):
 
 ```bash
-# 1. Authenticate once on the host (interactive device-code login):
-pincer setup-ms365
+# 1. Set credentials in .env, then authenticate once on the host:
+ms365-mcp-setup
 
 # 2. Start the server (UID/GID let the container read/write the token cache):
 UID=$(id -u) GID=$(id -g) \
-  PINCER_MS365_CLIENT_ID=<azure-app-client-id> \
   docker compose -f docker-compose.ms365-mcp.yml up --build
 # MCP endpoint → http://localhost:18820/mcp
 ```
 
 Notes:
 
-- `pincer setup-ms365` is interactive, so run it **on the host first**. The
+- `ms365-mcp-setup` is interactive, so run it **on the host first**. The
   container only consumes the cached token.
 - The compose file mounts `~/.pincer` and runs as your host UID/GID so MSAL can
   read the token **and persist refreshed tokens**. A token cache mounted
@@ -451,10 +476,13 @@ the 34 write tools are then neither listed nor callable (leaving 35 read tools).
 
 | Symptom | Cause / fix |
 | --- | --- |
-| `No cached Microsoft 365 token…` on startup | Run `pincer setup-ms365` on the host first. |
-| `Microsoft 365 client_id is not configured` | Set `PINCER_MS365_CLIENT_ID` or `[integrations.ms365] client_id`. |
+| `No cached Microsoft 365 token…` on startup | Run `ms365-mcp-setup` on the host first. |
+| `PINCER_MS365_CLIENT_ID is not set` | Add `PINCER_MS365_CLIENT_ID` to `.env`, then re-run `ms365-mcp-setup`. |
+| `Microsoft 365 client_id is not configured` | Set `PINCER_MS365_CLIENT_ID` in `.env`. |
+| `MCP 'ms365' connection failed (attempt N):` with blank message | The sandboxed subprocess started but timed out before the MCP protocol initialised. Most likely cause: token cache not found because `HOME=/tmp` in the sandbox. Ensure `MS365_TOKEN_CACHE_PATH="${HOME}/.pincer/ms365_token_cache.json"` is in the server's `env` dict in `pincer.toml` (already the default). |
 | `Device flow failed` during setup | Enable **Allow public client flows** on the Azure app. |
-| Graph `401` / `403` in tool output | Missing scope or unconsented permission — add it in Azure and re-run `pincer setup-ms365`. |
+| `AADSTS9002346` error during setup | Your app is registered for personal accounts only — use `PINCER_MS365_TENANT_ID=consumers`. |
+| Graph `401` / `403` in tool output | Missing scope or unconsented permission — add it in Azure and re-run `ms365-mcp-setup`. |
 | `429` errors | Rate limited; the client retries, but reduce call volume. |
 | Docker: token "permission denied" | Run with `UID=$(id -u) GID=$(id -g)` so the container can read/write the mounted cache. |
 | Tools missing in the host | Confirm the server lists them: `pincer-ms365-mcp --services <svc>` and check host logs; verify `--read-only` isn't hiding writes. |
@@ -466,42 +494,19 @@ the 34 write tools are then neither listed nor callable (leaving 35 read tools).
 Run the test suite:
 
 ```bash
-.venv/bin/python -m pytest tests/integrations/ms365/test_mcp_server.py -q
-```
-
-Smoke-test an in-memory MCP round-trip:
-
-```python
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
-from pincer.integrations.ms365.auth import MS365Auth
-from pincer.integrations.ms365.graph_client import GraphClient
-from pincer.integrations.ms365 import mcp_server
-from mcp.shared.memory import create_connected_server_and_client_session as connect
-
-auth = MagicMock(spec=MS365Auth); auth.has_cached_token.return_value = True
-client = GraphClient(auth); client.get = AsyncMock(return_value={"value": []})
-
-async def main():
-    server, specs = mcp_server.build_server(client)
-    async with connect(server) as session:
-        tools = (await session.list_tools()).tools
-        print(len(tools), "tools")
-
-asyncio.run(main())
+cd src/ms365-mcp && uv run pytest tests/ -v
 ```
 
 Key entry points in
-[`mcp_server.py`](../../src/pincer/integrations/ms365/mcp_server.py):
+[`ms365_server.py`](../../src/ms365-mcp/ms365/ms365_server.py):
 
 | Function | Purpose |
 | --- | --- |
-| `collect_tools(client, services, read_only)` | Reuse `register_*_tools` to gather tool specs. |
+| `collect_tools(client, services, read_only)` | Gather tool specs from `tools_*.py` modules. |
 | `build_server(client, services, read_only)` | Build a low-level MCP `Server` from the specs. |
 | `run_stdio(server)` / `run_http(server, host, port)` | Transports. |
 | `build_http_app(server)` | Starlette ASGI app (`/mcp`, `/health`). |
 | `main()` | CLI entry point (`pincer-ms365-mcp`). |
 
-To add a tool, add it to the relevant `tools_*.py` `register_*_tools` function in
-the integration — it is automatically picked up here, no changes to
-`mcp_server.py` required.
+To add a tool, add it to the relevant `tools_*.py` file — it is automatically
+picked up, no changes to `ms365_server.py` required.

@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import EnvSettingsSource, PydanticBaseSettingsSource
+
+if TYPE_CHECKING:
+    from pydantic.fields import FieldInfo
 
 _DEFAULT_SERVICES = ["email", "calendar", "onedrive", "todo", "contacts", "onenote"]
 
@@ -28,14 +30,17 @@ class _CommaAwareEnvSource(EnvSettingsSource):  # type: ignore[misc]
 
 class MS365Settings(BaseSettings):  # type: ignore[misc]
     model_config = SettingsConfigDict(
-        env_prefix="PINCER_MS365_",
+        env_prefix="MS365_",
         env_ignore_empty=True,
         extra="ignore",
+        case_sensitive=False,
+        env_file=("../.env", ".env"),
+        env_file_encoding="utf-8"
     )
 
     enabled: bool = True
     client_id: str = ""
-    tenant_id: str = "common"
+    tenant_id: str = "consumers"
     auth_method: str = "device_code"
     services: list[str] = list(_DEFAULT_SERVICES)
     token_cache_path: str = ""
@@ -47,9 +52,9 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
         init_settings: PydanticBaseSettingsSource,
         env_settings: PydanticBaseSettingsSource,
         dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        return (init_settings, _CommaAwareEnvSource(settings_cls))
+        return (init_settings, _CommaAwareEnvSource(settings_cls), dotenv_settings, env_settings, file_secret_settings)
 
     @property
     def cache_path(self) -> Path:
@@ -58,6 +63,6 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
         return Path.home() / ".pincer" / "ms365_token_cache.json"
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1)
 def get_settings() -> MS365Settings:
     return MS365Settings()

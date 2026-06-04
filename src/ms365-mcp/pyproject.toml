@@ -23,7 +23,7 @@ dev = [
 ]
 
 [project.scripts]
-pincer-ms365-mcp = "ms365.ms365_server:main"
+ms365-mcp-run = "ms365.ms365_server:main"
 ms365-mcp-setup  = "ms365.setup_cli:main"
 
 [tool.pytest.ini_options]

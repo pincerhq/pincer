@@ -263,22 +263,11 @@ class MCPClientSession:
         config-load time, so no extra resolution is needed here.
         """
         import os
-        import re
         import sys
-
-        def extract_env_var_name(s: str) -> str | None:
-            match = re.search(r"\$\{(\w+)\}", s)
-            return match.group(1) if match else None
 
         if not self.config.sandbox:
             env = dict(os.environ)
             env.update(self.config.env)
-            if self.config.env:
-                for key, value in self.config.env.items():
-                    if value.startswith("$") and (ev := extract_env_var_name(value)):
-                        value = os.getenv(ev) or ""
-                    if value:
-                        env[key] = value
             return env
         # ── Sandbox: build minimal, safe base ────────────────────────────
         python_bin_dir = os.path.dirname(sys.executable)
@@ -310,14 +299,8 @@ class MCPClientSession:
                 base_env[passthrough] = val
 
         # Declared vars always win — they are explicitly trusted by the user.
-        if self.config.env:
-            for key, value in self.config.env.items():
-                logger.info(f"MCP server {self.config.name} consumed {key} from env")
-                if value.startswith("$") and (ev := extract_env_var_name(value)):
-                    value = os.getenv(ev) or ""
-                    logger.info(f"{ev}: {value}")
-                if value:
-                    base_env[key] = value
+        base_env.update(self.config.env)
+
         return base_env
 
     async def _cleanup(self) -> None:

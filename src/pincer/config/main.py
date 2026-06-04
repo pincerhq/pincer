@@ -10,10 +10,11 @@ from pincer.config.api import APISettings
 from pincer.config.channels import ChannelSettings
 from pincer.config.core import CoreSettings
 from pincer.config.llm import LLMProvider, LLMSettings
+from pincer.config.mcp import MCPSettings
 from pincer.config.tools import ToolSettings
 
 
-class Settings(BaseSettings, LLMSettings, ChannelSettings, ToolSettings, APISettings, CoreSettings):
+class Settings(BaseSettings, LLMSettings, ChannelSettings, ToolSettings, APISettings, CoreSettings, MCPSettings):
     """Main configuration for Pincer agent."""
 
     model_config = SettingsConfigDict(

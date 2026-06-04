@@ -5,45 +5,58 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from .config import get_settings
 
-def _save_config(client_id: str, tenant_id: str) -> None:
-    toml_path = Path.cwd() / "pincer.toml"
-    if toml_path.exists():
-        content = toml_path.read_text()
-        if "[integrations.ms365]" in content:
-            return
-    else:
-        content = ""
-    section = f'\n[integrations.ms365]\nenabled = true\nclient_id = "{client_id}"\ntenant_id = "{tenant_id}"\n'
-    toml_path.write_text(content + section)
-    print(f"  Config saved:  {toml_path}")
+
+def _load_dotenv(env_path: Path) -> dict[str, str]:
+    """Parse KEY=VALUE lines from a .env file. Ignores comments and blank lines."""
+    result: dict[str, str] = {}
+    if not env_path.exists():
+        return result
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        result[key.strip()] = value.strip().strip('"').strip("'")
+    return result
+
+
+def _get_ms365_config() -> tuple[str, str]:
+    """Return (client_id, tenant_id) from env or .env file fallback."""
+
+    config = get_settings()
+
+    client_id = config.client_id
+    tenant_id = config.tenant_id
+
+    if not client_id or not tenant_id:
+        for candidate in [Path(".env"), Path("../.env")]:
+            if candidate.exists():
+                dotenv = _load_dotenv(candidate.resolve())
+                client_id = dotenv.get("PINCER_MS365_CLIENT_ID", "")
+                tenant_id = dotenv.get("PINCER_MS365_TENANT_ID", "")
+                break
+
+    return client_id, tenant_id or "consumers"
 
 
 def main() -> None:
     """CLI entry point: ms365-mcp-setup"""
-    print("Microsoft 365 Setup\n")
-    print("This sets up all Microsoft 365 tools: Outlook email, Calendar, OneDrive,")
-    print("To Do, Contacts, and OneNote (61 tools total).\n")
+    client_id, tenant_id = _get_ms365_config()
 
-    print("Step 1: Azure App Registration\n")
-    print("If you haven't registered an app yet:")
-    print("  1. Go to https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade")
-    print("  2. Click 'New registration'")
-    print("  3. Name: 'MS365 MCP'")
-    print("  4. Supported account types: choose based on your account type:")
-    print("     - 'Personal Microsoft accounts only' for personal Outlook/OneDrive")
-    print("     - 'Accounts in any org directory + personal' for work + personal")
-    print("  5. Redirect URI: leave empty (device code flow)")
-    print("  6. Click 'Register'")
-    print("  7. Under 'Authentication', enable 'Allow public client flows'")
-    print("  8. Copy the Application (client) ID\n")
-
-    client_id = input("Paste your Application (client) ID: ").strip()
-    if not client_id or len(client_id) < 10:
-        print("Invalid client ID.")
+    if not client_id:
+        print("Error: PINCER_MS365_CLIENT_ID is not set.\n")
+        print("Add these to your .env file:")
+        print("  PINCER_MS365_CLIENT_ID=<your-azure-app-client-id>")
+        print("  PINCER_MS365_TENANT_ID=consumers  # or 'common' / your org tenant GUID")
+        print("\nThen re-run: ms365-mcp-setup")
+        print("\nSee docs/guides/ms365-mcp.md for Azure app registration steps.")
         sys.exit(1)
 
-    tenant_id = input("Tenant ID (press Enter for 'common'): ").strip() or "common"
+    print("Microsoft 365 Setup")
+    print(f"  Client ID:  {client_id}")
+    print(f"  Tenant ID:  {tenant_id}\n")
 
     from ms365.auth import MS365Auth
     from ms365.config import get_settings
@@ -58,7 +71,7 @@ def main() -> None:
 
     auth = MS365Auth(client_id=client_id, tenant_id=tenant_id, cache_path=str(cache_path))
 
-    print(f"\nRequesting {len(auth.scopes)} permission scope(s)...")
+    print(f"Requesting {len(auth.scopes)} permission scope(s)...")
     print("Starting device code authentication...")
     print("(The sign-in URL and code will appear below)\n")
 
@@ -73,11 +86,9 @@ def main() -> None:
     print(f"  Account:      {account}")
     print(f"  Token cached: {cache_path}")
     print(f"  Scopes:       {len(auth.scopes)}")
-
-    _save_config(client_id, tenant_id)
-
     print("\n69 Microsoft 365 tools are now available.")
-    print("Start the server:  pincer-ms365-mcp --transport http")
+    print("Start the server:  ms365-mcp-run --transport http")
+    print("Or run pincer:     pincer run")
 
 
 if __name__ == "__main__":

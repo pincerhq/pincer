@@ -187,7 +187,7 @@ Pincer ships **304 first-party tools** and plugs into **any MCP server** to reac
 | Core built-ins (`web_search`, `shell_exec`, `python_exec`, file ops, browser, email, calendar, image, voice) | 24 | Always on |
 | Bundled skills (weather, news, translate, stocks, expenses, habits, pomodoro, git, contacts…) | 27 | Always on |
 | **Google Workspace** — Gmail · Calendar · Drive · Docs · Sheets · Slides · Meet · Tasks · Contacts | **113** | `pincer setup-google` |
-| **Microsoft 365** — Outlook · Calendar · OneDrive · Teams · OneNote · To Do · Contacts | **69** | `pincer setup-ms365` |
+| **Microsoft 365** — Outlook · Calendar · OneDrive · Teams · OneNote · To Do · Contacts | **69** | `ms365-mcp-setup` |
 | **Slack (native)** — messages · channels · users · files · reactions · pins · reminders · search | **71** | `PINCER_SLACK_BOT_TOKEN` |
 | **MCP tools** (GitHub, Postgres, Notion, Linear, Stripe, filesystem, …) | unlimited | `pincer.toml` + `[mcp]` |
 | Custom skills (AST-scanned + sandboxed) | unlimited | `pincer skills install` |
@@ -485,7 +485,7 @@ pincer mcp tools                   # list registered MCP tools
 pincer mcp call <server> <tool>    # call a specific MCP tool
 pincer pair approve <ch> <code>    # approve a DM sender
 pincer setup-google                # Google Workspace OAuth (113 tools)
-pincer setup-ms365                 # Microsoft 365 device-code auth (69 tools)
+ms365-mcp-setup                    # Microsoft 365 device-code auth (69 tools)
 ```
 
 **Chat commands** (any channel): `/status`, `/budget`, `/new`, `/compact`, `/model <name>`, `/tools`
@@ -580,7 +580,7 @@ pip install "pincer-agent[image]"  # Image generation (fal.ai + Gemini)
 - [x] Docker + one-click deploys (Railway, Render, DigitalOcean)
 - [x] Voice calling (Twilio + STT/TTS + compliance)
 - [x] Google Workspace integration (113 tools via `pincer setup-google`)
-- [x] Microsoft 365 integration (69 tools via `pincer setup-ms365`)
+- [x] Microsoft 365 integration (69 tools via `ms365-mcp-setup`)
 - [x] Slack native integration (71 tools)
 - [x] MCP client + OAuth 2.0 authorization server
 - [x] Google Meet full surface — spaces, recordings, transcripts, smart notes
@@ -641,7 +641,7 @@ cd pincer && uv sync && pytest
 | **[MCP Guide](docs/mcp-guide.md)** | Connect any MCP-compliant server; OAuth 2.0 server setup |
 | **[API Reference](docs/API reference.md)** | REST API for integrations |
 | **[Tools Catalog](docs/TOOLS_CATALOG.md)** | Every tool Pincer can call — 304 native + MCP |
-| **[Microsoft 365 Setup](docs/ms365-setup.md)** | Azure app registration + device-code auth |
+| **[Microsoft 365 MCP Guide](docs/guides/ms365-mcp.md)** | Azure app registration + device-code auth + 69 tools |
 | **[Migrating from OpenClaw](docs/Migration from openclaw.md)** | Import your data in 30 min |
 
 ---

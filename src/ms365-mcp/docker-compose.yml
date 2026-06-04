@@ -7,8 +7,8 @@ services:
     volumes:
       - ms365-data:/app/data
     environment:
-      PINCER_MS365_CLIENT_ID: "${PINCER_MS365_CLIENT_ID}"
-      PINCER_MS365_TENANT_ID: "${PINCER_MS365_TENANT_ID:-common}"
+      MS365_CLIENT_ID: "${MS365_CLIENT_ID}"
+      MS365_TENANT_ID: "${MS365_TENANT_ID:-consumers}"
       TRANSPORT: http
 
 volumes:

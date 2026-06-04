@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field
 
 
 class LogLevel(StrEnum):
@@ -35,8 +35,6 @@ class CoreSettings(BaseModel):
     )
 
     # ── Scheduler / Proactive ─────────────────────────────
-    openweathermap_api_key: SecretStr = Field(default=SecretStr(""), description="OpenWeatherMap API key")
-    newsapi_key: SecretStr = Field(default=SecretStr(""), description="NewsAPI key")
     briefing_time: str = Field(default="07:00", description="Morning briefing time HH:MM")
     briefing_timezone: str = Field(default="Europe/Berlin", description="Briefing timezone")
     timezone: str = Field(default="Europe/Berlin", description="Default timezone")

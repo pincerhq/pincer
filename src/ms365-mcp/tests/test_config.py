@@ -5,14 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from ms365.config import MS365Settings, _DEFAULT_SERVICES, get_settings
+from ms365.config import _DEFAULT_SERVICES, MS365Settings, get_settings
 
 
 def test_defaults() -> None:
     cfg = MS365Settings()
     assert cfg.enabled is True
     assert cfg.client_id == ""
-    assert cfg.tenant_id == "common"
+    assert cfg.tenant_id == "consumers"
     assert cfg.auth_method == "device_code"
     assert cfg.services == list(_DEFAULT_SERVICES)
     assert cfg.token_cache_path == ""
@@ -40,13 +40,13 @@ def test_cache_path_expands_home() -> None:
 
 
 def test_client_id_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PINCER_MS365_CLIENT_ID", "env-client-id")
+    monkeypatch.setenv("MS365_CLIENT_ID", "env-client-id")
     cfg = MS365Settings()
     assert cfg.client_id == "env-client-id"
 
 
 def test_explicit_client_id_not_overwritten_by_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PINCER_MS365_CLIENT_ID", "env-id")
+    monkeypatch.setenv("MS365_CLIENT_ID", "env-id")
     cfg = MS365Settings(client_id="explicit-id")
     assert cfg.client_id == "explicit-id"
 
@@ -82,7 +82,7 @@ def test_services_json_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_empty_client_id_env_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PINCER_MS365_CLIENT_ID", "")
+    monkeypatch.setenv("MS365_CLIENT_ID", "")
     cfg = MS365Settings()
     assert cfg.client_id == ""
 
@@ -99,6 +99,24 @@ def test_get_settings_is_cached() -> None:
 
 
 def test_get_settings_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PINCER_MS365_CLIENT_ID", "from-env")
+    monkeypatch.setenv("MS365_CLIENT_ID", "from-env")
     cfg = get_settings()
     assert cfg.client_id == "from-env"
+
+
+def test_client_id_from_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """MS365Settings reads client_id from .env when env var is absent."""
+    monkeypatch.delenv("MS365_CLIENT_ID", raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("MS365_CLIENT_ID=dotenv-client-id\n")
+    cfg = MS365Settings(_env_file=str(env_file))
+    assert cfg.client_id == "dotenv-client-id"
+
+
+def test_env_var_takes_priority_over_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Environment variable wins over .env file value."""
+    monkeypatch.setenv("MS365_CLIENT_ID", "env-wins")
+    env_file = tmp_path / ".env"
+    env_file.write_text("MS365_CLIENT_ID=dotenv-loses\n")
+    cfg = MS365Settings(_env_file=str(env_file))
+    assert cfg.client_id == "env-wins"

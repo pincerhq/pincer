@@ -2793,6 +2793,7 @@ all = [
     { name = "fpdf2" },
     { name = "google-genai" },
     { name = "mcp" },
+    { name = "ms365-mcp" },
     { name = "pincer-mcps" },
     { name = "pincer-telemetry" },
     { name = "playwright" },
@@ -2828,6 +2829,7 @@ image = [
 ]
 mcp = [
     { name = "mcp" },
+    { name = "ms365-mcp" },
     { name = "pincer-mcps" },
     { name = "pomodoro-mcp" },
     { name = "pyjwt", extra = ["crypto"] },
@@ -2891,6 +2893,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27.0" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.8.0" },
+    { name = "ms365-mcp", marker = "extra == 'mcp'", editable = "src/ms365-mcp" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13.0" },
     { name = "neonize", specifier = ">=0.3.17" },
     { name = "openai", specifier = ">=1.60.0" },

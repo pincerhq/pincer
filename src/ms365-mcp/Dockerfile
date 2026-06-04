@@ -17,7 +17,7 @@ RUN uv sync --no-cache --no-dev
 
 VOLUME ["/app/data"]
 
-ENV PINCER_MS365_TOKEN_CACHE_PATH=/app/data/ms365_token_cache.json
+ENV MS365_TOKEN_CACHE_PATH=/app/data/ms365_token_cache.json
 ENV TRANSPORT=http
 ENV HOST=0.0.0.0
 ENV PORT=8000
@@ -27,4 +27,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
-CMD ["uv", "run", "pincer-ms365-mcp"]
+CMD ["uv", "run", "ms365-mcp-run"]

@@ -6,8 +6,8 @@ Contacts, and OneNote using Microsoft Graph REST API.
 
 Quick start — run as MCP server::
 
-    pincer-ms365-mcp --transport stdio
-    pincer-ms365-mcp --transport http --host 127.0.0.1 --port 8000
+    ms365-mcp-run --transport stdio
+    ms365-mcp-run --transport http --host 127.0.0.1 --port 8000
 
 Setup (one-time device code auth)::
 
