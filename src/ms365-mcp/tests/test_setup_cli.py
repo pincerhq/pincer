@@ -73,7 +73,7 @@ class TestGetMs365Config:
 
 class TestMainExitsWhenClientIdMissing:
     def test_exits_with_code_1(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         monkeypatch.delenv("MS365_CLIENT_ID", raising=False)
         monkeypatch.delenv("MS365_TENANT_ID", raising=False)

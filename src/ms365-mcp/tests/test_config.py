@@ -109,7 +109,7 @@ def test_client_id_from_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delenv("MS365_CLIENT_ID", raising=False)
     env_file = tmp_path / ".env"
     env_file.write_text("MS365_CLIENT_ID=dotenv-client-id\n")
-    cfg = MS365Settings(_env_file=str(env_file))
+    cfg = MS365Settings(_env_file=str(env_file))  # type: ignore[call-arg]
     assert cfg.client_id == "dotenv-client-id"
 
 
@@ -118,5 +118,5 @@ def test_env_var_takes_priority_over_dotenv(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setenv("MS365_CLIENT_ID", "env-wins")
     env_file = tmp_path / ".env"
     env_file.write_text("MS365_CLIENT_ID=dotenv-loses\n")
-    cfg = MS365Settings(_env_file=str(env_file))
+    cfg = MS365Settings(_env_file=str(env_file))  # type: ignore[call-arg]
     assert cfg.client_id == "env-wins"
