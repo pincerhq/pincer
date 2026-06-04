@@ -247,9 +247,7 @@ async def _build_client(tenant_override: str | None) -> GraphClient:
     tenant_id = tenant_override or cfg.tenant_id
 
     if not cfg.client_id:
-        sys.exit(
-            "Microsoft 365 client_id is not configured. Set PINCER_MS365_CLIENT_ID."
-        )
+        sys.exit("Microsoft 365 client_id is not configured. Set PINCER_MS365_CLIENT_ID.")
 
     auth = MS365Auth(
         client_id=cfg.client_id,

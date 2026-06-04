@@ -21,7 +21,7 @@ class TestLoadDotenv:
 
     def test_strips_quotes(self, tmp_path: Path) -> None:
         env = tmp_path / ".env"
-        env.write_text('FOO="quoted"\nBAR=\'single\'\n')
+        env.write_text("FOO=\"quoted\"\nBAR='single'\n")
         assert _load_dotenv(env) == {"FOO": "quoted", "BAR": "single"}
 
     def test_missing_file_returns_empty(self, tmp_path: Path) -> None:

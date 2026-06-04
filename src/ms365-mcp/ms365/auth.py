@@ -36,8 +36,7 @@ SERVICE_SCOPES: dict[str, list[str]] = {
 def scopes_for_services(services: list[str] | None = None) -> list[str]:
     """Return the deduplicated scope list for the given service names."""
     if services is None:
-        return ["User.Read"]+[scope for scopes in SERVICE_SCOPES.values()
-            for scope in scopes]
+        return ["User.Read"] + [scope for scopes in SERVICE_SCOPES.values() for scope in scopes]
     seen: set[str] = set()
     result: list[str] = ["User.Read"]
     seen.add("User.Read")
@@ -141,9 +140,7 @@ class MS365Auth:
 
         flow = self._app.initiate_device_flow(self._scopes)
         if "user_code" not in flow:
-            raise MS365AuthError(
-                f"Device flow failed: {flow.get('error_description', 'unknown error')}"
-            )
+            raise MS365AuthError(f"Device flow failed: {flow.get('error_description', 'unknown error')}")
 
         msg = flow.get(
             "message",

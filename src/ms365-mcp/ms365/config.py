@@ -35,7 +35,7 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
         extra="ignore",
         case_sensitive=False,
         env_file=("../.env", ".env"),
-        env_file_encoding="utf-8"
+        env_file_encoding="utf-8",
     )
 
     enabled: bool = True
@@ -52,7 +52,7 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
         init_settings: PydanticBaseSettingsSource,
         env_settings: PydanticBaseSettingsSource,
         dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource
+        file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         return (init_settings, _CommaAwareEnvSource(settings_cls), dotenv_settings, file_secret_settings)
 
