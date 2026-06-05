@@ -6,9 +6,9 @@ import json
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
-from pydantic import computed_field, field_validator
 from typing import TYPE_CHECKING, Any
 
+from pydantic import computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import EnvSettingsSource, PydanticBaseSettingsSource
 
@@ -52,7 +52,7 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
     tenant_id: str = "common"
     auth_method: str = "device_code"
     services: list[str] = list(_DEFAULT_SERVICES)
-    token_cache_path: Path = Path("ms365_token_cache.json")
+    token_cache_path: Path = Path.home() / ".pincer" / "ms365_token_cache.json"
 
     @classmethod
     def settings_customise_sources(
@@ -65,13 +65,14 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         return (init_settings, _CommaAwareEnvSource(settings_cls), dotenv_settings, file_secret_settings)
 
-    @field_validator('token_cache_path', mode='before')
+    @field_validator("token_cache_path", mode="before")
     @classmethod
-    def capitalize(cls, value: str | Path) -> Path:
+    def path_str_to_path(cls, value: str | Path) -> Path:
         try:
-            value = Path(value)
+            # NOTE: here is safe manage home directory `~` prefix
+            value = Path(value).expanduser()
         except Exception as e:
-            raise ValueError(f"Invalid path: {value} - {e}")
+            raise ValueError(f"Invalid path: {value} - {e}") from e
         if value.is_dir():
             value = value / "ms365_token_cache.json"
         return value

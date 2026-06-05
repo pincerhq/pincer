@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
-from rich.logging import RichHandler
 
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
@@ -39,7 +38,7 @@ def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level),
         # NOTE: rich formatting temporarily disabled
-        #handlers=[RichHandler(console=console, show_path=False, markup=True)],
+        # handlers=[RichHandler(console=console, show_path=False, markup=True)],
     )
     # format="%(message)s",
 

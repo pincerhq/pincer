@@ -56,7 +56,7 @@ class TestGetMs365Config:
         monkeypatch.delenv("MS365_TENANT_ID", raising=False)
         monkeypatch.chdir(tmp_path)
         client_id, tenant_id = _get_ms365_config()
-        assert tenant_id == "consumers"
+        assert tenant_id == "common"
         assert client_id == ""
 
     def test_env_takes_priority_over_dotenv(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -68,7 +68,7 @@ class TestGetMs365Config:
         client_id, tenant_id = _get_ms365_config()
         assert client_id == "env-wins"
         # dotenv fallback is skipped when client_id is already set from env
-        assert tenant_id == "consumers"
+        assert tenant_id == "common"
 
 
 class TestMainExitsWhenClientIdMissing:

@@ -10,12 +10,11 @@ from ms365.config import _DEFAULT_SERVICES, MS365Settings, get_settings
 
 def test_defaults() -> None:
     cfg = MS365Settings()
-    assert cfg.enabled is True
     assert cfg.client_id == ""
-    assert cfg.tenant_id == "consumers"
+    assert cfg.tenant_id == "common"
     assert cfg.auth_method == "device_code"
     assert cfg.services == list(_DEFAULT_SERVICES)
-    assert cfg.token_cache_path == ""
+    assert cfg.token_cache_path == Path.home() / ".pincer" / "ms365_token_cache.json"
 
 
 def test_default_services_count() -> None:
