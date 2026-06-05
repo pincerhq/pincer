@@ -77,7 +77,7 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
             value = value / "ms365_token_cache.json"
         return value
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def cache_path(self) -> Path:
         return self.token_cache_path

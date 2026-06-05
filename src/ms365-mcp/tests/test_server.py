@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import argparse
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from ms365 import ms365_server
@@ -416,7 +417,7 @@ async def test_async_main_filters_services(mock_client: MagicMock, monkeypatch: 
 
     _orig_build = ms365_server.build_server
 
-    def _fake_build(client: object, services: object = None, read_only: bool = False) -> object:
+    def _fake_build(client: Any, services: list[str] | None = None, read_only: bool = False) -> Any:
         result = _orig_build(client, services=services, read_only=read_only)
         captured_specs.append(len(result[1]))
         return result
@@ -450,7 +451,7 @@ async def test_run_stdio_calls_server_run(monkeypatch: pytest.MonkeyPatch) -> No
     write_stream = MagicMock()
 
     @contextlib.asynccontextmanager
-    async def _fake_stdio_server() -> object:
+    async def _fake_stdio_server() -> Any:  # type: ignore[return]
         yield read_stream, write_stream
 
     monkeypatch.setattr("mcp.server.stdio.stdio_server", _fake_stdio_server)
@@ -551,7 +552,7 @@ def test_main_calls_build_client_sync_and_asyncio_run(monkeypatch: pytest.Monkey
         sync_called.append(tenant_override)
         return mock_client
 
-    async def _fake_async_main(client: object, args: object) -> None:
+    async def _fake_async_main(client: object, args: argparse.Namespace) -> None:
         async_called.append((client, args.transport))
 
     monkeypatch.setattr("ms365.ms365_server._build_client_sync", _fake_build_client_sync)

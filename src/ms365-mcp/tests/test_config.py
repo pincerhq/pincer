@@ -28,12 +28,12 @@ def test_cache_path_default() -> None:
 
 
 def test_cache_path_custom() -> None:
-    cfg = MS365Settings(token_cache_path="/tmp/custom_tokens.json")
+    cfg = MS365Settings(token_cache_path="/tmp/custom_tokens.json")  # type: ignore[arg-type]
     assert cfg.cache_path == Path("/tmp/custom_tokens.json")
 
 
 def test_cache_path_expands_home() -> None:
-    cfg = MS365Settings(token_cache_path="~/.pincer/tokens.json")
+    cfg = MS365Settings(token_cache_path="~/.pincer/tokens.json")  # type: ignore[arg-type]
     assert "~" not in str(cfg.cache_path)
     assert cfg.cache_path == Path.home() / ".pincer" / "tokens.json"
 
