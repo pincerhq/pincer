@@ -31,7 +31,11 @@ if TYPE_CHECKING:
 
     from ms365.graph_client import GraphClient
 
-logging.basicConfig(level=logging.DEBUG)
+from ms365.config import get_settings
+
+logging.basicConfig(
+    level=getattr(logging, get_settings().log_level.value)
+)
 logger = logging.getLogger("ms365.ms365_server")
 
 DEFAULT_HOST = "127.0.0.1"

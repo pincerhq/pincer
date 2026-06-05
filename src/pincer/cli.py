@@ -38,7 +38,8 @@ console = Console()
 def _setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level),
-        handlers=[RichHandler(console=console, show_path=False, markup=True)],
+        # NOTE: rich formatting temporarily disabled
+        #handlers=[RichHandler(console=console, show_path=False, markup=True)],
     )
     # format="%(message)s",
 
@@ -93,7 +94,7 @@ def run() -> None:
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
 
-    # _setup_logging(settings.log_level.value)
+    _setup_logging(settings.log_level.value)
 
     if settings.telemetry_dsn:
         try:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from pydantic import computed_field, field_validator
 from typing import TYPE_CHECKING, Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,6 +30,13 @@ class _CommaAwareEnvSource(EnvSettingsSource):  # type: ignore[misc]
             raise
 
 
+class LogLevel(StrEnum):
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+
+
 class MS365Settings(BaseSettings):  # type: ignore[misc]
     model_config = SettingsConfigDict(
         env_prefix="MS365_",
@@ -38,12 +47,12 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
         env_file_encoding="utf-8",
     )
 
-    enabled: bool = True
+    log_level: LogLevel = LogLevel.INFO
     client_id: str = ""
-    tenant_id: str = "consumers"
+    tenant_id: str = "common"
     auth_method: str = "device_code"
     services: list[str] = list(_DEFAULT_SERVICES)
-    token_cache_path: str = ""
+    token_cache_path: Path = Path("ms365_token_cache.json")
 
     @classmethod
     def settings_customise_sources(
@@ -56,11 +65,21 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         return (init_settings, _CommaAwareEnvSource(settings_cls), dotenv_settings, file_secret_settings)
 
+    @field_validator('token_cache_path', mode='before')
+    @classmethod
+    def capitalize(cls, value: str | Path) -> Path:
+        try:
+            value = Path(value)
+        except Exception as e:
+            raise ValueError(f"Invalid path: {value} - {e}")
+        if value.is_dir():
+            value = value / "ms365_token_cache.json"
+        return value
+
+    @computed_field
     @property
     def cache_path(self) -> Path:
-        if self.token_cache_path:
-            return Path(self.token_cache_path).expanduser()
-        return Path.home() / ".pincer" / "ms365_token_cache.json"
+        return self.token_cache_path
 
 
 @lru_cache(maxsize=1)

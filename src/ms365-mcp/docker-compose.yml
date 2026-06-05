@@ -7,9 +7,15 @@ services:
     volumes:
       - ms365-data:/app/data
     environment:
-      MS365_CLIENT_ID: "${MS365_CLIENT_ID}"
-      MS365_TENANT_ID: "${MS365_TENANT_ID:-consumers}"
-      TRANSPORT: http
+      MS365_CLIENT_ID: "${MS365_CLIENT_ID:-none}"
+      MS365_TENANT_ID: "${MS365_TENANT_ID:-common}"
+      MS365_TOKEN_CACHE_PATH: "/app/data"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:${PORT:-8000}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 22 # 15 minutes allowed to register service as device, then ubhealthy
+      start_period: 15s
 
 volumes:
   ms365-data:

@@ -252,3 +252,314 @@ async def test_build_client_exits_when_device_flow_fails(monkeypatch: pytest.Mon
     monkeypatch.setattr("ms365.auth.MS365Auth", _FailingAuth)
     with pytest.raises(SystemExit):
         await ms365_server._build_client(None)
+
+
+# ── build_http_app ─────────────────────────────────────────────────────────────
+
+
+def test_build_http_app_health_endpoint(mock_client: MagicMock) -> None:
+    from starlette.testclient import TestClient
+
+    server, _ = ms365_server.build_server(mock_client)
+    app = ms365_server.build_http_app(server)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "healthy"
+    assert data["service"] == "ms365-mcp"
+
+
+def test_build_http_app_root_endpoint(mock_client: MagicMock) -> None:
+    from starlette.testclient import TestClient
+
+    server, _ = ms365_server.build_server(mock_client)
+    app = ms365_server.build_http_app(server)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "healthy"
+
+
+def test_build_http_app_has_mcp_route(mock_client: MagicMock) -> None:
+    server, _ = ms365_server.build_server(mock_client)
+    app = ms365_server.build_http_app(server)
+    route_paths = [r.path for r in app.routes]
+    assert "/mcp" in route_paths
+
+
+# ── _build_client_sync ────────────────────────────────────────────────────────
+
+
+def test_build_client_sync_exits_without_client_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MS365_CLIENT_ID", raising=False)
+    with pytest.raises(SystemExit):
+        ms365_server._build_client_sync(None)
+
+
+def test_build_client_sync_runs_device_flow_when_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("MS365_CLIENT_ID", "test-client-id")
+
+    flow_called: list[bool] = []
+
+    class _NoTokenAuth:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def has_cached_token(self) -> bool:
+            return False
+
+        def device_code_flow_sync(self) -> dict[str, object]:
+            flow_called.append(True)
+            return {"access_token": "new-token"}
+
+    mock_graph = MagicMock()
+    monkeypatch.setattr("ms365.auth.MS365Auth", _NoTokenAuth)
+    monkeypatch.setattr("ms365.graph_client.GraphClient", mock_graph)
+    ms365_server._build_client_sync(None)
+
+    assert flow_called == [True]
+
+
+def test_build_client_sync_exits_when_device_flow_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ms365.auth import MS365AuthError
+
+    monkeypatch.setenv("MS365_CLIENT_ID", "test-client-id")
+
+    class _FailingAuth:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def has_cached_token(self) -> bool:
+            return False
+
+        def device_code_flow_sync(self) -> dict[str, object]:
+            raise MS365AuthError("bad credentials")
+
+    monkeypatch.setattr("ms365.auth.MS365Auth", _FailingAuth)
+    with pytest.raises(SystemExit):
+        ms365_server._build_client_sync(None)
+
+
+def test_build_client_sync_skips_device_flow_when_token_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("MS365_CLIENT_ID", "test-client-id")
+
+    flow_called: list[bool] = []
+
+    class _CachedAuth:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def has_cached_token(self) -> bool:
+            return True
+
+        def device_code_flow_sync(self) -> dict[str, object]:
+            flow_called.append(True)
+            return {"access_token": "new-token"}
+
+    mock_graph = MagicMock()
+    monkeypatch.setattr("ms365.auth.MS365Auth", _CachedAuth)
+    monkeypatch.setattr("ms365.graph_client.GraphClient", mock_graph)
+    ms365_server._build_client_sync(None)
+
+    assert flow_called == []
+
+
+# ── _async_main ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_async_main_uses_stdio_transport(mock_client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    import argparse
+
+    stdio_called: list[bool] = []
+
+    async def _fake_run_stdio(server: object) -> None:
+        stdio_called.append(True)
+
+    monkeypatch.setattr("ms365.ms365_server.run_stdio", _fake_run_stdio)
+
+    args = argparse.Namespace(transport="stdio", services="", read_only=False)
+    await ms365_server._async_main(mock_client, args)
+
+    assert stdio_called == [True]
+
+
+@pytest.mark.asyncio
+async def test_async_main_uses_http_transport(mock_client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    import argparse
+
+    http_calls: list[tuple[str, int]] = []
+
+    async def _fake_run_http(server: object, host: str, port: int) -> None:
+        http_calls.append((host, port))
+
+    monkeypatch.setattr("ms365.ms365_server.run_http", _fake_run_http)
+
+    args = argparse.Namespace(transport="http", host="0.0.0.0", port=9000, services="", read_only=False)
+    await ms365_server._async_main(mock_client, args)
+
+    assert http_calls == [("0.0.0.0", 9000)]
+
+
+@pytest.mark.asyncio
+async def test_async_main_filters_services(mock_client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    import argparse
+
+    captured_specs: list[int] = []
+
+    _orig_build = ms365_server.build_server
+
+    def _fake_build(client: object, services: object = None, read_only: bool = False) -> object:
+        result = _orig_build(client, services=services, read_only=read_only)
+        captured_specs.append(len(result[1]))
+        return result
+
+    monkeypatch.setattr("ms365.ms365_server.build_server", _fake_build)
+
+    async def _fake_run_stdio(server: object) -> None:
+        pass
+
+    monkeypatch.setattr("ms365.ms365_server.run_stdio", _fake_run_stdio)
+
+    args = argparse.Namespace(transport="stdio", services="email,calendar", read_only=False)
+    await ms365_server._async_main(mock_client, args)
+
+    assert captured_specs == [_EXPECTED_COUNTS["email"] + _EXPECTED_COUNTS["calendar"]]
+
+
+# ── run_stdio ─────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_stdio_calls_server_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    import contextlib
+    from unittest.mock import AsyncMock, MagicMock
+
+    mock_server = MagicMock()
+    mock_server.run = AsyncMock()
+    mock_server.create_initialization_options.return_value = {"version": "1.0"}
+
+    read_stream = MagicMock()
+    write_stream = MagicMock()
+
+    @contextlib.asynccontextmanager
+    async def _fake_stdio_server() -> object:
+        yield read_stream, write_stream
+
+    monkeypatch.setattr("mcp.server.stdio.stdio_server", _fake_stdio_server)
+
+    await ms365_server.run_stdio(mock_server)
+
+    mock_server.run.assert_awaited_once_with(read_stream, write_stream, {"version": "1.0"})
+
+
+# ── _parse_args ───────────────────────────────────────────────────────────────
+
+
+def test_parse_args_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.argv", ["ms365-mcp-run"])
+    args = ms365_server._parse_args()
+    assert args.transport == "stdio"
+    assert args.host == ms365_server.DEFAULT_HOST
+    assert args.port == ms365_server.DEFAULT_PORT
+    assert args.services == ""
+    assert args.tenant == ""
+    assert args.read_only is False
+
+
+def test_parse_args_http_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.argv", ["ms365-mcp-run", "--transport", "http", "--port", "9999"])
+    args = ms365_server._parse_args()
+    assert args.transport == "http"
+    assert args.port == 9999
+
+
+def test_parse_args_read_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.argv", ["ms365-mcp-run", "--read-only"])
+    args = ms365_server._parse_args()
+    assert args.read_only is True
+
+
+# ── call_tool error handling ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_call_tool_handler_exception_returns_error_text(mock_client: MagicMock) -> None:
+    import mcp.types as types
+
+    mock_client.get.side_effect = RuntimeError("Graph API down")
+
+    server, _ = ms365_server.build_server(mock_client)
+    call_handler = server.request_handlers[types.CallToolRequest]
+    req = types.CallToolRequest(
+        method="tools/call",
+        params=types.CallToolRequestParams(
+            name="outlook__list_messages",
+            arguments={"folder": "Inbox", "max_results": 5},
+        ),
+    )
+    result = await call_handler(req)
+    content = result.root.content
+    assert content and "RuntimeError" in content[0].text
+    assert "Graph API down" in content[0].text
+
+
+# ── run_http ──────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_http_calls_uvicorn_serve(mock_client: MagicMock, monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    from unittest.mock import AsyncMock, MagicMock
+
+    server, _ = ms365_server.build_server(mock_client)
+
+    mock_uvicorn_server = MagicMock()
+    mock_uvicorn_server.serve = AsyncMock()
+
+    mock_uvicorn = MagicMock()
+    mock_uvicorn.Config = MagicMock(return_value=MagicMock())
+    mock_uvicorn.Server = MagicMock(return_value=mock_uvicorn_server)
+
+    monkeypatch.setitem(sys.modules, "uvicorn", mock_uvicorn)
+
+    await ms365_server.run_http(server, "127.0.0.1", 9999)
+
+    mock_uvicorn_server.serve.assert_awaited_once()
+
+
+# ── main ──────────────────────────────────────────────────────────────────────
+
+
+def test_main_calls_build_client_sync_and_asyncio_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    mock_client = MagicMock()
+    sync_called: list[object] = []
+    async_called: list[tuple[object, str]] = []
+
+    monkeypatch.setattr("sys.argv", ["ms365-mcp-run"])
+
+    def _fake_build_client_sync(tenant_override: object) -> object:
+        sync_called.append(tenant_override)
+        return mock_client
+
+    async def _fake_async_main(client: object, args: object) -> None:
+        async_called.append((client, args.transport))
+
+    monkeypatch.setattr("ms365.ms365_server._build_client_sync", _fake_build_client_sync)
+    monkeypatch.setattr("ms365.ms365_server._async_main", _fake_async_main)
+
+    ms365_server.main()
+
+    assert sync_called == [None]
+    assert len(async_called) == 1
+    assert async_called[0][0] is mock_client
+    assert async_called[0][1] == "stdio"

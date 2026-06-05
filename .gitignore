@@ -17,6 +17,7 @@ venv/
 # AI
 .cursor/
 .claude/
+.agents/
 
 # OS
 .DS_Store

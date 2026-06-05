@@ -45,7 +45,6 @@ services:
     image: pincer/newsapi-mcp:latest
     profiles:
       - http
-    env_file: .env
     environment:
       API_KEY: ${PINCER_NEWSAPI_KEY:-}
 
@@ -56,7 +55,6 @@ services:
     image: pincer/openweathermap-mcp:latest
     profiles:
       - http
-    env_file: .env
     environment:
       API_KEY: ${PINCER_OPENWEATHERMAP_API_KEY:-}
 
@@ -67,7 +65,6 @@ services:
     image: pincer/pomodoro-mcp:latest
     profiles:
       - http
-    env_file: .env
 
   stock-price-mcp:
     extends:
@@ -76,7 +73,6 @@ services:
     image: pincer/stock-price-mcp:latest
     profiles:
       - http
-    env_file: .env
 
   summarize-mcp:
     extends:
@@ -85,7 +81,6 @@ services:
     image: pincer/summarize-mcp:latest
     profiles:
       - http
-    env_file: .env
 
   translate-mcp:
     extends:
@@ -94,7 +89,6 @@ services:
     image: pincer/translate-mcp:latest
     profiles:
       - http
-    env_file: .env
 
   memory-mcp:
     extends:
@@ -103,9 +97,6 @@ services:
     image: pincer/memory-mcp:latest
     profiles:
       - http
-    env_file: .env
-    #volumes:
-    #  - /etc/localtime:/etc/localtime:ro
 
   ms365-mcp:
     extends:
@@ -114,7 +105,9 @@ services:
     image: pincer/ms365-mcp:latest
     profiles:
       - http
-    env_file: .env
+    environment:
+      MS365_CLIENT_ID: "${PINCER_MS365_CLIENT_ID}"
+      MS365_TENANT_ID: "${PINCER_MS365_TENANT_ID:-common}"
 
   pincer-stdio:
     <<: *pincer-base
@@ -171,8 +164,8 @@ services:
 volumes:
   pincer-data:
   memory-data:
-  ms365-data:
   model-cache:
+  ms365-data:
 
 networks:
   pincer-net:
