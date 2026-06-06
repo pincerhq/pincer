@@ -908,6 +908,24 @@ async def _run_agent(settings: Settings) -> None:
     else:
         console.print("[dim]Slack skipped (no PINCER_SLACK_BOT_TOKEN / PINCER_SLACK_APP_TOKEN)[/dim]")
 
+    # Microsoft Teams channel (optional — requires PINCER_TEAMS_APP_ID + PINCER_TEAMS_APP_PASSWORD)
+    if settings.teams_app_id and settings.teams_app_password.get_secret_value():
+        try:
+            from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
+
+            ms = MicrosoftTeamsChannel(settings)
+            await ms.start(on_message)
+            if ms._app is not None:  # start() may bail silently if import fails
+                channel_map[ms.name] = ms
+                router.register(ChannelType.TEAMS, ms)
+                console.print(f"[green]Teams connected (port {settings.teams_port})[/green]")
+            else:
+                console.print("[yellow]Teams failed to start (check logs)[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow]Teams failed: {e}[/yellow]")
+    else:
+        console.print("[dim]Teams skipped (no PINCER_TEAMS_APP_ID / PINCER_TEAMS_APP_PASSWORD)[/dim]")
+
     if not router.channels:
         console.print("[yellow]No channels configured. Set PINCER_TELEGRAM_BOT_TOKEN.[/yellow]")
         return

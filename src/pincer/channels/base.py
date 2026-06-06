@@ -20,6 +20,7 @@ class ChannelType(StrEnum):
     VOICE = "voice"
     SIGNAL = "signal"
     SLACK = "slack"
+    TEAMS = "teams"
 
 
 @dataclass
