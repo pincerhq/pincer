@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from pincer.integrations.ms365.graph_client import GraphClient
-    from pincer.tools.registry import ToolRegistry
+    from ms365._registry import ToolRegistry
+    from ms365.graph_client import GraphClient
 
 logger = logging.getLogger(__name__)
 
@@ -296,7 +296,7 @@ def register_onedrive_tools(registry: ToolRegistry, client: GraphClient) -> int:
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
         async def wrapper(**kwargs: Any) -> str:
-            return await fn(client, **kwargs)
+            return str(await fn(client, **kwargs))
 
         return wrapper
 

@@ -76,9 +76,7 @@ mcp = [
     "pomodoro-mcp",
     "pincer-mcps",
     "sqlite-vec-memory-mcp",
-]
-ms365 = [
-    "msal>=1.28.0",
+    "ms365-mcp",
 ]
 slack = [
     "slack-sdk>=3.27.0",
@@ -87,7 +85,7 @@ slack = [
 telemetry = [
     "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@main"
 ]
-all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp,ms365,slack,telemetry]"]
+all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,telemetry]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
@@ -140,6 +138,9 @@ extend-ignore = ["N814", "N818"]
 [tool.ruff.lint.per-file-ignores]
 # FastMCP tool parameters are declared with `Field(...)` in default arguments.
 "mcp_servers/**" = ["B008"]
+# Test files use pytest/stdlib imports in annotations at runtime — TC rules don't apply.
+"src/ms365-mcp/tests/**" = ["TC002", "TC003"]
+"tests/**" = ["TC002", "TC003"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -172,7 +173,6 @@ module = [
     "pincer.memory.store",
     "pincer.api.skills",
     "pincer.cli",
-    "pincer.integrations.ms365.*",
 ]
 disable_error_code = [
     "type-arg",
@@ -198,9 +198,11 @@ members = [
     "src/pincer-mcps",
     "src/pomodoro-mcp",
     "src/sqlite-vec-memory-mcp",
+    "src/ms365-mcp",
 ]
 
 [tool.uv.sources]
 pomodoro-mcp = { workspace = true }
 pincer-mcps = { workspace = true }
 sqlite-vec-memory-mcp = { workspace = true }
+ms365-mcp = { workspace = true }

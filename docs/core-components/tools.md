@@ -9,7 +9,7 @@ This is the complete, authoritative catalog of every tool Pincer can call. It is
 | **Core built-ins** (incl. `generate_image`, `make_phone_call`) | 24 | `src/pincer/tools/builtin/` + `src/pincer/cli.py` | Always on (voice/image need their API key) |
 | **Bundled skills** | 27 | `skills/` (11 skills) | Always on (bundled) |
 | **Google Workspace** | 113 | `src/pincer/integrations/google/` | `pincer setup-google` |
-| **Microsoft 365** | 69 | `src/pincer/integrations/ms365/` | `pincer setup-ms365` |
+| **Microsoft 365** | 69 | `src/ms365-mcp/ms365/` | `ms365-mcp-setup` |
 | **Slack (native)** | 71 | `src/pincer/integrations/slack/` | `PINCER_SLACK_BOT_TOKEN` |
 | **MCP servers (external)** | unlimited | `src/pincer/mcp/` | `pincer.toml` `[[mcp.servers]]` |
 | **Custom skills** | unlimited | `pincer skills install` | AST-scanned + sandboxed |
@@ -119,7 +119,7 @@ Full Meet REST v2 surface — spaces, conference records, participants, recordin
 
 ## Microsoft 365 (69 tools)
 
-Registered when `pincer setup-ms365` is completed and a token is cached at `~/.pincer/ms365_token_cache.json`.
+Available via the standalone `ms365-mcp` server. Run `ms365-mcp-setup` once to authenticate; a token is cached at `~/.pincer/ms365_token_cache.json`.
 
 ### Outlook Email (17) — `outlook__`
 

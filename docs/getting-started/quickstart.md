@@ -148,13 +148,20 @@ Once configured, all 85 `google__*` tools are available every time `pincer run` 
 
 To unlock Outlook email, Calendar, OneDrive, To Do, Teams, Contacts, and OneNote — 69 tools total:
 
-```bash
-pincer setup-ms365
-```
+1. [Register a free Azure app](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) to get a client ID
+2. Add to your `.env`:
+   ```
+   PINCER_MS365_CLIENT_ID=<your-client-id>
+   PINCER_MS365_TENANT_ID=consumers
+   ```
+3. Run the setup wizard:
+   ```bash
+   ms365-mcp-setup
+   ```
 
-You'll need to [register a free Azure app](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) first to get a client ID. The wizard walks you through it. The token is cached locally at `~/.pincer/ms365_token_cache.json` (readable only by you).
+The token is cached locally at `~/.pincer/ms365_token_cache.json` (readable only by you).
 
-See [Microsoft 365 Setup Guide](../guides/ms365-setup.md) for detailed instructions.
+See [Microsoft 365 MCP Guide](../guides/ms365-mcp.md) for detailed instructions.
 
 ---
 

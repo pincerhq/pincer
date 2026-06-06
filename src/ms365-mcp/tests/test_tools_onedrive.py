@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
+from typing import TYPE_CHECKING
 
-from pincer.integrations.ms365.tools_onedrive import (
+import pytest
+from ms365.tools_onedrive import (
     onedrive__copy_file,
     onedrive__create_folder,
     onedrive__delete_file,
@@ -21,9 +22,12 @@ from pincer.integrations.ms365.tools_onedrive import (
     onedrive__upload_file,
 )
 
+if TYPE_CHECKING:
+    from unittest.mock import MagicMock
+
 
 @pytest.mark.asyncio
-async def test_list_drive_items(mock_client):
+async def test_list_drive_items(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "value": [
             {
@@ -49,7 +53,7 @@ async def test_list_drive_items(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_search_files(mock_client):
+async def test_search_files(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "value": [
             {
@@ -67,7 +71,7 @@ async def test_search_files(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_get_file_metadata(mock_client):
+async def test_get_file_metadata(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "id": "file-1",
         "name": "presentation.pptx",
@@ -84,12 +88,8 @@ async def test_get_file_metadata(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_download_file_text(mock_client):
-    mock_client.get.return_value = {
-        "name": "notes.txt",
-        "size": 100,
-        "file": {"mimeType": "text/plain"},
-    }
+async def test_download_file_text(mock_client: MagicMock) -> None:
+    mock_client.get.return_value = {"name": "notes.txt", "size": 100, "file": {"mimeType": "text/plain"}}
     mock_client.get_binary.return_value = b"Hello, world!"
     result = await onedrive__download_file(mock_client, item_id="file-1")
     assert "notes.txt" in result
@@ -97,12 +97,8 @@ async def test_download_file_text(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_download_file_binary(mock_client):
-    mock_client.get.return_value = {
-        "name": "image.png",
-        "size": 5000,
-        "file": {"mimeType": "image/png"},
-    }
+async def test_download_file_binary(mock_client: MagicMock) -> None:
+    mock_client.get.return_value = {"name": "image.png", "size": 5000, "file": {"mimeType": "image/png"}}
     mock_client.get_binary.return_value = b"\x89PNG"
     result = await onedrive__download_file(mock_client, item_id="file-2")
     assert "image.png" in result
@@ -110,13 +106,13 @@ async def test_download_file_binary(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_get_file_preview(mock_client):
+async def test_get_file_preview(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "value": [
             {
                 "large": {"url": "https://preview.example.com/large"},
                 "medium": {"url": "https://preview.example.com/medium"},
-            },
+            }
         ]
     }
     result = await onedrive__get_file_preview(mock_client, item_id="file-1")
@@ -124,7 +120,7 @@ async def test_get_file_preview(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_list_shared_with_me(mock_client):
+async def test_list_shared_with_me(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "value": [
             {
@@ -133,7 +129,7 @@ async def test_list_shared_with_me(mock_client):
                 "size": 30000,
                 "lastModifiedDateTime": "2026-03-20T10:00:00Z",
                 "file": {},
-            },
+            }
         ]
     }
     result = await onedrive__list_shared_with_me(mock_client)
@@ -141,7 +137,7 @@ async def test_list_shared_with_me(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_list_recent_files(mock_client):
+async def test_list_recent_files(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "value": [
             {
@@ -150,7 +146,7 @@ async def test_list_recent_files(mock_client):
                 "size": 500,
                 "lastModifiedDateTime": "2026-03-26T15:00:00Z",
                 "file": {},
-            },
+            }
         ]
     }
     result = await onedrive__list_recent_files(mock_client)
@@ -158,7 +154,7 @@ async def test_list_recent_files(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_upload_file(mock_client):
+async def test_upload_file(mock_client: MagicMock) -> None:
     mock_client.put.return_value = {"id": "uploaded-1", "size": 11}
     result = await onedrive__upload_file(mock_client, path="/Documents/test.txt", content="hello world")
     assert "uploaded" in result
@@ -166,7 +162,7 @@ async def test_upload_file(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_create_folder(mock_client):
+async def test_create_folder(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {"id": "new-folder-1"}
     result = await onedrive__create_folder(mock_client, name="New Folder")
     assert "Folder created" in result
@@ -174,14 +170,14 @@ async def test_create_folder(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_move_file(mock_client):
+async def test_move_file(mock_client: MagicMock) -> None:
     mock_client.patch.return_value = {"id": "file-1"}
     result = await onedrive__move_file(mock_client, item_id="file-1", destination_path="/Archive")
     assert "moved" in result
 
 
 @pytest.mark.asyncio
-async def test_rename_file(mock_client):
+async def test_rename_file(mock_client: MagicMock) -> None:
     mock_client.patch.return_value = {"id": "file-1"}
     result = await onedrive__rename_file(mock_client, item_id="file-1", new_name="renamed.txt")
     assert "renamed" in result
@@ -189,14 +185,14 @@ async def test_rename_file(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_copy_file(mock_client):
+async def test_copy_file(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {}
     result = await onedrive__copy_file(mock_client, item_id="file-1", destination_path="/Backup")
     assert "Copy initiated" in result
 
 
 @pytest.mark.asyncio
-async def test_delete_file(mock_client):
+async def test_delete_file(mock_client: MagicMock) -> None:
     mock_client.delete.return_value = {}
     result = await onedrive__delete_file(mock_client, item_id="file-1")
     assert "deleted" in result
@@ -204,7 +200,7 @@ async def test_delete_file(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_share_file(mock_client):
+async def test_share_file(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {"link": {"webUrl": "https://1drv.ms/shared-link"}}
     result = await onedrive__share_file(mock_client, item_id="file-1")
     assert "Sharing link" in result

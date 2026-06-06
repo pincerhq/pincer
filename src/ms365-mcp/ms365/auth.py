@@ -8,7 +8,7 @@ Supports:
 Token cache: ~/.pincer/ms365_token_cache.json
 MSAL handles refresh tokens automatically.
 
-Run ``pincer setup-ms365`` to perform the one-time device code auth flow.
+Run ``ms365-mcp-setup`` to perform the one-time device code auth flow.
 """
 
 from __future__ import annotations
@@ -16,35 +16,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# All scopes required by the full MS365 integration.
-ALL_SCOPES: list[str] = [
-    "User.Read",
-    "Mail.ReadWrite",
-    "Mail.Send",
-    "Calendars.ReadWrite",
-    "Files.ReadWrite.All",
-    "Tasks.ReadWrite",
-    "Chat.ReadWrite",
-    "Contacts.ReadWrite",
-    "Notes.ReadWrite.All",
-    "Team.ReadBasic.All",
-    "Channel.ReadBasic.All",
-    "ChannelMessage.Send",
-    "OnlineMeetings.ReadWrite",
-]
-
 # Scopes grouped by service.
 SERVICE_SCOPES: dict[str, list[str]] = {
     "email": ["Mail.ReadWrite", "Mail.Send"],
-    "calendar": ["Calendars.ReadWrite", "OnlineMeetings.ReadWrite"],
+    "calendar": ["Calendars.ReadWrite"],
     "onedrive": ["Files.ReadWrite.All"],
     "todo": ["Tasks.ReadWrite"],
-    "teams": ["Team.ReadBasic.All", "Channel.ReadBasic.All", "ChannelMessage.Send", "Chat.ReadWrite"],
     "contacts": ["Contacts.ReadWrite"],
     "onenote": ["Notes.ReadWrite.All"],
 }
@@ -53,7 +36,7 @@ SERVICE_SCOPES: dict[str, list[str]] = {
 def scopes_for_services(services: list[str] | None = None) -> list[str]:
     """Return the deduplicated scope list for the given service names."""
     if services is None:
-        return list(ALL_SCOPES)
+        return ["User.Read"] + [scope for scopes in SERVICE_SCOPES.values() for scope in scopes]
     seen: set[str] = set()
     result: list[str] = ["User.Read"]
     seen.add("User.Read")
@@ -129,7 +112,7 @@ class MS365Auth:
         result = self._app.acquire_token_silent(self._scopes, account=accounts[0])
         if result and "access_token" in result:
             self._save_cache()
-            return result["access_token"]
+            return str(result["access_token"])
         return None
 
     async def get_token(self) -> str:
@@ -141,28 +124,60 @@ class MS365Auth:
         if token:
             return token
 
-        raise MS365AuthError("No valid Microsoft 365 token found. Run 'pincer setup-ms365' to authenticate.")
+        raise MS365AuthError("No valid Microsoft 365 token found. Run 'ms365-mcp-setup' to authenticate.")
 
-    async def device_code_flow(self) -> dict[str, Any]:
-        """Run device code flow: user enters code in browser. Returns MSAL result."""
+    def device_code_flow_sync(self) -> dict[str, Any]:
+        """Run device code flow synchronously (blocking).
+
+        Call this BEFORE starting an asyncio event loop so that all MSAL calls
+        execute in the same thread with no asyncio/threading indirection.
+        stdout is reserved for the MCP stdio protocol; the user-code message is
+        printed to stderr.
+        """
+        import time
+
         self._ensure_app()
 
         flow = self._app.initiate_device_flow(self._scopes)
         if "user_code" not in flow:
             raise MS365AuthError(f"Device flow failed: {flow.get('error_description', 'unknown error')}")
 
-        self._pending_flow_message = (
-            f"To sign in, visit https://microsoft.com/devicelogin and enter code: {flow['user_code']}"
+        msg = flow.get(
+            "message",
+            f"To sign in, visit https://microsoft.com/devicelogin and enter code: {flow['user_code']}",
+        )
+        self._pending_flow_message = msg
+        print(f"\n{msg}\n", file=sys.stderr, flush=True)
+
+        expires_in = flow.get("expires_in", 900)
+        expires_at = flow.get("expires_at", time.time() + expires_in)
+        logger.debug(
+            "Device flow: expires_in=%s expires_at=%.0f now=%.0f remaining=%.0fs",
+            expires_in,
+            expires_at,
+            time.time(),
+            expires_at - time.time(),
         )
 
-        # This blocks until user completes auth (up to 15 min)
-        result = await asyncio.to_thread(self._app.acquire_token_by_device_flow, flow)
+        result = dict(self._app.acquire_token_by_device_flow(flow))  # type: ignore[no-any-return]
 
         if "access_token" not in result:
-            raise MS365AuthError(f"Auth failed: {result.get('error_description', 'unknown error')}")
+            error_code = result.get("error", "")
+            error_desc = result.get("error_description", "unknown error")
+            logger.error(
+                "Device code flow failed — error=%s desc=%s full_result=%s",
+                error_code,
+                error_desc,
+                result,
+            )
+            raise MS365AuthError(f"Auth failed ({error_code}): {error_desc}")
 
         self._save_cache()
         return result
+
+    async def device_code_flow(self) -> dict[str, Any]:
+        """Async wrapper around device_code_flow_sync for programmatic / test use."""
+        return await asyncio.to_thread(self.device_code_flow_sync)
 
     async def interactive_flow(self) -> dict[str, Any]:
         """Run interactive browser flow. Returns MSAL result."""
@@ -177,19 +192,34 @@ class MS365Auth:
             raise MS365AuthError(f"Auth failed: {result.get('error_description', 'unknown error')}")
 
         self._save_cache()
-        return result
+        return dict(result)
 
     def has_cached_token(self) -> bool:
-        """Check if there's any cached account."""
+        """Return True only if a silent token acquisition actually succeeds.
+
+        Checking for cached accounts alone is insufficient — the account may
+        exist but its refresh token could be expired or revoked, which would
+        cause get_token() to fail silently after skipping the device flow.
+        """
         self._ensure_app()
-        return bool(self._app.get_accounts())
+        accounts = self._app.get_accounts()
+        if not accounts:
+            return False
+        result = self._app.acquire_token_silent(self._scopes, account=accounts[0])
+        has_token = bool(result and "access_token" in result)
+        if has_token:
+            self._save_cache()
+        else:
+            logger.debug("has_cached_token: silent refresh failed — %s", result)
+        return has_token
 
     def authenticated_account(self) -> str | None:
         """Return the username from cached accounts, if any."""
         self._ensure_app()
         accounts = self._app.get_accounts()
         if accounts:
-            return accounts[0].get("username")
+            username = accounts[0].get("username")
+            return str(username) if username is not None else None
         return None
 
     @property

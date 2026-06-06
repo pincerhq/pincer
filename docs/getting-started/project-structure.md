@@ -22,7 +22,7 @@
 | A0 | Mar 21, 2026 | MCP Architecture | MCPServiceCore, layered shells (embedded + standalone), resources, prompts, sampling, `pincer mcp serve` |
 | 9 | Mar 26, 2026 | Google Workspace | 85-tool native integration (Gmail 19, Calendar 12, Drive 15, Docs 8, Sheets 10, Slides 6, Tasks 8, Contacts 7), `pincer setup-google` |
 | 9.5 | — | Google Meet | Extended Google Workspace integration to 113 tools — full Meet v2 REST surface (27 tools: spaces, conference records, participants, recordings, transcripts, smart notes, event subscriptions) |
-| 10 | Apr 6, 2026 | Microsoft 365 | 69-tool native integration (Outlook 17, Calendar 12, OneDrive 14, To Do 8, Teams 7, Contacts 6, OneNote 5), `pincer setup-ms365` |
+| 10 | Apr 6, 2026 | Microsoft 365 | 69-tool standalone MCP server (Outlook 17, Calendar 12, OneDrive 14, To Do 8, Teams 7, Contacts 6, OneNote 5), `ms365-mcp-setup` |
 | 11 | Apr 2026 | Slack Native | 71-tool native integration (messages 18, channels 16, users 10, files 10, misc 12, reactions 5) on top of the existing Slack channel; supports bot + user tokens for full-text search |
 | 12 | Apr 2026 | MCP OAuth 2.0 | Full OAuth 2.0 Authorization Server for MCP — `/authorize`, `/token`, `/introspect`, `/revoke`, RFC 8414 metadata, PKCE, JWT tokens, scope enforcement, `token_store.py` (SQLite + keyring) |
 | 13 | Apr 17, 2026 | Tools Catalog | 304 first-party tools catalogued in `docs/TOOLS_CATALOG.md`; README + docs refreshed to reflect 600+ with popular MCP servers |

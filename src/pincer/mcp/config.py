@@ -184,6 +184,12 @@ def _pincer_config_vars(settings: Settings) -> dict[str, str]:
     for field_name in ChannelSettings.model_fields:
         if field_name.startswith("email_"):
             result[f"PINCER_{field_name.upper()}"] = _str(getattr(settings, field_name))
+
+    from pincer.config.mcp import MCPSettings
+
+    for field_name in MCPSettings.model_fields:
+        result[f"PINCER_{field_name.upper()}"] = _str(getattr(settings, field_name))
+
     return result
 
 

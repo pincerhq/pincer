@@ -30,13 +30,12 @@ def register_default_tools(tools: ToolRegistry, settings: Settings) -> dict[str,
     """Register the default tool suite in *tools*.
 
     Returns a small report dict so the caller can log what came on/off
-    (e.g. ``{"google": 112, "ms365": 69, "slack": 71, "builtins": 12}``).
+    (e.g. ``{"google": 112, "slack": 71, "builtins": 12}``).
     """
     report: dict[str, int] = {"builtins": 0}
 
     _register_builtins(tools, settings, report)
     _register_google_workspace(tools, report)
-    _register_ms365(tools, report)
     _register_slack(tools, report)
     _register_image_gen(tools, settings, report)
 
@@ -414,21 +413,6 @@ def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> N
         logger.warning("Google Workspace tools disabled: %s", e)
     except Exception:
         logger.debug("Google Workspace tools not loaded", exc_info=True)
-
-
-def _register_ms365(tools: ToolRegistry, report: dict[str, int]) -> None:
-    try:
-        from pincer.integrations.ms365 import get_ms365_client
-        from pincer.integrations.ms365 import register_all_tools as register_ms365_tools
-
-        client = get_ms365_client()
-        if client is None:
-            return
-        report["ms365"] = register_ms365_tools(tools, client)
-    except RuntimeError as e:
-        logger.warning("Microsoft 365 tools disabled: %s", e)
-    except Exception:
-        logger.debug("Microsoft 365 tools not loaded", exc_info=True)
 
 
 def _register_slack(tools: ToolRegistry, report: dict[str, int]) -> None:

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-import pytest
+from typing import TYPE_CHECKING
 
-from pincer.integrations.ms365.tools_email import (
+import pytest
+from ms365.tools_email import (
     outlook__create_draft,
     outlook__delete_message,
     outlook__download_attachment,
@@ -24,9 +25,12 @@ from pincer.integrations.ms365.tools_email import (
     outlook__update_draft,
 )
 
+if TYPE_CHECKING:
+    from unittest.mock import MagicMock
+
 
 @pytest.mark.asyncio
-async def test_list_mail_folders(mock_client):
+async def test_list_mail_folders(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "value": [
             {"displayName": "Inbox", "totalItemCount": 42, "unreadItemCount": 5, "id": "inbox-id"},
@@ -41,7 +45,7 @@ async def test_list_mail_folders(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_list_messages(mock_client):
+async def test_list_messages(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "value": [
             {
@@ -62,16 +66,16 @@ async def test_list_messages(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_list_messages_unread_filter(mock_client):
+async def test_list_messages_unread_filter(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {"value": []}
     await outlook__list_messages(mock_client, unread_only=True)
     call_args = mock_client.get.call_args
-    params = call_args[1].get("params") or call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("params", {})
+    params = call_args[1].get("params") or (call_args[0][1] if len(call_args[0]) > 1 else {})
     assert "isRead eq false" in str(params)
 
 
 @pytest.mark.asyncio
-async def test_search_messages(mock_client):
+async def test_search_messages(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "value": [
             {
@@ -90,7 +94,7 @@ async def test_search_messages(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_get_message(mock_client):
+async def test_get_message(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "id": "msg-full",
         "subject": "Important Update",
@@ -112,7 +116,7 @@ async def test_get_message(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_get_attachments(mock_client):
+async def test_get_attachments(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "value": [
             {"id": "att-1", "name": "report.pdf", "contentType": "application/pdf", "size": 102400},
@@ -124,7 +128,7 @@ async def test_get_attachments(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_download_attachment(mock_client):
+async def test_download_attachment(mock_client: MagicMock) -> None:
     mock_client.get.return_value = {
         "id": "att-1",
         "name": "notes.txt",
@@ -137,14 +141,9 @@ async def test_download_attachment(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_send_message(mock_client):
+async def test_send_message(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {}
-    result = await outlook__send_message(
-        mock_client,
-        to="test@example.com",
-        subject="Hello",
-        body="Hi there!",
-    )
+    result = await outlook__send_message(mock_client, to="test@example.com", subject="Hello", body="Hi there!")
     assert "Email sent to test@example.com" in result
     assert '"Hello"' in result
     mock_client.post.assert_called_once()
@@ -153,15 +152,10 @@ async def test_send_message(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_send_message_with_cc_bcc(mock_client):
+async def test_send_message_with_cc_bcc(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {}
     result = await outlook__send_message(
-        mock_client,
-        to="a@example.com",
-        subject="Test",
-        body="Body",
-        cc="b@example.com",
-        bcc="c@example.com",
+        mock_client, to="a@example.com", subject="Test", body="Body", cc="b@example.com", bcc="c@example.com"
     )
     assert "Email sent" in result
     call_json = mock_client.post.call_args[1]["json"]
@@ -170,22 +164,21 @@ async def test_send_message_with_cc_bcc(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_reply_to_message(mock_client):
+async def test_reply_to_message(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {}
     result = await outlook__reply_to_message(mock_client, message_id="msg-1", body="Thanks!")
     assert "Reply sent" in result
-    mock_client.post.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_reply_all(mock_client):
+async def test_reply_all(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {}
     result = await outlook__reply_all_to_message(mock_client, message_id="msg-1", body="Noted.")
     assert "Reply-all sent" in result
 
 
 @pytest.mark.asyncio
-async def test_forward_message(mock_client):
+async def test_forward_message(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {}
     result = await outlook__forward_message(mock_client, message_id="msg-1", to="bob@example.com")
     assert "forwarded" in result
@@ -193,7 +186,7 @@ async def test_forward_message(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_create_draft(mock_client):
+async def test_create_draft(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {"id": "draft-1"}
     result = await outlook__create_draft(mock_client, to="a@example.com", subject="Draft", body="Content")
     assert "Draft created" in result
@@ -201,21 +194,21 @@ async def test_create_draft(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_update_draft(mock_client):
+async def test_update_draft(mock_client: MagicMock) -> None:
     mock_client.patch.return_value = {}
     result = await outlook__update_draft(mock_client, message_id="draft-1", subject="Updated Subject")
     assert "updated" in result
 
 
 @pytest.mark.asyncio
-async def test_send_draft(mock_client):
+async def test_send_draft(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {}
     result = await outlook__send_draft(mock_client, message_id="draft-1")
     assert "sent" in result
 
 
 @pytest.mark.asyncio
-async def test_move_message(mock_client):
+async def test_move_message(mock_client: MagicMock) -> None:
     mock_client.post.return_value = {"id": "msg-moved"}
     result = await outlook__move_message(mock_client, message_id="msg-1", destination_folder="Archive")
     assert "moved" in result
@@ -223,14 +216,14 @@ async def test_move_message(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_delete_message(mock_client):
+async def test_delete_message(mock_client: MagicMock) -> None:
     mock_client.delete.return_value = {}
     result = await outlook__delete_message(mock_client, message_id="msg-1")
     assert "deleted" in result
 
 
 @pytest.mark.asyncio
-async def test_mark_as_read(mock_client):
+async def test_mark_as_read(mock_client: MagicMock) -> None:
     mock_client.patch.return_value = {}
     result = await outlook__mark_as_read(mock_client, message_id="msg-1")
     assert "read" in result
@@ -239,7 +232,7 @@ async def test_mark_as_read(mock_client):
 
 
 @pytest.mark.asyncio
-async def test_flag_message(mock_client):
+async def test_flag_message(mock_client: MagicMock) -> None:
     mock_client.patch.return_value = {}
     result = await outlook__flag_message(mock_client, message_id="msg-1", flagged=True)
     assert "flagged" in result

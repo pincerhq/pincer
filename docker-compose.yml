@@ -45,7 +45,6 @@ services:
     image: pincer/newsapi-mcp:latest
     profiles:
       - http
-    env_file: .env
     environment:
       API_KEY: ${PINCER_NEWSAPI_KEY:-}
 
@@ -56,7 +55,6 @@ services:
     image: pincer/openweathermap-mcp:latest
     profiles:
       - http
-    env_file: .env
     environment:
       API_KEY: ${PINCER_OPENWEATHERMAP_API_KEY:-}
 
@@ -67,7 +65,6 @@ services:
     image: pincer/pomodoro-mcp:latest
     profiles:
       - http
-    env_file: .env
 
   stock-price-mcp:
     extends:
@@ -76,7 +73,6 @@ services:
     image: pincer/stock-price-mcp:latest
     profiles:
       - http
-    env_file: .env
 
   summarize-mcp:
     extends:
@@ -85,7 +81,6 @@ services:
     image: pincer/summarize-mcp:latest
     profiles:
       - http
-    env_file: .env
 
   translate-mcp:
     extends:
@@ -94,7 +89,6 @@ services:
     image: pincer/translate-mcp:latest
     profiles:
       - http
-    env_file: .env
 
   memory-mcp:
     extends:
@@ -103,7 +97,17 @@ services:
     image: pincer/memory-mcp:latest
     profiles:
       - http
-    env_file: .env
+
+  ms365-mcp:
+    extends:
+      file: ./src/ms365-mcp/docker-compose.yml
+      service: ms365-mcp
+    image: pincer/ms365-mcp:latest
+    profiles:
+      - http
+    environment:
+      MS365_CLIENT_ID: "${PINCER_MS365_CLIENT_ID}"
+      MS365_TENANT_ID: "${PINCER_MS365_TENANT_ID:-common}"
 
   pincer-stdio:
     <<: *pincer-base
@@ -141,6 +145,8 @@ services:
         condition: service_healthy
       translate-mcp:
         condition: service_healthy
+      ms365-mcp:
+        condition: service_healthy
 
   ngrok:
     image: ngrok/ngrok:latest
@@ -159,6 +165,7 @@ volumes:
   pincer-data:
   memory-data:
   model-cache:
+  ms365-data:
 
 networks:
   pincer-net:
