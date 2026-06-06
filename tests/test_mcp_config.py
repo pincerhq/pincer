@@ -143,6 +143,12 @@ def _make_settings(**overrides: object) -> SimpleNamespace:
         email_username="",
         email_password=SecretStr(""),
         email_from="",
+        # MCPSettings fields — needed for PINCER_* interpolation vars
+        ms365_client_id="",
+        ms365_client_secret="",
+        ms365_tenant_id="consumers",
+        newsapi_key=SecretStr(""),
+        openweathermap_api_key=SecretStr(""),
     )
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
@@ -184,11 +190,12 @@ def test_pincer_config_vars_all_fields() -> None:
     for field_name in ChannelSettings.model_fields:
         if field_name.startswith("email_"):
             assert f"PINCER_{field_name.upper()}" in result
-    # Service-specific vars must not be broadcast to every MCP server
+    # MCP credential vars are present for ${} interpolation in server env dicts
+    assert "PINCER_MS365_CLIENT_ID" in result
+    assert "PINCER_OPENWEATHERMAP_API_KEY" in result
+    assert "PINCER_NEWSAPI_KEY" in result
+    # Non-MCP settings are not included (not settable via MCPSettings)
     assert "PINCER_DAILY_BUDGET_USD" not in result
-    assert "PINCER_MS365_CLIENT_ID" not in result
-    assert "PINCER_OPENWEATHERMAP_API_KEY" not in result
-    assert "PINCER_NEWSAPI_KEY" not in result
     assert "PINCER_BRIEFING_TIME" not in result
     assert "PINCER_BRIEFING_TIMEZONE" not in result
 

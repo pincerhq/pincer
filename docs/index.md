@@ -25,8 +25,7 @@ Your personal AI agent. Text it on Telegram, WhatsApp, or Discord. It does stuff
 - [MCP Guide](guides/mcp-guide.md) — connecting Pincer to external MCP servers
 - [Skills Guide](guides/skills-guide.md) — *(deprecated in 0.8.0, removed in 0.9.0 — use MCP)*
 - [WhatsApp Troubleshooting](guides/whatsapp-troubleshooting.md)
-- [MS365 Setup](guides/ms365-setup.md) — Microsoft 365 integration
-- [MS365 MCP Server](guides/ms365-mcp.md) — expose the 69 Microsoft 365 tools as an MCP server
+- [MS365 MCP Server](guides/ms365-mcp.md) — Microsoft 365 setup + 69 tools as a standalone MCP server
 - [Signal Setup](guides/signal-setup.md)
 - [Voice Calling Setup](guides/voice-calling-setup.md)
 - [Migration from OpenClaw](guides/migration-from-openclaw.md)

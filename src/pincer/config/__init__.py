@@ -3,6 +3,7 @@ from pincer.config.channels import ChannelSettings
 from pincer.config.core import CoreSettings, LogLevel
 from pincer.config.llm import LLMProvider, LLMSettings
 from pincer.config.main import Settings, get_settings, get_settings_relaxed
+from pincer.config.mcp import MCPSettings
 from pincer.config.tools import ToolSettings
 
 __all__ = [
@@ -12,6 +13,7 @@ __all__ = [
     "LogLevel",
     "LLMProvider",
     "LLMSettings",
+    "MCPSettings",
     "Settings",
     "ToolSettings",
     "get_settings",

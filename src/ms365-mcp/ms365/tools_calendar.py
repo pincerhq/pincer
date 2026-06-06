@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from pincer.integrations.ms365.graph_client import GraphClient
-    from pincer.tools.registry import ToolRegistry
+    from ms365._registry import ToolRegistry
+    from ms365.graph_client import GraphClient
 
 logger = logging.getLogger(__name__)
 
@@ -331,7 +331,7 @@ def register_calendar_tools(registry: ToolRegistry, client: GraphClient) -> int:
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
         async def wrapper(**kwargs: Any) -> str:
-            return await fn(client, **kwargs)
+            return str(await fn(client, **kwargs))
 
         return wrapper
 
@@ -485,19 +485,4 @@ def register_calendar_tools(registry: ToolRegistry, client: GraphClient) -> int:
         },
         require_approval=True,
     )
-    registry.register(
-        name="outlook__create_online_meeting",
-        description="Create a Microsoft Teams online meeting link.",
-        handler=_h(outlook__create_online_meeting),
-        parameters={
-            "type": "object",
-            "properties": {
-                "subject": {"type": "string"},
-                "start": {"type": "string", "description": "Start ISO 8601"},
-                "end": {"type": "string", "description": "End ISO 8601"},
-            },
-            "required": ["subject", "start", "end"],
-        },
-        require_approval=True,
-    )
-    return 12
+    return 11

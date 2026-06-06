@@ -6,9 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-from pincer.integrations.ms365.auth import (
-    ALL_SCOPES,
+from ms365.auth import (
     SERVICE_SCOPES,
     MS365Auth,
     MS365AuthError,
@@ -16,70 +14,68 @@ from pincer.integrations.ms365.auth import (
 )
 
 
-def test_scopes_for_all_services():
-    """All scopes are returned when no services specified."""
+def test_scopes_for_all_services() -> None:
     result = scopes_for_services(None)
-    assert result == ALL_SCOPES
+    assert "User.Read" in result
+    for scopes in SERVICE_SCOPES.values():
+        for scope in scopes:
+            assert scope in result
 
 
-def test_scopes_for_email_service():
-    """Only email scopes returned for email service."""
+def test_scopes_for_email_service() -> None:
     result = scopes_for_services(["email"])
     assert "Mail.ReadWrite" in result
     assert "Mail.Send" in result
-    assert "User.Read" in result  # always included
+    assert "User.Read" in result
     assert "Calendars.ReadWrite" not in result
 
 
-def test_scopes_deduplicated():
-    """Duplicate scopes are removed."""
+def test_scopes_deduplicated() -> None:
     result = scopes_for_services(["email", "email"])
-    count = sum(1 for s in result if s == "Mail.ReadWrite")
-    assert count == 1
+    assert sum(1 for s in result if s == "Mail.ReadWrite") == 1
 
 
-def test_scopes_complete():
-    """All required scopes are in ALL_SCOPES list."""
-    assert len(ALL_SCOPES) >= 13
-    assert "User.Read" in ALL_SCOPES
-    assert "Mail.ReadWrite" in ALL_SCOPES
-    assert "Mail.Send" in ALL_SCOPES
-    assert "Calendars.ReadWrite" in ALL_SCOPES
-    assert "Files.ReadWrite.All" in ALL_SCOPES
+def test_scopes_complete() -> None:
+    result = scopes_for_services(None)
+    assert "User.Read" in result
+    assert "Mail.ReadWrite" in result
+    assert "Mail.Send" in result
+    assert "Calendars.ReadWrite" in result
+    assert "Files.ReadWrite.All" in result
 
 
-def test_tenant_common():
-    """Default tenant is 'common'."""
-    with patch("pincer.integrations.ms365.auth.msal", create=True):
+def test_service_scopes_cover_all_services() -> None:
+    expected = {"email", "calendar", "onedrive", "todo", "contacts", "onenote"}
+    assert set(SERVICE_SCOPES.keys()) == expected
+
+
+def test_tenant_default() -> None:
+    with patch("ms365.auth.msal", create=True):
         auth = MS365Auth(client_id="test-id")
     assert auth.tenant_id == "common"
 
 
-def test_tenant_custom():
-    """Custom tenant ID stored correctly."""
-    with patch("pincer.integrations.ms365.auth.msal", create=True):
+def test_tenant_custom() -> None:
+    with patch("ms365.auth.msal", create=True):
         auth = MS365Auth(client_id="test-id", tenant_id="my-tenant-id")
     assert auth.tenant_id == "my-tenant-id"
 
 
-def test_cache_path_default():
-    """Default cache path is ~/.pincer/ms365_token_cache.json."""
-    with patch("pincer.integrations.ms365.auth.msal", create=True):
+def test_cache_path_default() -> None:
+    with patch("ms365.auth.msal", create=True):
         auth = MS365Auth(client_id="test-id")
     assert auth.cache_path == Path.home() / ".pincer" / "ms365_token_cache.json"
 
 
-def test_cache_path_custom(tmp_path):
-    """Custom cache path resolves correctly."""
+def test_cache_path_custom(tmp_path: Path) -> None:
     custom = str(tmp_path / "tokens.json")
-    with patch("pincer.integrations.ms365.auth.msal", create=True):
+    with patch("ms365.auth.msal", create=True):
         auth = MS365Auth(client_id="test-id", cache_path=custom)
     assert auth.cache_path == Path(custom)
 
 
 @pytest.mark.asyncio
-async def test_get_token_no_cache_raises():
-    """get_token raises when no cached token exists."""
+async def test_get_token_no_cache_raises() -> None:
     mock_msal = MagicMock()
     mock_cache = MagicMock()
     mock_cache.has_state_changed = False
@@ -103,8 +99,7 @@ async def test_get_token_no_cache_raises():
 
 
 @pytest.mark.asyncio
-async def test_get_token_from_cache():
-    """get_token returns cached token when available."""
+async def test_get_token_from_cache() -> None:
     mock_msal = MagicMock()
     mock_cache = MagicMock()
     mock_cache.has_state_changed = False
@@ -126,9 +121,3 @@ async def test_get_token_from_cache():
 
         token = await auth.get_token()
         assert token == "cached-token"
-
-
-def test_service_scopes_cover_all_services():
-    """SERVICE_SCOPES covers all 7 service types."""
-    expected_services = {"email", "calendar", "onedrive", "todo", "teams", "contacts", "onenote"}
-    assert set(SERVICE_SCOPES.keys()) == expected_services
