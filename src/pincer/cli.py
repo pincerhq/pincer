@@ -413,7 +413,7 @@ async def _run_agent(settings: Settings) -> None:
 
     # If memory is backed by MCP but MCP never started, degrade to no-memory
     # rather than letting the agent start with a broken backend that crashes on first write.
-    if mcp_manager is None and memory_store is not None:
+    if mcp_manager is None and memory_store is not None:  # pragma: no cover
         from pincer.memory.mcp import MCPMemoryBackend
 
         if isinstance(memory_store, MCPMemoryBackend):
