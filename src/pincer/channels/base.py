@@ -44,6 +44,12 @@ class IncomingMessage:
     # IdentityMiddleware tries these in order after user_id.
     alt_user_ids: list[str] = field(default_factory=list)
 
+    # Adapter override for the session key when the channel name and the
+    # conversation-isolation key differ (e.g. Teams: channel="teams",
+    # session_id="teams-thread-{root}"). When set, session management uses
+    # session_id; channel is used only for identity and memory tagging.
+    session_id: str | None = None
+
     # Sprint 3: generic media fields (used by WhatsApp)
     media_type: str | None = None  # "image", "audio", "document", None
     media_data: bytes | None = None

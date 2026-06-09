@@ -615,9 +615,18 @@ async def _run_agent(settings: Settings) -> None:
         except Exception:
             pass
 
+        # Recover channel_user_id from a channel-scoped fallback canonical_id
+        # (e.g. "teams:{aad_id}" when has_config=True and the user is absent
+        # from PINCER_IDENTITY_MAP — no channel_identities row exists for them).
+        if ch_user_id is None:
+            prefix = f"{incoming.channel_type.value}:"
+            if canonical_id.startswith(prefix):
+                ch_user_id = canonical_id[len(prefix):]
+
         response = await agent.handle_message(
             user_id=canonical_id,
-            channel=incoming.channel,
+            channel=incoming.session_id or incoming.channel,
+            channel_name=incoming.channel,
             text=text,
             images=incoming.images if incoming.images else None,
             channel_user_id=ch_user_id,

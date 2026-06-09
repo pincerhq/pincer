@@ -85,8 +85,11 @@ class IdentityMiddleware:
                     except Exception:
                         logger.debug("Failed to back-link %s/%s", msg.channel, candidate, exc_info=True)
         else:
-            # Fallback: channel-scoped canonical ID so the agent never sees ""
-            msg.pincer_user_id = f"{msg.channel}:{msg.user_id}"
+            # Fallback: channel-scoped canonical ID so the agent never sees "".
+            # Use channel_type.value (e.g. "teams"), not msg.channel, so adapters
+            # that set channel to a conversation-specific key (Teams session keys)
+            # still produce a stable canonical_id across all conversations.
+            msg.pincer_user_id = f"{msg.channel_type.value}:{msg.user_id}"
 
         return msg
 

@@ -234,7 +234,8 @@ class MicrosoftTeamsChannel(BaseChannel):
 
         incoming = IncomingMessage(
             user_id=user_id,
-            channel=session_key,
+            channel="teams",         # stable name → identity + memory tag "user:teams:{id}"
+            session_id=session_key,  # conversation key → session isolation
             text=text,
             channel_type=ChannelType.TEAMS,
             raw=activity,
