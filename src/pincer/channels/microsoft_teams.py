@@ -19,6 +19,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import json as _json
 import logging
 import re
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,81 @@ logger = logging.getLogger(__name__)
 MAX_TEAMS_MESSAGE_LENGTH = 8000  # Teams allows ~28k; keep replies readable
 
 _MENTION_RE = re.compile(r"<at>[^<]*</at>")
+
+# Activity types the microsoft-teams-apps SDK can parse without Pydantic errors.
+# Anything outside this set is ACKed with 200 OK so Teams stops retrying.
+_SDK_KNOWN_TYPES: frozenset[str] = frozenset({
+    "message",
+    "typing",
+    "conversationUpdate",
+    "messageReaction",
+    "messageUpdate",
+    "messageDelete",
+    "invoke",
+    "installationUpdate",
+    "event",
+    "command",
+    "commandResult",
+})
+
+
+class _ActivityFilterMiddleware:
+    """ASGI middleware: intercepts POST /api/messages before the SDK.
+
+    When Teams sends an activity type the SDK cannot parse it logs 14 Pydantic
+    validation errors and (depending on SDK version) returns 400, which causes
+    Teams to retry indefinitely.  This middleware ACKs unrecognised types with
+    200 OK immediately; known types are forwarded to the SDK unchanged.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self._app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if (
+            scope.get("type") != "http"
+            or scope.get("path") != "/api/messages"
+            or scope.get("method") != "POST"
+        ):
+            await self._app(scope, receive, send)
+            return
+
+        # Buffer the request body — consumed once here, must be replayed.
+        chunks: list[bytes] = []
+        more = True
+        while more:
+            msg = await receive()
+            chunks.append(msg.get("body", b""))
+            more = msg.get("more_body", False)
+        body = b"".join(chunks)
+
+        activity_type = ""
+        try:
+            activity_type = _json.loads(body).get("type", "")
+        except Exception:
+            pass
+
+        if activity_type and activity_type not in _SDK_KNOWN_TYPES:
+            logger.debug("Teams: silently ACKing unhandled activity type %r", activity_type)
+            await send({
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"application/json")],
+            })
+            await send({"type": "http.response.body", "body": b'{"status":"ok"}', "more_body": False})
+            return
+
+        # Replay the buffered body so the SDK route handler can read it.
+        replayed = False
+
+        async def _replay_receive() -> dict:  # type: ignore[return]
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.disconnect"}
+
+        await self._app(scope, _replay_receive, send)
 
 
 def split_message(text: str, max_len: int = MAX_TEAMS_MESSAGE_LENGTH) -> list[str]:
@@ -117,7 +193,6 @@ class MicrosoftTeamsChannel(BaseChannel):
             result = await graph.users.get()
             for u in result.value:
                 if _identifier in u.user_principal_name or identifier in u.mail:
-                    print(u.user_principal_name, u.mail, u.id)
                     return u.id
 
         except Exception:
@@ -151,6 +226,7 @@ class MicrosoftTeamsChannel(BaseChannel):
         self._handler = handler
 
         self._fastapi = FastAPI(title="Pincer Teams Bot")
+        self._fastapi.add_middleware(_ActivityFilterMiddleware)
         adapter = FastAPIAdapter(app=self._fastapi)
         self._app = App(
             client_id=app_id,
