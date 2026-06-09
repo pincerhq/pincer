@@ -99,6 +99,12 @@ class MicrosoftTeamsChannel(BaseChannel):
         self._server: Any = None
         self._server_task: asyncio.Task[Any] | None = None
         self._conversation_refs: dict[str, str] = {}
+        self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
+        self._pending_inputs: dict[str, asyncio.Future[str]] = {}
+        # Active ctx.send callbacks, keyed by user_id, set while a message is
+        # being handled so approval/input prompts can reply in-thread instead
+        # of going through the proactive send API (which 400s on thread convs).
+        self._active_reply_fns: dict[str, Any] = {}
 
     @property
     def name(self) -> str:
@@ -232,6 +238,24 @@ class MicrosoftTeamsChannel(BaseChannel):
         session_key = self._make_session_key(activity)
         self._store_conversation_ref(user_id, activity)
 
+        # Intercept approval/input responses before routing to the agent.
+        approval_fut = self._pending_approvals.get(user_id)
+        if approval_fut and not approval_fut.done():
+            decision = self._parse_yes_no(text)
+            if decision is None:
+                try:
+                    await ctx.send("Please reply **yes** or **no**.")
+                except Exception as e:
+                    logger.error("Teams approval re-prompt failed: %s", e)
+                return
+            approval_fut.set_result(decision)
+            return
+
+        input_fut = self._pending_inputs.get(user_id)
+        if input_fut and not input_fut.done():
+            input_fut.set_result(text)
+            return
+
         incoming = IncomingMessage(
             user_id=user_id,
             channel="teams",         # stable name → identity + memory tag "user:teams:{id}"
@@ -244,11 +268,16 @@ class MicrosoftTeamsChannel(BaseChannel):
         if not self._handler:
             return
 
+        # Expose ctx.send so request_approval / request_input can reply
+        # in-thread without hitting the proactive send API.
+        self._active_reply_fns[user_id] = ctx.send
         try:
             response = await self._handler(incoming)
         except Exception:
             logger.exception("Agent error for Teams user %s", user_id)
             response = "⚠️ Something went wrong. Please try again."
+        finally:
+            self._active_reply_fns.pop(user_id, None)
 
         if response:
             for chunk in split_message(response):
@@ -257,6 +286,76 @@ class MicrosoftTeamsChannel(BaseChannel):
                 except Exception as e:
                     logger.error("Teams reply failed: %s", e)
                     break
+
+    # ── Interactive prompts (approval / ask_user) ─────────────────────────────
+
+    async def _send_to_user(self, user_id: str, text: str) -> None:
+        """Send a message using the active ctx.send if available, else proactive.
+
+        ctx.send (set while a message is being handled) works for all
+        conversation types including channel threads.  The proactive fallback
+        only works for personal DMs and may 400 on thread conversations.
+        """
+        reply_fn = self._active_reply_fns.get(user_id)
+        if reply_fn is not None:
+            for chunk in split_message(text):
+                await reply_fn(chunk)
+        else:
+            await self.send(user_id, text)
+
+    @staticmethod
+    def _parse_yes_no(text: str) -> bool | None:
+        t = (text or "").strip().lower()
+        if t in {"yes", "y", "ok", "okay", "sure", "approve", "approved", "allow", "👍", "✅"}:
+            return True
+        if t in {"no", "n", "deny", "denied", "cancel", "stop", "abort", "👎", "❌"}:
+            return False
+        return None
+
+    async def request_approval(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> bool:
+        """Send an approval prompt and wait up to 120 s for a yes/no reply."""
+        args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
+        if len(args_preview) > 200:
+            args_preview = args_preview[:200] + "…"
+        prompt = (
+            f"🔐 **Approval required**\n\n"
+            f"Tool: `{tool_name}`\n"
+            f"Args: `{args_preview}`\n\n"
+            f"Reply **yes** or **no**."
+        )
+        try:
+            await self._send_to_user(user_id, prompt)
+        except Exception as e:
+            logger.warning(
+                "Teams approval prompt undeliverable to %s for %s (%s); denying.",
+                user_id, tool_name, e,
+            )
+            return False
+        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._pending_approvals[user_id] = fut
+        try:
+            return await asyncio.wait_for(fut, timeout=120)
+        except TimeoutError:
+            logger.info("Teams approval timed out for %s / %s", user_id, tool_name)
+            return False
+        finally:
+            self._pending_approvals.pop(user_id, None)
+
+    async def request_input(self, user_id: str, question: str) -> str:
+        """Send a question and wait up to 120 s for the user's reply."""
+        try:
+            await self._send_to_user(user_id, question)
+        except Exception as e:
+            logger.warning("Teams input prompt undeliverable to %s (%s)", user_id, e)
+            return "[Could not deliver question to user]"
+        fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._pending_inputs[user_id] = fut
+        try:
+            return await asyncio.wait_for(fut, timeout=120)
+        except TimeoutError:
+            return "[No response from user — timed out after 120s]"
+        finally:
+            self._pending_inputs.pop(user_id, None)
 
     @staticmethod
     def _activity_user_id(activity: Any) -> str:

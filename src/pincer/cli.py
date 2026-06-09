@@ -744,6 +744,9 @@ async def _run_agent(settings: Settings) -> None:
         if channel == "whatsapp" and wa is not None:
             raw_id = await _raw_id(user_id, "whatsapp")
             return await wa.request_approval(raw_id, tool_name, arguments)
+        if channel == "teams" and ms is not None:
+            raw_id = await _raw_id(user_id, "teams")
+            return await ms.request_approval(raw_id, tool_name, arguments)
         logger.warning(
             "No approval UI for channel %s; denying %s",
             channel,
@@ -772,6 +775,12 @@ async def _run_agent(settings: Settings) -> None:
                 return "[No response from user — timed out after 120s]"
             finally:
                 _pending_ask.pop(user_id, None)
+        if channel == "teams" and ms is not None:
+            raw_id = await _raw_id(user_id, "teams")
+            return await ms.request_input(
+                raw_id,
+                f"🔌 **MCP Client** asks:\n\n{question}\n\n_Reply with your answer:_",
+            )
         return "[No supported channel for ask_user]"
 
     async def _channel_tool_event(
@@ -788,7 +797,7 @@ async def _run_agent(settings: Settings) -> None:
             except Exception:
                 logger.debug("WA tool_event notify failed", exc_info=True)
 
-    if tg is not None or wa is not None:
+    if tg is not None or wa is not None or ms is not None:
         agent._approval_callback = _channel_approval
         agent._ask_user_callback = _channel_ask_user
         agent._tool_event_callback = _channel_tool_event

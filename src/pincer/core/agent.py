@@ -466,7 +466,7 @@ class Agent:
                 iteration_had_error = False
                 for tool_call in response.tool_calls:
                     tool_calls_count += 1
-                    result = await self._execute_tool(tool_call, user_id, channel)
+                    result = await self._execute_tool(tool_call, user_id, channel, channel_name)
 
                     result_msg = LLMMessage(
                         role=MessageRole.TOOL_RESULT,
@@ -825,6 +825,7 @@ class Agent:
         tool_call: ToolCall,
         user_id: str,
         channel: str,
+        channel_name: str | None = None,
     ) -> ToolResult:
         """Execute a single tool call, catching errors.
 
@@ -872,7 +873,7 @@ class Agent:
                         tool_call.name,
                         tool_call.arguments,
                         user_id,
-                        channel,
+                        channel_name or channel,
                     )
                 except Exception:
                     logger.exception("Approval callback failed for '%s'", tool_call.name)
