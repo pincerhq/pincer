@@ -84,6 +84,7 @@ class MicrosoftTeamsChannel(BaseChannel):
 
     Credentials come from the Azure Bot / App Registration:
     - PINCER_TEAMS_APP_ID        Microsoft App (client) ID
+    - PINCER_TEAMS_APP_TENANTID  Microsoft App tenant ID, only for single tenant config
     - PINCER_TEAMS_APP_PASSWORD  App Password (client secret)
     - PINCER_TEAMS_PORT          local server port (default 3978)
     """
@@ -103,18 +104,21 @@ class MicrosoftTeamsChannel(BaseChannel):
     def name(self) -> str:
         return "teams"
 
+    async def resolve_internal_user_id(self, identifier: str) -> str:
+        _identifier = identifier.replace("@", "_")
+        try:
+            graph = self._app.get_app_graph()
+            result = await graph.users.get()
+            for u in result.value:
+                if _identifier in u.user_principal_name or identifier in u.mail:
+                    print(u.user_principal_name, u.mail, u.id)
+                    return u.id
+
+        except Exception:
+            logger.error("MS Teams: could not resolve identifier %r to user_id", identifier)
+        return identifier
+
     async def start(self, handler: MessageHandler) -> None:
-        app_id = self._settings.teams_app_id
-        app_password = self._settings.teams_app_password.get_secret_value()
-
-        if not app_id or not app_password:
-            logger.warning(
-                "Teams channel disabled: PINCER_TEAMS_APP_ID and PINCER_TEAMS_APP_PASSWORD required."
-            )
-            return
-
-        self._handler = handler
-
         try:
             import uvicorn
             from fastapi import FastAPI
@@ -123,11 +127,29 @@ class MicrosoftTeamsChannel(BaseChannel):
             logger.error("microsoft-teams-apps not installed. Run: pip install 'pincer-agent[teams]'")
             return
 
+        app_id = self._settings.teams_app_id
+        app_tenant_id = self._settings.teams_app_tenant_id
+        app_password = self._settings.teams_app_password.get_secret_value()
+
+        if not app_id or not app_password:
+            logger.warning(
+                "Teams channel disabled: PINCER_TEAMS_APP_ID and PINCER_TEAMS_APP_PASSWORD required."
+            )
+            return
+
+        if app_tenant_id:
+            logger.warning("Teams channel client run in single-tenant mode")
+        else:
+            logger.warning("Teams channel client run in multi-tenant mode")
+
+        self._handler = handler
+
         self._fastapi = FastAPI(title="Pincer Teams Bot")
         adapter = FastAPIAdapter(app=self._fastapi)
         self._app = App(
             client_id=app_id,
             client_secret=app_password,
+            tenant_id=app_tenant_id,
             http_server_adapter=adapter,
         )
 

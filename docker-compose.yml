@@ -123,6 +123,7 @@ services:
 
   pincer-http:
     <<: *pincer-base
+    container_name: pincer
     profiles:
       - http
     env_file: .env
@@ -149,17 +150,14 @@ services:
         condition: service_healthy
 
   ngrok:
+    restart: unless-stopped
     image: ngrok/ngrok:latest
-    container_name: pincer-ngrok
+    command: ["http", "--url", "${NGROK_DOMAIN}",  "--log", "stdout", "--log-level", "info", "pincer:3978"]
     profiles:
-      - ngrok
-    command: ["http", "pincer:8080"]
+      - http
+      - stdio
     environment:
       - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
-    depends_on:
-      pincer:
-        condition: service_healthy
-    restart: unless-stopped
 
 volumes:
   pincer-data:

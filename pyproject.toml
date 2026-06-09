@@ -83,7 +83,7 @@ slack = [
     "slack-bolt>=1.18.0",
 ]
 teams = [
-    "microsoft-teams-apps>=0.1.0",
+    "microsoft-teams-apps[graph]>=0.1.0",
 ]
 telemetry = [
     "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@main"
