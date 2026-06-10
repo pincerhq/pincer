@@ -149,16 +149,6 @@ services:
       ms365-mcp:
         condition: service_healthy
 
-  ngrok:
-    restart: unless-stopped
-    image: ngrok/ngrok:latest
-    command: ["http", "--url", "${NGROK_DOMAIN}",  "--log", "stdout", "--log-level", "info", "pincer:3978"]
-    profiles:
-      - http
-      - stdio
-    environment:
-      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
-
 volumes:
   pincer-data:
   memory-data:

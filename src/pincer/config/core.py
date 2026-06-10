@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 
 class LogLevel(StrEnum):
@@ -38,3 +38,13 @@ class CoreSettings(BaseModel):
     briefing_time: str = Field(default="07:00", description="Morning briefing time HH:MM")
     briefing_timezone: str = Field(default="Europe/Berlin", description="Briefing timezone")
     timezone: str = Field(default="Europe/Berlin", description="Default timezone")
+
+    # ── Local Tunnel ──────────────────────────────────────
+    ngrok_authtoken: SecretStr = Field(
+        default=SecretStr(""),
+        description="ngrok auth token — activates built-in tunnel for local dev (PINCER_NGROK_AUTHTOKEN)",
+    )
+    ngrok_domain: str = Field(
+        default="",
+        description="ngrok static domain, e.g. my-bot.ngrok-free.app (PINCER_NGROK_DOMAIN)",
+    )

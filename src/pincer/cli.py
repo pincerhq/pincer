@@ -1014,6 +1014,7 @@ async def _run_agent(settings: Settings) -> None:
     # Sprint 5: Start API server
     api_server = None
     api_task = None
+    tunnel = None
     if _port_in_use(settings.dashboard_host, settings.dashboard_port):
         console.print(f"[yellow]Port {settings.dashboard_port} is already in use. API server skipped.[/yellow]")
         console.print(
@@ -1042,6 +1043,17 @@ async def _run_agent(settings: Settings) -> None:
             console.print(
                 f"[green]API server started on http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
             )
+            if settings.ngrok_authtoken.get_secret_value():
+                from pincer.tunnel.ngrok import NgrokTunnel
+
+                tunnel = NgrokTunnel(
+                    authtoken=settings.ngrok_authtoken.get_secret_value(),
+                    domain=settings.ngrok_domain,
+                    target_port=settings.dashboard_port,
+                )
+                public_url = await tunnel.start()
+                if public_url:
+                    console.print(f"[green]Ngrok tunnel: {public_url}[/green]")
         except Exception as e:
             console.print(f"[yellow]API server failed to start: {e}[/yellow]")
 
@@ -1060,6 +1072,8 @@ async def _run_agent(settings: Settings) -> None:
         import signal as _signal
 
         _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+        if tunnel is not None:
+            await tunnel.stop()
         if api_server:
             api_server.should_exit = True
             if api_task:

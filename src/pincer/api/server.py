@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from pincer.api.audit import router as audit_router
 from pincer.api.chat import router as chat_router
@@ -164,8 +164,6 @@ def create_app() -> FastAPI:
 
     dist = _dashboard_dist()
     if dist.is_dir():
-        from fastapi.responses import FileResponse
-
         @app.get("/{full_path:path}")
         async def _spa(full_path: str) -> FileResponse:
             candidate = dist / full_path
