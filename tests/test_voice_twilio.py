@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from pincer.voice.twiml_server import init_voice_routes, voice_router
+from pincer.voice.twiml_server import init_voice_routes, twilio_router
 
 
 @pytest.fixture
@@ -40,7 +40,7 @@ def app(mock_engine, mock_settings):
 
     init_voice_routes(mock_engine, mock_settings)
     app = FastAPI()
-    app.include_router(voice_router)
+    app.include_router(twilio_router)
     return app
 
 
@@ -51,7 +51,7 @@ def client(app):
 
 class TestHealthEndpoint:
     def test_health_check(self, client):
-        response = client.get("/voice/health")
+        response = client.get("/apps/twilio/health")
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
@@ -61,7 +61,7 @@ class TestHealthEndpoint:
 class TestWebhookEndpoint:
     def test_inbound_call_webhook(self, client, mock_engine):
         response = client.post(
-            "/voice/webhook",
+            "/apps/twilio/webhook",
             data={
                 "CallSid": "CA123",
                 "From": "+14155551234",
@@ -76,7 +76,7 @@ class TestWebhookEndpoint:
     def test_rejected_caller(self, client, mock_settings, mock_engine):
         mock_settings.voice_allowed_callers = "+10000000000"
         response = client.post(
-            "/voice/webhook",
+            "/apps/twilio/webhook",
             data={
                 "CallSid": "CA123",
                 "From": "+14155551234",
@@ -91,7 +91,7 @@ class TestWebhookEndpoint:
 class TestStatusEndpoint:
     def test_status_callback(self, client):
         response = client.post(
-            "/voice/status",
+            "/apps/twilio/status",
             data={
                 "CallSid": "CA123",
                 "CallStatus": "ringing",
@@ -104,7 +104,7 @@ class TestStatusEndpoint:
 class TestFallbackEndpoint:
     def test_fallback(self, client):
         response = client.post(
-            "/voice/fallback",
+            "/apps/twilio/fallback",
             data={
                 "CallSid": "CA123",
                 "ErrorCode": "12345",
@@ -118,7 +118,7 @@ class TestFallbackEndpoint:
 class TestRelayWebhook:
     def test_prompt_event(self, client, mock_engine):
         response = client.post(
-            "/voice/relay-webhook",
+            "/apps/twilio/relay-webhook",
             json={
                 "type": "prompt",
                 "CallSid": "CA123",
@@ -133,7 +133,7 @@ class TestRelayWebhook:
 
     def test_interrupt_event(self, client, mock_engine):
         response = client.post(
-            "/voice/relay-webhook",
+            "/apps/twilio/relay-webhook",
             json={
                 "type": "interrupt",
                 "CallSid": "CA123",

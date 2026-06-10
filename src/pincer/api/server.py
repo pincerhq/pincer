@@ -131,10 +131,11 @@ def create_app() -> FastAPI:
     app.include_router(integrations_router)
     app.include_router(chat_router)
 
-    # Voice routes (Sprint 7) — mounted unconditionally; handlers check engine state
-    from pincer.voice.twiml_server import voice_router
+    if settings.voice_enabled:
+        from pincer.voice.twiml_server import twilio_router, voice_router
 
-    app.include_router(voice_router)
+        app.include_router(twilio_router)
+        app.include_router(voice_router)  # deprecated /voice/* aliases
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
