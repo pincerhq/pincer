@@ -35,6 +35,7 @@ from pincer.llm.base import (
     ToolCall,
     ToolResult,
 )
+from pincer.llm.router import LLMRouter
 from pincer.memory.base import (
     PINCER_MEMORY_ASSISTANT_RESPONSE_PREFIX,
     PINCER_MEMORY_USER_REQUEST_PREFIX,
@@ -429,12 +430,17 @@ class Agent:
 
             # Track cost
             try:
+                # Attribute cost to the provider that actually served (may be a
+                # failover), not the configured primary.
+                provider = response.provider or self._settings.default_provider
+                is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
                 cost = await self._costs.record(
-                    provider=self._settings.default_provider.value,
+                    provider=provider,
                     model=response.model,
                     input_tokens=response.input_tokens,
                     output_tokens=response.output_tokens,
                     session_id=session.session_id,
+                    is_free=is_free,
                 )
                 total_cost += cost
             except BudgetExceededError as e:

@@ -98,6 +98,7 @@ class LLMResponse:
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     model: str = ""
+    provider: str = ""  # name of the provider that actually served this response
     input_tokens: int = 0
     output_tokens: int = 0
     stop_reason: str = ""
@@ -124,7 +125,7 @@ class BaseLLMProvider(ABC):
         ...
 
     @abstractmethod
-    async def stream(
+    def stream(
         self,
         messages: list[LLMMessage],
         tools: list[dict[str, Any]] | None = None,
@@ -133,7 +134,11 @@ class BaseLLMProvider(ABC):
         temperature: float | None = None,
         system: str | None = None,
     ) -> AsyncIterator[str]:
-        """Stream text tokens as they arrive."""
+        """Stream text tokens as they arrive.
+
+        Declared as a plain method returning an async iterator (not ``async def``)
+        so async-generator implementations type-check cleanly as overrides.
+        """
         ...
 
     @abstractmethod

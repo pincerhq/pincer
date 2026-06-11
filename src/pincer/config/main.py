@@ -9,7 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pincer.config.api import APISettings
 from pincer.config.channels import ChannelSettings
 from pincer.config.core import CoreSettings
-from pincer.config.llm import LLMProvider, LLMSettings
+from pincer.config.llm import LLMSettings
 from pincer.config.mcp import MCPSettings
 from pincer.config.tools import ToolSettings
 
@@ -28,38 +28,21 @@ class Settings(BaseSettings, LLMSettings, ChannelSettings, ToolSettings, APISett
 
     @model_validator(mode="after")
     def validate_api_keys(self) -> Settings:
-        """Ensure at least one LLM provider API key is set."""
-        if self.default_provider == LLMProvider.OLLAMA:
-            return self
-        anthropic_set = self.anthropic_api_key.get_secret_value() != ""
-        openai_set = self.openai_api_key.get_secret_value() != ""
-        grok_set = self.grok_api_key.get_secret_value() != ""
-        if not anthropic_set and not openai_set and not grok_set:
+        """Ensure at least one usable LLM provider is configured.
+
+        Per-leaf validation (which named provider needs which key/base_url) lives
+        in `pincer.llm.router.LLMRouter` at build time so it also covers failovers.
+        """
+        has_anthropic = self.anthropic_api_key.get_secret_value() != ""
+        has_openai = self.openai_api_key.get_secret_value() != ""
+        has_openai_compatible = self.openai_compatible_base_url != ""
+        has_anthropic_compatible = self.anthropic_compatible_base_url != ""
+        if not (has_anthropic or has_openai or has_openai_compatible or has_anthropic_compatible):
             raise ValueError(
-                "At least one LLM API key required. "
-                "Set PINCER_ANTHROPIC_API_KEY, PINCER_OPENAI_API_KEY, or PINCER_GROK_API_KEY."
+                "At least one LLM provider required. Set an API key "
+                "(PINCER_ANTHROPIC_API_KEY / PINCER_OPENAI_API_KEY) or a compatible "
+                "base URL (PINCER_OPENAI_COMPATIBLE_BASE_URL / PINCER_ANTHROPIC_COMPATIBLE_BASE_URL)."
             )
-        if self.default_provider == LLMProvider.ANTHROPIC and not anthropic_set:
-            if openai_set:
-                object.__setattr__(self, "default_provider", LLMProvider.OPENAI)
-            elif grok_set:
-                object.__setattr__(self, "default_provider", LLMProvider.GROK)
-            else:
-                raise ValueError("PINCER_ANTHROPIC_API_KEY required for Anthropic provider.")
-        if self.default_provider == LLMProvider.OPENAI and not openai_set:
-            if anthropic_set:
-                object.__setattr__(self, "default_provider", LLMProvider.ANTHROPIC)
-            elif grok_set:
-                object.__setattr__(self, "default_provider", LLMProvider.GROK)
-            else:
-                raise ValueError("PINCER_OPENAI_API_KEY required for OpenAI provider.")
-        if self.default_provider == LLMProvider.GROK and not grok_set:
-            if anthropic_set:
-                object.__setattr__(self, "default_provider", LLMProvider.ANTHROPIC)
-            elif openai_set:
-                object.__setattr__(self, "default_provider", LLMProvider.OPENAI)
-            else:
-                raise ValueError("PINCER_GROK_API_KEY required for Grok provider.")
         return self
 
     @property

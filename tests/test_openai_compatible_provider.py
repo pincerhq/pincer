@@ -9,7 +9,7 @@ import pytest
 
 from pincer.llm.base import LLMMessage, MessageRole
 
-MODULE = "pincer.llm._openai_common"
+MODULE = "pincer.llm.openai_common"
 
 
 def _make_chat_completion(content: str = "Hello!", model: str = "test-model"):
@@ -49,14 +49,14 @@ def openai_settings():
     return Settings(
         openai_api_key="sk-test",  # type: ignore[arg-type]
         telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
-        default_provider="openai",  # type: ignore[arg-type]
+        default_provider="openai",
         default_model="my-model",
     )
 
 
 @pytest.mark.asyncio
 async def test_complete_returns_content(openai_settings):
-    from pincer.llm._openai_common import OpenAICompatibleProvider
+    from pincer.llm.openai_common import OpenAICompatibleProvider
 
     fake_response = _make_chat_completion("Hi!")
 
@@ -66,26 +66,73 @@ async def test_complete_returns_content(openai_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OpenAICompatibleProvider(openai_settings)
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
         result = await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
 
     assert result.content == "Hi!"
     assert result.input_tokens == 10
     assert result.output_tokens == 5
+    assert result.provider == "openai"  # stamps the serving provider for cost attribution
 
 
-@pytest.mark.asyncio
-async def test_model_map_remaps_model_name(openai_settings):
+def test_missing_openai_key_raises():
     from pincer.config import Settings
-    from pincer.llm._openai_common import OpenAICompatibleProvider
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    settings = Settings(
+        anthropic_api_key="sk-ant",  # type: ignore[arg-type]  (some provider must be set)
+        openai_api_key="",  # type: ignore[arg-type]
+        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
+        default_provider="anthropic",
+        default_model="gpt-4o",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    with patch(f"{MODULE}.AsyncOpenAI"), pytest.raises(ValueError, match="PINCER_OPENAI_API_KEY"):
+        OpenAICompatibleProvider(settings, "openai")
+
+
+def test_claude_model_on_openai_wire_raises():
+    from pincer.config import Settings
+    from pincer.llm.openai_common import OpenAICompatibleProvider
 
     settings = Settings(
         openai_api_key="sk-test",  # type: ignore[arg-type]
         telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
-        default_provider="openai",  # type: ignore[arg-type]
-        default_model="claude-sonnet-4-5-20250929",
+        default_provider="openai",
+        default_model="claude-sonnet-4-5-20250929",  # claude default with no openai_model
+        _env_file=None,  # type: ignore[call-arg]
     )
-    fake_response = _make_chat_completion(model="gpt-4o")
+    with patch(f"{MODULE}.AsyncOpenAI"), pytest.raises(ValueError, match="PINCER_OPENAI_MODEL"):
+        OpenAICompatibleProvider(settings, "openai")
+
+
+@pytest.mark.asyncio
+async def test_well_known_openai_uses_key_and_base_url(openai_settings):
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        OpenAICompatibleProvider(openai_settings, "openai")
+
+    kwargs = mock_cls.call_args.kwargs
+    assert kwargs["api_key"] == "sk-test"
+    assert kwargs["base_url"] == "https://api.openai.com/v1"
+
+
+@pytest.mark.asyncio
+async def test_compatible_uses_compatible_base_url_and_passthrough_model():
+    from pincer.config import Settings
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    settings = Settings(
+        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
+        default_provider="grok",
+        default_model="grok-3",
+        openai_compatible_provider="grok",
+        openai_compatible_base_url="https://api.x.ai/v1",
+        openai_compatible_api_key="xai-key",  # type: ignore[arg-type]
+    )
+    fake_response = _make_chat_completion(model="grok-3")
 
     with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
         mock_client = MagicMock()
@@ -93,11 +140,157 @@ async def test_model_map_remaps_model_name(openai_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OpenAICompatibleProvider(settings)
+        provider = OpenAICompatibleProvider(settings, "grok")
         await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
 
-    call_kwargs = mock_client.chat.completions.create.call_args.kwargs
-    assert call_kwargs["model"] == "gpt-4o"
+    init_kwargs = mock_cls.call_args.kwargs
+    assert init_kwargs["base_url"] == "https://api.x.ai/v1"
+    assert init_kwargs["api_key"] == "xai-key"
+    # model passed straight through — no remapping
+    assert mock_client.chat.completions.create.call_args.kwargs["model"] == "grok-3"
+
+
+@pytest.mark.asyncio
+async def test_per_provider_model_overrides_default():
+    """A compatible endpoint uses its own model, not the primary's default_model."""
+    from pincer.config import Settings
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    settings = Settings(
+        anthropic_api_key="sk-ant",  # type: ignore[arg-type]
+        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
+        default_provider="anthropic",
+        default_model="claude-sonnet-4-5-20250929",  # primary's model
+        openai_compatible_provider="ollama",
+        openai_compatible_base_url="http://localhost:11434/v1",
+        openai_compatible_model="llama3.2",  # failover's own model
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    fake_response = _make_chat_completion(model="llama3.2")
+
+    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=fake_response)
+        mock_cls.return_value = mock_client
+
+        provider = OpenAICompatibleProvider(settings, "ollama")
+        await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+
+    # uses the compatible endpoint's model, NOT default_model (claude-…)
+    assert mock_client.chat.completions.create.call_args.kwargs["model"] == "llama3.2"
+
+
+@pytest.mark.asyncio
+async def test_well_known_openai_model_override():
+    from pincer.config import Settings
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    settings = Settings(
+        openai_api_key="sk-test",  # type: ignore[arg-type]
+        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
+        default_provider="anthropic",
+        anthropic_api_key="sk-ant",  # type: ignore[arg-type]
+        default_model="claude-sonnet-4-5-20250929",
+        openai_model="gpt-4o",
+        _env_file=None,  # type: ignore[call-arg]
+    )
+    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        provider = OpenAICompatibleProvider(settings, "openai")
+
+    assert provider._default_model == "gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_compatible_empty_key_uses_placeholder():
+    from pincer.config import Settings
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    settings = Settings(
+        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
+        default_provider="ollama",
+        default_model="llama3.2",
+        openai_compatible_provider="ollama",
+        openai_compatible_base_url="http://localhost:11434/v1",
+    )
+
+    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
+        mock_cls.return_value = MagicMock()
+        OpenAICompatibleProvider(settings, "ollama")
+
+    assert mock_cls.call_args.kwargs["api_key"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_complete_converts_complex_messages(openai_settings):
+    from pincer.llm.base import ImageContent, ToolCall
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=_make_chat_completion())
+        mock_cls.return_value = mock_client
+
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
+        messages = [
+            LLMMessage(role=MessageRole.SYSTEM, content="sys"),
+            LLMMessage(
+                role=MessageRole.USER,
+                content="look",
+                images=[ImageContent(data="abc", media_type="image/png")],
+            ),
+            LLMMessage(
+                role=MessageRole.ASSISTANT,
+                content="calling",
+                tool_calls=[ToolCall(id="t1", name="search", arguments={"q": "x"})],
+            ),
+            LLMMessage(role=MessageRole.TOOL_RESULT, content="res", tool_call_id="t1"),
+        ]
+        await provider.complete(messages, system="top-system")
+
+    sent = mock_client.chat.completions.create.call_args.kwargs["messages"]
+    assert sent[0] == {"role": "system", "content": "top-system"}
+    roles = [m["role"] for m in sent]
+    assert "tool" in roles and "assistant" in roles
+
+
+@pytest.mark.asyncio
+async def test_complete_parses_tool_calls(openai_settings):
+    import json
+
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    tc = MagicMock()
+    tc.id = "call_1"
+    tc.type = "function"
+    tc.function.name = "search"
+    tc.function.arguments = json.dumps({"q": "x"})
+
+    message = MagicMock()
+    message.content = None
+    message.tool_calls = [tc]
+    choice = MagicMock()
+    choice.message = message
+    choice.finish_reason = "tool_calls"
+    usage = MagicMock()
+    usage.prompt_tokens = 1
+    usage.completion_tokens = 1
+    response = MagicMock()
+    response.choices = [choice]
+    response.model = "my-model"
+    response.usage = usage
+
+    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=response)
+        mock_cls.return_value = mock_client
+
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
+        result = await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
+
+    assert result.has_tool_calls
+    assert result.tool_calls[0].name == "search"
+    assert result.tool_calls[0].arguments == {"q": "x"}
 
 
 @pytest.mark.asyncio
@@ -105,7 +298,7 @@ async def test_connection_error_includes_provider_name(openai_settings):
     import openai
 
     from pincer.exceptions import LLMError
-    from pincer.llm._openai_common import OpenAICompatibleProvider
+    from pincer.llm.openai_common import OpenAICompatibleProvider
 
     with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
         mock_client = MagicMock()
@@ -113,52 +306,15 @@ async def test_connection_error_includes_provider_name(openai_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OpenAICompatibleProvider(openai_settings)
-        with pytest.raises(LLMError, match="OpenAI connection error"):
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
+        with pytest.raises(LLMError, match="connection error"):
             await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
-
-
-@pytest.fixture
-def grok_settings():
-    from pincer.config import Settings
-
-    return Settings(
-        grok_api_key="grok-test-key",  # type: ignore[arg-type]
-        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
-        default_provider="grok",  # type: ignore[arg-type]
-        default_model="grok-3",
-    )
-
-
-@pytest.mark.asyncio
-async def test_grok_provider_initialises(grok_settings):
-    from pincer.llm._openai_common import OpenAICompatibleProvider
-
-    with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
-        mock_cls.return_value = MagicMock()
-        provider = OpenAICompatibleProvider(grok_settings)
-
-    assert provider._provider_name == "Grok"
-
-
-def test_unsupported_provider_raises():
-    from pincer.config.main import Settings
-    from pincer.llm._openai_common import OpenAICompatibleProvider
-
-    settings = Settings(
-        openai_api_key="sk-x",  # type: ignore[arg-type]
-        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
-        default_provider="openai",  # type: ignore[arg-type]
-    )
-    object.__setattr__(settings, "default_provider", type("P", (), {"value": "unsupported"})())
-    with patch(f"{MODULE}.AsyncOpenAI"), pytest.raises(ValueError, match="Unsupported"):
-        OpenAICompatibleProvider(settings)
 
 
 @pytest.mark.asyncio
 async def test_complete_api_status_error(openai_settings):
     from pincer.exceptions import LLMError
-    from pincer.llm._openai_common import OpenAICompatibleProvider
+    from pincer.llm.openai_common import OpenAICompatibleProvider
 
     with patch(f"{MODULE}.AsyncOpenAI") as mock_cls:
         mock_client = MagicMock()
@@ -168,7 +324,7 @@ async def test_complete_api_status_error(openai_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OpenAICompatibleProvider(openai_settings)
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
         with pytest.raises(LLMError, match="400"):
             await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
 
@@ -188,7 +344,7 @@ def _make_async_iterable(chunks):
 
 @pytest.mark.asyncio
 async def test_stream_yields_content(openai_settings):
-    from pincer.llm._openai_common import OpenAICompatibleProvider
+    from pincer.llm.openai_common import OpenAICompatibleProvider
 
     chunks = [_make_stream_chunk("Hello"), _make_stream_chunk(" world"), _make_stream_chunk(None)]
 
@@ -198,7 +354,7 @@ async def test_stream_yields_content(openai_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OpenAICompatibleProvider(openai_settings)
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
         result = [t async for t in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")])]
 
     assert result == ["Hello", " world"]
@@ -206,7 +362,7 @@ async def test_stream_yields_content(openai_settings):
 
 @pytest.mark.asyncio
 async def test_stream_with_tools(openai_settings):
-    from pincer.llm._openai_common import OpenAICompatibleProvider
+    from pincer.llm.openai_common import OpenAICompatibleProvider
 
     chunks = [_make_stream_chunk("ok")]
 
@@ -224,7 +380,7 @@ async def test_stream_with_tools(openai_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OpenAICompatibleProvider(openai_settings)
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
         tools = [{"name": "my_tool", "description": "a tool", "input_schema": {"type": "object", "properties": {}}}]
         result = [t async for t in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")], tools=tools)]
 
@@ -234,7 +390,7 @@ async def test_stream_with_tools(openai_settings):
 @pytest.mark.asyncio
 async def test_stream_rate_limit_error(openai_settings):
     from pincer.exceptions import LLMRateLimitError
-    from pincer.llm._openai_common import OpenAICompatibleProvider
+    from pincer.llm.openai_common import OpenAICompatibleProvider
 
     async def _raise(**kwargs):
         raise _openai.RateLimitError("rate limited", response=MagicMock(status_code=429), body={})
@@ -245,7 +401,7 @@ async def test_stream_rate_limit_error(openai_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OpenAICompatibleProvider(openai_settings)
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
         with pytest.raises(LLMRateLimitError):
             async for _ in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")]):
                 pass
@@ -254,7 +410,7 @@ async def test_stream_rate_limit_error(openai_settings):
 @pytest.mark.asyncio
 async def test_stream_api_status_error(openai_settings):
     from pincer.exceptions import LLMError
-    from pincer.llm._openai_common import OpenAICompatibleProvider
+    from pincer.llm.openai_common import OpenAICompatibleProvider
 
     async def _raise(**kwargs):
         raise _openai.APIStatusError("server error", response=MagicMock(status_code=500), body={})
@@ -265,7 +421,7 @@ async def test_stream_api_status_error(openai_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OpenAICompatibleProvider(openai_settings)
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
         with pytest.raises(LLMError, match="500"):
             async for _ in provider.stream([LLMMessage(role=MessageRole.USER, content="hi")]):
                 pass
@@ -274,7 +430,7 @@ async def test_stream_api_status_error(openai_settings):
 @pytest.mark.asyncio
 async def test_retry_on_rate_limit_exhausted(openai_settings):
     from pincer.exceptions import LLMRateLimitError
-    from pincer.llm._openai_common import OpenAICompatibleProvider
+    from pincer.llm.openai_common import OpenAICompatibleProvider
 
     call_count = 0
 
@@ -289,24 +445,8 @@ async def test_retry_on_rate_limit_exhausted(openai_settings):
         mock_client.close = AsyncMock()
         mock_cls.return_value = mock_client
 
-        provider = OpenAICompatibleProvider(openai_settings)
+        provider = OpenAICompatibleProvider(openai_settings, "openai")
         with pytest.raises(LLMRateLimitError):
             await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
 
     assert call_count == 3  # max_retries=3
-
-
-def test_build_llm_returns_openai_compatible_for_openai():
-    from pincer.api._deps import _build_llm
-    from pincer.config import Settings
-    from pincer.llm._openai_common import OpenAICompatibleProvider
-
-    settings = Settings(
-        openai_api_key="sk-test",  # type: ignore[arg-type]
-        telegram_bot_token="123456:TEST",  # type: ignore[arg-type]
-        default_provider="openai",  # type: ignore[arg-type]
-    )
-    with patch(f"{MODULE}.AsyncOpenAI"):
-        provider = _build_llm(settings)
-
-    assert isinstance(provider, OpenAICompatibleProvider)

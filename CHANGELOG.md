@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Multi-provider LLM architecture with random failover
+
+- **`LLMRouter`** — a single construction entry point (`pincer.llm.router`) that also *is* a `BaseLLMProvider`. `cli.py` and `api/_deps.py` now call `LLMRouter().get_llm()` / `.get_summarizer()`; adding a provider touches only `pincer/llm/`.
+- **1 + N failover** — configure a primary plus up to 3 failovers via `PINCER_FALLBACK_PROVIDERS`. On any `LLMError`/`LLMRateLimitError` (after a provider's own retries) the router falls over to a randomly-ordered failover, re-sampled per failure, and re-raises the primary's error if all fail. `stream()` fails over only before the first token. `LLMResponse.model` reflects the provider that actually served the response.
+- **Compatible endpoints** — any OpenAI- or Anthropic-wire endpoint (Grok, Ollama, OpenRouter, LiteLLM, local proxies, gateways) is configured as a named compatible provider: `PINCER_OPENAI_COMPATIBLE_PROVIDER`/`_BASE_URL`/`_API_KEY` and the `PINCER_ANTHROPIC_COMPATIBLE_*` equivalents. A custom OpenAI-wire and a custom Anthropic-wire endpoint can run side by side.
+- **Per-provider models** — each provider carries its own model id (`PINCER_ANTHROPIC_MODEL`, `PINCER_OPENAI_MODEL`, `PINCER_OPENAI_COMPATIBLE_MODEL`, `PINCER_ANTHROPIC_COMPATIBLE_MODEL`), each defaulting to `PINCER_DEFAULT_MODEL` when unset. This makes failover correct: e.g. an `anthropic` primary on `claude-sonnet-4-5` can fall over to an Ollama endpoint on `llama3.2` instead of sending the Claude model id to Ollama.
+- **Cost attributed to the serving provider** — `LLMResponse.provider` carries the provider that actually served the response (the failover, when one is used), and cost/`is_free` are recorded against it rather than the configured primary. Fixes mis-billing on the failover path.
+- **Fail-fast provider validation** — building the provider pool raises a clear error instead of a runtime 401/404 when a well-known `openai`/`anthropic` provider is missing its API key, or when an OpenAI-wire provider resolves to a `claude-*` model (the Anthropic default leaking onto a non-Anthropic endpoint — set that provider's `*_MODEL`).
+- **Configurable Summarizer provider** — `PINCER_SUMMARY_PROVIDER` selects which pool provider summarizes (defaults to the primary).
+- **Free-provider cost handling** — keyless endpoints (e.g. local Ollama) are billed at `$0` via `LLMRouter.is_free()`, replacing the hardcoded provider allowlist.
+
+### Changed
+
+- **Provider names are now free-form.** `openai`/`anthropic` are well-known (key only, built-in base URL); any other `PINCER_DEFAULT_PROVIDER` value must match a configured `*_COMPATIBLE_PROVIDER`.
+- Provider classes renamed/generalised: `AnthropicProvider` → `AnthropicCompatibleProvider` (`llm/anthropic_common.py`), `_openai_common.py` → `llm/openai_common.py`. Both select well-known vs compatible config from the provider name.
+
+### Removed
+
+- **`grok`/`ollama` as named providers**, their dedicated env vars (`PINCER_GROK_*`, `PINCER_OLLAMA_BASE_URL`), and the claude→model maps. **Migration:** point them at a compatible endpoint instead, e.g. `PINCER_DEFAULT_PROVIDER=grok` + `PINCER_OPENAI_COMPATIBLE_PROVIDER=grok` + `PINCER_OPENAI_COMPATIBLE_BASE_URL=https://api.x.ai/v1` + `PINCER_DEFAULT_MODEL=grok-3` (Ollama: base URL `http://localhost:11434/v1`, model `llama3.2`, no key).
+- Empty provider stub modules (`deep_seek_provider.py`, `google_gemini_provider.py`, `groq_provider.py`, `mistral_provider.py`).
+
 #### Cross-channel identity overhaul
 
 - **N-channel identity format** — `PINCER_IDENTITY_MAP` now supports any number of channels per identity: `john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890`. Old two-channel format (`telegram:12345=whatsapp:491234567890`) is fully backward-compatible.

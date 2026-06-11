@@ -8,7 +8,7 @@ Get a personal AI agent running on your machine, answering you on Telegram, in u
 
 - **Python 3.12+** — [install](https://python.org/downloads)
 - **A Telegram account** — you'll create a bot via BotFather
-- **An LLM API key** — Anthropic (Claude) recommended, OpenAI and Grok also supported; or run **Ollama locally** (no API key needed)
+- **An LLM API key** — Anthropic (Claude) recommended; OpenAI works out of the box too. Grok, **Ollama** (local, no key), and any OpenAI-/Anthropic-compatible endpoint are supported as *compatible* providers (set a base URL)
 
 ---
 
@@ -41,7 +41,7 @@ pincer init
 
 The wizard walks you through:
 
-1. **LLM Provider** — paste your Anthropic, OpenAI, or Grok API key; or choose Ollama for local models (no key needed)
+1. **LLM Provider** — paste your Anthropic or OpenAI API key, or choose `compatible` to point at a Grok/Ollama/proxy endpoint (base URL + optional key)
 2. **Telegram Bot** — open [@BotFather](https://t.me/BotFather) in Telegram, send `/newbot`, follow prompts, paste the token
 3. **Allowed Users** — enter your Telegram user ID (the wizard shows you how to find it)
 4. **Budget** — set a daily spending limit (default: $5/day)
