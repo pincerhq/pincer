@@ -26,7 +26,7 @@ class TTSProvider(ABC):
     """Abstract text-to-speech provider."""
 
     @abstractmethod
-    async def synthesize_stream(
+    def synthesize_stream(
         self,
         text: str,
         voice: str | None = None,

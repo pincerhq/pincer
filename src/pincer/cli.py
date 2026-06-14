@@ -22,6 +22,7 @@ from rich.console import Console
 
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
+    from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
     from pincer.config import Settings
     from pincer.memory.base import BaseMemoryBackend
 
@@ -621,7 +622,7 @@ async def _run_agent(settings: Settings) -> None:
         if ch_user_id is None:
             prefix = f"{incoming.channel_type.value}:"
             if canonical_id.startswith(prefix):
-                ch_user_id = canonical_id[len(prefix):]
+                ch_user_id = canonical_id[len(prefix) :]
 
         response = await agent.handle_message(
             user_id=canonical_id,
@@ -677,6 +678,8 @@ async def _run_agent(settings: Settings) -> None:
     from pincer.channels.base import ChannelType
 
     tg = None
+    wa = None
+    ms: MicrosoftTeamsChannel | None = None
     if settings.telegram_bot_token.get_secret_value():
         from pincer.channels.telegram import TelegramChannel
 
@@ -688,7 +691,6 @@ async def _run_agent(settings: Settings) -> None:
     if tg:
         router.register(ChannelType.TELEGRAM, tg)
 
-    wa = None
     if settings.whatsapp_enabled:
         try:
             from pincer.channels.whatsapp import WhatsAppChannel
@@ -927,7 +929,6 @@ async def _run_agent(settings: Settings) -> None:
         console.print("[dim]Slack skipped (no PINCER_SLACK_BOT_TOKEN / PINCER_SLACK_APP_TOKEN)[/dim]")
 
     # Microsoft Teams channel (optional — requires PINCER_TEAMS_APP_ID + PINCER_TEAMS_APP_PASSWORD)
-    ms = None
     if settings.teams_app_id and settings.teams_app_password.get_secret_value():
         try:
             from pincer.channels.microsoft_teams import MicrosoftTeamsChannel

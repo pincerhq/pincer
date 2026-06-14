@@ -174,6 +174,7 @@ def create_app() -> FastAPI:
 
     dist = _dashboard_dist()
     if dist.is_dir():
+
         @app.get("/{full_path:path}")
         async def _spa(full_path: str) -> FileResponse:
             candidate = dist / full_path

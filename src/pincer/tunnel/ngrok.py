@@ -32,18 +32,18 @@ class NgrokTunnel:
         try:
             from pyngrok import ngrok as _ngrok
         except ImportError:
-            raise RuntimeError(
-                "pyngrok is not installed. Run: pip install 'pincer-agent[local]'"
-            ) from None
+            raise RuntimeError("pyngrok is not installed. Run: pip install 'pincer-agent[local]'") from None
         _ngrok.set_auth_token(self._authtoken)
 
-        kwargs: dict = {
+        kwargs: dict[str, object] = {
             "proto": "http",
         }
         if self._domain:
             kwargs["domain"] = self._domain
 
         self._tunnel = _ngrok.connect(self._target_port, **kwargs)
+        if self._tunnel is None:
+            raise RuntimeError("ngrok.connect returned None — check authtoken and network")
         public_url: str = self._tunnel.public_url
         if public_url.startswith("http://"):
             public_url = "https://" + public_url[7:]

@@ -19,6 +19,7 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json as _json
 import logging
 import re
@@ -37,19 +38,21 @@ _MENTION_RE = re.compile(r"<at>[^<]*</at>")
 
 # Activity types the microsoft-teams-apps SDK can parse without Pydantic errors.
 # Anything outside this set is ACKed with 200 OK so Teams stops retrying.
-_SDK_KNOWN_TYPES: frozenset[str] = frozenset({
-    "message",
-    "typing",
-    "conversationUpdate",
-    "messageReaction",
-    "messageUpdate",
-    "messageDelete",
-    "invoke",
-    "installationUpdate",
-    "event",
-    "command",
-    "commandResult",
-})
+_SDK_KNOWN_TYPES: frozenset[str] = frozenset(
+    {
+        "message",
+        "typing",
+        "conversationUpdate",
+        "messageReaction",
+        "messageUpdate",
+        "messageDelete",
+        "invoke",
+        "installationUpdate",
+        "event",
+        "command",
+        "commandResult",
+    }
+)
 
 
 class _ActivityFilterMiddleware:
@@ -65,11 +68,7 @@ class _ActivityFilterMiddleware:
         self._app = app
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        if (
-            scope.get("type") != "http"
-            or scope.get("path") != "/messages"
-            or scope.get("method") != "POST"
-        ):
+        if scope.get("type") != "http" or scope.get("path") != "/messages" or scope.get("method") != "POST":
             await self._app(scope, receive, send)
             return
 
@@ -83,25 +82,25 @@ class _ActivityFilterMiddleware:
         body = b"".join(chunks)
 
         activity_type = ""
-        try:
+        with contextlib.suppress(Exception):
             activity_type = _json.loads(body).get("type", "")
-        except Exception:
-            pass
 
         if activity_type and activity_type not in _SDK_KNOWN_TYPES:
             logger.debug("Teams: silently ACKing unhandled activity type %r", activity_type)
-            await send({
-                "type": "http.response.start",
-                "status": 200,
-                "headers": [(b"content-type", b"application/json")],
-            })
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
             await send({"type": "http.response.body", "body": b'{"status":"ok"}', "more_body": False})
             return
 
         # Replay the buffered body so the SDK route handler can read it.
         replayed = False
 
-        async def _replay_receive() -> dict:  # type: ignore[return]
+        async def _replay_receive() -> dict[str, object]:  # type: ignore[return]
             nonlocal replayed
             if not replayed:
                 replayed = True
@@ -190,7 +189,7 @@ class MicrosoftTeamsChannel(BaseChannel):
             result = await graph.users.get()
             for u in result.value:
                 if _identifier in u.user_principal_name or identifier in u.mail:
-                    return u.id
+                    return str(u.id)
 
         except Exception:
             logger.error("MS Teams: could not resolve identifier %r to user_id", identifier)
@@ -213,9 +212,7 @@ class MicrosoftTeamsChannel(BaseChannel):
             from fastapi import FastAPI
             from microsoft_teams.apps import App, FastAPIAdapter
         except ImportError as e:
-            raise RuntimeError(
-                "microsoft-teams-apps not installed. Run: pip install 'pincer-agent[teams]'"
-            ) from e
+            raise RuntimeError("microsoft-teams-apps not installed. Run: pip install 'pincer-agent[teams]'") from e
 
         app_id = self._settings.teams_app_id
         app_tenant_id = self._settings.teams_app_tenant_id
@@ -269,9 +266,7 @@ class MicrosoftTeamsChannel(BaseChannel):
             logger.warning("Teams app not initialized, cannot send")
             return
 
-        conversation_id: str | None = kwargs.get("conversation_id") or self._conversation_refs.get(
-            user_id
-        )
+        conversation_id: str | None = kwargs.get("conversation_id") or self._conversation_refs.get(user_id)
         if not conversation_id:
             logger.warning("Teams: no conversation reference for %s; cannot send", user_id)
             return
@@ -327,7 +322,7 @@ class MicrosoftTeamsChannel(BaseChannel):
 
         incoming = IncomingMessage(
             user_id=user_id,
-            channel="teams",         # stable name → identity + memory tag "user:teams:{id}"
+            channel="teams",  # stable name → identity + memory tag "user:teams:{id}"
             session_id=session_key,  # conversation key → session isolation
             text=text,
             channel_type=ChannelType.TEAMS,
@@ -386,18 +381,15 @@ class MicrosoftTeamsChannel(BaseChannel):
         args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
         if len(args_preview) > 200:
             args_preview = args_preview[:200] + "…"
-        prompt = (
-            f"🔐 **Approval required**\n\n"
-            f"Tool: `{tool_name}`\n"
-            f"Args: `{args_preview}`\n\n"
-            f"Reply **yes** or **no**."
-        )
+        prompt = f"🔐 **Approval required**\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\nReply **yes** or **no**."
         try:
             await self._send_to_user(user_id, prompt)
         except Exception as e:
             logger.warning(
                 "Teams approval prompt undeliverable to %s for %s (%s); denying.",
-                user_id, tool_name, e,
+                user_id,
+                tool_name,
+                e,
             )
             return False
         fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
