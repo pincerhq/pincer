@@ -927,18 +927,16 @@ async def _run_agent(settings: Settings) -> None:
         console.print("[dim]Slack skipped (no PINCER_SLACK_BOT_TOKEN / PINCER_SLACK_APP_TOKEN)[/dim]")
 
     # Microsoft Teams channel (optional — requires PINCER_TEAMS_APP_ID + PINCER_TEAMS_APP_PASSWORD)
+    ms = None
     if settings.teams_app_id and settings.teams_app_password.get_secret_value():
         try:
             from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
 
             ms = MicrosoftTeamsChannel(settings)
             await ms.start(on_message)
-            if ms._app is not None:  # start() may bail silently if import fails
-                channel_map[ms.name] = ms
-                router.register(ChannelType.TEAMS, ms)
-                console.print(f"[green]Teams connected (port {settings.teams_port})[/green]")
-            else:
-                console.print("[yellow]Teams failed to start (check logs)[/yellow]")
+            channel_map[ms.name] = ms
+            router.register(ChannelType.TEAMS, ms)
+            console.print("[green]Teams connected (mounted under /api/apps/teams)[/green]")
         except Exception as e:
             console.print(f"[yellow]Teams failed: {e}[/yellow]")
     else:
@@ -1015,7 +1013,8 @@ async def _run_agent(settings: Settings) -> None:
     api_server = None
     api_task = None
     tunnel = None
-    if _port_in_use(settings.dashboard_host, settings.dashboard_port):
+    _api_will_run = not _port_in_use(settings.dashboard_host, settings.dashboard_port)
+    if not _api_will_run:
         console.print(f"[yellow]Port {settings.dashboard_port} is already in use. API server skipped.[/yellow]")
         console.print(
             f"  Options: Set PINCER_DASHBOARD_PORT=8081 in .env, "
@@ -1032,6 +1031,7 @@ async def _run_agent(settings: Settings) -> None:
             # backend already wired) so the API server doesn't create a second
             # disconnected instance.
             api_app.state.agent = agent
+            api_app.state.teams_channel = ms
             api_config = uvicorn.Config(
                 api_app,
                 host=settings.dashboard_host,

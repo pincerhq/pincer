@@ -57,6 +57,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logging.getLogger(__name__).warning("Agent not built at startup: %s", e)
             app.state.agent = None
 
+    teams_channel = getattr(app.state, "teams_channel", None)
+    if teams_channel is not None:
+        sub_app = teams_channel.get_sub_app()
+        if sub_app is not None:
+            app.mount("/api/apps/teams", sub_app)
+            logging.getLogger(__name__).info("Teams sub-app mounted at /api/apps/teams")
+
     yield
     await audit.shutdown()
 
@@ -113,6 +120,8 @@ def create_app() -> FastAPI:
         public_paths = ("/api/health", "/api/docs", "/api/openapi.json")
         if request.url.path in public_paths:
             return await call_next(request)
+        if request.url.path.startswith("/api/apps/teams/"):
+            return await call_next(request)  # Teams webhooks use their own HMAC auth
         if not request.url.path.startswith("/api/"):
             return await call_next(request)  # dashboard static files
         if not _dashboard_token and not _web_chat_token:

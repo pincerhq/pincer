@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing_extensions import Self
 
 from pincer.config.api import APISettings
 from pincer.config.channels import ChannelSettings
@@ -27,7 +28,7 @@ class Settings(BaseSettings, LLMSettings, ChannelSettings, ToolSettings, APISett
     )
 
     @model_validator(mode="after")
-    def validate_api_keys(self) -> Settings:
+    def validate_api_keys(self) -> Self:
         """Ensure at least one LLM provider API key is set."""
         if self.default_provider == LLMProvider.OLLAMA:
             return self
@@ -60,6 +61,8 @@ class Settings(BaseSettings, LLMSettings, ChannelSettings, ToolSettings, APISett
                 object.__setattr__(self, "default_provider", LLMProvider.OPENAI)
             else:
                 raise ValueError("PINCER_GROK_API_KEY required for Grok provider.")
+        if not self.voice_webhook_base_url and self.voice_enabled:
+            self.voice_webhook_base_url = str(self.base_url)
         return self
 
     @property

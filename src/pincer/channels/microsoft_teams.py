@@ -2,7 +2,7 @@
 Microsoft Teams channel implementation using the microsoft-teams-apps SDK.
 
 Architecture:
-  Teams ──HTTP POST /api/messages──> uvicorn + FastAPIAdapter ──> App.on_message ──> Pincer Agent
+  Teams ──HTTP POST /messages──> uvicorn + FastAPIAdapter ──> App.on_message ──> Pincer Agent
 
 Teams delivers activities by POSTing them to a public endpoint, so the channel runs a
 small uvicorn server instead of holding an outbound connection like Slack or Discord.
@@ -53,7 +53,7 @@ _SDK_KNOWN_TYPES: frozenset[str] = frozenset({
 
 
 class _ActivityFilterMiddleware:
-    """ASGI middleware: intercepts POST /api/messages before the SDK.
+    """ASGI middleware: intercepts POST /messages before the SDK.
 
     When Teams sends an activity type the SDK cannot parse it logs 14 Pydantic
     validation errors and (depending on SDK version) returns 400, which causes
@@ -67,7 +67,7 @@ class _ActivityFilterMiddleware:
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if (
             scope.get("type") != "http"
-            or scope.get("path") != "/api/messages"
+            or scope.get("path") != "/messages"
             or scope.get("method") != "POST"
         ):
             await self._app(scope, receive, send)
@@ -162,7 +162,6 @@ class MicrosoftTeamsChannel(BaseChannel):
     - PINCER_TEAMS_APP_ID        Microsoft App (client) ID
     - PINCER_TEAMS_APP_TENANTID  Microsoft App tenant ID, only for single tenant config
     - PINCER_TEAMS_APP_PASSWORD  App Password (client secret)
-    - PINCER_TEAMS_PORT          local server port (default 3978)
     """
 
     channel_type = ChannelType.TEAMS
@@ -172,8 +171,6 @@ class MicrosoftTeamsChannel(BaseChannel):
         self._handler: MessageHandler | None = None
         self._app: Any = None
         self._fastapi: Any = None
-        self._server: Any = None
-        self._server_task: asyncio.Task[Any] | None = None
         self._conversation_refs: dict[str, str] = {}
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
         self._pending_inputs: dict[str, asyncio.Future[str]] = {}
@@ -199,29 +196,40 @@ class MicrosoftTeamsChannel(BaseChannel):
             logger.error("MS Teams: could not resolve identifier %r to user_id", identifier)
         return identifier
 
-    async def start(self, handler: MessageHandler) -> None:
+    def get_sub_app(self) -> Any:
+        """Return the initialized FastAPI sub-app, or None if not yet initialized."""
+        return self._fastapi
+
+    async def _init_app(self, handler: MessageHandler) -> None:
+        """Create the FastAPI sub-app and wire up the Teams SDK. No server started.
+
+        Raises RuntimeError if the SDK is not installed or credentials are missing.
+        Idempotent — safe to call multiple times.
+        """
+        if self._fastapi is not None:
+            return
+
         try:
-            import uvicorn
             from fastapi import FastAPI
             from microsoft_teams.apps import App, FastAPIAdapter
-        except ImportError:
-            logger.error("microsoft-teams-apps not installed. Run: pip install 'pincer-agent[teams]'")
-            return
+        except ImportError as e:
+            raise RuntimeError(
+                "microsoft-teams-apps not installed. Run: pip install 'pincer-agent[teams]'"
+            ) from e
 
         app_id = self._settings.teams_app_id
         app_tenant_id = self._settings.teams_app_tenant_id
         app_password = self._settings.teams_app_password.get_secret_value()
 
         if not app_id or not app_password:
-            logger.warning(
-                "Teams channel disabled: PINCER_TEAMS_APP_ID and PINCER_TEAMS_APP_PASSWORD required."
+            raise RuntimeError(
+                "Teams channel cannot start: PINCER_TEAMS_APP_ID and PINCER_TEAMS_APP_PASSWORD are required."
             )
-            return
 
         if app_tenant_id:
-            logger.warning("Teams channel client run in single-tenant mode")
+            logger.info("Teams channel running in single-tenant mode")
         else:
-            logger.warning("Teams channel client run in multi-tenant mode")
+            logger.info("Teams channel running in multi-tenant mode")
 
         self._handler = handler
 
@@ -233,36 +241,21 @@ class MicrosoftTeamsChannel(BaseChannel):
             client_secret=app_password,
             tenant_id=app_tenant_id,
             http_server_adapter=adapter,
+            messaging_endpoint="/messages",
         )
 
         @self._app.on_message  # type: ignore[misc, untyped-decorator]
         async def _on_message(ctx: Any) -> None:
             await self._handle_activity(ctx)
 
-        # Mount the /api/messages route on the FastAPI app; we own the server.
         await self._app.initialize()
 
-        config = uvicorn.Config(
-            app=self._fastapi,
-            host="0.0.0.0",
-            port=self._settings.teams_port,
-            log_level="warning",
-        )
-        self._server = uvicorn.Server(config)
-        self._server_task = asyncio.create_task(self._server.serve())
-        logger.info("Teams channel started (HTTP server on port %s)", self._settings.teams_port)
+    async def start(self, handler: MessageHandler) -> None:
+        """Initialize the Teams SDK sub-app for mounting under the main API server."""
+        await self._init_app(handler)
+        logger.info("Teams channel initialized (mounted via main API server)")
 
     async def stop(self) -> None:
-        if self._server is not None:
-            self._server.should_exit = True
-        if self._server_task is not None:
-            try:
-                await asyncio.wait_for(self._server_task, timeout=5.0)
-            except (TimeoutError, asyncio.CancelledError):
-                self._server_task.cancel()
-            except Exception as e:
-                logger.debug("Teams server shutdown error: %s", e)
-        self._server_task = None
         logger.info("Teams channel stopped")
 
     async def send(self, user_id: str, text: str, **kwargs: Any) -> None:

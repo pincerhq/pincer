@@ -10,7 +10,7 @@ For architecture, state machine, compliance, and full configuration, see the [Vo
 
 - **Python 3.12+**
 - **Twilio account** — [Sign up](https://www.twilio.com)
-- **ngrok** (for local dev) — Twilio must reach your instance via HTTPS
+- **ngrok** (for local or dev) — Twilio must reach your instance via HTTPS
 
 ---
 
@@ -47,7 +47,7 @@ PINCER_VOICE_OUTBOUND_ENABLED=true
 PINCER_TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 PINCER_TWILIO_AUTH_TOKEN=your-auth-token
 PINCER_TWILIO_PHONE_NUMBER=+1234567890
-PINCER_VOICE_WEBHOOK_BASE_URL=https://your-ngrok-url
+PINCER_VOICE_WEBHOOK_BASE_URL=https://your-ngrok-url # optional if PINCER_BASE_URL is set
 ```
 
 Set `PINCER_VOICE_ENABLED=true` only if you want **inbound** calls (people calling your Twilio number).

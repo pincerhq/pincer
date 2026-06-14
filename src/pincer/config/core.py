@@ -3,7 +3,9 @@ from __future__ import annotations
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic.networks import AnyHttpUrl
+from typing_extensions import Self
 
 
 class LogLevel(StrEnum):
@@ -14,6 +16,11 @@ class LogLevel(StrEnum):
 
 
 class CoreSettings(BaseModel):
+    # ── General ───────────────────────────────────────────
+    base_url: AnyHttpUrl = Field(
+        default=AnyHttpUrl("http://localhost:8080"),
+        description="Application domain (e.g. localhost, example.com)",
+    )
     # ── Storage ───────────────────────────────────────────
     data_dir: Path = Field(
         default=Path.home() / ".pincer",
@@ -48,3 +55,9 @@ class CoreSettings(BaseModel):
         default="",
         description="ngrok static domain, e.g. my-bot.ngrok-free.app (PINCER_NGROK_DOMAIN)",
     )
+
+    @model_validator(mode='after')
+    def check_ngrok_domain(self) -> Self:
+        if not self.ngrok_domain and self.ngrok_authtoken:
+            self.ngrok_domain = self.base_url.host  # noqa: F841
+        return self

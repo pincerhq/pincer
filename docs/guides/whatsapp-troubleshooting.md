@@ -138,6 +138,33 @@ rate-limit settings in `pincer.toml` and your agent's outbound cadence.
 The primary phone is offline or logged out of WhatsApp. Re-verify the primary
 device, then delete the neonize session and re-pair.
 
+## Messages processed before identity map is ready
+
+**Symptom**
+
+A message sent to the bot immediately after it starts (or replayed from history-sync on reconnect) is answered correctly, but the conversation is stored under the raw channel ID (`whatsapp:<lid>`) instead of the configured name from `PINCER_IDENTITY_MAP` (e.g. `user:john`). Subsequent messages in the same session resolve correctly.
+
+**Cause**
+
+`neonize` registers the `MessageEv` handler and begins delivering events as soon as the WhatsApp socket handshake completes. Pincer's startup sequence seeds the identity map (`seed_from_config`) only after **all** channels have finished connecting. The gap between WhatsApp connecting and the identity map being ready is typically 1–3 seconds (longer if multiple channels are starting concurrently), but `neonize` may replay a burst of recent history-sync events during exactly that window.
+
+When a message arrives in this gap, `IdentityMiddleware` cannot find the user in the (not-yet-seeded) database. If `PINCER_IDENTITY_MAP` is configured, no new row is created (by design, to prevent phantom identities), and the message falls back to a channel-scoped identity: `whatsapp:<lid>`. Memory and context from that message are stored under the wrong key and will not be merged when the correct identity is seeded moments later.
+
+**Impact**
+
+- Only the first message(s) received in the startup window are affected.
+- WhatsApp sends a history-sync burst of recent messages on every reconnect. The existing 120-second age filter (`_MAX_MESSAGE_AGE`) drops most of these before identity resolution runs, so real conversations are rarely affected in practice.
+- Any context written under the fallback identity is not automatically migrated; it remains as an orphaned entry in the database.
+
+**Workaround**
+
+If you consistently see this (e.g. a user messages the bot the instant it restarts):
+
+1. Wait a few seconds after seeing `WhatsApp connected` in the console before sending a message.
+2. If a message was misidentified, delete the orphaned row from the identity database and re-send: `sqlite3 data/pincer.db "DELETE FROM channel_identities WHERE channel='whatsapp' AND channel_user_id='<lid>';"`.
+
+This is a known limitation; a readiness gate that queues messages until the identity map is seeded is tracked as a future improvement.
+
 ## Keeping an eye on this
 
 `pincer doctor` includes a `whatsapp_neonize_version` check. It reports PASS

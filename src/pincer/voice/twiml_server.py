@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-twilio_router = APIRouter(prefix="/apps/twilio", tags=["apps", "twilio"])
+twilio_router = APIRouter(prefix="/api/apps/twilio", tags=["apps", "twilio"])
 voice_router = APIRouter(prefix="/voice", tags=["voice"])
 
 _engine: VoiceEngine | None = None
@@ -119,8 +119,8 @@ async def voice_webhook(request: Request) -> Response:
     engine_type = _settings.voice_engine.lower().strip()
 
     if engine_type == "media_streams":
-        stream_url = f"wss://{_extract_host(base_url)}/apps/twilio/stream/{call_sid}"
-        status_url = f"{base_url}/apps/twilio/status"
+        stream_url = f"wss://{_extract_host(base_url)}/api/apps/twilio/stream/{call_sid}"
+        status_url = f"{base_url}/api/apps/twilio/status"
         twiml = (
             "<Response>"
             "<Say>Connecting you now.</Say>"
@@ -129,7 +129,7 @@ async def voice_webhook(request: Request) -> Response:
             "</Response>"
         )
     else:
-        relay_url = f"{base_url}/apps/twilio/relay-webhook"
+        relay_url = f"{base_url}/api/apps/twilio/relay-webhook"
         twiml = (
             "<Response>"
             "<Say>Please wait while I connect you to your assistant.</Say>"
@@ -279,7 +279,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
 
 # ── Deprecated /voice/* aliases ───────────────────────────────────────────────
 # These remain fully functional so existing Twilio webhook configs keep working.
-# Migrate to /apps/twilio/* at your convenience.
+# Migrate to /api/apps/twilio/* at your convenience.
 
 
 @voice_router.get("/health", deprecated=True)
