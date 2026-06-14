@@ -37,6 +37,12 @@ def init_voice_routes(engine: VoiceEngine, settings: Settings) -> None:
     _settings = settings
 
 
+def update_voice_base_url(url: str) -> None:
+    """Overwrite the webhook base URL on the live settings object (e.g. after ngrok starts)."""
+    if _settings is not None:
+        _settings.voice_webhook_base_url = url
+
+
 def _validate_twilio_signature(request: Request, body: bytes) -> bool:
     """Validate Twilio webhook HMAC signature to prevent spoofed requests."""
     if not _settings:

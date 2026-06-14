@@ -15,7 +15,7 @@ import logging
 import os
 import socket
 from datetime import UTC
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.console import Console
@@ -81,6 +81,30 @@ def _port_in_use(host: str, port: int) -> bool:
     check_host = "127.0.0.1" if host == "0.0.0.0" else host
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex((check_host, port)) == 0
+
+
+def _print_voice_webhook_urls(settings: Any, console: Any) -> None:  # type: ignore[no-untyped-def]
+    base = (settings.voice_webhook_base_url or "").rstrip("/")
+    if not base:
+        return
+    lines = [
+        "[bold]Voice webhook URLs (configure in Twilio Console):[/bold]",
+        f"  Inbound:           {base}/api/apps/twilio/webhook",
+        f"  Status callback:   {base}/api/apps/twilio/status",
+        f"  Fallback:          {base}/api/apps/twilio/fallback",
+    ]
+    engine = getattr(settings, "voice_engine", "conversation_relay").lower().strip()
+    if engine == "media_streams":
+        host = base
+        for prefix in ("https://", "http://"):
+            if host.startswith(prefix):
+                host = host[len(prefix) :]
+                break
+        lines.append(f"  Media stream WS:   wss://{host}/api/apps/twilio/stream/{{CallSid}}")
+    else:
+        lines.append(f"  ConversationRelay: {base}/api/apps/twilio/relay-webhook")
+    for line in lines:
+        console.print(line)
 
 
 @app.command()
@@ -1051,8 +1075,19 @@ async def _run_agent(settings: Settings) -> None:
                 public_url = await tunnel.start()
                 if public_url:
                     console.print(f"[green]Ngrok tunnel: {public_url}[/green]")
+                    if (
+                        settings.voice_enabled or settings.voice_outbound_enabled
+                    ) and not settings.voice_webhook_base_url:
+                        settings.voice_webhook_base_url = public_url
+                        from pincer.voice.twiml_server import update_voice_base_url
+
+                        update_voice_base_url(public_url)
+                        console.print(f"[green]Voice webhook base URL auto-set to {public_url}[/green]")
         except Exception as e:
             console.print(f"[yellow]API server failed to start: {e}[/yellow]")
+
+    if settings.voice_enabled or settings.voice_outbound_enabled:
+        _print_voice_webhook_urls(settings, console)
 
     active = [ch.name for ch in router.channels.values()]
     console.print(

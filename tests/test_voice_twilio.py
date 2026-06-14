@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from pincer.voice.twiml_server import init_voice_routes, twilio_router
+from pincer.voice.twiml_server import init_voice_routes, twilio_router, update_voice_base_url, voice_router
 
 
 @pytest.fixture
@@ -141,3 +141,74 @@ class TestRelayWebhook:
         )
         assert response.status_code == 200
         mock_engine.interrupt_speech.assert_called_once_with("CA123")
+
+
+# ── update_voice_base_url ─────────────────────────────────────────────────────
+
+
+def test_update_voice_base_url_mutates_settings(mock_engine, mock_settings):
+    init_voice_routes(mock_engine, mock_settings)
+    update_voice_base_url("https://new.ngrok.io")
+    assert mock_settings.voice_webhook_base_url == "https://new.ngrok.io"
+
+
+def test_update_voice_base_url_noop_before_init():
+    from pincer.voice import twiml_server
+
+    original = twiml_server._settings
+    twiml_server._settings = None
+    try:
+        update_voice_base_url("https://example.com")  # must not raise
+    finally:
+        twiml_server._settings = original
+
+
+# ── Deprecated /voice/* aliases ───────────────────────────────────────────────
+
+
+@pytest.fixture
+def legacy_client(mock_engine, mock_settings):
+    from fastapi import FastAPI
+
+    init_voice_routes(mock_engine, mock_settings)
+    app = FastAPI()
+    app.include_router(voice_router)
+    return TestClient(app)
+
+
+class TestLegacyVoiceAliases:
+    def test_health_alias(self, legacy_client):
+        response = legacy_client.get("/voice/health")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+
+    def test_webhook_alias(self, legacy_client, mock_engine):
+        response = legacy_client.post(
+            "/voice/webhook",
+            data={"CallSid": "CA999", "From": "+10000000001", "To": "+10000000002"},
+        )
+        assert response.status_code == 200
+        assert "<Response>" in response.text
+
+    def test_status_alias(self, legacy_client):
+        response = legacy_client.post(
+            "/voice/status",
+            data={"CallSid": "CA999", "CallStatus": "ringing", "CallDuration": "0"},
+        )
+        assert response.status_code == 200
+
+    def test_fallback_alias(self, legacy_client):
+        response = legacy_client.post(
+            "/voice/fallback",
+            data={"CallSid": "CA999", "ErrorCode": "12345", "ErrorMessage": "oops"},
+        )
+        assert response.status_code == 200
+        assert "difficulties" in response.text
+
+    def test_relay_webhook_alias(self, legacy_client, mock_engine):
+        response = legacy_client.post(
+            "/voice/relay-webhook",
+            json={"type": "interrupt", "CallSid": "CA999"},
+        )
+        assert response.status_code == 200
+        mock_engine.interrupt_speech.assert_called_with("CA999")

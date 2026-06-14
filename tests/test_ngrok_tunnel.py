@@ -183,3 +183,12 @@ async def test_stop_swallows_disconnect_exception() -> None:
         await t.start()
         await t.stop()  # must not propagate
     assert t._tunnel is None
+
+
+@pytest.mark.asyncio
+async def test_start_raises_when_connect_returns_none() -> None:
+    fake = _make_fake_ngrok()
+    fake.connect.return_value = None
+    with _pyngrok_patch(fake), pytest.raises(RuntimeError, match="ngrok.connect returned None"):
+        t = NgrokTunnel(authtoken="tok", domain="", target_port=8080)
+        await t.start()

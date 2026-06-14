@@ -17,6 +17,7 @@ from pincer.channels.base import ChannelType, IncomingMessage
 from pincer.channels.microsoft_teams import (
     MAX_TEAMS_MESSAGE_LENGTH,
     MicrosoftTeamsChannel,
+    _ActivityFilterMiddleware,
     split_message,
 )
 
@@ -418,3 +419,67 @@ async def test_send_explicit_conversation_id_override() -> None:
     with patch.dict(sys.modules, {"microsoft_teams.api": fake_api}):
         await ch.send("ignored", "hi", conversation_id="explicit-conv")
     assert ch._app.send.await_args.args[0] == "explicit-conv"
+
+
+# ── _ActivityFilterMiddleware ─────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_activity_filter_passes_known_type() -> None:
+    import json
+
+    received: list[Any] = []
+
+    async def inner_app(scope: Any, receive: Any, send: Any) -> None:
+        msg = await receive()
+        received.append(json.loads(msg["body"]))
+
+    mw = _ActivityFilterMiddleware(inner_app)
+    body = json.dumps({"type": "message", "text": "hi"}).encode()
+
+    chunks: list[Any] = [{"type": "http.request", "body": body, "more_body": False}]
+
+    async def receive() -> Any:
+        return chunks.pop(0)
+
+    await mw({"type": "http", "path": "/messages", "method": "POST"}, receive, MagicMock())
+    assert received == [{"type": "message", "text": "hi"}]
+
+
+@pytest.mark.asyncio
+async def test_activity_filter_acks_unknown_type() -> None:
+    import json
+
+    sent: list[Any] = []
+    inner_called = False
+
+    async def inner_app(scope: Any, receive: Any, send: Any) -> None:
+        nonlocal inner_called
+        inner_called = True
+
+    async def send(msg: Any) -> None:
+        sent.append(msg)
+
+    mw = _ActivityFilterMiddleware(inner_app)
+    body = json.dumps({"type": "unknownFutureType"}).encode()
+    chunks: list[Any] = [{"type": "http.request", "body": body, "more_body": False}]
+
+    async def receive() -> Any:
+        return chunks.pop(0)
+
+    await mw({"type": "http", "path": "/messages", "method": "POST"}, receive, send)
+    assert not inner_called
+    assert any(m.get("status") == 200 for m in sent)
+
+
+@pytest.mark.asyncio
+async def test_activity_filter_passes_non_message_paths() -> None:
+    inner_called = False
+
+    async def inner_app(scope: Any, receive: Any, send: Any) -> None:
+        nonlocal inner_called
+        inner_called = True
+
+    mw = _ActivityFilterMiddleware(inner_app)
+    await mw({"type": "http", "path": "/health", "method": "GET"}, MagicMock(), MagicMock())
+    assert inner_called
