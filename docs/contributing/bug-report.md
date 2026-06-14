@@ -29,7 +29,7 @@ What actually happened.
 - **Pincer version:** `pincer --version`
 - **Python version:** `python --version`
 - **OS:** (e.g., Ubuntu 24.04, macOS 15, Docker)
-- **LLM provider:** (Anthropic / OpenAI / Ollama)
+- **LLM provider:** (anthropic / openai / compatible endpoint name, e.g. grok/ollama)
 - **Channel:** (Telegram / WhatsApp / Discord)
 
 ## Logs

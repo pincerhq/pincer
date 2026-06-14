@@ -19,33 +19,59 @@ def test_settings_load_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert s.max_tokens == 8192
 
 
-def test_settings_fallback_to_openai(tmp_path: Path) -> None:
+def test_settings_accepts_openai_only(tmp_path: Path) -> None:
     s = Settings(
         anthropic_api_key="",  # type: ignore[arg-type]
         openai_api_key="sk-openai-test",  # type: ignore[arg-type]
         data_dir=tmp_path,
-        default_provider=LLMProvider.ANTHROPIC,
+        default_provider="openai",
     )
-    assert s.default_provider == LLMProvider.OPENAI
+    assert s.default_provider == "openai"
+    assert s.openai_api_key.get_secret_value() == "sk-openai-test"
 
 
-def test_settings_no_keys_raises(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="At least one LLM API key"):
+def test_settings_no_providers_raises(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="At least one LLM provider"):
         Settings(
-            default_provider=LLMProvider.ANTHROPIC,  # type: ignore[arg-type]
+            default_provider="anthropic",
             anthropic_api_key="",  # type: ignore[arg-type]
             openai_api_key="",  # type: ignore[arg-type]
-            grok_api_key="",  # type: ignore[arg-type]
             data_dir=tmp_path,
+            _env_file=None,  # hermetic: ignore the developer's .env  # type: ignore[call-arg]
         )
 
 
-def test_ollama_requires_no_api_key(tmp_path: Path) -> None:
+def test_compatible_base_url_satisfies_validation(tmp_path: Path) -> None:
+    # e.g. Ollama: no API key, just a compatible base URL.
     s = Settings(
-        default_provider=LLMProvider.OLLAMA,  # type: ignore[arg-type]
+        default_provider="ollama",
+        anthropic_api_key="",  # type: ignore[arg-type]
+        openai_api_key="",  # type: ignore[arg-type]
+        openai_compatible_provider="ollama",
+        openai_compatible_base_url="http://localhost:11434/v1",
         data_dir=tmp_path,
     )
-    assert s.default_provider == LLMProvider.OLLAMA
+    assert s.default_provider == "ollama"
+
+
+def test_fallback_providers_from_env_comma_string(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Regression: PINCER_FALLBACK_PROVIDERS must parse a comma string from the
+    # environment (pydantic-settings would otherwise try to JSON-decode the list).
+    monkeypatch.setenv("PINCER_FALLBACK_PROVIDERS", "openai,grok")
+    s = Settings(anthropic_api_key="sk-test", data_dir=tmp_path)  # type: ignore[arg-type]
+    assert s.fallback_providers == ["openai", "grok"]
+
+
+def test_parse_fallback_providers_comma_string() -> None:
+    assert Settings.parse_fallback_providers("openai, grok ,my-claude") == ["openai", "grok", "my-claude"]
+
+
+def test_parse_fallback_providers_empty() -> None:
+    assert Settings.parse_fallback_providers("") == []
+
+
+def test_parse_fallback_providers_list_passthrough() -> None:
+    assert Settings.parse_fallback_providers(["openai", "grok"]) == ["openai", "grok"]
 
 
 def test_parse_allowed_users() -> None:

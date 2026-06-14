@@ -711,9 +711,21 @@ All variables use `PINCER_` prefix.
 ### LLM
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PINCER_DEFAULT_PROVIDER` | `anthropic` | LLM provider |
-| `PINCER_DEFAULT_MODEL` | `claude-3-5-sonnet-20241022` | Model name |
-| `PINCER_OPENAI_API_KEY` | | OpenAI API key |
+| `PINCER_DEFAULT_PROVIDER` | `anthropic` | Primary provider name (`openai`/`anthropic` or a `*_COMPATIBLE_PROVIDER`) |
+| `PINCER_FALLBACK_PROVIDERS` | | Up to 3 comma-separated provider names; random failover on error |
+| `PINCER_DEFAULT_MODEL` | `claude-sonnet-4-5-20250929` | Model for the primary; fallback for any provider without its own `*_MODEL` |
+| `PINCER_ANTHROPIC_MODEL` | | Model for the well-known `anthropic` provider |
+| `PINCER_OPENAI_API_KEY` | | OpenAI API key (well-known `openai`) |
+| `PINCER_OPENAI_MODEL` | | Model for the well-known `openai` provider (e.g. `gpt-4o`) |
+| `PINCER_OPENAI_COMPATIBLE_PROVIDER` | | Name for an OpenAI-wire endpoint (e.g. `grok`, `ollama`) |
+| `PINCER_OPENAI_COMPATIBLE_BASE_URL` | | Base URL for that endpoint |
+| `PINCER_OPENAI_COMPATIBLE_API_KEY` | | Optional key for that endpoint |
+| `PINCER_OPENAI_COMPATIBLE_MODEL` | | Model for that endpoint (e.g. `grok-3`, `llama3.2`) |
+| `PINCER_ANTHROPIC_COMPATIBLE_PROVIDER` | | Name for an Anthropic-wire endpoint |
+| `PINCER_ANTHROPIC_COMPATIBLE_BASE_URL` | | Base URL for that endpoint |
+| `PINCER_ANTHROPIC_COMPATIBLE_API_KEY` | | Optional key for that endpoint |
+| `PINCER_ANTHROPIC_COMPATIBLE_MODEL` | | Model for that endpoint |
+| `PINCER_SUMMARY_PROVIDER` | primary | Pool provider used by the Summarizer |
 
 ### Channels
 | Variable | Default | Description |

@@ -271,9 +271,9 @@ pincer/
 │   │
 │   ├── llm/                        # LLM provider abstraction
 │   │   ├── base.py                 # Abstract BaseLLMProvider + message types
-│   │   ├── anthropic_provider.py   # Anthropic Claude (with message validation)
-│   │   ├── openai_provider.py      # OpenAI GPT implementation
-│   │   ├── ollama_provider.py      # Ollama local models (stub)
+│   │   ├── anthropic_common.py     # Anthropic-wire provider (well-known + compatible)
+│   │   ├── openai_common.py        # OpenAI-wire provider (well-known + compatible)
+│   │   ├── router.py               # LLMRouter — construction + random failover entry point
 │   │   └── cost_tracker.py         # Per-model cost tracking & budget limits
 │   │
 │   ├── memory/                     # Persistent memory system
@@ -378,8 +378,9 @@ pincer/
 | `channels/whatsapp.py` | WhatsApp via neonize — QR pairing, self-chat (LID-aware), DM allowlist, groups, voice/image/docs |
 | `channels/router.py` | Cross-channel message router for proactive delivery |
 | `llm/base.py` | Abstract LLM interface, unified message types |
-| `llm/anthropic_provider.py` | Anthropic Claude — complete + stream with tool use, message validation |
-| `llm/openai_provider.py` | OpenAI GPT — complete + stream with tool use |
+| `llm/anthropic_common.py` | Anthropic-wire provider — complete + stream with tool use, message validation |
+| `llm/openai_common.py` | OpenAI-wire provider — complete + stream with tool use |
+| `llm/router.py` | LLMRouter — single construction entry point + random 1+N failover |
 | `llm/cost_tracker.py` | Per-model token cost tracking with daily budget limits |
 | `memory/store.py` | SQLite memory store with FTS5 full-text search |
 | `memory/summarizer.py` | Conversation summarization with pair-safe splitting |
@@ -406,7 +407,6 @@ pincer/
 |--------|-------------|
 | `channels/discord_channel.py` | Discord bot integration |
 | `channels/web.py` | Web/HTTP REST channel |
-| `llm/ollama_provider.py` | Ollama local model provider |
 
 ---
 
@@ -477,9 +477,15 @@ All configuration via environment variables with `PINCER_` prefix. See `.env.exa
 
 | Variable | Purpose |
 |----------|---------|
-| `PINCER_ANTHROPIC_API_KEY` | Anthropic Claude API key |
-| `PINCER_OPENAI_API_KEY` | OpenAI API key (also used for voice transcription) |
+| `PINCER_ANTHROPIC_API_KEY` | Anthropic Claude API key (well-known `anthropic`) |
+| `PINCER_OPENAI_API_KEY` | OpenAI API key (well-known `openai`; also used for voice transcription) |
 | `PINCER_TELEGRAM_BOT_TOKEN` | Telegram bot token (from @BotFather) |
+
+For Grok, Ollama, or any other endpoint, configure a *compatible* provider instead:
+`PINCER_OPENAI_COMPATIBLE_PROVIDER` / `PINCER_OPENAI_COMPATIBLE_BASE_URL` (+ optional
+`_API_KEY`), or the `PINCER_ANTHROPIC_COMPATIBLE_*` equivalents, then set
+`PINCER_DEFAULT_PROVIDER` to that name. `PINCER_FALLBACK_PROVIDERS` (≤3, comma-separated)
+enables random failover.
 
 ### Optional — WhatsApp
 

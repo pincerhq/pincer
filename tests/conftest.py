@@ -20,6 +20,18 @@ from pincer.llm.cost_tracker import CostTracker
 from pincer.tools.registry import ToolRegistry
 
 
+@pytest.fixture(autouse=True)
+def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unit tests must not read the developer's project .env file.
+
+    Settings reads env_file=("../.env", ".env") by default; disable it so local
+    config (e.g. PINCER_OPENAI_COMPATIBLE_MODEL) can't leak into assertions. Tests
+    that need a specific dotenv still pass `_env_file=...` explicitly (that init
+    kwarg overrides this).
+    """
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(

@@ -143,9 +143,13 @@ async def test_chat_loop_degrades_mcp_memory_backend(
 
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
     monkeypatch.setattr("pincer.cli._create_memory_backend", lambda _s: fake_memory)
+    mock_router = MagicMock()
+    mock_router.get_llm.return_value = mock_llm
+    mock_router.get_summarizer.return_value = mock_llm
+
     monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=mock_session))
     monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=mock_cost))
-    monkeypatch.setattr("pincer.llm.anthropic_provider.AnthropicProvider", MagicMock(return_value=mock_llm))
+    monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))
     monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=mock_agent))
 
     # Exit the input loop immediately on first prompt
@@ -198,9 +202,13 @@ async def test_chat_loop_creates_summarizer_for_non_mcp_memory(
 
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
     monkeypatch.setattr("pincer.cli._create_memory_backend", lambda _s: fake_memory)
+    mock_router = MagicMock()
+    mock_router.get_llm.return_value = mock_llm
+    mock_router.get_summarizer.return_value = mock_llm
+
     monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=AsyncMock()))
     monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=AsyncMock()))
-    monkeypatch.setattr("pincer.llm.anthropic_provider.AnthropicProvider", MagicMock(return_value=mock_llm))
+    monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))
     monkeypatch.setattr("pincer.memory.summarizer.Summarizer", _mock_summarizer)
     monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock()))
 

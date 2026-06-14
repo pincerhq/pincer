@@ -1,25 +1,77 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Annotated
 
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, SecretStr, field_validator
+from pydantic_settings import NoDecode
 
 
 class LLMProvider(StrEnum):
+    """The two well-known provider names. Any other name is resolved as a
+    configured OpenAI-/Anthropic-compatible endpoint (see `pincer.llm.router`)."""
+
     ANTHROPIC = "anthropic"
     OPENAI = "openai"
-    GROK = "grok"
-    OLLAMA = "ollama"
 
 
 class LLMSettings(BaseModel):
-    default_provider: LLMProvider = LLMProvider.ANTHROPIC
+    # Provider names are free-form strings. "openai"/"anthropic" are well-known
+    # (key only); any other name must match a configured *_compatible_provider.
+    default_provider: str = Field(default="anthropic", description="Primary LLM provider name")
+    # NoDecode: skip pydantic-settings' JSON decoding of the env value so the
+    # comma-splitting validator below receives the raw string.
+    fallback_providers: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description="Up to 3 failover provider names (comma-separated)",
+    )
+    summary_provider: str | None = Field(
+        default=None,
+        description="Provider used by the Summarizer; defaults to the primary",
+    )
+
+    # Well-known providers — set the key, base URL is built in.
+    # Each carries an optional model so failover targets the right model id
+    # (empty → falls back to default_model).
     anthropic_api_key: SecretStr = Field(default=SecretStr(""), description="Anthropic API key")
+    anthropic_model: str = Field(
+        default="", description="Model for the 'anthropic' provider (defaults to default_model)"
+    )
     openai_api_key: SecretStr = Field(default=SecretStr(""), description="OpenAI API key")
-    grok_api_key: SecretStr = Field(default=SecretStr(""), description="xAI Grok API key")
     openai_base_url: str = Field(default="https://api.openai.com/v1", description="OpenAI API base URL")
-    grok_base_url: str = Field(default="https://api.x.ai/v1", description="Grok API base URL")
-    ollama_base_url: str = Field(default="http://localhost:11434/v1", description="Ollama API base URL")
+    openai_model: str = Field(default="", description="Model for the 'openai' provider (defaults to default_model)")
+
+    # Compatible endpoints — name each one, set its base URL; key optional; model
+    # falls back to default_model when empty.
+    openai_compatible_provider: str = Field(
+        default="", description="Name for the OpenAI-wire compatible endpoint (e.g. grok, ollama)"
+    )
+    openai_compatible_base_url: str = Field(default="", description="OpenAI-wire compatible endpoint base URL")
+    openai_compatible_api_key: SecretStr = Field(
+        default=SecretStr(""), description="OpenAI-wire compatible endpoint API key (optional)"
+    )
+    openai_compatible_model: str = Field(
+        default="", description="Model for the OpenAI-wire compatible endpoint (defaults to default_model)"
+    )
+    anthropic_compatible_provider: str = Field(
+        default="", description="Name for the Anthropic-wire compatible endpoint"
+    )
+    anthropic_compatible_base_url: str = Field(default="", description="Anthropic-wire compatible endpoint base URL")
+    anthropic_compatible_api_key: SecretStr = Field(
+        default=SecretStr(""), description="Anthropic-wire compatible endpoint API key (optional)"
+    )
+    anthropic_compatible_model: str = Field(
+        default="", description="Model for the Anthropic-wire compatible endpoint (defaults to default_model)"
+    )
+
+    @field_validator("fallback_providers", mode="before")
+    @classmethod
+    def parse_fallback_providers(cls, v: str | list[str]) -> list[str]:
+        if isinstance(v, str):
+            if not v.strip():
+                return []
+            return [name.strip() for name in v.split(",") if name.strip()]
+        return v
 
     default_model: str = Field(
         default="claude-sonnet-4-5-20250929",

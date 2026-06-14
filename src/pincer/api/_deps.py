@@ -16,7 +16,6 @@ no skills, no rate limiter — those stay in the CLI.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
 
 from pincer.api.approvals import request_web_approval
 from pincer.core.agent import Agent
@@ -25,26 +24,12 @@ from pincer.llm.cost_tracker import CostTracker
 from pincer.tools.bootstrap import register_default_tools
 from pincer.tools.registry import ToolRegistry
 
-if TYPE_CHECKING:
-    from pincer.config import Settings
-    from pincer.llm.base import BaseLLMProvider
-
 logger = logging.getLogger(__name__)
-
-
-def _build_llm(settings: Settings) -> BaseLLMProvider:
-    provider = settings.default_provider.value
-    if provider == "anthropic":
-        from pincer.llm.anthropic_provider import AnthropicProvider
-
-        return AnthropicProvider(settings)
-    from pincer.llm._openai_common import OpenAICompatibleProvider
-
-    return OpenAICompatibleProvider(settings)
 
 
 async def build_agent_from_settings() -> Agent:
     from pincer.config import get_settings_relaxed
+    from pincer.llm.router import LLMRouter
 
     settings = get_settings_relaxed()
 
@@ -54,7 +39,7 @@ async def build_agent_from_settings() -> Agent:
     cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
     await cost_tracker.initialize()
 
-    llm = _build_llm(settings)
+    llm = LLMRouter().get_llm()
 
     tools = ToolRegistry()
     report = register_default_tools(tools, settings)
