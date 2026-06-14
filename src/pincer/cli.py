@@ -117,7 +117,7 @@ def run() -> None:
             console.print(f"[yellow]Telemetry init failed (non-fatal): {_tel_err}[/yellow]")
 
     console.print(f"[bold green]{settings.agent_name} starting...[/bold green]")
-    console.print(f"   Provider: {settings.default_provider.value}")
+    console.print(f"   Provider: {settings.default_provider}")
     console.print(f"   Model: {settings.default_model}")
     console.print(f"   Budget: ${settings.daily_budget_usd:.2f}/day")
     console.print(f"   Data: {settings.data_dir}")
@@ -173,21 +173,17 @@ async def _run_agent(settings: Settings) -> None:
     memory_store: BaseMemoryBackend | None = None
     summarizer: Summarizer | None = None
 
-    # Create LLM provider
-    if settings.default_provider.value == "anthropic":
-        from pincer.llm.anthropic_provider import AnthropicProvider
+    # Create LLM provider (primary + optional random failover)
+    from pincer.llm.router import LLMRouter
 
-        llm = AnthropicProvider(settings)
-    else:
-        from pincer.llm._openai_common import OpenAICompatibleProvider
-
-        llm = OpenAICompatibleProvider(settings)
+    llm_router = LLMRouter()
+    llm = llm_router.get_llm()
 
     if settings.memory_enabled:
         memory_store = _create_memory_backend(settings)
         await memory_store.initialize()
         summarizer = Summarizer(
-            llm=llm,
+            llm=llm_router.get_summarizer(),
             memory_store=memory_store,
             session_manager=session_mgr,
             summary_model=settings.summary_model,
@@ -1119,7 +1115,7 @@ def config() -> None:
     try:
         settings = get_settings()
         console.print("[bold]Pincer Configuration[/bold]\n")
-        console.print(f"  Provider:     {settings.default_provider.value}")
+        console.print(f"  Provider:     {settings.default_provider}")
         console.print(f"  Model:        {settings.default_model}")
         console.print(f"  Anthropic:    {'set' if settings.anthropic_api_key.get_secret_value() else 'not set'}")
         console.print(f"  OpenAI:       {'set' if settings.openai_api_key.get_secret_value() else 'not set'}")
@@ -1324,7 +1320,7 @@ def init() -> None:
     console.print("\n[bold]Step 1: LLM Provider[/bold]")
     provider = Prompt.ask(
         "Choose provider",
-        choices=["anthropic", "openai", "both"],
+        choices=["anthropic", "openai", "both", "compatible"],
         default="anthropic",
     )
     if provider in ("anthropic", "both"):
@@ -1339,6 +1335,20 @@ def init() -> None:
         if provider == "openai":
             env_lines.append("PINCER_DEFAULT_PROVIDER=openai")
             env_lines.append("PINCER_DEFAULT_MODEL=gpt-4o")
+    if provider == "compatible":
+        # Any OpenAI-/Anthropic-wire endpoint (Grok, Ollama, local proxy, gateway).
+        wire = Prompt.ask("Wire format", choices=["openai", "anthropic"], default="openai")
+        name = Prompt.ask("Provider name (e.g. grok, ollama, my-claude)")
+        base_url = Prompt.ask("Base URL")
+        key = Prompt.ask("API key (empty if not required)", password=True, default="")
+        model = Prompt.ask("Model id (e.g. grok-3, llama3.2)")
+        prefix = "OPENAI" if wire == "openai" else "ANTHROPIC"
+        env_lines.append(f"PINCER_DEFAULT_PROVIDER={name}")
+        env_lines.append(f"PINCER_{prefix}_COMPATIBLE_PROVIDER={name}")
+        env_lines.append(f"PINCER_{prefix}_COMPATIBLE_BASE_URL={base_url}")
+        if key:
+            env_lines.append(f"PINCER_{prefix}_COMPATIBLE_API_KEY={key}")
+        env_lines.append(f"PINCER_{prefix}_COMPATIBLE_MODEL={model}")
 
     # Step 2: Channels
     console.print("\n[bold]Step 2: Channels[/bold]")
@@ -1537,14 +1547,10 @@ async def _chat_loop() -> None:
     cost_tracker = CostTracker(settings.db_path, settings.daily_budget_usd)
     await cost_tracker.initialize()
 
-    if settings.default_provider.value == "anthropic":
-        from pincer.llm.anthropic_provider import AnthropicProvider
+    from pincer.llm.router import LLMRouter
 
-        llm = AnthropicProvider(settings)
-    else:
-        from pincer.llm._openai_common import OpenAICompatibleProvider
-
-        llm = OpenAICompatibleProvider(settings)
+    llm_router = LLMRouter()
+    llm = llm_router.get_llm()
 
     memory_store: BaseMemoryBackend | None = None
     summarizer: Summarizer | None = None
@@ -1562,7 +1568,7 @@ async def _chat_loop() -> None:
             memory_store = None
         else:
             summarizer = Summarizer(
-                llm=llm,
+                llm=llm_router.get_summarizer(),
                 memory_store=memory_store,
                 session_manager=session_mgr,
                 summary_model=settings.summary_model,

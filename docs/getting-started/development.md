@@ -53,7 +53,7 @@ pip install -e ".[dev,all]"
 
 ```bash
 cp .env.example .env
-# Edit .env with your API keys (Anthropic, OpenAI, or Ollama)
+# Edit .env with your API keys (Anthropic/OpenAI, or a compatible endpoint like Ollama)
 ```
 
 Minimal `.env` for development:

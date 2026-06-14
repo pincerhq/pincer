@@ -111,7 +111,7 @@ So I built it. Pincer is the agent I wanted. If you want the same thing, it's yo
 
 ### Prerequisites
 
-You need three things: **Python 3.12+**, **an LLM API key** (Anthropic, OpenAI, Grok, or free with Ollama), and **a Telegram bot token** (takes 2 min via [@BotFather](https://t.me/BotFather)).
+You need three things: **Python 3.12+**, **an LLM API key** (Anthropic or OpenAI out of the box; Grok, Ollama, and any OpenAI-/Anthropic-compatible endpoint also supported), and **a Telegram bot token** (takes 2 min via [@BotFather](https://t.me/BotFather)).
 
 ### Option 1: pip
 
@@ -138,7 +138,7 @@ docker compose up -d         # dashboard on localhost:8080
 ### Minimal .env
 
 ```bash
-PINCER_ANTHROPIC_API_KEY=sk-ant-...    # Anthropic, OpenAI, or Grok
+PINCER_ANTHROPIC_API_KEY=sk-ant-...    # well-known: anthropic or openai (compatible endpoints use *_COMPATIBLE_*)
 PINCER_TELEGRAM_BOT_TOKEN=7000000:AAx... # From @BotFather
 PINCER_TELEGRAM_ALLOWED_USERS=123456789  # Your Telegram user ID
 PINCER_DAILY_BUDGET_USD=5.00           # Hard daily spending limit in USD
@@ -441,16 +441,68 @@ These are focus decisions, not limitations. Every feature we didn't build is mai
 <details>
 <summary><strong>🤖 Supported Models</strong></summary>
 
-Set one or more — failover is automatic.
+Configure a primary provider and up to 3 failovers (`PINCER_FALLBACK_PROVIDERS`) — on an error the primary falls over to a randomly-chosen failover.
+
+**Two well-known providers** need only an API key (base URL is built in):
 
 | Provider | Env var | Models |
 |----------|---------|--------|
 | **Anthropic** ⭐ | `PINCER_ANTHROPIC_API_KEY` | Claude Opus 4.6 / Sonnet 4.5 / Haiku 4.5 |
 | **OpenAI** | `PINCER_OPENAI_API_KEY` | GPT-4o / GPT-5 / o-series |
-| **xAI Grok** | `PINCER_GROK_API_KEY` | Grok-2 / Grok-3 (OpenAI-compatible API) |
-| **DeepSeek** | `PINCER_LLM_API_KEY` | DeepSeek V3 / R1 |
-| **Ollama** | `OLLAMA_HOST` | Any local model — fully offline, $0 |
-| **OpenRouter** | `PINCER_LLM_API_KEY` | 100+ models, single key |
+
+**Everything else** (Grok, Ollama, OpenRouter, DeepSeek, LiteLLM, local proxies, gateways) is a *compatible endpoint* — anything speaking the OpenAI or Anthropic wire format. Name it, point it at a base URL, set its model.
+
+**Each provider carries its own model**, so failover always targets a model that endpoint actually has (`*_MODEL` / `*_COMPATIBLE_MODEL`; empty → `PINCER_DEFAULT_MODEL`).
+
+#### Fast config (one provider, the common case)
+
+```bash
+PINCER_DEFAULT_PROVIDER=anthropic
+PINCER_ANTHROPIC_API_KEY=sk-ant-...
+PINCER_DEFAULT_MODEL=claude-sonnet-4-5-20250929
+```
+
+Single compatible endpoint, e.g. Grok or fully-offline Ollama:
+
+```bash
+# Grok (OpenAI-compatible wire)
+PINCER_DEFAULT_PROVIDER=grok
+PINCER_OPENAI_COMPATIBLE_PROVIDER=grok
+PINCER_OPENAI_COMPATIBLE_BASE_URL=https://api.x.ai/v1
+PINCER_OPENAI_COMPATIBLE_API_KEY=xai-...
+PINCER_OPENAI_COMPATIBLE_MODEL=grok-3
+
+# Ollama (OpenAI-compatible wire, no key — $0)
+PINCER_DEFAULT_PROVIDER=ollama
+PINCER_OPENAI_COMPATIBLE_PROVIDER=ollama
+PINCER_OPENAI_COMPATIBLE_BASE_URL=http://localhost:11434/v1
+PINCER_OPENAI_COMPATIBLE_MODEL=llama3.2
+```
+
+#### Extended config (up to 4 providers, each its own model)
+
+One primary + three failovers; the router falls over in random order, each using its own model:
+
+```bash
+PINCER_DEFAULT_PROVIDER=anthropic
+PINCER_FALLBACK_PROVIDERS=openai,grok,my-claude
+PINCER_DEFAULT_MODEL=claude-sonnet-4-5-20250929      # primary (anthropic)
+# well-known OpenAI failover
+PINCER_OPENAI_API_KEY=sk-...
+PINCER_OPENAI_MODEL=gpt-4o
+# OpenAI-wire compatible failover (Grok)
+PINCER_OPENAI_COMPATIBLE_PROVIDER=grok
+PINCER_OPENAI_COMPATIBLE_BASE_URL=https://api.x.ai/v1
+PINCER_OPENAI_COMPATIBLE_API_KEY=xai-...
+PINCER_OPENAI_COMPATIBLE_MODEL=grok-3
+# Anthropic-wire compatible failover (proxy/gateway)
+PINCER_ANTHROPIC_COMPATIBLE_PROVIDER=my-claude
+PINCER_ANTHROPIC_COMPATIBLE_BASE_URL=https://your-proxy/v1
+PINCER_ANTHROPIC_COMPATIBLE_API_KEY=...
+PINCER_ANTHROPIC_COMPATIBLE_MODEL=claude-3-7-sonnet
+```
+
+One OpenAI-wire + one Anthropic-wire compatible endpoint can run side by side (one `*_COMPATIBLE_*` set each), so the maximum distinct pool is `anthropic` + `openai` + one OpenAI-compatible + one Anthropic-compatible.
 
 **Recommendation:** Claude Sonnet 4.5 for tool-use quality and prompt-injection resistance. Ollama for zero-cost, fully private operation.
 
@@ -540,7 +592,7 @@ pincer/
 ├── src/pincer/
 │   ├── core/         agent.py, session.py, config.py, soul.py, identity.py
 │   ├── llm/          anthropic, openai, grok, ollama, router, cost_tracker
-│   ├── channels/     telegram, whatsapp, discord, slack, teams, email, voice, signal, web
+│   ├── channels/     telegram, whatsapp, discord, slack, email, voice, signal, web
 │   ├── memory/       store (SQLite+FTS5), embeddings, entities, summarizer
 │   ├── tools/        registry, sandbox, approval, builtin/ (24 core tools)
 │   ├── skills/       loader, scanner (AST), signer

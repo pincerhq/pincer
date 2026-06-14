@@ -50,6 +50,18 @@ async def test_cost_tracker_record(cost_tracker: CostTracker) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cost_tracker_record_free_provider(cost_tracker: CostTracker) -> None:
+    cost = await cost_tracker.record(
+        provider="ollama",
+        model="llama3.2",
+        input_tokens=1000,
+        output_tokens=500,
+        is_free=True,
+    )
+    assert cost == 0.0
+
+
+@pytest.mark.asyncio
 async def test_cost_tracker_summary(cost_tracker: CostTracker) -> None:
     await cost_tracker.record("test", "gpt-4o", 100, 50)
     await cost_tracker.record("test", "gpt-4o", 200, 100)
@@ -59,3 +71,38 @@ async def test_cost_tracker_summary(cost_tracker: CostTracker) -> None:
     assert summary.total_input_tokens == 300
     assert summary.total_output_tokens == 150
     assert summary.total_usd > 0
+
+
+@pytest.mark.asyncio
+async def test_cost_tracker_image_and_budget(cost_tracker: CostTracker) -> None:
+    await cost_tracker.add_image_cost(0.05, provider="fal", model="nano-banana")
+    assert await cost_tracker.get_image_count_today() == 1
+    assert await cost_tracker.get_today_spend() >= 0.05
+
+    status = await cost_tracker.get_budget_status()
+    assert status["daily_limit"] == 100.0
+    assert status["spent_today"] >= 0.05
+    assert status["remaining"] <= 100.0
+
+
+@pytest.mark.asyncio
+async def test_cost_tracker_reporting_queries(cost_tracker: CostTracker) -> None:
+    from datetime import UTC, datetime
+
+    await cost_tracker.record("test", "gpt-4o", 100, 50)
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+
+    daily = await cost_tracker.get_daily_costs(today)
+    assert daily["request_count"] == 1
+    assert "gpt-4o" in daily["by_model"]
+
+    history = await cost_tracker.get_daily_history(today, today)
+    assert history and history[0]["requests"] == 1
+
+    by_model = await cost_tracker.get_costs_by_model(today, today)
+    assert by_model[0]["model"] == "gpt-4o"
+
+    assert await cost_tracker.get_costs_by_tool(today, today) == []
+
+    summary = await cost_tracker.get_summary(since_timestamp=1.0)
+    assert summary.total_calls == 1

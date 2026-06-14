@@ -116,6 +116,8 @@ def parse_openai_response(response: ChatCompletion) -> LLMResponse:
 
     if message.tool_calls:
         for tc in message.tool_calls:
+            if tc.type != "function":  # skip non-function (custom) tool calls
+                continue
             try:
                 args = json.loads(tc.function.arguments)
             except json.JSONDecodeError:
@@ -132,62 +134,45 @@ def parse_openai_response(response: ChatCompletion) -> LLMResponse:
     )
 
 
-_MODEL_MAPS: dict[str, dict[str, str]] = {
-    "openai": {
-        "claude-sonnet-4-5-20250929": "gpt-4o",
-        "claude-haiku-4-5-20251001": "gpt-4o-mini",
-    },
-    "grok": {
-        "claude-sonnet-4-5-20250929": "grok-3",
-        "claude-haiku-4-5-20251001": "grok-3-mini",
-        "gpt-4o": "grok-3",
-        "gpt-4o-mini": "grok-3-mini",
-    },
-    "ollama": {
-        "claude-sonnet-4-5-20250929": "llama3.2",
-        "claude-haiku-4-5-20251001": "llama3.2",
-        "gpt-4o": "llama3.2",
-        "gpt-4o-mini": "llama3.2",
-    },
-}
-
-_PROVIDER_DISPLAY_NAMES: dict[str, str] = {
-    "openai": "OpenAI",
-    "grok": "Grok",
-    "ollama": "Ollama",
-}
-
-
 # ── Base class ────────────────────────────────────────────────────────────────
 
 
 class OpenAICompatibleProvider(BaseLLMProvider):
-    """Single class for all OpenAI-compatible providers (OpenAI, Grok, Ollama)."""
+    """Provider for any OpenAI-wire endpoint.
 
-    def __init__(self, settings: Settings) -> None:
-        provider = settings.default_provider.value
-        self._provider_name = _PROVIDER_DISPLAY_NAMES.get(provider, provider.capitalize())
+    `provider == "openai"` uses the well-known API (key + built-in base URL); any
+    other name uses the configured compatible endpoint (base URL + optional key).
+    The model id is passed straight through — no claude→model mapping.
+    """
+
+    def __init__(self, settings: Settings, provider: str) -> None:
+        self._provider_name = provider
 
         if provider == "openai":
             api_key = settings.openai_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("provider 'openai' needs PINCER_OPENAI_API_KEY")
             base_url = settings.openai_base_url
-        elif provider == "grok":
-            api_key = settings.grok_api_key.get_secret_value()
-            base_url = settings.grok_base_url
-        elif provider == "ollama":
-            api_key = "ollama"
-            base_url = settings.ollama_base_url
+            model = settings.openai_model or settings.default_model
         else:
-            raise ValueError(f"Unsupported OpenAI-compatible provider: {provider!r}")
+            api_key = settings.openai_compatible_api_key.get_secret_value() or "none"
+            base_url = settings.openai_compatible_base_url
+            model = settings.openai_compatible_model or settings.default_model
+
+        # An OpenAI-wire endpoint won't accept an Anthropic-native model id. This
+        # catches PINCER_DEFAULT_MODEL (a claude-* default) leaking onto an OpenAI
+        # provider with no model of its own — fail fast instead of a runtime 404.
+        if model.startswith("claude"):
+            env = "PINCER_OPENAI_MODEL" if provider == "openai" else "PINCER_OPENAI_COMPATIBLE_MODEL"
+            raise ValueError(
+                f"OpenAI-wire provider {provider!r} resolved to model {model!r}, which an OpenAI "
+                f"endpoint will reject. Set {env} to a model this endpoint supports."
+            )
 
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=2)
-        self._model_map = _MODEL_MAPS.get(provider, {})
-        self._default_model = self._model_map.get(settings.default_model, settings.default_model)
+        self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
-
-    def _resolve_model(self, model: str) -> str:
-        return self._model_map.get(model, model)
 
     async def complete(
         self,
@@ -200,7 +185,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
     ) -> LLMResponse:
         api_messages = convert_messages_to_openai(messages, system)
         kwargs: dict[str, Any] = {
-            "model": self._resolve_model(model) if model else self._default_model,
+            "model": model or self._default_model,
             "max_tokens": max_tokens or self._default_max_tokens,
             "temperature": temperature if temperature is not None else self._default_temperature,
             "messages": api_messages,
@@ -215,7 +200,9 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         except openai.APIConnectionError as e:
             raise LLMError(f"{self._provider_name} connection error: {e}") from e
 
-        return parse_openai_response(response)
+        result = parse_openai_response(response)
+        result.provider = self._provider_name
+        return result
 
     async def stream(
         self,
@@ -228,7 +215,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
     ) -> AsyncIterator[str]:
         api_messages = convert_messages_to_openai(messages, system)
         kwargs: dict[str, Any] = {
-            "model": self._resolve_model(model) if model else self._default_model,
+            "model": model or self._default_model,
             "max_tokens": max_tokens or self._default_max_tokens,
             "temperature": temperature if temperature is not None else self._default_temperature,
             "messages": api_messages,

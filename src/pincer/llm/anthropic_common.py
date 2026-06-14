@@ -36,16 +36,31 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class AnthropicProvider(BaseLLMProvider):
-    """Claude LLM provider via Anthropic API."""
+class AnthropicCompatibleProvider(BaseLLMProvider):
+    """Provider for any Anthropic-wire endpoint.
 
-    def __init__(self, settings: Settings) -> None:
+    `provider == "anthropic"` uses the well-known API (key + SDK default
+    endpoint); any other name uses the configured compatible endpoint
+    (base URL + optional key) — local proxies, gateways, etc.
+    """
+
+    def __init__(self, settings: Settings, provider: str) -> None:
         self._settings = settings
-        self._client = AsyncAnthropic(
-            api_key=settings.anthropic_api_key.get_secret_value(),
-            max_retries=2,
-        )
-        self._default_model = settings.default_model
+        self._provider_name = provider
+
+        if provider == "anthropic":
+            api_key = settings.anthropic_api_key.get_secret_value()
+            if not api_key:
+                raise ValueError("provider 'anthropic' needs PINCER_ANTHROPIC_API_KEY")
+            base_url: str | None = None
+            model = settings.anthropic_model or settings.default_model
+        else:
+            api_key = settings.anthropic_compatible_api_key.get_secret_value() or "none"
+            base_url = settings.anthropic_compatible_base_url
+            model = settings.anthropic_compatible_model or settings.default_model
+
+        self._client = AsyncAnthropic(api_key=api_key, base_url=base_url, max_retries=2)
+        self._default_model = model
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
 
@@ -77,7 +92,9 @@ class AnthropicProvider(BaseLLMProvider):
         except anthropic.APIConnectionError as e:
             raise LLMError(f"Anthropic connection error: {e}") from e
 
-        return self._parse_response(response)
+        result = self._parse_response(response)
+        result.provider = self._provider_name
+        return result
 
     async def stream(
         self,
@@ -123,7 +140,8 @@ class AnthropicProvider(BaseLLMProvider):
         """Call API with exponential backoff on rate limits."""
         for attempt in range(max_retries):
             try:
-                return await self._client.messages.create(**kwargs)
+                result: Message = await self._client.messages.create(**kwargs)
+                return result
             except anthropic.RateLimitError as e:
                 retry_after = float(e.response.headers.get("retry-after", "5"))
                 if attempt == max_retries - 1:

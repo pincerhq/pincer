@@ -70,7 +70,7 @@ For a complete development guide including dashboard setup, debugging the agent 
 - [uv](https://github.com/astral-sh/uv) (strongly recommended) or pip
 - Git
 - A Telegram bot token (fastest channel to test against)
-- At least one LLM API key (Anthropic, OpenAI, or free with Ollama)
+- At least one LLM provider (Anthropic/OpenAI key, or a compatible endpoint such as a free local Ollama)
 
 ### Getting Running
 
@@ -101,7 +101,7 @@ If you get stuck at any step, that's a documentation bug. [Open an issue](https:
 pincer/
 ├── src/pincer/
 │   ├── core/           # Agent loop, sessions, events — the brain
-│   ├── llm/            # LLM providers (Anthropic, OpenAI, Ollama, etc.)
+│   ├── llm/            # LLM providers (OpenAI-/Anthropic-wire) + router/failover
 │   ├── channels/       # Telegram, WhatsApp, Discord — the ears and mouth
 │   ├── memory/         # SQLite + FTS5, entities — the memory
 │   ├── tools/          # Tool registry, sandbox — the hands
