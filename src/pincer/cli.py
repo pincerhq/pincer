@@ -22,6 +22,7 @@ from rich.console import Console
 
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
+    from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
     from pincer.config import Settings
     from pincer.memory.base import BaseMemoryBackend
 
@@ -621,7 +622,7 @@ async def _run_agent(settings: Settings) -> None:
         if ch_user_id is None:
             prefix = f"{incoming.channel_type.value}:"
             if canonical_id.startswith(prefix):
-                ch_user_id = canonical_id[len(prefix):]
+                ch_user_id = canonical_id[len(prefix) :]
 
         response = await agent.handle_message(
             user_id=canonical_id,
@@ -677,6 +678,8 @@ async def _run_agent(settings: Settings) -> None:
     from pincer.channels.base import ChannelType
 
     tg = None
+    wa = None
+    ms: MicrosoftTeamsChannel | None = None
     if settings.telegram_bot_token.get_secret_value():
         from pincer.channels.telegram import TelegramChannel
 
@@ -688,7 +691,6 @@ async def _run_agent(settings: Settings) -> None:
     if tg:
         router.register(ChannelType.TELEGRAM, tg)
 
-    wa = None
     if settings.whatsapp_enabled:
         try:
             from pincer.channels.whatsapp import WhatsAppChannel
@@ -933,12 +935,9 @@ async def _run_agent(settings: Settings) -> None:
 
             ms = MicrosoftTeamsChannel(settings)
             await ms.start(on_message)
-            if ms._app is not None:  # start() may bail silently if import fails
-                channel_map[ms.name] = ms
-                router.register(ChannelType.TEAMS, ms)
-                console.print(f"[green]Teams connected (port {settings.teams_port})[/green]")
-            else:
-                console.print("[yellow]Teams failed to start (check logs)[/yellow]")
+            channel_map[ms.name] = ms
+            router.register(ChannelType.TEAMS, ms)
+            console.print("[green]Teams connected (mounted under /api/apps/teams)[/green]")
         except Exception as e:
             console.print(f"[yellow]Teams failed: {e}[/yellow]")
     else:
@@ -1014,7 +1013,9 @@ async def _run_agent(settings: Settings) -> None:
     # Sprint 5: Start API server
     api_server = None
     api_task = None
-    if _port_in_use(settings.dashboard_host, settings.dashboard_port):
+    tunnel = None
+    _api_will_run = not _port_in_use(settings.dashboard_host, settings.dashboard_port)
+    if not _api_will_run:
         console.print(f"[yellow]Port {settings.dashboard_port} is already in use. API server skipped.[/yellow]")
         console.print(
             f"  Options: Set PINCER_DASHBOARD_PORT=8081 in .env, "
@@ -1031,6 +1032,7 @@ async def _run_agent(settings: Settings) -> None:
             # backend already wired) so the API server doesn't create a second
             # disconnected instance.
             api_app.state.agent = agent
+            api_app.state.teams_channel = ms
             api_config = uvicorn.Config(
                 api_app,
                 host=settings.dashboard_host,
@@ -1042,6 +1044,17 @@ async def _run_agent(settings: Settings) -> None:
             console.print(
                 f"[green]API server started on http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
             )
+            if settings.ngrok_authtoken.get_secret_value():
+                from pincer.tunnel.ngrok import NgrokTunnel
+
+                tunnel = NgrokTunnel(
+                    authtoken=settings.ngrok_authtoken.get_secret_value(),
+                    domain=settings.ngrok_domain,
+                    target_port=settings.dashboard_port,
+                )
+                public_url = await tunnel.start()
+                if public_url:
+                    console.print(f"[green]Ngrok tunnel: {public_url}[/green]")
         except Exception as e:
             console.print(f"[yellow]API server failed to start: {e}[/yellow]")
 
@@ -1060,6 +1073,8 @@ async def _run_agent(settings: Settings) -> None:
         import signal as _signal
 
         _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+        if tunnel is not None:
+            await tunnel.stop()
         if api_server:
             api_server.should_exit = True
             if api_task:

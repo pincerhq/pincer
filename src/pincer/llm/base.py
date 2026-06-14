@@ -124,7 +124,7 @@ class BaseLLMProvider(ABC):
         ...
 
     @abstractmethod
-    async def stream(
+    def stream(
         self,
         messages: list[LLMMessage],
         tools: list[dict[str, Any]] | None = None,

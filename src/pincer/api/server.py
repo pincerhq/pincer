@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from pincer.api.audit import router as audit_router
 from pincer.api.chat import router as chat_router
@@ -56,6 +56,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception as e:
             logging.getLogger(__name__).warning("Agent not built at startup: %s", e)
             app.state.agent = None
+
+    teams_channel = getattr(app.state, "teams_channel", None)
+    if teams_channel is not None:
+        sub_app = teams_channel.get_sub_app()
+        if sub_app is not None:
+            app.mount("/api/apps/teams", sub_app)
+            logging.getLogger(__name__).info("Teams sub-app mounted at /api/apps/teams")
 
     yield
     await audit.shutdown()
@@ -113,6 +120,8 @@ def create_app() -> FastAPI:
         public_paths = ("/api/health", "/api/docs", "/api/openapi.json")
         if request.url.path in public_paths:
             return await call_next(request)
+        if request.url.path.startswith("/api/apps/teams/"):
+            return await call_next(request)  # Teams webhooks use their own HMAC auth
         if not request.url.path.startswith("/api/"):
             return await call_next(request)  # dashboard static files
         if not _dashboard_token and not _web_chat_token:
@@ -131,10 +140,11 @@ def create_app() -> FastAPI:
     app.include_router(integrations_router)
     app.include_router(chat_router)
 
-    # Voice routes (Sprint 7) — mounted unconditionally; handlers check engine state
-    from pincer.voice.twiml_server import voice_router
+    if settings.voice_enabled:
+        from pincer.voice.twiml_server import twilio_router, voice_router
 
-    app.include_router(voice_router)
+        app.include_router(twilio_router)
+        app.include_router(voice_router)  # deprecated /voice/* aliases
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
@@ -164,7 +174,6 @@ def create_app() -> FastAPI:
 
     dist = _dashboard_dist()
     if dist.is_dir():
-        from fastapi.responses import FileResponse
 
         @app.get("/{full_path:path}")
         async def _spa(full_path: str) -> FileResponse:

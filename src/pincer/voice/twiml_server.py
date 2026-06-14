@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+twilio_router = APIRouter(prefix="/api/apps/twilio", tags=["apps", "twilio"])
 voice_router = APIRouter(prefix="/voice", tags=["voice"])
 
 _engine: VoiceEngine | None = None
@@ -77,7 +78,7 @@ def _twiml_response(twiml: str) -> Response:
     return Response(content=twiml, media_type="text/xml")
 
 
-@voice_router.get("/health")
+@twilio_router.get("/health")
 async def voice_health() -> dict[str, Any]:
     """Health check for Twilio webhook validation."""
     active = {}
@@ -90,7 +91,7 @@ async def voice_health() -> dict[str, Any]:
     }
 
 
-@voice_router.post("/webhook")
+@twilio_router.post("/webhook")
 async def voice_webhook(request: Request) -> Response:
     """Inbound call handler — returns TwiML to start a stream or ConversationRelay."""
     if not _engine or not _settings:
@@ -118,8 +119,8 @@ async def voice_webhook(request: Request) -> Response:
     engine_type = _settings.voice_engine.lower().strip()
 
     if engine_type == "media_streams":
-        stream_url = f"wss://{_extract_host(base_url)}/voice/stream/{call_sid}"
-        status_url = f"{base_url}/voice/status"
+        stream_url = f"wss://{_extract_host(base_url)}/api/apps/twilio/stream/{call_sid}"
+        status_url = f"{base_url}/api/apps/twilio/status"
         twiml = (
             "<Response>"
             "<Say>Connecting you now.</Say>"
@@ -128,7 +129,7 @@ async def voice_webhook(request: Request) -> Response:
             "</Response>"
         )
     else:
-        relay_url = f"{base_url}/voice/relay-webhook"
+        relay_url = f"{base_url}/api/apps/twilio/relay-webhook"
         twiml = (
             "<Response>"
             "<Say>Please wait while I connect you to your assistant.</Say>"
@@ -141,7 +142,7 @@ async def voice_webhook(request: Request) -> Response:
     return _twiml_response(twiml)
 
 
-@voice_router.post("/status")
+@twilio_router.post("/status")
 async def voice_status(request: Request) -> PlainTextResponse:
     """Call status callbacks (ringing, answered, completed)."""
     form = await request.form()
@@ -159,7 +160,7 @@ async def voice_status(request: Request) -> PlainTextResponse:
     return PlainTextResponse("OK")
 
 
-@voice_router.post("/fallback")
+@twilio_router.post("/fallback")
 async def voice_fallback(request: Request) -> Response:
     """Error fallback — plays apology message, logs error."""
     form = await request.form()
@@ -183,7 +184,7 @@ async def voice_fallback(request: Request) -> Response:
     )
 
 
-@voice_router.post("/relay-webhook")
+@twilio_router.post("/relay-webhook")
 async def relay_webhook(request: Request) -> Response:
     """ConversationRelay text webhook — receives transcribed text, returns agent response."""
     if not _engine:
@@ -219,7 +220,7 @@ async def relay_webhook(request: Request) -> Response:
     return PlainTextResponse("OK")
 
 
-@voice_router.websocket("/stream/{call_sid}")
+@twilio_router.websocket("/stream/{call_sid}")
 async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
     """Media Streams WebSocket endpoint — bidirectional raw audio."""
     await websocket.accept()
@@ -274,6 +275,41 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
         if state:
             state.metadata.pop("websocket", None)
             state.metadata.pop("stream_sid", None)
+
+
+# ── Deprecated /voice/* aliases ───────────────────────────────────────────────
+# These remain fully functional so existing Twilio webhook configs keep working.
+# Migrate to /api/apps/twilio/* at your convenience.
+
+
+@voice_router.get("/health", deprecated=True)
+async def voice_health_legacy() -> dict[str, Any]:
+    return await voice_health()
+
+
+@voice_router.post("/webhook", deprecated=True)
+async def voice_webhook_legacy(request: Request) -> Response:
+    return await voice_webhook(request)
+
+
+@voice_router.post("/status", deprecated=True)
+async def voice_status_legacy(request: Request) -> PlainTextResponse:
+    return await voice_status(request)
+
+
+@voice_router.post("/fallback", deprecated=True)
+async def voice_fallback_legacy(request: Request) -> Response:
+    return await voice_fallback(request)
+
+
+@voice_router.post("/relay-webhook", deprecated=True)
+async def relay_webhook_legacy(request: Request) -> Response:
+    return await relay_webhook(request)
+
+
+@voice_router.websocket("/stream/{call_sid}")
+async def media_stream_ws_legacy(websocket: WebSocket, call_sid: str) -> None:
+    await media_stream_ws(websocket, call_sid)
 
 
 def _extract_host(base_url: str) -> str:

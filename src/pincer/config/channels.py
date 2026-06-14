@@ -54,8 +54,8 @@ class ChannelSettings(BaseModel):
         description="Microsoft Teams / Azure Bot App (client) ID",
     )
     teams_app_tenant_id: str = Field(
-        default=None,
-        description="Microsoft Teams / Azure Bot App Tenant ID",
+        default="common",
+        description="Microsoft Teams / Azure Bot App Tenant ID (common for personal accounts)",
     )
     teams_app_password: SecretStr = Field(
         default=SecretStr(""),

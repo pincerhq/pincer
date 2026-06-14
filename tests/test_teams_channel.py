@@ -117,16 +117,16 @@ def test_split_message_over_limit_hard_cuts() -> None:
 @pytest.mark.asyncio
 async def test_start_no_credentials_logs_warning() -> None:
     ch = MicrosoftTeamsChannel(make_settings(app_id="", app_password=""))
-    with patch("pincer.channels.microsoft_teams.logger") as mock_log:
+    with pytest.raises(RuntimeError, match="PINCER_TEAMS_APP_ID"):
         await ch.start(_echo_handler)
-        mock_log.warning.assert_called_once()
     assert ch._app is None
 
 
 @pytest.mark.asyncio
 async def test_start_no_password_skips() -> None:
     ch = MicrosoftTeamsChannel(make_settings(app_password=""))
-    await ch.start(_echo_handler)
+    with pytest.raises(RuntimeError, match="PINCER_TEAMS_APP_ID"):
+        await ch.start(_echo_handler)
     assert ch._app is None
 
 
@@ -184,17 +184,12 @@ async def test_start_builds_app_and_serves() -> None:
     try:
         ch = MicrosoftTeamsChannel(make_settings())
         await ch.start(_echo_handler)
-        # Let the background serve task get scheduled
         assert ch._app is not None
         handles["app_instance"].initialize.assert_awaited_once()
-        # App constructed with the right credentials
         _, kwargs = handles["app_cls"].call_args
         assert kwargs["client_id"] == "app-123"
         assert kwargs["client_secret"] == "secret-xyz"
-        assert ch._server_task is not None
     finally:
-        if ch._server_task is not None:
-            ch._server_task.cancel()
         for name, orig in original.items():
             if orig is None:
                 sys.modules.pop(name, None)
@@ -205,13 +200,11 @@ async def test_start_builds_app_and_serves() -> None:
 @pytest.mark.asyncio
 async def test_start_import_error_is_handled() -> None:
     ch = MicrosoftTeamsChannel(make_settings())
-    # Force the SDK import to fail
     with (
         patch.dict(sys.modules, {"microsoft_teams.apps": None}),
-        patch("pincer.channels.microsoft_teams.logger") as mock_log,
+        pytest.raises(RuntimeError, match="microsoft-teams-apps not installed"),
     ):
         await ch.start(_echo_handler)
-        mock_log.error.assert_called_once()
     assert ch._app is None
 
 
@@ -219,20 +212,11 @@ async def test_start_import_error_is_handled() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stop_signals_server_exit() -> None:
+async def test_stop_logs_stopped() -> None:
     ch = MicrosoftTeamsChannel(make_settings())
-    mock_server = MagicMock()
-
-    async def _serve() -> None:
-        return None
-
-    import asyncio
-
-    ch._server = mock_server
-    ch._server_task = asyncio.create_task(_serve())
-    await ch.stop()
-    assert mock_server.should_exit is True
-    assert ch._server_task is None
+    with patch("pincer.channels.microsoft_teams.logger") as mock_log:
+        await ch.stop()
+        mock_log.info.assert_called_once_with("Teams channel stopped")
 
 
 @pytest.mark.asyncio
@@ -258,9 +242,7 @@ def test_session_key_group_chat() -> None:
 
 def test_session_key_channel_new_message() -> None:
     ch = MicrosoftTeamsChannel(make_settings())
-    activity = make_activity(
-        conversation_type="channel", conversation_id="19:abc@thread.tacv2", activity_id="act-42"
-    )
+    activity = make_activity(conversation_type="channel", conversation_id="19:abc@thread.tacv2", activity_id="act-42")
     assert ch._make_session_key(activity) == "teams-thread-act-42"
 
 
@@ -300,7 +282,8 @@ async def test_handle_activity_builds_incoming_message() -> None:
     msg = captured["msg"]
     assert msg.user_id == "aad-1"
     assert msg.text == "do a thing"
-    assert msg.channel == "teams-dm-aad-1"
+    assert msg.channel == "teams"
+    assert msg.session_id == "teams-dm-aad-1"
     assert msg.channel_type == ChannelType.TEAMS
     assert msg.raw is activity
     ctx.send.assert_awaited_once_with("reply text")
