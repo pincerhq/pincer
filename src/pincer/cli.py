@@ -15,13 +15,14 @@ import logging
 import os
 import socket
 from datetime import UTC
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.console import Console
 
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
+    from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
     from pincer.config import Settings
     from pincer.memory.base import BaseMemoryBackend
 
@@ -80,6 +81,30 @@ def _port_in_use(host: str, port: int) -> bool:
     check_host = "127.0.0.1" if host == "0.0.0.0" else host
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         return s.connect_ex((check_host, port)) == 0
+
+
+def _print_voice_webhook_urls(settings: Any, console: Any) -> None:  # type: ignore[no-untyped-def]
+    base = (settings.voice_webhook_base_url or "").rstrip("/")
+    if not base:
+        return
+    lines = [
+        "[bold]Voice webhook URLs (configure in Twilio Console):[/bold]",
+        f"  Inbound:           {base}/api/apps/twilio/webhook",
+        f"  Status callback:   {base}/api/apps/twilio/status",
+        f"  Fallback:          {base}/api/apps/twilio/fallback",
+    ]
+    engine = getattr(settings, "voice_engine", "conversation_relay").lower().strip()
+    if engine == "media_streams":
+        host = base
+        for prefix in ("https://", "http://"):
+            if host.startswith(prefix):
+                host = host[len(prefix) :]
+                break
+        lines.append(f"  Media stream WS:   wss://{host}/api/apps/twilio/stream/{{CallSid}}")
+    else:
+        lines.append(f"  ConversationRelay: {base}/api/apps/twilio/relay-webhook")
+    for line in lines:
+        console.print(line)
 
 
 @app.command()
@@ -611,9 +636,18 @@ async def _run_agent(settings: Settings) -> None:
         except Exception:
             pass
 
+        # Recover channel_user_id from a channel-scoped fallback canonical_id
+        # (e.g. "teams:{aad_id}" when has_config=True and the user is absent
+        # from PINCER_IDENTITY_MAP — no channel_identities row exists for them).
+        if ch_user_id is None:
+            prefix = f"{incoming.channel_type.value}:"
+            if canonical_id.startswith(prefix):
+                ch_user_id = canonical_id[len(prefix) :]
+
         response = await agent.handle_message(
             user_id=canonical_id,
-            channel=incoming.channel,
+            channel=incoming.session_id or incoming.channel,
+            channel_name=incoming.channel,
             text=text,
             images=incoming.images if incoming.images else None,
             channel_user_id=ch_user_id,
@@ -664,6 +698,8 @@ async def _run_agent(settings: Settings) -> None:
     from pincer.channels.base import ChannelType
 
     tg = None
+    wa = None
+    ms: MicrosoftTeamsChannel | None = None
     if settings.telegram_bot_token.get_secret_value():
         from pincer.channels.telegram import TelegramChannel
 
@@ -675,7 +711,6 @@ async def _run_agent(settings: Settings) -> None:
     if tg:
         router.register(ChannelType.TELEGRAM, tg)
 
-    wa = None
     if settings.whatsapp_enabled:
         try:
             from pincer.channels.whatsapp import WhatsAppChannel
@@ -731,6 +766,9 @@ async def _run_agent(settings: Settings) -> None:
         if channel == "whatsapp" and wa is not None:
             raw_id = await _raw_id(user_id, "whatsapp")
             return await wa.request_approval(raw_id, tool_name, arguments)
+        if channel == "teams" and ms is not None:
+            raw_id = await _raw_id(user_id, "teams")
+            return await ms.request_approval(raw_id, tool_name, arguments)
         logger.warning(
             "No approval UI for channel %s; denying %s",
             channel,
@@ -759,6 +797,12 @@ async def _run_agent(settings: Settings) -> None:
                 return "[No response from user — timed out after 120s]"
             finally:
                 _pending_ask.pop(user_id, None)
+        if channel == "teams" and ms is not None:
+            raw_id = await _raw_id(user_id, "teams")
+            return await ms.request_input(
+                raw_id,
+                f"🔌 **MCP Client** asks:\n\n{question}\n\n_Reply with your answer:_",
+            )
         return "[No supported channel for ask_user]"
 
     async def _channel_tool_event(
@@ -775,7 +819,7 @@ async def _run_agent(settings: Settings) -> None:
             except Exception:
                 logger.debug("WA tool_event notify failed", exc_info=True)
 
-    if tg is not None or wa is not None:
+    if tg is not None or wa is not None or ms is not None:
         agent._approval_callback = _channel_approval
         agent._ask_user_callback = _channel_ask_user
         agent._tool_event_callback = _channel_tool_event
@@ -904,6 +948,21 @@ async def _run_agent(settings: Settings) -> None:
     else:
         console.print("[dim]Slack skipped (no PINCER_SLACK_BOT_TOKEN / PINCER_SLACK_APP_TOKEN)[/dim]")
 
+    # Microsoft Teams channel (optional — requires PINCER_TEAMS_APP_ID + PINCER_TEAMS_APP_PASSWORD)
+    if settings.teams_app_id and settings.teams_app_password.get_secret_value():
+        try:
+            from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
+
+            ms = MicrosoftTeamsChannel(settings)
+            await ms.start(on_message)
+            channel_map[ms.name] = ms
+            router.register(ChannelType.TEAMS, ms)
+            console.print("[green]Teams connected (mounted under /api/apps/teams)[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Teams failed: {e}[/yellow]")
+    else:
+        console.print("[dim]Teams skipped (no PINCER_TEAMS_APP_ID / PINCER_TEAMS_APP_PASSWORD)[/dim]")
+
     if not router.channels:
         console.print("[yellow]No channels configured. Set PINCER_TELEGRAM_BOT_TOKEN.[/yellow]")
         return
@@ -974,7 +1033,9 @@ async def _run_agent(settings: Settings) -> None:
     # Sprint 5: Start API server
     api_server = None
     api_task = None
-    if _port_in_use(settings.dashboard_host, settings.dashboard_port):
+    tunnel = None
+    _api_will_run = not _port_in_use(settings.dashboard_host, settings.dashboard_port)
+    if not _api_will_run:
         console.print(f"[yellow]Port {settings.dashboard_port} is already in use. API server skipped.[/yellow]")
         console.print(
             f"  Options: Set PINCER_DASHBOARD_PORT=8081 in .env, "
@@ -991,6 +1052,7 @@ async def _run_agent(settings: Settings) -> None:
             # backend already wired) so the API server doesn't create a second
             # disconnected instance.
             api_app.state.agent = agent
+            api_app.state.teams_channel = ms
             api_config = uvicorn.Config(
                 api_app,
                 host=settings.dashboard_host,
@@ -1002,8 +1064,30 @@ async def _run_agent(settings: Settings) -> None:
             console.print(
                 f"[green]API server started on http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
             )
+            if settings.ngrok_authtoken.get_secret_value():
+                from pincer.tunnel.ngrok import NgrokTunnel
+
+                tunnel = NgrokTunnel(
+                    authtoken=settings.ngrok_authtoken.get_secret_value(),
+                    domain=settings.ngrok_domain,
+                    target_port=settings.dashboard_port,
+                )
+                public_url = await tunnel.start()
+                if public_url:
+                    console.print(f"[green]Ngrok tunnel: {public_url}[/green]")
+                    if (
+                        settings.voice_enabled or settings.voice_outbound_enabled
+                    ) and not settings.voice_webhook_base_url:
+                        settings.voice_webhook_base_url = public_url
+                        from pincer.voice.twiml_server import update_voice_base_url
+
+                        update_voice_base_url(public_url)
+                        console.print(f"[green]Voice webhook base URL auto-set to {public_url}[/green]")
         except Exception as e:
             console.print(f"[yellow]API server failed to start: {e}[/yellow]")
+
+    if settings.voice_enabled or settings.voice_outbound_enabled:
+        _print_voice_webhook_urls(settings, console)
 
     active = [ch.name for ch in router.channels.values()]
     console.print(
@@ -1020,6 +1104,8 @@ async def _run_agent(settings: Settings) -> None:
         import signal as _signal
 
         _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+        if tunnel is not None:
+            await tunnel.stop()
         if api_server:
             api_server.should_exit = True
             if api_task:

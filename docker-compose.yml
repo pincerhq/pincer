@@ -123,6 +123,7 @@ services:
 
   pincer-http:
     <<: *pincer-base
+    container_name: pincer
     profiles:
       - http
     env_file: .env
@@ -147,19 +148,6 @@ services:
         condition: service_healthy
       ms365-mcp:
         condition: service_healthy
-
-  ngrok:
-    image: ngrok/ngrok:latest
-    container_name: pincer-ngrok
-    profiles:
-      - ngrok
-    command: ["http", "pincer:8080"]
-    environment:
-      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
-    depends_on:
-      pincer:
-        condition: service_healthy
-    restart: unless-stopped
 
 volumes:
   pincer-data:

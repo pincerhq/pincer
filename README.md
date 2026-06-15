@@ -96,7 +96,7 @@ So I built it. Pincer is the agent I wanted. If you want the same thing, it's yo
 | **Skill vetting** | AST scan + safety score + optional signing | Community-reported | DIY | DIY |
 | **Cost controls** | Hard daily cap, auto-downgrade, per-response cost | None built-in | None built-in | DIY |
 | **Config surface** | Env vars + optional TOML | Multi-file JSON | Code | Code |
-| **Channels** | 8 + voice calling | 2–3 | 0 | 1 (usually) |
+| **Channels** | 9 + voice calling | 2–3 | 0 | 1 (usually) |
 | **Native tool count** | 304 (304+ MCP) | ~60 | ~40 | DIY |
 | **Memory** | Cross-channel, FTS5 + embeddings | Per-channel | Needs setup | DIY |
 | **MCP** | Full client + OAuth 2.0 server | None | Plugins | DIY |
@@ -169,6 +169,7 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 | **WhatsApp** | 🟡 | Multi-device protocol via neonize — QR pairing, no API costs |
 | **Discord** | 🟡 | Slash commands, threads, rich embeds via discord.py |
 | **Slack** | 🟡 | DMs, channels, threads via slack-bolt |
+| **Microsoft Teams** | 🧪 | DMs, channel @mentions, threads, group chats via microsoft-teams-apps SDK (inbound HTTP push) |
 | **Email** | 🟡 | Gmail OAuth — read, search, draft, send |
 | **Signal** | 🧪 | E2E encrypted via signal-cli-rest-api Docker sidecar; WebSocket or poll receive mode |
 | **Voice** | 🧪 | Make/receive phone calls via Twilio (~$0.12/3-min call) |
@@ -590,7 +591,7 @@ No frameworks. No abstractions. `async/await` + the Anthropic SDK.
 pincer/
 ├── src/pincer/
 │   ├── core/         agent.py, session.py, config.py, soul.py, identity.py
-│   ├── llm/          anthropic_common, openai_common, router (failover), cost_tracker
+│   ├── llm/          anthropic, openai, grok, ollama, router, cost_tracker
 │   ├── channels/     telegram, whatsapp, discord, slack, email, voice, signal, web
 │   ├── memory/       store (SQLite+FTS5), embeddings, entities, summarizer
 │   ├── tools/        registry, sandbox, approval, builtin/ (24 core tools)
@@ -627,7 +628,7 @@ pip install "pincer-agent[image]"  # Image generation (fal.ai + Gemini)
 ## 🗺️ Roadmap
 
 - [x] Agent core, memory, tools, security, cost controls
-- [x] Telegram, WhatsApp, Discord, Slack, Email, Signal
+- [x] Telegram, WhatsApp, Discord, Slack, Microsoft Teams, Email, Signal
 - [x] Skill system with sandboxing, AST scanning, signing
 - [x] Docker + one-click deploys (Railway, Render, DigitalOcean)
 - [x] Voice calling (Twilio + STT/TTS + compliance)
@@ -663,7 +664,7 @@ We welcome contributions from everyone — first-timers, experienced engineers, 
 |------|-----|:----------:|
 | **Build a skill** | [Skills guide](docs/Skills guide.md) — 50–150 lines | 🟢 Easy |
 | **Improve docs** | Fix what confused you, translate, write a tutorial | 🟢 Easy |
-| **New channel** | SMS, iMessage, Teams, Zoom, Viber, WeChat | 🟡 Medium |
+| **New channel** | SMS, iMessage, Zoom, Viber, WeChat | 🟡 Medium |
 | **Core features** | Encrypted memory, multi-agent routing | 🔴 Hard |
 
 ```bash
@@ -690,6 +691,7 @@ cd pincer && uv sync && pytest
 | **[Voice Setup](docs/Voice-calling-setup.md)** | Quick setup for outbound phone calls |
 | **[Voice Calling](docs/Voice calling.md)** | Twilio setup, STT/TTS, compliance |
 | **[Signal Setup](docs/signal-setup.md)** | signal-cli Docker sidecar setup |
+| **[Microsoft Teams Setup](docs/teams-setup.md)** | Azure Bot registration + ngrok local dev |
 | **[MCP Guide](docs/mcp-guide.md)** | Connect any MCP-compliant server; OAuth 2.0 server setup |
 | **[API Reference](docs/API reference.md)** | REST API for integrations |
 | **[Tools Catalog](docs/TOOLS_CATALOG.md)** | Every tool Pincer can call — 304 native + MCP |

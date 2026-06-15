@@ -127,15 +127,10 @@ PINCER_ELEVENLABS_VOICE_ID=pNInz6...    # Optional: specific voice
 Twilio needs to reach your Pincer instance via HTTPS. Configure your phone number's Voice webhook to:
 
 ```
-https://pincer.yourdomain.com/voice/webhook
+https://pincer.yourdomain.com/api/apps/twilio/webhook
 ```
 
-For local development, use ngrok:
-
-```bash
-ngrok http 8080
-# Copy the https URL to PINCER_VOICE_WEBHOOK_BASE_URL
-```
+**Local development / no public IP:** Pincer has a built-in ngrok integration that opens a tunnel automatically on startup — no manual `ngrok` command needed. See [Local Tunnel (ngrok)](../getting-started/local-tunnel.md) for the full setup, including static domain configuration and the exact Twilio console steps.
 
 ### 6. Verify Setup
 
@@ -368,11 +363,11 @@ The tool executed but returned an error. Check logs for the exact cause:
 
 2. **Twilio trial account** — Trial accounts can only call **verified numbers**. Add the target number in Twilio Console > Phone Numbers > Verified Caller IDs. Unverified numbers will fail with an error.
 
-3. **ngrok** — Ensure ngrok is running and the URL matches `PINCER_VOICE_WEBHOOK_BASE_URL`. Test reachability:
+3. **Tunnel** — If running locally, confirm the built-in ngrok tunnel is active (`Ngrok tunnel: https://...` in the console) and that `PINCER_VOICE_WEBHOOK_BASE_URL` matches that URL exactly (no trailing slash). Test reachability:
    ```bash
-   curl -X POST https://your-ngrok-url/voice/relay-webhook -H "Content-Type: application/json" -d '{}'
+   curl -X POST https://your-tunnel-url/api/apps/twilio/relay-webhook -H "Content-Type: application/json" -d '{}'
    ```
-   Should return `OK` (200), not an HTML interstitial page. ngrok free tier may show a "Visit Site" interstitial on first request, which breaks Twilio webhooks.
+   Should return `OK` (200). ngrok free tier may show a browser interstitial on the very first request — use a static domain to avoid it. See [Local Tunnel (ngrok)](../getting-started/local-tunnel.md).
 
 4. **Twilio Debugger** — Check Twilio Console > Monitor > Logs for call attempts and any webhook or API errors.
 

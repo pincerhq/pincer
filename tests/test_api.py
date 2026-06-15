@@ -127,6 +127,10 @@ def test_status_channels_from_dotenv_only(tmp_path, monkeypatch):
     monkeypatch.delenv("PINCER_WHATSAPP_ENABLED", raising=False)
     monkeypatch.delenv("PINCER_VOICE_ENABLED", raising=False)
     monkeypatch.delenv("PINCER_SIGNAL_ENABLED", raising=False)
+    # microsoft_teams calls load_dotenv() on import, which may populate os.environ
+    # with variables from the project .env (including a dashboard token). Remove it.
+    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
 
     get_settings_relaxed.cache_clear()
     try:
@@ -140,3 +144,91 @@ def test_status_channels_from_dotenv_only(tmp_path, monkeypatch):
         assert channels["whatsapp"] is False
     finally:
         get_settings_relaxed.cache_clear()
+
+
+def test_teams_path_bypasses_auth(monkeypatch, tmp_path):
+    """Requests to /api/apps/teams/* skip Bearer auth even when a token is configured."""
+    from pincer.config import get_settings_relaxed
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "secret-token")
+    get_settings_relaxed.cache_clear()
+    try:
+        app = create_app()
+        with TestClient(app) as c:
+            # No Authorization header — would normally get 401
+            resp = c.post("/api/apps/teams/api/messages", json={})
+            # 404 (route not registered) rather than 401 confirms auth was bypassed
+            assert resp.status_code != 401
+    finally:
+        get_settings_relaxed.cache_clear()
+
+
+def test_ngrok_domain_falls_back_to_base_url_host(monkeypatch, tmp_path):
+    """check_ngrok_domain fills ngrok_domain from base_url.host when authtoken is set."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_BASE_URL", "https://mybot.example.com")
+    monkeypatch.setenv("PINCER_NGROK_AUTHTOKEN", "tok_test")
+    monkeypatch.delenv("PINCER_NGROK_DOMAIN", raising=False)
+    from pincer.config import get_settings_relaxed
+
+    get_settings_relaxed.cache_clear()
+    try:
+        settings = get_settings_relaxed()
+        assert settings.ngrok_domain == "mybot.example.com"
+    finally:
+        get_settings_relaxed.cache_clear()
+
+
+# ── _print_voice_webhook_urls ─────────────────────────────────────────────────
+
+
+class _FakeConsole:
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def print(self, line: str) -> None:
+        self.lines.append(line)
+
+
+def test_print_voice_webhook_urls_conversation_relay():
+    from unittest.mock import MagicMock
+
+    from pincer.cli import _print_voice_webhook_urls
+
+    settings = MagicMock()
+    settings.voice_webhook_base_url = "https://abc.ngrok.io"
+    settings.voice_engine = "conversation_relay"
+    console = _FakeConsole()
+    _print_voice_webhook_urls(settings, console)
+    joined = "\n".join(console.lines)
+    assert "https://abc.ngrok.io/api/apps/twilio/webhook" in joined
+    assert "https://abc.ngrok.io/api/apps/twilio/relay-webhook" in joined
+    assert "stream" not in joined
+
+
+def test_print_voice_webhook_urls_media_streams():
+    from unittest.mock import MagicMock
+
+    from pincer.cli import _print_voice_webhook_urls
+
+    settings = MagicMock()
+    settings.voice_webhook_base_url = "https://abc.ngrok.io"
+    settings.voice_engine = "media_streams"
+    console = _FakeConsole()
+    _print_voice_webhook_urls(settings, console)
+    joined = "\n".join(console.lines)
+    assert "wss://abc.ngrok.io/api/apps/twilio/stream" in joined
+    assert "relay-webhook" not in joined
+
+
+def test_print_voice_webhook_urls_skips_when_empty():
+    from unittest.mock import MagicMock
+
+    from pincer.cli import _print_voice_webhook_urls
+
+    settings = MagicMock()
+    settings.voice_webhook_base_url = ""
+    console = _FakeConsole()
+    _print_voice_webhook_urls(settings, console)
+    assert console.lines == []

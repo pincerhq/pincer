@@ -82,10 +82,16 @@ slack = [
     "slack-sdk>=3.27.0",
     "slack-bolt>=1.18.0",
 ]
+teams = [
+    "microsoft-teams-apps[graph]>=2.0.13.4",
+]
+local = [
+    "pyngrok>=7.0",
+]
 telemetry = [
     "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@main"
 ]
-all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,telemetry]"]
+all = ["pincer-agent[search,tavily,browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic.networks import AnyHttpUrl
 
 
 class LogLevel(StrEnum):
@@ -14,6 +16,11 @@ class LogLevel(StrEnum):
 
 
 class CoreSettings(BaseModel):
+    # ── General ───────────────────────────────────────────
+    base_url: AnyHttpUrl = Field(
+        default=AnyHttpUrl("http://localhost:8080"),
+        description="Application domain (e.g. localhost, example.com)",
+    )
     # ── Storage ───────────────────────────────────────────
     data_dir: Path = Field(
         default=Path.home() / ".pincer",
@@ -38,3 +45,19 @@ class CoreSettings(BaseModel):
     briefing_time: str = Field(default="07:00", description="Morning briefing time HH:MM")
     briefing_timezone: str = Field(default="Europe/Berlin", description="Briefing timezone")
     timezone: str = Field(default="Europe/Berlin", description="Default timezone")
+
+    # ── Local Tunnel ──────────────────────────────────────
+    ngrok_authtoken: SecretStr = Field(
+        default=SecretStr(""),
+        description="ngrok auth token — activates built-in tunnel for local dev (PINCER_NGROK_AUTHTOKEN)",
+    )
+    ngrok_domain: str = Field(
+        default="",
+        description="ngrok static domain, e.g. my-bot.ngrok-free.app (PINCER_NGROK_DOMAIN)",
+    )
+
+    @model_validator(mode="after")
+    def check_ngrok_domain(self) -> Self:
+        if not self.ngrok_domain and self.ngrok_authtoken:
+            self.ngrok_domain = self.base_url.host or ""  # noqa: F841
+        return self

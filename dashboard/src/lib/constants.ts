@@ -49,6 +49,7 @@ export const CHANNEL_COLORS: Record<string, string> = {
   whatsapp: "#25D366",
   discord: "#5865F2",
   signal: "#3A76F0",
+  teams: "#6264A7",
   web: "#888888",
   cli: "#888888",
 }

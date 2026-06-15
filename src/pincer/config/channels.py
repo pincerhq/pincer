@@ -48,6 +48,30 @@ class ChannelSettings(BaseModel):
         description="Optional Slack user IDs allowed to use the bot (empty = allow all)",
     )
 
+    # ── Microsoft Teams ───────────────────────────────────
+    teams_app_id: str = Field(
+        default="",
+        description="Microsoft Teams / Azure Bot App (client) ID",
+    )
+    teams_app_tenant_id: str = Field(
+        default="common",
+        description="Microsoft Teams / Azure Bot App Tenant ID (common for personal accounts)",
+    )
+    teams_app_password: SecretStr = Field(
+        default=SecretStr(""),
+        description="Teams bot App Password (client secret)",
+    )
+    teams_port: int = Field(
+        default=3978,
+        ge=1,
+        le=65535,
+        description="Local port for the Teams bot HTTP server (/api/messages)",
+    )
+    teams_user_allowlist: list[str] = Field(
+        default_factory=list,
+        description="Optional Teams user AAD IDs / UPNs allowed to use the bot (empty = allow all)",
+    )
+
     # ── Signal ────────────────────────────────────────────
     signal_enabled: bool = Field(default=False, description="Enable Signal channel")
     signal_api_url: str = Field(default="http://signal-api:8080", description="signal-cli-rest-api base URL")
@@ -121,7 +145,7 @@ class ChannelSettings(BaseModel):
         description="Default pincer_user_id for proactive messages",
     )
 
-    @field_validator("slack_user_allowlist", mode="before")
+    @field_validator("slack_user_allowlist", "teams_user_allowlist", mode="before")
     @classmethod
     def parse_slack_allowlist(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):

@@ -333,21 +333,28 @@ class Agent:
         text: str,
         images: list[tuple[bytes, str]] | None = None,
         channel_user_id: str | None = None,
+        channel_name: str | None = None,
     ) -> AgentResponse:
         """
         Main entry point: process a user message and return agent's response.
 
         Args:
             user_id: Canonical pincer_user_id
-            channel: Channel name (telegram, whatsapp, etc.)
+            channel: Session key (used for session isolation).  For most
+                channels this is the channel name.  For channels where the
+                session key differs from the channel name (e.g. Teams per-thread
+                keys), pass the session key here and the stable channel name via
+                ``channel_name``.
             text: User's message text
             images: Optional list of (raw_bytes, media_type) tuples
             channel_user_id: Stable channel-specific user ID (e.g. phone number,
                 Telegram numeric ID).  Used to tag memories with both
-                ``user:{user_id}`` and ``user:{channel}:{channel_user_id}`` so
-                records are findable by either identifier.
+                ``user:{user_id}`` and ``user:{channel_name}:{channel_user_id}``
+                so records are findable by either identifier.
+            channel_name: Stable channel name for memory tagging when it differs
+                from the session key.  Defaults to ``channel`` when omitted.
         """
-        self._last_active = (user_id, channel)
+        self._last_active = (user_id, channel_name or channel)
         session = await self._sessions.get_or_create(user_id, channel)
 
         # Snapshot onboarding state BEFORE the user message is appended.
@@ -465,7 +472,7 @@ class Agent:
                 iteration_had_error = False
                 for tool_call in response.tool_calls:
                     tool_calls_count += 1
-                    result = await self._execute_tool(tool_call, user_id, channel)
+                    result = await self._execute_tool(tool_call, user_id, channel, channel_name)
 
                     result_msg = LLMMessage(
                         role=MessageRole.TOOL_RESULT,
@@ -522,7 +529,8 @@ class Agent:
         # Store the final exchange as a memory for future retrieval
         if self._memory and final_text:
             try:
-                extra_tags = [f"user:{channel}:{channel_user_id}"] if channel_user_id else None
+                tag_channel = channel_name or channel
+                extra_tags = [f"user:{tag_channel}:{channel_user_id}"] if channel_user_id else None
                 await self._memory.store_memory(
                     user_id=user_id,
                     content=(
@@ -823,6 +831,7 @@ class Agent:
         tool_call: ToolCall,
         user_id: str,
         channel: str,
+        channel_name: str | None = None,
     ) -> ToolResult:
         """Execute a single tool call, catching errors.
 
@@ -870,7 +879,7 @@ class Agent:
                         tool_call.name,
                         tool_call.arguments,
                         user_id,
-                        channel,
+                        channel_name or channel,
                     )
                 except Exception:
                     logger.exception("Approval callback failed for '%s'", tool_call.name)
