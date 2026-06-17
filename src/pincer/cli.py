@@ -1075,14 +1075,6 @@ async def _run_agent(settings: Settings) -> None:
                 public_url = await tunnel.start()
                 if public_url:
                     console.print(f"[green]Ngrok tunnel: {public_url}[/green]")
-                    if (
-                        settings.voice_enabled or settings.voice_outbound_enabled
-                    ) and not settings.voice_webhook_base_url:
-                        settings.voice_webhook_base_url = public_url
-                        from pincer.voice.twiml_server import update_voice_base_url
-
-                        update_voice_base_url(public_url)
-                        console.print(f"[green]Voice webhook base URL auto-set to {public_url}[/green]")
         except Exception as e:
             console.print(f"[yellow]API server failed to start: {e}[/yellow]")
 
