@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from pincer.voice.twiml_server import init_voice_routes, twilio_router, update_voice_base_url, voice_router
+from pincer.voice.twiml_server import init_voice_routes, twilio_router, voice_router
 
 
 @pytest.fixture
@@ -141,26 +141,6 @@ class TestRelayWebhook:
         )
         assert response.status_code == 200
         mock_engine.interrupt_speech.assert_called_once_with("CA123")
-
-
-# ── update_voice_base_url ─────────────────────────────────────────────────────
-
-
-def test_update_voice_base_url_mutates_settings(mock_engine, mock_settings):
-    init_voice_routes(mock_engine, mock_settings)
-    update_voice_base_url("https://new.ngrok.io")
-    assert mock_settings.voice_webhook_base_url == "https://new.ngrok.io"
-
-
-def test_update_voice_base_url_noop_before_init():
-    from pincer.voice import twiml_server
-
-    original = twiml_server._settings
-    twiml_server._settings = None
-    try:
-        update_voice_base_url("https://example.com")  # must not raise
-    finally:
-        twiml_server._settings = original
 
 
 # ── Deprecated /voice/* aliases ───────────────────────────────────────────────

@@ -45,6 +45,12 @@ class Settings(BaseSettings, LLMSettings, ChannelSettings, ToolSettings, APISett
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_base_urls(self) -> Settings:
+        if not self.voice_webhook_base_url:
+            self.voice_webhook_base_url = f"https://{self.base_url.host}"
+        return self
+
     @property
     def db_path(self) -> Path:
         return self.data_dir / "pincer.db"
