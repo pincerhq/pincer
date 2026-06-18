@@ -605,7 +605,7 @@ def main() -> None:
         )
         uvicorn.run(cors_app, host=args.host, port=args.port)
     else:
-        mcp.run(transport="stdio")
+        mcp.run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":

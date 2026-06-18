@@ -395,9 +395,32 @@ async def sandbox_streams(sandbox: MCPSandbox) -> Any:
             except Exception:
                 logger.debug("MCPSandbox '%s' stdin writer exited", sandbox.server_name, exc_info=True)
 
+    async def _stderr_reader() -> None:
+        """Forward subprocess stderr lines live (not just buffered for shutdown).
+
+        Sandboxed stdio servers may print interactive prompts to stderr on first
+        run (e.g. a device-code auth link). Those must be visible immediately —
+        get_stderr() only surfaces buffered output, and by the time the sandbox
+        is stopped the prompt is long past useful.
+        """
+        stderr_pipe = proc.stderr
+        if stderr_pipe is None:
+            return
+        try:
+            while True:
+                line: bytes = await anyio.to_thread.run_sync(stderr_pipe.readline, abandon_on_cancel=True)
+                if not line:
+                    break
+                text = line.decode(errors="replace").rstrip()
+                if text:
+                    print(f"[{sandbox.server_name}] {text}", file=sys.stderr, flush=True)
+        except Exception:
+            logger.debug("MCPSandbox '%s' stderr reader exited", sandbox.server_name, exc_info=True)
+
     async with anyio.create_task_group() as tg:
         tg.start_soon(_stdout_reader)
         tg.start_soon(_stdin_writer)
+        tg.start_soon(_stderr_reader)
         try:
             yield read_receive, write_send
         finally:

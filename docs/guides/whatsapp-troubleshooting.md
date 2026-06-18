@@ -46,6 +46,29 @@ rm -f ./pincer-wa.sqlite3   # or the path printed above
 pincer run --channel whatsapp
 ```
 
+NOTE: neonize strictly require libmagick library. You should install it system wide if you run app without docker.
+
+MacOS:
+
+```bash
+brew install imagemagick
+```
+
+Linux:
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install libmagick++-dev
+# Fedora/CentOS/RHEL
+sudo yum install ImageMagick-devel
+```
+
+Windows:
+
+```
+WIP
+```
+
 Scan the QR code that appears in the terminal.
 
 ### 2. Verify the shipped backend
