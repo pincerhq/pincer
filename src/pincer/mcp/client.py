@@ -81,8 +81,11 @@ class MCPClientSession:
             # Enter ClientSession outside fail_after — it spawns background tasks whose
             # cancel scope must outlive our timeout scope.
             self._session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
-            # Timeout only the pure protocol operations.
-            with anyio.fail_after(self.config.timeout):
+            # Bound the handshake by startup_timeout, not the per-tool-call timeout —
+            # servers that run one-time interactive auth (e.g. device code flow) on
+            # first launch need a much longer window here without slowing down every
+            # subsequent tool call.
+            with anyio.fail_after(self.config.startup_timeout):
                 await self._session.initialize()
                 await self._discover_tools()
 

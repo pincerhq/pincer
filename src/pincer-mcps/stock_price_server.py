@@ -246,7 +246,7 @@ def main() -> None:
         cors_app = CORSMiddleware(app=app, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
         uvicorn.run(cors_app, host=args.host, port=args.port)
     else:
-        mcp.run(transport="stdio")
+        mcp.run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":
