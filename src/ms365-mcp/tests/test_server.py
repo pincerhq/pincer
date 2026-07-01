@@ -6,6 +6,7 @@ import argparse
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from fastmcp.exceptions import NotFoundError, ToolError
 from ms365 import ms365_server
 
 if TYPE_CHECKING:
@@ -18,8 +19,9 @@ _EXPECTED_COUNTS = {
     "todo": 8,
     "contacts": 6,
     "onenote": 5,
+    "directory": 1,
 }
-_TOTAL = sum(_EXPECTED_COUNTS.values())  # 61
+_TOTAL = sum(_EXPECTED_COUNTS.values())  # 62
 
 
 # ── collect_tools ─────────────────────────────────────────────────────────────
@@ -132,6 +134,7 @@ def test_read_tools_no_approval_flag(mock_client: MagicMock) -> None:
         "onenote__list_sections",
         "onenote__list_pages",
         "onenote__get_page_content",
+        "ms365__search_users",
     ]
     for name in read_tools:
         assert not by_name[name].require_approval, f"{name} should not require approval"
@@ -149,52 +152,92 @@ def test_low_risk_write_tools_no_approval(mock_client: MagicMock) -> None:
 
 @pytest.mark.asyncio
 async def test_build_server_lists_all_tools(mock_client: MagicMock) -> None:
-    import mcp.types as types
-
-    server, specs = ms365_server.build_server(mock_client)
+    mcp, specs = ms365_server.build_server(mock_client)
     assert len(specs) == _TOTAL
 
-    list_handler = server.request_handlers[types.ListToolsRequest]
-    result = await list_handler(types.ListToolsRequest(method="tools/list"))
-    tools = result.root.tools
+    tools = await mcp.list_tools()
     assert len(tools) == _TOTAL
 
     by_name = {t.name: t for t in tools}
-    assert by_name["outlook__send_message"].annotations.destructiveHint is True
-    assert by_name["outlook__list_messages"].annotations.readOnlyHint is True
+    send_message_annotations = by_name["outlook__send_message"].annotations
+    list_messages_annotations = by_name["outlook__list_messages"].annotations
+    assert send_message_annotations is not None
+    assert list_messages_annotations is not None
+    assert send_message_annotations.destructiveHint is True
+    assert list_messages_annotations.readOnlyHint is True
+
+
+@pytest.mark.asyncio
+async def test_build_server_schema_matches_spec_parameters(mock_client: MagicMock) -> None:
+    """FastMCP derives each tool's JSON schema from the handler's real signature —
+    confirm it lines up with the `parameters` dict `collect_tools()` still carries
+    (and, crucially, doesn't leak the bound `client: GraphClient` argument)."""
+    mcp, _ = ms365_server.build_server(mock_client)
+    tool = await mcp.get_tool("outlook__list_messages")
+    assert tool is not None
+    schema = tool.parameters
+    assert "client" not in schema["properties"]
+    assert schema["properties"]["folder"]["default"] == "Inbox"
+    assert schema["properties"]["max_results"]["default"] == 25
 
 
 @pytest.mark.asyncio
 async def test_call_tool_dispatches_to_handler(mock_client: MagicMock) -> None:
-    import mcp.types as types
-
-    server, _ = ms365_server.build_server(mock_client)
-    call_handler = server.request_handlers[types.CallToolRequest]
-    req = types.CallToolRequest(
-        method="tools/call",
-        params=types.CallToolRequestParams(
-            name="outlook__list_messages",
-            arguments={"folder": "Inbox", "max_results": 5},
-        ),
-    )
-    result = await call_handler(req)
-    content = result.root.content
+    mcp, _ = ms365_server.build_server(mock_client)
+    result = await mcp.call_tool("outlook__list_messages", {"folder": "Inbox", "max_results": 5})
+    content = result.content
     assert content and content[0].type == "text"
     mock_client.get.assert_awaited()
 
 
 @pytest.mark.asyncio
-async def test_call_unknown_tool_returns_error(mock_client: MagicMock) -> None:
-    import mcp.types as types
+async def test_call_unknown_tool_raises(mock_client: MagicMock) -> None:
+    """FastMCP raises for an unregistered tool name instead of returning
+    "[Error] Unknown tool: ..." as ordinary text — a deliberate behavior change
+    from the low-level SDK version. A real MCP client sees this as a protocol
+    error result (`isError=True`) rather than a disguised successful response;
+    Pincer's own bridge (`pincer/mcp/bridge.py::_format_result`) already extracts
+    the text content regardless of `isError`, so the LLM still sees a clear
+    error string either way."""
+    mcp, _ = ms365_server.build_server(mock_client)
+    with pytest.raises(NotFoundError, match="nope__nope"):
+        await mcp.call_tool("nope__nope", {})
 
-    server, _ = ms365_server.build_server(mock_client)
-    call_handler = server.request_handlers[types.CallToolRequest]
-    req = types.CallToolRequest(
-        method="tools/call",
-        params=types.CallToolRequestParams(name="nope__nope", arguments={}),
-    )
-    result = await call_handler(req)
-    assert "Unknown tool" in result.root.content[0].text
+
+# ── build_http_app ─────────────────────────────────────────────────────────────
+
+
+def test_build_http_app_health_endpoint(mock_client: MagicMock) -> None:
+    from starlette.testclient import TestClient
+
+    mcp, _ = ms365_server.build_server(mock_client)
+    app = ms365_server.build_http_app(mcp)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/health")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "healthy"
+    assert data["service"] == "ms365-mcp"
+
+
+def test_build_http_app_root_endpoint(mock_client: MagicMock) -> None:
+    from starlette.testclient import TestClient
+
+    mcp, _ = ms365_server.build_server(mock_client)
+    app = ms365_server.build_http_app(mcp)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        resp = client.get("/")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "healthy"
+
+
+def test_build_http_app_has_mcp_route(mock_client: MagicMock) -> None:
+    mcp, _ = ms365_server.build_server(mock_client)
+    app = ms365_server.build_http_app(mcp)
+    route_paths = [r.path for r in app.routes]
+    assert "/mcp" in route_paths
 
 
 # ── _build_client ─────────────────────────────────────────────────────────────
@@ -253,42 +296,6 @@ async def test_build_client_exits_when_device_flow_fails(monkeypatch: pytest.Mon
     monkeypatch.setattr("ms365.auth.MS365Auth", _FailingAuth)
     with pytest.raises(SystemExit):
         await ms365_server._build_client(None)
-
-
-# ── build_http_app ─────────────────────────────────────────────────────────────
-
-
-def test_build_http_app_health_endpoint(mock_client: MagicMock) -> None:
-    from starlette.testclient import TestClient
-
-    server, _ = ms365_server.build_server(mock_client)
-    app = ms365_server.build_http_app(server)
-
-    with TestClient(app, raise_server_exceptions=False) as client:
-        resp = client.get("/health")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["status"] == "healthy"
-    assert data["service"] == "ms365-mcp"
-
-
-def test_build_http_app_root_endpoint(mock_client: MagicMock) -> None:
-    from starlette.testclient import TestClient
-
-    server, _ = ms365_server.build_server(mock_client)
-    app = ms365_server.build_http_app(server)
-
-    with TestClient(app, raise_server_exceptions=False) as client:
-        resp = client.get("/")
-    assert resp.status_code == 200
-    assert resp.json()["status"] == "healthy"
-
-
-def test_build_http_app_has_mcp_route(mock_client: MagicMock) -> None:
-    server, _ = ms365_server.build_server(mock_client)
-    app = ms365_server.build_http_app(server)
-    route_paths = [r.path for r in app.routes]
-    assert "/mcp" in route_paths
 
 
 # ── _build_client_sync ────────────────────────────────────────────────────────
@@ -439,26 +446,15 @@ async def test_async_main_filters_services(mock_client: MagicMock, monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_run_stdio_calls_server_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    import contextlib
+async def test_run_stdio_calls_run_async() -> None:
     from unittest.mock import AsyncMock, MagicMock
 
-    mock_server = MagicMock()
-    mock_server.run = AsyncMock()
-    mock_server.create_initialization_options.return_value = {"version": "1.0"}
+    mock_mcp = MagicMock()
+    mock_mcp.run_async = AsyncMock()
 
-    read_stream = MagicMock()
-    write_stream = MagicMock()
+    await ms365_server.run_stdio(mock_mcp)
 
-    @contextlib.asynccontextmanager
-    async def _fake_stdio_server() -> Any:  # type: ignore[return]
-        yield read_stream, write_stream
-
-    monkeypatch.setattr("mcp.server.stdio.stdio_server", _fake_stdio_server)
-
-    await ms365_server.run_stdio(mock_server)
-
-    mock_server.run.assert_awaited_once_with(read_stream, write_stream, {"version": "1.0"})
+    mock_mcp.run_async.assert_awaited_once_with(transport="stdio", show_banner=False)
 
 
 # ── _parse_args ───────────────────────────────────────────────────────────────
@@ -492,24 +488,16 @@ def test_parse_args_read_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_call_tool_handler_exception_returns_error_text(mock_client: MagicMock) -> None:
-    import mcp.types as types
-
+async def test_call_tool_handler_exception_raises_tool_error(mock_client: MagicMock) -> None:
+    """A Graph API failure surfaces as a `ToolError` (FastMCP's native tool-failure
+    signal, `isError=True` on the wire) rather than the old `[Error] ...` text
+    disguised as a normal response. See `test_call_unknown_tool_raises` for why
+    this is a deliberate, low-risk change rather than a regression."""
     mock_client.get.side_effect = RuntimeError("Graph API down")
 
-    server, _ = ms365_server.build_server(mock_client)
-    call_handler = server.request_handlers[types.CallToolRequest]
-    req = types.CallToolRequest(
-        method="tools/call",
-        params=types.CallToolRequestParams(
-            name="outlook__list_messages",
-            arguments={"folder": "Inbox", "max_results": 5},
-        ),
-    )
-    result = await call_handler(req)
-    content = result.root.content
-    assert content and "RuntimeError" in content[0].text
-    assert "Graph API down" in content[0].text
+    mcp, _ = ms365_server.build_server(mock_client)
+    with pytest.raises(ToolError, match="Graph API down"):
+        await mcp.call_tool("outlook__list_messages", {"folder": "Inbox", "max_results": 5})
 
 
 # ── run_http ──────────────────────────────────────────────────────────────────
@@ -520,7 +508,7 @@ async def test_run_http_calls_uvicorn_serve(mock_client: MagicMock, monkeypatch:
     import sys
     from unittest.mock import AsyncMock, MagicMock
 
-    server, _ = ms365_server.build_server(mock_client)
+    mcp, _ = ms365_server.build_server(mock_client)
 
     mock_uvicorn_server = MagicMock()
     mock_uvicorn_server.serve = AsyncMock()
@@ -531,7 +519,7 @@ async def test_run_http_calls_uvicorn_serve(mock_client: MagicMock, monkeypatch:
 
     monkeypatch.setitem(sys.modules, "uvicorn", mock_uvicorn)
 
-    await ms365_server.run_http(server, "127.0.0.1", 9999)
+    await ms365_server.run_http(mcp, "127.0.0.1", 9999)
 
     mock_uvicorn_server.serve.assert_awaited_once()
 

@@ -2387,6 +2387,7 @@ name = "ms365-mcp"
 version = "0.8.0"
 source = { editable = "src/ms365-mcp" }
 dependencies = [
+    { name = "fastmcp" },
     { name = "httpx" },
     { name = "mcp" },
     { name = "msal" },
@@ -2411,15 +2412,16 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastmcp", specifier = ">=3.2,<4" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "mcp", specifier = ">=1.8.0" },
+    { name = "mcp", specifier = ">=1.24.0" },
     { name = "msal", specifier = ">=1.28.0" },
     { name = "pydantic-settings", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0.0" },
     { name = "starlette", specifier = ">=0.41.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.35.0" },
 ]
 provides-extras = ["dev"]
 

@@ -66,9 +66,15 @@ class GraphClient:
         self,
         path: str,
         params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """GET request to Graph API."""
-        return await self._request("GET", path, params=params)
+        """GET request to Graph API.
+
+        ``headers`` merges on top of the default Authorization/Content-Type
+        headers — used for endpoints that need e.g. ``ConsistencyLevel: eventual``
+        for advanced query capabilities (directory filtering/counting).
+        """
+        return await self._request("GET", path, params=params, extra_headers=headers)
 
     async def post(
         self,
@@ -142,10 +148,13 @@ class GraphClient:
         path: str,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Make an HTTP request with rate limit retry."""
         client = await self._ensure_client()
         headers = await self._get_headers()
+        if extra_headers:
+            headers.update(extra_headers)
 
         for attempt in range(3):
             resp = await client.request(method, path, params=params, json=json, headers=headers)
