@@ -21,6 +21,7 @@ Token is cached at ``~/.pincer/ms365_token_cache.json`` for subsequent starts.
 from __future__ import annotations
 
 import argparse
+import inspect
 import logging
 import os
 from dataclasses import dataclass
@@ -28,6 +29,8 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from fastmcp import FastMCP
 
     from ms365.graph_client import GraphClient
 
@@ -38,13 +41,14 @@ logger = logging.getLogger("ms365.ms365_server")
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
-SERVICES = ("email", "calendar", "onedrive", "todo", "contacts", "onenote")
+SERVICES = ("email", "calendar", "onedrive", "todo", "contacts", "onenote", "directory")
 
 
 def _registrars() -> dict[str, Callable[..., int]]:
     """Map each service to the register function that emits its tools."""
     from ms365.tools_calendar import register_calendar_tools
     from ms365.tools_contacts import register_contacts_tools
+    from ms365.tools_directory import register_directory_tools
     from ms365.tools_email import register_email_tools
     from ms365.tools_onedrive import register_onedrive_tools
     from ms365.tools_onenote import register_onenote_tools
@@ -56,6 +60,7 @@ def _registrars() -> dict[str, Callable[..., int]]:
         "onedrive": register_onedrive_tools,
         "todo": register_todo_tools,
         "contacts": register_contacts_tools,
+        "directory": register_directory_tools,
         "onenote": register_onenote_tools,
     }
 
@@ -127,110 +132,130 @@ def collect_tools(
     return registry.specs
 
 
+def _resolve_annotation(raw: Any, globalns: dict[str, Any]) -> Any:
+    """Best-effort resolve a (possibly stringified) annotation to a real type.
+
+    ``tools_*.py`` use ``from __future__ import annotations``, so every
+    parameter annotation on the original tool functions is a plain string at
+    runtime (e.g. ``"str"``, ``"bool"``). Evaluate it against the defining
+    module's globals; fall back to ``Any`` if it can't be resolved (e.g. a
+    forward reference like ``GraphClient`` that's only imported under
+    ``TYPE_CHECKING`` and isn't needed once ``client`` has been dropped).
+    """
+    if not isinstance(raw, str):
+        return raw
+    try:
+        return eval(raw, globalns)  # noqa: S307 — trusted first-party annotation strings
+    except NameError:
+        return Any
+
+
+def _with_exposed_signature(spec: _ToolSpec) -> Callable[..., Any]:
+    """Build a thin wrapper FastMCP can introspect for the tool's JSON schema.
+
+    ``register_*_tools()`` wraps every tool as ``async def wrapper(**kwargs)``
+    via ``functools.wraps(fn)``, which also copies ``fn.__annotations__``
+    verbatim — including the ``client: GraphClient`` parameter, whose type is
+    only available under ``TYPE_CHECKING``. FastMCP/pydantic eagerly resolve
+    every entry in ``__annotations__``, which would crash trying to look up
+    ``GraphClient`` at runtime. Build a fresh function exposing only the
+    already-bound handler's real, non-``client`` parameters with concrete
+    (non-string) annotations instead.
+    """
+    handler = spec.handler
+    original = getattr(handler, "__wrapped__", None)
+    if original is None:
+        return handler
+
+    sig = inspect.signature(original)
+    globalns = getattr(original, "__globals__", {})
+    kept_params = [p for p in sig.parameters.values() if p.name != "client"]
+    resolved_params = [p.replace(annotation=_resolve_annotation(p.annotation, globalns)) for p in kept_params]
+    return_annotation = _resolve_annotation(sig.return_annotation, globalns)
+
+    async def tool_fn(**kwargs: Any) -> str:
+        return await handler(**kwargs)
+
+    tool_fn.__name__ = spec.name
+    tool_fn.__doc__ = spec.description
+    tool_fn.__signature__ = sig.replace(parameters=resolved_params, return_annotation=return_annotation)  # type: ignore[attr-defined]
+    tool_fn.__annotations__ = {
+        p.name: p.annotation for p in resolved_params if p.annotation is not inspect.Parameter.empty
+    }
+    if return_annotation is not inspect.Signature.empty:
+        tool_fn.__annotations__["return"] = return_annotation
+    return tool_fn
+
+
 def build_server(
     client: GraphClient,
     services: list[str] | None = None,
     read_only: bool = False,
-) -> tuple[Any, list[_ToolSpec]]:
-    """Build a low-level MCP ``Server`` exposing the collected MS365 tools.
+) -> tuple[FastMCP, list[_ToolSpec]]:
+    """Build a FastMCP app exposing the collected MS365 tools.
 
-    Returns the server and the list of specs it serves.
+    Returns the FastMCP instance and the list of specs it serves.
     """
-    import mcp.types as types
-    from mcp.server.lowlevel import Server
+    from fastmcp import FastMCP
+    from fastmcp.tools import Tool
+    from fastmcp.tools.tool import ToolAnnotations
 
     specs = collect_tools(client, services=services, read_only=read_only)
-    by_name = {s.name: s for s in specs}
 
-    server: Server = Server("pincer-ms365")
-
-    @server.list_tools()  # type: ignore[no-untyped-call,untyped-decorator]
-    async def list_tools() -> list[types.Tool]:
-        return [
-            types.Tool(
-                name=s.name,
-                description=s.description,
-                inputSchema=s.parameters,
-                annotations=types.ToolAnnotations(
-                    readOnlyHint=not s.require_approval,
-                    destructiveHint=s.require_approval,
+    mcp = FastMCP("pincer-ms365")
+    for spec in specs:
+        mcp.add_tool(
+            Tool.from_function(
+                _with_exposed_signature(spec),
+                name=spec.name,
+                description=spec.description,
+                annotations=ToolAnnotations(
+                    readOnlyHint=not spec.require_approval,
+                    destructiveHint=spec.require_approval,
                 ),
             )
-            for s in specs
-        ]
-
-    @server.call_tool()  # type: ignore[no-untyped-call,untyped-decorator]
-    async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-        spec = by_name.get(name)
-        if spec is None:
-            return [types.TextContent(type="text", text=f"[Error] Unknown tool: {name}")]
-        try:
-            result = await spec.handler(**(arguments or {}))
-        except Exception as exc:
-            logger.exception("MS365 tool '%s' failed", name)
-            result = f"[Error] {name}: {type(exc).__name__}: {exc}"
-        return [types.TextContent(type="text", text=result)]
+        )
 
     logger.debug("MS365 MCP server built with %d tool(s)", len(specs))
-    return server, specs
+    return mcp, specs
 
 
 # ── Transports ────────────────────────────────────────────────────────────────
 
 
-async def run_stdio(server: Any) -> None:
+async def run_stdio(mcp: FastMCP) -> None:
     """Serve the MCP server over stdio (default transport)."""
-    from mcp.server.stdio import stdio_server
-
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options(),
-        )
+    # show_banner=False: the banner (and its PyPI version check) would otherwise
+    # print straight to stderr on every launch and make an unnecessary network call.
+    await mcp.run_async(transport="stdio", show_banner=False)
 
 
-def build_http_app(server: Any) -> Any:
+def build_http_app(mcp: FastMCP) -> Any:
     """Build a Starlette ASGI app serving the MCP server over streamable HTTP.
 
     Exposes the MCP endpoint at ``/mcp`` and a ``/health`` probe.
+
+    Note: this bypasses FastMCP's own ``run_http_async`` (which is what prints
+    the startup banner) in favor of building the app and serving it with our
+    own uvicorn config, so no banner-suppression flag is needed here.
     """
-    import contextlib
-
-    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-    from starlette.applications import Starlette
     from starlette.responses import JSONResponse
-    from starlette.routing import Mount, Route
-
-    session_manager = StreamableHTTPSessionManager(app=server, stateless=True)
-
-    async def handle_mcp(scope: Any, receive: Any, send: Any) -> None:
-        await session_manager.handle_request(scope, receive, send)
 
     async def health(_request: Any) -> JSONResponse:
         return JSONResponse({"status": "healthy", "service": "ms365-mcp"})
 
-    @contextlib.asynccontextmanager
-    async def lifespan(_app: Starlette) -> Any:
-        async with session_manager.run():
-            yield
+    mcp.custom_route("/health", methods=["GET"])(health)
+    mcp.custom_route("/", methods=["GET"])(health)
 
-    return Starlette(
-        routes=[
-            Route("/health", health, methods=["GET"]),
-            Route("/", health, methods=["GET"]),
-            Mount("/mcp", app=handle_mcp),
-        ],
-        lifespan=lifespan,
-    )
+    return mcp.http_app(path="/mcp", transport="http")
 
 
-async def run_http(server: Any, host: str, port: int) -> None:
+async def run_http(mcp: FastMCP, host: str, port: int) -> None:
     """Serve the MCP server over streamable HTTP via uvicorn."""
     import uvicorn
 
-    logger.info("Starting s365-mcp · HTTP · %s:%s/mcp", host, port)
-    config = uvicorn.Config(build_http_app(server), host=host, port=port)
+    logger.info("Starting ms365-mcp · HTTP · %s:%s/mcp", host, port)
+    config = uvicorn.Config(build_http_app(mcp), host=host, port=port)
     await uvicorn.Server(config).serve()
 
 

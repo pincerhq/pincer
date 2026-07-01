@@ -15,7 +15,7 @@ from pydantic_settings.sources import EnvSettingsSource, PydanticBaseSettingsSou
 if TYPE_CHECKING:
     from pydantic.fields import FieldInfo
 
-_DEFAULT_SERVICES = ["email", "calendar", "onedrive", "todo", "contacts", "onenote"]
+_DEFAULT_SERVICES = ["email", "calendar", "onedrive", "todo", "contacts", "onenote", "directory"]
 
 
 class _CommaAwareEnvSource(EnvSettingsSource):  # type: ignore[misc]

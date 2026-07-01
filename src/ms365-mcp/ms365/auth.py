@@ -30,6 +30,7 @@ SERVICE_SCOPES: dict[str, list[str]] = {
     "todo": ["Tasks.ReadWrite"],
     "contacts": ["Contacts.ReadWrite"],
     "onenote": ["Notes.ReadWrite.All"],
+    "directory": ["User.ReadBasic.All"],
 }
 
 

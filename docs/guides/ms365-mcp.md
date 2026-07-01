@@ -120,6 +120,7 @@ registrations** → **New registration**:
 | Teams | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Send`, `Chat.ReadWrite` |
 | Contacts | `Contacts.ReadWrite` |
 | OneNote | `Notes.ReadWrite.All` |
+| Directory | `User.ReadBasic.All` |
 
 If you only run a subset of services (`--services`), you only need that subset's
 scopes plus `User.Read`.
@@ -422,6 +423,17 @@ The **Write** column marks tools that modify data; those carry the MCP
 | `onenote__list_pages` | **`section_id`**, `max_results`=`50` | |
 | `onenote__get_page_content` | **`page_id`** | |
 | `onenote__create_page` | **`section_id`**, **`title`**, **`content`** | ✅ |
+
+### Directory (1)
+
+| Tool | Parameters | Write |
+| --- | --- | --- |
+| `ms365__search_users` | `email`=`""`, `first_name`=`""`, `last_name`=`""` | |
+
+> **`ms365__search_users`** looks up other users in the organization's
+> directory (not just the signed-in user) by exact email, or by first/last
+> name prefix. Returns a single user's basic info if there's exactly one
+> match, otherwise a list capped at 5 matches.
 
 > **Date/time params** (`start`, `end`, `time_min`, `time_max`, `due_date`) are
 > ISO 8601 strings, e.g. `2026-06-01T09:00:00`. **HTML bodies** are sent by

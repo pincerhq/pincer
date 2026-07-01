@@ -45,7 +45,7 @@ def test_scopes_complete() -> None:
 
 
 def test_service_scopes_cover_all_services() -> None:
-    expected = {"email", "calendar", "onedrive", "todo", "contacts", "onenote"}
+    expected = {"email", "calendar", "onedrive", "todo", "contacts", "onenote", "directory"}
     assert set(SERVICE_SCOPES.keys()) == expected
 
 

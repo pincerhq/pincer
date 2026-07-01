@@ -108,7 +108,7 @@ services:
     environment:
       MS365_CLIENT_ID: "${PINCER_MS365_CLIENT_ID}"
       MS365_TENANT_ID: "${PINCER_MS365_TENANT_ID:-common}"
-
+      MS365_TOKEN_CACHE_PATH: "/app/data/ms365_token_cache.json"
   pincer-stdio:
     <<: *pincer-base
     container_name: pincer
