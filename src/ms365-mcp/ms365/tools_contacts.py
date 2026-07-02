@@ -8,10 +8,12 @@ import functools
 import logging
 from typing import TYPE_CHECKING, Any
 
+from fastmcp import Context
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ms365._registry import ToolRegistry
+    from ms365._registry import ClientResolver, ToolRegistry
     from ms365.graph_client import GraphClient
 
 logger = logging.getLogger(__name__)
@@ -190,12 +192,13 @@ async def outlook__delete_contact(
 # ── Registry ──────────────────────────────────────���───────────────────────────
 
 
-def register_contacts_tools(registry: ToolRegistry, client: GraphClient) -> int:
+def register_contacts_tools(registry: ToolRegistry, resolve_client: ClientResolver) -> int:
     """Register all 6 Contacts tools. Returns count."""
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
-        async def wrapper(**kwargs: Any) -> str:
+        async def wrapper(ctx: Context, **kwargs: Any) -> str:
+            client = await resolve_client(ctx)
             return str(await fn(client, **kwargs))
 
         return wrapper

@@ -62,6 +62,23 @@ def test_token_cache_path_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg.cache_path == Path("/tmp/env_tokens.json")
 
 
+def test_token_cache_dir_default() -> None:
+    cfg = MS365Settings()
+    assert cfg.token_cache_dir == Path.home() / ".pincer" / "ms365"
+
+
+def test_token_cache_dir_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MS365_TOKEN_CACHE_DIR", "/tmp/ms365-identities")
+    cfg = MS365Settings()
+    assert cfg.token_cache_dir == Path("/tmp/ms365-identities")
+
+
+def test_token_cache_dir_expands_home() -> None:
+    cfg = MS365Settings(token_cache_dir="~/.pincer/other-ms365")  # type: ignore[arg-type]
+    assert "~" not in str(cfg.token_cache_dir)
+    assert cfg.token_cache_dir == Path.home() / ".pincer" / "other-ms365"
+
+
 def test_services_csv_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MS365_SERVICES", "email,calendar")
     cfg = MS365Settings()

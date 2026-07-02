@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -429,3 +430,78 @@ async def test_health_loop_suppresses_generic_exceptions() -> None:
 
     # Loop should have called health checks multiple times without dying
     assert call_count >= 2
+
+
+# ── Notification handler ──────────────────────────────────────────────────────
+
+
+async def test_set_notification_handler_applies_to_connected_sessions() -> None:
+    cfg = _make_config("server1", "server2")
+    manager = _make_manager(cfg)
+    created: dict[str, MagicMock] = {}
+
+    def _new_session(srv_config: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
+        session = MagicMock()
+        session.connected = True
+        session.tools = []
+        session.connect = AsyncMock()
+        session.disconnect = AsyncMock()
+        created[srv_config.name] = session
+        return session
+
+    with patch("pincer.mcp.manager.MCPClientSession", side_effect=_new_session):
+        await manager.start()
+
+    handler = AsyncMock()
+    manager.set_notification_handler(handler)
+
+    for session in created.values():
+        session.set_notification_handler.assert_called_with(handler)
+
+    await manager.stop()
+
+
+async def test_set_notification_handler_applied_to_newly_connected_sessions() -> None:
+    """Handler set before start() must still reach sessions connected afterward."""
+    cfg = _make_config("server1")
+    manager = _make_manager(cfg)
+    created: dict[str, MagicMock] = {}
+
+    handler = AsyncMock()
+    manager.set_notification_handler(handler)
+
+    def _new_session(srv_config: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
+        session = MagicMock()
+        session.connected = True
+        session.tools = []
+        session.connect = AsyncMock()
+        session.disconnect = AsyncMock()
+        created[srv_config.name] = session
+        return session
+
+    with patch("pincer.mcp.manager.MCPClientSession", side_effect=_new_session):
+        await manager.start()
+
+    created["server1"].set_notification_handler.assert_called_once_with(handler)
+
+    await manager.stop()
+
+
+async def test_reconnect_applies_notification_handler_to_new_session() -> None:
+    cfg = _make_config("srv")
+    manager = _make_manager(cfg)
+
+    old_session = MagicMock()
+    old_session.config = cfg.servers[0]
+    manager._sessions["srv"] = old_session
+
+    handler = AsyncMock()
+    manager.set_notification_handler(handler)
+
+    new_session = MagicMock()
+    new_session.connect = AsyncMock()
+
+    with patch("pincer.mcp.manager.MCPClientSession", return_value=new_session):
+        await manager._reconnect("srv")
+
+    new_session.set_notification_handler.assert_called_once_with(handler)

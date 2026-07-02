@@ -11,11 +11,13 @@ Transports::
     ms365-mcp-run --transport http --host 127.0.0.1 --port 8000
         MCP endpoint → http://127.0.0.1:8000/mcp
 
-Authentication: set ``MS365_CLIENT_ID`` (and optionally
-``MS365_TENANT_ID``) then start the server.  If no cached token exists
-the server runs the device code flow at boot — instructions are printed to
-stderr so they are visible without corrupting the MCP stdio stream.
-Token is cached at ``~/.pincer/ms365_token_cache.json`` for subsequent starts.
+Authentication is per-identity and lazy: set ``MS365_CLIENT_ID`` (and
+optionally ``MS365_TENANT_ID``) then start the server — no auth happens at
+boot. Each distinct caller ``identity`` (an opaque string carried in the MCP
+call's ``_meta``, see ``_identity_from_ctx``) authenticates on its own first
+tool call, with its own token cache at
+``<MS365_TOKEN_CACHE_DIR>/<identity>_token_cache.json`` (default
+``~/.pincer/ms365/``). See ``ms365/identity_session.py``.
 """
 
 from __future__ import annotations
@@ -27,12 +29,16 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from fastmcp import Context
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from fastmcp import FastMCP
 
+    from ms365._registry import ClientResolver
     from ms365.graph_client import GraphClient
+    from ms365.identity_session import IdentitySessionManager
 
 from ms365.config import get_settings
 
@@ -106,14 +112,15 @@ class _CollectingRegistry:
 
 
 def collect_tools(
-    client: GraphClient,
+    resolve_client: ClientResolver,
     services: list[str] | None = None,
     read_only: bool = False,
 ) -> list[_ToolSpec]:
     """Collect tool specs for the requested services by reusing the registrars.
 
     Args:
-        client: Authenticated Graph client injected into every handler.
+        resolve_client: Resolves the caller's identity (from `ctx`) to that
+            identity's authenticated GraphClient — see `ms365/identity_session.py`.
         services: Subset of service names to expose; ``None`` exposes all.
         read_only: When True, drop tools that require approval (writes/deletes).
     """
@@ -125,7 +132,7 @@ def collect_tools(
         if register_fn is None:
             logger.warning("Unknown MS365 service '%s' — skipping", svc)
             continue
-        register_fn(registry, client)
+        register_fn(registry, resolve_client)
 
     if read_only:
         return [s for s in registry.specs if not s.require_approval]
@@ -153,14 +160,16 @@ def _resolve_annotation(raw: Any, globalns: dict[str, Any]) -> Any:
 def _with_exposed_signature(spec: _ToolSpec) -> Callable[..., Any]:
     """Build a thin wrapper FastMCP can introspect for the tool's JSON schema.
 
-    ``register_*_tools()`` wraps every tool as ``async def wrapper(**kwargs)``
+    ``register_*_tools()`` wraps every tool as ``async def wrapper(ctx, **kwargs)``
     via ``functools.wraps(fn)``, which also copies ``fn.__annotations__``
     verbatim — including the ``client: GraphClient`` parameter, whose type is
     only available under ``TYPE_CHECKING``. FastMCP/pydantic eagerly resolve
     every entry in ``__annotations__``, which would crash trying to look up
     ``GraphClient`` at runtime. Build a fresh function exposing only the
     already-bound handler's real, non-``client`` parameters with concrete
-    (non-string) annotations instead.
+    (non-string) annotations, plus a ``ctx: Context`` parameter so FastMCP
+    auto-injects the caller's per-call Context (used to resolve `identity`)
+    without it ever appearing in the tool's public JSON schema.
     """
     handler = spec.handler
     original = getattr(handler, "__wrapped__", None)
@@ -173,14 +182,18 @@ def _with_exposed_signature(spec: _ToolSpec) -> Callable[..., Any]:
     resolved_params = [p.replace(annotation=_resolve_annotation(p.annotation, globalns)) for p in kept_params]
     return_annotation = _resolve_annotation(sig.return_annotation, globalns)
 
+    ctx_param = inspect.Parameter("ctx", inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=Context)
+    all_params = [ctx_param, *resolved_params]
+
     async def tool_fn(**kwargs: Any) -> str:
         return await handler(**kwargs)
 
     tool_fn.__name__ = spec.name
     tool_fn.__doc__ = spec.description
-    tool_fn.__signature__ = sig.replace(parameters=resolved_params, return_annotation=return_annotation)  # type: ignore[attr-defined]
+    tool_fn.__signature__ = sig.replace(parameters=all_params, return_annotation=return_annotation)  # type: ignore[attr-defined]
     tool_fn.__annotations__ = {
-        p.name: p.annotation for p in resolved_params if p.annotation is not inspect.Parameter.empty
+        "ctx": Context,
+        **{p.name: p.annotation for p in resolved_params if p.annotation is not inspect.Parameter.empty},
     }
     if return_annotation is not inspect.Signature.empty:
         tool_fn.__annotations__["return"] = return_annotation
@@ -188,7 +201,7 @@ def _with_exposed_signature(spec: _ToolSpec) -> Callable[..., Any]:
 
 
 def build_server(
-    client: GraphClient,
+    resolve_client: ClientResolver,
     services: list[str] | None = None,
     read_only: bool = False,
 ) -> tuple[FastMCP, list[_ToolSpec]]:
@@ -200,7 +213,7 @@ def build_server(
     from fastmcp.tools import Tool
     from fastmcp.tools.tool import ToolAnnotations
 
-    specs = collect_tools(client, services=services, read_only=read_only)
+    specs = collect_tools(resolve_client, services=services, read_only=read_only)
 
     mcp = FastMCP("pincer-ms365")
     for spec in specs:
@@ -262,35 +275,50 @@ async def run_http(mcp: FastMCP, host: str, port: int) -> None:
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
-async def _build_client(tenant_override: str | None) -> GraphClient:
-    """Build an authenticated GraphClient, running device code flow at boot if needed."""
-    import sys
+def _identity_from_ctx(ctx: Context) -> str | None:
+    """Read the caller's opaque `identity` out of the MCP call's `_meta` envelope.
 
-    from ms365.auth import MS365Auth, MS365AuthError
-    from ms365.config import get_settings
-    from ms365.graph_client import GraphClient
+    Returns None if absent (e.g. a bare MCP client that doesn't send one) —
+    IdentitySessionManager.get_or_create() falls back to a fixed default slot.
+    """
+    request_context = ctx.request_context
+    meta = getattr(request_context, "meta", None) if request_context is not None else None
+    return getattr(meta, "identity", None) if meta is not None else None
 
-    cfg = get_settings()
-    tenant_id = tenant_override or cfg.tenant_id
 
-    if not cfg.client_id:
-        sys.exit("Microsoft 365 client_id is not configured. Set PINCER_MS365_CLIENT_ID.")
+def _make_client_resolver(manager: IdentitySessionManager) -> ClientResolver:
+    """Bind a manager into the `ClientResolver` shape tool registration expects."""
 
-    auth = MS365Auth(
-        client_id=cfg.client_id,
-        tenant_id=tenant_id,
-        cache_path=str(cfg.cache_path),
-        services=cfg.services,
+    async def resolve_client(ctx: Context) -> GraphClient:
+        return await manager.get_or_create(_identity_from_ctx(ctx), ctx=ctx)
+
+    return resolve_client
+
+
+def _register_auth_status_tool(mcp: FastMCP, manager: IdentitySessionManager) -> None:
+    """Register a transport-agnostic fallback for checking sign-in status.
+
+    The background device-code poll pushes a best-effort completion
+    notification (see `identity_session.py`'s module docstring for why this
+    isn't guaranteed to reach every transport/client) — this tool lets any
+    caller poll instead, regardless of transport.
+    """
+    from fastmcp.tools import Tool
+    from fastmcp.tools.tool import ToolAnnotations
+
+    async def ms365__check_auth_status(ctx: Context) -> str:
+        """Check Microsoft 365 sign-in status: signed in, sign-in pending, or not signed in yet."""
+        identity = _identity_from_ctx(ctx)
+        return manager.status_for(identity).message
+
+    mcp.add_tool(
+        Tool.from_function(
+            ms365__check_auth_status,
+            name="ms365__check_auth_status",
+            description="Check Microsoft 365 sign-in status for the caller.",
+            annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False),
+        )
     )
-
-    if not auth.has_cached_token():
-        logger.info("No cached token — starting device code flow...")
-        try:
-            await auth.device_code_flow()
-        except MS365AuthError as exc:
-            sys.exit(f"Microsoft 365 authentication failed: {exc}")
-
-    return GraphClient(auth)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -330,54 +358,47 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def _async_main(client: GraphClient, args: argparse.Namespace) -> None:
-    """Async entry point: serve the already-authenticated client."""
-    services = [s.strip() for s in args.services.split(",") if s.strip()] or None
-    server, specs = build_server(client, services=services, read_only=args.read_only)
-    logger.info("Exposing %d Microsoft 365 tool(s) over %s", len(specs), args.transport)
+async def _async_main(args: argparse.Namespace) -> None:
+    """Async entry point: build the identity-aware server and serve it.
 
-    if args.transport == "http":
-        await run_http(server, args.host, args.port)
-    else:
-        await run_stdio(server)
-
-
-def _build_client_sync(tenant_override: str | None) -> GraphClient:
-    """Build an authenticated GraphClient synchronously (blocking).
-
-    Runs the device code flow in the calling thread — no event loop involved.
-    Call this before asyncio.run() so MSAL never crosses thread boundaries.
+    No boot-time authentication happens here anymore — each identity
+    authenticates lazily on its first tool call (see `identity_session.py`).
     """
     import sys
 
-    from ms365.auth import MS365Auth, MS365AuthError
     from ms365.config import get_settings
-    from ms365.graph_client import GraphClient
+    from ms365.identity_session import IdentitySessionManager
 
     cfg = get_settings()
-    tenant_id = tenant_override or cfg.tenant_id
-
     if not cfg.client_id:
         sys.exit(
             "Microsoft 365 client_id is not configured. "
             "Set MS365_CLIENT_ID (standalone) or PINCER_MS365_CLIENT_ID in .env (pincer run)."
         )
 
-    auth = MS365Auth(
+    services = [s.strip() for s in args.services.split(",") if s.strip()] or None
+    tenant_id = args.tenant or cfg.tenant_id
+
+    # Note: OAuth scopes are derived from `cfg.services` (the full configured
+    # set), not the `--services` tool-exposure filter above — matches today's
+    # existing behavior where a narrower `--services` only hides tools, it
+    # doesn't shrink the consent scope requested per identity.
+    manager = IdentitySessionManager(
         client_id=cfg.client_id,
         tenant_id=tenant_id,
-        cache_path=str(cfg.cache_path),
+        cache_dir=cfg.token_cache_dir,
         services=cfg.services,
     )
+    resolve_client = _make_client_resolver(manager)
 
-    if not auth.has_cached_token():
-        logger.info("No cached token — starting device code flow...")
-        try:
-            auth.device_code_flow_sync()
-        except MS365AuthError as exc:
-            sys.exit(f"Microsoft 365 authentication failed: {exc}")
+    server, specs = build_server(resolve_client, services=services, read_only=args.read_only)
+    _register_auth_status_tool(server, manager)
+    logger.info("Exposing %d Microsoft 365 tool(s) over %s", len(specs), args.transport)
 
-    return GraphClient(auth)
+    if args.transport == "http":
+        await run_http(server, args.host, args.port)
+    else:
+        await run_stdio(server)
 
 
 def main() -> None:
@@ -389,10 +410,7 @@ def main() -> None:
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
     args = _parse_args()
-    # Authenticate synchronously before starting the event loop so MSAL's
-    # device code flow runs in a single thread with no async indirection.
-    client = _build_client_sync(args.tenant or None)
-    asyncio.run(_async_main(client, args))
+    asyncio.run(_async_main(args))
 
 
 if __name__ == "__main__":

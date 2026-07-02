@@ -124,6 +124,188 @@ class TestIdentityResolver:
 
 
 @pytest.mark.asyncio
+class TestActiveChannel:
+    async def test_touch_sets_active_channel(self, resolver):
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 11111)
+        await resolver.link_if_new(uid, ChannelType.WHATSAPP, "491234567890")
+
+        await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
+
+        async with resolver._get_db() as db:
+            cursor = await db.execute(
+                "SELECT active_channel, active_channel_updated_at FROM identity_meta WHERE pincer_user_id = ?",
+                (uid,),
+            )
+            row = await cursor.fetchone()
+        assert row[0] == "whatsapp"
+        assert row[1] is not None
+
+    async def test_get_preferred_channel_prefers_active_over_preferred(self, resolver):
+        """preferred_channel is telegram (set at creation); active_channel moves
+        to whatsapp after a message comes in from there — get_preferred_channel
+        must follow the active one, not the stale creation-time value."""
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 22222)
+        await resolver.link_if_new(uid, ChannelType.WHATSAPP, "491234567891")
+
+        ch_type, _ = await resolver.get_preferred_channel(uid)
+        assert ch_type == ChannelType.TELEGRAM  # unchanged: no active_channel set yet
+
+        await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
+
+        ch_type, chat_id = await resolver.get_preferred_channel(uid)
+        assert ch_type == ChannelType.WHATSAPP
+        assert chat_id == "491234567891"
+
+    async def test_get_preferred_channel_falls_back_when_active_channel_unlinked(self, resolver):
+        """If active_channel points at a channel that's no longer linked
+        (e.g. cleaned up), fall back to preferred_channel instead of erroring."""
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 33333)
+
+        async with resolver._get_db() as db:
+            await db.execute(
+                "UPDATE identity_meta SET active_channel = 'whatsapp' WHERE pincer_user_id = ?",
+                (uid,),
+            )
+            await db.commit()
+
+        ch_type, chat_id = await resolver.get_preferred_channel(uid)
+        assert ch_type == ChannelType.TELEGRAM
+        assert chat_id == "33333"
+
+    async def test_touch_active_channel_unknown_user_is_noop(self, resolver):
+        """Touching an identity that doesn't exist shouldn't raise."""
+        await resolver.touch_active_channel("usr_nonexistent", ChannelType.TELEGRAM)
+
+    async def test_touch_active_channel_skips_write_when_unchanged(self, resolver):
+        """Repeated touches with the same channel don't bump the timestamp needlessly."""
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 44444)
+        await resolver.touch_active_channel(uid, ChannelType.TELEGRAM)
+
+        async with resolver._get_db() as db:
+            cursor = await db.execute(
+                "SELECT active_channel_updated_at FROM identity_meta WHERE pincer_user_id = ?", (uid,)
+            )
+            first_ts = (await cursor.fetchone())[0]
+
+        await resolver.touch_active_channel(uid, ChannelType.TELEGRAM)
+
+        async with resolver._get_db() as db:
+            cursor = await db.execute(
+                "SELECT active_channel_updated_at FROM identity_meta WHERE pincer_user_id = ?", (uid,)
+            )
+            second_ts = (await cursor.fetchone())[0]
+
+        assert first_ts == second_ts
+
+    async def test_touch_active_channel_updates_when_channel_changes(self, resolver):
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 55556)
+        await resolver.link_if_new(uid, ChannelType.WHATSAPP, "491234567892")
+
+        await resolver.touch_active_channel(uid, ChannelType.TELEGRAM)
+        await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
+
+        async with resolver._get_db() as db:
+            cursor = await db.execute(
+                "SELECT active_channel FROM identity_meta WHERE pincer_user_id = ?", (uid,)
+            )
+            row = await cursor.fetchone()
+        assert row[0] == "whatsapp"
+
+    async def test_max_active_age_ignores_stale_active_channel(self, resolver):
+        """active_channel older than max_active_age_seconds falls back to preferred_channel."""
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 55557)  # preferred_channel = telegram
+        await resolver.link_if_new(uid, ChannelType.WHATSAPP, "491234567893")
+        await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
+
+        # Backdate active_channel_updated_at by 31 minutes (past the 30-minute window).
+        async with resolver._get_db() as db:
+            await db.execute(
+                "UPDATE identity_meta SET active_channel_updated_at = "
+                "datetime('now', '-31 minutes') WHERE pincer_user_id = ?",
+                (uid,),
+            )
+            await db.commit()
+
+        ch_type, _ = await resolver.get_preferred_channel(uid, max_active_age_seconds=1800)
+        assert ch_type == ChannelType.TELEGRAM  # fell back, ignoring the stale whatsapp active_channel
+
+    async def test_max_active_age_accepts_fresh_active_channel(self, resolver):
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 55558)
+        await resolver.link_if_new(uid, ChannelType.WHATSAPP, "491234567894")
+        await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
+
+        ch_type, _ = await resolver.get_preferred_channel(uid, max_active_age_seconds=1800)
+        assert ch_type == ChannelType.WHATSAPP  # fresh — well within the window
+
+    async def test_max_active_age_none_ignores_staleness(self, resolver):
+        """Default (no max age) preserves today's behavior — always trust active_channel."""
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 55559)
+        await resolver.link_if_new(uid, ChannelType.WHATSAPP, "491234567895")
+        await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
+
+        async with resolver._get_db() as db:
+            await db.execute(
+                "UPDATE identity_meta SET active_channel_updated_at = "
+                "datetime('now', '-1 day') WHERE pincer_user_id = ?",
+                (uid,),
+            )
+            await db.commit()
+
+        ch_type, _ = await resolver.get_preferred_channel(uid)  # no max_active_age_seconds
+        assert ch_type == ChannelType.WHATSAPP
+
+    async def test_max_active_age_treats_missing_timestamp_as_stale(self, resolver):
+        """active_channel set but active_channel_updated_at NULL (shouldn't normally
+        happen, but defensively) is treated as stale, not fresh."""
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 55560)
+        await resolver.link_if_new(uid, ChannelType.WHATSAPP, "491234567896")
+
+        async with resolver._get_db() as db:
+            await db.execute(
+                "UPDATE identity_meta SET active_channel = 'whatsapp', active_channel_updated_at = NULL "
+                "WHERE pincer_user_id = ?",
+                (uid,),
+            )
+            await db.commit()
+
+        ch_type, _ = await resolver.get_preferred_channel(uid, max_active_age_seconds=1800)
+        assert ch_type == ChannelType.TELEGRAM
+
+    async def test_ensure_table_migration_adds_columns_to_existing_db(self, tmp_path):
+        """A DB created before this feature (no active_channel columns) must
+        migrate cleanly the next time ensure_table() runs."""
+        db_path = tmp_path / "legacy_schema.db"
+
+        import aiosqlite
+
+        async with aiosqlite.connect(str(db_path)) as db:
+            await db.execute("""
+                CREATE TABLE identity_meta (
+                    pincer_user_id TEXT PRIMARY KEY,
+                    preferred_channel TEXT,
+                    display_name TEXT,
+                    created_at TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            await db.execute(
+                "INSERT INTO identity_meta (pincer_user_id, preferred_channel) VALUES ('usr_old', 'telegram')"
+            )
+            await db.commit()
+
+        r = IdentityResolver(db_path)
+        await r.ensure_table()  # must not raise despite the columns already being absent
+
+        # Existing row (and touch_active_channel on it) must keep working post-migration.
+        await r.touch_active_channel("usr_old", ChannelType.WHATSAPP)
+
+        async with r._get_db() as db:
+            cursor = await db.execute("PRAGMA table_info(identity_meta)")
+            col_names = {row[1] for row in await cursor.fetchall()}
+        assert "active_channel" in col_names
+        assert "active_channel_updated_at" in col_names
+
+
+@pytest.mark.asyncio
 class TestSeedFromConfig:
     async def test_creates_identity(self, tmp_path):
         db_path = tmp_path / "seed_test.db"

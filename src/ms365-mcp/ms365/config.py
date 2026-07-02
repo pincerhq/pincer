@@ -53,6 +53,7 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
     auth_method: str = "device_code"
     services: list[str] = list(_DEFAULT_SERVICES)
     token_cache_path: Path = Path.home() / ".pincer" / "ms365_token_cache.json"
+    token_cache_dir: Path = Path.home() / ".pincer" / "ms365_mcp"
 
     @classmethod
     def settings_customise_sources(
@@ -76,6 +77,14 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
         if value.is_dir():
             value = value / "ms365_token_cache.json"
         return value
+
+    @field_validator("token_cache_dir", mode="before")
+    @classmethod
+    def dir_str_to_path(cls, value: str | Path) -> Path:
+        try:
+            return Path(value).expanduser()
+        except Exception as e:
+            raise ValueError(f"Invalid path: {value} - {e}") from e
 
     @computed_field  # type: ignore[prop-decorator]
     @property

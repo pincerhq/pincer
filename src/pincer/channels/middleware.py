@@ -84,6 +84,14 @@ class IdentityMiddleware:
                         await self._identity.link_if_new(owner, msg.channel_type, candidate)
                     except Exception:
                         logger.debug("Failed to back-link %s/%s", msg.channel, candidate, exc_info=True)
+            # Keep track of which channel this (possibly multi-channel) identity
+            # is actually active on right now, so proactive sends (e.g. an MCP
+            # server's auth-completion notification) reach the right place
+            # instead of wherever the identity happened to be first created.
+            try:
+                await self._identity.touch_active_channel(owner, msg.channel_type)
+            except Exception:
+                logger.debug("Failed to update active channel for %s", owner, exc_info=True)
         else:
             # Fallback: channel-scoped canonical ID so the agent never sees "".
             # Use channel_type.value (e.g. "teams"), not msg.channel, so adapters

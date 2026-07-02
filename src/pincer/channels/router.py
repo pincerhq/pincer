@@ -58,10 +58,16 @@ class ChannelRouter:
         pincer_user_id: str,
         text: str,
         prefer: ChannelType | None = None,
+        max_active_age_seconds: float | None = None,
     ) -> bool:
         """
         Send to a user on their preferred channel.
         Falls back to other channels if preferred fails.
+
+        `max_active_age_seconds` bounds how stale the user's tracked
+        "active channel" may be before it's ignored in favor of the durable
+        `preferred_channel` — see `IdentityResolver.get_preferred_channel`.
+        Default `None` preserves today's behavior (no staleness check).
         """
         if prefer:
             all_channels = await self._identity.get_all_channels(pincer_user_id)
@@ -73,6 +79,7 @@ class ChannelRouter:
         try:
             channel_type, chat_id = await self._identity.get_preferred_channel(
                 pincer_user_id,
+                max_active_age_seconds=max_active_age_seconds,
             )
             return await self.send(channel_type, chat_id, text)
         except ValueError:

@@ -9,10 +9,12 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from fastmcp import Context
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ms365._registry import ToolRegistry
+    from ms365._registry import ClientResolver, ToolRegistry
     from ms365.graph_client import GraphClient
 
 logger = logging.getLogger(__name__)
@@ -325,12 +327,13 @@ async def outlook__create_online_meeting(
 # ── Registry ──────────────────────────────────────────────────────────────────
 
 
-def register_calendar_tools(registry: ToolRegistry, client: GraphClient) -> int:
+def register_calendar_tools(registry: ToolRegistry, resolve_client: ClientResolver) -> int:
     """Register all 12 Calendar tools. Returns count."""
 
     def _h(fn: Callable[..., Any]) -> Callable[..., Any]:
         @functools.wraps(fn)
-        async def wrapper(**kwargs: Any) -> str:
+        async def wrapper(ctx: Context, **kwargs: Any) -> str:
+            client = await resolve_client(ctx)
             return str(await fn(client, **kwargs))
 
         return wrapper

@@ -89,6 +89,30 @@ async def test_call_tool_raises_when_not_connected() -> None:
         await session.call_tool("my_tool", {})
 
 
+async def test_call_tool_forwards_identity_as_meta() -> None:
+    cfg = _make_stdio_config()
+    session = MCPClientSession(cfg)
+    session._connected = True
+    session._session = MagicMock()
+    session._session.call_tool = AsyncMock(return_value="result")
+
+    await session.call_tool("my_tool", {"x": 1}, identity="usr_abc123")
+
+    session._session.call_tool.assert_awaited_once_with("my_tool", {"x": 1}, meta={"identity": "usr_abc123"})
+
+
+async def test_call_tool_omits_meta_when_no_identity() -> None:
+    cfg = _make_stdio_config()
+    session = MCPClientSession(cfg)
+    session._connected = True
+    session._session = MagicMock()
+    session._session.call_tool = AsyncMock(return_value="result")
+
+    await session.call_tool("my_tool", {"x": 1})
+
+    session._session.call_tool.assert_awaited_once_with("my_tool", {"x": 1}, meta=None)
+
+
 async def test_call_tool_raises_timeout() -> None:
     cfg = _make_stdio_config()
     session = MCPClientSession(cfg)
@@ -108,6 +132,86 @@ async def test_call_tool_raises_timeout() -> None:
 
     with pytest.raises(TimeoutError, match="timed out"):
         await session.call_tool("slow_tool", {})
+
+
+# ── notification handler ──────────────────────────────────────────────────────
+
+
+async def test_handle_notification_does_nothing_without_handler() -> None:
+    cfg = _make_stdio_config()
+    session = MCPClientSession(cfg)
+
+    # Should not raise even with no handler registered.
+    await session._handle_notification(MagicMock())
+
+
+async def test_handle_notification_forwards_to_registered_handler() -> None:
+    cfg = _make_stdio_config()
+    session = MCPClientSession(cfg)
+
+    handler = AsyncMock()
+    session.set_notification_handler(handler)
+
+    params = MagicMock()
+    await session._handle_notification(params)
+
+    handler.assert_awaited_once_with(params)
+
+
+async def test_set_notification_handler_none_clears_it() -> None:
+    cfg = _make_stdio_config()
+    session = MCPClientSession(cfg)
+
+    handler = AsyncMock()
+    session.set_notification_handler(handler)
+    session.set_notification_handler(None)
+
+    await session._handle_notification(MagicMock())
+    handler.assert_not_awaited()
+
+
+async def test_handle_notification_swallows_handler_exception() -> None:
+    cfg = _make_stdio_config()
+    session = MCPClientSession(cfg)
+    session.set_notification_handler(AsyncMock(side_effect=RuntimeError("boom")))
+
+    # Must not raise — a broken handler shouldn't take down the MCP session.
+    await session._handle_notification(MagicMock())
+
+
+async def test_connect_passes_handle_notification_as_logging_callback() -> None:
+    """connect() must wire session._handle_notification as ClientSession's logging_callback."""
+    cfg = _make_stdio_config(sandbox=False)
+    session = MCPClientSession(cfg)
+
+    captured_kwargs: dict[str, object] = {}
+
+    class _FakeClientSession:
+        def __init__(self, read_stream: object, write_stream: object, **kwargs: object) -> None:
+            captured_kwargs.update(kwargs)
+
+        async def __aenter__(self) -> _FakeClientSession:
+            return self
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+        async def initialize(self) -> None:
+            pass
+
+        async def list_tools(self) -> MagicMock:
+            return MagicMock(tools=[])
+
+    async def _fake_connect_stdio(*args: object, **kwargs: object) -> tuple[MagicMock, MagicMock]:
+        return MagicMock(), MagicMock()
+
+    with (
+        patch("mcp.ClientSession", _FakeClientSession),
+        patch("pincer.mcp.client.MCPClientSession._connect_stdio", _fake_connect_stdio),
+    ):
+        await session.connect()
+
+    assert captured_kwargs.get("logging_callback") == session._handle_notification
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
