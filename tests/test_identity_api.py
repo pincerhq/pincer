@@ -83,9 +83,7 @@ class TestIdentityApi:
         assert data["active_channel"] == "whatsapp"
         assert data["active_channel_updated_at"] is not None
 
-    async def test_search_includes_active_channel_fields(
-        self, client: TestClient, resolver: IdentityResolver
-    ) -> None:
+    async def test_search_includes_active_channel_fields(self, client: TestClient, resolver: IdentityResolver) -> None:
         uid = await resolver.resolve(ChannelType.TELEGRAM, 66666)
         await resolver.touch_active_channel(uid, ChannelType.TELEGRAM)
 

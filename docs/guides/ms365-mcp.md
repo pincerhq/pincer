@@ -1,12 +1,15 @@
 # Microsoft 365 MCP Server
 
-`pincer-ms365-mcp` exposes all **69 Microsoft 365 tools** — Outlook email,
-Calendar, OneDrive, Microsoft To Do, Teams, Contacts, and OneNote — as a
-standalone [Model Context Protocol](https://modelcontextprotocol.io) (MCP)
-server. Any MCP host can connect to it: Claude Desktop, Cursor, VS Code, or
-Pincer's own MCP client.
+`ms365-mcp` exposes **62 Microsoft 365 tools** (plus one always-on auth-status
+tool) — Outlook email, Calendar, OneDrive, Microsoft To Do, Contacts, OneNote,
+and organization directory lookups — as a standalone
+[Model Context Protocol](https://modelcontextprotocol.io) (MCP) server built
+on [FastMCP](https://gofastmcp.com). Any MCP host can connect to it: Claude
+Desktop, Cursor, VS Code, or Pincer's own MCP client.
 
-It is built on Microsoft Graph and lives in `src/ms365-mcp/ms365/`.
+It supports **multiple Microsoft accounts from one running server** — each
+caller authenticates independently, lazily, on its first tool call. It is
+built on Microsoft Graph and lives in `src/ms365-mcp/ms365/`.
 
 ---
 
@@ -33,10 +36,14 @@ It is built on Microsoft Graph and lives in `src/ms365-mcp/ms365/`.
 
 ```
 MCP host (Claude Desktop / Cursor / Pincer MCP client)
-        │  MCP protocol (stdio or streamable HTTP)
+        │  MCP protocol (stdio or streamable HTTP), tool call carries
+        │  an opaque `identity` in its `_meta` envelope
         ▼
-pincer-ms365-mcp            ← mcp_server.py (low-level mcp SDK Server)
-        │  reuses register_*_tools() via a collecting shim
+ms365_server.py            ← FastMCP app; register_*_tools() unchanged per service
+        │  each tool call resolves `identity` → that caller's own GraphClient
+        ▼
+IdentitySessionManager      ← one MS365Auth/GraphClient pair per identity,
+        │                      created lazily on first use (identity_session.py)
         ▼
 GraphClient                 ← httpx, bearer token, retry, pagination
         │  Authorization: Bearer <token>
@@ -45,18 +52,18 @@ Microsoft Graph API (https://graph.microsoft.com/v1.0)
 ```
 
 - **Tool collection.** `collect_tools()` calls the existing
-  `register_email_tools()`, `register_calendar_tools()`, … functions through a
-  `_CollectingRegistry` shim that matches `ToolRegistry.register`'s signature, so
-  every tool's name, JSON schema, description, and approval flag is reused
-  verbatim — no duplication.
-- **Serving.** `build_server()` registers those specs on a low-level
-  `mcp.server.Server`: `list_tools` returns explicit `inputSchema`s, and
-  `call_tool` validates input against the schema, then dispatches to the original
-  async handler.
-- **Auth.** The server consumes a cached MSAL token; it does not perform the
-  interactive login itself.
+  `register_email_tools()`, `register_calendar_tools()`, … functions per
+  service, reusing each tool's name, JSON schema, description, and approval
+  flag verbatim.
+- **Serving.** `build_server()` registers those specs on a `fastmcp.FastMCP`
+  instance. Each tool handler takes a FastMCP `Context` (never exposed in the
+  tool's public schema) to resolve the caller's `identity` and look up (or
+  lazily create) that identity's `GraphClient`.
+- **Auth is per-identity and lazy** — see [Authentication](#authentication).
+  There is no boot-time sign-in anymore.
 
-Source: [`src/ms365-mcp/ms365/ms365_server.py`](../../src/ms365-mcp/ms365/ms365_server.py)
+Source: [`src/ms365-mcp/ms365/ms365_server.py`](../../src/ms365-mcp/ms365/ms365_server.py),
+[`src/ms365-mcp/ms365/identity_session.py`](../../src/ms365-mcp/ms365/identity_session.py)
 
 ---
 
@@ -65,10 +72,9 @@ Source: [`src/ms365-mcp/ms365/ms365_server.py`](../../src/ms365-mcp/ms365/ms365_
 | Requirement | Notes |
 | --- | --- |
 | Python ≥ 3.12 | Same as the rest of Pincer. |
-| `mcp` SDK | Installed by the `[mcp]` extra. |
-| `msal` | Installed by the `[ms365]` extra. |
+| `fastmcp` | The MCP server framework this is built on. |
+| `msal` | Microsoft's auth library (device-code flow). |
 | Azure app registration | A public client with delegated Graph permissions (below). |
-| A signed-in token cache | Created once by `ms365-mcp-setup`. |
 
 Install the extras:
 
@@ -76,8 +82,8 @@ Install the extras:
 uv pip install "pincer-agent[mcp,ms365]"
 # or everything:
 uv pip install "pincer-agent[all]"
-# or 
-uv sync --all-extras 
+# or
+uv sync --all-extras
 ```
 
 `starlette` and `uvicorn` (needed for the HTTP transport) ship with Pincer's
@@ -97,9 +103,7 @@ registrations** → **New registration**:
    `PINCER_MS365_TENANT_ID=consumers` (recommended), or "Accounts in any
    organizational directory and personal Microsoft accounts" for `common`,
    or single-tenant for a specific org tenant.
-3. **Redirect URI:** none needed for device code. (For the interactive flow,
-   add a "Mobile and desktop applications" platform with
-   `http://localhost`.)
+3. **Redirect URI:** none needed for device code.
 4. After creating, copy the **Application (client) ID** → this is
    `PINCER_MS365_CLIENT_ID`.
 5. Under **Authentication** → **Advanced settings**, set **Allow public client
@@ -114,50 +118,77 @@ registrations** → **New registration**:
 | --- | --- |
 | (always) | `User.Read` |
 | Email | `Mail.ReadWrite`, `Mail.Send` |
-| Calendar | `Calendars.ReadWrite`, `OnlineMeetings.ReadWrite` |
+| Calendar | `Calendars.ReadWrite` |
 | OneDrive | `Files.ReadWrite.All` |
 | To Do | `Tasks.ReadWrite` |
-| Teams | `Team.ReadBasic.All`, `Channel.ReadBasic.All`, `ChannelMessage.Send`, `Chat.ReadWrite` |
 | Contacts | `Contacts.ReadWrite` |
 | OneNote | `Notes.ReadWrite.All` |
 | Directory | `User.ReadBasic.All` |
 
-If you only run a subset of services (`--services`), you only need that subset's
-scopes plus `User.Read`.
+Every identity requests the **full configured scope set** (`--services` only
+hides which tools are *exposed*; it doesn't shrink the consent each identity
+is asked for).
 
 ---
 
 ## Authentication
 
-### Step 1 — Set credentials in `.env`
+Authentication is **per-identity and lazy** — there is no boot-time sign-in
+step. `identity` is an opaque string carried in the MCP call's `_meta`
+envelope (Pincer populates it with the caller's `pincer_user_id`; a bare MCP
+client that sends none falls back to a fixed `"default"` identity slot).
 
-Add these to your `.env` file before running the setup wizard:
+### First use of a new identity
 
-```bash
-PINCER_MS365_CLIENT_ID=<your-azure-app-client-id>
-PINCER_MS365_TENANT_ID=consumers   # or "common" / your org tenant GUID
+1. A tool call for an identity with no cached token starts a Microsoft
+   device-code flow and **returns immediately** with the sign-in URL and code
+   — it does not block the request while waiting for the user to sign in.
+   Concretely, this surfaces as a tool error (`isError=true`) whose message
+   *is* the sign-in instructions, e.g.:
+
+   > Go to https://microsoft.com/devicelogin and enter code ABC-DEF. Once
+   > signed in, retry your request (or call `ms365__check_auth_status`).
+
+2. Sign-in completes in the background (polling Microsoft, same as MSAL's
+   normal device-code flow, up to its `expires_in` window). A second tool
+   call for the same identity while this is in flight gets the same
+   instructions again rather than starting a competing device code.
+3. Once complete, the *next* tool call for that identity just works. Call
+   **`ms365__check_auth_status`** at any time to check "not signed in" /
+   "sign-in in progress" / "signed in" without retrying a real Graph call —
+   this is the reliable way to check status regardless of transport.
+4. When running inside Pincer, a completion notification is also pushed back
+   over the MCP connection and relayed to the user's chat (see
+   `pincer/mcp/notifications.py`) — this is delivered reliably over stdio,
+   but not guaranteed over streamable HTTP depending on how the client keeps
+   its connection open, which is why step 3's polling tool exists as the
+   transport-agnostic fallback.
+
+### Token storage
+
+Each identity's MSAL token cache is a separate file:
+
+```
+<MS365_TOKEN_CACHE_DIR>/<identity>_token_cache.json   (default dir: ~/.pincer/ms365_mcp/, file mode 0600)
 ```
 
-### Step 2 — Run the setup wizard
+`identity` is sanitized to a safe filename component before use. Refresh is
+automatic — MSAL rewrites the cache using the cached refresh token. **The
+cache is plaintext** (protected only by filesystem permissions) — encrypting
+it at rest is a known follow-up, not yet implemented.
+
+### `ms365-mcp-setup` (optional, single-identity convenience)
 
 ```bash
 ms365-mcp-setup
 ```
 
-The wizard reads the credentials from `.env` (or the shell environment) and
-runs MSAL's **device-code flow**: it prints a code and a URL
-(`https://microsoft.com/devicelogin`); after you sign in, the token is written to:
-
-```
-~/.pincer/ms365_token_cache.json   (file mode 0600)
-```
-
-- **Refresh** is automatic — MSAL uses the cached refresh token to mint new
-  access tokens silently and rewrites the cache. The server never prompts.
-- **The server only reads/refreshes** this cache. If it is missing or empty, the
-  server exits with a message telling you to run `ms365-mcp-setup`.
-- The cache path can be overridden with `MS365_TOKEN_CACHE_PATH` (standalone server) or
-  `PINCER_MS365_TOKEN_CACHE_PATH` in `.env` (when running via `pincer run`).
+Runs the device-code flow once, synchronously, for the **`"default"`
+identity slot only** — the same slot a bare MCP client without an `identity`
+would use. This is convenient for standalone testing outside Pincer, or to
+pre-authenticate before the first real tool call, but it is **not required**
+for Pincer's normal multi-user operation — each real user authenticates
+lazily on their own first tool call regardless.
 
 ---
 
@@ -167,11 +198,13 @@ runs MSAL's **device-code flow**: it prints a code and a URL
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `PINCER_MS365_CLIENT_ID` | — | Azure app (client) ID. **Required.** |
-| `PINCER_MS365_TENANT_ID` | `consumers` | `consumers` for personal accounts, `common`, `organizations`, or your tenant GUID. |
+| `MS365_CLIENT_ID` (or `PINCER_MS365_CLIENT_ID` via `pincer run`) | — | Azure app (client) ID. **Required.** |
+| `MS365_TENANT_ID` | `common` | `consumers` for personal accounts, `common`, `organizations`, or your tenant GUID. |
+| `MS365_SERVICES` | all 7 | Comma-separated services requested for the OAuth scope set. |
+| `MS365_TOKEN_CACHE_DIR` | `~/.pincer/ms365_mcp/` | Directory holding each identity's `<identity>_token_cache.json`. |
 | `TRANSPORT` | `stdio` | `stdio` or `http` (overridden by `--transport`). |
 | `HOST` | `127.0.0.1` | HTTP bind host (overridden by `--host`). |
-| `PORT` | `18820` | HTTP bind port (overridden by `--port`). |
+| `PORT` | `8000` | HTTP bind port (overridden by `--port`). |
 | `LOG_LEVEL` | `INFO` | Python logging level. |
 
 Set these in your `.env` file:
@@ -187,16 +220,16 @@ PINCER_MS365_TENANT_ID=consumers
 
 ```bash
 # stdio (default) — for Claude Desktop / Cursor / local hosts
-pincer-ms365-mcp
+ms365-mcp-run
 
-# streamable HTTP — endpoint at http://127.0.0.1:18820/mcp
-pincer-ms365-mcp --transport http --host 127.0.0.1 --port 18820
+# streamable HTTP — endpoint at http://127.0.0.1:8000/mcp
+ms365-mcp-run --transport http --host 127.0.0.1 --port 8000
 
 # expose only a subset of services
-pincer-ms365-mcp --services email,calendar
+ms365-mcp-run --services email,calendar
 
 # read-only mode (hide every write/destructive tool)
-pincer-ms365-mcp --read-only
+ms365-mcp-run --read-only
 ```
 
 ### Command-line options
@@ -205,16 +238,13 @@ pincer-ms365-mcp --read-only
 | --- | --- | --- |
 | `--transport {stdio,http}` | `stdio` | Transport to serve. |
 | `--host HOST` | `127.0.0.1` | Bind host (HTTP only). |
-| `--port PORT` | `18820` | Bind port (HTTP only). |
-| `--services LIST` | all | Comma-separated subset: `email,calendar,onedrive,todo,teams,contacts,onenote`. |
+| `--port PORT` | `8000` | Bind port (HTTP only). |
+| `--services LIST` | all | Comma-separated subset: `email,calendar,onedrive,todo,contacts,onenote,directory`. Only filters which tools are exposed — see [Configuration](#configuration) for the OAuth scope set. |
 | `--tenant ID` | from config | Override the Microsoft tenant id. |
 | `--read-only` | off | Expose only read tools; hide writes (send/create/update/delete/move/share). |
 
 HTTP mode also serves `GET /health` (and `GET /`) returning
-`{"status": "healthy", "service": "pincer-ms365-mcp"}`.
-
-> **Port note:** the default `18820` deliberately avoids `18800`, which Pincer's
-> embedded MCP server uses.
+`{"status": "healthy", "service": "ms365-mcp"}`.
 
 ---
 
@@ -229,23 +259,26 @@ config:
 {
   "mcpServers": {
     "ms365": {
-      "command": "pincer-ms365-mcp",
+      "command": "ms365-mcp-run",
       "args": ["--transport", "stdio"],
       "env": {
-        "PINCER_MS365_CLIENT_ID": "00000000-0000-0000-0000-000000000000",
-        "PINCER_MS365_TENANT_ID": "consumers"
+        "MS365_CLIENT_ID": "00000000-0000-0000-0000-000000000000",
+        "MS365_TENANT_ID": "consumers"
       }
     }
   }
 }
 ```
 
+A host that doesn't send an `identity` in its tool calls transparently uses
+the `"default"` identity slot (see [Authentication](#authentication)).
+
 ### Pincer's own MCP client (stdio — default)
 
 The `pincer.toml` shipped in the repo uses stdio transport. Pincer spawns the
-server as a sandboxed subprocess, so credentials and the token cache path must
-be declared explicitly in the `env` dict — the sandbox intentionally restricts
-`HOME` and does not inherit your shell environment:
+server as a sandboxed subprocess, so credentials must be declared explicitly
+in the `env` dict — the sandbox intentionally restricts `HOME` and does not
+inherit your shell environment:
 
 ```toml
 [[mcp.servers]]
@@ -254,17 +287,19 @@ transport = "stdio"
 command   = "python"
 args      = ["${PINCER_SRC_DIR:-$PWD}/src/ms365-mcp/ms365/ms365_server.py"]
 env       = {
-  MS365_CLIENT_ID         = "${PINCER_MS365_CLIENT_ID}",
-  MS365_CLIENT_SECRET     = "${PINCER_MS365_CLIENT_SECRET}",
-  MS365_TENANT_ID         = "${PINCER_MS365_TENANT_ID}",
-  MS365_TOKEN_CACHE_PATH  = "${HOME}/.pincer/ms365_token_cache.json"
+  MS365_CLIENT_ID        = "${PINCER_MS365_CLIENT_ID}",
+  MS365_TENANT_ID        = "${PINCER_MS365_TENANT_ID}",
+  MS365_TOKEN_CACHE_DIR  = "${HOME}/.pincer/ms365_mcp"
 }
 approval_required = ["*"]
 ```
 
 `${PINCER_MS365_*}` values are interpolated from your `.env` file at startup.
-`${HOME}` resolves from the parent process so the subprocess can find the token
-cache even though the sandbox sets `HOME=/tmp`.
+`${HOME}` resolves from the parent process so the subprocess can find the
+per-identity token caches even though the sandbox sets `HOME=/tmp`. Pincer's
+agent loop populates `identity` on every tool call automatically — no extra
+config needed for multi-user identity mapping to work (see
+`src/pincer/core/identity.py`).
 
 ### Pincer's own MCP client (HTTP)
 
@@ -274,7 +309,7 @@ Run the server over HTTP, then register it in `pincer.toml`:
 [[mcp.servers]]
 name = "ms365"
 transport = "http"
-url = "http://127.0.0.1:18820/mcp"
+url = "http://127.0.0.1:8000/mcp"
 ```
 
 Tools then appear to the agent as `ms365__outlook__list_messages`, etc.
@@ -284,30 +319,25 @@ Tools then appear to the agent as `ms365__outlook__list_messages`, etc.
 
 ## Docker
 
-The server runs from the **root image** — `Dockerfile` already installs the
-`[mcp]` and `[ms365]` extras (`uv sync --all-extras`) and the `pincer-ms365-mcp`
-entry point, so no separate image is needed. A ready-made compose file is
-provided at
-[`docker-compose.ms365-mcp.yml`](../../docker-compose.ms365-mcp.yml):
+A ready-made compose file is provided at
+[`src/ms365-mcp/docker-compose.yml`](../../src/ms365-mcp/docker-compose.yml):
 
 ```bash
-# 1. Set credentials in .env, then authenticate once on the host:
-ms365-mcp-setup
-
-# 2. Start the server (UID/GID let the container read/write the token cache):
-UID=$(id -u) GID=$(id -g) \
-  docker compose -f docker-compose.ms365-mcp.yml up --build
-# MCP endpoint → http://localhost:18820/mcp
+cd src/ms365-mcp
+# Set MS365_CLIENT_ID / MS365_TENANT_ID in .env, then:
+docker compose up --build
+# MCP endpoint → http://localhost:8000/mcp
 ```
 
 Notes:
 
-- `ms365-mcp-setup` is interactive, so run it **on the host first**. The
-  container only consumes the cached token.
-- The compose file mounts `~/.pincer` and runs as your host UID/GID so MSAL can
-  read the token **and persist refreshed tokens**. A token cache mounted
-  read-only would break silent refresh.
-- stdio also works in a container (`docker run -i … pincer-ms365-mcp`) for hosts
+- No pre-authentication step is required — each identity (including the
+  `"default"` slot for a bare MCP client) authenticates lazily on its first
+  tool call, same as any other deployment.
+- The compose file mounts a named volume at `/app/data` and sets
+  `MS365_TOKEN_CACHE_DIR=/app/data`, so every identity's token cache
+  persists across container restarts.
+- stdio also works in a container (`docker run -i … ms365-mcp-run`) for hosts
   that speak MCP over stdio, but HTTP is the better fit for a long-running
   service with a health check.
 
@@ -315,10 +345,12 @@ Notes:
 
 ## Tool reference
 
-All 69 tools keep their original names and parameters. Parameter notation:
-`name` (type) — required params are **bold**; optional params show their default.
-The **Write** column marks tools that modify data; those carry the MCP
-`destructiveHint` annotation and are hidden by `--read-only`.
+62 tools across 7 services, plus `ms365__check_auth_status` (always
+available, not tied to any one service — see [Authentication](#authentication)).
+Parameter notation: `name` (type) — required params are **bold**; optional
+params show their default. The **Write** column marks tools that modify data;
+those carry the MCP `destructiveHint` annotation and are hidden by
+`--read-only`.
 
 ### Email — Outlook (17)
 
@@ -342,7 +374,7 @@ The **Write** column marks tools that modify data; those carry the MCP
 | `outlook__mark_as_read` | **`message_id`**, `is_read`=`true` | |
 | `outlook__flag_message` | **`message_id`**, `flagged`=`true` | |
 
-### Calendar (12)
+### Calendar (11)
 
 | Tool | Parameters | Write |
 | --- | --- | --- |
@@ -357,7 +389,6 @@ The **Write** column marks tools that modify data; those carry the MCP
 | `outlook__accept_event` | **`event_id`**, `comment`=`""` | ✅ |
 | `outlook__decline_event` | **`event_id`**, `comment`=`""` | ✅ |
 | `outlook__tentative_event` | **`event_id`**, `comment`=`""` | ✅ |
-| `outlook__create_online_meeting` | **`subject`**, **`start`**, **`end`** | ✅ |
 
 ### OneDrive (14)
 
@@ -391,18 +422,6 @@ The **Write** column marks tools that modify data; those carry the MCP
 | `ms_todo__delete_task` | **`list_id`**, **`task_id`** | ✅ |
 | `ms_todo__create_task_list` | **`name`** | ✅ |
 
-### Teams (7)
-
-| Tool | Parameters | Write |
-| --- | --- | --- |
-| `teams__list_teams` | — | |
-| `teams__list_channels` | **`team_id`** | |
-| `teams__list_channel_messages` | **`team_id`**, **`channel_id`**, `max_results`=`25` | |
-| `teams__get_channel_message` | **`team_id`**, **`channel_id`**, **`message_id`** | |
-| `teams__send_channel_message` | **`team_id`**, **`channel_id`**, **`body`**, `body_type`=`text` | ✅ |
-| `teams__list_chats` | `max_results`=`25` | |
-| `teams__send_chat_message` | **`chat_id`**, **`body`**, `body_type`=`text` | ✅ |
-
 ### Contacts (6)
 
 | Tool | Parameters | Write |
@@ -435,6 +454,16 @@ The **Write** column marks tools that modify data; those carry the MCP
 > name prefix. Returns a single user's basic info if there's exactly one
 > match, otherwise a list capped at 5 matches.
 
+### Auth status (always available, 1)
+
+| Tool | Parameters | Write |
+| --- | --- | --- |
+| `ms365__check_auth_status` | — | |
+
+> Not part of any `--services` subset or `--read-only` filtering — always
+> registered, since it's about the caller's own auth state rather than a
+> Graph resource. See [Authentication](#authentication).
+
 > **Date/time params** (`start`, `end`, `time_min`, `time_max`, `due_date`) are
 > ISO 8601 strings, e.g. `2026-06-01T09:00:00`. **HTML bodies** are sent by
 > passing `body_type=html`.
@@ -453,16 +482,19 @@ Because a standalone MCP server has no messaging channel of its own, it does not
 block on its own approval prompt — **confirmation is the host's
 responsibility** (Claude Desktop, Cursor, and Pincer's MCP client all prompt on
 destructive tools). To remove the write tools entirely, run with `--read-only`;
-the 34 write tools are then neither listed nor callable (leaving 35 read tools).
+the 31 write tools are then neither listed nor callable (leaving 31 read tools
+plus `ms365__check_auth_status`).
 
 ---
 
 ## Error handling
 
-- **Input validation.** The MCP SDK validates every call against the tool's
-  `inputSchema` before dispatch; bad arguments return an MCP validation error.
-- **Graph / auth errors** are caught and returned as readable tool text
-  (`[Error] <tool>: <ExceptionType>: <message>`) rather than crashing the server.
+- **Input validation.** FastMCP validates every call against the tool's schema
+  before dispatch; bad arguments return an MCP validation error.
+- **Graph / auth errors** are caught and raised as FastMCP `ToolError`s
+  (`isError=true` on the wire) with a readable message, rather than crashing
+  the server. This includes the "sign-in pending" case — see
+  [Authentication](#authentication).
 - **Rate limits.** `GraphClient` retries `429` responses up to 3 times, honoring
   the `Retry-After` header.
 - **Pagination.** List endpoints follow `@odata.nextLink` up to each tool's
@@ -472,15 +504,22 @@ the 34 write tools are then neither listed nor callable (leaving 35 read tools).
 
 ## Security
 
-- **Token storage.** `~/.pincer/ms365_token_cache.json` is written with mode
-  `0600`. Treat it as a credential — it contains refresh tokens.
+- **Token storage.** Each identity's cache file is written with mode `0600`
+  under `MS365_TOKEN_CACHE_DIR` (default `~/.pincer/ms365_mcp/`). Treat these
+  as credentials — they contain refresh tokens. They are **not encrypted at
+  rest** (filesystem permissions only) — this is a known limitation, not yet
+  addressed.
+- **`identity` is untrusted input.** It's sanitized before being used as part
+  of a filename, but never assume it has any particular shape — it's an
+  opaque string from whatever MCP host set it.
 - **Bind locally.** The HTTP transport defaults to `127.0.0.1`. Only bind to
   `0.0.0.0` (e.g. in Docker) behind a trusted network or reverse proxy; the
   endpoint is unauthenticated.
 - **Least privilege.** Grant only the Graph scopes for the services you run, and
   use `--services` / `--read-only` to narrow the exposed surface.
 - **Delegated access.** All actions run as the signed-in user — the server can
-  do nothing the user cannot already do.
+  do nothing the user cannot already do, and each identity can only ever act
+  as its own Microsoft account.
 
 ---
 
@@ -488,16 +527,17 @@ the 34 write tools are then neither listed nor callable (leaving 35 read tools).
 
 | Symptom | Cause / fix |
 | --- | --- |
-| `No cached Microsoft 365 token…` on startup | Run `ms365-mcp-setup` on the host first. |
-| `PINCER_MS365_CLIENT_ID is not set` | Add `PINCER_MS365_CLIENT_ID` to `.env`, then re-run `ms365-mcp-setup`. |
-| `Microsoft 365 client_id is not configured` | Set `PINCER_MS365_CLIENT_ID` in `.env`. |
-| `MCP 'ms365' connection failed (attempt N):` with blank message | The sandboxed subprocess started but timed out before the MCP protocol initialised. Most likely cause: token cache not found because `HOME=/tmp` in the sandbox. Ensure `MS365_TOKEN_CACHE_PATH="${HOME}/.pincer/ms365_token_cache.json"` is in the server's `env` dict in `pincer.toml` (already the default). |
-| `Device flow failed` during setup | Enable **Allow public client flows** on the Azure app. |
-| `AADSTS9002346` error during setup | Your app is registered for personal accounts only — use `PINCER_MS365_TENANT_ID=consumers`. |
-| Graph `401` / `403` in tool output | Missing scope or unconsented permission — add it in Azure and re-run `ms365-mcp-setup`. |
+| `Microsoft 365 client_id is not configured` on startup | Set `MS365_CLIENT_ID` (standalone) or `PINCER_MS365_CLIENT_ID` in `.env` (via `pincer run`). |
+| A tool call returns a sign-in URL/code instead of a result | Expected on first use of a new identity — not an error. Sign in, then retry (or poll `ms365__check_auth_status`). |
+| `Sign-in already in progress for this account…` | A device-code flow for that identity is already running — wait for it to complete (or expire) rather than retrying repeatedly. |
+| Sign-in notification never reached my chat | Best-effort over streamable HTTP — poll `ms365__check_auth_status` instead of waiting for the push. |
+| `Device flow failed` | Enable **Allow public client flows** on the Azure app. |
+| `AADSTS9002346` error | Your app is registered for personal accounts only — use `MS365_TENANT_ID=consumers`. |
+| Graph `401` / `403` in tool output | Missing scope or unconsented permission — add it in Azure; the identity will need to re-authenticate (its next tool call after `has_cached_token()` fails will start a fresh device-code flow automatically). |
 | `429` errors | Rate limited; the client retries, but reduce call volume. |
-| Docker: token "permission denied" | Run with `UID=$(id -u) GID=$(id -g)` so the container can read/write the mounted cache. |
-| Tools missing in the host | Confirm the server lists them: `pincer-ms365-mcp --services <svc>` and check host logs; verify `--read-only` isn't hiding writes. |
+| `MCP 'ms365' connection failed (attempt N):` with blank message (Pincer sandboxed stdio) | The sandboxed subprocess started but timed out before the MCP protocol initialized — check `MS365_CLIENT_ID` is present in the server's `env` dict in `pincer.toml`. |
+| Docker: token "permission denied" | Ensure `MS365_TOKEN_CACHE_DIR` points at the mounted volume and the container can write to it. |
+| Tools missing in the host | Confirm the server lists them: `ms365-mcp-run --services <svc>` and check host logs; verify `--read-only` isn't hiding writes. |
 
 ---
 
@@ -509,16 +549,21 @@ Run the test suite:
 cd src/ms365-mcp && uv run pytest tests/ -v
 ```
 
-Key entry points in
-[`ms365_server.py`](../../src/ms365-mcp/ms365/ms365_server.py):
+Key entry points:
 
-| Function | Purpose |
-| --- | --- |
-| `collect_tools(client, services, read_only)` | Gather tool specs from `tools_*.py` modules. |
-| `build_server(client, services, read_only)` | Build a low-level MCP `Server` from the specs. |
-| `run_stdio(server)` / `run_http(server, host, port)` | Transports. |
-| `build_http_app(server)` | Starlette ASGI app (`/mcp`, `/health`). |
-| `main()` | CLI entry point (`pincer-ms365-mcp`). |
+| Function | File | Purpose |
+| --- | --- | --- |
+| `collect_tools(resolve_client, services, read_only)` | `ms365_server.py` | Gather tool specs from `tools_*.py` modules. |
+| `build_server(resolve_client, services, read_only)` | `ms365_server.py` | Build a FastMCP app from the specs. |
+| `_register_auth_status_tool(mcp, manager)` | `ms365_server.py` | Register the always-on `ms365__check_auth_status` tool. |
+| `run_stdio(mcp)` / `run_http(mcp, host, port)` | `ms365_server.py` | Transports. |
+| `build_http_app(mcp)` | `ms365_server.py` | Starlette ASGI app (`/mcp`, `/health`). |
+| `main()` | `ms365_server.py` | CLI entry point (`ms365-mcp-run`). |
+| `IdentitySessionManager.get_or_create(identity, ctx)` | `identity_session.py` | Lazily resolve/authenticate an identity's `GraphClient`; raises `AuthPendingError` while sign-in is pending. |
+| `IdentitySessionManager.status_for(identity)` | `identity_session.py` | Backing implementation of `ms365__check_auth_status`. |
 
 To add a tool, add it to the relevant `tools_*.py` file — it is automatically
-picked up, no changes to `ms365_server.py` required.
+picked up, no changes to `ms365_server.py` required. Each `register_*_tools()`
+function still takes `(registry, resolve_client)`; its inner `_h()` wrapper
+resolves the caller's `GraphClient` via `resolve_client(ctx)` on every call
+rather than closing over one fixed client.

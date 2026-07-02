@@ -551,15 +551,19 @@ class IdentityResolver:
         """Record `channel` as this identity's most-recently-active channel.
 
         Called on every inbound message (see `IdentityMiddleware`), regardless
-        of which channel it came in on. Skips the write when the value hasn't
-        changed — most users stick to one channel most of the time, so this
-        keeps the common case a no-op UPDATE rather than a real write.
+        of which channel it came in on. Always writes `active_channel_updated_at`,
+        even when `active_channel` itself hasn't changed — the timestamp tracks
+        "last seen active", not "last changed channel". A user who messages
+        continuously on the same channel for hours must keep that timestamp
+        current, or `get_preferred_channel`'s `max_active_age_seconds` staleness
+        check would wrongly treat them as inactive and fall back to
+        `preferred_channel`.
         """
         async with self._get_db() as db:
             await db.execute(
                 "UPDATE identity_meta SET active_channel = ?, active_channel_updated_at = datetime('now') "
-                "WHERE pincer_user_id = ? AND (active_channel IS NULL OR active_channel != ?)",
-                (channel.value, pincer_user_id, channel.value),
+                "WHERE pincer_user_id = ?",
+                (channel.value, pincer_user_id),
             )
             await db.commit()
 

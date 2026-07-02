@@ -63,9 +63,7 @@ def create_auth_notification_handler(
             logger.debug("Got notification with no identity in extra — dropping: %s", params.data)
             return
 
-        sent = await router.send_to_user(
-            identity, message, max_active_age_seconds=MAX_ACTIVE_CHANNEL_AGE_SECONDS
-        )
+        sent = await router.send_to_user(identity, message, max_active_age_seconds=MAX_ACTIVE_CHANNEL_AGE_SECONDS)
         if not sent:
             logger.warning("Could not deliver notification to user_id=%s", identity)
 

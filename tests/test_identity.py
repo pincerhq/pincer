@@ -176,26 +176,32 @@ class TestActiveChannel:
         """Touching an identity that doesn't exist shouldn't raise."""
         await resolver.touch_active_channel("usr_nonexistent", ChannelType.TELEGRAM)
 
-    async def test_touch_active_channel_skips_write_when_unchanged(self, resolver):
-        """Repeated touches with the same channel don't bump the timestamp needlessly."""
+    async def test_touch_active_channel_refreshes_timestamp_even_when_channel_unchanged(self, resolver):
+        """Regression test: a user messaging continuously on the same channel for
+        hours must keep active_channel_updated_at current. An earlier version
+        skipped the write whenever active_channel itself hadn't changed, which
+        let the timestamp go stale for the common case (most users stick to one
+        channel) and made get_preferred_channel wrongly fall back to
+        preferred_channel under a staleness check."""
         uid = await resolver.resolve(ChannelType.TELEGRAM, 44444)
         await resolver.touch_active_channel(uid, ChannelType.TELEGRAM)
 
+        # Simulate real elapsed time (sqlite datetime('now') has 1s resolution,
+        # too coarse to observe a difference from two touches back-to-back).
         async with resolver._get_db() as db:
-            cursor = await db.execute(
-                "SELECT active_channel_updated_at FROM identity_meta WHERE pincer_user_id = ?", (uid,)
+            await db.execute(
+                "UPDATE identity_meta SET active_channel_updated_at = datetime('now', '-1 hour') "
+                "WHERE pincer_user_id = ?",
+                (uid,),
             )
-            first_ts = (await cursor.fetchone())[0]
+            await db.commit()
 
-        await resolver.touch_active_channel(uid, ChannelType.TELEGRAM)
+        await resolver.touch_active_channel(uid, ChannelType.TELEGRAM)  # same channel again
 
-        async with resolver._get_db() as db:
-            cursor = await db.execute(
-                "SELECT active_channel_updated_at FROM identity_meta WHERE pincer_user_id = ?", (uid,)
-            )
-            second_ts = (await cursor.fetchone())[0]
-
-        assert first_ts == second_ts
+        # If the timestamp were still stale (bug), a 30-minute staleness window
+        # would reject it and fall back to preferred_channel instead.
+        ch_type, _ = await resolver.get_preferred_channel(uid, max_active_age_seconds=1800)
+        assert ch_type == ChannelType.TELEGRAM
 
     async def test_touch_active_channel_updates_when_channel_changes(self, resolver):
         uid = await resolver.resolve(ChannelType.TELEGRAM, 55556)
@@ -205,9 +211,7 @@ class TestActiveChannel:
         await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
 
         async with resolver._get_db() as db:
-            cursor = await db.execute(
-                "SELECT active_channel FROM identity_meta WHERE pincer_user_id = ?", (uid,)
-            )
+            cursor = await db.execute("SELECT active_channel FROM identity_meta WHERE pincer_user_id = ?", (uid,))
             row = await cursor.fetchone()
         assert row[0] == "whatsapp"
 

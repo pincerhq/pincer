@@ -8,7 +8,13 @@ version = "0.8.0"
 requires-python = ">=3.12"
 dependencies = [
     "msal>=1.28.0",
-    "fastmcp>=3.2,<4",
+    # Pinned exactly: fastmcp 3.4.2 restructured its PyPI packaging into a thin
+    # wrapper around a separate `fastmcp-slim` distribution, and that install
+    # ends up without a usable `fastmcp/__init__.py` (`Context`, `FastMCP`,
+    # `exceptions` all fail to import) — a real breakage, not a local fluke.
+    # 3.2.4 is the version this whole server was built and tested against;
+    # widen this only after verifying a newer release imports cleanly.
+    "fastmcp==3.2.4",
     "mcp>=1.24.0",
     "httpx>=0.27.0",
     "pydantic-settings>=2.0.0",

@@ -195,9 +195,7 @@ class IdentitySessionManager:
             expires_at = float(flow["expires_at"])
             task = asyncio.create_task(self._complete_flow(slug, auth, flow, ctx))
             self._pending[slug] = _PendingFlow(task=task, message=message, expires_at=expires_at)
-            raise AuthPendingError(
-                f"{message} Once signed in, retry your request (or call ms365__check_auth_status)."
-            )
+            raise AuthPendingError(f"{message} Once signed in, retry your request (or call ms365__check_auth_status).")
 
     async def _complete_flow(self, slug: str, auth: MS365Auth, flow: dict[str, Any], ctx: Context | None) -> None:
         """Background task: poll Microsoft until the device code flow resolves."""

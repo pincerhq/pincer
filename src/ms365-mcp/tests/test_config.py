@@ -64,7 +64,7 @@ def test_token_cache_path_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_token_cache_dir_default() -> None:
     cfg = MS365Settings()
-    assert cfg.token_cache_dir == Path.home() / ".pincer" / "ms365"
+    assert cfg.token_cache_dir == Path.home() / ".pincer" / "ms365_mcp"
 
 
 def test_token_cache_dir_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

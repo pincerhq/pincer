@@ -9,7 +9,7 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from ms365.identity_session import AuthPendingError, DEFAULT_IDENTITY, IdentitySessionManager, sanitize_identity
+from ms365.identity_session import DEFAULT_IDENTITY, AuthPendingError, IdentitySessionManager, sanitize_identity
 
 # ── sanitize_identity ─────────────────────────────────────────────────────────
 
@@ -272,9 +272,7 @@ async def test_get_or_create_retries_fresh_after_background_flow_fails(
 
 
 @pytest.mark.asyncio
-async def test_get_or_create_expired_pending_flow_starts_fresh(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_get_or_create_expired_pending_flow_starts_fresh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from ms365.identity_session import _PendingFlow
 
     monkeypatch.setattr("ms365.auth.MS365Auth", _FakePendingAuth)

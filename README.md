@@ -36,7 +36,7 @@ pip install pincer-agent && pincer init
 - **Slack Native — 71 tools** (messages, channels, users, files, reactions, pins/bookmarks/reminders/search) in `src/pincer/integrations/slack/`. Enable with `PINCER_SLACK_BOT_TOKEN` (+ `PINCER_SLACK_USER_TOKEN` for search).
 - **MCP OAuth 2.0 Authorization Server** — expose Pincer tools to remote MCP clients: `/authorize` · `/token` · `/introspect` · `/revoke`, RFC 8414 metadata, PKCE, JWT, scope-based access.
 - **Google Workspace Meet v2** — 27 new tools (spaces, conference records, recordings, transcripts, smart notes). Google Workspace total is now **113**.
-- **Tools Catalog** — `docs/TOOLS_CATALOG.md` documents all **304 native tools** (24 core + 27 skills + 113 Google Workspace + 69 Microsoft 365 + 71 Slack) plus unlimited via MCP.
+- **Tools Catalog** — `docs/TOOLS_CATALOG.md` documents all **297 native tools** (24 core + 27 skills + 113 Google Workspace + 62 Microsoft 365 + 71 Slack) plus unlimited via MCP.
 
 📖 Full release notes → [`CHANGELOG.md`](CHANGELOG.md) · Upgrade guide → [`docs/announcements/v0.7.6.md`](docs/announcements/v0.7.6.md)
 
@@ -101,7 +101,7 @@ So I built it. Pincer is the agent I wanted. If you want the same thing, it's yo
 | **Memory** | Cross-channel, FTS5 + embeddings | Per-channel | Needs setup | DIY |
 | **MCP** | Full client + OAuth 2.0 server | None | Plugins | DIY |
 | **Google Workspace** | 113 tools (Gmail/Calendar/Drive/Docs/Sheets/Slides/Meet/Tasks/Contacts) | Partial | DIY | DIY |
-| **Microsoft 365** | 69 tools (Outlook/OneDrive/Teams/OneNote/To Do) | None | DIY | DIY |
+| **Microsoft 365** | 62 tools (Outlook/Calendar/OneDrive/OneNote/To Do), multi-user | None | DIY | DIY |
 | **Slack (native)** | 71 tools (messages/channels/users/files/reactions) | None | DIY | DIY |
 | **Image generation** | fal.ai + Gemini built-in | None | DIY | DIY |
 
@@ -156,7 +156,7 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 |------|----------------|----------------------|
 | **🟢 Core** | Agent loop, memory, tools, security, cost controls, Telegram | CI-tested, regression-protected, release-blocking |
 | **🟡 Stable** | WhatsApp, Discord, Slack (channel + 71 native tools), Email, Google Workspace (113 tools), dashboard, skills system | Tested, maintained, may lag 1–2 weeks on upstream API changes |
-| **🧪 Peripheral** | Voice calling, Signal, Microsoft 365 (69 tools), MCP client + OAuth 2.0 server, image generation, proactive scheduler | Working, documented, community-maintained welcome |
+| **🧪 Peripheral** | Voice calling, Signal, Microsoft 365 (62 tools, multi-user), MCP client + OAuth 2.0 server, image generation, proactive scheduler | Working, documented, community-maintained welcome |
 | **🔮 Planned** | iMessage, SMS, Zoom, Viber, WeChat, Matrix | Not yet started — [help wanted](https://github.com/pincerhq/pincer/labels/help-wanted) |
 
 ---
@@ -188,7 +188,7 @@ Pincer ships **304 first-party tools** and plugs into **any MCP server** to reac
 | Core built-ins (`web_search`, `shell_exec`, `python_exec`, file ops, browser, email, calendar, image, voice) | 24 | Always on |
 | Bundled skills (weather, news, translate, stocks, expenses, habits, pomodoro, git, contacts…) | 27 | Always on |
 | **Google Workspace** — Gmail · Calendar · Drive · Docs · Sheets · Slides · Meet · Tasks · Contacts | **113** | `pincer setup-google` |
-| **Microsoft 365** — Outlook · Calendar · OneDrive · Teams · OneNote · To Do · Contacts | **69** | `ms365-mcp-setup` |
+| **Microsoft 365** — Outlook · Calendar · OneDrive · OneNote · To Do · Contacts · Directory (multi-user) | **62** | `ms365-mcp-setup` |
 | **Slack (native)** — messages · channels · users · files · reactions · pins · reminders · search | **71** | `PINCER_SLACK_BOT_TOKEN` |
 | **MCP tools** (GitHub, Postgres, Notion, Linear, Stripe, filesystem, …) | unlimited | `pincer.toml` + `[mcp]` |
 | Custom skills (AST-scanned + sandboxed) | unlimited | `pincer skills install` |
@@ -378,7 +378,7 @@ $ pincer doctor
   ✅ Daily budget: $5.00
   ✅ 11 skills installed, all scored ≥ 80
   ✅ Google Workspace: 113 tools registered
-  ✅ Microsoft 365: 69 tools registered (token cached)
+  ✅ Microsoft 365: 62 tools registered (per-identity auth, lazy on first use)
   ✅ Slack native: 71 tools registered
   ✅ MCP: 2 servers connected (github, postgres) — 42 extra tools
   ✅ Image generation: fal.ai key present, daily limit 50
@@ -538,7 +538,7 @@ pincer mcp tools                   # list registered MCP tools
 pincer mcp call <server> <tool>    # call a specific MCP tool
 pincer pair approve <ch> <code>    # approve a DM sender
 pincer setup-google                # Google Workspace OAuth (113 tools)
-ms365-mcp-setup                    # Microsoft 365 device-code auth (69 tools)
+ms365-mcp-setup                    # Microsoft 365 device-code auth, default identity (62 tools)
 ```
 
 **Chat commands** (any channel): `/status`, `/budget`, `/new`, `/compact`, `/model <name>`, `/tools`
@@ -571,7 +571,7 @@ graph TD
     TR --> BT[Built-in Tools · 304 native]
     TR --> SK[Custom Skills · Sandboxed]
     TR --> GW[Google Workspace · 113 tools]
-    TR --> MS[Microsoft 365 · 69 tools]
+    TR --> MS[Microsoft 365 · 62 tools · multi-user]
     TR --> SLK[Slack Native · 71 tools]
     MCP --> EXT[External MCP Servers · GitHub · Postgres · etc.]
 ```
@@ -599,7 +599,7 @@ pincer/
 │   ├── image/        router, provider_fal, provider_gemini, types
 │   ├── integrations/
 │   │   ├── google/   113 tools — Gmail, Calendar, Drive, Docs, Sheets, Slides, Meet, Tasks, Contacts
-│   │   ├── ms365/    69 tools — Outlook, Calendar, OneDrive, Teams, OneNote, To Do, Contacts
+│   │   ├── ms365/    62 tools — Outlook, Calendar, OneDrive, OneNote, To Do, Contacts, Directory (multi-user)
 │   │   └── slack/    71 tools — messages, channels, users, files, reactions, pins, search
 │   ├── mcp/          core, client, manager, bridge, audit, security, exporter, registry_client
 │   │   └── auth/     endpoints, tokens, pkce, scopes, consent, token_store (OAuth 2.0 server)
@@ -633,7 +633,7 @@ pip install "pincer-agent[image]"  # Image generation (fal.ai + Gemini)
 - [x] Docker + one-click deploys (Railway, Render, DigitalOcean)
 - [x] Voice calling (Twilio + STT/TTS + compliance)
 - [x] Google Workspace integration (113 tools via `pincer setup-google`)
-- [x] Microsoft 365 integration (69 tools via `ms365-mcp-setup`)
+- [x] Microsoft 365 integration (62 tools, multi-user, lazy per-identity auth)
 - [x] Slack native integration (71 tools)
 - [x] MCP client + OAuth 2.0 authorization server
 - [x] Google Meet full surface — spaces, recordings, transcripts, smart notes
@@ -695,7 +695,7 @@ cd pincer && uv sync && pytest
 | **[MCP Guide](docs/mcp-guide.md)** | Connect any MCP-compliant server; OAuth 2.0 server setup |
 | **[API Reference](docs/API reference.md)** | REST API for integrations |
 | **[Tools Catalog](docs/TOOLS_CATALOG.md)** | Every tool Pincer can call — 304 native + MCP |
-| **[Microsoft 365 MCP Guide](docs/guides/ms365-mcp.md)** | Azure app registration + device-code auth + 69 tools |
+| **[Microsoft 365 MCP Guide](docs/guides/ms365-mcp.md)** | Azure app registration + multi-user device-code auth + 62 tools |
 | **[Migrating from OpenClaw](docs/Migration from openclaw.md)** | Import your data in 30 min |
 
 ---

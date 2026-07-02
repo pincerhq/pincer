@@ -9,10 +9,10 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from fastmcp import Context
-
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from fastmcp import Context
 
     from ms365._registry import ClientResolver, ToolRegistry
     from ms365.graph_client import GraphClient

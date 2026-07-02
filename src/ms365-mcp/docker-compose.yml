@@ -9,7 +9,7 @@ services:
     environment:
       MS365_CLIENT_ID: "${MS365_CLIENT_ID:-none}"
       MS365_TENANT_ID: "${MS365_TENANT_ID:-common}"
-      MS365_TOKEN_CACHE_PATH: "/app/data"
+      MS365_TOKEN_CACHE_DIR: "/app/data"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:${PORT:-8000}/health"]
       interval: 30s

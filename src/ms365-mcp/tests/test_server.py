@@ -195,7 +195,8 @@ async def test_call_tool_dispatches_to_handler(resolve_client: Any, mock_client:
 @pytest.mark.asyncio
 async def test_call_tool_uses_client_resolved_for_the_caller_identity(mock_client: MagicMock) -> None:
     """Two different identities resolve to two different GraphClients."""
-    from unittest.mock import AsyncMock, MagicMock as _MagicMock
+    from unittest.mock import AsyncMock
+    from unittest.mock import MagicMock as _MagicMock
 
     other_client = _MagicMock()
     other_client.get = AsyncMock(return_value={"value": []})
