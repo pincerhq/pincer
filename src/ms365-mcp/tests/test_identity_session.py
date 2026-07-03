@@ -163,8 +163,8 @@ async def test_get_or_create_shares_one_fernet_across_identities(
     await manager.get_or_create("usr_abc")
     await manager.get_or_create("usr_xyz")
 
-    assert manager._auths["usr_abc"].fernet is fernet  # noqa: SLF001
-    assert manager._auths["usr_xyz"].fernet is fernet  # noqa: SLF001
+    assert cast("Any", manager._auths["usr_abc"]).fernet is fernet  # noqa: SLF001
+    assert cast("Any", manager._auths["usr_xyz"]).fernet is fernet  # noqa: SLF001
     assert cache_paths == [
         str(tmp_path / "usr_abc_token_cache.json"),
         str(tmp_path / "usr_xyz_token_cache.json"),

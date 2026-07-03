@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from cryptography.fernet import Fernet
 from ms365.config import MS365Settings
 from ms365.crypto import load_or_generate_fernet
 
 
-def test_generates_key_file_with_0600_permissions(tmp_path: Path) -> None:
+def test_generates_key_file_with_0600_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MS365_TOKEN_ENCRYPTION_KEY", raising=False)
     key_path = tmp_path / "token_encryption.key"
-    settings = MS365Settings(token_encryption_key_path=key_path)  # type: ignore[arg-type]
+    settings = MS365Settings(token_encryption_key_path=key_path, _env_file=None)  # type: ignore[call-arg]
 
     load_or_generate_fernet(settings)
 
@@ -19,12 +21,15 @@ def test_generates_key_file_with_0600_permissions(tmp_path: Path) -> None:
     assert oct(key_path.stat().st_mode)[-3:] == "600"
 
 
-def test_reload_is_idempotent(tmp_path: Path) -> None:
+def test_reload_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MS365_TOKEN_ENCRYPTION_KEY", raising=False)
     key_path = tmp_path / "token_encryption.key"
-    settings = MS365Settings(token_encryption_key_path=key_path)  # type: ignore[arg-type]
+    settings = MS365Settings(token_encryption_key_path=key_path, _env_file=None)  # type: ignore[call-arg]
 
     first = load_or_generate_fernet(settings)
-    second = load_or_generate_fernet(MS365Settings(token_encryption_key_path=key_path))  # type: ignore[arg-type]
+    second = load_or_generate_fernet(
+        MS365Settings(token_encryption_key_path=key_path, _env_file=None)  # type: ignore[call-arg]
+    )
 
     token = first.encrypt(b"payload")
     assert second.decrypt(token) == b"payload"
