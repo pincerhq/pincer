@@ -174,8 +174,17 @@ Each identity's MSAL token cache is a separate file:
 
 `identity` is sanitized to a safe filename component before use. Refresh is
 automatic — MSAL rewrites the cache using the cached refresh token. **The
-cache is plaintext** (protected only by filesystem permissions) — encrypting
-it at rest is a known follow-up, not yet implemented.
+cache is encrypted at rest** with a shared Fernet key: auto-generated on
+first run at `MS365_TOKEN_ENCRYPTION_KEY_PATH` (default
+`~/.pincer/ms365_mcp/token_encryption.key`, file mode `0600`), or overridden
+entirely with `MS365_TOKEN_ENCRYPTION_KEY` (a raw Fernet key — useful when
+injecting the key from an external secrets manager instead of a local file).
+One key is shared across all identities on a given server; per-identity
+isolation comes from separate cache files, not separate keys. A file that
+fails to decrypt (wrong/rotated key, corruption, or a stray plaintext file
+left over from before this was added) is treated as "no cached token" —
+the affected identity is prompted to re-authenticate rather than crashing
+the server.
 
 ### `ms365-mcp-setup` (optional, single-identity convenience)
 
@@ -506,9 +515,14 @@ plus `ms365__check_auth_status`).
 
 - **Token storage.** Each identity's cache file is written with mode `0600`
   under `MS365_TOKEN_CACHE_DIR` (default `~/.pincer/ms365_mcp/`). Treat these
-  as credentials — they contain refresh tokens. They are **not encrypted at
-  rest** (filesystem permissions only) — this is a known limitation, not yet
-  addressed.
+  as credentials — they contain refresh tokens. They are **encrypted at rest**
+  with a Fernet key (see [Token storage](#token-storage) above) — note the key
+  file itself is also only protected by filesystem permissions, so this
+  doesn't help against an attacker with full read access to your account, but
+  it does protect against the cache file leaking independently of the key
+  (backups, cloud sync, accidentally archived/committed, etc.). Losing or
+  rotating the key invalidates all cached tokens; affected identities simply
+  re-authenticate.
 - **`identity` is untrusted input.** It's sanitized before being used as part
   of a filename, but never assume it has any particular shape — it's an
   opaque string from whatever MCP host set it.

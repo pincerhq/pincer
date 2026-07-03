@@ -367,6 +367,7 @@ async def _async_main(args: argparse.Namespace) -> None:
     import sys
 
     from ms365.config import get_settings
+    from ms365.crypto import load_or_generate_fernet
     from ms365.identity_session import IdentitySessionManager
 
     cfg = get_settings()
@@ -383,11 +384,13 @@ async def _async_main(args: argparse.Namespace) -> None:
     # set), not the `--services` tool-exposure filter above — matches today's
     # existing behavior where a narrower `--services` only hides tools, it
     # doesn't shrink the consent scope requested per identity.
+    fernet = load_or_generate_fernet(cfg)
     manager = IdentitySessionManager(
         client_id=cfg.client_id,
         tenant_id=tenant_id,
         cache_dir=cfg.token_cache_dir,
         services=cfg.services,
+        fernet=fernet,
     )
     resolve_client = _make_client_resolver(manager)
 

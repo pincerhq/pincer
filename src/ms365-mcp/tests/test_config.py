@@ -56,6 +56,34 @@ def test_token_cache_dir_expands_home() -> None:
     assert cfg.token_cache_dir == Path.home() / ".pincer" / "other-ms365"
 
 
+def test_token_encryption_key_default_is_empty_secret() -> None:
+    cfg = MS365Settings()
+    assert cfg.token_encryption_key.get_secret_value() == ""
+
+
+def test_token_encryption_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MS365_TOKEN_ENCRYPTION_KEY", "some-raw-key")
+    cfg = MS365Settings()
+    assert cfg.token_encryption_key.get_secret_value() == "some-raw-key"
+
+
+def test_token_encryption_key_path_default() -> None:
+    cfg = MS365Settings()
+    assert cfg.token_encryption_key_path == Path.home() / ".pincer" / "ms365_mcp" / "token_encryption.key"
+
+
+def test_token_encryption_key_path_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MS365_TOKEN_ENCRYPTION_KEY_PATH", "/tmp/ms365-key/token.key")
+    cfg = MS365Settings()
+    assert cfg.token_encryption_key_path == Path("/tmp/ms365-key/token.key")
+
+
+def test_token_encryption_key_path_expands_home() -> None:
+    cfg = MS365Settings(token_encryption_key_path="~/.pincer/other-key.key")  # type: ignore[arg-type]
+    assert "~" not in str(cfg.token_encryption_key_path)
+    assert cfg.token_encryption_key_path == Path.home() / ".pincer" / "other-key.key"
+
+
 def test_services_csv_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MS365_SERVICES", "email,calendar")
     cfg = MS365Settings()

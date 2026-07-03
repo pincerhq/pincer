@@ -119,7 +119,7 @@ Full Meet REST v2 surface — spaces, conference records, participants, recordin
 
 ## Microsoft 365 (69 tools)
 
-Available via the standalone `ms365-mcp` server. Run `ms365-mcp-setup` once to authenticate; a token is cached at `~/.pincer/ms365_token_cache.json`.
+Available via the standalone `ms365-mcp` server. Run `ms365-mcp-setup` once to authenticate; a token is cached (encrypted at rest) at `~/.pincer/ms365_mcp/default_token_cache.json`.
 
 ### Outlook Email (17) — `outlook__`
 

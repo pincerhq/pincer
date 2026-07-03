@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### ms365-mcp: encrypted token cache at rest
+
+- Per-identity Microsoft 365 token caches (`<MS365_TOKEN_CACHE_DIR>/<identity>_token_cache.json`) are now encrypted at rest with a shared Fernet key, auto-generated on first run at `MS365_TOKEN_ENCRYPTION_KEY_PATH` (default `~/.pincer/ms365_mcp/token_encryption.key`, mode `0600`), or overridden with `MS365_TOKEN_ENCRYPTION_KEY` (raw key, e.g. injected by a secrets manager). A cache file that fails to decrypt (wrong/rotated key, corruption, or a stray pre-encryption plaintext file) is treated as "no cached token" — the identity re-authenticates rather than crashing the server.
+
 #### Multi-provider LLM architecture with random failover
 
 - **`LLMRouter`** — a single construction entry point (`pincer.llm.router`) that also *is* a `BaseLLMProvider`. `cli.py` and `api/_deps.py` now call `LLMRouter().get_llm()` / `.get_summarizer()`; adding a provider touches only `pincer/llm/`.

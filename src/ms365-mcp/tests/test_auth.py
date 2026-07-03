@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from cryptography.fernet import Fernet
 from ms365.auth import (
     SERVICE_SCOPES,
     MS365Auth,
@@ -87,12 +88,13 @@ async def test_get_token_no_cache_raises() -> None:
         auth._app = None
         auth._cache = None
         auth._pending_flow_message = ""
+        auth._fernet = None
 
         with pytest.raises(MS365AuthError, match="No valid Microsoft 365 token"):
             await auth.get_token()
 
 
-def _bare_auth() -> MS365Auth:
+def _bare_auth(fernet: Fernet | None = None) -> MS365Auth:
     """Build an MS365Auth with private attrs set directly (no msal import needed)."""
     auth = MS365Auth.__new__(MS365Auth)
     auth._client_id = "test-id"
@@ -103,6 +105,7 @@ def _bare_auth() -> MS365Auth:
     auth._cache = MagicMock()
     auth._cache.has_state_changed = False
     auth._pending_flow_message = ""
+    auth._fernet = fernet
     return auth
 
 
@@ -130,7 +133,7 @@ def test_initiate_device_flow_sync_raises_without_user_code() -> None:
         auth.initiate_device_flow_sync()
 
 
-def test_complete_device_flow_sync_success_saves_cache() -> None:
+def test_complete_device_flow_sync_success_saves_cache_unencrypted() -> None:
     auth = _bare_auth()
     auth._cache.has_state_changed = True
     auth._cache.serialize.return_value = '{"fake": "cache"}'
@@ -142,6 +145,60 @@ def test_complete_device_flow_sync_success_saves_cache() -> None:
     auth._cache.serialize.assert_called_once()
     assert auth._cache_path.read_text() == '{"fake": "cache"}'
     auth._cache_path.unlink()
+
+
+def test_complete_device_flow_sync_success_saves_cache_encrypted() -> None:
+    fernet = Fernet(Fernet.generate_key())
+    auth = _bare_auth(fernet=fernet)
+    auth._cache.has_state_changed = True
+    auth._cache.serialize.return_value = '{"fake": "cache"}'
+    auth._app.acquire_token_by_device_flow.return_value = {"access_token": "new-token"}
+
+    result = auth.complete_device_flow_sync({"device_code": "xyz"})
+
+    assert result["access_token"] == "new-token"
+    raw = auth._cache_path.read_bytes()
+    assert raw != b'{"fake": "cache"}'
+    assert fernet.decrypt(raw) == b'{"fake": "cache"}'
+    auth._cache_path.unlink()
+
+
+def test_load_cache_decrypts_with_matching_key(tmp_path: Path) -> None:
+    fernet = Fernet(Fernet.generate_key())
+    cache_path = tmp_path / "tokens.json"
+    cache_path.write_bytes(fernet.encrypt(b'{"real": "cache"}'))
+
+    auth = _bare_auth(fernet=fernet)
+    auth._cache_path = cache_path
+
+    auth._load_cache()
+
+    auth._cache.deserialize.assert_called_once_with('{"real": "cache"}')
+
+
+def test_load_cache_wrong_key_treated_as_no_cached_token(tmp_path: Path) -> None:
+    cache_path = tmp_path / "tokens.json"
+    cache_path.write_bytes(Fernet(Fernet.generate_key()).encrypt(b'{"real": "cache"}'))
+
+    auth = _bare_auth(fernet=Fernet(Fernet.generate_key()))
+    auth._cache_path = cache_path
+
+    auth._load_cache()
+
+    auth._cache.deserialize.assert_not_called()
+
+
+def test_load_cache_stray_plaintext_legacy_file_treated_as_no_cached_token(tmp_path: Path) -> None:
+    """A leftover unencrypted cache from before Fernet encryption must not crash the server."""
+    cache_path = tmp_path / "tokens.json"
+    cache_path.write_text('{"legacy": "plaintext cache"}')
+
+    auth = _bare_auth(fernet=Fernet(Fernet.generate_key()))
+    auth._cache_path = cache_path
+
+    auth._load_cache()
+
+    auth._cache.deserialize.assert_not_called()
 
 
 def test_complete_device_flow_sync_failure_raises() -> None:
@@ -191,6 +248,7 @@ async def test_get_token_from_cache() -> None:
         auth._app = mock_app
         auth._cache = mock_cache
         auth._pending_flow_message = ""
+        auth._fernet = None
 
         token = await auth.get_token()
         assert token == "cached-token"

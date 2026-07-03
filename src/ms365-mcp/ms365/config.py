@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import EnvSettingsSource, PydanticBaseSettingsSource
 
@@ -56,6 +56,11 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
     auth_method: str = "device_code"
     services: list[str] = list(_DEFAULT_SERVICES)
     token_cache_dir: Path = Path.home() / ".pincer" / "ms365_mcp"
+    token_encryption_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Raw Fernet key (urlsafe-base64, 32 bytes) overriding the on-disk key file.",
+    )
+    token_encryption_key_path: Path = Path.home() / ".pincer" / "ms365_mcp" / "token_encryption.key"
 
     @classmethod
     def settings_customise_sources(
@@ -88,6 +93,14 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
             raise SystemExit(f"Cannot create/access MS365_TOKEN_CACHE_DIR {path}: {e}") from e
 
         return path
+
+    @field_validator("token_encryption_key_path", mode="before")
+    @classmethod
+    def key_path_str_to_path(cls, value: str | Path) -> Path:
+        try:
+            return Path(value).expanduser()
+        except TypeError as e:
+            raise ValueError(f"Invalid path: {value!r} - {e}") from e
 
 
 @lru_cache(maxsize=1)

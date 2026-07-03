@@ -21,7 +21,12 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from cryptography.fernet import InvalidToken
+
+if TYPE_CHECKING:
+    from cryptography.fernet import Fernet
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +75,7 @@ class MS365Auth:
         cache_path: str,
         tenant_id: str = "common",
         services: list[str] | None = None,
+        fernet: Fernet | None = None,
     ) -> None:
         self._client_id = client_id
         self._tenant_id = tenant_id
@@ -78,6 +84,7 @@ class MS365Auth:
         self._app: Any = None  # msal.PublicClientApplication
         self._cache: Any = None  # msal.SerializableTokenCache
         self._pending_flow_message: str = ""
+        self._fernet = fernet
 
     def _ensure_app(self) -> None:
         """Lazily initialise the MSAL application."""
@@ -96,14 +103,31 @@ class MS365Auth:
         )
 
     def _load_cache(self) -> None:
-        if self._cache_path.exists():
-            self._cache.deserialize(self._cache_path.read_text())
+        if not self._cache_path.exists():
+            return
+        raw = self._cache_path.read_bytes()
+        if self._fernet is not None:
+            try:
+                raw = self._fernet.decrypt(raw)
+            except InvalidToken:
+                logger.warning(
+                    "Token cache at %s could not be decrypted (wrong/rotated key, corrupt "
+                    "file, or a stray unencrypted legacy cache) — treating as no cached "
+                    "token; re-authentication will be required.",
+                    self._cache_path,
+                )
+                return
+        self._cache.deserialize(raw.decode("utf-8"))
 
     def _save_cache(self) -> None:
-        if self._cache.has_state_changed:
-            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cache_path.write_text(self._cache.serialize())
-            os.chmod(self._cache_path, 0o600)
+        if not self._cache.has_state_changed:
+            return
+        data = self._cache.serialize().encode("utf-8")
+        if self._fernet is not None:
+            data = self._fernet.encrypt(data)
+        self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self._cache_path.write_bytes(data)
+        os.chmod(self._cache_path, 0o600)
 
     # ── Public API ────────────────────────────────────────────────────────────
 

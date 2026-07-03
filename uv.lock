@@ -2357,6 +2357,7 @@ name = "ms365-mcp"
 version = "0.8.0"
 source = { editable = "src/ms365-mcp" }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastmcp" },
     { name = "httpx" },
     { name = "mcp" },
@@ -2382,6 +2383,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=42" },
     { name = "fastmcp", specifier = "==3.2.4" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "mcp", specifier = ">=1.24.0" },
