@@ -57,9 +57,7 @@ def test_tenant_default(tmp_path: Path) -> None:
 
 def test_tenant_custom(tmp_path: Path) -> None:
     with patch("ms365.auth.msal", create=True):
-        auth = MS365Auth(
-            client_id="test-id", cache_path=str(tmp_path / "tokens.json"), tenant_id="my-tenant-id"
-        )
+        auth = MS365Auth(client_id="test-id", cache_path=str(tmp_path / "tokens.json"), tenant_id="my-tenant-id")
     assert auth.tenant_id == "my-tenant-id"
 
 
