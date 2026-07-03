@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -40,3 +41,14 @@ def mock_client(mock_auth: MagicMock) -> MagicMock:
     client.get_binary = AsyncMock(return_value=b"file content")
     client.paginate = AsyncMock(return_value=[])
     return client
+
+
+@pytest.fixture
+def resolve_client(mock_client: MagicMock) -> Any:
+    """A ClientResolver stub (see ms365._registry.ClientResolver) that always
+    returns `mock_client`, regardless of the caller's identity/ctx."""
+
+    async def _resolve(ctx: Any) -> MagicMock:
+        return mock_client
+
+    return _resolve

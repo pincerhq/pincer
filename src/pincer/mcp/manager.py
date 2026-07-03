@@ -21,6 +21,10 @@ from pincer.mcp.bridge import MCPToolBridge
 from pincer.mcp.client import MCPClientSession
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from mcp.types import LoggingMessageNotificationParams
+
     from pincer.mcp.config import MCPConfig
     from pincer.mcp.security import MCPSecurityGate
     from pincer.security.audit import AuditLogger
@@ -58,6 +62,23 @@ class MCPClientManager:
         self._task_group: anyio.abc.TaskGroup | None = None
         self._task_group_ctx: Any = None
         self._disabled: set[str] = set()  # servers that exhausted retries
+        self._notification_handler: Callable[[LoggingMessageNotificationParams], Awaitable[None]] | None = None
+
+    def set_notification_handler(
+        self, handler: Callable[[LoggingMessageNotificationParams], Awaitable[None]] | None
+    ) -> None:
+        """Attach a callback for server-initiated notifications (e.g. an MCP
+        server pushing a message well after some earlier tool call already
+        returned — see `pincer.mcp.notifications`).
+
+        Applied to every currently-connected session, and remembered so it's
+        also applied to sessions connected/reconnected afterward (this is
+        typically called after startup finishes wiring up the channel router,
+        which doesn't exist yet when MCPClientManager itself is constructed).
+        """
+        self._notification_handler = handler
+        for session in self._sessions.values():
+            session.set_notification_handler(handler)
 
     async def start(self) -> dict[str, bool]:
         """
@@ -79,6 +100,7 @@ class MCPClientManager:
         async def _connect_one(srv_config: Any) -> None:
 
             session = MCPClientSession(srv_config)
+            session.set_notification_handler(self._notification_handler)
             try:
                 # Client handles startup_timeout + timeout internally
                 await session.connect()
@@ -207,6 +229,7 @@ class MCPClientManager:
         for attempt in range(1, srv_config.max_retries + 1):
             try:
                 new_session = MCPClientSession(srv_config)
+                new_session.set_notification_handler(self._notification_handler)
                 await new_session.connect()
 
                 # Deregister old tools, register new ones

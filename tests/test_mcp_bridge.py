@@ -247,7 +247,27 @@ async def test_handler_calls_session() -> None:
 
     result = await registry.execute("testserver__echo_tool", {"message": "hello"})
     assert "echo: hello" in result
-    session.call_tool.assert_called_once_with("echo_tool", {"message": "hello"})
+    session.call_tool.assert_called_once_with("echo_tool", {"message": "hello"}, identity=None)
+
+
+async def test_handler_forwards_identity_from_context() -> None:
+    """context['user_id'] (set by the agent loop) is forwarded as identity."""
+    tool = FakeTool("echo_tool")
+    session = _make_session([tool])
+    session.config.approval_required = ["none"]
+    session.call_tool = AsyncMock(return_value=FakeCallToolResult(content=[FakeTextContent(text="echo: hello")]))
+
+    registry = _make_registry()
+    audit = _make_audit()
+    bridge = MCPToolBridge(session, registry, audit, prefix=True)
+    bridge.register_tools()
+
+    await registry.execute(
+        "testserver__echo_tool",
+        {"message": "hello"},
+        context={"user_id": "usr_abc123", "channel": "telegram"},
+    )
+    session.call_tool.assert_called_once_with("echo_tool", {"message": "hello"}, identity="usr_abc123")
 
 
 async def test_handler_logs_audit_on_success() -> None:

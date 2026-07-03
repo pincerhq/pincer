@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import computed_field, field_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import EnvSettingsSource, PydanticBaseSettingsSource
 
 if TYPE_CHECKING:
     from pydantic.fields import FieldInfo
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_SERVICES = ["email", "calendar", "onedrive", "todo", "contacts", "onenote", "directory"]
 
@@ -52,7 +55,7 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
     tenant_id: str = "common"
     auth_method: str = "device_code"
     services: list[str] = list(_DEFAULT_SERVICES)
-    token_cache_path: Path = Path.home() / ".pincer" / "ms365_token_cache.json"
+    token_cache_dir: Path = Path.home() / ".pincer" / "ms365_mcp"
 
     @classmethod
     def settings_customise_sources(
@@ -65,22 +68,26 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         return (init_settings, _CommaAwareEnvSource(settings_cls), dotenv_settings, file_secret_settings)
 
-    @field_validator("token_cache_path", mode="before")
+    @field_validator("token_cache_dir", mode="before")
     @classmethod
-    def path_str_to_path(cls, value: str | Path) -> Path:
+    def dir_str_to_path(cls, value: str | Path) -> Path:
         try:
-            # NOTE: here is safe manage home directory `~` prefix
-            value = Path(value).expanduser()
-        except Exception as e:
-            raise ValueError(f"Invalid path: {value} - {e}") from e
-        if value.is_dir():
-            value = value / "ms365_token_cache.json"
-        return value
+            path = Path(value).expanduser()
+        except TypeError as e:
+            raise ValueError(f"Invalid path: {value!r} - {e}") from e
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def cache_path(self) -> Path:
-        return self.token_cache_path
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            # Deliberately not a ValueError: pydantic only folds ValueError/AssertionError
+            # into a (catchable) ValidationError. A broken cache dir is a fatal
+            # environment problem, not a bad-input validation issue, so this must
+            # not be swallowed by a caller's `except Exception` — raising SystemExit
+            # here propagates unwrapped and always aborts bootstrap.
+            logger.critical("Cannot create/access MS365_TOKEN_CACHE_DIR %s: %s", path, e)
+            raise SystemExit(f"Cannot create/access MS365_TOKEN_CACHE_DIR {path}: {e}") from e
+
+        return path
 
 
 @lru_cache(maxsize=1)

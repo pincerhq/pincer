@@ -10,7 +10,9 @@ dependencies = [
     "fastapi>=0.115.12",
     "pydantic>=2.4.1,<2.13",
     "uvicorn>=0.34.0",
-    "fastmcp>=3.4.2",
+    # See src/ms365-mcp/pyproject.toml's comment: fastmcp 3.4.2's PyPI
+    # packaging is broken (empty `fastmcp/__init__.py`, `FastMCP` unimportable).
+    "fastmcp==3.2.4",
     "fastembed>=0.4.0",
     "sqlite-vec>=0.1.6",
 ]

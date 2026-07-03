@@ -5,10 +5,13 @@ Supports:
 1. Device code flow (headless — user enters code in browser)
 2. Interactive browser flow (opens browser automatically)
 
-Token cache: ~/.pincer/ms365_token_cache.json
+Each `MS365Auth` instance owns one token cache file, at whatever `cache_path`
+its caller gives it — `identity_session.py`'s `IdentitySessionManager` builds
+one per identity under `MS365_TOKEN_CACHE_DIR` (default `~/.pincer/ms365_mcp/`).
 MSAL handles refresh tokens automatically.
 
-Run ``ms365-mcp-setup`` to perform the one-time device code auth flow.
+Run ``ms365-mcp-setup`` to perform a one-time device code auth flow for the
+`"default"` identity slot.
 """
 
 from __future__ import annotations
@@ -64,8 +67,8 @@ class MS365Auth:
     def __init__(
         self,
         client_id: str,
+        cache_path: str,
         tenant_id: str = "common",
-        cache_path: str = "~/.pincer/ms365_token_cache.json",
         services: list[str] | None = None,
     ) -> None:
         self._client_id = client_id
@@ -127,13 +130,16 @@ class MS365Auth:
 
         raise MS365AuthError("No valid Microsoft 365 token found. Run 'ms365-mcp-setup' to authenticate.")
 
-    def device_code_flow_sync(self) -> dict[str, Any]:
-        """Run device code flow synchronously (blocking).
+    def initiate_device_flow_sync(self) -> dict[str, Any]:
+        """Start the device code flow and return immediately (non-blocking).
 
-        Call this BEFORE starting an asyncio event loop so that all MSAL calls
-        execute in the same thread with no asyncio/threading indirection.
-        stdout is reserved for the MCP stdio protocol; the user-code message is
-        printed to stderr.
+        Does **not** wait for the user to sign in — the returned dict (MSAL's
+        flow, with a normalized ``expires_at``) must be passed to
+        ``complete_device_flow`` / ``complete_device_flow_sync`` to actually
+        poll Microsoft for completion. Use this (instead of
+        ``device_code_flow_sync``) when the caller needs to show the
+        verification URL/code right away without blocking on the whole flow —
+        e.g. a per-identity tool call, where the block would tie up the request.
         """
         import time
 
@@ -148,10 +154,10 @@ class MS365Auth:
             f"To sign in, visit https://microsoft.com/devicelogin and enter code: {flow['user_code']}",
         )
         self._pending_flow_message = msg
-        print(f"\n{msg}\n", file=sys.stderr, flush=True)
 
         expires_in = flow.get("expires_in", 900)
         expires_at = flow.get("expires_at", time.time() + expires_in)
+        flow["expires_at"] = expires_at  # normalize: callers can always rely on this key
         logger.debug(
             "Device flow: expires_in=%s expires_at=%.0f now=%.0f remaining=%.0fs",
             expires_in,
@@ -159,6 +165,20 @@ class MS365Auth:
             time.time(),
             expires_at - time.time(),
         )
+        return dict(flow)  # type: ignore[no-any-return]
+
+    async def initiate_device_flow(self) -> dict[str, Any]:
+        """Async wrapper around initiate_device_flow_sync."""
+        return await asyncio.to_thread(self.initiate_device_flow_sync)
+
+    def complete_device_flow_sync(self, flow: dict[str, Any]) -> dict[str, Any]:
+        """Block until the device code flow started by ``initiate_device_flow`` completes.
+
+        Polls Microsoft until the user signs in, the flow is declined, or it
+        expires (MSAL enforces ``flow["expires_at"]`` internally) — this is the
+        long-running half split out of the old ``device_code_flow_sync``.
+        """
+        self._ensure_app()
 
         result = dict(self._app.acquire_token_by_device_flow(flow))  # type: ignore[no-any-return]
 
@@ -175,6 +195,25 @@ class MS365Auth:
 
         self._save_cache()
         return result
+
+    async def complete_device_flow(self, flow: dict[str, Any]) -> dict[str, Any]:
+        """Async wrapper around complete_device_flow_sync."""
+        return await asyncio.to_thread(self.complete_device_flow_sync, flow)
+
+    def device_code_flow_sync(self) -> dict[str, Any]:
+        """Run the full device code flow synchronously: start + block until completion.
+
+        Call this BEFORE starting an asyncio event loop so that all MSAL calls
+        execute in the same thread with no asyncio/threading indirection.
+        stdout is reserved for the MCP stdio protocol; the user-code message is
+        printed to stderr. Used by the CLI setup wizard (``ms365-mcp-setup``);
+        the lazy per-identity flow (``identity_session.py``) uses
+        ``initiate_device_flow``/``complete_device_flow`` directly instead so it
+        never blocks a tool call.
+        """
+        flow = self.initiate_device_flow_sync()
+        print(f"\n{self._pending_flow_message}\n", file=sys.stderr, flush=True)
+        return self.complete_device_flow_sync(flow)
 
     async def device_code_flow(self) -> dict[str, Any]:
         """Async wrapper around device_code_flow_sync for programmatic / test use."""

@@ -60,8 +60,15 @@ def main() -> None:
 
     from ms365.auth import MS365Auth
     from ms365.config import get_settings
+    from ms365.identity_session import DEFAULT_IDENTITY
 
-    cache_path = get_settings().cache_path
+    # Pre-seeds the "default" identity slot — the one ms365-mcp-run falls back
+    # to for a caller that sends no `identity` in its tool calls (e.g. a bare
+    # MCP client, or Pincer before any per-user auth has happened). This is
+    # the same path IdentitySessionManager reads from lazily on first tool
+    # call, so pre-authenticating here just saves that first caller the
+    # device-code round trip — it is *not* required for multi-identity use.
+    cache_path = get_settings().token_cache_dir / f"{DEFAULT_IDENTITY}_token_cache.json"
 
     if cache_path.exists():
         print(f"Token cache already exists: {cache_path}")
@@ -82,11 +89,19 @@ def main() -> None:
         sys.exit(1)
 
     account = auth.authenticated_account() or result.get("id_token_claims", {}).get("preferred_username", "unknown")
+
+    from ms365.ms365_server import collect_tools
+
+    async def _unused_resolver(ctx: object) -> object:  # never invoked during collection
+        raise NotImplementedError
+
+    tool_count = len(collect_tools(_unused_resolver))  # type: ignore[arg-type]
+
     print("\nMicrosoft 365 authenticated!")
     print(f"  Account:      {account}")
     print(f"  Token cached: {cache_path}")
     print(f"  Scopes:       {len(auth.scopes)}")
-    print("\n69 Microsoft 365 tools are now available.")
+    print(f"\n{tool_count} Microsoft 365 tools are now available under the 'default' identity.")
     print("Start the server:  ms365-mcp-run --transport http")
     print("Or run pincer:     pincer run")
 

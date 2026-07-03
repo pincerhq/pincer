@@ -14,12 +14,17 @@ from __future__ import annotations
 import contextlib
 import logging
 from contextlib import AsyncExitStack
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import anyio
 
 from pincer.mcp.config import MCPServerConfig, MCPTransport
 from pincer.mcp.sandbox import MCPSandbox, sandbox_streams
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from mcp.types import LoggingMessageNotificationParams
 
 logger = logging.getLogger("pincer.mcp")
 
@@ -36,6 +41,30 @@ class MCPClientSession:
         self._connect_attempts = 0
         self._tmpdir: str | None = None
         self._sandbox: MCPSandbox | None = None
+        # Set via set_notification_handler() — may be attached before or after
+        # connect(), since the server-to-client push this feeds (e.g. ms365-mcp's
+        # delayed auth-completion message) can arrive minutes after connection.
+        self._notification_handler: Callable[[LoggingMessageNotificationParams], Awaitable[None]] | None = None
+
+    def set_notification_handler(
+        self, handler: Callable[[LoggingMessageNotificationParams], Awaitable[None]] | None
+    ) -> None:
+        """Register (or clear, with None) a callback for server-initiated logging notifications.
+
+        Generic on purpose: this session has no notion of what a notification
+        means — it just relays `mcp.types.LoggingMessageNotificationParams` to
+        whoever registered interest. Filtering by `.logger` and acting on
+        `.data` is the handler's job (see `pincer.mcp.notifications`).
+        """
+        self._notification_handler = handler
+
+    async def _handle_notification(self, params: LoggingMessageNotificationParams) -> None:
+        if self._notification_handler is None:
+            return
+        try:
+            await self._notification_handler(params)
+        except Exception:
+            logger.exception("MCP '%s': notification handler raised", self.name)
 
     @property
     def name(self) -> str:
@@ -80,7 +109,9 @@ class MCPClientSession:
 
             # Enter ClientSession outside fail_after — it spawns background tasks whose
             # cancel scope must outlive our timeout scope.
-            self._session = await self._exit_stack.enter_async_context(ClientSession(read_stream, write_stream))
+            self._session = await self._exit_stack.enter_async_context(
+                ClientSession(read_stream, write_stream, logging_callback=self._handle_notification)
+            )
             # Bound the handshake by startup_timeout, not the per-tool-call timeout —
             # servers that run one-time interactive auth (e.g. device code flow) on
             # first launch need a much longer window here without slowing down every
@@ -106,9 +137,15 @@ class MCPClientSession:
         await self._cleanup()
         logger.info("MCP '%s' disconnected", self.name)
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> Any:
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any], identity: str | None = None) -> Any:
         """
         Execute a tool call with timeout enforcement.
+
+        ``identity`` is forwarded as the protocol-level ``_meta.identity`` field
+        (via the mcp SDK's ``meta`` kwarg) — an opaque, host-agnostic scoping key
+        a server can use to keep per-caller state (e.g. ms365-mcp's per-user auth).
+        It is not a Pincer-specific concept as far as the wire protocol is concerned;
+        Pincer just happens to populate it with its own pincer_user_id.
 
         Returns mcp.types.CallToolResult.
         Raises ConnectionError if not connected, TimeoutError if timeout exceeded.
@@ -116,9 +153,11 @@ class MCPClientSession:
         if not self.connected:
             raise ConnectionError(f"MCP '{self.name}' is not connected")
 
+        meta = {"identity": identity} if identity else None
+
         try:
             with anyio.fail_after(self.config.timeout):
-                result = await self._session.call_tool(tool_name, arguments)
+                result = await self._session.call_tool(tool_name, arguments, meta=meta)
             return result
         except TimeoutError:
             raise TimeoutError(f"MCP '{self.name}' tool '{tool_name}' timed out after {self.config.timeout}s") from None

@@ -23,7 +23,7 @@ Complete command reference across all sprints (1–13). For the full list of too
 | `pincer pair-whatsapp` | Pair WhatsApp via QR code | 3 |
 | `pincer auth-google` | Google Calendar OAuth consent flow (legacy, 3 tools) | 3 |
 | `pincer setup-google` | Google Workspace OAuth consent flow (113 tools incl. Meet v2) | 9 |
-| `ms365-mcp-setup` | Microsoft 365 device code auth flow (69 tools) | 10 |
+| `ms365-mcp-setup` | Microsoft 365 device code auth flow, default identity (62 tools) | 10 |
 | `pincer signal start/stop/status/link` | Manage Signal integration (signal-cli sidecar) | 7.5 |
 
 ## Cost & Budget
@@ -143,7 +143,7 @@ After setup, the 113 `google__*` tools are auto-registered every time `pincer ru
 
 | Command | Description |
 |---------|-------------|
-| `ms365-mcp-setup` | One-time device code auth — reads credentials from `.env`, displays device code, caches token to `~/.pincer/ms365_token_cache.json` |
+| `ms365-mcp-setup` | One-time device code auth for the `"default"` identity slot — reads credentials from `.env`, displays device code, caches token under `~/.pincer/ms365_mcp/` |
 
 ### What `ms365-mcp-setup` does
 
@@ -151,10 +151,14 @@ After setup, the 113 `google__*` tools are auto-registered every time `pincer ru
 2. Exits with instructions if `PINCER_MS365_CLIENT_ID` is not set
 3. Starts MSAL device code flow — prints `https://microsoft.com/devicelogin` + one-time code
 4. Waits while you complete sign-in in a browser
-5. Caches the token at `~/.pincer/ms365_token_cache.json` (mode `0600`)
-6. Reports: `Microsoft 365 authenticated! … 69 Microsoft 365 tools are now available`
+5. Caches the token at `~/.pincer/ms365_mcp/default_token_cache.json` (mode `0600`)
+6. Reports: `Microsoft 365 authenticated! … 62 Microsoft 365 tools are now available under the 'default' identity`
 
-After setup, start the MCP server with `pincer-ms365-mcp --transport http`. Full catalog: see `docs/TOOLS_CATALOG.md` in the repository.
+This is optional — ms365-mcp authenticates every identity lazily on its own
+first tool call, so this step isn't required for Pincer's normal multi-user
+operation. After setup, start the MCP server with `ms365-mcp-run --transport http`.
+See the [Microsoft 365 MCP Guide](../guides/ms365-mcp.md) for the full
+tool catalog and multi-user auth flow.
 
 ## Slack Native
 

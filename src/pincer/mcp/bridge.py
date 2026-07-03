@@ -181,8 +181,8 @@ class MCPToolBridge:
         audit = self.audit_logger
         security = self.security_gate
 
-        async def handler(**kwargs: Any) -> str:
-            kwargs.pop("context", None)
+        async def handler(context: dict[str, Any] | None = None, **kwargs: Any) -> str:
+            identity = (context or {}).get("user_id")
 
             # Rate limiting
             if security and not security.check_rate_limit(session.name, mcp_name):
@@ -192,7 +192,7 @@ class MCPToolBridge:
             audit.start_call(session.name, mcp_name, call_key)
 
             try:
-                result = await session.call_tool(mcp_name, kwargs)
+                result = await session.call_tool(mcp_name, kwargs, identity=identity)
                 output = _format_result(result)
 
                 # Sanitize output for prompt injection

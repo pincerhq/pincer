@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import aiosqlite
@@ -96,6 +97,29 @@ class IdentityResolver:
             """)
             await db.commit()
             await self._migrate_legacy(db)
+            await self._migrate_active_channel(db)
+
+    async def _migrate_active_channel(self, db: aiosqlite.Connection) -> None:
+        """Add active_channel tracking columns to identity_meta if missing.
+
+        Separate from `preferred_channel` (a write-once value set at identity
+        creation / config-seed time, never updated afterward) — this tracks
+        whichever channel most recently sent a message for this identity, kept
+        current by `touch_active_channel()`. `get_preferred_channel()` prefers
+        this when present, since for a multi-channel identity (linked via
+        PINCER_IDENTITY_MAP) `preferred_channel` alone goes stale the moment the
+        user messages from a different linked channel than the one that
+        created the identity row.
+        """
+        cursor = await db.execute("PRAGMA table_info(identity_meta)")
+        col_names = {row[1] for row in await cursor.fetchall()}
+
+        if "active_channel" not in col_names:
+            await db.execute("ALTER TABLE identity_meta ADD COLUMN active_channel TEXT")
+        if "active_channel_updated_at" not in col_names:
+            await db.execute("ALTER TABLE identity_meta ADD COLUMN active_channel_updated_at TEXT")
+
+        await db.commit()
 
     async def _migrate_legacy(self, db: aiosqlite.Connection) -> None:
         """Migrate old identity_map rows into the new schema (no-op if absent)."""
@@ -523,20 +547,67 @@ class IdentityResolver:
             await db.commit()
             logger.info("Identity config seeded")
 
-    async def get_preferred_channel(self, pincer_user_id: str) -> tuple[ChannelType, str]:
-        """Get user's preferred channel for proactive messages."""
+    async def touch_active_channel(self, pincer_user_id: str, channel: ChannelType) -> None:
+        """Record `channel` as this identity's most-recently-active channel.
+
+        Called on every inbound message (see `IdentityMiddleware`), regardless
+        of which channel it came in on. Always writes `active_channel_updated_at`,
+        even when `active_channel` itself hasn't changed — the timestamp tracks
+        "last seen active", not "last changed channel". A user who messages
+        continuously on the same channel for hours must keep that timestamp
+        current, or `get_preferred_channel`'s `max_active_age_seconds` staleness
+        check would wrongly treat them as inactive and fall back to
+        `preferred_channel`.
+        """
+        async with self._get_db() as db:
+            await db.execute(
+                "UPDATE identity_meta SET active_channel = ?, active_channel_updated_at = datetime('now') "
+                "WHERE pincer_user_id = ?",
+                (channel.value, pincer_user_id),
+            )
+            await db.commit()
+
+    async def get_preferred_channel(
+        self,
+        pincer_user_id: str,
+        max_active_age_seconds: float | None = None,
+    ) -> tuple[ChannelType, str]:
+        """Get user's channel for proactive messages.
+
+        Prefers `active_channel` (the channel that most recently sent a
+        message for this identity — see `touch_active_channel`) over the
+        write-once `preferred_channel` set at identity creation, since for a
+        multi-channel identity (linked via PINCER_IDENTITY_MAP) the latter
+        goes stale the moment the user messages from a different linked
+        channel than the one that originally created the identity row.
+
+        If `max_active_age_seconds` is given, `active_channel` is only used
+        when `active_channel_updated_at` is within that window of now —
+        otherwise falls through to `preferred_channel`. Meant for delayed
+        notifications (e.g. an MCP server's background task completing well
+        after the message that triggered it): a channel the user was active
+        on half an hour ago may no longer be the right place to reach them,
+        so a stale `active_channel` is worse than the durable fallback.
+        """
         async with self._get_db() as db:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
-                "SELECT preferred_channel FROM identity_meta WHERE pincer_user_id = ?",
+                "SELECT preferred_channel, active_channel, active_channel_updated_at "
+                "FROM identity_meta WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             )
             meta = await cursor.fetchone()
             if not meta:
                 raise ValueError(f"Unknown user: {pincer_user_id}")
 
+            active = meta["active_channel"]
+            active_updated_at = meta["active_channel_updated_at"]
             preferred = meta["preferred_channel"]
             all_channels = await self._get_all_channels_raw(db, pincer_user_id)
+
+            active_fresh = self._is_within_age(active_updated_at, max_active_age_seconds)
+            if active and active in all_channels and active_fresh:
+                return ChannelType(active), all_channels[active]
 
             if preferred and preferred in all_channels:
                 return ChannelType(preferred), all_channels[preferred]
@@ -545,6 +616,23 @@ class IdentityResolver:
                 return ChannelType(ch_name), ch_id
 
             raise ValueError(f"No channels linked for user: {pincer_user_id}")
+
+    @staticmethod
+    def _is_within_age(timestamp: str | None, max_age_seconds: float | None) -> bool:
+        """True if `timestamp` (a SQLite `datetime('now')` UTC string) is within `max_age_seconds` of now.
+
+        No age limit (`max_age_seconds is None`) always passes. A limit with a
+        missing/unparseable timestamp always fails — treat "unknown age" as stale.
+        """
+        if max_age_seconds is None:
+            return True
+        if not timestamp:
+            return False
+        try:
+            ts = datetime.fromisoformat(timestamp).replace(tzinfo=UTC)
+        except ValueError:
+            return False
+        return (datetime.now(UTC) - ts).total_seconds() <= max_age_seconds
 
     async def get_all_channels(self, pincer_user_id: str) -> dict[ChannelType, str]:
         """Get all linked channels for a user (one entry per channel type)."""

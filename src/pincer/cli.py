@@ -970,6 +970,15 @@ async def _run_agent(settings: Settings) -> None:
     # normalize identity map in through router
     await router.rebuild_identity_map()
 
+    # MCP servers may push notifications for work that outlives the tool call
+    # that triggered it (e.g. ms365-mcp's delayed auth completion) — the
+    # channel router doesn't exist yet when MCPClientManager is constructed
+    # above, so this is wired up as late-binding here.
+    if mcp_manager is not None:
+        from pincer.mcp.notifications import create_auth_notification_handler
+
+        mcp_manager.set_notification_handler(create_auth_notification_handler(router))
+
     # Sprint 3: Scheduler + Proactive Agent
     from pincer.scheduler import CronScheduler, EventTriggerManager, ProactiveAgent
 
