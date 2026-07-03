@@ -49,22 +49,18 @@ def test_service_scopes_cover_all_services() -> None:
     assert set(SERVICE_SCOPES.keys()) == expected
 
 
-def test_tenant_default() -> None:
+def test_tenant_default(tmp_path: Path) -> None:
     with patch("ms365.auth.msal", create=True):
-        auth = MS365Auth(client_id="test-id")
+        auth = MS365Auth(client_id="test-id", cache_path=str(tmp_path / "tokens.json"))
     assert auth.tenant_id == "common"
 
 
-def test_tenant_custom() -> None:
+def test_tenant_custom(tmp_path: Path) -> None:
     with patch("ms365.auth.msal", create=True):
-        auth = MS365Auth(client_id="test-id", tenant_id="my-tenant-id")
+        auth = MS365Auth(
+            client_id="test-id", cache_path=str(tmp_path / "tokens.json"), tenant_id="my-tenant-id"
+        )
     assert auth.tenant_id == "my-tenant-id"
-
-
-def test_cache_path_default() -> None:
-    with patch("ms365.auth.msal", create=True):
-        auth = MS365Auth(client_id="test-id")
-    assert auth.cache_path == Path.home() / ".pincer" / "ms365_token_cache.json"
 
 
 def test_cache_path_custom(tmp_path: Path) -> None:

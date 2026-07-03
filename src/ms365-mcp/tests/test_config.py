@@ -14,28 +14,11 @@ def test_defaults() -> None:
     assert cfg.tenant_id == "common"
     assert cfg.auth_method == "device_code"
     assert cfg.services == list(_DEFAULT_SERVICES)
-    assert cfg.token_cache_path == Path.home() / ".pincer" / "ms365_token_cache.json"
 
 
 def test_default_services_count() -> None:
     cfg = MS365Settings()
     assert len(cfg.services) == len(_DEFAULT_SERVICES)
-
-
-def test_cache_path_default() -> None:
-    cfg = MS365Settings()
-    assert cfg.cache_path == Path.home() / ".pincer" / "ms365_token_cache.json"
-
-
-def test_cache_path_custom() -> None:
-    cfg = MS365Settings(token_cache_path="/tmp/custom_tokens.json")  # type: ignore[arg-type]
-    assert cfg.cache_path == Path("/tmp/custom_tokens.json")
-
-
-def test_cache_path_expands_home() -> None:
-    cfg = MS365Settings(token_cache_path="~/.pincer/tokens.json")  # type: ignore[arg-type]
-    assert "~" not in str(cfg.cache_path)
-    assert cfg.cache_path == Path.home() / ".pincer" / "tokens.json"
 
 
 def test_client_id_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -54,12 +37,6 @@ def test_tenant_id_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MS365_TENANT_ID", "my-tenant")
     cfg = MS365Settings()
     assert cfg.tenant_id == "my-tenant"
-
-
-def test_token_cache_path_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MS365_TOKEN_CACHE_PATH", "/tmp/env_tokens.json")
-    cfg = MS365Settings()
-    assert cfg.cache_path == Path("/tmp/env_tokens.json")
 
 
 def test_token_cache_dir_default() -> None:

@@ -59,7 +59,7 @@ DEFAULT_IDENTITY = "default"
 
 # Logger name notifications are tagged with, so a listening MCP client can
 # distinguish "this identity's auth just resolved" from ordinary log noise.
-NOTIFICATION_LOGGER_NAME = "ms365-mcp"
+NOTIFICATION_LOGGER_NAME = "ms365_mcp"
 
 # Keep identity slugs safe as a filename component: alphanumerics, and a small
 # set of separators that are common in emails/usernames (`_`, `.`, `@`, `-`).

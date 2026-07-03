@@ -5,10 +5,13 @@ Supports:
 1. Device code flow (headless — user enters code in browser)
 2. Interactive browser flow (opens browser automatically)
 
-Token cache: ~/.pincer/ms365_token_cache.json
+Each `MS365Auth` instance owns one token cache file, at whatever `cache_path`
+its caller gives it — `identity_session.py`'s `IdentitySessionManager` builds
+one per identity under `MS365_TOKEN_CACHE_DIR` (default `~/.pincer/ms365_mcp/`).
 MSAL handles refresh tokens automatically.
 
-Run ``ms365-mcp-setup`` to perform the one-time device code auth flow.
+Run ``ms365-mcp-setup`` to perform a one-time device code auth flow for the
+`"default"` identity slot.
 """
 
 from __future__ import annotations
@@ -64,8 +67,8 @@ class MS365Auth:
     def __init__(
         self,
         client_id: str,
+        cache_path: str,
         tenant_id: str = "common",
-        cache_path: str = "~/.pincer/ms365_token_cache.json",
         services: list[str] | None = None,
     ) -> None:
         self._client_id = client_id
