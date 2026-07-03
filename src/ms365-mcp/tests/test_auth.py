@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -89,12 +90,13 @@ async def test_get_token_no_cache_raises() -> None:
         auth._cache = None
         auth._pending_flow_message = ""
         auth._fernet = None
+        auth._import_legacy_cache = False
 
         with pytest.raises(MS365AuthError, match="No valid Microsoft 365 token"):
             await auth.get_token()
 
 
-def _bare_auth(fernet: Fernet | None = None) -> MS365Auth:
+def _bare_auth(fernet: Fernet | None = None, import_legacy_cache: bool = False) -> MS365Auth:
     """Build an MS365Auth with private attrs set directly (no msal import needed)."""
     auth = MS365Auth.__new__(MS365Auth)
     auth._client_id = "test-id"
@@ -106,6 +108,7 @@ def _bare_auth(fernet: Fernet | None = None) -> MS365Auth:
     auth._cache.has_state_changed = False
     auth._pending_flow_message = ""
     auth._fernet = fernet
+    auth._import_legacy_cache = import_legacy_cache
     return auth
 
 
@@ -188,10 +191,27 @@ def test_load_cache_wrong_key_treated_as_no_cached_token(tmp_path: Path) -> None
     auth._cache.deserialize.assert_not_called()
 
 
-def test_load_cache_stray_plaintext_legacy_file_treated_as_no_cached_token(tmp_path: Path) -> None:
-    """A leftover unencrypted cache from before Fernet encryption must not crash the server."""
+def test_load_cache_migrates_legacy_plaintext_cache_in_place(tmp_path: Path) -> None:
+    """A leftover unencrypted per-identity cache is encrypted in place, not discarded."""
     cache_path = tmp_path / "tokens.json"
     cache_path.write_text('{"legacy": "plaintext cache"}')
+    fernet = Fernet(Fernet.generate_key())
+
+    auth = _bare_auth(fernet=fernet)
+    auth._cache_path = cache_path
+
+    auth._load_cache()
+
+    auth._cache.deserialize.assert_called_once_with('{"legacy": "plaintext cache"}')
+    raw = cache_path.read_bytes()
+    assert raw != b'{"legacy": "plaintext cache"}'
+    assert fernet.decrypt(raw) == b'{"legacy": "plaintext cache"}'
+    assert oct(cache_path.stat().st_mode)[-3:] == "600"
+
+
+def test_load_cache_non_json_garbage_treated_as_no_cached_token(tmp_path: Path) -> None:
+    cache_path = tmp_path / "tokens.json"
+    cache_path.write_bytes(b"\xff\xfe\x00\x01")
 
     auth = _bare_auth(fernet=Fernet(Fernet.generate_key()))
     auth._cache_path = cache_path
@@ -199,6 +219,120 @@ def test_load_cache_stray_plaintext_legacy_file_treated_as_no_cached_token(tmp_p
     auth._load_cache()
 
     auth._cache.deserialize.assert_not_called()
+
+
+def test_load_cache_non_dict_json_treated_as_no_cached_token(tmp_path: Path) -> None:
+    cache_path = tmp_path / "tokens.json"
+    cache_path.write_text("[1, 2, 3]")
+
+    auth = _bare_auth(fernet=Fernet(Fernet.generate_key()))
+    auth._cache_path = cache_path
+
+    auth._load_cache()
+
+    auth._cache.deserialize.assert_not_called()
+
+
+def test_load_cache_fernet_none_with_stale_encrypted_file_deletes_it(tmp_path: Path) -> None:
+    """Key removed after being used: the now-unreadable file is deleted, forcing re-auth."""
+    cache_path = tmp_path / "tokens.json"
+    cache_path.write_bytes(Fernet(Fernet.generate_key()).encrypt(b'{"real": "cache"}'))
+
+    auth = _bare_auth(fernet=None)
+    auth._cache_path = cache_path
+    # Real MSAL's deserialize() calls json.loads(state) internally and raises on
+    # invalid JSON — the MagicMock cache doesn't do that by default, so simulate it.
+    auth._cache.deserialize.side_effect = json.loads
+
+    auth._load_cache()
+
+    assert not cache_path.exists()
+
+
+def test_import_legacy_cache_plaintext(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_bytes(b'{"legacy": "session"}')
+    monkeypatch.setattr("ms365.auth.LEGACY_CACHE_PATH", legacy_path)
+    target = tmp_path / "default_token_cache.json"
+
+    from ms365.auth import _import_legacy_cache
+
+    _import_legacy_cache(target, None)
+
+    assert target.read_bytes() == b'{"legacy": "session"}'
+    assert not legacy_path.exists()
+
+
+def test_import_legacy_cache_encrypted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_bytes(b'{"legacy": "session"}')
+    monkeypatch.setattr("ms365.auth.LEGACY_CACHE_PATH", legacy_path)
+    target = tmp_path / "default_token_cache.json"
+    fernet = Fernet(Fernet.generate_key())
+
+    from ms365.auth import _import_legacy_cache
+
+    _import_legacy_cache(target, fernet)
+
+    assert fernet.decrypt(target.read_bytes()) == b'{"legacy": "session"}'
+    assert not legacy_path.exists()
+
+
+def test_import_legacy_cache_skips_when_legacy_file_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("ms365.auth.LEGACY_CACHE_PATH", tmp_path / "does-not-exist.json")
+    target = tmp_path / "default_token_cache.json"
+
+    from ms365.auth import _import_legacy_cache
+
+    _import_legacy_cache(target, None)
+
+    assert not target.exists()
+
+
+def test_import_legacy_cache_skips_when_target_already_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_bytes(b'{"legacy": "session"}')
+    monkeypatch.setattr("ms365.auth.LEGACY_CACHE_PATH", legacy_path)
+    target = tmp_path / "default_token_cache.json"
+    target.write_bytes(b'{"already": "here"}')
+
+    from ms365.auth import _import_legacy_cache
+
+    _import_legacy_cache(target, None)
+
+    assert target.read_bytes() == b'{"already": "here"}'
+    assert legacy_path.exists()
+
+
+def test_load_cache_imports_legacy_single_cache_when_flag_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_bytes(b'{"legacy": "session"}')
+    monkeypatch.setattr("ms365.auth.LEGACY_CACHE_PATH", legacy_path)
+    cache_path = tmp_path / "default_token_cache.json"
+
+    auth = _bare_auth(import_legacy_cache=True)
+    auth._cache_path = cache_path
+
+    auth._load_cache()
+
+    auth._cache.deserialize.assert_called_once_with('{"legacy": "session"}')
+    assert not legacy_path.exists()
+
+
+def test_load_cache_ignores_legacy_cache_when_flag_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_bytes(b'{"legacy": "session"}')
+    monkeypatch.setattr("ms365.auth.LEGACY_CACHE_PATH", legacy_path)
+    cache_path = tmp_path / "default_token_cache.json"
+
+    auth = _bare_auth(import_legacy_cache=False)
+    auth._cache_path = cache_path
+
+    auth._load_cache()
+
+    auth._cache.deserialize.assert_not_called()
+    assert legacy_path.exists()
+    assert not cache_path.exists()
 
 
 def test_complete_device_flow_sync_failure_raises() -> None:
@@ -249,6 +383,7 @@ async def test_get_token_from_cache() -> None:
         auth._cache = mock_cache
         auth._pending_flow_message = ""
         auth._fernet = None
+        auth._import_legacy_cache = False
 
         token = await auth.get_token()
         assert token == "cached-token"

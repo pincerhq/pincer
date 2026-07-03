@@ -60,7 +60,7 @@ def main() -> None:
 
     from ms365.auth import MS365Auth
     from ms365.config import get_settings
-    from ms365.crypto import load_or_generate_fernet
+    from ms365.crypto import resolve_fernet
     from ms365.identity_session import DEFAULT_IDENTITY
 
     # Pre-seeds the "default" identity slot — the one ms365-mcp-run falls back
@@ -78,8 +78,14 @@ def main() -> None:
         if answer not in ("y", "yes"):
             sys.exit(0)
 
-    fernet = load_or_generate_fernet(settings)
-    auth = MS365Auth(client_id=client_id, tenant_id=tenant_id, cache_path=str(cache_path), fernet=fernet)
+    fernet = resolve_fernet(settings)
+    auth = MS365Auth(
+        client_id=client_id,
+        tenant_id=tenant_id,
+        cache_path=str(cache_path),
+        fernet=fernet,
+        import_legacy_cache=True,
+    )
 
     print(f"Requesting {len(auth.scopes)} permission scope(s)...")
     print("Starting device code authentication...")

@@ -394,7 +394,11 @@ def test_parse_args_read_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _set_dummy_encryption_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Avoid load_or_generate_fernet() writing a real key file to disk during tests."""
+    """Keep _async_main tests deterministic regardless of the local .env's MS365_TOKEN_ENCRYPTION_KEY.
+
+    monkeypatch.setenv works here because env vars take priority over .env-file
+    values in MS365Settings' source ordering.
+    """
     monkeypatch.setenv("MS365_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
 

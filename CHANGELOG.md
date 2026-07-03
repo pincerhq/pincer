@@ -9,9 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-#### ms365-mcp: encrypted token cache at rest
+#### ms365-mcp: opt-in encrypted token cache at rest
 
-- Per-identity Microsoft 365 token caches (`<MS365_TOKEN_CACHE_DIR>/<identity>_token_cache.json`) are now encrypted at rest with a shared Fernet key, auto-generated on first run at `MS365_TOKEN_ENCRYPTION_KEY_PATH` (default `~/.pincer/ms365_mcp/token_encryption.key`, mode `0600`), or overridden with `MS365_TOKEN_ENCRYPTION_KEY` (raw key, e.g. injected by a secrets manager). A cache file that fails to decrypt (wrong/rotated key, corruption, or a stray pre-encryption plaintext file) is treated as "no cached token" — the identity re-authenticates rather than crashing the server.
+- Per-identity Microsoft 365 token caches (`<MS365_TOKEN_CACHE_DIR>/<identity>_token_cache.json`) can now be encrypted at rest — set `MS365_TOKEN_ENCRYPTION_KEY` to a Fernet key to enable it; unset, caches remain plaintext. No on-disk key file or auto-generation — the env var is the only source of the key.
+- Existing plaintext per-identity caches are migrated to encrypted storage in place, automatically, the first time each identity's cache is loaded after a key is configured — no re-authentication needed.
+- The pre-per-identity single-account cache (`~/.pincer/ms365_token_cache.json`) is imported as the `default` identity's cache the first time a caller with no/absent identity is resolved, then removed.
+- A cache file that can't be used (wrong/rotated key, corruption) is treated as "no cached token" rather than crashing the server; if the key is removed after being used, the now-unreadable file is deleted and that identity is prompted to re-authenticate.
 
 #### Multi-provider LLM architecture with random failover
 

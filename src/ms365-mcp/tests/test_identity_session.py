@@ -53,10 +53,17 @@ def _patch_cached_auth(monkeypatch: pytest.MonkeyPatch, has_token: bool = True) 
 
     class _FakeAuth:
         def __init__(
-            self, client_id: str, tenant_id: str, cache_path: str, services: list[str] | None, fernet: Any = None
+            self,
+            client_id: str,
+            tenant_id: str,
+            cache_path: str,
+            services: list[str] | None,
+            fernet: Any = None,
+            import_legacy_cache: bool = False,
         ) -> None:
             constructed_cache_paths.append(cache_path)
             self.fernet = fernet
+            self.import_legacy_cache = import_legacy_cache
 
         def has_cached_token(self) -> bool:
             return has_token
@@ -73,9 +80,16 @@ class _FakePendingAuth:
     """MS365Auth stand-in with no cached token and a controllable device flow."""
 
     def __init__(
-        self, client_id: str, tenant_id: str, cache_path: str, services: list[str] | None, fernet: Any = None
+        self,
+        client_id: str,
+        tenant_id: str,
+        cache_path: str,
+        services: list[str] | None,
+        fernet: Any = None,
+        import_legacy_cache: bool = False,
     ) -> None:
         self.cache_path = cache_path
+        self.import_legacy_cache = import_legacy_cache
         self.completed = asyncio.Event()
         self.should_fail = False
 
@@ -172,6 +186,30 @@ async def test_get_or_create_shares_one_fernet_across_identities(
 
 
 @pytest.mark.asyncio
+async def test_get_or_create_default_identity_passes_import_legacy_cache_true(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_cached_auth(monkeypatch)
+    manager = _manager(tmp_path)
+
+    await manager.get_or_create(None)
+
+    assert cast("Any", manager._auths[DEFAULT_IDENTITY]).import_legacy_cache is True  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_non_default_identity_passes_import_legacy_cache_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_cached_auth(monkeypatch)
+    manager = _manager(tmp_path)
+
+    await manager.get_or_create("usr_abc")
+
+    assert cast("Any", manager._auths["usr_abc"]).import_legacy_cache is False  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_concurrent_calls_construct_auth_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -179,7 +217,13 @@ async def test_get_or_create_concurrent_calls_construct_auth_once(
 
     class _SlowAuth:
         def __init__(
-            self, client_id: str, tenant_id: str, cache_path: str, services: list[str] | None, fernet: Any = None
+            self,
+            client_id: str,
+            tenant_id: str,
+            cache_path: str,
+            services: list[str] | None,
+            fernet: Any = None,
+            import_legacy_cache: bool = False,
         ) -> None:
             nonlocal construct_count
             construct_count += 1
@@ -271,9 +315,14 @@ async def test_get_or_create_retries_fresh_after_background_flow_fails(
     instances: list[_FakePendingAuth] = []
 
     def _make_auth(
-        client_id: str, tenant_id: str, cache_path: str, services: list[str] | None, fernet: Any = None
+        client_id: str,
+        tenant_id: str,
+        cache_path: str,
+        services: list[str] | None,
+        fernet: Any = None,
+        import_legacy_cache: bool = False,
     ) -> _FakePendingAuth:
-        auth = _FakePendingAuth(client_id, tenant_id, cache_path, services, fernet)
+        auth = _FakePendingAuth(client_id, tenant_id, cache_path, services, fernet, import_legacy_cache)
         instances.append(auth)
         return auth
 

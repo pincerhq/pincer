@@ -151,6 +151,7 @@ class IdentitySessionManager:
                 cache_path=str(self.cache_path_for(slug)),
                 services=self._services,
                 fernet=self._fernet,
+                import_legacy_cache=(slug == DEFAULT_IDENTITY),
             )
             self._auths[slug] = auth
         return auth
