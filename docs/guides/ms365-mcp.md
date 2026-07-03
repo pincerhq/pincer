@@ -173,9 +173,43 @@ Each identity's MSAL token cache is a separate file:
 ```
 
 `identity` is sanitized to a safe filename component before use. Refresh is
-automatic — MSAL rewrites the cache using the cached refresh token. **The
-cache is plaintext** (protected only by filesystem permissions) — encrypting
-it at rest is a known follow-up, not yet implemented.
+automatic — MSAL rewrites the cache using the cached refresh token.
+
+**Encryption at rest is opt-in.** By default, caches are plaintext. Set
+`MS365_TOKEN_ENCRYPTION_KEY` to a raw Fernet key to enable encryption for
+every identity's cache on that server — there's no on-disk key file to
+manage, and no auto-generation; the env var is the only source of the key.
+Generate one with:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+One key is shared across all identities on a given server; per-identity
+isolation comes from separate cache files, not separate keys.
+
+Setting the key for the first time on a deployment that already has
+plaintext per-identity caches (e.g. from before this feature existed)
+migrates each one to encrypted storage in place, automatically, the next
+time that identity's cache is loaded — no action needed, and no
+re-authentication required.
+
+Removing `MS365_TOKEN_ENCRYPTION_KEY` after it's been in use makes any
+previously-encrypted cache unreadable; the next time an affected identity's
+cache is loaded, the now-unreadable file is deleted and that identity is
+prompted to re-authenticate — this happens lazily, per identity, not as an
+immediate bulk sweep. Rotating to a *different* key (still set, just
+changed) instead leaves the old file in place with a warning logged, since
+that could be a transient misconfiguration rather than a deliberate move
+away from encryption — corruption is handled the same way.
+
+**Migrating from the pre-per-identity single-account cache.** Before the
+per-identity scheme existed, `ms365-mcp` (and its predecessor) kept one
+global cache at `~/.pincer/ms365_token_cache.json`. The first time a caller
+with no/absent identity is resolved (the `"default"` identity slot), that
+legacy file — if present — is imported as the default identity's cache
+(encrypted too, if a key is configured) and then deleted. Back it up first
+if you want to keep a copy.
 
 ### `ms365-mcp-setup` (optional, single-identity convenience)
 
@@ -506,9 +540,15 @@ plus `ms365__check_auth_status`).
 
 - **Token storage.** Each identity's cache file is written with mode `0600`
   under `MS365_TOKEN_CACHE_DIR` (default `~/.pincer/ms365_mcp/`). Treat these
-  as credentials — they contain refresh tokens. They are **not encrypted at
-  rest** (filesystem permissions only) — this is a known limitation, not yet
-  addressed.
+  as credentials — they contain refresh tokens. Encryption at rest is
+  **opt-in** via `MS365_TOKEN_ENCRYPTION_KEY` (see [Token storage](#token-storage)
+  above) — by default, caches are plaintext. Protect the key env var like any
+  other credential; unlike the cache files it isn't a local file at all, so
+  it protects against the cache leaking independently (backups, cloud sync,
+  accidentally archived/committed, etc.) rather than against an attacker with
+  full read access to your account/process environment. Removing or rotating
+  the key invalidates previously-encrypted caches; affected identities simply
+  re-authenticate.
 - **`identity` is untrusted input.** It's sanitized before being used as part
   of a filename, but never assume it has any particular shape — it's an
   opaque string from whatever MCP host set it.

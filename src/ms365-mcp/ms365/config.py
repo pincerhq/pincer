@@ -9,7 +9,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pydantic import field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.sources import EnvSettingsSource, PydanticBaseSettingsSource
 
@@ -56,6 +56,10 @@ class MS365Settings(BaseSettings):  # type: ignore[misc]
     auth_method: str = "device_code"
     services: list[str] = list(_DEFAULT_SERVICES)
     token_cache_dir: Path = Path.home() / ".pincer" / "ms365_mcp"
+    token_encryption_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Raw Fernet key (urlsafe-base64, 32 bytes) enabling encryption. Unset = plaintext caches.",
+    )
 
     @classmethod
     def settings_customise_sources(

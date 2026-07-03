@@ -8,6 +8,7 @@ version = "0.8.0"
 requires-python = ">=3.12"
 dependencies = [
     "msal>=1.28.0",
+    "cryptography>=42",
     # Pinned exactly: fastmcp 3.4.2 restructured its PyPI packaging into a thin
     # wrapper around a separate `fastmcp-slim` distribution, and that install
     # ends up without a usable `fastmcp/__init__.py` (`Context`, `FastMCP`,

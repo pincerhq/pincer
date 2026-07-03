@@ -56,6 +56,18 @@ def test_token_cache_dir_expands_home() -> None:
     assert cfg.token_cache_dir == Path.home() / ".pincer" / "other-ms365"
 
 
+def test_token_encryption_key_default_is_empty_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MS365_TOKEN_ENCRYPTION_KEY", raising=False)
+    cfg = MS365Settings(_env_file=None)  # type: ignore[call-arg]
+    assert cfg.token_encryption_key.get_secret_value() == ""
+
+
+def test_token_encryption_key_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MS365_TOKEN_ENCRYPTION_KEY", "some-raw-key")
+    cfg = MS365Settings()
+    assert cfg.token_encryption_key.get_secret_value() == "some-raw-key"
+
+
 def test_services_csv_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MS365_SERVICES", "email,calendar")
     cfg = MS365Settings()

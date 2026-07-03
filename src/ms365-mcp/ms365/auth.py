@@ -17,13 +17,23 @@ Run ``ms365-mcp-setup`` to perform a one-time device code auth flow for the
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from cryptography.fernet import InvalidToken
+
+if TYPE_CHECKING:
+    from cryptography.fernet import Fernet
 
 logger = logging.getLogger(__name__)
+
+# Before the per-identity cache scheme (issue #154), ms365-mcp kept a single
+# global token cache here. Confirmed via `git show fca49ff:src/pincer/integrations/ms365/config.py`.
+LEGACY_CACHE_PATH = Path.home() / ".pincer" / "ms365_token_cache.json"
 
 # Scopes grouped by service.
 SERVICE_SCOPES: dict[str, list[str]] = {
@@ -52,6 +62,43 @@ def scopes_for_services(services: list[str] | None = None) -> list[str]:
     return result
 
 
+def _is_plaintext_cache(raw: bytes) -> bool:
+    """Return True if `raw` looks like a real MSAL cache (JSON object).
+
+    `msal.token_cache.SerializableTokenCache.serialize()` always emits
+    `json.dumps(self._cache, indent=4)` where `self._cache` starts as `{}` —
+    i.e. the real on-disk format is always a JSON object, never ciphertext
+    (which won't parse as JSON at all) or a bare non-dict value.
+    """
+    try:
+        parsed = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(parsed, dict)
+
+
+def _import_legacy_cache(target_cache_path: Path, fernet: Fernet | None) -> None:
+    """Import the pre-per-identity single-account cache into `target_cache_path`, once.
+
+    No-ops if the legacy file doesn't exist, or `target_cache_path` already
+    exists. The old file is deleted after a successful import — not kept as
+    a backup.
+    """
+    if not LEGACY_CACHE_PATH.exists() or target_cache_path.exists():
+        return
+    raw = LEGACY_CACHE_PATH.read_bytes()
+    data = fernet.encrypt(raw) if fernet is not None else raw
+    target_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    target_cache_path.write_bytes(data)
+    target_cache_path.chmod(0o600)
+    LEGACY_CACHE_PATH.unlink()
+    logger.info(
+        "Migrated legacy Microsoft 365 token cache %s to %s (old file removed)",
+        LEGACY_CACHE_PATH,
+        target_cache_path,
+    )
+
+
 class MS365AuthError(Exception):
     """Raised when authentication fails."""
 
@@ -70,6 +117,8 @@ class MS365Auth:
         cache_path: str,
         tenant_id: str = "common",
         services: list[str] | None = None,
+        fernet: Fernet | None = None,
+        import_legacy_cache: bool = False,
     ) -> None:
         self._client_id = client_id
         self._tenant_id = tenant_id
@@ -78,6 +127,8 @@ class MS365Auth:
         self._app: Any = None  # msal.PublicClientApplication
         self._cache: Any = None  # msal.SerializableTokenCache
         self._pending_flow_message: str = ""
+        self._fernet = fernet
+        self._import_legacy_cache = import_legacy_cache
 
     def _ensure_app(self) -> None:
         """Lazily initialise the MSAL application."""
@@ -96,14 +147,54 @@ class MS365Auth:
         )
 
     def _load_cache(self) -> None:
-        if self._cache_path.exists():
-            self._cache.deserialize(self._cache_path.read_text())
+        if not self._cache_path.exists():
+            if self._import_legacy_cache:
+                _import_legacy_cache(self._cache_path, self._fernet)
+            if not self._cache_path.exists():
+                return
+        raw = self._cache_path.read_bytes()
+        if self._fernet is not None:
+            try:
+                raw = self._fernet.decrypt(raw)
+            except InvalidToken:
+                if not _is_plaintext_cache(raw):
+                    logger.warning(
+                        "Token cache at %s could not be decrypted (wrong/rotated key or "
+                        "corrupt file) — treating as no cached token; re-authentication "
+                        "will be required.",
+                        self._cache_path,
+                    )
+                    return
+                logger.info(
+                    "Migrating legacy unencrypted token cache to encrypted storage: %s",
+                    self._cache_path,
+                )
+                self._cache.deserialize(raw.decode("utf-8"))
+                self._write_cache_bytes(self._fernet.encrypt(raw))
+                return
+        try:
+            self._cache.deserialize(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            logger.warning(
+                "Token cache at %s is not readable as plaintext JSON (likely still "
+                "encrypted from a previous run with MS365_TOKEN_ENCRYPTION_KEY set, "
+                "which is now unset) — deleting it; re-authentication will be required.",
+                self._cache_path,
+            )
+            self._cache_path.unlink(missing_ok=True)
+
+    def _write_cache_bytes(self, data: bytes) -> None:
+        self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self._cache_path.write_bytes(data)
+        os.chmod(self._cache_path, 0o600)
 
     def _save_cache(self) -> None:
-        if self._cache.has_state_changed:
-            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
-            self._cache_path.write_text(self._cache.serialize())
-            os.chmod(self._cache_path, 0o600)
+        if not self._cache.has_state_changed:
+            return
+        data = self._cache.serialize().encode("utf-8")
+        if self._fernet is not None:
+            data = self._fernet.encrypt(data)
+        self._write_cache_bytes(data)
 
     # ── Public API ────────────────────────────────────────────────────────────
 

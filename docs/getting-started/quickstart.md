@@ -159,7 +159,7 @@ To unlock Outlook email, Calendar, OneDrive, To Do, Teams, Contacts, and OneNote
    ms365-mcp-setup
    ```
 
-The token is cached locally at `~/.pincer/ms365_token_cache.json` (readable only by you).
+The token is cached locally at `~/.pincer/ms365_mcp/default_token_cache.json` (readable only by you; encrypted at rest if `MS365_TOKEN_ENCRYPTION_KEY` is set).
 
 See [Microsoft 365 MCP Guide](../guides/ms365-mcp.md) for detailed instructions.
 

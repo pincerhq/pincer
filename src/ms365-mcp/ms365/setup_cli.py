@@ -60,6 +60,7 @@ def main() -> None:
 
     from ms365.auth import MS365Auth
     from ms365.config import get_settings
+    from ms365.crypto import resolve_fernet
     from ms365.identity_session import DEFAULT_IDENTITY
 
     # Pre-seeds the "default" identity slot — the one ms365-mcp-run falls back
@@ -68,7 +69,8 @@ def main() -> None:
     # the same path IdentitySessionManager reads from lazily on first tool
     # call, so pre-authenticating here just saves that first caller the
     # device-code round trip — it is *not* required for multi-identity use.
-    cache_path = get_settings().token_cache_dir / f"{DEFAULT_IDENTITY}_token_cache.json"
+    settings = get_settings()
+    cache_path = settings.token_cache_dir / f"{DEFAULT_IDENTITY}_token_cache.json"
 
     if cache_path.exists():
         print(f"Token cache already exists: {cache_path}")
@@ -76,7 +78,14 @@ def main() -> None:
         if answer not in ("y", "yes"):
             sys.exit(0)
 
-    auth = MS365Auth(client_id=client_id, tenant_id=tenant_id, cache_path=str(cache_path))
+    fernet = resolve_fernet(settings)
+    auth = MS365Auth(
+        client_id=client_id,
+        tenant_id=tenant_id,
+        cache_path=str(cache_path),
+        fernet=fernet,
+        import_legacy_cache=True,
+    )
 
     print(f"Requesting {len(auth.scopes)} permission scope(s)...")
     print("Starting device code authentication...")

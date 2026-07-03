@@ -6,6 +6,7 @@ import argparse
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from cryptography.fernet import Fernet
 from fastmcp.exceptions import NotFoundError, ToolError
 from ms365 import ms365_server
 
@@ -392,6 +393,15 @@ def test_parse_args_read_only_flag(monkeypatch: pytest.MonkeyPatch) -> None:
 # ── _async_main ───────────────────────────────────────────────────────────────
 
 
+def _set_dummy_encryption_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep _async_main tests deterministic regardless of the local .env's MS365_TOKEN_ENCRYPTION_KEY.
+
+    monkeypatch.setenv works here because env vars take priority over .env-file
+    values in MS365Settings' source ordering.
+    """
+    monkeypatch.setenv("MS365_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
+
 @pytest.mark.asyncio
 async def test_async_main_exits_without_client_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MS365_CLIENT_ID", raising=False)
@@ -404,6 +414,7 @@ async def test_async_main_exits_without_client_id(monkeypatch: pytest.MonkeyPatc
 @pytest.mark.asyncio
 async def test_async_main_uses_stdio_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MS365_CLIENT_ID", "test-client-id")
+    _set_dummy_encryption_key(monkeypatch)
 
     stdio_called: list[bool] = []
 
@@ -421,6 +432,7 @@ async def test_async_main_uses_stdio_transport(monkeypatch: pytest.MonkeyPatch) 
 @pytest.mark.asyncio
 async def test_async_main_uses_http_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MS365_CLIENT_ID", "test-client-id")
+    _set_dummy_encryption_key(monkeypatch)
 
     http_calls: list[tuple[str, int]] = []
 
@@ -438,6 +450,7 @@ async def test_async_main_uses_http_transport(monkeypatch: pytest.MonkeyPatch) -
 @pytest.mark.asyncio
 async def test_async_main_filters_services(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MS365_CLIENT_ID", "test-client-id")
+    _set_dummy_encryption_key(monkeypatch)
 
     captured_specs: list[int] = []
 
@@ -469,6 +482,7 @@ async def test_async_main_builds_identity_session_manager_from_settings(monkeypa
 
     monkeypatch.setenv("MS365_CLIENT_ID", "test-client-id")
     monkeypatch.setenv("MS365_SERVICES", "email,calendar,onedrive")
+    _set_dummy_encryption_key(monkeypatch)
 
     constructed: list[dict[str, Any]] = []
 

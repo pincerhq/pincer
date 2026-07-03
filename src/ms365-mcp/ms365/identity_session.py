@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from cryptography.fernet import Fernet
     from fastmcp import Context
 
     from ms365.auth import MS365Auth
@@ -112,11 +113,13 @@ class IdentitySessionManager:
         tenant_id: str,
         cache_dir: Path,
         services: list[str] | None = None,
+        fernet: Fernet | None = None,
     ) -> None:
         self._client_id = client_id
         self._tenant_id = tenant_id
         self._cache_dir = cache_dir
         self._services = services
+        self._fernet = fernet
         self._auths: dict[str, MS365Auth] = {}
         self._clients: dict[str, GraphClient] = {}
         self._pending: dict[str, _PendingFlow] = {}
@@ -147,6 +150,8 @@ class IdentitySessionManager:
                 tenant_id=self._tenant_id,
                 cache_path=str(self.cache_path_for(slug)),
                 services=self._services,
+                fernet=self._fernet,
+                import_legacy_cache=(slug == DEFAULT_IDENTITY),
             )
             self._auths[slug] = auth
         return auth
