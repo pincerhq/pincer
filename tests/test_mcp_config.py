@@ -144,9 +144,6 @@ def _make_settings(**overrides: object) -> SimpleNamespace:
         email_password=SecretStr(""),
         email_from="",
         # MCPSettings fields — needed for PINCER_* interpolation vars
-        ms365_client_id="",
-        ms365_client_secret="",
-        ms365_tenant_id="consumers",
         newsapi_key=SecretStr(""),
         openweathermap_api_key=SecretStr(""),
     )
@@ -190,14 +187,18 @@ def test_pincer_config_vars_all_fields() -> None:
     for field_name in ChannelSettings.model_fields:
         if field_name.startswith("email_"):
             assert f"PINCER_{field_name.upper()}" in result
-    # MCP credential vars are present for ${} interpolation in server env dicts
-    assert "PINCER_MS365_CLIENT_ID" in result
+    # MCP credential vars Pincer's own tools also consume directly are present
+    # for ${} interpolation in server env dicts
     assert "PINCER_OPENWEATHERMAP_API_KEY" in result
     assert "PINCER_NEWSAPI_KEY" in result
     # Non-MCP settings are not included (not settable via MCPSettings)
     assert "PINCER_DAILY_BUDGET_USD" not in result
     assert "PINCER_BRIEFING_TIME" not in result
     assert "PINCER_BRIEFING_TIMEZONE" not in result
+    # Credentials that only an external MCP server needs (e.g. MS365 client
+    # id/secret/tenant) are deliberately NOT in MCPSettings/pincer_vars — they
+    # flow straight from os.environ (see test_env_interpolation_reads_dotenv_var).
+    assert "PINCER_MS365_CLIENT_ID" not in result
 
 
 def test_interpolate_env_extra_wins_over_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,6 +254,50 @@ env = { MEMORY_DB_PATH = "${PINCER_DATA_DIR}/sqlite_vec.db" }
     (tmp_path / "pincer.toml").write_text(toml_content)
     cfg = load_mcp_config(tmp_path, pincer_vars={"PINCER_DATA_DIR": "/tmp/pincer_test"})
     assert cfg.servers[0].env["MEMORY_DB_PATH"] == "/tmp/pincer_test/sqlite_vec.db"
+
+
+def test_load_mcp_config_resolves_env_var_straight_from_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """${VAR} in a server's env block resolves from .env directly — no pincer_vars entry needed.
+
+    This is how MCP-server-only credentials (e.g. an external server's client
+    secret) reach the subprocess: Pincer core never declares them by name.
+    """
+    monkeypatch.delenv("SOME_MCP_SERVER_TOKEN", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("SOME_MCP_SERVER_TOKEN=from-dotenv\n")
+    toml_content = """
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "memory"
+transport = "stdio"
+command = "python"
+env = { TOKEN = "${SOME_MCP_SERVER_TOKEN}" }
+"""
+    (tmp_path / "pincer.toml").write_text(toml_content)
+    cfg = load_mcp_config(tmp_path, pincer_vars={"PINCER_DATA_DIR": "/tmp/pincer_test"})
+    assert cfg.servers[0].env["TOKEN"] == "from-dotenv"
+
+
+def test_load_mcp_config_dotenv_does_not_override_real_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real environment variable always wins over the same key in .env."""
+    monkeypatch.setenv("SOME_MCP_SERVER_TOKEN", "from-real-env")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("SOME_MCP_SERVER_TOKEN=from-dotenv\n")
+    toml_content = """
+[mcp]
+enabled = true
+
+[[mcp.servers]]
+name = "memory"
+transport = "stdio"
+command = "python"
+env = { TOKEN = "${SOME_MCP_SERVER_TOKEN}" }
+"""
+    (tmp_path / "pincer.toml").write_text(toml_content)
+    cfg = load_mcp_config(tmp_path, pincer_vars={"PINCER_DATA_DIR": "/tmp/pincer_test"})
+    assert cfg.servers[0].env["TOKEN"] == "from-real-env"
 
 
 def test_load_mcp_config_no_file(tmp_path: Path) -> None:

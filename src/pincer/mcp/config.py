@@ -40,6 +40,29 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Mirrors Settings.model_config["env_file"] in pincer/config/main.py: ".env" takes
+# priority over "../.env" (monorepo layout — commands run from a subdirectory
+# still find the repo-root .env as a fallback).
+_DOTENV_CANDIDATES = (".env", "../.env")
+
+
+def _load_dotenv_into_environ() -> None:
+    """Load .env into the real process environment (os.environ), not just pydantic-settings.
+
+    MCP servers are external processes with their own env vars (e.g. an MCP
+    server's client id/secret) that Pincer core has no business knowing by
+    name — pincer.toml's ``${VAR}`` interpolation resolves those straight
+    against os.environ (see `_interpolate_env`). That fallback is a no-op
+    unless .env actually lands in os.environ, since pydantic-settings' own
+    dotenv parsing only populates its own declared Settings fields.
+    """
+    from dotenv import load_dotenv
+
+    for candidate in _DOTENV_CANDIDATES:
+        path = Path(candidate)
+        if path.is_file():
+            load_dotenv(path, override=False)
+
 
 class MCPTransport(StrEnum):
     STDIO = "stdio"
@@ -418,6 +441,7 @@ def load_mcp_config(config_dir: Path | None = None, pincer_vars: dict[str, str] 
 
     Call this at agent startup; invalid config raises ValueError immediately.
     """
+    _load_dotenv_into_environ()
     base_dir = config_dir or Path.cwd()
 
     # Load raw TOML dicts

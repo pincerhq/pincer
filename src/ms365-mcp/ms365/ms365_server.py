@@ -49,6 +49,8 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 SERVICES = ("email", "calendar", "onedrive", "todo", "contacts", "onenote", "directory")
 
+logger.info(os.environ)
+
 
 def _registrars() -> dict[str, Callable[..., int]]:
     """Map each service to the register function that emits its tools."""
@@ -385,6 +387,13 @@ async def _async_main(args: argparse.Namespace) -> None:
     # existing behavior where a narrower `--services` only hides tools, it
     # doesn't shrink the consent scope requested per identity.
     fernet = resolve_fernet(cfg)
+    if fernet is not None:
+        from ms365.auth import migrate_plaintext_caches
+
+        migrated = migrate_plaintext_caches(cfg.token_cache_dir, fernet)
+        if migrated:
+            logger.info("Encrypted %d existing plaintext token cache(s) at startup", len(migrated))
+
     manager = IdentitySessionManager(
         client_id=cfg.client_id,
         tenant_id=tenant_id,
