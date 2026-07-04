@@ -77,6 +77,48 @@ def _is_plaintext_cache(raw: bytes) -> bool:
     return isinstance(parsed, dict)
 
 
+def migrate_plaintext_caches(cache_dir: Path, fernet: Fernet) -> list[str]:
+    """Encrypt any already-on-disk per-identity caches still stored as plaintext.
+
+    Per-identity caches are only touched lazily, inside `MS365Auth._load_cache`,
+    when that identity's *next* tool call happens to run — turning on
+    MS365_TOKEN_ENCRYPTION_KEY does nothing for identities that aren't used
+    again, leaving their tokens sitting in plaintext on disk indefinitely. Call
+    this once at server startup (when a Fernet key is configured) to sweep
+    `cache_dir` and bring every existing cache under encryption immediately,
+    regardless of whether its identity ever reconnects.
+
+    Returns the list of cache file names that were migrated.
+    """
+    migrated: list[str] = []
+    if not cache_dir.is_dir():
+        return migrated
+
+    for path in sorted(cache_dir.glob("*_token_cache.json")):
+        raw = path.read_bytes()
+        try:
+            fernet.decrypt(raw)
+        except InvalidToken:
+            pass
+        else:
+            continue  # already encrypted
+
+        if not _is_plaintext_cache(raw):
+            logger.warning(
+                "Token cache %s is neither valid ciphertext nor plaintext JSON "
+                "(wrong/rotated key, or corrupt file) — leaving it untouched.",
+                path,
+            )
+            continue
+
+        path.write_bytes(fernet.encrypt(raw))
+        os.chmod(path, 0o600)
+        migrated.append(path.name)
+        logger.info("Encrypted existing plaintext token cache: %s", path)
+
+    return migrated
+
+
 def _import_legacy_cache(target_cache_path: Path, fernet: Fernet | None) -> None:
     """Import the pre-per-identity single-account cache into `target_cache_path`, once.
 

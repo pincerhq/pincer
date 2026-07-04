@@ -12,6 +12,7 @@ from ms365.auth import (
     SERVICE_SCOPES,
     MS365Auth,
     MS365AuthError,
+    migrate_plaintext_caches,
     scopes_for_services,
 )
 
@@ -207,6 +208,51 @@ def test_load_cache_migrates_legacy_plaintext_cache_in_place(tmp_path: Path) -> 
     assert raw != b'{"legacy": "plaintext cache"}'
     assert fernet.decrypt(raw) == b'{"legacy": "plaintext cache"}'
     assert oct(cache_path.stat().st_mode)[-3:] == "600"
+
+
+def test_migrate_plaintext_caches_encrypts_existing_plaintext_files(tmp_path: Path) -> None:
+    """Startup sweep encrypts caches even when their identity never reconnects this run."""
+    fernet = Fernet(Fernet.generate_key())
+    plain = tmp_path / "alice_token_cache.json"
+    plain.write_text(json.dumps({"AccessToken": {}}))
+
+    migrated = migrate_plaintext_caches(tmp_path, fernet)
+
+    assert migrated == ["alice_token_cache.json"]
+    raw = plain.read_bytes()
+    assert fernet.decrypt(raw) == b'{"AccessToken": {}}'
+    assert oct(plain.stat().st_mode)[-3:] == "600"
+
+
+def test_migrate_plaintext_caches_skips_already_encrypted_files(tmp_path: Path) -> None:
+    fernet = Fernet(Fernet.generate_key())
+    encrypted = tmp_path / "bob_token_cache.json"
+    original = fernet.encrypt(json.dumps({"AccessToken": {}}).encode())
+    encrypted.write_bytes(original)
+
+    migrated = migrate_plaintext_caches(tmp_path, fernet)
+
+    assert migrated == []
+    assert encrypted.read_bytes() == original
+
+
+def test_migrate_plaintext_caches_leaves_undecryptable_garbage_untouched(tmp_path: Path) -> None:
+    fernet = Fernet(Fernet.generate_key())
+    garbage = tmp_path / "carol_token_cache.json"
+    garbage.write_bytes(b"not json and not fernet ciphertext")
+
+    migrated = migrate_plaintext_caches(tmp_path, fernet)
+
+    assert migrated == []
+    assert garbage.read_bytes() == b"not json and not fernet ciphertext"
+
+
+def test_migrate_plaintext_caches_ignores_other_files_and_missing_dir(tmp_path: Path) -> None:
+    fernet = Fernet(Fernet.generate_key())
+    (tmp_path / "not_a_cache.txt").write_text("irrelevant")
+
+    assert migrate_plaintext_caches(tmp_path / "does_not_exist", fernet) == []
+    assert migrate_plaintext_caches(tmp_path, fernet) == []
 
 
 def test_load_cache_non_json_garbage_treated_as_no_cached_token(tmp_path: Path) -> None:
