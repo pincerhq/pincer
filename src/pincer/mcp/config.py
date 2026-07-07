@@ -149,7 +149,6 @@ class MCPServerExportConfig:
     # Which Pincer tools to expose (conservative default: read-only + ask_user)
     expose_tools: list[str] = field(
         default_factory=lambda: [
-            "web_search",
             "email_check",
             "calendar_today",
             "memory_search",
@@ -340,7 +339,6 @@ def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | Non
         expose_tools=srv_raw.get(
             "expose_tools",
             [
-                "web_search",
                 "email_check",
                 "calendar_today",
                 "memory_search",

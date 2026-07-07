@@ -14,6 +14,8 @@ dependencies = [
     "httpx>=0.28.1",
     "pydantic>=2.4.1,<2.13",
     "youtube-transcript-api>=0.6.3",
+    "tavily-python>=0.5.0",
+    "ddgs>=9.0.0",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +29,7 @@ openweathermap_server = "openweathermap_server:main"
 stock_price_server = "stock_price_server:main"
 summarize_server = "summarize_server:main"
 translate_server = "translate_server:main"
+websearch_server = "websearch_server:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true

@@ -27,7 +27,6 @@ VOICE_ALLOWED_TOOLS = {
     "email_read",
     "email_send",
     "email_search",
-    "web_search",
     "make_phone_call",
     "send_file",
     "send_image",
@@ -85,11 +84,6 @@ def verbalize_tool_result(tool_name: str, result: str) -> str:
         if isinstance(data, dict):
             if "error" in data:
                 return f"Sorry, there was a problem: {data['error']}"
-            if tool_name == "web_search" and "results" in data:
-                results = data["results"]
-                if results:
-                    first = results[0]
-                    return f"Here's what I found: {first.get('title', '')}. {first.get('snippet', '')}"
             return result
         if isinstance(data, list):
             return f"I found {len(data)} items. " + (f"The first one is: {json.dumps(data[0])}" if data else "")

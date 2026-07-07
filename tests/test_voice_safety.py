@@ -104,7 +104,7 @@ class TestConfirmationGate:
 
 class TestRequiresConfirmation:
     def test_read_tools_no_confirm(self):
-        assert not requires_confirmation("web_search")
+        assert not requires_confirmation("file_read")
         assert not requires_confirmation("calendar_today")
         assert not requires_confirmation("email_check")
 

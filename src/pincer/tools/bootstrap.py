@@ -1,9 +1,9 @@
 """Shared tool-registration helper.
 
 Builds a ToolRegistry containing all *channel-independent* tools the agent
-can use: web search, file IO, Python/shell exec, browser, email, calendar
-builtins, and the full Google Workspace / Microsoft 365 / Slack
-integrations when configured.
+can use: file IO, Python/shell exec, browser, email, calendar builtins,
+and the full Google Workspace / Microsoft 365 / Slack integrations when
+configured.
 
 Used by both `cli._run_agent` (for terminal/messaging-channel agents) and
 `api._deps.build_agent_from_settings` (for the web chat agent) so the two
@@ -45,30 +45,6 @@ def register_default_tools(tools: ToolRegistry, settings: Settings) -> dict[str,
 def _register_builtins(tools: ToolRegistry, settings: Settings, report: dict[str, int]) -> None:
     from pincer.tools.builtin.files import file_list, file_read, file_write
     from pincer.tools.builtin.python_exec import python_exec
-    from pincer.tools.builtin.web_search import web_search
-
-    tools.register(
-        name="web_search",
-        description=(
-            "Search the web for current information. Use for any question about recent "
-            "events, facts you're not sure about, or anything that would benefit from "
-            "up-to-date information."
-        ),
-        handler=web_search,
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "The search query"},
-                "num_results": {
-                    "type": "integer",
-                    "description": "Number of results (1-10)",
-                    "default": 5,
-                },
-            },
-            "required": ["query"],
-        },
-    )
-    report["builtins"] += 1
 
     if settings.shell_enabled:
         from pincer.tools.builtin.shell import shell_exec

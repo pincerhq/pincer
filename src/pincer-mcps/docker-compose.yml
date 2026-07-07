@@ -56,3 +56,12 @@ services:
       <<: *env-base
       LIBRETRANSLATE_URL: ${LIBRETRANSLATE_URL:-https://libretranslate.com}
       API_KEY: ${LIBRETRANSLATE_API_KEY:-}
+
+  websearch-mcp:
+    <<: *service-base
+    build:
+      context: .
+      target: websearch-mcp
+    environment:
+      <<: *env-base
+      API_KEY: ${PINCER_TAVILY_API_KEY:-}

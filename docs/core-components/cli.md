@@ -173,7 +173,7 @@ $ pincer chat
 🦜 Pincer CLI Chat (type /quit to exit)
 
 You: What's the weather in Berlin?
-🔧 Using tool: web_search("weather Berlin")
+🔧 Using tool: openweathermap__get_current_weather("Berlin")
 Pincer: Currently 3°C in Berlin with cloudy skies...
 
 You: /quit
@@ -349,7 +349,7 @@ pincer audit --since 2026-02-01 --export feb_audit.json
 ┌──────────────────┬──────────┬──────────────┬────────────┬──────┬────┐
 │ Time             │ User     │ Action       │ Tool       │ Cost │ ms │
 ├──────────────────┼──────────┼──────────────┼────────────┼──────┼────┤
-│ 2026-02-25T14:32 │ vova_tg  │ tool_call    │ web_search │ $0.00│ 430│
+│ 2026-02-25T14:32 │ vova_tg  │ tool_call    │ file_write │ $0.00│ 430│
 │ 2026-02-25T14:32 │ vova_tg  │ llm_request  │ sonnet     │ $0.01│ 890│
 │ 2026-02-25T14:31 │ vova_tg  │ message_recv │            │      │    │
 └──────────────────┴──────────┴──────────────┴────────────┴──────┴────┘

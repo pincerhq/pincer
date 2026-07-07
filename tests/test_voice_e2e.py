@@ -168,7 +168,7 @@ class TestTranscriptPIIMasking:
 class TestVoiceToolFiltering:
     def test_allowed_tools(self):
         assert is_voice_compatible("calendar_today")
-        assert is_voice_compatible("web_search")
+        assert is_voice_compatible("email_check")
         assert is_voice_compatible("make_phone_call")
 
     def test_excluded_tools(self):
@@ -181,14 +181,14 @@ class TestVoiceToolFiltering:
 
     def test_filter_schemas(self):
         schemas = [
-            {"name": "web_search"},
+            {"name": "email_check"},
             {"name": "shell_exec"},
             {"name": "calendar_today"},
             {"name": "python_exec"},
         ]
         filtered = filter_voice_tools(schemas)
         names = [s["name"] for s in filtered]
-        assert "web_search" in names
+        assert "email_check" in names
         assert "calendar_today" in names
         assert "shell_exec" not in names
         assert "python_exec" not in names

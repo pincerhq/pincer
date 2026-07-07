@@ -36,7 +36,6 @@ logger = logging.getLogger("pincer.mcp.standalone")
 # ── Built-in tools available in standalone mode ────────────────────────────────
 # Only tools that don't require agent state (no memory, no messaging channels).
 _STANDALONE_SAFE_TOOL_NAMES = (
-    "web_search",
     "file_read",
     "memory_search",
 )
@@ -237,16 +236,8 @@ def _load_builtin_tools_into(registry: Any) -> None:
 
     Only tools that work without a full agent context are loaded.
     This is a best-effort operation; missing tools are silently skipped.
-    """
-    # Try to import and register web_search (no agent needed)
-    try:
-        from pincer.tools.builtin.web_search import web_search
 
-        registry.register(
-            name="web_search",
-            description="Search the web",
-            handler=web_search,
-            require_approval=False,
-        )
-    except Exception:
-        pass
+    Web search is no longer a builtin — standalone mode picks it up via the
+    ordinary MCP-client path (a ``websearch`` entry in ``[[mcp.servers]]``)
+    like any other external tool, not through this shortcut.
+    """

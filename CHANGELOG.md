@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### websearch-mcp: web search extracted into a standalone FastMCP server
+
+- New `src/pincer-mcps/websearch_server.py` (`search` tool) replaces the `web_search` builtin — same Tavily-primary/DuckDuckGo-fallback behavior, plus retry/backoff on transient errors from both providers (the old builtin had none). Connect it via a `[[mcp.servers]]` entry in `pincer.toml` (`name = "websearch"`); consumed tools are prefixed, so it appears as `websearch__search`.
+- Ships with `stdio` and `streamable-HTTP` transports, a `/health` route, and Docker/`docker-compose` targets, matching the other bundled `pincer-mcps` servers.
+
 #### ms365-mcp: opt-in encrypted token cache at rest
 
 - Per-identity Microsoft 365 token caches (`<MS365_TOKEN_CACHE_DIR>/<identity>_token_cache.json`) can now be encrypted at rest — set `MS365_TOKEN_ENCRYPTION_KEY` to a Fernet key to enable it; unset, caches remain plaintext. No on-disk key file or auto-generation — the env var is the only source of the key.
@@ -34,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **`web_search` builtin tool** — removed `pincer.tools.builtin.web_search` and its registration from `bootstrap.py`, the standalone MCP shell's safe-tool list, the outbound MCP server's default `expose_tools`, the OAuth scope map, and the voice tool allow-list. **Migration:** add a `websearch` entry to `[[mcp.servers]]` in `pincer.toml` (see `docs/core-components/mcp-servers.md`); the tool is then available as `websearch__search`. `PINCER_TAVILY_API_KEY` still works — it's now passed to the new server as `API_KEY`. Also dropped the now-unused `search`/`tavily` extras from the root `pyproject.toml` and the dead `tavily_api_key` field from `ToolSettings`.
 - **`grok`/`ollama` as named providers**, their dedicated env vars (`PINCER_GROK_*`, `PINCER_OLLAMA_BASE_URL`), and the claude→model maps. **Migration:** point them at a compatible endpoint instead, e.g. `PINCER_DEFAULT_PROVIDER=grok` + `PINCER_OPENAI_COMPATIBLE_PROVIDER=grok` + `PINCER_OPENAI_COMPATIBLE_BASE_URL=https://api.x.ai/v1` + `PINCER_DEFAULT_MODEL=grok-3` (Ollama: base URL `http://localhost:11434/v1`, model `llama3.2`, no key).
 - Empty provider stub modules (`deep_seek_provider.py`, `google_gemini_provider.py`, `groq_provider.py`, `mistral_provider.py`).
 

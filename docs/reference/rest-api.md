@@ -59,7 +59,7 @@ Today's spending breakdown.
     "claude-haiku-4-5-20251001": 0.38
   },
   "by_tool": {
-    "web_search": 0.45,
+    "shell_exec": 0.45,
     "gmail_read": 0.32,
     "python_exec": 0.81
   },

@@ -20,7 +20,6 @@ host         = "127.0.0.1" # Localhost only; use 0.0.0.0 in Docker (see docker-c
 port         = 18800
 path         = "/mcp"
 expose_tools = [
-    "web_search",
     "email_check",
     "calendar_today",
     "memory_search",
@@ -119,6 +118,11 @@ expose_tools = [
 # transport = "streamable-http"
 # url       = "http://translate-mcp:8000/mcp"
 
+# [[mcp.servers]]
+# name      = "websearch"
+# transport = "streamable-http"
+# url       = "http://websearch-mcp:8000/mcp"
+
 # In app runtime servers using stdio protocol for fast startup (default)
 [[mcp.servers]]
 name = "sqlite_vec_memory"
@@ -168,6 +172,14 @@ name      = "translate"
 transport = "stdio"
 command = "python"
 args = ["${PINCER_SRC_DIR:-$PWD}/src/pincer-mcps/translate_server.py"]
+
+[[mcp.servers]]
+name      = "websearch"
+transport = "stdio"
+command = "python"
+args = ["${PINCER_SRC_DIR:-$PWD}/src/pincer-mcps/websearch_server.py"]
+env = { API_KEY="${PINCER_TAVILY_API_KEY}" }
+approval_required = ["*"]
 
 [[mcp.servers]]
 name      = "ms365"
