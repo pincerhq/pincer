@@ -350,8 +350,8 @@ def test_tools_all_expands() -> None:
 
 
 def test_tool_scope_check() -> None:
-    assert check_tool_scope("web_search", "tools:read") is True
-    assert check_tool_scope("web_search", "tools:all") is True
+    assert check_tool_scope("memory_search", "tools:read") is True
+    assert check_tool_scope("memory_search", "tools:all") is True
 
 
 def test_tool_scope_denied() -> None:

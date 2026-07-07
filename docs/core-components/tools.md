@@ -6,27 +6,26 @@ This is the complete, authoritative catalog of every tool Pincer can call. It is
 
 | Category | Tools | Module | How to enable |
 |---|---:|---|---|
-| **Core built-ins** (incl. `generate_image`, `make_phone_call`) | 24 | `src/pincer/tools/builtin/` + `src/pincer/cli.py` | Always on (voice/image need their API key) |
+| **Core built-ins** (incl. `generate_image`, `make_phone_call`) | 23 | `src/pincer/tools/builtin/` + `src/pincer/cli.py` | Always on (voice/image need their API key) |
 | **Bundled skills** | 27 | `skills/` (11 skills) | Always on (bundled) |
 | **Google Workspace** | 113 | `src/pincer/integrations/google/` | `pincer setup-google` |
 | **Microsoft 365** | 69 | `src/ms365-mcp/ms365/` | `ms365-mcp-setup` |
 | **Slack (native)** | 71 | `src/pincer/integrations/slack/` | `PINCER_SLACK_BOT_TOKEN` |
 | **MCP servers (external)** | unlimited | `src/pincer/mcp/` | `pincer.toml` `[[mcp.servers]]` |
 | **Custom skills** | unlimited | `pincer skills install` | AST-scanned + sandboxed |
-| **Native tools (first-party)** | **304** | — | — |
+| **Native tools (first-party)** | **303** | — | — |
 | **Available out of the box with popular MCP servers** | **600+** | — | — |
 
-> **"600+"** refers to the practical total when Pincer is paired with the most common MCP servers (GitHub, Postgres, Filesystem, Notion, Linear, Stripe, etc.) plus the 304 native Pincer tools. Pincer itself ships 304 first-party tools; MCP multiplies that arbitrarily.
+> **"600+"** refers to the practical total when Pincer is paired with the most common MCP servers (GitHub, Postgres, Filesystem, Notion, Linear, Stripe, etc.) plus the 303 native Pincer tools. Pincer itself ships 303 first-party tools; MCP multiplies that arbitrarily.
 
 ---
 
-## Core built-ins (24)
+## Core built-ins (23)
 
 Registered in `src/pincer/cli.py::_run_agent()`. These are always available.
 
 | Tool | Approval | Description |
 |---|:---:|---|
-| `web_search` | No | Web search via Tavily or DuckDuckGo |
 | `shell_exec` | **Yes** | Run shell commands in a sandboxed subprocess |
 | `python_exec` | **Yes** | Execute Python code in an isolated sandbox |
 | `file_read` | No | Read a file from the workspace |

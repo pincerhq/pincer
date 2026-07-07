@@ -64,7 +64,7 @@ Tools are classified at registration time:
 
 | Risk Level | Example Tools | Approval Required |
 |------------|--------------|-------------------|
-| **Safe** | web_search, memory_search, calendar_read | No |
+| **Safe** | memory_search, calendar_today, file_read | No |
 | **Moderate** | gmail_send, calendar_create | Configurable |
 | **Dangerous** | shell_exec, file_write, python_exec | Always |
 

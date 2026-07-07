@@ -18,7 +18,6 @@ PINCER_SCOPES: dict[str, str] = {
 # Which tool name patterns each scope grants
 SCOPE_TOOL_MAP: dict[str, list[str]] = {
     "tools:read": [
-        "web_search",
         "memory_search",
         "email_check",
         "calendar_today",
@@ -34,7 +33,6 @@ SCOPE_TOOL_MAP: dict[str, list[str]] = {
         "memory_update",
     ],
     "tools:execute": [
-        "web_search",
         "memory_search",
         "email_check",
         "calendar_today",

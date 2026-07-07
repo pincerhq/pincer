@@ -79,7 +79,7 @@ class MCPServiceCore:
             config=mcp_cfg,
             approval_backend=PolicyApprovalBackend({"read": "approve", "default": "deny"}),
         )
-        core.register_tool("pincer_web_search", handler, schema, approval_required=False)
+        core.register_tool("pincer_memory_search", handler, schema, approval_required=False)
         core.register_resource("pincer://memory/recent", memory_handler, "Recent memory")
         client_results = await core.start_clients()   # consume external MCP servers
         await core.start_server()                     # expose tools/resources/prompts

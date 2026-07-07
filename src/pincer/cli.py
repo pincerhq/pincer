@@ -215,8 +215,8 @@ async def _run_agent(settings: Settings) -> None:
         )
         console.print("[green]Memory system enabled[/green]")
 
-    # Register channel-independent tools (web_search, shell_exec, files,
-    # browser, python_exec, email, calendar, Google Workspace, MS365, Slack,
+    # Register channel-independent tools (shell_exec, files, browser,
+    # python_exec, email, calendar, Google Workspace, MS365, Slack,
     # generate_image). Channel-bound tools (send_file/send_image), skills,
     # and MCP are wired separately below.
     tools = ToolRegistry()
@@ -1575,7 +1575,6 @@ async def _chat_loop() -> None:
     from pincer.llm.cost_tracker import CostTracker
     from pincer.memory.summarizer import Summarizer
     from pincer.tools.builtin.files import file_list, file_read, file_write
-    from pincer.tools.builtin.web_search import web_search
     from pincer.tools.registry import ToolRegistry
 
     session_mgr = SessionManager(settings.db_path, settings.max_session_messages)
@@ -1612,12 +1611,6 @@ async def _chat_loop() -> None:
             )
 
     tools = ToolRegistry()
-    tools.register(
-        name="web_search",
-        description="Search the web",
-        handler=web_search,
-        parameters={"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-    )
     tools.register(name="file_read", description="Read a file", handler=file_read)
     tools.register(name="file_write", description="Write a file", handler=file_write)
     tools.register(name="file_list", description="List files", handler=file_list)

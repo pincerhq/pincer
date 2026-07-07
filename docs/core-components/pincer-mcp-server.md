@@ -45,7 +45,6 @@ path    = "/mcp"         # Endpoint path
 
 # Tools to expose (conservative defaults — only read-only tools)
 expose_tools = [
-    "web_search",
     "email_check",
     "calendar_today",
     "memory_search",
@@ -68,7 +67,6 @@ All Pincer built-in tools can be exposed. Configure which ones via `expose_tools
 
 | Tool name | What it does | Approval required? |
 |-----------|-------------|-------------------|
-| `web_search` | Search the web via Tavily/DuckDuckGo | No |
 | `web_browse` | Navigate URLs and extract content | No |
 | `email_check` | Read Gmail inbox | No |
 | `email_send` | Draft and send email | **Yes** |
@@ -82,6 +80,8 @@ All Pincer built-in tools can be exposed. Configure which ones via `expose_tools
 | `voice_call` | Make phone calls via Twilio | **Yes** |
 
 When an MCP client calls an approval-required tool, the approval prompt goes to the user's active messaging channel (Telegram, WhatsApp, etc.) before the tool executes.
+
+> Web search is no longer a Pincer built-in — it lives in its own MCP server (`src/pincer-mcps/websearch_server.py`, see [MCP Servers](mcp-servers.md)). To re-expose it here, enable a `websearch` entry under `[[mcp.servers]]` in `pincer.toml`, then add `"websearch__search"` to `expose_tools` above.
 
 ### The `pincer_ask_user` tool
 
@@ -106,13 +106,14 @@ path    = "/mcp"             # URL path for the MCP endpoint
 
 # Tools to expose to MCP clients (whitelist — nothing exposed by default)
 expose_tools = [
-    "web_search",
     "web_browse",
     "email_check",
     "calendar_today",
     "memory_search",
     "file_read",
     # Add tools you want external clients to access
+    # (e.g. "websearch__search", once you've enabled the "websearch"
+    # entry under [[mcp.servers]])
 ]
 ```
 
@@ -164,7 +165,7 @@ enabled = true
 host    = "0.0.0.0"   # Accept from any interface
 port    = 18800
 
-expose_tools = ["web_search", "memory_search"]
+expose_tools = ["email_check", "memory_search"]
 ```
 
 > **Never expose the MCP server to the internet without OAuth or a VPN.** Without auth, anyone who can reach the port can call your tools. Use a VPN or SSH tunnel for remote access.
@@ -289,7 +290,16 @@ approval_required = ["*"]  # Approve all cross-agent tool calls
 enabled      = true
 host         = "0.0.0.0"
 port         = 18800
-expose_tools = ["web_search", "web_browse", "memory_search"]
+expose_tools = ["websearch__search", "web_browse", "memory_search"]
+
+# Machine B also needs to consume the websearch MCP server as a client
+# so "websearch__search" lands in its tool registry before re-exporting it:
+[[mcp.servers]]
+name      = "websearch"
+transport = "stdio"
+command   = "python"
+args      = ["src/pincer-mcps/websearch_server.py"]
+env       = { API_KEY = "${PINCER_TAVILY_API_KEY}" }
 ```
 
 Now the orchestrator on machine A can say "search for recent papers on MCP security" and delegate the web search to the specialist on machine B. Each instance maintains its own memory, budget, and audit trail.
@@ -332,7 +342,7 @@ pincer mcp serve --verbose
 
 ```toml
 [mcp.server.approval_policy]
-read        = "approve"   # auto-approve read-only tools (web_search, file_read, …)
+read        = "approve"   # auto-approve read-only tools (memory_search, file_read, …)
 write       = "deny"      # auto-deny write tools (file_write, email_send, …)
 destructive = "deny"      # auto-deny destructive tools (shell_exec, python_exec, …)
 unknown     = "deny"      # auto-deny unclassified tools
@@ -376,7 +386,7 @@ MCP Server — http://127.0.0.1:18800/mcp
 
   Status:         running
   Uptime:         14m 23s
-  Tools exposed:  5 (web_search, email_check, calendar_today, memory_search, pincer_ask_user)
+  Tools exposed:  4 (email_check, calendar_today, memory_search, pincer_ask_user)
   OAuth:          disabled (localhost only)
 
   Connected clients: 1
@@ -413,7 +423,7 @@ MCP Server — http://127.0.0.1:18800/mcp
 
 **Tool call returns "tool not found"**
 - The tool may not be in `expose_tools` — check `pincer mcp server status`
-- All exposed tools are prefixed with `pincer_` in the MCP namespace (e.g., `pincer_web_search`)
+- All exposed tools are prefixed with `pincer_` in the MCP namespace (e.g., `pincer_email_check`)
 
 **Approval prompt not appearing**
 - The approval is sent to your active messaging channel (Telegram, WhatsApp, etc.)

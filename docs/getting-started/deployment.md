@@ -213,7 +213,7 @@ Add this to `~/Library/Application Support/Claude/claude_desktop_config.json` (m
 }
 ```
 
-Restart Claude Desktop. Pincer tools (`pincer_web_search`, `pincer_email_check`, `pincer_memory_search`, etc.) appear in the tool list.
+Restart Claude Desktop. Pincer tools (`pincer_email_check`, `pincer_calendar_today`, `pincer_memory_search`, etc.) appear in the tool list.
 
 ### Connecting Cursor
 
@@ -226,7 +226,6 @@ Edit `pincer.toml` (mounted into the container) and set `expose_tools` under `[m
 ```toml
 [mcp.server]
 expose_tools = [
-    "web_search",
     "email_check",
     "calendar_today",
     "memory_search",

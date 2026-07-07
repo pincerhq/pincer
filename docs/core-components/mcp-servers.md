@@ -148,6 +148,7 @@ python summarize_server.py --transport stdio
 python stock_price_server.py --transport stdio
 python openweathermap_server.py --transport stdio
 python newsapi_server.py --transport stdio
+python websearch_server.py --transport stdio
 
 # sqlite-vec-memory-mcp
 python memory_server.py --transport stdio
@@ -428,6 +429,7 @@ Server-specific variables:
 | `pincer-mcps` (`openweathermap`) | `API_KEY` | — | OpenWeatherMap API key |
 | `pincer-mcps` (`newsapi`) | `API_KEY` | — | NewsAPI.org API key |
 | `pincer-mcps` (`translate`) | `LIBRETRANSLATE_URL` | — | LibreTranslate instance URL |
+| `pincer-mcps` (`websearch`) | `API_KEY` | — | Tavily API key (optional — falls back to DuckDuckGo if unset) |
 | All MCP servers | `OTEL_DSN` | — | OpenTelemetry collector DSN (optional, see [Telemetry](#telemetry)) |
 
 ---

@@ -12,9 +12,6 @@ class ToolSettings(BaseModel):
         description="Require user approval before running shell commands",
     )
 
-    # ── Search ────────────────────────────────────────────
-    tavily_api_key: SecretStr = Field(default=SecretStr(""), description="Tavily API key")
-
     # ── Memory ────────────────────────────────────────────
     memory_enabled: bool = Field(default=True, description="Enable memory system")
     memory_backend: str = Field(

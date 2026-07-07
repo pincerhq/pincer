@@ -57,3 +57,9 @@ ENV LIBRETRANSLATE_URL=https://libretranslate.com
 FROM builder AS openweathermap-mcp
 
 COPY openweathermap_server.py ./server.py
+
+
+# Web search mcp server
+FROM builder AS websearch-mcp
+
+COPY websearch_server.py ./server.py

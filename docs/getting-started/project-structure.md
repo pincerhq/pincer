@@ -291,8 +291,7 @@ pincer/
 │   │       ├── files.py            # File read/write/list
 │   │       ├── python_exec.py      # Python code execution
 │   │       ├── shell.py            # Shell command execution
-│   │       ├── transcribe.py       # Voice transcription (OpenAI Whisper)
-│   │       └── web_search.py       # DuckDuckGo / Tavily search
+│   │       └── transcribe.py       # Voice transcription (OpenAI Whisper)
 │   │
 │   ├── scheduler/                  # Task scheduling & proactive agent
 │   │   ├── cron.py                 # SQLite-backed cron scheduler
@@ -392,7 +391,6 @@ pincer/
 | `tools/builtin/python_exec.py` | Sandboxed Python code execution |
 | `tools/builtin/shell.py` | Shell command execution |
 | `tools/builtin/transcribe.py` | Voice note transcription (OpenAI Whisper) |
-| `tools/builtin/web_search.py` | Web search via DuckDuckGo / Tavily |
 | `scheduler/cron.py` | SQLite-backed cron scheduler with timezone support |
 | `scheduler/proactive.py` | Morning briefing (weather, calendar, email, news) |
 | `scheduler/triggers.py` | Event triggers (email polling, calendar reminders, webhooks) |
