@@ -60,16 +60,23 @@ class VoiceChannel(BaseChannel):
     async def send(self, user_id: str, text: str, **kwargs: Any) -> None:
         """Send a text response to the active voice call for this user.
 
-        In voice mode, the engine converts the text to speech.
+        In voice mode, the engine converts the text to speech. Raises when
+        there's no active call to speak into, instead of logging and
+        swallowing — the live in-call reply path (`_handle_speech`) always
+        has `call_sid` on hand and speaks via the engine directly, so it never
+        goes through this method; only tool-invoked sends (send_file,
+        send_image, generate_image) use the user_id lookup below, and those
+        need to know delivery didn't happen rather than reporting false
+        success back to the LLM (issue #162).
         """
         call_sid = kwargs.get("call_sid", "")
         if not call_sid:
             call_sid = self._find_active_call_for_user(user_id)
 
-        if call_sid and self._engine:
-            await self._engine.send_speech(call_sid, text)
-        else:
-            logger.warning("No active call for user %s to send speech", user_id)
+        if not call_sid or not self._engine:
+            raise RuntimeError(f"No active call for user {user_id!r} to send speech")
+
+        await self._engine.send_speech(call_sid, text)
 
     async def _handle_speech(self, call_sid: str, text: str) -> None:
         """Called when the caller speaks (STT output or ConversationRelay text)."""

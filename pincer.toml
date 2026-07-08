@@ -129,7 +129,7 @@ name = "sqlite_vec_memory"
 transport = "stdio"
 command = "python"
 args = ["${PINCER_SRC_DIR:-$PWD}/src/sqlite-vec-memory-mcp/memory_server.py"]
-env = { MEMORY_DB_PATH = "${PINCER_DATA_DIR}/sqlite_vec.db" }
+env = { MEMORY_DB_PATH = "${PINCER_DATA_DIR}/sqlite_vec.db", FASTEMBED__CACHE_DIR = "${PINCER_DATA_DIR}/fastembed_cache" }
 sandbox = true
 approval_required = ["*"]
 

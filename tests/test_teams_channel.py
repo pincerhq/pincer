@@ -376,9 +376,11 @@ async def test_handle_activity_handler_exception_sends_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_no_app_is_safe() -> None:
+async def test_send_no_app_raises() -> None:
+    """Delivery failure must be visible to the caller, not silently swallowed (issue #162)."""
     ch = MicrosoftTeamsChannel(make_settings())
-    await ch.send("aad-1", "hi")  # Must not raise (no app)
+    with pytest.raises(RuntimeError, match="not initialized"):
+        await ch.send("aad-1", "hi")
 
 
 @pytest.mark.asyncio
@@ -399,13 +401,13 @@ async def test_send_uses_stored_conversation_ref() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_no_conversation_ref_warns() -> None:
+async def test_send_no_conversation_ref_raises() -> None:
+    """No known conversation for the user must raise, not silently no-op (issue #162)."""
     ch = MicrosoftTeamsChannel(make_settings())
     ch._app = MagicMock()
     ch._app.send = AsyncMock()
-    with patch("pincer.channels.microsoft_teams.logger") as mock_log:
+    with pytest.raises(RuntimeError, match="no conversation reference"):
         await ch.send("unknown-user", "hi")
-        mock_log.warning.assert_called_once()
     ch._app.send.assert_not_awaited()
 
 

@@ -261,27 +261,30 @@ class MicrosoftTeamsChannel(BaseChannel):
         Teams requires a prior interaction before the bot can message a user, so this
         looks up the conversation reference stored from an earlier incoming activity.
         Pass conversation_id in kwargs to target a specific conversation directly.
+
+        Raises on failure so callers can tell delivery didn't happen —
+        previously every failure here (including no known conversation
+        reference for the user) was logged and swallowed, so tool-invoked
+        sends like send_file/send_image reported false success back to the
+        LLM (issue #162). `request_approval`/`request_input` already expect
+        `_send_to_user` (which calls this) to raise and handle it — this used
+        to make their except blocks effectively dead code, forcing a
+        guaranteed 120s timeout instead of an immediate "couldn't deliver".
         """
         if not self._app:
-            logger.warning("Teams app not initialized, cannot send")
-            return
+            raise RuntimeError("Teams app not initialized, cannot send")
 
         conversation_id: str | None = kwargs.get("conversation_id") or self._conversation_refs.get(user_id)
         if not conversation_id:
-            logger.warning("Teams: no conversation reference for %s; cannot send", user_id)
-            return
+            raise RuntimeError(f"Teams: no conversation reference for {user_id!r}; cannot send")
 
         try:
             from microsoft_teams.api import MessageActivityInput
-        except ImportError:
-            logger.error("microsoft-teams-apps not installed; cannot send Teams message")
-            return
+        except ImportError as e:
+            raise RuntimeError("microsoft-teams-apps not installed; cannot send Teams message") from e
 
         for chunk in split_message(text):
-            try:
-                await self._app.send(conversation_id, MessageActivityInput(text=chunk))
-            except Exception as e:
-                logger.error("Teams proactive send failed: %s", e)
+            await self._app.send(conversation_id, MessageActivityInput(text=chunk))
 
     async def _handle_activity(self, ctx: Any) -> None:
         activity = getattr(ctx, "activity", None)

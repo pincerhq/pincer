@@ -427,14 +427,31 @@ class DiscordChannel(BaseChannel):
         thread_id = kwargs.get("thread_id")
         channel_id = kwargs.get("channel_id")
 
+        # Parse whichever numeric id we'll actually use before touching the
+        # Discord API, and raise a single clear error if it isn't one (e.g. a
+        # canonical cross-channel identity string leaking in instead of the
+        # real Discord id, issue #162) — this used to be an unhandled
+        # `ValueError` from inside the try block below, indistinguishable from
+        # a real Discord API failure since only `discord.NotFound`/
+        # `discord.HTTPException` were caught.
         try:
-            target = None
             if thread_id:
-                target = self._bot.get_channel(int(thread_id))
+                target_id = int(thread_id)
             elif channel_id:
-                target = self._bot.get_channel(int(channel_id))
+                target_id = int(channel_id)
             else:
-                user = await self._bot.fetch_user(int(user_id))
+                target_id = int(user_id)
+        except ValueError as e:
+            raise ValueError(
+                f"DiscordChannel.send: invalid numeric id (user_id={user_id!r}, "
+                f"thread_id={thread_id!r}, channel_id={channel_id!r})"
+            ) from e
+
+        try:
+            if thread_id or channel_id:
+                target = self._bot.get_channel(target_id)
+            else:
+                user = await self._bot.fetch_user(target_id)
                 target = await user.create_dm()
 
             if target:

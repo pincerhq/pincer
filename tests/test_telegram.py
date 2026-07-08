@@ -1,6 +1,10 @@
 """Tests for Telegram channel utilities."""
 
-from pincer.channels.telegram import split_message
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from pincer.channels.telegram import TelegramChannel, split_message
 
 
 def test_split_short_message() -> None:
@@ -27,3 +31,45 @@ def test_split_preserves_content() -> None:
     assert "Part 1" in chunks[0]
     assert "Part 2" in chunks[0]
     assert "Part 3" in chunks[0]
+
+
+def _make_channel() -> TelegramChannel:
+    settings = MagicMock()
+    settings.telegram_allowed_users = []
+    channel = TelegramChannel(settings)
+    channel._bot = AsyncMock()
+    return channel
+
+
+async def test_send_with_non_numeric_user_id_raises_once() -> None:
+    """A canonical id (not a real Telegram chat id) must fail once, clearly — not twice (issue #162)."""
+    channel = _make_channel()
+
+    with pytest.raises(ValueError, match="invalid chat_id 'r_lutsiv'"):
+        await channel.send("r_lutsiv", "hello")
+
+    # The retry-on-failure path (send_message called a second time with
+    # parse_mode=None) must never be reached — chat_id is invalid, not the markdown.
+    channel._bot.send_message.assert_not_called()
+
+
+async def test_send_file_with_non_numeric_user_id_raises_once(tmp_path) -> None:
+    channel = _make_channel()
+    file_path = tmp_path / "report.csv"
+    file_path.write_text("a,b,c\n")
+
+    with pytest.raises(ValueError, match="invalid chat_id 'r_lutsiv'"):
+        await channel.send_file("r_lutsiv", str(file_path))
+
+    channel._bot.send_document.assert_not_called()
+    # send_file's except-fallback (self.send(...)) must not even be attempted —
+    # it would fail on the exact same invalid id, doubling the exception.
+    channel._bot.send_message.assert_not_called()
+
+
+async def test_send_with_numeric_user_id_still_works() -> None:
+    channel = _make_channel()
+
+    await channel.send("123456789", "hello")
+
+    channel._bot.send_message.assert_called_once_with(chat_id=123456789, text="hello")

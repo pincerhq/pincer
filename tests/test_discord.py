@@ -1,7 +1,8 @@
 """Tests for Discord channel utilities and DiscordChannel class."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from pydantic import SecretStr
 
 from pincer.channels.base import ChannelType
@@ -138,3 +139,33 @@ async def test_start_without_token_no_error() -> None:
     channel = DiscordChannel(settings)
     await channel.start(MagicMock())
     # No exception raised
+
+
+async def test_send_with_non_numeric_user_id_raises_clear_error() -> None:
+    """A canonical id (not a real Discord user id) must raise a clear, single error (issue #162).
+
+    Previously this ValueError propagated from inside the try block, which
+    only caught discord.NotFound/discord.HTTPException — indistinguishable
+    from an actual Discord API failure.
+    """
+    channel = DiscordChannel(MagicMock())
+    channel._bot = AsyncMock()
+
+    with pytest.raises(ValueError, match="invalid numeric id"):
+        await channel.send("r_lutsiv", "hello")
+
+    channel._bot.fetch_user.assert_not_called()
+
+
+async def test_send_with_numeric_user_id_still_works() -> None:
+    channel = DiscordChannel(MagicMock())
+    channel._bot = AsyncMock()
+    dm_channel = AsyncMock()
+    user_mock = MagicMock()
+    user_mock.create_dm = AsyncMock(return_value=dm_channel)
+    channel._bot.fetch_user.return_value = user_mock
+
+    await channel.send("123456789", "hello")
+
+    channel._bot.fetch_user.assert_called_once_with(123456789)
+    dm_channel.send.assert_called_once_with("hello")
