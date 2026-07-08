@@ -401,6 +401,22 @@ async def test_send_uses_stored_conversation_ref() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_raises_when_sdk_not_installed() -> None:
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._app = MagicMock()
+    ch._app.send = AsyncMock()
+    ch._conversation_refs["aad-1"] = "conv-9"
+
+    with (
+        patch.dict(sys.modules, {"microsoft_teams.api": None}),
+        pytest.raises(RuntimeError, match="microsoft-teams-apps not installed"),
+    ):
+        await ch.send("aad-1", "hello there")
+
+    ch._app.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_send_no_conversation_ref_raises() -> None:
     """No known conversation for the user must raise, not silently no-op (issue #162)."""
     ch = MicrosoftTeamsChannel(make_settings())

@@ -251,6 +251,21 @@ async def test_send_no_app_raises() -> None:
         await ch.send("C123", "ignored")
 
 
+@pytest.mark.asyncio
+async def test_send_conversations_open_failure_raises() -> None:
+    """A failure opening the DM must be visible to the caller, not swallowed (issue #162)."""
+    mock_app = MagicMock()
+    mock_app.client = AsyncMock()
+    mock_app.client.conversations_open = AsyncMock(side_effect=RuntimeError("channel_not_found"))
+    ch = SlackChannel(make_settings())
+    ch._app = mock_app
+
+    with pytest.raises(RuntimeError, match="Slack conversations_open failed"):
+        await ch.send("U5678", "proactive message")
+
+    mock_app.client.chat_postMessage.assert_not_awaited()
+
+
 # ── _process_message ─────────────────────────────────────────────────────────
 
 

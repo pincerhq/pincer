@@ -169,3 +169,28 @@ async def test_send_with_numeric_user_id_still_works() -> None:
 
     channel._bot.fetch_user.assert_called_once_with(123456789)
     dm_channel.send.assert_called_once_with("hello")
+
+
+async def test_send_with_thread_id_targets_thread_channel() -> None:
+    channel = DiscordChannel(MagicMock())
+    channel._bot = AsyncMock()
+    target_channel = AsyncMock()
+    channel._bot.get_channel = MagicMock(return_value=target_channel)
+
+    await channel.send("ignored", "hello", thread_id="999")
+
+    channel._bot.get_channel.assert_called_once_with(999)
+    channel._bot.fetch_user.assert_not_called()
+    target_channel.send.assert_called_once_with("hello")
+
+
+async def test_send_with_channel_id_targets_channel() -> None:
+    channel = DiscordChannel(MagicMock())
+    channel._bot = AsyncMock()
+    target_channel = AsyncMock()
+    channel._bot.get_channel = MagicMock(return_value=target_channel)
+
+    await channel.send("ignored", "hello", channel_id="555")
+
+    channel._bot.get_channel.assert_called_once_with(555)
+    target_channel.send.assert_called_once_with("hello")

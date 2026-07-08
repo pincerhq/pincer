@@ -73,3 +73,82 @@ async def test_send_with_numeric_user_id_still_works() -> None:
     await channel.send("123456789", "hello")
 
     channel._bot.send_message.assert_called_once_with(chat_id=123456789, text="hello")
+
+
+async def test_send_photo_fast_path_uses_chat_id() -> None:
+    channel = _make_channel()
+
+    await channel.send_photo("123456789", "https://example.com/cat.png", caption="cat")
+
+    channel._bot.send_photo.assert_called_once()
+    kwargs = channel._bot.send_photo.call_args.kwargs
+    assert kwargs["chat_id"] == 123456789
+    assert kwargs["photo"] == "https://example.com/cat.png"
+    assert kwargs["caption"] == "cat"
+
+
+async def test_send_photo_with_non_numeric_user_id_raises() -> None:
+    channel = _make_channel()
+
+    with pytest.raises(ValueError, match="invalid chat_id 'r_lutsiv'"):
+        await channel.send_photo("r_lutsiv", "https://example.com/cat.png")
+
+    channel._bot.send_photo.assert_not_called()
+
+
+async def test_send_photo_from_bytes_uses_chat_id() -> None:
+    channel = _make_channel()
+
+    await channel.send_photo_from_bytes("123456789", b"PNGDATA", "image/png", "cat")
+
+    channel._bot.send_photo.assert_called_once()
+    kwargs = channel._bot.send_photo.call_args.kwargs
+    assert kwargs["chat_id"] == 123456789
+    assert kwargs["photo"].data == b"PNGDATA"
+    assert kwargs["caption"] == "cat"
+
+
+async def test_send_animation_fast_path_uses_chat_id() -> None:
+    channel = _make_channel()
+
+    await channel.send_animation("123456789", "https://example.com/cat.gif", caption="cat")
+
+    channel._bot.send_animation.assert_called_once()
+    kwargs = channel._bot.send_animation.call_args.kwargs
+    assert kwargs["chat_id"] == 123456789
+    assert kwargs["animation"] == "https://example.com/cat.gif"
+
+
+async def test_send_animation_with_non_numeric_user_id_raises() -> None:
+    channel = _make_channel()
+
+    with pytest.raises(ValueError, match="invalid chat_id 'r_lutsiv'"):
+        await channel.send_animation("r_lutsiv", "https://example.com/cat.gif")
+
+    channel._bot.send_animation.assert_not_called()
+
+
+async def test_send_streaming_uses_chat_id() -> None:
+    channel = _make_channel()
+    sent_msg = AsyncMock()
+    channel._bot.send_message.return_value = sent_msg
+
+    async def one_chunk():
+        yield "hello"
+
+    await channel.send_streaming("123456789", one_chunk())
+
+    channel._bot.send_message.assert_called_once_with(chat_id=123456789, text="...", parse_mode=None)
+    sent_msg.edit_text.assert_called_once_with("hello")
+
+
+async def test_send_streaming_with_non_numeric_user_id_raises() -> None:
+    channel = _make_channel()
+
+    async def one_chunk():
+        yield "hello"
+
+    with pytest.raises(ValueError, match="invalid chat_id 'r_lutsiv'"):
+        await channel.send_streaming("r_lutsiv", one_chunk())
+
+    channel._bot.send_message.assert_not_called()
