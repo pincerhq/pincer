@@ -112,7 +112,7 @@ class TelegramChannel(BaseChannel):
         )
 
         await self._bot.send_message(
-            chat_id=int(user_id),
+            chat_id=self._chat_id(user_id),
             text=(f"*Approval required*\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\nAllow this action?"),
             reply_markup=keyboard,
         )
@@ -196,18 +196,36 @@ class TelegramChannel(BaseChannel):
             await self._bot.session.close()
         logger.info("Telegram channel stopped")
 
+    @staticmethod
+    def _chat_id(user_id: str) -> int:
+        """Parse `user_id` as a Telegram chat id, raising a clear single error if it isn't one.
+
+        Callers must not catch a broad `Exception` around this and retry the
+        same conversion — a non-numeric `user_id` (e.g. a canonical
+        cross-channel identity string leaking in instead of the real Telegram
+        id) will fail identically every time, so retrying just raises the same
+        `ValueError` a second time, unhandled (issue #162).
+        """
+        try:
+            return int(user_id)
+        except ValueError as e:
+            raise ValueError(
+                f"TelegramChannel: invalid chat_id {user_id!r} (expected a numeric Telegram user/chat ID)"
+            ) from e
+
     async def send(self, user_id: str, text: str, **kwargs: Any) -> None:
         assert self._bot is not None
+        chat_id = self._chat_id(user_id)
         for chunk in split_message(text):
             try:
                 await self._bot.send_message(
-                    chat_id=int(user_id),
+                    chat_id=chat_id,
                     text=chunk,
                 )
             except Exception as e:
                 logger.warning("Markdown send failed, retrying plain: %s", e)
                 await self._bot.send_message(
-                    chat_id=int(user_id),
+                    chat_id=chat_id,
                     text=chunk,
                     parse_mode=None,
                 )
@@ -217,10 +235,12 @@ class TelegramChannel(BaseChannel):
         assert self._bot is not None
         from aiogram.types import FSInputFile
 
+        chat_id = self._chat_id(user_id)
+
         try:
             doc = FSInputFile(file_path)
             await self._bot.send_document(
-                chat_id=int(user_id),
+                chat_id=chat_id,
                 document=doc,
                 caption=caption or None,
             )
@@ -261,7 +281,7 @@ class TelegramChannel(BaseChannel):
         assert self._bot is not None
         from aiogram.types import BufferedInputFile
 
-        chat_id = int(user_id)
+        chat_id = self._chat_id(user_id)
 
         # Fast path: let Telegram fetch the URL directly
         try:
@@ -295,7 +315,7 @@ class TelegramChannel(BaseChannel):
             if sub in ("jpeg", "jpg", "png", "webp", "gif"):
                 ext = "jpg" if sub == "jpeg" else sub
         photo = BufferedInputFile(data, filename=f"image.{ext}")
-        await self._bot.send_photo(chat_id=int(user_id), photo=photo, caption=caption or None)
+        await self._bot.send_photo(chat_id=self._chat_id(user_id), photo=photo, caption=caption or None)
 
     async def send_animation(self, user_id: str, url: str, caption: str = "") -> None:
         """Send a GIF/animation from a URL inline in the chat.
@@ -306,7 +326,7 @@ class TelegramChannel(BaseChannel):
         assert self._bot is not None
         from aiogram.types import BufferedInputFile
 
-        chat_id = int(user_id)
+        chat_id = self._chat_id(user_id)
 
         try:
             await self._bot.send_animation(chat_id=chat_id, animation=url, caption=caption or None)
@@ -326,7 +346,7 @@ class TelegramChannel(BaseChannel):
         the remainder.
         """
         assert self._bot is not None
-        chat_id = int(user_id)
+        chat_id = self._chat_id(user_id)
 
         msg = await self._bot.send_message(chat_id=chat_id, text="...", parse_mode=None)
         buffer = ""

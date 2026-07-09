@@ -81,9 +81,17 @@ class SignalChannel(BaseChannel):
         logger.info("SignalChannel stopped")
 
     async def send(self, user_id: str, text: str, **kwargs: Any) -> None:
+        """Send a message, raising on failure so callers can tell delivery didn't happen.
+
+        Previously any send failure (including an unresolvable/wrong
+        recipient) was logged and swallowed here, so tool-invoked sends like
+        send_file/send_image reported false success back to the LLM (issue
+        #162). The one internal auto-reply call site
+        (`_process_signal_message`) wraps this itself to keep its existing
+        log-and-continue resilience across a receive-loop batch.
+        """
         if not self._client:
-            logger.error("SignalChannel.send called before start()")
-            return
+            raise RuntimeError("SignalChannel.send called before start()")
 
         is_group: bool = kwargs.get("is_group", False)
         group_id: str = kwargs.get("group_id", "")
@@ -95,13 +103,10 @@ class SignalChannel(BaseChannel):
                 await self._client.send_typing_indicator(recipient)
 
         for chunk in _split_message(text):
-            try:
-                if is_group and group_id:
-                    await self._client.send_group_message(group_id, chunk)
-                else:
-                    await self._client.send_message(recipient, chunk)
-            except Exception as exc:
-                logger.error("Signal send failed: %s", exc)
+            if is_group and group_id:
+                await self._client.send_group_message(group_id, chunk)
+            else:
+                await self._client.send_message(recipient, chunk)
 
     # ── Receive loops ─────────────────────────────────────────────────────────
 
@@ -212,10 +217,15 @@ class SignalChannel(BaseChannel):
             return
 
         if reply:
-            await self.send(
-                user_id=msg.source,
-                text=reply,
-                is_group=msg.is_group,
-                group_id=msg.group_id,
-                recipient=msg.source,
-            )
+            try:
+                await self.send(
+                    user_id=msg.source,
+                    text=reply,
+                    is_group=msg.is_group,
+                    group_id=msg.group_id,
+                    recipient=msg.source,
+                )
+            except Exception as exc:
+                # Isolated per-message: one recipient's send failure must not
+                # abort the rest of this receive-loop batch.
+                logger.error("Signal reply send failed: %s", exc)

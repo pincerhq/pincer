@@ -72,6 +72,14 @@ class TestVoiceChannel:
         await channel.send("+1234", "Found you!")
         mock_engine.send_speech.assert_called_once_with("CA456", "Found you!")
 
+    async def test_send_no_active_call_raises(self, channel, mock_engine):
+        """No active call for the user must raise, not silently no-op (issue #162)."""
+        handler = AsyncMock()
+        await channel.start(handler)
+        with pytest.raises(RuntimeError, match="No active call"):
+            await channel.send("+9999", "Hello?")
+        mock_engine.send_speech.assert_not_called()
+
     def test_engine_callbacks_set(self, channel, mock_engine):
         mock_engine.set_on_speech.assert_called_once()
         mock_engine.set_on_call_end.assert_called_once()

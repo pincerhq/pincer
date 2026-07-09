@@ -350,7 +350,10 @@ class Agent:
             channel_user_id: Stable channel-specific user ID (e.g. phone number,
                 Telegram numeric ID).  Used to tag memories with both
                 ``user:{user_id}`` and ``user:{channel_name}:{channel_user_id}``
-                so records are findable by either identifier.
+                so records are findable by either identifier, and passed to
+                tool execution so channel-bound tools (``send_file``,
+                ``send_image``) address the user's real channel ID instead of
+                the cross-channel canonical ``user_id``.
             channel_name: Stable channel name for memory tagging when it differs
                 from the session key.  Defaults to ``channel`` when omitted.
         """
@@ -472,7 +475,7 @@ class Agent:
                 iteration_had_error = False
                 for tool_call in response.tool_calls:
                     tool_calls_count += 1
-                    result = await self._execute_tool(tool_call, user_id, channel, channel_name)
+                    result = await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id)
 
                     result_msg = LLMMessage(
                         role=MessageRole.TOOL_RESULT,
@@ -563,6 +566,11 @@ class Agent:
 
         Tool-call iterations use complete() (non-streaming). Only the final
         text response is streamed token-by-token.
+
+        ``channel_user_id``, when given, is the channel-native ID and is
+        passed to tool execution so channel-bound tools (``send_file``,
+        ``send_image``) address the user's real channel ID instead of the
+        cross-channel canonical ``user_id`` — see ``handle_message``.
         """
         self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel)
@@ -650,7 +658,7 @@ class Agent:
             iteration_had_error = False
             for tool_call in response.tool_calls:
                 yield StreamChunk(StreamEventType.TOOL_START, f"Using {tool_call.name}...")
-                result = await self._execute_tool(tool_call, user_id, channel)
+                result = await self._execute_tool(tool_call, user_id, channel, channel_user_id=channel_user_id)
                 result_msg = LLMMessage(
                     role=MessageRole.TOOL_RESULT,
                     content=result.content,
@@ -832,8 +840,15 @@ class Agent:
         user_id: str,
         channel: str,
         channel_name: str | None = None,
+        channel_user_id: str | None = None,
     ) -> ToolResult:
         """Execute a single tool call, catching errors.
+
+        ``channel_user_id``, when given, is the channel-native ID (e.g. a
+        Telegram numeric ID or WhatsApp JID) and takes priority over the
+        canonical ``user_id`` for the tool-execution context — channel-bound
+        tools like ``send_file``/``send_image`` need the native ID to actually
+        address the user, not the cross-channel canonical identity.
 
         If the tool requires approval and a callback is configured, the user
         is prompted first.  Without a callback the tool still runs (backward
@@ -902,7 +917,7 @@ class Agent:
                 result_text = await self._tools.execute(
                     tool_call.name,
                     tool_call.arguments,
-                    context={"user_id": user_id, "channel": channel},
+                    context={"user_id": channel_user_id or user_id, "channel": channel},
                 )
                 if tool_call.name == "make_phone_call":
                     logger.info(

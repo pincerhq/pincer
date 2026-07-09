@@ -627,22 +627,32 @@ async def _run_agent(settings: Settings) -> None:
             file_context = "\n\n".join(file_parts)
             text = f"{file_context}\n\n{text}" if text else file_context
 
-        # Look up the stable (configured) channel ID for this user so memories
-        # get tagged with both user:{canonical_id} and user:{channel}:{id}.
-        ch_user_id: str | None = None
-        try:
-            all_ch = await identity.get_all_channels(canonical_id)
-            ch_user_id = all_ch.get(incoming.channel_type)
-        except Exception:
-            pass
+        # The raw ID already on this message is the channel-native ID for
+        # whoever we're replying to right now — guaranteed correct, and more
+        # reliable than the DB-linked ID below for accounts whose channel
+        # identifier can rotate (e.g. WhatsApp LID) or was never fully
+        # linked. Same reasoning _raw_id() uses ("most recently seen raw
+        # sender") to route approval prompts back to the right JID.
+        ch_user_id: str | None = incoming.user_id or None
 
-        # Recover channel_user_id from a channel-scoped fallback canonical_id
-        # (e.g. "teams:{aad_id}" when has_config=True and the user is absent
-        # from PINCER_IDENTITY_MAP — no channel_identities row exists for them).
         if ch_user_id is None:
-            prefix = f"{incoming.channel_type.value}:"
-            if canonical_id.startswith(prefix):
-                ch_user_id = canonical_id[len(prefix) :]
+            # Fallback for the rare case a channel ever constructs an
+            # IncomingMessage without a user_id: look up the stable
+            # (configured) channel ID so memories still get tagged with both
+            # user:{canonical_id} and user:{channel}:{id}.
+            try:
+                all_ch = await identity.get_all_channels(canonical_id)
+                ch_user_id = all_ch.get(incoming.channel_type)
+            except Exception:
+                pass
+
+            # Recover channel_user_id from a channel-scoped fallback canonical_id
+            # (e.g. "teams:{aad_id}" when has_config=True and the user is absent
+            # from PINCER_IDENTITY_MAP — no channel_identities row exists for them).
+            if ch_user_id is None:
+                prefix = f"{incoming.channel_type.value}:"
+                if canonical_id.startswith(prefix):
+                    ch_user_id = canonical_id[len(prefix) :]
 
         response = await agent.handle_message(
             user_id=canonical_id,

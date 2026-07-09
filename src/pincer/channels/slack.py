@@ -192,10 +192,16 @@ class SlackChannel(BaseChannel):
         kwargs:
           thread_ts: str — reply in this thread timestamp
           channel_id: str — explicit channel override
+
+        Raises on failure so callers can tell delivery didn't happen —
+        previously every failure here (including an unresolvable user/channel
+        id) was logged and swallowed, so tool-invoked sends like
+        send_file/send_image reported false success back to the LLM (issue
+        #162). The one internal auto-reply call site (`_process_message`)
+        wraps this itself to keep its existing log-and-continue resilience.
         """
         if not self._app:
-            logger.warning("Slack app not initialized, cannot send")
-            return
+            raise RuntimeError("Slack app not initialized, cannot send")
 
         thread_ts: str | None = kwargs.get("thread_ts")
         channel_id: str | None = kwargs.get("channel_id") or (
@@ -208,20 +214,16 @@ class SlackChannel(BaseChannel):
                 result = await self._app.client.conversations_open(users=[user_id])
                 channel_id = result["channel"]["id"]
             except Exception as e:
-                logger.error("Slack conversations_open failed for %s: %s", user_id, e)
-                return
+                raise RuntimeError(f"Slack conversations_open failed for {user_id!r}: {e}") from e
 
         formatted = markdown_to_mrkdwn(text)
         for chunk in split_message(formatted):
-            try:
-                await self._app.client.chat_postMessage(
-                    channel=channel_id,
-                    text=chunk,
-                    thread_ts=thread_ts,
-                    unfurl_links=False,
-                )
-            except Exception as e:
-                logger.error("Slack chat_postMessage failed: %s", e)
+            await self._app.client.chat_postMessage(
+                channel=channel_id,
+                text=chunk,
+                thread_ts=thread_ts,
+                unfurl_links=False,
+            )
 
     async def send_approval_request(
         self,
@@ -359,12 +361,15 @@ class SlackChannel(BaseChannel):
             response = "⚠️ Something went wrong. Please try again."
 
         if response:
-            await self.send(
-                user_id=channel_id,
-                text=response,
-                channel_id=channel_id,
-                thread_ts=reply_thread_ts,
-            )
+            try:
+                await self.send(
+                    user_id=channel_id,
+                    text=response,
+                    channel_id=channel_id,
+                    thread_ts=reply_thread_ts,
+                )
+            except Exception as exc:
+                logger.error("Slack reply send failed: %s", exc)
 
     # ── Approval flow ────────────────────────────────────────────────────────
 

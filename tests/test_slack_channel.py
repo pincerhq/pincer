@@ -243,10 +243,27 @@ async def test_send_user_id_opens_dm() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_no_app_is_safe() -> None:
+async def test_send_no_app_raises() -> None:
+    """Delivery failure must be visible to the caller, not silently swallowed (issue #162)."""
     ch = SlackChannel(make_settings())
     ch._app = None
-    await ch.send("C123", "ignored")  # Must not raise
+    with pytest.raises(RuntimeError, match="not initialized"):
+        await ch.send("C123", "ignored")
+
+
+@pytest.mark.asyncio
+async def test_send_conversations_open_failure_raises() -> None:
+    """A failure opening the DM must be visible to the caller, not swallowed (issue #162)."""
+    mock_app = MagicMock()
+    mock_app.client = AsyncMock()
+    mock_app.client.conversations_open = AsyncMock(side_effect=RuntimeError("channel_not_found"))
+    ch = SlackChannel(make_settings())
+    ch._app = mock_app
+
+    with pytest.raises(RuntimeError, match="Slack conversations_open failed"):
+        await ch.send("U5678", "proactive message")
+
+    mock_app.client.chat_postMessage.assert_not_awaited()
 
 
 # ── _process_message ─────────────────────────────────────────────────────────
@@ -288,6 +305,39 @@ async def test_dm_dispatches_to_handler() -> None:
     assert received[0].text == "Hello Pincer"
     assert received[0].channel_type == ChannelType.SLACK
     assert "dm" in received[0].channel
+
+
+@pytest.mark.asyncio
+async def test_process_message_reply_send_failure_does_not_propagate() -> None:
+    """A failed reply send must not blow up Slack's event dispatch (issue #162)."""
+
+    async def handler(msg: IncomingMessage) -> str:
+        return "response"
+
+    mock_app = MagicMock()
+    mock_app.client = AsyncMock()
+    mock_app.client.chat_postMessage.side_effect = RuntimeError("slack api down")
+
+    ch = SlackChannel(make_settings())
+    ch._app = mock_app
+    ch._bot_user_id = "U_BOT"
+    ch._handler = handler
+    ch._identity = make_identity("usr_test")
+
+    mock_client = AsyncMock()
+    mock_client.users_info = AsyncMock(
+        return_value={"user": {"profile": {"display_name": "Alice", "real_name": "Alice"}}}
+    )
+
+    event = {
+        "user": "U_ALICE",
+        "channel": "D_DIRECT",
+        "channel_type": "im",
+        "text": "Hello Pincer",
+        "ts": "1000.0",
+    }
+
+    await ch._process_message(event, mock_client)  # must not raise
 
 
 @pytest.mark.asyncio

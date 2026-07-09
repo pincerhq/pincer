@@ -91,6 +91,27 @@ async def test_send_splits_long_message() -> None:
     assert mock_client.send_message.await_count == 3
 
 
+@pytest.mark.asyncio
+async def test_send_before_start_raises() -> None:
+    """Delivery failure must be visible to the caller, not silently swallowed (issue #162)."""
+    ch = SignalChannel(_make_settings())
+
+    with pytest.raises(RuntimeError, match="called before start"):
+        await ch.send("+491111111111", "Hello!")
+
+
+@pytest.mark.asyncio
+async def test_send_message_failure_propagates() -> None:
+    settings = _make_settings()
+    ch = SignalChannel(settings)
+    mock_client = AsyncMock()
+    mock_client.send_message.side_effect = RuntimeError("signal-cli unreachable")
+    ch._client = mock_client
+
+    with pytest.raises(RuntimeError, match="signal-cli unreachable"):
+        await ch.send("+491111111111", "Hello!", recipient="+491111111111")
+
+
 # ── allowlist filtering ───────────────────────────────────────────────────────
 
 
@@ -194,6 +215,22 @@ async def test_dedup_by_timestamp() -> None:
     await ch._process_signal_message(msg)  # second time — should be deduplicated
 
     assert handler.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_process_message_reply_send_failure_does_not_propagate() -> None:
+    """A failed reply send must not blow up the receive loop for the rest of a batch."""
+    from pincer.channels.signal_client import SignalMessage
+
+    settings = _make_settings()
+    ch = SignalChannel(settings)
+    ch._handler = AsyncMock(return_value="reply")
+    mock_client = AsyncMock()
+    mock_client.send_message.side_effect = RuntimeError("signal-cli unreachable")
+    ch._client = mock_client
+
+    msg = SignalMessage(source="+491111111111", timestamp=42, text="hi", is_group=False)
+    await ch._process_signal_message(msg)  # must not raise
 
 
 # ── stop cancels tasks ────────────────────────────────────────────────────────
