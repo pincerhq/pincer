@@ -1,16 +1,15 @@
 import { useNavigate } from "react-router-dom"
-import type { SkillInfo } from "@/api/types"
+import type { ExtensionItem } from "@/api/types"
 import { SkillCard } from "./SkillCard"
 import { Skeleton } from "@/components/ui/skeleton"
 
 interface SkillGridProps {
-  skills: SkillInfo[]
+  skills: ExtensionItem[]
   loading?: boolean
   viewMode?: "grid" | "list"
-  onDelete?: (name: string) => void
 }
 
-export function SkillGrid({ skills, loading, viewMode = "grid", onDelete }: SkillGridProps) {
+export function SkillGrid({ skills, loading, viewMode = "grid" }: SkillGridProps) {
   const navigate = useNavigate()
 
   if (loading) {
@@ -31,10 +30,15 @@ export function SkillGrid({ skills, loading, viewMode = "grid", onDelete }: Skil
 
   if (!skills.length) return null
 
-  const handleClick = (skill: SkillInfo) =>
-    skill.source === "integration" && skill.slug
-      ? () => navigate(`/skills/integrations/${skill.slug}`)
-      : undefined
+  const handleClick = (skill: ExtensionItem) => {
+    if (skill.source === "integration" && skill.slug) {
+      return () => navigate(`/integrations/${skill.slug}`)
+    }
+    if (skill.source === "file") {
+      return () => navigate(`/skills/${encodeURIComponent(skill.name)}`)
+    }
+    return undefined
+  }
 
   return viewMode === "list" ? (
     <div className="rounded-xl border border-[var(--color-border)] divide-y divide-[var(--color-border)] overflow-hidden">
@@ -43,7 +47,6 @@ export function SkillGrid({ skills, loading, viewMode = "grid", onDelete }: Skil
           key={skill.name}
           skill={skill}
           viewMode="list"
-          onDelete={onDelete}
           onClick={handleClick(skill)}
         />
       ))}
@@ -55,7 +58,6 @@ export function SkillGrid({ skills, loading, viewMode = "grid", onDelete }: Skil
           key={skill.name}
           skill={skill}
           viewMode="grid"
-          onDelete={onDelete}
           onClick={handleClick(skill)}
         />
       ))}

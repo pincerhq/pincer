@@ -137,16 +137,33 @@ export interface ConversationsResponse {
 
 export interface SkillInfo {
   name: string
-  version: string
   description: string
-  author: string
-  safety_score: number
   status: "active" | "disabled" | "error"
-  permissions: string[]
-  tools: string[]
-  source?: "file" | "mcp" | "integration"
-  slug?: string
+  source: "file"
+  /** SKILL.md discovery root. */
+  root: "bundled" | "user"
 }
+
+export interface BuiltinToolInfo {
+  name: string
+  description: string
+  status: "active" | "disabled" | "error"
+  source: "builtin"
+  approval_required: boolean
+}
+
+export interface IntegrationCardInfo {
+  name: string
+  description: string
+  status: "active" | "disabled" | "error"
+  source: "mcp" | "integration"
+  slug?: string
+  version?: string
+  author?: string
+  tools?: string[]
+}
+
+export type IntegrationInfo = IntegrationCardInfo | BuiltinToolInfo
 
 export interface IntegrationTool {
   name: string
@@ -172,22 +189,23 @@ export interface IntegrationDetail {
   }
 }
 
+export interface SkillDetail extends SkillInfo {
+  /** Full markdown body of SKILL.md (frontmatter stripped). */
+  body: string
+  /** Relative paths of other files in the skill's directory. */
+  files: string[]
+}
+
 export interface SkillsResponse {
   skills: SkillInfo[]
 }
 
-export interface ScanIssue {
-  severity: "critical" | "warning" | "info"
-  message: string
-  line?: number
-  file?: string
+export interface IntegrationsResponse {
+  integrations: IntegrationInfo[]
 }
 
-export interface ScanResult {
-  score: number
-  issues: ScanIssue[]
-  verdict: "pass" | "warn" | "fail"
-}
+/** Shared shape rendered by SkillCard/SkillGrid — either a SKILL.md skill or an integration/MCP entry. */
+export type ExtensionItem = SkillInfo | IntegrationInfo
 
 export interface SettingsLLM {
   provider: string

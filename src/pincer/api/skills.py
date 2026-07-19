@@ -1,16 +1,76 @@
-"""DEPRECATED! Skills API — FastAPI endpoints for skill list."""
+"""Skills API — FastAPI endpoints for discovered SKILL.md skills."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from typing import TYPE_CHECKING, Any
 
-from pincer.api.integrations import list_integrations
+from fastapi import APIRouter, HTTPException
 
-router = APIRouter(prefix="/api/skills", tags=["skills"], deprecated=True)
+if TYPE_CHECKING:
+    from pincer.tools.skills.index import SkillIndex
+
+router = APIRouter(prefix="/api/skills", tags=["skills"])
+
+
+def _build_index() -> SkillIndex:
+    from pincer.config import get_settings_relaxed
+    from pincer.tools.skills.index import SkillIndex
+
+    settings = get_settings_relaxed()
+    index = SkillIndex(
+        bundled_dir=settings.skills_bundled_dir,
+        user_dir=settings.skills_dir,
+        max_per_root=settings.skills_max_loaded_per_root,
+    )
+    index.discover()
+    return index
+
+
+def _skill_entries() -> list[dict[str, Any]]:
+    """Discover SKILL.md-based skills via the shared SkillIndex (bundled + user, uniformly)."""
+    return [
+        {
+            "name": entry.name,
+            "description": entry.description,
+            "status": "active",
+            "source": "file",
+            "root": entry.skill.source_root,
+        }
+        for entry in _build_index().all_skills()
+    ]
+
+
+def _skill_detail(dir_name: str) -> dict[str, Any] | None:
+    """Full detail for a single skill, looked up by its directory name on disk.
+
+    Matched against the actual folder name rather than SkillIndex's internal
+    (frontmatter-name-keyed) lookup, so this stays correct even if a skill's
+    SKILL.md `name` field drifts from its directory name.
+    """
+    for entry in _build_index().all_skills():
+        if entry.skill.path.name == dir_name:
+            return {
+                "name": entry.name,
+                "description": entry.description,
+                "status": "active",
+                "source": "file",
+                "root": entry.skill.source_root,
+                "body": entry.skill.body,
+                "files": entry.list_files(),
+            }
+    return None
 
 
 @router.get("")
-async def list_skills() -> dict[str, list[dict]]:
-    """List installed skills and configured MCP servers."""
-    respond = await list_integrations()
-    return {"skills": respond.get("integrations", [])}
+async def list_skills() -> dict[str, list[dict[str, Any]]]:
+    """List discovered SKILL.md skills (bundled + user)."""
+    return {"skills": _skill_entries()}
+
+
+@router.get("/{name}")
+async def get_skill(name: str) -> dict[str, Any]:
+    """Get a single skill's full SKILL.md body and file manifest, by directory name."""
+    detail = _skill_detail(name)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"Unknown skill: {name}")
+    return detail

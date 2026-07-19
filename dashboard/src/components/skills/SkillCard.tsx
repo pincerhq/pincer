@@ -1,43 +1,48 @@
-import type { SkillInfo } from "@/api/types"
+import type { BuiltinToolInfo, ExtensionItem, IntegrationCardInfo } from "@/api/types"
 import { cn } from "@/lib/utils"
-import { Trash2 } from "lucide-react"
-import { Button } from "@/components/ui/button"
+import { Lock } from "lucide-react"
 
 interface SkillCardProps {
-  skill: SkillInfo
+  skill: ExtensionItem
   viewMode?: "grid" | "list"
-  onDelete?: (name: string) => void
   onClick?: () => void
 }
 
-function scoreColor(score: number) {
-  if (score >= 80) return "text-[var(--color-success)]"
-  if (score >= 50) return "text-[var(--color-warning)]"
-  return "text-[var(--color-danger)]"
+function isIntegrationCard(item: ExtensionItem): item is IntegrationCardInfo {
+  return item.source === "mcp" || item.source === "integration"
 }
 
-function scoreDot(score: number) {
-  if (score >= 80) return "bg-[var(--color-success)]"
-  if (score >= 50) return "bg-[var(--color-warning)]"
-  return "bg-[var(--color-danger)]"
+function isBuiltin(item: ExtensionItem): item is BuiltinToolInfo {
+  return item.source === "builtin"
 }
 
-function SourceBadge({ source }: { source?: string }) {
-  if (source === "mcp") {
+function SourceBadge({ item }: { item: ExtensionItem }) {
+  if (item.source === "file") {
+    return (
+      <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400">
+        {item.root}
+      </span>
+    )
+  }
+  if (item.source === "builtin") {
+    return (
+      <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-slate-500/15 text-slate-400">
+        CORE
+      </span>
+    )
+  }
+  if (item.source === "mcp") {
     return (
       <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">
         MCP
       </span>
     )
   }
-  if (source === "integration") {
-    return (
-      <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400">
-        INT
-      </span>
-    )
-  }
-  return null
+  return (
+    <span className="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400">
+      INT
+    </span>
+  )
 }
 
 function StatusDot({ status }: { status: string }) {
@@ -57,9 +62,19 @@ function StatusDot({ status }: { status: string }) {
   )
 }
 
-export function SkillCard({ skill, viewMode = "grid", onDelete, onClick }: SkillCardProps) {
-  const isFile = !skill.source || skill.source === "file"
+function ApprovalBadge({ skill }: { skill: ExtensionItem }) {
+  if (!isBuiltin(skill) || !skill.approval_required) return null
+  return (
+    <span
+      title="Requires user approval before running"
+      className="inline-flex items-center gap-1 text-[10px] text-[var(--color-warning)]"
+    >
+      <Lock className="h-3 w-3" />
+    </span>
+  )
+}
 
+export function SkillCard({ skill, viewMode = "grid", onClick }: SkillCardProps) {
   if (viewMode === "list") {
     return (
       <div
@@ -71,24 +86,15 @@ export function SkillCard({ skill, viewMode = "grid", onDelete, onClick }: Skill
       >
         {/* Badge */}
         <div className="shrink-0 w-10 flex justify-center">
-          {isFile ? (
-            <div className="flex items-center gap-1">
-              <div className={cn("h-1.5 w-1.5 rounded-full", scoreDot(skill.safety_score))} />
-              <span className={cn("text-xs font-mono font-medium", scoreColor(skill.safety_score))}>
-                {skill.safety_score}
-              </span>
-            </div>
-          ) : (
-            <SourceBadge source={skill.source} />
-          )}
+          <SourceBadge item={skill} />
         </div>
 
-        {/* Name + version */}
+        {/* Name */}
         <div className="w-44 shrink-0">
           <p className="text-sm font-medium truncate">{skill.name}</p>
-          <p className="text-[11px] text-[var(--color-muted)] font-mono">
-            {isFile ? `v${skill.version}` : skill.version}
-          </p>
+          {isIntegrationCard(skill) && skill.version && (
+            <p className="text-[11px] text-[var(--color-muted)] font-mono">{skill.version}</p>
+          )}
         </div>
 
         {/* Description */}
@@ -99,19 +105,10 @@ export function SkillCard({ skill, viewMode = "grid", onDelete, onClick }: Skill
           {skill.description}
         </p>
 
-        {/* Status + delete */}
+        {/* Status */}
         <div className="flex items-center gap-3 shrink-0">
+          <ApprovalBadge skill={skill} />
           <StatusDot status={skill.status} />
-          {onDelete && isFile && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={(e) => { e.stopPropagation(); onDelete(skill.name) }}
-              className="h-7 w-7 p-0 opacity-0 group-hover:opacity-100 transition-opacity text-[var(--color-muted)] hover:text-[var(--color-danger)]"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-            </Button>
-          )}
         </div>
       </div>
     )
@@ -131,21 +128,12 @@ export function SkillCard({ skill, viewMode = "grid", onDelete, onClick }: Skill
       <div className="flex items-start justify-between">
         <div className="flex-1 min-w-0">
           <h3 className="text-sm font-medium truncate">{skill.name}</h3>
-          <p className="text-xs text-[var(--color-muted)] mt-0.5 font-mono">
-            {isFile ? `v${skill.version}` : skill.version}
-          </p>
+          {isIntegrationCard(skill) && skill.version && (
+            <p className="text-xs text-[var(--color-muted)] mt-0.5 font-mono">{skill.version}</p>
+          )}
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
-          {isFile ? (
-            <>
-              <div className={cn("h-2 w-2 rounded-full", scoreDot(skill.safety_score))} />
-              <span className={cn("text-xs font-mono font-medium", scoreColor(skill.safety_score))}>
-                {skill.safety_score}
-              </span>
-            </>
-          ) : (
-            <SourceBadge source={skill.source} />
-          )}
+          <SourceBadge item={skill} />
         </div>
       </div>
 
@@ -158,16 +146,7 @@ export function SkillCard({ skill, viewMode = "grid", onDelete, onClick }: Skill
 
       <div className="flex items-center justify-between mt-3">
         <StatusDot status={skill.status} />
-        {onDelete && isFile && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={(e) => { e.stopPropagation(); onDelete(skill.name) }}
-            className="h-7 w-7 p-0 opacity-0 group-hover:opacity-100 transition-opacity text-[var(--color-muted)] hover:text-[var(--color-danger)]"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </Button>
-        )}
+        <ApprovalBadge skill={skill} />
       </div>
     </div>
   )

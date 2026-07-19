@@ -39,58 +39,6 @@ def test_doctor_runs() -> None:
     assert "Configuration" in result.output or "Check" in result.output
 
 
-def test_skills_list_shows_header() -> None:
-    """skills list output contains 'Installed Skills' or 'Name'."""
-    result = runner.invoke(app, ["skills", "list"])
-    assert result.exit_code == 0
-    assert "Installed Skills" in result.output or "Name" in result.output
-
-
-def test_skills_create_scaffolds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """skills create scaffolds manifest.json and skill.py."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "skills").mkdir()
-    result = runner.invoke(app, ["skills", "create", "testskill"])
-    assert result.exit_code == 0
-    assert (tmp_path / "skills" / "testskill" / "manifest.json").exists()
-    assert (tmp_path / "skills" / "testskill" / "skill.py").exists()
-
-
-def test_skills_create_fails_if_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """skills create fails when directory already exists."""
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "skills").mkdir()
-    (tmp_path / "skills" / "testskill").mkdir()
-    result = runner.invoke(app, ["skills", "create", "testskill"])
-    assert result.exit_code == 1
-    assert "already exists" in result.output or "exists" in result.output.lower()
-
-
-def test_skills_install_fails_nonexistent() -> None:
-    """skills install /nonexistent fails."""
-    result = runner.invoke(app, ["skills", "install", "/nonexistent"])
-    assert result.exit_code == 1
-    assert "Not a directory" in result.output or "directory" in result.output.lower()
-
-
-def test_skills_install_fails_invalid(tmp_path: Path) -> None:
-    """skills install fails for directory without manifest.json."""
-    invalid_skill = tmp_path / "invalid_skill"
-    invalid_skill.mkdir()
-    # No manifest.json, no skill.py
-    (invalid_skill / "random.txt").write_text("x")
-    result = runner.invoke(app, ["skills", "install", str(invalid_skill)])
-    assert result.exit_code == 1
-    assert "Invalid skill" in result.output or "manifest" in result.output.lower()
-
-
-def test_skills_scan_fails_nonexistent() -> None:
-    """skills scan /nonexistent fails."""
-    result = runner.invoke(app, ["skills", "scan", "/nonexistent"])
-    assert result.exit_code == 1
-    assert "Not a directory" in result.output or "directory" in result.output.lower()
-
-
 # ── patch-coverage: new lines from ms365-standalone-mcp branch ───────────────
 
 

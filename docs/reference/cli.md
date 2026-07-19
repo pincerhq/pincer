@@ -57,14 +57,9 @@ Complete command reference across all sprints (1–13). For the full list of too
 
 ## Skills
 
-| Command | Description | Sprint |
-|---------|-------------|--------|
-| `pincer skills list` | Show installed skills with status | 4 |
-| `pincer skills install <path>` | Install skill from path (scans first) | 4 |
-| `pincer skills create <name>` | Scaffold a new skill (manifest + template) | 4 |
-| `pincer skills scan <path>` | Security scan a skill directory (0-100 score) | 4 |
-| `pincer skills remove <name>` | Uninstall a user skill | 5 |
-| `pincer skills info <name>` | Show skill details (version, permissions, env) | 5 |
+There is no `pincer skills` CLI command group. Skills are discovered purely from
+the filesystem — drop a `SKILL.md`-containing directory into `skills/` (bundled)
+or `~/.pincer/skills/` (user) and restart. See the [Skills Guide](../guides/skills-guide.md).
 
 ## Memory
 

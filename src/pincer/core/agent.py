@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from pincer.memory.base import BaseMemoryBackend
     from pincer.memory.summarizer import Summarizer
     from pincer.tools.registry import ToolRegistry
+    from pincer.tools.skills.index import SkillIndex
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +301,7 @@ class Agent:
         self._tool_event_callback = tool_event_callback
         self.mcp_manager: MCPClientManager | None = None  # set by cli after startup
         self.mcp_server: PincerMCPServer | None = None  # set by cli after startup
+        self.skill_index: SkillIndex | None = None  # set by cli after startup
         self.mcp_shell: Any = None  # set by EmbeddedMCPShell.start()
         # (user_id, channel_name) of the most recent message — used by ask_user
         self._last_active: tuple[str, str] | None = None
@@ -746,6 +748,15 @@ class Agent:
         # Google Workspace tool chain hints when google__ tools are registered
         if any(t.startswith("google__") for t in self._tools.list_tools()):
             base_prompt += "\n" + _GOOGLE_TOOL_CHAIN_HINTS
+
+        # Inject available skills (progressive disclosure level 1)
+        if self.skill_index:
+            skills_block = self.skill_index.render_prompt_block(max_tokens=self._settings.skills_max_prompt_tokens)
+            if skills_block:
+                base_prompt += (
+                    "\n\n[Available Skills — call load_skill(name) to read one before using its scripts]\n"
+                    + skills_block
+                )
 
         # Inject connected MCP server info when available
         if self.mcp_manager:

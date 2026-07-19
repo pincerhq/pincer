@@ -27,6 +27,12 @@ const AuditPage = lazy(() =>
 const SkillsPage = lazy(() =>
   import("@/pages/Skills").then((m) => ({ default: m.SkillsPage })),
 )
+const SkillDetailPage = lazy(() =>
+  import("@/pages/SkillDetail").then((m) => ({ default: m.SkillDetailPage })),
+)
+const IntegrationsPage = lazy(() =>
+  import("@/pages/Integrations").then((m) => ({ default: m.IntegrationsPage })),
+)
 const DoctorPage = lazy(() =>
   import("@/pages/Doctor").then((m) => ({ default: m.DoctorPage })),
 )
@@ -104,6 +110,14 @@ export default function App() {
               <Route
                 path={ROUTES.SKILLS}
                 element={<PageWrapper><SkillsPage /></PageWrapper>}
+              />
+              <Route
+                path={ROUTES.SKILL}
+                element={<PageWrapper><SkillDetailPage /></PageWrapper>}
+              />
+              <Route
+                path={ROUTES.INTEGRATIONS}
+                element={<PageWrapper><IntegrationsPage /></PageWrapper>}
               />
               <Route
                 path={ROUTES.INTEGRATION}

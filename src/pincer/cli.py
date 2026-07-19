@@ -145,7 +145,7 @@ def run() -> None:
     console.print(f"   Model: {settings.default_model}")
     console.print(f"   Budget: ${settings.daily_budget_usd:.2f}/day")
     console.print(f"   Data: {settings.data_dir}")
-    console.print(f"   Skills dir(deprecated): {settings.skills_dir}")
+    console.print(f"   Skills dir: {settings.skills_dir}")
     console.print()
 
     asyncio.run(_run_agent(settings))
@@ -335,7 +335,55 @@ async def _run_agent(settings: Settings) -> None:
         },
     )
 
-    # Load MCP config early so we can decide whether to skip skills.
+    # Skills: SKILL.md-based discovery, coexists unconditionally with MCP.
+    from pincer.tools.builtin.skills_tools import make_skills_tools
+    from pincer.tools.skills.index import SkillIndex
+
+    skill_index = SkillIndex(
+        bundled_dir=settings.skills_bundled_dir,
+        user_dir=settings.skills_dir,
+        max_per_root=settings.skills_max_loaded_per_root,
+    )
+    skill_index.discover()
+
+    skill_tools = make_skills_tools(skill_index, sandbox_disabled=settings.skill_sandbox_disabled)
+    tools.register(
+        name="load_skill",
+        description="Load a skill's full instructions by name (see Available Skills in the system prompt).",
+        handler=skill_tools["load_skill"],
+    )
+    tools.register(
+        name="load_skill_reference",
+        description="Read a file referenced by a skill (e.g. a reference doc or data file), by relative path.",
+        handler=skill_tools["load_skill_reference"],
+    )
+    tools.register(
+        name="run_skill_script",
+        description="Run a script bundled with a skill in a sandboxed subprocess.",
+        handler=skill_tools["run_skill_script"],
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Exact skill name"},
+                "script": {"type": "string", "description": "Script path relative to the skill's own directory"},
+                "args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Command-line arguments to pass to the script",
+                },
+            },
+            "required": ["name", "script"],
+        },
+        require_approval=True,
+    )
+
+    if skill_index.all_skills():
+        skill_names = ", ".join(e.name for e in skill_index.all_skills())
+        console.print(f"[green]Skills indexed: {skill_names}[/green]")
+    else:
+        console.print("[dim]Skills: none found[/dim]")
+
+    # Load MCP config (coexists with skills — no mutual exclusion).
     _mcp_cfg = None
     try:
         from pincer.mcp import load_mcp_config as _load_mcp_config
@@ -345,60 +393,7 @@ async def _run_agent(settings: Settings) -> None:
     except ImportError:
         pass  # mcp package not installed
     except Exception as _mcp_cfg_err:
-        console.print(f"[yellow]MCP config load failed — MCP disabled, skills will load: {_mcp_cfg_err}[/yellow]")
-
-    # Skills are disabled only when MCP is explicitly enabled AND has servers configured.
-    # When [mcp] enabled = false, _mcp_cfg.enabled is False → _mcp_active is False → skills load.
-    _mcp_active = _mcp_cfg is not None and _mcp_cfg.enabled is True and bool(_mcp_cfg.servers)
-
-    # Sprint 4: Load skills — skipped when MCP servers are configured (MCP replaces skills).
-    if not _mcp_active:
-        from pathlib import Path as _SkillPath
-
-        from pincer.tools.skills.loader import SkillLoader
-        from pincer.tools.skills.scanner import SkillScanner
-
-        skill_loader = SkillLoader(
-            bundled_dir=_SkillPath(settings.skills_dir),
-            scanner=SkillScanner(),  # bundled skills are trusted, skip scanning
-        )
-        loaded_skills = await skill_loader.discover_and_load()
-
-        def _wrap_skill_fn(sync_fn):
-            import functools
-            import inspect
-            import json as _json
-
-            async def handler(**kwargs):
-                kwargs.pop("context", None)
-                if inspect.iscoroutinefunction(sync_fn):
-                    result = await sync_fn(**kwargs)
-                else:
-                    loop = asyncio.get_event_loop()
-                    result = await loop.run_in_executor(None, functools.partial(sync_fn, **kwargs))
-                return _json.dumps(result) if isinstance(result, dict) else str(result)
-
-            return handler
-
-        all_fns = skill_loader.get_all_tool_functions()
-        for schema in skill_loader.get_all_tool_schemas():
-            fn_key = schema["name"].replace("__", ".", 1)
-            fn = all_fns.get(fn_key)
-            if fn:
-                tools.register(
-                    name=schema["name"],
-                    description=schema["description"],
-                    handler=_wrap_skill_fn(fn),
-                    parameters=schema["input_schema"],
-                )
-
-        if loaded_skills:
-            skill_names = [s.manifest.name for s in loaded_skills.values()]
-            console.print(f"[green]Skills loaded: {', '.join(skill_names)}[/green]")
-        else:
-            console.print("[dim]Skills: none found (skills/ directory empty or missing)[/dim]")
-    else:
-        console.print("[yellow]Skills disabled: MCP servers are configured[/yellow]")
+        console.print(f"[yellow]MCP config load failed — MCP disabled: {_mcp_cfg_err}[/yellow]")
 
     # MCP client manager (optional — requires mcp package + pincer.toml or env config)
     mcp_manager = None
@@ -455,6 +450,7 @@ async def _run_agent(settings: Settings) -> None:
         memory_store=memory_store,
         summarizer=summarizer,
     )
+    agent.skill_index = skill_index
     if mcp_manager:
         agent.mcp_manager = mcp_manager
         from pincer.memory.mcp import MCPMemoryBackend
@@ -1786,214 +1782,6 @@ async def _signal_test(recipient: str) -> None:
         console.print(f"[red]Send failed: {e}[/red]")
     finally:
         await client.disconnect()
-
-
-# ── Skills subcommands ────────────────────────
-
-skills_app = typer.Typer(name="skills", help="Manage skills and plugins")
-app.add_typer(skills_app, name="skills")
-
-
-@skills_app.command(name="list")
-def skills_list() -> None:
-    """List installed skills."""
-    from pathlib import Path as _P
-
-    from rich.table import Table
-
-    from pincer.tools.skills.loader import SkillLoader
-
-    loader = SkillLoader(bundled_dir=_P("skills"))
-    dirs = loader._discover_skill_dirs()
-
-    table = Table(title="Installed Skills")
-    table.add_column("Name", style="bold")
-    table.add_column("Version")
-    table.add_column("Tools")
-    table.add_column("Author")
-    table.add_column("Source")
-
-    import json
-
-    for d in dirs:
-        try:
-            m = json.loads((d / "manifest.json").read_text())
-            tool_names = [t["name"] for t in m.get("tools", [])]
-            source = "bundled" if "skills" in str(d) and ".pincer" not in str(d) else "user"
-            table.add_row(
-                m.get("name", d.name),
-                m.get("version", "?"),
-                str(len(tool_names)),
-                m.get("author", "unknown"),
-                source,
-            )
-        except Exception as e:
-            table.add_row(d.name, "?", "?", "?", f"error: {e}")
-
-    console.print(table)
-
-
-@skills_app.command(name="install")
-def skills_install(source: str = typer.Argument(help="Path to skill directory")) -> None:
-    """Install a skill (scan first, block if unsafe)."""
-    import json
-    import shutil
-    from pathlib import Path as _P
-
-    from pincer.tools.skills.scanner import SkillScanner
-
-    source_path = _P(source)
-    if not source_path.is_dir():
-        console.print(f"[red]Not a directory: {source}[/red]")
-        raise typer.Exit(1)
-    if not (source_path / "manifest.json").is_file() or not (source_path / "skill.py").is_file():
-        console.print("[red]Invalid skill: needs manifest.json and skill.py[/red]")
-        raise typer.Exit(1)
-
-    scanner = SkillScanner()
-    result = scanner.scan_directory(str(source_path))
-    console.print(result.summary())
-
-    if not result.passed:
-        console.print(f"\n[red]Skill blocked (score {result.score}/100, min 50)[/red]")
-        raise typer.Exit(1)
-
-    manifest = json.loads((source_path / "manifest.json").read_text())
-    name = manifest.get("name", source_path.name)
-    dest = _P.home() / ".pincer" / "skills" / name
-    dest.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source_path, dest, dirs_exist_ok=True)
-    console.print(f"\n[green]Skill '{name}' installed to {dest}[/green]")
-
-
-@skills_app.command(name="create")
-def skills_create(name: str = typer.Argument(help="Name for the new skill")) -> None:
-    """Scaffold a new skill directory."""
-    import json
-    from pathlib import Path as _P
-
-    skill_dir = _P("skills") / name
-    if skill_dir.exists():
-        console.print(f"[red]Directory already exists: {skill_dir}[/red]")
-        raise typer.Exit(1)
-
-    skill_dir.mkdir(parents=True)
-
-    manifest = {
-        "name": name,
-        "version": "0.1.0",
-        "description": f"{name} skill",
-        "author": "you",
-        "permissions": [],
-        "env_required": [],
-        "tools": [
-            {
-                "name": f"{name}_action",
-                "description": f"Main action for {name}",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "input": {"type": "string", "description": "Input value"},
-                    },
-                    "required": ["input"],
-                },
-            }
-        ],
-    }
-    (skill_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-
-    skill_py = f'''"""Skill: {name}"""
-
-
-def {name}_action(input: str) -> dict:
-    """Main action for {name}."""
-    return {{"result": f"Processed: {{input}}"}}
-'''
-    (skill_dir / "skill.py").write_text(skill_py)
-    console.print(f"[green]Created skill scaffold at {skill_dir}/[/green]")
-    console.print("  manifest.json — edit metadata and tool definitions")
-    console.print("  skill.py      — implement your tool functions")
-
-
-@skills_app.command(name="scan")
-def skills_scan(path: str = typer.Argument(help="Path to skill directory")) -> None:
-    """Run security scanner on a skill."""
-    from pathlib import Path as _P
-
-    from rich.table import Table
-
-    from pincer.tools.skills.scanner import SkillScanner
-
-    skill_path = _P(path)
-    if not skill_path.is_dir():
-        console.print(f"[red]Not a directory: {path}[/red]")
-        raise typer.Exit(1)
-
-    scanner = SkillScanner()
-    result = scanner.scan_directory(str(skill_path))
-
-    console.print(f"\n[bold]Scan: {result.skill_name}[/bold]")
-    console.print(f"Score: {result.score}/100 — {'[green]PASS[/green]' if result.passed else '[red]FAIL[/red]'}")
-
-    if result.findings:
-        table = Table(title="Findings")
-        table.add_column("Sev", width=8)
-        table.add_column("Line", width=6)
-        table.add_column("Category")
-        table.add_column("Description")
-        table.add_column("Penalty", justify="right")
-
-        for f in result.findings:
-            sev_color = {"critical": "red", "warning": "yellow", "info": "blue"}.get(f.severity, "white")
-            table.add_row(
-                f"[{sev_color}]{f.severity}[/{sev_color}]",
-                str(f.line),
-                f.category,
-                f.description,
-                f"-{f.penalty}",
-            )
-        console.print(table)
-
-    if result.error:
-        console.print(f"[red]Error: {result.error}[/red]")
-
-
-@skills_app.command(name="remove")
-def skills_remove(name: str = typer.Argument(help="Skill name to uninstall")) -> None:
-    """Uninstall a user skill."""
-    import shutil
-    from pathlib import Path as _P
-
-    dest = _P.home() / ".pincer" / "skills" / name
-    if not dest.exists():
-        console.print(f"[red]Skill not found: {name}[/red]")
-        raise typer.Exit(1)
-    shutil.rmtree(dest)
-    console.print(f"[green]Skill '{name}' removed[/green]")
-
-
-@skills_app.command(name="info")
-def skills_info(name: str = typer.Argument(help="Skill name")) -> None:
-    """Show skill details."""
-    import json
-    from pathlib import Path as _P
-
-    for base in [_P("skills"), _P.home() / ".pincer" / "skills"]:
-        skill_dir = base / name
-        manifest_path = skill_dir / "manifest.json"
-        if manifest_path.exists():
-            m = json.loads(manifest_path.read_text())
-            console.print(f"[bold]{m.get('name', name)}[/bold] v{m.get('version', '?')}")
-            console.print(f"  Description: {m.get('description', '')}")
-            console.print(f"  Author:      {m.get('author', 'unknown')}")
-            console.print(f"  Permissions: {', '.join(m.get('permissions', [])) or 'none'}")
-            console.print(f"  Env:         {', '.join(m.get('env_required', [])) or 'none'}")
-            tools = m.get("tools", [])
-            console.print(f"  Tools:       {len(tools)}")
-            for t in tools:
-                console.print(f"    - {t['name']}: {t.get('description', '')}")
-            return
-    console.print(f"[red]Skill not found: {name}[/red]")
 
 
 # ── Audit subcommands ─────────────────────────

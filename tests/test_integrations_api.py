@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from fastapi.testclient import TestClient
 
 from pincer.api.integrations import (
+    _builtin_entries,
     _google_active,
     _google_categories,
     _integration_entries,
@@ -278,6 +279,43 @@ def test_mcp_skill_entries_disabled_server_shows_disabled_status() -> None:
     assert result[0]["status"] == "disabled"
 
 
+# ── _builtin_entries ──────────────────────────────────────────────────────────
+
+
+def test_builtin_entries_includes_core_tools() -> None:
+    names = {e["name"] for e in _builtin_entries()}
+    assert "file_read" in names
+    assert "python_exec" in names
+
+
+def test_builtin_entries_excludes_double_underscore_tools() -> None:
+    for entry in _builtin_entries():
+        assert "__" not in entry["name"]
+
+
+def test_builtin_entries_have_required_fields() -> None:
+    for entry in _builtin_entries():
+        assert entry["source"] == "builtin"
+        assert entry["status"] == "active"
+        assert "description" in entry
+        assert isinstance(entry["approval_required"], bool)
+
+
+def test_builtin_entries_reflects_approval_flags() -> None:
+    by_name = {e["name"]: e for e in _builtin_entries()}
+    assert by_name["file_read"]["approval_required"] is False
+
+
+def test_builtin_entries_respects_shell_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_SHELL_ENABLED", "false")
+    from pincer.config import get_settings_relaxed
+
+    get_settings_relaxed.cache_clear()
+    names = {e["name"] for e in _builtin_entries()}
+    get_settings_relaxed.cache_clear()
+    assert "shell_exec" not in names
+
+
 # ── _integration_entries ──────────────────────────────────────────────────────
 
 
@@ -328,6 +366,19 @@ def test_list_integrations_includes_builtin_names(client: TestClient) -> None:
     names = {e["name"] for e in resp.json()["integrations"]}
     assert "Google Workspace" in names
     assert "Slack" in names
+
+
+def test_list_integrations_excludes_file_skills(client: TestClient) -> None:
+    """File-based (SKILL.md) skills are served by /api/skills, not /api/integrations."""
+    resp = client.get("/api/integrations")
+    sources = {e["source"] for e in resp.json()["integrations"]}
+    assert "file" not in sources
+
+
+def test_list_integrations_includes_builtin_tools(client: TestClient) -> None:
+    resp = client.get("/api/integrations")
+    names = {e["name"] for e in resp.json()["integrations"]}
+    assert "file_read" in names
 
 
 # ── GET /api/integrations/{slug} ──────────────────────────────────────────────

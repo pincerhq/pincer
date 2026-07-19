@@ -3,41 +3,47 @@
 from __future__ import annotations
 
 import importlib
-import json
-from pathlib import Path
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from pincer.tools.skills.loader import SkillManifest
-from pincer.tools.skills.scanner import SkillScanner
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
-
-# Project root for bundled skills (src/pincer/api/skills.py -> ../../../..)
-_API_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _API_DIR.parent.parent.parent
-_BUNDLED_SKILLS = _PROJECT_ROOT / "skills"
-_USER_SKILLS = Path.home() / ".pincer" / "skills"
-_SKIP_DIRS = {"__pycache__", ".git", ".venv", "node_modules"}
 
 # ── List integrations ────────────────────────────────────────────
 
 
-def _discover_skill_dirs() -> list[Path]:
-    """Find all skill directories in bundled and user locations."""
-    dirs: list[Path] = []
-    for base in (_BUNDLED_SKILLS, _USER_SKILLS):
-        if not base.is_dir():
-            continue
-        for entry in sorted(base.iterdir()):
-            if not entry.is_dir():
-                continue
-            if entry.name.startswith(".") or entry.name in _SKIP_DIRS:
-                continue
-            if (entry / "manifest.json").is_file() and (entry / "skill.py").is_file():
-                dirs.append(entry)
-    return dirs
+def _builtin_entries() -> list[dict[str, Any]]:
+    """List core built-in tools (shell/python/file/browser/email/calendar/image).
+
+    Excludes `__`-prefixed tools (Google Workspace, Slack) — those are
+    already represented by the Google/Slack integration cards below.
+    """
+    try:
+        from pincer.config import get_settings_relaxed
+        from pincer.tools.bootstrap import register_default_tools
+        from pincer.tools.registry import ToolRegistry
+
+        settings = get_settings_relaxed()
+        registry = ToolRegistry()
+        register_default_tools(registry, settings)
+    except Exception:
+        logger.debug("Could not build builtin tool list", exc_info=True)
+        return []
+
+    return [
+        {
+            "name": schema["name"],
+            "description": schema["description"],
+            "status": "active",
+            "source": "builtin",
+            "approval_required": registry.requires_approval(schema["name"]),
+        }
+        for schema in registry.get_schemas()
+        if "__" not in schema["name"]
+    ]
 
 
 def _integration_entries() -> list[dict[str, Any]]:
@@ -141,35 +147,9 @@ def _mcp_skill_entries() -> list[dict[str, Any]]:
 
 @router.get("")
 async def list_integrations() -> dict[str, list[dict[str, Any]]]:
-    """List installed skills and configured MCP servers."""
-    scanner = SkillScanner(pass_threshold=50)
+    """List built-in tools, configured integrations (Google Workspace, Slack), and MCP servers."""
     integrations: list[dict[str, Any]] = []
-
-    for skill_dir in _discover_skill_dirs():
-        manifest_path = skill_dir / "manifest.json"
-        try:
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest = SkillManifest.from_dict(data, str(skill_dir))
-        except Exception:
-            continue
-
-        scan_result = scanner.scan_directory(str(skill_dir), manifest=manifest)
-        tool_names = [t.get("name", "") for t in manifest.tools if t.get("name")]
-
-        integrations.append(
-            {
-                "name": manifest.name,
-                "version": manifest.version,
-                "description": manifest.description,
-                "author": manifest.author,
-                "safety_score": scan_result.score,
-                "status": "active" if scan_result.passed else "error",
-                "permissions": manifest.permissions,
-                "tools": tool_names,
-                "source": "file",
-            }
-        )
-
+    integrations.extend(_builtin_entries())
     integrations.extend(_integration_entries())
     integrations.extend(_mcp_skill_entries())
     return {"integrations": integrations}

@@ -50,11 +50,11 @@ export function IntegrationDetailPage() {
     <PageContainer title="">
       {/* Back link */}
       <button
-        onClick={() => navigate(ROUTES.SKILLS)}
+        onClick={() => navigate(ROUTES.INTEGRATIONS)}
         className="flex items-center gap-1.5 text-sm text-[var(--color-muted)] hover:text-[var(--color-foreground)] mb-6 transition-colors"
       >
         <ArrowLeft className="h-3.5 w-3.5" />
-        Skills &amp; Integrations
+        Integrations
       </button>
 
       {isLoading && (

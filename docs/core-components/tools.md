@@ -6,21 +6,21 @@ This is the complete, authoritative catalog of every tool Pincer can call. It is
 
 | Category | Tools | Module | How to enable |
 |---|---:|---|---|
-| **Core built-ins** (incl. `generate_image`, `make_phone_call`) | 23 | `src/pincer/tools/builtin/` + `src/pincer/cli.py` | Always on (voice/image need their API key) |
-| **Bundled skills** | 27 | `skills/` (11 skills) | Always on (bundled) |
+| **Core built-ins** (incl. `generate_image`, `make_phone_call`, `load_skill`, `load_skill_reference`, `run_skill_script`) | 26 | `src/pincer/tools/builtin/` + `src/pincer/cli.py` | Always on (voice/image need their API key) |
+| **Bundled skills** | 5 (progressive disclosure, no fixed tool count) | `skills/` (SKILL.md) | Always on (bundled) |
 | **Google Workspace** | 113 | `src/pincer/integrations/google/` | `pincer setup-google` |
 | **Microsoft 365** | 69 | `src/ms365-mcp/ms365/` | `ms365-mcp-setup` |
 | **Slack (native)** | 71 | `src/pincer/integrations/slack/` | `PINCER_SLACK_BOT_TOKEN` |
 | **MCP servers (external)** | unlimited | `src/pincer/mcp/` | `pincer.toml` `[[mcp.servers]]` |
-| **Custom skills** | unlimited | `pincer skills install` | AST-scanned + sandboxed |
-| **Native tools (first-party)** | **303** | — | — |
-| **Available out of the box with popular MCP servers** | **600+** | — | — |
+| **Custom skills** | unlimited | `~/.pincer/skills/` (SKILL.md) | No install step — filesystem discovery |
+| **Native tools (first-party)** | **~279** | — | — |
+| **Available out of the box with popular MCP servers** | **550+** | — | — |
 
-> **"600+"** refers to the practical total when Pincer is paired with the most common MCP servers (GitHub, Postgres, Filesystem, Notion, Linear, Stripe, etc.) plus the 303 native Pincer tools. Pincer itself ships 303 first-party tools; MCP multiplies that arbitrarily.
+> **"550+"** refers to the practical total when Pincer is paired with the most common MCP servers (GitHub, Postgres, Filesystem, Notion, Linear, Stripe, etc.) plus the ~279 native Pincer tools. Pincer itself ships ~279 first-party tools; MCP multiplies that arbitrarily.
 
 ---
 
-## Core built-ins (23)
+## Core built-ins (26)
 
 Registered in `src/pincer/cli.py::_run_agent()`. These are always available.
 
@@ -49,26 +49,23 @@ Registered in `src/pincer/cli.py::_run_agent()`. These are always available.
 | `send_image` | No | Send an image to the current channel |
 | `generate_image` | No | Generate an image via fal.ai or Gemini |
 | `make_phone_call` | **Yes** | Place an outbound call via Twilio (when voice is enabled) |
+| `load_skill` | No | Load a skill's full instructions by name |
+| `load_skill_reference` | No | Read a file referenced by a skill, by relative path |
+| `run_skill_script` | **Yes** | Run a script bundled with a skill in a sandboxed subprocess |
 
 ---
 
-## Bundled skills (27 tool functions across 11 skills)
+## Bundled skills (5)
 
-Loaded from `skills/` at startup. Each runs in a subprocess sandbox with a permission-declaring `manifest.json`.
+Discovered from `src/pincer/skills/` (shipped inside the package) at startup — each is a `SKILL.md` directory (name + description + markdown instructions), not a fixed set of registered tools. The agent reads the description from the system prompt and calls `load_skill(name)` to read the rest. See the [Skills Guide](../guides/skills-guide.md).
 
-| Skill | Tools | Permissions |
-|---|---|---|
-| `weather` | `get_weather`, `get_forecast` | network |
-| `news` | `get_headlines`, `search_news`, `read_rss` | network |
-| `translate` | `translate_text`, `list_languages` | network |
-| `summarize_url` | `summarize_url` | network |
-| `youtube_summary` | `get_transcript` | network |
-| `stock_price` | `get_stock_price`, `get_crypto_price` | network |
-| `expense_tracker` | `log_expense`, `expense_report` | filesystem |
-| `habit_tracker` | `add_habit`, `checkin`, `habit_status` | filesystem |
-| `pomodoro` | `start_pomodoro`, `pomodoro_stats` | filesystem |
-| `git_status` | `repo_status`, `recent_commits` | shell |
-| `phone_contacts` | `add_contact`, `search_contacts`, `list_contacts`, `update_contact`, `delete_contact` | filesystem |
+| Skill | Purpose |
+|---|---|
+| `skill-authoring` | How to write a new SKILL.md skill |
+| `memory-recall` | How Pincer's long-term memory works |
+| `mcp-server-setup` | How to connect or expose MCP servers |
+| `scheduler-briefings` | Cron scheduler and morning briefings |
+| `doctor-troubleshooting` | Reading `pincer doctor` output |
 
 ---
 
@@ -226,13 +223,7 @@ Pincer exposes its **own** tools to MCP clients via an embedded OAuth 2.0 Author
 
 ## Custom skills (unlimited)
 
-Any Python file + `manifest.json` in `skills/` is loaded at startup after an AST scan. Community skills can be installed via:
-
-```bash
-pincer skills install github:user/repo
-```
-
-Skills run in a subprocess sandbox with declared permissions only (`network`, `filesystem`, `shell`). See `docs/Skills guide.md`.
+Any directory containing a `SKILL.md` file under `skills/` (bundled) or `~/.pincer/skills/` (user) is discovered at startup — no install step, no CLI. Any script a skill ships runs via `run_skill_script` in a subprocess sandbox (resource limits + network domain allowlisting) and always requires approval. See the [Skills Guide](../guides/skills-guide.md).
 
 ---
 

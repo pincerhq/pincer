@@ -2,16 +2,16 @@ import { useQuery } from "@tanstack/react-query"
 import { pincer } from "@/api/client"
 import { REFETCH_INTERVALS } from "@/lib/constants"
 
-export function useSkills() {
+export function useIntegrations() {
   return useQuery({
-    queryKey: ["skills"],
+    queryKey: ["integrations"],
     queryFn: async () => {
       try {
-        return await pincer.skills()
+        return await pincer.integrations()
       } catch (err) {
         const res = (err as { response?: { status?: number } })?.response
         if (res?.status === 404) {
-          return { skills: [] }
+          return { integrations: [] }
         }
         throw err
       }

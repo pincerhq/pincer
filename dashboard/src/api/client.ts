@@ -11,7 +11,8 @@ import type {
   ConversationsResponse,
   Conversation,
   SkillsResponse,
-  ScanResult,
+  SkillDetail,
+  IntegrationsResponse,
   Settings,
   DoctorReport,
   IntegrationDetail,
@@ -126,16 +127,7 @@ export const pincer = {
   identity: (id: string) => api().get(`api/identity/${id}`).json<Identity>(),
 
   skills: () => api().get("api/skills").json<SkillsResponse>(),
-  skillScan: (path: string) =>
-    api().post("api/skills/scan", { json: { path } }).json<ScanResult>(),
-  skillInstall: (url: string) =>
-    api()
-      .post("api/skills/install", { json: { url } })
-      .json<{ success: boolean; name: string; version: string }>(),
-  skillDelete: (name: string) =>
-    api()
-      .delete(`api/skills/${name}`)
-      .json<{ success: boolean }>(),
+  skill: (name: string) => api().get(`api/skills/${encodeURIComponent(name)}`).json<SkillDetail>(),
 
   settings: () => api().get("api/settings").json<Settings>(),
   updateSettings: (data: Partial<Settings>) =>
@@ -143,6 +135,7 @@ export const pincer = {
 
   doctor: () => api().get("api/doctor").json<DoctorReport>(),
 
+  integrations: () => api().get("api/integrations").json<IntegrationsResponse>(),
   integration: (slug: string) =>
     api().get(`api/integrations/${slug}`).json<IntegrationDetail>(),
 }

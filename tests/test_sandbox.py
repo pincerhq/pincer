@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from pincer.tools.sandbox import SandboxConfig, execute
+from pincer.tools.sandbox import SandboxConfig, execute, execute_script
 
 SAFE_SKILL = """
 def add(a, b):
@@ -113,3 +113,58 @@ async def test_network_allowing(skill_path: Path) -> None:
     result = await execute(str(skill_path), "add", {"a": 1, "b": 2}, config=config)
     assert result.success is True
     assert result.result == {"sum": 3}
+
+
+# ── execute_script() ─────────────────────────────────────────────────
+
+
+async def test_execute_script_python(tmp_path: Path) -> None:
+    """Python script receives argv and prints to stdout."""
+    script = tmp_path / "hello.py"
+    script.write_text('import sys\nprint("hello", *sys.argv[1:])\n', encoding="utf-8")
+
+    result = await execute_script(str(script), args=["a", "b"])
+    assert result.success is True
+    assert result.result == "hello a b"
+
+
+async def test_execute_script_non_python(tmp_path: Path) -> None:
+    """Non-Python (shell) script runs directly with argv."""
+    script = tmp_path / "hello.sh"
+    script.write_text("#!/bin/sh\necho shell $1\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    result = await execute_script(str(script), args=["world"])
+    assert result.success is True
+    assert result.result == "shell world"
+
+
+async def test_execute_script_error(tmp_path: Path) -> None:
+    """Script raising an exception returns success=False with error/stderr."""
+    script = tmp_path / "bad.py"
+    script.write_text('raise RuntimeError("boom")\n', encoding="utf-8")
+
+    result = await execute_script(str(script))
+    assert result.success is False
+    assert result.exit_code != 0
+    assert "boom" in (result.error or "")
+
+
+async def test_execute_script_timeout(tmp_path: Path) -> None:
+    """Script that hangs is killed after the configured timeout."""
+    script = tmp_path / "loop.py"
+    script.write_text("while True:\n    pass\n", encoding="utf-8")
+
+    result = await execute_script(str(script), config=SandboxConfig(timeout=2))
+    assert result.timed_out is True
+    assert result.success is False
+
+
+async def test_execute_script_no_args_defaults_empty(tmp_path: Path) -> None:
+    """args=None is treated as an empty argv list."""
+    script = tmp_path / "noargs.py"
+    script.write_text("import sys\nprint(len(sys.argv) - 1)\n", encoding="utf-8")
+
+    result = await execute_script(str(script))
+    assert result.success is True
+    assert result.result == "0"

@@ -140,5 +140,7 @@ def requires_confirmation(tool_name: str) -> bool:
         "email_list_folders",
         "file_read",
         "file_list",
+        "load_skill",
+        "load_skill_reference",
     }
     return tool_name not in no_confirm_tools
