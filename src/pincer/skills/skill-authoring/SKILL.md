@@ -1,5 +1,5 @@
 ---
-name: skill-authoring
+name: Authoring a Pincer skill
 description: How to write a new Pincer skill as a SKILL.md directory — frontmatter fields, progressive disclosure, and when to add a script versus pure instructions. Load this when the user asks you to create, package, or explain a Pincer skill.
 ---
 
@@ -8,7 +8,7 @@ description: How to write a new Pincer skill as a SKILL.md directory — frontma
 A skill is a directory containing a single `SKILL.md` file. Nothing else is
 required — a directory with `SKILL.md` present *is* a skill.
 
-```
+```text
 skills/<skill-name>/
   SKILL.md          # required: frontmatter + instructions
   reference.md       # optional: extra docs, loaded on demand
@@ -66,7 +66,7 @@ an API with a fixed auth scheme) that's error-prone to improvise every time.
 
 ## Where skills live
 
-- Bundled skills: shipped inside the installed package at `src/pincer/skills/` (configurable via `skills_bundled_dir`).
+- Bundled skills: shipped inside the installed package at `src/pincer/skills/` (fixed path, not configurable).
 - User skills: `~/.pincer/skills/` (configurable via `skills_dir`).
 
 A user skill with the same `name` as a bundled skill overrides it. Both

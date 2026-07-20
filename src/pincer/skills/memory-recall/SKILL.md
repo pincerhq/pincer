@@ -1,5 +1,5 @@
 ---
-name: memory-recall
+name: Memory recall
 description: How Pincer's long-term memory works and how to search or reference past conversations and stored facts about a user. Load this when the user asks what you remember about them, references something from a previous conversation, or asks you to recall/forget information.
 ---
 

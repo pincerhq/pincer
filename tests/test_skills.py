@@ -37,14 +37,6 @@ def test_frontmatter_has_required_fields(skill_name: str) -> None:
 
 
 @pytest.mark.parametrize("skill_name", SKILL_NAMES)
-def test_frontmatter_name_matches_dir(skill_name: str) -> None:
-    raw = (SKILLS_DIR / skill_name / "SKILL.md").read_text(encoding="utf-8")
-    _, frontmatter_raw, _ = raw.split("---\n", 2)
-    data = yaml.safe_load(frontmatter_raw)
-    assert data["name"] == skill_name, f"frontmatter name '{data['name']}' should match dir '{skill_name}'"
-
-
-@pytest.mark.parametrize("skill_name", SKILL_NAMES)
 def test_body_non_empty(skill_name: str) -> None:
     from pincer.tools.skills.parser import parse_skill_md
 
@@ -53,9 +45,12 @@ def test_body_non_empty(skill_name: str) -> None:
 
 
 def test_bundled_index_discovers_all_starter_skills() -> None:
+    """Discovery is directory-based, not frontmatter-name-based — a skill's
+    frontmatter `name` is a free-form display name and need not match its
+    directory (that's what /api/skills/{name} and this lookup key off)."""
     from pincer.tools.skills.index import SkillIndex
 
     index = SkillIndex(bundled_dir=SKILLS_DIR, user_dir=None, max_per_root=100)
     index.discover()
-    names = {e.name for e in index.all_skills()}
-    assert names == set(SKILL_NAMES)
+    dir_names = {e.skill.path.name for e in index.all_skills()}
+    assert dir_names == set(SKILL_NAMES)

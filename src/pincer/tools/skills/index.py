@@ -11,14 +11,17 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import Literal
 
 from pincer.tools.skills.parser import ParsedSkill, parse_skill_md
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
 logger = logging.getLogger(__name__)
+
+# Bundled skills ship inside the installed package (see pyproject.toml's
+# [tool.hatch.build.targets.wheel] packages = ["src/pincer"]), so this path
+# resolves correctly both from a source checkout and a pip-installed distribution.
+BUNDLED_SKILLS_DIR: Path = Path(__file__).resolve().parent.parent.parent / "skills"
 
 _SKIP_DIRS = {"__pycache__", ".git", ".venv", "node_modules"}
 _DESC_TRUNCATE_LEN = 80

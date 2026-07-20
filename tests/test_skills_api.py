@@ -38,10 +38,12 @@ def client(monkeypatch, tmp_path):
 
 def test_skill_entries_empty_when_no_dirs(tmp_path: Path) -> None:
     settings = MagicMock()
-    settings.skills_bundled_dir = tmp_path / "bundled"
     settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
-    with patch("pincer.config.get_settings_relaxed", return_value=settings):
+    with (
+        patch("pincer.config.get_settings_relaxed", return_value=settings),
+        patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", tmp_path / "bundled"),
+    ):
         assert _skill_entries() == []
 
 
@@ -52,10 +54,12 @@ def test_skill_entries_discovers_skill_md(tmp_path: Path) -> None:
         "---\nname: demo\ndescription: demo skill\n---\nbody\n", encoding="utf-8"
     )
     settings = MagicMock()
-    settings.skills_bundled_dir = bundled
     settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
-    with patch("pincer.config.get_settings_relaxed", return_value=settings):
+    with (
+        patch("pincer.config.get_settings_relaxed", return_value=settings),
+        patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", bundled),
+    ):
         entries = _skill_entries()
 
     assert len(entries) == 1
@@ -74,10 +78,12 @@ def test_skill_entries_bundled_and_user(tmp_path: Path) -> None:
     (user / "b" / "SKILL.md").write_text("---\nname: b\ndescription: d\n---\nx\n", encoding="utf-8")
 
     settings = MagicMock()
-    settings.skills_bundled_dir = bundled
     settings.skills_dir = user
     settings.skills_max_loaded_per_root = 100
-    with patch("pincer.config.get_settings_relaxed", return_value=settings):
+    with (
+        patch("pincer.config.get_settings_relaxed", return_value=settings),
+        patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", bundled),
+    ):
         entries = _skill_entries()
 
     roots = {e["name"]: e["root"] for e in entries}
@@ -89,10 +95,12 @@ def test_skill_entries_bundled_and_user(tmp_path: Path) -> None:
 
 def test_skill_detail_returns_none_for_unknown(tmp_path: Path) -> None:
     settings = MagicMock()
-    settings.skills_bundled_dir = tmp_path / "bundled"
     settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
-    with patch("pincer.config.get_settings_relaxed", return_value=settings):
+    with (
+        patch("pincer.config.get_settings_relaxed", return_value=settings),
+        patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", tmp_path / "bundled"),
+    ):
         assert _skill_detail("nope") is None
 
 
@@ -106,10 +114,12 @@ def test_skill_detail_returns_body_and_files(tmp_path: Path) -> None:
     (skill_dir / "notes.txt").write_text("x", encoding="utf-8")
 
     settings = MagicMock()
-    settings.skills_bundled_dir = bundled
     settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
-    with patch("pincer.config.get_settings_relaxed", return_value=settings):
+    with (
+        patch("pincer.config.get_settings_relaxed", return_value=settings),
+        patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", bundled),
+    ):
         detail = _skill_detail("demo")
 
     assert detail["name"] == "demo"
@@ -129,10 +139,12 @@ def test_skill_detail_matches_by_directory_name_not_frontmatter_name(tmp_path: P
     )
 
     settings = MagicMock()
-    settings.skills_bundled_dir = bundled
     settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
-    with patch("pincer.config.get_settings_relaxed", return_value=settings):
+    with (
+        patch("pincer.config.get_settings_relaxed", return_value=settings),
+        patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", bundled),
+    ):
         assert _skill_detail("on-disk-folder") is not None
         assert _skill_detail("different-frontmatter-name") is None
 
@@ -154,8 +166,8 @@ def test_list_skills_is_not_deprecated(client: TestClient) -> None:
 
 def test_list_skills_includes_bundled_starter_skills(client: TestClient) -> None:
     resp = client.get("/api/skills")
-    names = {e["name"] for e in resp.json()["skills"]}
-    assert "skill-authoring" in names
+    bundled = [e for e in resp.json()["skills"] if e["root"] == "bundled"]
+    assert len(bundled) == 5
 
 
 def test_list_skills_only_returns_file_source(client: TestClient) -> None:
@@ -182,10 +194,10 @@ def test_list_skills_excludes_integrations(client: TestClient) -> None:
 
 
 def test_get_skill_returns_200_with_body(client: TestClient) -> None:
+    """Looked up by directory name on disk — 'skill-authoring' regardless of frontmatter name."""
     resp = client.get("/api/skills/skill-authoring")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["name"] == "skill-authoring"
     assert data["source"] == "file"
     assert data["root"] == "bundled"
     assert "# Authoring a Pincer skill" in data["body"]

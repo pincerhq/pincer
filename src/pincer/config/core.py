@@ -30,10 +30,6 @@ class CoreSettings(BaseModel):
         default=Path.home() / ".pincer/skills",
         description="User-installed skills directory (SKILL.md subdirectories)",
     )
-    skills_bundled_dir: Path = Field(
-        default=Path(__file__).resolve().parent.parent / "skills",
-        description="Bundled skills directory (SKILL.md subdirectories), shipped inside the package",
-    )
     skills_max_loaded_per_root: int = Field(
         default=100,
         ge=1,

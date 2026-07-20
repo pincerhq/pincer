@@ -1,5 +1,5 @@
 ---
-name: scheduler-briefings
+name: Scheduler and proactive briefings
 description: How Pincer's cron scheduler, morning briefings, and event triggers work, and how to configure or customize them. Load this when the user asks to schedule a recurring task, change their briefing time or sections, or set up a reactive notification.
 ---
 

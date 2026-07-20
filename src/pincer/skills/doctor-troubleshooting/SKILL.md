@@ -1,5 +1,5 @@
 ---
-name: doctor-troubleshooting
+name: Doctor troubleshooting
 description: How to run and interpret Pincer's security doctor checks (pincer doctor) to diagnose configuration, permission, and security issues. Load this when the user reports something misconfigured, insecure, or asks you to check their setup's health.
 ---
 
@@ -16,6 +16,7 @@ pincer doctor --json    # machine-readable, for scripting
 ## Reading the report
 
 Each check has:
+
 - A status icon: ✅ pass, ⚠️ warning, ❌ critical, ➖ skipped (not applicable
   to this deployment).
 - A category (grouped in the table, e.g. filesystem permissions, secrets,

@@ -50,7 +50,7 @@ description: One dense sentence describing what this skill does and when to use 
 ---
 ```
 
-- `name` must match the directory name.
+- `name` is the identifier the agent uses — it's what appears in the system prompt's Available Skills block, and what `load_skill(name)` / `load_skill_reference(name, path)` / `run_skill_script(name, script, args)` take as their `name` argument. It does **not** need to match the skill's directory name; the directory is just where the files live on disk. (The dashboard's `GET /api/skills/{name}` route is the exception — it addresses skills by directory name specifically, so it keeps working even if a skill's frontmatter `name` changes.)
 - `description` is the *only* part of the skill shown to the model before it decides to load it — write it as a specific, dense sentence covering both what the skill does and when to reach for it. A vague description means the model will never load the skill.
 
 Everything after the closing `---` is free-form markdown: the instructions returned by `load_skill(name)`.
@@ -87,7 +87,7 @@ Prefer pure-instruction skills (no scripts) when the model can already accomplis
 
 ## Where Skills Live
 
-- **Bundled skills:** shipped inside the installed package at `src/pincer/skills/` (`skills_bundled_dir` config). Ships with `pip install pincer-agent` — no project checkout required.
+- **Bundled skills:** shipped inside the installed package at `src/pincer/skills/` (fixed path, not configurable). Ships with `pip install pincer-agent` — no project checkout required.
 - **User skills:** `~/.pincer/skills/` (`skills_dir` config).
 
 A user skill with the same `name` as a bundled skill overrides it.
@@ -97,7 +97,6 @@ A user skill with the same `name` as a bundled skill overrides it.
 | Setting | Default | Purpose |
 |---|---|---|
 | `skills_dir` | `~/.pincer/skills` | User skills root |
-| `skills_bundled_dir` | `<package install dir>/skills` | Bundled skills root |
 | `skills_max_loaded_per_root` | `100` | Hard cap on skills loaded per root — applied at discovery, before prompt construction |
 | `skills_max_prompt_tokens` | `None` (no limit) | Soft budget for the Available Skills prompt block; once exceeded, descriptions are truncated and then trailing entries are dropped with an "X more skills" note. Tune this down for small-context local models. |
 | `skill_sandbox_disabled` | `False` | Bypass sandboxing for `run_skill_script` (trusted/dev workflows only) |

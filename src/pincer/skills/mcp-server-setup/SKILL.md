@@ -1,5 +1,5 @@
 ---
-name: mcp-server-setup
+name: MCP server setup
 description: How to connect an external MCP server to Pincer (config file location, format, auth) or expose Pincer's own tools to external MCP clients. Load this when the user wants to add, configure, or troubleshoot an MCP server connection.
 ---
 

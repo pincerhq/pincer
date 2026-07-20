@@ -337,10 +337,10 @@ async def _run_agent(settings: Settings) -> None:
 
     # Skills: SKILL.md-based discovery, coexists unconditionally with MCP.
     from pincer.tools.builtin.skills_tools import make_skills_tools
-    from pincer.tools.skills.index import SkillIndex
+    from pincer.tools.skills.index import BUNDLED_SKILLS_DIR, SkillIndex
 
     skill_index = SkillIndex(
-        bundled_dir=settings.skills_bundled_dir,
+        bundled_dir=BUNDLED_SKILLS_DIR,
         user_dir=settings.skills_dir,
         max_per_root=settings.skills_max_loaded_per_root,
     )

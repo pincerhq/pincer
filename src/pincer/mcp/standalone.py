@@ -246,11 +246,11 @@ def _load_builtin_tools_into(registry: Any) -> None:
     try:
         from pincer.config import get_settings_relaxed
         from pincer.tools.builtin.skills_tools import make_skills_tools
-        from pincer.tools.skills.index import SkillIndex
+        from pincer.tools.skills.index import BUNDLED_SKILLS_DIR, SkillIndex
 
         settings = get_settings_relaxed()
         index = SkillIndex(
-            bundled_dir=settings.skills_bundled_dir,
+            bundled_dir=BUNDLED_SKILLS_DIR,
             user_dir=settings.skills_dir,
             max_per_root=settings.skills_max_loaded_per_root,
         )
