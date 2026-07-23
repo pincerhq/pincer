@@ -120,11 +120,15 @@ class SkillIndex:
         logger.info("Skill index: discovered %d skill(s)", len(self._skills))
 
     def check_for_changes(self) -> list[str]:
-        """Re-parse any skill whose SKILL.md hash changed. Returns names reloaded."""
+        """Re-parse any skill whose SKILL.md hash changed, and drop any whose SKILL.md
+        was deleted. Returns names reloaded or removed."""
         reloaded: list[str] = []
         for name, entry in list(self._skills.items()):
             skill_md = entry.skill.path / "SKILL.md"
             if not skill_md.is_file():
+                del self._skills[name]
+                reloaded.append(name)
+                logger.info("Removed skill '%s' (SKILL.md no longer present)", name)
                 continue
             current_hash = _hash_file(skill_md)
             if current_hash == entry.file_hash:

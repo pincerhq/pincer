@@ -127,6 +127,24 @@ def test_check_for_changes_noop_when_unchanged(tmp_path: Path) -> None:
     assert index.check_for_changes() == []
 
 
+def test_check_for_changes_removes_deleted_skill(tmp_path: Path) -> None:
+    """Regression for PR #167 review: a skill whose SKILL.md is deleted from disk
+    must stop being served (load_skill etc.) rather than lingering until a full
+    discover() rescan replaces the whole index."""
+    bundled = tmp_path / "bundled"
+    _make_skill(bundled, "demo")
+    index = SkillIndex(bundled_dir=bundled, user_dir=None, max_per_root=100)
+    index.discover()
+    assert index.get("demo") is not None
+
+    (bundled / "demo" / "SKILL.md").unlink()
+    reloaded = index.check_for_changes()
+
+    assert reloaded == ["demo"]
+    assert index.get("demo") is None
+    assert index.all_skills() == []
+
+
 def test_render_prompt_block_empty_when_no_skills(tmp_path: Path) -> None:
     index = SkillIndex(bundled_dir=tmp_path / "empty", user_dir=None, max_per_root=100)
     index.discover()

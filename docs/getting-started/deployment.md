@@ -281,7 +281,7 @@ Key files to back up:
 - `data/google_tokens.json` — OAuth tokens (re-auth needed if lost)
 - `data/` — WhatsApp session (neonize store); re-pair if lost
 - `.env` — your configuration
-- `skills/` — custom skills
+- `~/.pincer/skills/` — custom skills you've added
 
 ---
 

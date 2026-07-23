@@ -3,7 +3,14 @@ Skill sandboxing — execute untrusted skill functions in isolated subprocesses.
 
 Security layers:
   1. Resource limits (RLIMIT_AS, RLIMIT_CPU) via the resource module
-  2. Network domain whitelisting via socket.getaddrinfo monkey-patch
+  2. Network domain allowlisting via socket.getaddrinfo monkey-patch — best-effort
+     only. It blocks naive `requests`/`httpx`/stdlib-socket calls to non-allowed
+     hosts, but a script that deliberately wants to exfiltrate data can bypass it
+     by shelling out to `curl`/`wget` (never touches this process's monkey-patch)
+     or connecting to a hardcoded IP (skips DNS resolution, and thus this check,
+     entirely). Do not treat this as a hard boundary against a malicious script —
+     only resource limits (1) and the process boundary itself are enforced at the
+     OS level.
   3. Environment variable isolation (only declared vars passed through)
   4. Timeout enforcement via asyncio.wait_for + SIGKILL
   5. Filesystem isolation (HOME set to temp directory)

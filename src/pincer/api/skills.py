@@ -35,6 +35,9 @@ def _skill_entries() -> list[dict[str, Any]]:
             "status": "active",
             "source": "file",
             "root": entry.skill.source_root,
+            # Directory name on disk — GET /api/skills/{name} matches on this, not
+            # the frontmatter `name` above, so clients must link using this field.
+            "dir": entry.skill.path.name,
         }
         for entry in _build_index().all_skills()
     ]
@@ -55,6 +58,7 @@ def _skill_detail(dir_name: str) -> dict[str, Any] | None:
                 "status": "active",
                 "source": "file",
                 "root": entry.skill.source_root,
+                "dir": entry.skill.path.name,
                 "body": entry.skill.body,
                 "files": entry.list_files(),
             }

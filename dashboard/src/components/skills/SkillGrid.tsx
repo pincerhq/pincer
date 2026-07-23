@@ -35,16 +35,20 @@ export function SkillGrid({ skills, loading, viewMode = "grid" }: SkillGridProps
       return () => navigate(`/integrations/${skill.slug}`)
     }
     if (skill.source === "file") {
-      return () => navigate(`/skills/${encodeURIComponent(skill.name)}`)
+      // Link by directory name, not the frontmatter `name` — GET /api/skills/{name}
+      // matches on disk directory, and the two can differ (see SkillInfo.dir).
+      return () => navigate(`/skills/${encodeURIComponent(skill.dir)}`)
     }
     return undefined
   }
+
+  const keyOf = (skill: ExtensionItem) => (skill.source === "file" ? skill.dir : skill.name)
 
   return viewMode === "list" ? (
     <div className="rounded-xl border border-[var(--color-border)] divide-y divide-[var(--color-border)] overflow-hidden">
       {skills.map((skill) => (
         <SkillCard
-          key={skill.name}
+          key={keyOf(skill)}
           skill={skill}
           viewMode="list"
           onClick={handleClick(skill)}
@@ -55,7 +59,7 @@ export function SkillGrid({ skills, loading, viewMode = "grid" }: SkillGridProps
     <div className="grid grid-cols-4 gap-4">
       {skills.map((skill) => (
         <SkillCard
-          key={skill.name}
+          key={keyOf(skill)}
           skill={skill}
           viewMode="grid"
           onClick={handleClick(skill)}

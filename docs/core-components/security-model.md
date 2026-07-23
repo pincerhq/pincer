@@ -80,11 +80,11 @@ PINCER_SKIP_APPROVAL=gmail_send,calendar_create
 
 ### Layer 3: Skill Sandboxing
 
-Skills are `SKILL.md` directories, discovered from the filesystem only (`skills/` bundled, `~/.pincer/skills/` user — see the [Skills Guide](../guides/skills-guide.md)). The markdown instructions a skill provides carry no execution risk by themselves — `load_skill`/`load_skill_reference` are plain reads. The risk surface is scripts a skill ships, invoked via `run_skill_script`:
+Skills are `SKILL.md` directories, discovered from the filesystem only (`src/pincer/skills/` bundled, `~/.pincer/skills/` user — see the [Skills Guide](../guides/skills-guide.md)). The markdown instructions a skill provides carry no execution risk by themselves — `load_skill`/`load_skill_reference` are plain reads. The risk surface is scripts a skill ships, invoked via `run_skill_script`:
 
-- **Always requires approval** — unlike `load_skill`/`load_skill_reference`, `run_skill_script` is approval-gated at the tool registry level regardless of config.
-- **Resource limits** — CPU time (10s default), memory (256MB default) via subprocess rlimits.
-- **Network domain allowlisting** — enforced in-process for Python scripts via a `socket.getaddrinfo` restriction; non-Python scripts get rlimits and restricted env only, since the allowlist can't survive a real `exec()` into a foreign binary.
+- **Requires approval when an approval callback is configured** — `run_skill_script` is approval-gated at the tool registry level regardless of config, but the gate only has an effect if `agent._approval_callback` is actually wired up, which happens when a chat channel (Telegram/WhatsApp/Teams) is bridged. Running the console REPL (`pincer chat`) or the standalone MCP export server with no chat channel configured currently **auto-approves** every gated tool call, logging a warning instead of blocking. Don't rely on this gate alone in those modes.
+- **Resource limits** — CPU time (10s default), memory (256MB default) via subprocess rlimits. This is the one layer enforced at the OS level, and the one actually load-bearing against a resource-exhaustion attack.
+- **Network domain allowlisting — best-effort, not a hard boundary.** Enforced in-process for Python scripts via a `socket.getaddrinfo` monkey-patch, which only intercepts DNS lookups made through the Python stdlib socket layer in that same process. A script that wants to exfiltrate data can bypass it by shelling out to `curl`/`wget` (never touches the patched function) or connecting to a hardcoded IP (skips DNS resolution, and thus this check, entirely). It stops naive/accidental network calls, not a deliberately malicious script. Non-Python scripts don't even get the in-process patch — they get rlimits and restricted env only, since the allowlist can't survive a real `exec()` into a foreign binary.
 - **Restricted environment** — only explicitly allowed env vars are passed through; `HOME` is redirected to a throwaway temp directory.
 - **Escape hatch** — `skill_sandbox_disabled=true` runs scripts as a plain subprocess for trusted/dev workflows; use with care.
 

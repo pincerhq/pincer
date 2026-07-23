@@ -30,13 +30,6 @@ pincer
 ├── cost                    # Spending summary
 ├── doctor                  # Security health check
 ├── audit                   # View audit logs
-├── skills
-│   ├── list                # Installed skills
-│   ├── install <url>       # Install skill
-│   ├── create <name>       # Scaffold new skill
-│   ├── scan <path>         # Security scan
-│   ├── remove <name>       # Uninstall skill
-│   └── info <name>         # Skill details
 ├── mcp
 │   ├── list                # MCP servers + connection status
 │   ├── test <server>       # Test connection to a server
@@ -362,8 +355,9 @@ Total: 1,247 entries | Cost: $2.4510 | Failed: 3
 ### Skills
 
 There is no `pincer skills` CLI command group. Skills are discovered purely from
-the filesystem: drop a directory containing a `SKILL.md` file into `skills/`
-(bundled) or `~/.pincer/skills/` (user) and restart Pincer. See the
+the filesystem: drop a directory containing a `SKILL.md` file into
+`src/pincer/skills/` (bundled, shipped inside the package) or `~/.pincer/skills/`
+(user) and restart Pincer. See the
 [Skills Guide](../guides/skills-guide.md) for the format and the
 `load_skill` / `load_skill_reference` / `run_skill_script` tools the agent
 uses to read and act on them.

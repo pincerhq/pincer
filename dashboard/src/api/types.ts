@@ -142,6 +142,8 @@ export interface SkillInfo {
   source: "file"
   /** SKILL.md discovery root. */
   root: "bundled" | "user"
+  /** Directory name on disk — GET /api/skills/{name} matches on this, not `name`. */
+  dir: string
 }
 
 export interface BuiltinToolInfo {

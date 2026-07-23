@@ -105,7 +105,7 @@ A user skill with the same `name` as a bundled skill overrides it.
 
 ## Bundled Starter Skills
 
-Pincer ships five pure-instruction starter skills documenting its own capabilities: `skill-authoring` (this guide, in agent-readable form), `memory-recall`, `mcp-server-setup`, `scheduler-briefings`, and `doctor-troubleshooting`. Read any of them under `skills/` for a second example of the format.
+Pincer ships five pure-instruction starter skills documenting its own capabilities: `skill-authoring` (this guide, in agent-readable form), `memory-recall`, `mcp-server-setup`, `scheduler-briefings`, and `doctor-troubleshooting`. Read any of them under `src/pincer/skills/` for a second example of the format.
 
 ---
 

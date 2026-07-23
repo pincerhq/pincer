@@ -58,8 +58,9 @@ Complete command reference across all sprints (1–13). For the full list of too
 ## Skills
 
 There is no `pincer skills` CLI command group. Skills are discovered purely from
-the filesystem — drop a `SKILL.md`-containing directory into `skills/` (bundled)
-or `~/.pincer/skills/` (user) and restart. See the [Skills Guide](../guides/skills-guide.md).
+the filesystem — drop a `SKILL.md`-containing directory into `src/pincer/skills/`
+(bundled, shipped inside the package) or `~/.pincer/skills/` (user) and restart.
+See the [Skills Guide](../guides/skills-guide.md).
 
 ## Memory
 

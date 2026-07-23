@@ -7,7 +7,7 @@ This is the complete, authoritative catalog of every tool Pincer can call. It is
 | Category | Tools | Module | How to enable |
 |---|---:|---|---|
 | **Core built-ins** (incl. `generate_image`, `make_phone_call`, `load_skill`, `load_skill_reference`, `run_skill_script`) | 26 | `src/pincer/tools/builtin/` + `src/pincer/cli.py` | Always on (voice/image need their API key) |
-| **Bundled skills** | 5 (progressive disclosure, no fixed tool count) | `skills/` (SKILL.md) | Always on (bundled) |
+| **Bundled skills** | 5 (progressive disclosure, no fixed tool count) | `src/pincer/skills/` (SKILL.md) | Always on (bundled) |
 | **Google Workspace** | 113 | `src/pincer/integrations/google/` | `pincer setup-google` |
 | **Microsoft 365** | 69 | `src/ms365-mcp/ms365/` | `ms365-mcp-setup` |
 | **Slack (native)** | 71 | `src/pincer/integrations/slack/` | `PINCER_SLACK_BOT_TOKEN` |
@@ -223,7 +223,7 @@ Pincer exposes its **own** tools to MCP clients via an embedded OAuth 2.0 Author
 
 ## Custom skills (unlimited)
 
-Any directory containing a `SKILL.md` file under `skills/` (bundled) or `~/.pincer/skills/` (user) is discovered at startup — no install step, no CLI. Any script a skill ships runs via `run_skill_script` in a subprocess sandbox (resource limits + network domain allowlisting) and always requires approval. See the [Skills Guide](../guides/skills-guide.md).
+Any directory containing a `SKILL.md` file under `src/pincer/skills/` (bundled, shipped inside the package) or `~/.pincer/skills/` (user) is discovered at startup — no install step, no CLI. Any script a skill ships runs via `run_skill_script` in a subprocess sandbox (resource limits + best-effort network domain allowlisting — see [Security Model](security-model.md)) and is approval-gated whenever an approval callback is configured. See the [Skills Guide](../guides/skills-guide.md).
 
 ---
 

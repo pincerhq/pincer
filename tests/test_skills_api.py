@@ -67,6 +67,30 @@ def test_skill_entries_discovers_skill_md(tmp_path: Path) -> None:
     assert entries[0]["description"] == "demo skill"
     assert entries[0]["source"] == "file"
     assert entries[0]["root"] == "bundled"
+    assert entries[0]["dir"] == "demo"
+
+
+def test_skill_entries_dir_reflects_disk_name_even_when_frontmatter_name_differs(tmp_path: Path) -> None:
+    """Regression for PR #167 review: dashboard links must use `dir`, not `name`,
+    since GET /api/skills/{name} matches the directory, not the frontmatter name."""
+    bundled = tmp_path / "bundled"
+    skill_dir = bundled / "on-disk-folder"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: A Totally Different Display Name\ndescription: d\n---\nbody\n", encoding="utf-8"
+    )
+
+    settings = MagicMock()
+    settings.skills_dir = tmp_path / "user"
+    settings.skills_max_loaded_per_root = 100
+    with (
+        patch("pincer.config.get_settings_relaxed", return_value=settings),
+        patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", bundled),
+    ):
+        entries = _skill_entries()
+
+    assert entries[0]["name"] == "A Totally Different Display Name"
+    assert entries[0]["dir"] == "on-disk-folder"
 
 
 def test_skill_entries_bundled_and_user(tmp_path: Path) -> None:
@@ -125,6 +149,7 @@ def test_skill_detail_returns_body_and_files(tmp_path: Path) -> None:
     assert detail["name"] == "demo"
     assert detail["source"] == "file"
     assert detail["root"] == "bundled"
+    assert detail["dir"] == "demo"
     assert detail["body"] == "# Demo body"
     assert detail["files"] == ["notes.txt"]
 
@@ -200,6 +225,7 @@ def test_get_skill_returns_200_with_body(client: TestClient) -> None:
     data = resp.json()
     assert data["source"] == "file"
     assert data["root"] == "bundled"
+    assert data["dir"] == "skill-authoring"
     assert "# Authoring a Pincer skill" in data["body"]
     assert isinstance(data["files"], list)
 
