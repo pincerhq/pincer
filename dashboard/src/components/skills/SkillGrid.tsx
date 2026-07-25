@@ -1,16 +1,15 @@
 import { useNavigate } from "react-router-dom"
-import type { SkillInfo } from "@/api/types"
+import type { ExtensionItem } from "@/api/types"
 import { SkillCard } from "./SkillCard"
 import { Skeleton } from "@/components/ui/skeleton"
 
 interface SkillGridProps {
-  skills: SkillInfo[]
+  skills: ExtensionItem[]
   loading?: boolean
   viewMode?: "grid" | "list"
-  onDelete?: (name: string) => void
 }
 
-export function SkillGrid({ skills, loading, viewMode = "grid", onDelete }: SkillGridProps) {
+export function SkillGrid({ skills, loading, viewMode = "grid" }: SkillGridProps) {
   const navigate = useNavigate()
 
   if (loading) {
@@ -31,19 +30,27 @@ export function SkillGrid({ skills, loading, viewMode = "grid", onDelete }: Skil
 
   if (!skills.length) return null
 
-  const handleClick = (skill: SkillInfo) =>
-    skill.source === "integration" && skill.slug
-      ? () => navigate(`/skills/integrations/${skill.slug}`)
-      : undefined
+  const handleClick = (skill: ExtensionItem) => {
+    if (skill.source === "integration" && skill.slug) {
+      return () => navigate(`/integrations/${skill.slug}`)
+    }
+    if (skill.source === "file") {
+      // Link by directory name, not the frontmatter `name` — GET /api/skills/{name}
+      // matches on disk directory, and the two can differ (see SkillInfo.dir).
+      return () => navigate(`/skills/${encodeURIComponent(skill.dir)}`)
+    }
+    return undefined
+  }
+
+  const keyOf = (skill: ExtensionItem) => (skill.source === "file" ? skill.dir : skill.name)
 
   return viewMode === "list" ? (
     <div className="rounded-xl border border-[var(--color-border)] divide-y divide-[var(--color-border)] overflow-hidden">
       {skills.map((skill) => (
         <SkillCard
-          key={skill.name}
+          key={keyOf(skill)}
           skill={skill}
           viewMode="list"
-          onDelete={onDelete}
           onClick={handleClick(skill)}
         />
       ))}
@@ -52,10 +59,9 @@ export function SkillGrid({ skills, loading, viewMode = "grid", onDelete }: Skil
     <div className="grid grid-cols-4 gap-4">
       {skills.map((skill) => (
         <SkillCard
-          key={skill.name}
+          key={keyOf(skill)}
           skill={skill}
           viewMode="grid"
-          onDelete={onDelete}
           onClick={handleClick(skill)}
         />
       ))}

@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pincer.config import get_settings
+from pincer.tools.path_sandbox import confine_path
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 MAX_READ_SIZE = 100_000  # 100KB
 
@@ -15,20 +19,10 @@ def _sandbox_path(path_str: str) -> Path:
     workspace = settings.data_dir / "workspace"
     workspace.mkdir(exist_ok=True)
 
-    if path_str.startswith("~"):
-        path_str = path_str.replace("~", str(workspace), 1)
-
-    raw = Path(path_str)
-
-    # Resolve relative paths against workspace (not CWD)
-    target = (workspace / path_str).resolve() if not raw.is_absolute() else raw.resolve()
-
-    # Security: must be within workspace
-    if not str(target).startswith(str(workspace.resolve())):
-        raise ValueError(
-            f"Access denied: path '{path_str}' is outside workspace ({workspace}). All file operations are sandboxed."
-        )
-    return target
+    try:
+        return confine_path(workspace, path_str, label="workspace")
+    except ValueError as e:
+        raise ValueError(f"{e} All file operations are sandboxed.") from e
 
 
 async def file_read(path: str) -> str:

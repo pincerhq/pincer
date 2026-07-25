@@ -24,6 +24,8 @@ SCOPE_TOOL_MAP: dict[str, list[str]] = {
         "file_read",
         "list_tools",
         "memory_read",
+        "load_skill",
+        "load_skill_reference",
     ],
     "tools:write": [
         "file_write",
@@ -46,6 +48,9 @@ SCOPE_TOOL_MAP: dict[str, list[str]] = {
         "execute_command",
         "browser_action",
         "run_script",
+        "load_skill",
+        "load_skill_reference",
+        "run_skill_script",
     ],
     "tools:all": [],  # Matches everything — checked separately
     "admin:ask_user": ["ask_user", "pincer_ask_user"],

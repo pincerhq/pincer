@@ -30,13 +30,6 @@ pincer
 ├── cost                    # Spending summary
 ├── doctor                  # Security health check
 ├── audit                   # View audit logs
-├── skills
-│   ├── list                # Installed skills
-│   ├── install <url>       # Install skill
-│   ├── create <name>       # Scaffold new skill
-│   ├── scan <path>         # Security scan
-│   ├── remove <name>       # Uninstall skill
-│   └── info <name>         # Skill details
 ├── mcp
 │   ├── list                # MCP servers + connection status
 │   ├── test <server>       # Test connection to a server
@@ -359,133 +352,15 @@ Total: 1,247 entries | Cost: $2.4510 | Failed: 3
 
 ---
 
-### `pincer skills list`
+### Skills
 
-Show all installed skills.
-
-```bash
-pincer skills list
-```
-
-**Output:**
-```
-🔧 Installed Skills (10)
-
-  Name             Version  Safety   Status
-  ─────────────────────────────────────────
-  weather          0.1.0    92/100   ✓ active
-  news             0.1.0    88/100   ✓ active
-  translate        0.1.0    95/100   ✓ active
-  summarize_url    0.1.0    85/100   ✓ active
-  youtube_summary  0.1.0    78/100   ✓ active
-  expense_tracker  0.1.0    90/100   ✓ active
-  habit_tracker    0.1.0    91/100   ✓ active
-  pomodoro         0.1.0    93/100   ✓ active
-  stock_price      0.1.0    82/100   ✓ active
-  git_status       0.1.0    70/100   ✓ active
-```
-
----
-
-### `pincer skills install <url>`
-
-Install a skill from URL or local path. Scans for security first.
-
-```bash
-pincer skills install <url_or_path>
-```
-
-**Example:**
-```bash
-$ pincer skills install https://github.com/user/pincer-skill-notion
-🔍 Scanning skill...
-  Safety score: 85/100
-  Permissions: network:api.notion.com
-  Env required: NOTION_API_KEY
-
-? Install this skill? Yes
-✓ Installed: notion v0.1.0
-```
-
----
-
-### `pincer skills create <name>`
-
-Scaffold a new skill from template.
-
-```bash
-pincer skills create <name>
-```
-
-**Creates:**
-```
-~/.pincer/skills/<name>/
-├── skill.py
-├── manifest.json
-└── README.md
-```
-
----
-
-### `pincer skills scan <path>`
-
-Security scan a skill directory (static analysis).
-
-```bash
-pincer skills scan <path>
-```
-
-**Output:**
-```
-🔍 Scanning: ./my-skill/
-
-  AST analysis...
-  ✓ No os.system/subprocess calls
-  ✓ No eval/exec usage
-  🟡 Network call to undeclared domain: api.example.com
-  ✓ No filesystem access outside skill dir
-
-  Safety Score: 78/100
-  Verdict: ⚠️ Review network permissions before installing
-```
-
----
-
-### `pincer skills remove <name>`
-
-Uninstall a skill.
-
-```bash
-$ pincer skills remove notion
-? Remove skill 'notion'? Yes
-✓ Removed: notion
-```
-
----
-
-### `pincer skills info <name>`
-
-Show detailed skill information.
-
-```bash
-$ pincer skills info weather
-🔧 Skill: weather v0.1.0
-
-  Author:       pincerhq
-  Description:  Get weather forecasts
-  Safety:       92/100
-  Status:       active
-
-  Permissions:
-    network: api.openweathermap.org
-
-  Environment:
-    OPENWEATHER_API_KEY (required)
-
-  Tools:
-    get_weather(city: str) → Weather forecast
-    get_forecast(city: str, days: int) → Multi-day forecast
-```
+There is no `pincer skills` CLI command group. Skills are discovered purely from
+the filesystem: drop a directory containing a `SKILL.md` file into
+`src/pincer/skills/` (bundled, shipped inside the package) or `~/.pincer/skills/`
+(user) and restart Pincer. See the
+[Skills Guide](../guides/skills-guide.md) for the format and the
+`load_skill` / `load_skill_reference` / `run_skill_script` tools the agent
+uses to read and act on them.
 
 ---
 

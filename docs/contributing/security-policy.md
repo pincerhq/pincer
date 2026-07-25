@@ -50,7 +50,7 @@ Instead, please report responsibly through one of these channels:
 ### In Scope
 
 - The Pincer agent codebase (`src/pincer/`)
-- Bundled skills (`skills/`)
+- Bundled skills (`src/pincer/skills/`)
 - Docker images published by the project
 - The web dashboard
 - The skill security scanner

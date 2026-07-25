@@ -7,6 +7,7 @@ const pageTitles: Record<string, string> = {
   [ROUTES.CONVERSATIONS]: "Conversations",
   [ROUTES.AUDIT]: "Audit Log",
   [ROUTES.SKILLS]: "Skills",
+  [ROUTES.INTEGRATIONS]: "Integrations",
   [ROUTES.DOCTOR]: "Security",
   [ROUTES.SETTINGS]: "Settings",
 }

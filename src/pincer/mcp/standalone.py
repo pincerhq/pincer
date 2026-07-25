@@ -38,6 +38,8 @@ logger = logging.getLogger("pincer.mcp.standalone")
 _STANDALONE_SAFE_TOOL_NAMES = (
     "file_read",
     "memory_search",
+    "load_skill",
+    "load_skill_reference",
 )
 
 
@@ -241,3 +243,28 @@ def _load_builtin_tools_into(registry: Any) -> None:
     ordinary MCP-client path (a ``websearch`` entry in ``[[mcp.servers]]``)
     like any other external tool, not through this shortcut.
     """
+    try:
+        from pincer.config import get_settings_relaxed
+        from pincer.tools.builtin.skills_tools import make_skills_tools
+        from pincer.tools.skills.index import BUNDLED_SKILLS_DIR, SkillIndex
+
+        settings = get_settings_relaxed()
+        index = SkillIndex(
+            bundled_dir=BUNDLED_SKILLS_DIR,
+            user_dir=settings.skills_dir,
+            max_per_root=settings.skills_max_loaded_per_root,
+        )
+        index.discover()
+        skill_tools = make_skills_tools(index, sandbox_disabled=settings.skill_sandbox_disabled)
+        registry.register(
+            name="load_skill",
+            description="Load a skill's full instructions by name.",
+            handler=skill_tools["load_skill"],
+        )
+        registry.register(
+            name="load_skill_reference",
+            description="Read a file referenced by a skill, by relative path.",
+            handler=skill_tools["load_skill_reference"],
+        )
+    except Exception:
+        logger.debug("Could not load skill tools for standalone mode", exc_info=True)

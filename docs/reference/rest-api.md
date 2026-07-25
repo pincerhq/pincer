@@ -224,30 +224,46 @@ List extracted entities. Types: `person`, `place`, `project`, `organization`.
 
 ### `GET /api/skills`
 
-List installed skills.
+List discovered `SKILL.md` skills — bundled (shipped inside the package at `src/pincer/skills/`) and user (`~/.pincer/skills/`), listed uniformly. Read-only — there is no install/scan/delete API; skills are added by placing a directory under `~/.pincer/skills/` and restarting. See the [Skills Guide](../guides/skills-guide.md).
 
 ```json
 {
   "skills": [
     {
-      "name": "weather",
-      "version": "1.0.0",
-      "author": "pincerhq",
-      "tools": ["get_weather", "get_forecast"],
-      "signed": true,
-      "status": "active"
+      "name": "skill-authoring",
+      "description": "How to write a new Pincer skill as a SKILL.md directory...",
+      "status": "active",
+      "source": "file",
+      "root": "bundled"
     }
   ]
 }
 ```
 
-### `POST /api/skills/scan`
+### `GET /api/integrations`
 
-Scan a skill for security issues. Body: `{"path": "/path/to/skill"}`.
+List the agent's built-in tools, configured Google Workspace / Slack integrations, and MCP servers — a separate list from `/api/skills`, which is `SKILL.md` skills only. (`load_skill`/`load_skill_reference`/`run_skill_script` are wired per-agent at runtime rather than in the shared default tool set this endpoint introspects, so they aren't listed here — see the [Skills Guide](../guides/skills-guide.md).)
 
-### `DELETE /api/skills/:name`
-
-Remove a skill.
+```json
+{
+  "integrations": [
+    {
+      "name": "file_read",
+      "description": "Read a file's content from the workspace.",
+      "status": "active",
+      "source": "builtin",
+      "approval_required": false
+    },
+    {
+      "name": "Google Workspace",
+      "description": "Gmail · Calendar · Drive · Docs · Sheets · Slides · Tasks · Contacts · Meet",
+      "status": "active",
+      "source": "integration",
+      "slug": "google"
+    }
+  ]
+}
+```
 
 ---
 

@@ -152,6 +152,8 @@ class MCPServerExportConfig:
             "email_check",
             "calendar_today",
             "memory_search",
+            "load_skill",
+            "load_skill_reference",
         ]
     )
     # Approval policy for standalone mode
@@ -342,6 +344,8 @@ def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | Non
                 "email_check",
                 "calendar_today",
                 "memory_search",
+                "load_skill",
+                "load_skill_reference",
             ],
         ),
         approval_policy=approval_policy,

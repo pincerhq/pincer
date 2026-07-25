@@ -208,53 +208,39 @@ PINCER_LOG_LEVEL=DEBUG pincer run
 ### Skill Structure
 
 ```
-skills/my_skill/
-├── skill.yaml      # Manifest (name, version, permissions)
-├── main.py         # Tool definitions
-└── requirements.txt  # Optional pip deps
+skills/my-skill/
+├── SKILL.md        # Required: frontmatter (name, description) + instructions
+└── scripts/          # Optional: executable helpers, run via run_skill_script
 ```
 
 ### Create a New Skill
 
-1. Create `skills/my_skill/skill.yaml`:
+Create `skills/my-skill/SKILL.md`:
 
-```yaml
-name: my_skill
-version: 0.1.0
-description: Does something useful
-author: your-name
-permissions: [network]
+```markdown
+---
+name: my-skill
+description: Does something useful. Load this when the user asks for X.
+---
+
+# My Skill
+
+Instructions for the agent go here.
 ```
 
-2. Create `skills/my_skill/main.py`:
-
-```python
-from pincer.tools import tool
-
-@tool(name="my_tool", description="Description for the LLM")
-async def my_tool(arg: str) -> str:
-    return f"Result: {arg}"
-```
-
-3. Restart Pincer. The agent will load the skill automatically.
+Restart Pincer. The skill's name and description appear in the system prompt automatically; the agent loads the rest via `load_skill("my-skill")` when relevant. See the [Skills Guide](../guides/skills-guide.md) for the full format, progressive disclosure levels, and how to add a script.
 
 ### Test a Skill
 
 ```bash
-# Security scan before install
-pincer skills scan ./skills/my_skill
-
-# List loaded skills
-pincer skills list
-
-# Run agent and ask it to use your tool
+# Run agent and ask it something matching the skill's description
 pincer run
 # Or: pincer chat (CLI chat for quick testing)
 ```
 
 ### Skill Tests
 
-See `tests/test_skill_loader.py` and `tests/test_skill_scanner.py` for patterns. Use `sample_skill_dir` and `malicious_skill_dir` fixtures from `conftest.py`.
+See `tests/test_skill_parser.py`, `tests/test_skill_index.py`, and `tests/test_skills_tools.py` for patterns.
 
 ---
 

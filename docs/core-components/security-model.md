@@ -18,11 +18,11 @@ AI agents with tool access can read your emails, execute code, browse the web, a
 |--------|-----------|
 | Unauthorized access | User allowlist — only approved IDs can interact |
 | Prompt injection via tools | Tool outputs are sanitized, system prompt is hardened |
-| Malicious skills | Sandbox isolation, security scanner, optional skill signing |
+| Malicious skill scripts | Subprocess sandbox (rlimits, network allowlist), always-approval-gated |
 | Runaway costs | Hard budget limits, per-session and per-tool caps, auto-downgrade |
 | Data exfiltration | No telemetry, all data stays on your machine, audit logging |
 | Credential exposure | `SecretStr` for API keys, masked in logs, `.env` not committed |
-| Lateral movement | Skills can't access other skills' data, minimal permissions |
+| Lateral movement | `load_skill_reference`/`run_skill_script` are confined to a single skill's own directory |
 | Replay attacks | Session tokens are time-limited, nonces for critical operations |
 
 ### What We Don't Protect Against
@@ -80,52 +80,15 @@ PINCER_SKIP_APPROVAL=gmail_send,calendar_create
 
 ### Layer 3: Skill Sandboxing
 
-Skills run in isolated subprocess environments with:
+Skills are `SKILL.md` directories, discovered from the filesystem only (`src/pincer/skills/` bundled, `~/.pincer/skills/` user — see the [Skills Guide](../guides/skills-guide.md)). The markdown instructions a skill provides carry no execution risk by themselves — `load_skill`/`load_skill_reference` are plain reads. The risk surface is scripts a skill ships, invoked via `run_skill_script`:
 
-- **Resource limits** — CPU time (30s default), memory (256MB default), no disk writes outside `data/`
-- **Permission system** — skills must declare what they need (`network`, `file_read`, etc.)
-- **Import restrictions** — dangerous modules blocked unless explicitly permitted
-- **No cross-skill access** — skills can't read other skills' data or state
+- **Requires approval when an approval callback is configured** — `run_skill_script` is approval-gated at the tool registry level regardless of config, but the gate only has an effect if `agent._approval_callback` is actually wired up, which happens when a chat channel (Telegram/WhatsApp/Teams) is bridged. Running the console REPL (`pincer chat`) or the standalone MCP export server with no chat channel configured currently **auto-approves** every gated tool call, logging a warning instead of blocking. Don't rely on this gate alone in those modes.
+- **Resource limits** — CPU time (10s default), memory (256MB default) via subprocess rlimits. This is the one layer enforced at the OS level, and the one actually load-bearing against a resource-exhaustion attack.
+- **Network domain allowlisting — best-effort, not a hard boundary.** Enforced in-process for Python scripts via a `socket.getaddrinfo` monkey-patch, which only intercepts DNS lookups made through the Python stdlib socket layer in that same process. A script that wants to exfiltrate data can bypass it by shelling out to `curl`/`wget` (never touches the patched function) or connecting to a hardcoded IP (skips DNS resolution, and thus this check, entirely). It stops naive/accidental network calls, not a deliberately malicious script. Non-Python scripts don't even get the in-process patch — they get rlimits and restricted env only, since the allowlist can't survive a real `exec()` into a foreign binary.
+- **Restricted environment** — only explicitly allowed env vars are passed through; `HOME` is redirected to a throwaway temp directory.
+- **Escape hatch** — `skill_sandbox_disabled=true` runs scripts as a plain subprocess for trusted/dev workflows; use with care.
 
-### Layer 4: Security Scanner
-
-Before loading any skill, Pincer scans the code for:
-
-- Calls to `os.system()`, `subprocess.run()`, `eval()`, `exec()`
-- Import of `socket`, `ctypes`, `importlib` without declared permissions
-- Obfuscated or encoded code (base64-encoded strings, char manipulation)
-- Network access patterns without `network` permission
-- File access outside the sandbox boundary
-- Known malicious code signatures
-
-Run it manually:
-
-```bash
-pincer skills scan ./suspicious-skill
-```
-
-Output:
-
-```
-🔍 Scanning: suspicious-skill
-  ⚠️  WARNING: Uses subprocess.run() without shell permission
-  🔴 CRITICAL: Encoded payload detected in line 47
-  ⚠️  WARNING: Accesses /etc/passwd (outside sandbox)
-  
-  Result: 1 critical, 2 warnings — NOT SAFE TO INSTALL
-```
-
-### Layer 5: Skill Signing
-
-For maximum assurance, enable skill signing:
-
-```env
-PINCER_REQUIRE_SIGNED_SKILLS=true
-```
-
-When enabled, only skills with a valid cryptographic signature from a trusted key are loaded. This prevents tampering and supply-chain attacks.
-
-### Layer 6: Audit Log
+### Layer 4: Audit Log
 
 Every action is logged to `data/audit.log` in structured JSON format:
 
@@ -164,7 +127,7 @@ pincer audit search --after 2026-02-25 --before 2026-02-26
 pincer audit export --format csv > audit.csv
 ```
 
-### Layer 7: Rate Limiting
+### Layer 5: Rate Limiting
 
 Protects against abuse and runaway loops:
 
@@ -179,7 +142,7 @@ PINCER_RATE_LIMIT_GLOBAL=100
 PINCER_MAX_TOOL_CALLS=10
 ```
 
-### Layer 8: Cost Controls
+### Layer 6: Cost Controls
 
 Prevents surprise bills:
 
@@ -220,9 +183,9 @@ Channels:
   🟡 Discord bot has admin permissions — consider restricting
 
 Skills:
-  🟢 3 skills installed, all pass security scan
-  🟡 Skill signing not enforced — consider enabling
-  🟢 No unsigned skills found
+  🟢 5 skills discovered under skills/ and ~/.pincer/skills/
+  🟢 Skills directory permissions are 755
+  🟢 No skill scripts run without approval
 
 System:
   🟢 SQLite database encrypted at rest
@@ -239,7 +202,7 @@ Summary: 22 passed, 3 warnings, 0 critical
 ## Best Practices
 
 1. **Keep your allowlist tight** — only add your own user IDs
-2. **Enable skill signing** if you install third-party skills
+2. **Review a skill's SKILL.md and scripts** before dropping it into `~/.pincer/skills/` — treat third-party skills like any other code you'd run
 3. **Set a reasonable daily budget** — $5 is plenty for personal use
 4. **Run `pincer doctor` weekly** — catch configuration drift early
 5. **Review the audit log** — especially after installing new skills

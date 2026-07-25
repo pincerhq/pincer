@@ -428,66 +428,6 @@ transport = "stdio"
     assert cfg.enabled is False
 
 
-def test_mcp_disabled_does_not_block_skills(tmp_path: Path) -> None:
-    """The _mcp_active gate in cli.py must be False when enabled=false."""
-    toml_content = """
-[mcp]
-enabled = false
-
-[[mcp.servers]]
-name = "myserver"
-transport = "stdio"
-command = "python"
-"""
-    (tmp_path / "pincer.toml").write_text(toml_content)
-    cfg = load_mcp_config(tmp_path)
-    # Reproduce the exact condition used in cli._run_agent
-    mcp_active = cfg is not None and cfg.enabled is True and bool(cfg.servers)
-    assert not mcp_active, "Skills must not be blocked when [mcp] enabled = false"
-
-
-def test_mcp_enabled_no_servers_does_not_block_skills(tmp_path: Path) -> None:
-    """enabled=true but no servers: _mcp_active is False, skills load."""
-    toml_content = """
-[mcp]
-enabled = true
-"""
-    (tmp_path / "pincer.toml").write_text(toml_content)
-    cfg = load_mcp_config(tmp_path)
-    mcp_active = cfg is not None and cfg.enabled is True and bool(cfg.servers)
-    assert not mcp_active
-
-
-def test_mcp_active_when_enabled_with_servers(tmp_path: Path) -> None:
-    """enabled=true with servers: _mcp_active is True, skills are skipped."""
-    toml_content = """
-[mcp]
-enabled = true
-
-[[mcp.servers]]
-name = "myserver"
-transport = "stdio"
-command = "python"
-"""
-    (tmp_path / "pincer.toml").write_text(toml_content)
-    cfg = load_mcp_config(tmp_path)
-    mcp_active = cfg is not None and cfg.enabled is True and bool(cfg.servers)
-    assert mcp_active
-
-
-def test_mcp_disabled_via_env_does_not_block_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """PINCER_MCP_ENABLED=false must also result in _mcp_active=False."""
-    monkeypatch.setenv("PINCER_MCP_ENABLED", "false")
-    # Even if servers are defined via env vars, the global toggle wins
-    monkeypatch.setenv("PINCER_MCP_SERVER_1_NAME", "srv")
-    monkeypatch.setenv("PINCER_MCP_SERVER_1_TRANSPORT", "stdio")
-    monkeypatch.setenv("PINCER_MCP_SERVER_1_COMMAND", "python")
-    cfg = load_mcp_config(tmp_path)
-    assert cfg.enabled is False
-    mcp_active = cfg is not None and cfg.enabled is True and bool(cfg.servers)
-    assert not mcp_active
-
-
 def test_env_var_in_toml_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MY_TOKEN", "secret123")
     toml_content = """

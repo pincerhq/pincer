@@ -186,12 +186,12 @@ Pincer ships **303 first-party tools** and plugs into **any MCP server** to reac
 | Category | Count | Enable with |
 |---|---:|---|
 | Core built-ins (`shell_exec`, `python_exec`, file ops, browser, email, calendar, image, voice) | 23 | Always on |
-| Bundled skills (weather, news, translate, stocks, expenses, habits, pomodoro, git, contacts…) | 27 | Always on |
+| Bundled skills (SKILL.md, progressive disclosure: `load_skill`/`load_skill_reference`/`run_skill_script`) | 5 | Always on |
 | **Google Workspace** — Gmail · Calendar · Drive · Docs · Sheets · Slides · Meet · Tasks · Contacts | **113** | `pincer setup-google` |
 | **Microsoft 365** — Outlook · Calendar · OneDrive · OneNote · To Do · Contacts · Directory (multi-user) | **62** | `ms365-mcp-setup` |
 | **Slack (native)** — messages · channels · users · files · reactions · pins · reminders · search | **71** | `PINCER_SLACK_BOT_TOKEN` |
 | **MCP tools** (GitHub, Postgres, Notion, Linear, Stripe, filesystem, …) | unlimited | `pincer.toml` + `[mcp]` |
-| Custom skills (AST-scanned + sandboxed) | unlimited | `pincer skills install` |
+| Custom skills (drop a `SKILL.md` dir in `~/.pincer/skills/`, sandboxed scripts) | unlimited | filesystem, no install step |
 
 **Approval model:** destructive tools (`shell_exec`, `python_exec`, `file_write`, `email_send`, `make_phone_call`, and every writing action on external APIs) ask in chat before executing. You reply ✅ or ❌.
 
@@ -294,41 +294,41 @@ Pincer also acts as an **OAuth 2.0 Authorization Server** for MCP clients. Any M
 
 ## 🧩 Skills
 
-Skills extend the agent. Each skill = a Python file + YAML manifest, loaded dynamically on startup.
+Skills extend the agent with Anthropic's open [Agent Skills](https://www.anthropic.com/) format: a directory with a `SKILL.md` file, discovered purely from the filesystem — no install step, no CLI. Skills and MCP servers coexist.
 
-```bash
-pincer skills list                     # what's installed
-pincer skills install github:user/repo # install (scanned first)
-pincer skills scan ./untrusted-skill   # security scan before install
-```
+Drop one in `~/.pincer/skills/<name>/SKILL.md` and restart; the agent reads its name + description from the system prompt, then calls `load_skill(name)` to read the full instructions, `load_skill_reference(name, path)` for extra files, and `run_skill_script(name, script, args)` — sandboxed, approval-gated — if it ships a script.
 
-11 bundled skills ship with Pincer (27 tool functions total): `weather`, `news`, `translate`, `summarize_url`, `youtube_summary`, `expense_tracker`, `habit_tracker`, `pomodoro`, `stock_price`, `git_status`, `phone_contacts`.
+5 bundled skills ship with Pincer, documenting its own capabilities: `skill-authoring`, `memory-recall`, `mcp-server-setup`, `scheduler-briefings`, `doctor-troubleshooting`.
 
 <details>
 <summary><strong>Writing your own skill</strong></summary>
 
-```python
-# skills/my_skill/main.py
-from pincer.tools import tool
-
-@tool(name="get_weather", description="Get current weather for a city")
-async def get_weather(city: str) -> str:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"https://wttr.in/{city}?format=j1")
-        data = resp.json()
-        return f"{city}: {data['current_condition'][0]['temp_C']}°C"
-```
-
-```yaml
-# skills/my_skill/skill.yaml
+```markdown
+<!-- skills/weather/SKILL.md -->
+---
 name: weather
-version: 1.0.0
-permissions: [network]
+description: Get current weather for a city. Load when asked about weather or forecasts.
+---
+
+# Weather
+
+Call `run_skill_script("weather", "scripts/get_weather.py", [city])` to fetch
+current conditions, then summarize the result for the user.
 ```
 
-The manifest declares permissions. The sandbox enforces them. No declared permissions = no network, no filesystem, no nothing.
+```python
+# skills/weather/scripts/get_weather.py
+import sys
+import urllib.request
 
-**[Full skills guide →](docs/Skills guide.md)**
+city = sys.argv[1]
+with urllib.request.urlopen(f"https://wttr.in/{city}?format=j1") as resp:
+    print(resp.read().decode())
+```
+
+`run_skill_script` runs in a subprocess sandbox (memory/CPU limits, network domain allowlist) and always asks for approval before executing.
+
+**[Full skills guide →](docs/guides/skills-guide.md)**
 
 </details>
 
@@ -429,7 +429,7 @@ $ pincer doctor
 ## What we intentionally didn't build
 
 - **No hosted cloud** — your data stays on your hardware. We're not a SaaS.
-- **No auto-installed skills** — every skill requires explicit `pincer skills install` with a security scan.
+- **No auto-installed skills** — skills are only loaded from directories you place under `~/.pincer/skills/` yourself; scripts they ship always require approval before executing.
 - **No team features** — Pincer is a single-user personal agent. Multi-user is planned, not promised.
 - **No telemetry** — zero analytics, zero crash reports, zero phone-home. Verify: `grep -r "telemetry\|analytics\|tracking" src/`.
 - **No framework dependency** — no LangChain, no CrewAI, no abstractions. Pure `asyncio` + provider SDKs.
@@ -531,7 +531,7 @@ pincer run --channel telegram      # single channel
 pincer chat                        # CLI chat for testing
 pincer doctor                      # security + config audit (40+ checks)
 pincer cost                        # spending summary
-pincer skills list|install|scan    # manage skills
+                                    # skills: no CLI — drop SKILL.md dirs in skills/
 pincer mcp list                    # MCP servers + status
 pincer mcp test <server>           # test MCP connection
 pincer mcp tools                   # list registered MCP tools

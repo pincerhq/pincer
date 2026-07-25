@@ -49,8 +49,6 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 SERVICES = ("email", "calendar", "onedrive", "todo", "contacts", "onenote", "directory")
 
-logger.info(os.environ)
-
 
 def _registrars() -> dict[str, Callable[..., int]]:
     """Map each service to the register function that emits its tools."""

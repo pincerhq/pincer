@@ -28,7 +28,16 @@ class CoreSettings(BaseModel):
     )
     skills_dir: Path = Field(
         default=Path.home() / ".pincer/skills",
-        description="Skills directory (deprecated)",
+        description="User-installed skills directory (SKILL.md subdirectories)",
+    )
+    skills_max_loaded_per_root: int = Field(
+        default=100,
+        ge=1,
+        description="Max skills loaded per root directory (bundled/user)",
+    )
+    skills_max_prompt_tokens: int | None = Field(
+        default=None,
+        description="Soft budget for the Available Skills prompt block; None disables truncation",
     )
 
     # ── Logging ───────────────────────────────────────────

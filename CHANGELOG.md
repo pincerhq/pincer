@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### skills: migrated to the open Agent Skills standard (SKILL.md)
+
+- Skills are now plain directories containing a `SKILL.md` file (YAML frontmatter + markdown), discovered from `src/pincer/skills/` (bundled, shipped inside the installed package) and `~/.pincer/skills/` (user), listed uniformly — Anthropic's open Agent Skills format, portable to other agents. New modules: `pincer.tools.skills.parser` (frontmatter/body parsing) and `pincer.tools.skills.index` (`SkillIndex`: discovery, hot-reload, per-root caps via `skills_max_loaded_per_root`, prompt-block rendering via `skills_max_prompt_tokens`).
+- **Progressive disclosure**: skill name + description are injected into the system prompt's "Available Skills" block; the agent calls the new `load_skill(name)` tool to read the full body, and `load_skill_reference(name, path)` to read one specific file from a skill's directory on demand.
+- **New `run_skill_script(name, script, args)` tool** runs a script bundled with a skill in a sandboxed subprocess (resource limits + network domain allowlisting for Python scripts) and always requires approval. `pincer.tools.sandbox` gained an `execute_script()` entry point for this (arbitrary script + argv, vs. the existing `execute()`'s "import module, call named function").
+- **Skills and MCP servers now coexist** — the old mutual-exclusion gate (MCP configured ⇒ skills skipped) is removed.
+- Ships 5 bundled starter skills documenting Pincer's own capabilities: `skill-authoring`, `memory-recall`, `mcp-server-setup`, `scheduler-briefings`, `doctor-troubleshooting`.
+- **Dashboard**: the old combined "Extensions" page is split into a **Skills** page (`SKILL.md` skills only, bundled + user) and an **Integrations** page (Google Workspace/Slack, MCP servers, and now a "Tools" tab listing the agent's core built-in tools with their approval requirement). `GET /api/skills` is a first-class endpoint (no longer a deprecated proxy) returning only `SKILL.md` skills; `GET /api/integrations` gained the built-in tool list. New `GET /api/skills/{name}` (matched by the skill's actual directory name on disk) returns a single skill's full `SKILL.md` body and file manifest, backing a new Skill detail page in the dashboard.
+- Bundled skills root is a fixed path (`src/pincer/skills/`, resolved relative to the installed package) rather than a config setting — there was never a legitimate reason to relocate it.
+
 #### websearch-mcp: web search extracted into a standalone FastMCP server
 
 - New `src/pincer-mcps/websearch_server.py` (`search` tool) replaces the `web_search` builtin — same Tavily-primary/DuckDuckGo-fallback behavior, plus retry/backoff on transient errors from both providers (the old builtin had none). Connect it via a `[[mcp.servers]]` entry in `pincer.toml` (`name = "websearch"`); consumed tools are prefixed, so it appears as `websearch__search`.
@@ -38,6 +48,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provider classes renamed/generalised: `AnthropicProvider` → `AnthropicCompatibleProvider` (`llm/anthropic_common.py`), `_openai_common.py` → `llm/openai_common.py`. Both select well-known vs compatible config from the provider name.
 
 ### Removed
+
+#### BREAKING: legacy `manifest.json` + `skill.py` skills format
+
+- Deleted `pincer.tools.skills.loader` (`SkillLoader`, `SkillManifest`), `pincer.tools.skills.scanner` (`SkillScanner`), all 11 bundled sample skills, and the `pincer skills` CLI group (`list`/`install`/`create`/`scan`/`remove`/`info`). There is no automatic converter — see the "Migrating from the legacy format" section of the [Skills Guide](docs/guides/skills-guide.md) for a manual conversion recipe. Skill tool names change from `{skill}__{tool}` (many, one per manifest entry) to the fixed set `load_skill`/`load_skill_reference`/`run_skill_script`.
+- The dashboard's skill Install/Scan/Delete UI is removed (those routes never had a working backend — `POST /api/skills/{scan,install}` and `DELETE /api/skills/:name` didn't exist server-side). The Skills page is now read-only.
+- `skills_dir` config is un-deprecated (it's the user skills root again); new fields `skills_max_loaded_per_root`, `skills_max_prompt_tokens`.
 
 - **`web_search` builtin tool** — removed `pincer.tools.builtin.web_search` and its registration from `bootstrap.py`, the standalone MCP shell's safe-tool list, the outbound MCP server's default `expose_tools`, the OAuth scope map, and the voice tool allow-list. **Migration:** add a `websearch` entry to `[[mcp.servers]]` in `pincer.toml` (see `docs/core-components/mcp-servers.md`); the tool is then available as `websearch__search`. `PINCER_TAVILY_API_KEY` still works — it's now passed to the new server as `API_KEY`. Also dropped the now-unused `search`/`tavily` extras from the root `pyproject.toml` and the dead `tavily_api_key` field from `ToolSettings`.
 - **`grok`/`ollama` as named providers**, their dedicated env vars (`PINCER_GROK_*`, `PINCER_OLLAMA_BASE_URL`), and the claude→model maps. **Migration:** point them at a compatible endpoint instead, e.g. `PINCER_DEFAULT_PROVIDER=grok` + `PINCER_OPENAI_COMPATIBLE_PROVIDER=grok` + `PINCER_OPENAI_COMPATIBLE_BASE_URL=https://api.x.ai/v1` + `PINCER_DEFAULT_MODEL=grok-3` (Ollama: base URL `http://localhost:11434/v1`, model `llama3.2`, no key).

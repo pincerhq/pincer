@@ -3,7 +3,14 @@ Skill sandboxing — execute untrusted skill functions in isolated subprocesses.
 
 Security layers:
   1. Resource limits (RLIMIT_AS, RLIMIT_CPU) via the resource module
-  2. Network domain whitelisting via socket.getaddrinfo monkey-patch
+  2. Network domain allowlisting via socket.getaddrinfo monkey-patch — best-effort
+     only. It blocks naive `requests`/`httpx`/stdlib-socket calls to non-allowed
+     hosts, but a script that deliberately wants to exfiltrate data can bypass it
+     by shelling out to `curl`/`wget` (never touches this process's monkey-patch)
+     or connecting to a hardcoded IP (skips DNS resolution, and thus this check,
+     entirely). Do not treat this as a hard boundary against a malicious script —
+     only resource limits (1) and the process boundary itself are enforced at the
+     OS level.
   3. Environment variable isolation (only declared vars passed through)
   4. Timeout enforcement via asyncio.wait_for + SIGKILL
   5. Filesystem isolation (HOME set to temp directory)
@@ -142,6 +149,128 @@ def _build_env(config: SandboxConfig, temp_dir: str) -> dict[str, str]:
         if val is not None:
             env[var] = val
     return env
+
+
+def _build_script_runner(script_path: str, args: list[str], config: SandboxConfig) -> str:
+    """Build a self-contained Python wrapper that runs an arbitrary script as argv[0].
+
+    Python scripts (`.py`) get the same in-process network-domain allowlist as
+    `_build_runner_script`. Non-Python scripts get rlimits + restricted env only —
+    the network monkey-patch cannot survive a real exec() into a foreign binary.
+    """
+    args_json = json.dumps(args)
+    domains_json = json.dumps(config.allowed_domains)
+
+    header = textwrap.dedent(f"""\
+        import json
+        import os
+        import sys
+
+        try:
+            import resource
+            mem = {config.max_memory_bytes}
+            resource.setrlimit(resource.RLIMIT_AS, (mem, mem))
+        except (ImportError, ValueError, OSError):
+            pass
+        try:
+            import resource
+            cpu = {config.max_cpu_seconds}
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu + 5))
+        except (ImportError, ValueError, OSError):
+            pass
+
+        allowed_domains = {domains_json}
+        if allowed_domains:
+            import socket
+            _original_getaddrinfo = socket.getaddrinfo
+            def _filtered_getaddrinfo(host, *a, **kw):
+                if host in ("localhost", "127.0.0.1", "::1"):
+                    return _original_getaddrinfo(host, *a, **kw)
+                ok = any(host == d or host.endswith("." + d) for d in allowed_domains)
+                if not ok:
+                    raise PermissionError(f"Network access to '{{host}}' blocked by sandbox")
+                return _original_getaddrinfo(host, *a, **kw)
+            socket.getaddrinfo = _filtered_getaddrinfo
+
+        script_args = json.loads({args_json!r})
+    """)
+
+    if script_path.endswith(".py"):
+        run = textwrap.dedent(f"""\
+            import runpy
+            sys.argv = [{script_path!r}, *script_args]
+            try:
+                runpy.run_path({script_path!r}, run_name="__main__")
+            except SystemExit as e:
+                sys.exit(e.code if isinstance(e.code, int) else (0 if e.code is None else 1))
+        """)
+    else:
+        run = textwrap.dedent(f"""\
+            os.execv({script_path!r}, [{script_path!r}, *script_args])
+        """)
+
+    return header + run
+
+
+async def execute_script(
+    script_path: str,
+    args: list[str] | None = None,
+    config: SandboxConfig | None = None,
+) -> SandboxResult:
+    """Execute an arbitrary script (Python or any executable) in a sandboxed subprocess.
+
+    Unlike `execute()` (which imports a module and calls a named function), this
+    runs `script_path` as a standalone program with `args` as argv, capturing raw
+    stdout rather than expecting JSON.
+    """
+    if config is None:
+        config = SandboxConfig()
+    args = args or []
+
+    start_time = time.monotonic()
+
+    with tempfile.TemporaryDirectory(prefix="pincer_sandbox_") as temp_dir:
+        script = _build_script_runner(script_path, args, config)
+        runner_path = Path(temp_dir) / "_runner.py"
+        runner_path.write_text(script, encoding="utf-8")
+
+        env = _build_env(config, temp_dir)
+
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(runner_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=temp_dir,
+        )
+
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=config.timeout)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return SandboxResult(
+                success=False,
+                error="Execution timed out",
+                exit_code=-1,
+                timed_out=True,
+                execution_time=time.monotonic() - start_time,
+            )
+
+        execution_time = time.monotonic() - start_time
+        stdout_str = stdout_bytes.decode("utf-8", errors="replace").strip()
+        stderr_str = stderr_bytes.decode("utf-8", errors="replace").strip()
+        exit_code = proc.returncode or 0
+
+        return SandboxResult(
+            success=exit_code == 0,
+            result=stdout_str or None,
+            error=None if exit_code == 0 else (stderr_str or stdout_str or f"Process exited with code {exit_code}"),
+            stderr=stderr_str or None,
+            exit_code=exit_code,
+            execution_time=execution_time,
+        )
 
 
 async def execute(

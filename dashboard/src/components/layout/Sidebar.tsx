@@ -5,6 +5,7 @@ import {
   MessageSquare,
   Shield,
   Puzzle,
+  Plug,
   Stethoscope,
   Settings,
   PanelLeftClose,
@@ -22,7 +23,8 @@ const navigation = [
   { name: "Costs", href: ROUTES.COSTS, icon: DollarSign },
   { name: "Conversations", href: ROUTES.CONVERSATIONS, icon: MessageSquare },
   { name: "Audit Log", href: ROUTES.AUDIT, icon: Shield },
-  { name: "Extensions", href: ROUTES.SKILLS, icon: Puzzle },
+  { name: "Skills", href: ROUTES.SKILLS, icon: Puzzle },
+  { name: "Integrations", href: ROUTES.INTEGRATIONS, icon: Plug },
   { name: "Security", href: ROUTES.DOCTOR, icon: Stethoscope },
   { name: "Settings", href: ROUTES.SETTINGS, icon: Settings },
 ]

@@ -46,4 +46,5 @@ docker-compose.override.yml
 
 # Internal and required MCP servers
 pincer.local.toml
+skills/*
 mcp-servers/*

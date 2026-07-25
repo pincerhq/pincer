@@ -30,6 +30,7 @@ VOICE_ALLOWED_TOOLS = {
     "make_phone_call",
     "send_file",
     "send_image",
+    "load_skill",
 }
 
 VOICE_EXCLUDED_TOOLS = {
@@ -40,6 +41,8 @@ VOICE_EXCLUDED_TOOLS = {
     "python_exec",
     "browse",
     "screenshot",
+    "load_skill_reference",
+    "run_skill_script",
 }
 
 

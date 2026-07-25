@@ -1,44 +1,30 @@
 # Skills Guide — Build Custom Pincer Skills
 
-> **Deprecation notice**
->
-> The Skills system is **deprecated as of Pincer 0.8.0** and will be **removed in 0.9.0**.
->
-> Skills are replaced by **MCP servers** — a standard, language-agnostic way to extend Pincer with any tool. MCP servers are more secure (sandboxed subprocess isolation), more portable (any language, any runtime), and interoperable with the broader MCP ecosystem (Claude Desktop, Cursor, VS Code, and more).
->
-> - **MCP disables skills entirely.** When one or more MCP servers are configured in `pincer.toml` (or `pincer.local.toml`) and MCP is enabled, Pincer skips skill loading at startup. Skills and MCP are mutually exclusive — migrate your skills to MCP servers before adding any `[[mcp.servers]]` entries.
-> - **Migration guide:** Replace your `skills/` directory with one or more MCP servers. See the [MCP Guide](mcp-guide.md) and [MCP Servers](../core-components/mcp-servers.md) for how to build and connect them.
-> - **Timeline:** Skills continue to load unchanged through 0.8.x **unless MCP servers are configured**. The `pincer skills` CLI commands, skill loader, sandbox, and signing infrastructure are removed in 0.9.0.
+Skills are how you extend Pincer's agent with domain-specific knowledge and, optionally, scripts. A skill is a directory containing a single `SKILL.md` file — this is Anthropic's open [Agent Skills](https://www.anthropic.com/) format, so skills you write for Pincer are portable to other agents that support the same convention.
 
-Skills are how you extend Pincer with new capabilities. A skill is a Python module that registers one or more tools the agent can use.
+Skills and MCP servers coexist — connecting an MCP server no longer disables skills.
 
 ---
 
 ## Your First Skill in 2 Minutes
 
-Create a file `skills/hello_world/main.py`:
+Create `skills/hello-world/SKILL.md`:
 
-```python
-from pincer.tools import tool
+```markdown
+---
+name: hello-world
+description: Greets the user by name. Load this when asked to say hello.
+---
 
-@tool(
-    name="hello_world",
-    description="Says hello to someone by name",
-)
-async def hello_world(name: str) -> str:
-    return f"Hello, {name}! 🦜"
+# Hello World
+
+When asked to greet someone, respond with a warm, personalized greeting
+that includes their name.
 ```
 
-Create `skills/hello_world/skill.yaml`:
+Restart Pincer. The skill's name and description now appear in the "Available Skills" block of the system prompt. Ask the agent something that matches the description and it will call `load_skill("hello-world")` to read the full body before acting on it.
 
-```yaml
-name: hello_world
-version: 0.1.0
-description: A simple greeting skill
-author: your-name
-```
-
-Restart Pincer. The agent now has access to `hello_world`. Ask it: "Say hello to Alice" and it'll call your skill.
+That's it — no manifest, no Python entry point, no registration step. A directory with `SKILL.md` present *is* a skill.
 
 ---
 
@@ -46,325 +32,88 @@ Restart Pincer. The agent now has access to `hello_world`. Ask it: "Say hello to
 
 ```
 skills/
-└── my_skill/
-    ├── skill.yaml          # Required: metadata
-    ├── main.py             # Required: tool definitions
-    ├── requirements.txt    # Optional: pip dependencies
-    └── README.md           # Optional: documentation
+└── my-skill/
+    ├── SKILL.md          # required: frontmatter + instructions
+    ├── reference.md        # optional: extra docs, loaded on demand
+    └── scripts/
+        └── do_thing.py     # optional: executable helper
 ```
 
-### skill.yaml
+### SKILL.md frontmatter
+
+Two fields are required:
 
 ```yaml
-name: stock_tracker
-version: 1.0.0
-description: Track stock prices and portfolio performance
-author: your-github-username
-license: MIT
-
-# Permissions this skill needs
-permissions:
-  - network          # Make HTTP requests
-  - file_read        # Read files from data directory
-
-# Dependencies (installed automatically)
-dependencies:
-  - yfinance>=0.2.0
-
-# Optional: tags for discoverability
-tags:
-  - finance
-  - stocks
-  - portfolio
+---
+name: my-skill
+description: One dense sentence describing what this skill does and when to use it.
+---
 ```
 
-### main.py
+- `name` is the identifier the agent uses — it's what appears in the system prompt's Available Skills block, and what `load_skill(name)` / `load_skill_reference(name, path)` / `run_skill_script(name, script, args)` take as their `name` argument. It does **not** need to match the skill's directory name; the directory is just where the files live on disk. (The dashboard's `GET /api/skills/{name}` route is the exception — it addresses skills by directory name specifically, so it keeps working even if a skill's frontmatter `name` changes.)
+- `description` is the *only* part of the skill shown to the model before it decides to load it — write it as a specific, dense sentence covering both what the skill does and when to reach for it. A vague description means the model will never load the skill.
 
-```python
-from pincer.tools import tool
-import yfinance as yf
-
-@tool(
-    name="get_stock_price",
-    description="Get the current price of a stock by its ticker symbol (e.g., AAPL, MSFT, GOOGL)",
-    requires_approval=False,
-)
-async def get_stock_price(ticker: str) -> str:
-    """Fetch current stock price."""
-    stock = yf.Ticker(ticker.upper())
-    info = stock.info
-    price = info.get("regularMarketPrice", "N/A")
-    change = info.get("regularMarketChangePercent", 0)
-    name = info.get("shortName", ticker)
-    
-    direction = "📈" if change >= 0 else "📉"
-    return f"{direction} {name} ({ticker.upper()}): ${price:.2f} ({change:+.2f}%)"
-
-
-@tool(
-    name="get_stock_history",
-    description="Get price history for a stock over a time period (1d, 5d, 1mo, 3mo, 6mo, 1y)",
-    requires_approval=False,
-)
-async def get_stock_history(ticker: str, period: str = "1mo") -> str:
-    """Fetch stock price history."""
-    stock = yf.Ticker(ticker.upper())
-    hist = stock.history(period=period)
-    
-    if hist.empty:
-        return f"No data found for {ticker.upper()}"
-    
-    lines = [f"📊 {ticker.upper()} — Last {period}:"]
-    lines.append(f"  Open:  ${hist['Open'].iloc[0]:.2f}")
-    lines.append(f"  Close: ${hist['Close'].iloc[-1]:.2f}")
-    lines.append(f"  High:  ${hist['High'].max():.2f}")
-    lines.append(f"  Low:   ${hist['Low'].min():.2f}")
-    
-    pct = ((hist['Close'].iloc[-1] - hist['Open'].iloc[0]) / hist['Open'].iloc[0]) * 100
-    lines.append(f"  Change: {pct:+.2f}%")
-    
-    return "\n".join(lines)
-```
+Everything after the closing `---` is free-form markdown: the instructions returned by `load_skill(name)`.
 
 ---
 
-## The `@tool` Decorator
+## Progressive Disclosure
 
-```python
-@tool(
-    name="tool_name",                 # Unique identifier (snake_case)
-    description="What this tool does", # Shown to the LLM — be specific!
-    requires_approval=False,          # Ask user before executing?
-    timeout=30,                       # Max execution time in seconds
-    cost_category="low",              # low / medium / high — affects budget tracking
-)
-async def my_tool(
-    param1: str,                      # Required parameter
-    param2: int = 10,                 # Optional with default
-    param3: list[str] | None = None,  # Optional nullable
-) -> str:                             # Must return a string
-    """Docstring is used as extended description."""
-    ...
-```
+Skills are loaded in three levels, so a large skill library doesn't blow the context budget:
 
-### Parameter Types
+| Level | Mechanism | What's loaded |
+|-------|-----------|----------------|
+| 1 | System prompt | Every skill's `name` + `description`, in the "Available Skills" block |
+| 2 | `load_skill(name)` | The full markdown body, plus a manifest of other files in the skill's directory |
+| 3 | `load_skill_reference(name, path)` | One specific file from the skill's directory, by relative path |
 
-The decorator auto-generates a JSON schema from your type hints. Supported types:
-
-| Python Type | JSON Schema | Notes |
-|-------------|------------|-------|
-| `str` | `string` | |
-| `int` | `integer` | |
-| `float` | `number` | |
-| `bool` | `boolean` | |
-| `list[str]` | `array` of strings | |
-| `dict[str, Any]` | `object` | |
-| `Literal["a", "b"]` | `enum` | Restricts values |
-| `Optional[str]` or `str \| None` | nullable string | |
-
-### Return Value
-
-Tools must return a `str`. The returned string is injected into the LLM's context as the tool result. Format it for readability — the LLM will summarize it for the user.
+Use level 3 for large reference docs, data files, or examples you don't want included in every `load_skill` call.
 
 ---
 
-## Permissions
+## Adding a Script
 
-Skills run in a sandbox by default. To access system resources, declare permissions in `skill.yaml`:
+If a skill needs to *do* something deterministic rather than just explain an approach, add an executable file anywhere under the skill's directory (Python or any script with a shebang) and call it with:
 
-| Permission | What It Allows |
-|-----------|---------------|
-| `network` | Make outbound HTTP requests |
-| `file_read` | Read files in `data/` directory |
-| `file_write` | Write files in `data/` directory |
-| `shell` | Execute shell commands (requires user approval) |
-| `system` | Access system info (CPU, memory, disk) |
+```
+run_skill_script(name, script, args)
+```
 
-Skills without declared permissions can only do pure computation — no I/O, no network, no filesystem.
+Scripts run in a sandboxed subprocess — resource limits (memory, CPU) and network domain allowlisting for Python scripts — unless `skill_sandbox_disabled` is set. **`run_skill_script` always requires user approval** before executing, unlike `load_skill`/`load_skill_reference` which are read-only and ungated.
+
+Prefer pure-instruction skills (no scripts) when the model can already accomplish the task with its existing tools just by being told the right approach. Reach for a script when you need repeatable, deterministic logic (parsing a fixed file format, calling an API with a specific auth scheme) that's error-prone to improvise from instructions alone.
 
 ---
 
-## Skill Lifecycle
+## Where Skills Live
 
-1. **Discovery** — Pincer scans the `skills/` directory on startup
-2. **Validation** — `skill.yaml` is parsed and validated
-3. **Security scan** — code is checked for known dangerous patterns
-4. **Dependency install** — `requirements.txt` deps are installed in an isolated environment
-5. **Registration** — tools are registered in the tool registry
-6. **Execution** — when the LLM calls a tool, it runs in the skill's sandbox
+- **Bundled skills:** shipped inside the installed package at `src/pincer/skills/` (fixed path, not configurable). Ships with `pip install pincer-agent` — no project checkout required.
+- **User skills:** `~/.pincer/skills/` (`skills_dir` config).
 
----
+A user skill with the same `name` as a bundled skill overrides it.
 
-## Managing Skills via CLI
+### Config
 
-```bash
-# List installed skills
-pincer skills list
-
-# Install a skill from GitHub
-pincer skills install github:username/pincer-skill-weather
-
-# Install from a local directory
-pincer skills install ./my-skill
-
-# Remove a skill
-pincer skills remove weather
-
-# Scan a skill for security issues
-pincer skills scan ./untrusted-skill
-
-# Verify a signed skill
-pincer skills verify ./skill-directory
-```
+| Setting | Default | Purpose |
+|---|---|---|
+| `skills_dir` | `~/.pincer/skills` | User skills root |
+| `skills_max_loaded_per_root` | `100` | Hard cap on skills loaded per root — applied at discovery, before prompt construction |
+| `skills_max_prompt_tokens` | `None` (no limit) | Soft budget for the Available Skills prompt block; once exceeded, descriptions are truncated and then trailing entries are dropped with an "X more skills" note. Tune this down for small-context local models. |
+| `skill_sandbox_disabled` | `False` | Bypass sandboxing for `run_skill_script` (trusted/dev workflows only) |
 
 ---
 
-## Skill Security
+## Bundled Starter Skills
 
-### Security Scanner
-
-Before installing third-party skills, run:
-
-```bash
-pincer skills scan ./downloaded-skill
-```
-
-The scanner checks for:
-- Import of dangerous modules (`os.system`, `subprocess`, `eval`, `exec`)
-- Network access without declared `network` permission
-- File access outside the sandbox
-- Obfuscated code
-- Known malicious patterns
-
-### Skill Signing
-
-Trusted skills can be cryptographically signed:
-
-```bash
-# Generate a signing key
-pincer skills keygen
-
-# Sign your skill
-pincer skills sign ./my-skill --key ~/.pincer/signing_key.pem
-
-# Verify a signed skill
-pincer skills verify ./my-skill
-```
-
-When `PINCER_REQUIRE_SIGNED_SKILLS=true`, only signed skills are loaded.
+Pincer ships five pure-instruction starter skills documenting its own capabilities: `skill-authoring` (this guide, in agent-readable form), `memory-recall`, `mcp-server-setup`, `scheduler-briefings`, and `doctor-troubleshooting`. Read any of them under `src/pincer/skills/` for a second example of the format.
 
 ---
 
-## Examples
+## Migrating from the Legacy Format
 
-### Weather Skill
+Prior to this migration, skills used a `manifest.json` + `skill.py` pair with Python-decorated tool functions, a security scanner that gated loading, and mutual exclusion with MCP. That format is removed — there is no automatic converter. To port an old skill:
 
-```python
-from pincer.tools import tool
-import httpx
-
-@tool(
-    name="get_weather",
-    description="Get current weather for a city",
-)
-async def get_weather(city: str) -> str:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            "https://wttr.in/{city}",
-            params={"format": "j1"},
-        )
-        data = resp.json()
-        current = data["current_condition"][0]
-        
-        return (
-            f"🌤️ Weather in {city}:\n"
-            f"  Temperature: {current['temp_C']}°C / {current['temp_F']}°F\n"
-            f"  Condition: {current['weatherDesc'][0]['value']}\n"
-            f"  Humidity: {current['humidity']}%\n"
-            f"  Wind: {current['windspeedKmph']} km/h"
-        )
-```
-
-### Habit Tracker Skill
-
-```python
-from pincer.tools import tool
-from datetime import date
-import json
-from pathlib import Path
-
-DATA_FILE = Path("data/habits.json")
-
-def _load() -> dict:
-    if DATA_FILE.exists():
-        return json.loads(DATA_FILE.read_text())
-    return {"habits": {}}
-
-def _save(data: dict):
-    DATA_FILE.write_text(json.dumps(data, indent=2))
-
-@tool(
-    name="log_habit",
-    description="Log completion of a daily habit (e.g., exercise, meditation, reading)",
-)
-async def log_habit(habit_name: str) -> str:
-    data = _load()
-    today = date.today().isoformat()
-    
-    if habit_name not in data["habits"]:
-        data["habits"][habit_name] = []
-    
-    if today not in data["habits"][habit_name]:
-        data["habits"][habit_name].append(today)
-    
-    streak = _calculate_streak(data["habits"][habit_name])
-    _save(data)
-    
-    return f"✅ Logged '{habit_name}' for {today}. Current streak: {streak} days 🔥"
-
-@tool(
-    name="habit_stats",
-    description="Show statistics for all tracked habits",
-)
-async def habit_stats() -> str:
-    data = _load()
-    if not data["habits"]:
-        return "No habits tracked yet. Tell me to log a habit!"
-    
-    lines = ["📊 Habit Stats:"]
-    for habit, dates in data["habits"].items():
-        streak = _calculate_streak(dates)
-        total = len(dates)
-        lines.append(f"  {habit}: {streak}-day streak, {total} total")
-    
-    return "\n".join(lines)
-
-def _calculate_streak(dates: list[str]) -> int:
-    if not dates:
-        return 0
-    sorted_dates = sorted(dates, reverse=True)
-    streak = 1
-    for i in range(len(sorted_dates) - 1):
-        curr = date.fromisoformat(sorted_dates[i])
-        prev = date.fromisoformat(sorted_dates[i + 1])
-        if (curr - prev).days == 1:
-            streak += 1
-        else:
-            break
-    return streak
-```
-
----
-
-## Publishing Skills
-
-Share your skill with the community:
-
-1. Create a GitHub repo named `pincer-skill-{name}`
-2. Include `skill.yaml`, `main.py`, `requirements.txt`, and `README.md`
-3. Tag a release (e.g., `v1.0.0`)
-4. Users can install with: `pincer skills install github:you/pincer-skill-{name}`
-
-### Community Skills Registry
-
-Submit a PR to [pincerhq/skill-registry](https://github.com/pincerhq/skill-registry) to list your skill in the official registry. We review for quality and security before listing.
+1. Create `skills/<name>/SKILL.md`. Move `manifest.json`'s `description` into the frontmatter `description` field; write a markdown body explaining what the skill does (this replaces the old per-tool `tools[]` schema entries — the model now reads instructions instead of calling a fixed function signature).
+2. If `skill.py` did real work (an API call, a computation), move it into `skills/<name>/scripts/` as a standalone script invoked via `run_skill_script`, rather than a function called directly by the tool registry.
+3. Drop `permissions`/`env_required` from the old manifest — the new sandbox model uses `SandboxConfig.allowed_domains`/`allowed_env_vars` passed by the caller, not a self-declared manifest field.
+4. Remove any dependency on the old `pincer skills` CLI (`list`/`install`/`create`/`scan`/`remove`/`info` are all gone) — skills are now filesystem-discovered only, no install step.
