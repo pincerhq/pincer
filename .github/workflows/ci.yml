@@ -10,7 +10,7 @@ jobs:
       - run: uv sync --all-extras
 
       - name: Run tests with coverage
-        run: uv run pytest --cov=pincer --cov-report=xml tests/ src/ms365-mcp/tests/
+        run: uv run pytest --cov=pincer --cov-report=xml tests/ src/ms365-mcp/tests/ src/doctr-mcp/tests
 
       - name: Type check
         run: uv run mypy src/

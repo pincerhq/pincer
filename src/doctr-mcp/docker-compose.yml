@@ -1,0 +1,30 @@
+services:
+  doctr-mcp:
+    build: .
+    restart: unless-stopped
+    environment:
+      TRANSPORT: http
+      HOST: 0.0.0.0
+      PORT: ${MCP_PORT:-8000}
+      DOCTR_DEVICE: cpu
+      DOCTR_MAX_WORKERS: 1
+      DOCTR_TORCH_THREADS: ${DOCTR_TORCH_THREADS:-0}
+      DOCTR_MAX_CACHED_PREDICTORS: ${DOCTR_MAX_CACHED_PREDICTORS:-4}
+      DOCTR_MAX_INPUT_MB: ${DOCTR_MAX_INPUT_MB:-20}
+      DOCTR_DEFAULT_DET_ARCH: ${DOCTR_DEFAULT_DET_ARCH:-db_resnet50}
+      DOCTR_DEFAULT_RECO_ARCH: ${DOCTR_DEFAULT_RECO_ARCH:-crnn_vgg16_bn}
+      # DOCTR_CACHE_DIR is already /app/models inside the image (set at build time).
+      PYTHONUNBUFFERED: 1
+    volumes:
+      - doctr-model-cache:/app/models
+    #ports:
+    #  - "8101:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:${MCP_PORT:-8000}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  doctr-model-cache:

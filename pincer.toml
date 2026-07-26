@@ -123,6 +123,12 @@ expose_tools = [
 # transport = "streamable-http"
 # url       = "http://websearch-mcp:8000/mcp"
 
+# [[mcp.servers]]
+# name      = "doctr"
+# transport = "streamable-http"
+# url       = "http://doctr-mcp:8000/mcp"
+# timeout   = 120  # CPU-bound OCR inference is slower than a quick API call or embedding lookup
+
 # In app runtime servers using stdio protocol for fast startup (default)
 [[mcp.servers]]
 name = "sqlite_vec_memory"
@@ -192,3 +198,16 @@ approval_required = ["*"]
 # flow before it can speak the MCP protocol — give the user time to sign in.
 # Subsequent runs reuse the cached token and connect in well under a second.
 startup_timeout = 600
+
+[[mcp.servers]]
+name      = "doctr"
+transport = "stdio"
+command = "python"
+args = ["${PINCER_SRC_DIR:-$PWD}/src/doctr-mcp/doctr_mcp/server.py", "--transport", "stdio"]
+env = { DOCTR_DEVICE = "cpu", DOCTR_CACHE_DIR = "${PINCER_DATA_DIR}/doctr_cache" }
+sandbox = true
+approval_required = ["*"]
+# Predictor construction and model download are lazy (only on first tool call, not
+# at startup), so the default startup_timeout is fine — but per-call inference on
+# CPU is slower than this repo's other bundled servers, hence the longer timeout.
+timeout = 120
