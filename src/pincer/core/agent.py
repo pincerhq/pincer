@@ -418,6 +418,13 @@ class Agent:
                     system=system_prompt,
                 )
                 last_response = response
+                # By the second iteration the model has already either
+                # committed to a tool call or produced final text — the
+                # image no longer needs to be resent (and, unlike text,
+                # isn't persisted across turns anyway; see LLMMessage.to_dict).
+                # Cuts vision re-ingestion cost on every retry within this loop.
+                if user_msg.images:
+                    user_msg.images = []
             except BudgetExceededError:
                 final_text = (
                     "Warning: Daily budget limit reached. "
@@ -622,6 +629,10 @@ class Agent:
                     tools=tool_schemas,
                     system=system_prompt,
                 )
+                # See handle_message: drop the image after the first
+                # completion so later retries in this loop don't resend it.
+                if user_msg.images:
+                    user_msg.images = []
             except BudgetExceededError:
                 yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
                 return

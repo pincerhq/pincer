@@ -41,6 +41,32 @@ def test_instructions_warn_against_self_reading_pdfs() -> None:
     assert "python_exec" in mcp.instructions
 
 
+def test_instructions_warn_against_self_vision_transcription() -> None:
+    """A vision-capable model that already 'sees' the image has no reason not
+    to just transcribe it itself unless explicitly told otherwise — generic
+    file-tool warnings alone (file_read/shell_exec/python_exec) don't cover
+    that case."""
+    from doctr_mcp.server import mcp
+
+    assert mcp.instructions is not None
+    assert "vision" in mcp.instructions.lower()
+
+
+def test_critical_instruction_survives_default_truncation() -> None:
+    """Pincer truncates each connected server's instructions to a per-server
+    character budget (mcp_instructions_max_chars, 400 by default) before
+    surfacing them into its own system prompt. The directive that actually
+    changes model behavior must land within that budget, or it never reaches
+    the model at all."""
+    from doctr_mcp.server import mcp
+
+    assert mcp.instructions is not None
+    collapsed = " ".join(mcp.instructions.split())
+    truncated = collapsed[:400]
+    assert "do not transcribe" in truncated.lower()
+    assert "file_read" in truncated
+
+
 def test_parse_args_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     from doctr_mcp import server
 

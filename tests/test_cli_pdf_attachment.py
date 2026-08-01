@@ -59,3 +59,18 @@ def test_long_content_is_truncated() -> None:
     result = _format_pdf_attachment(pages, "huge.pdf", "/data/uploads/huge.pdf", max_chars=100)
     assert "truncated" in result
     assert "1 pages total" in result
+
+
+def test_scanned_pdf_gives_explicit_ocr_tool_call_syntax() -> None:
+    """A scanned PDF must be handed to the OCR tool the same way a plain
+    image attachment is — with a concrete file_path argument, not a vague
+    'use an OCR tool' hint the model has to guess how to act on."""
+    pages = ["", "", ""]
+    result = _format_pdf_attachment(pages, "scan.pdf", "/data/uploads/scan.pdf")
+    assert "file_path='/data/uploads/scan.pdf'" in result
+
+
+def test_scanned_pdf_warns_against_self_transcription() -> None:
+    pages = ["", "", ""]
+    result = _format_pdf_attachment(pages, "scan.pdf", "/data/uploads/scan.pdf")
+    assert "do not try to transcribe it yourself" in result

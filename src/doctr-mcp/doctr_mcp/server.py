@@ -46,15 +46,20 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP(
     name="doctr_mcp",
     instructions=(
-        "OCR MCP server built on mindee/doctr. "
+        # Critical directive first: this string is truncated to a per-server
+        # character budget (Pincer's mcp_instructions_max_chars, 400 by
+        # default) when surfaced into the caller's system prompt, so the
+        # instruction that actually changes model behavior must survive
+        # truncation — the descriptive tool catalog after it is a bonus.
+        "OCR MCP server (mindee/doctr). ALWAYS hand PDFs/images to these tools — "
+        "do not transcribe or describe their text content yourself via your own "
+        "vision, and do not use file_read, shell_exec, or python_exec on them. "
         "Use ocr_document_text for a quick plain-text read of an image or PDF. "
         "Use ocr_document for the full block/line/word tree with geometry, "
         "orientation, and language detection. "
         "Use detect_text / recognize_text for the individual detection "
         "or recognition stages, extract_key_info for key-information extraction, "
         "and list_architectures to discover valid det_arch/reco_arch values. "
-        "Do not attempt to read PDF or image files yourself with file_read, shell_exec, "
-        "or python_exec — hand them to this server's OCR tools instead. "
         "(Tool names may appear with an additional server-name prefix depending on "
         "how the connecting MCP client namespaces tools.)"
     ),

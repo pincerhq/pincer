@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from pincer.mcp.bridge import MCPToolBridge, _convert_schema, _format_result, _requires_approval
+from pincer.mcp.bridge import (
+    MCPToolBridge,
+    _convert_schema,
+    _format_result,
+    _inline_local_file_paths,
+    _requires_approval,
+)
+from pincer.mcp.config import MCPTransport
 
 # ── Helpers / stubs ──────────────────────────────────────────────────────────
 
@@ -48,6 +56,7 @@ def _make_session(tools: list[FakeTool], server_name: str = "testserver"):
     session.tools = tools
     session.config = MagicMock()
     session.config.approval_required = ["*"]
+    session.config.transport = MCPTransport.STDIO
     session.connected = True
     return session
 
@@ -509,3 +518,148 @@ def test_collision_no_prefix_blocked() -> None:
 
     assert count == 0
     assert registry.list_tools() == ["shared_tool"]
+
+
+# ── Local file_path → image_b64 inlining (HTTP-transport fallback) ──────────
+
+
+def test_inline_swaps_file_path_for_base64_when_in_upload_root(tmp_path) -> None:
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    saved = upload_root / "image_ab12cd34.png"
+    saved.write_bytes(b"fake png bytes")
+
+    kwargs = {"params": {"source": {"file_path": str(saved)}}}
+    result = _inline_local_file_paths(kwargs, upload_root)
+
+    source = result["params"]["source"]
+    assert "file_path" not in source
+    assert base64.b64decode(source["image_b64"]) == b"fake png bytes"
+
+
+def test_inline_leaves_paths_outside_upload_root_untouched(tmp_path) -> None:
+    """A path outside our own cache is left alone — never read or forwarded
+    as base64 — so a compromised/hallucinating tool call can't be used to
+    exfiltrate arbitrary local files."""
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    outside = tmp_path / "secret.txt"
+    outside.write_bytes(b"do not leak me")
+
+    kwargs = {"params": {"source": {"file_path": str(outside)}}}
+    result = _inline_local_file_paths(kwargs, upload_root)
+
+    assert result["params"]["source"]["file_path"] == str(outside)
+    assert "image_b64" not in result["params"]["source"]
+
+
+def test_inline_leaves_nonexistent_path_untouched(tmp_path) -> None:
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    missing = upload_root / "does_not_exist.png"
+
+    kwargs = {"params": {"source": {"file_path": str(missing)}}}
+    result = _inline_local_file_paths(kwargs, upload_root)
+
+    assert result["params"]["source"]["file_path"] == str(missing)
+    assert "image_b64" not in result["params"]["source"]
+
+
+def test_inline_handles_list_of_sources(tmp_path) -> None:
+    """recognize_text's `images: list[ImageSource]` shape."""
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    saved = upload_root / "crop.png"
+    saved.write_bytes(b"crop bytes")
+
+    kwargs = {"params": {"images": [{"file_path": str(saved)}]}}
+    result = _inline_local_file_paths(kwargs, upload_root)
+
+    inlined = result["params"]["images"][0]
+    assert "file_path" not in inlined
+    assert base64.b64decode(inlined["image_b64"]) == b"crop bytes"
+
+
+def test_inline_skips_when_image_b64_already_present(tmp_path) -> None:
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    saved = upload_root / "image.png"
+    saved.write_bytes(b"bytes")
+
+    kwargs = {"source": {"file_path": str(saved), "image_b64": "already-set"}}
+    result = _inline_local_file_paths(kwargs, upload_root)
+
+    assert result["source"]["file_path"] == str(saved)
+    assert result["source"]["image_b64"] == "already-set"
+
+
+async def test_handler_inlines_file_path_for_http_transport(tmp_path) -> None:
+    """An HTTP-transport server (isolated container, no shared filesystem)
+    gets the locally-cached file read and forwarded as base64 instead of a
+    file_path it could never resolve on its own side."""
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    saved = upload_root / "scan.png"
+    saved.write_bytes(b"scan bytes")
+
+    tool = FakeTool("ocr_document_text")
+    session = _make_session([tool])
+    session.config.approval_required = ["none"]
+    session.config.transport = MCPTransport.STREAMABLE_HTTP
+    session.call_tool = AsyncMock(return_value=FakeCallToolResult(content=[FakeTextContent(text="ocr result")]))
+
+    registry = _make_registry()
+    audit = _make_audit()
+    bridge = MCPToolBridge(session, registry, audit, prefix=True, local_upload_root=upload_root)
+    bridge.register_tools()
+
+    await registry.execute("testserver__ocr_document_text", {"params": {"source": {"file_path": str(saved)}}})
+
+    called_kwargs = session.call_tool.call_args.args[1]
+    source = called_kwargs["params"]["source"]
+    assert "file_path" not in source
+    assert base64.b64decode(source["image_b64"]) == b"scan bytes"
+
+
+async def test_handler_leaves_file_path_untouched_for_stdio_transport(tmp_path) -> None:
+    """stdio servers already share Pincer's filesystem directly — inlining
+    would be pure overhead (and unnecessary base64 bloat) with no benefit."""
+    upload_root = tmp_path / "uploads"
+    upload_root.mkdir()
+    saved = upload_root / "scan.png"
+    saved.write_bytes(b"scan bytes")
+
+    tool = FakeTool("ocr_document_text")
+    session = _make_session([tool])
+    session.config.approval_required = ["none"]
+    session.config.transport = MCPTransport.STDIO
+    session.call_tool = AsyncMock(return_value=FakeCallToolResult(content=[FakeTextContent(text="ocr result")]))
+
+    registry = _make_registry()
+    audit = _make_audit()
+    bridge = MCPToolBridge(session, registry, audit, prefix=True, local_upload_root=upload_root)
+    bridge.register_tools()
+
+    await registry.execute("testserver__ocr_document_text", {"params": {"source": {"file_path": str(saved)}}})
+
+    called_kwargs = session.call_tool.call_args.args[1]
+    assert called_kwargs["params"]["source"]["file_path"] == str(saved)
+
+
+async def test_handler_leaves_kwargs_untouched_when_no_upload_root_configured() -> None:
+    """local_upload_root defaults to None — no-op unless cli.py wires it up."""
+    tool = FakeTool("ocr_document_text")
+    session = _make_session([tool])
+    session.config.approval_required = ["none"]
+    session.config.transport = MCPTransport.STREAMABLE_HTTP
+    session.call_tool = AsyncMock(return_value=FakeCallToolResult(content=[FakeTextContent(text="ocr result")]))
+
+    registry = _make_registry()
+    audit = _make_audit()
+    bridge = MCPToolBridge(session, registry, audit, prefix=True)  # no local_upload_root
+    bridge.register_tools()
+
+    await registry.execute("testserver__ocr_document_text", {"params": {"source": {"file_path": "/some/path"}}})
+
+    called_kwargs = session.call_tool.call_args.args[1]
+    assert called_kwargs["params"]["source"]["file_path"] == "/some/path"
