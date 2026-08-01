@@ -764,7 +764,16 @@ class Agent:
                 servers = await self.mcp_manager.list_servers()
                 connected = [s for s in servers if s["connected"]]
                 if connected:
-                    server_lines = [f"  - {s['name']} ({s['tool_count']} tool(s))" for s in connected]
+                    max_chars = self._settings.mcp_instructions_max_chars
+                    server_lines = []
+                    for s in connected:
+                        server_lines.append(f"  - {s['name']} ({s['tool_count']} tool(s))")
+                        instructions = s.get("instructions")
+                        if instructions:
+                            collapsed = " ".join(instructions.split())
+                            if max_chars and len(collapsed) > max_chars:
+                                collapsed = collapsed[:max_chars] + "…"
+                            server_lines.append(f"    → {collapsed}")
                     base_prompt += "\n\n[Connected MCP servers — use their prefixed tools when relevant]\n" + "\n".join(
                         server_lines
                     )

@@ -196,8 +196,8 @@ async def test_connect_passes_handle_notification_as_logging_callback() -> None:
         async def __aexit__(self, *exc: object) -> bool:
             return False
 
-        async def initialize(self) -> None:
-            pass
+        async def initialize(self) -> MagicMock:
+            return MagicMock(instructions=None)
 
         async def list_tools(self) -> MagicMock:
             return MagicMock(tools=[])
@@ -212,6 +212,87 @@ async def test_connect_passes_handle_notification_as_logging_callback() -> None:
         await session.connect()
 
     assert captured_kwargs.get("logging_callback") == session._handle_notification
+
+
+# ── instructions ──────────────────────────────────────────────────────────────
+
+
+async def test_connect_captures_server_instructions() -> None:
+    """connect() must capture InitializeResult.instructions from the handshake."""
+    cfg = _make_stdio_config(sandbox=False)
+    session = MCPClientSession(cfg)
+    assert session.instructions is None
+
+    class _FakeClientSession:
+        def __init__(self, read_stream: object, write_stream: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeClientSession:
+            return self
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+        async def initialize(self) -> MagicMock:
+            return MagicMock(instructions="Use ocr_document_text for a quick plain-text read.")
+
+        async def list_tools(self) -> MagicMock:
+            return MagicMock(tools=[])
+
+    async def _fake_connect_stdio(*args: object, **kwargs: object) -> tuple[MagicMock, MagicMock]:
+        return MagicMock(), MagicMock()
+
+    with (
+        patch("mcp.ClientSession", _FakeClientSession),
+        patch("pincer.mcp.client.MCPClientSession._connect_stdio", _fake_connect_stdio),
+    ):
+        await session.connect()
+
+    assert session.instructions == "Use ocr_document_text for a quick plain-text read."
+
+
+async def test_connect_captures_none_instructions() -> None:
+    """A server that reports no instructions leaves .instructions as None, not an error."""
+    cfg = _make_stdio_config(sandbox=False)
+    session = MCPClientSession(cfg)
+
+    class _FakeClientSession:
+        def __init__(self, read_stream: object, write_stream: object, **kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> _FakeClientSession:
+            return self
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+        async def initialize(self) -> MagicMock:
+            return MagicMock(instructions=None)
+
+        async def list_tools(self) -> MagicMock:
+            return MagicMock(tools=[])
+
+    async def _fake_connect_stdio(*args: object, **kwargs: object) -> tuple[MagicMock, MagicMock]:
+        return MagicMock(), MagicMock()
+
+    with (
+        patch("mcp.ClientSession", _FakeClientSession),
+        patch("pincer.mcp.client.MCPClientSession._connect_stdio", _fake_connect_stdio),
+    ):
+        await session.connect()
+
+    assert session.instructions is None
+
+
+async def test_cleanup_resets_instructions() -> None:
+    """disconnect() must clear instructions so a stale value can't leak into a reconnect."""
+    cfg = _make_stdio_config(sandbox=False)
+    session = MCPClientSession(cfg)
+    session._instructions = "stale instructions from a previous connection"
+
+    await session._cleanup()
+
+    assert session.instructions is None
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

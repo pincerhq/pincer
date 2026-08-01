@@ -172,6 +172,37 @@ async def test_list_servers_includes_all_configured() -> None:
     # Not connected yet → all show False
     for s in statuses:
         assert s["connected"] is False
+        assert s["instructions"] is None
+
+
+async def test_list_servers_propagates_connected_session_instructions() -> None:
+    cfg = _make_config("srv")
+    manager = _make_manager(cfg)
+
+    mock_session = MagicMock()
+    mock_session.connected = True
+    mock_session.tools = []
+    mock_session.instructions = "Use ocr_document_text for a quick plain-text read."
+    manager._sessions["srv"] = mock_session
+
+    statuses = await manager.list_servers()
+    by_name = {s["name"]: s for s in statuses}
+    assert by_name["srv"]["instructions"] == "Use ocr_document_text for a quick plain-text read."
+
+
+async def test_list_servers_instructions_none_for_connected_session_without_them() -> None:
+    cfg = _make_config("srv")
+    manager = _make_manager(cfg)
+
+    mock_session = MagicMock()
+    mock_session.connected = True
+    mock_session.tools = []
+    mock_session.instructions = None
+    manager._sessions["srv"] = mock_session
+
+    statuses = await manager.list_servers()
+    by_name = {s["name"]: s for s in statuses}
+    assert by_name["srv"]["instructions"] is None
 
 
 # ── Reconnection ──────────────────────────────────────────────────────────────

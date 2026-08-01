@@ -53,6 +53,8 @@ mcp = FastMCP(
         "Use detect_text / recognize_text for the individual detection "
         "or recognition stages, extract_key_info for key-information extraction, "
         "and list_architectures to discover valid det_arch/reco_arch values. "
+        "Do not attempt to read PDF or image files yourself with file_read, shell_exec, "
+        "or python_exec — hand them to this server's OCR tools instead. "
         "(Tool names may appear with an additional server-name prefix depending on "
         "how the connecting MCP client namespaces tools.)"
     ),
@@ -63,6 +65,19 @@ register_recognition_tools(mcp)
 register_ocr_tools(mcp)
 register_kie_tools(mcp)
 register_meta_tools(mcp)
+
+_settings = get_settings()
+if _settings.log_tool_requests:
+    from fastmcp.server.middleware.logging import LoggingMiddleware
+
+    mcp.add_middleware(
+        LoggingMiddleware(
+            logger=logging.getLogger("doctr_mcp.requests"),
+            include_payloads=True,
+            max_payload_length=_settings.log_max_payload_length,
+            methods=["tools/call"],
+        )
+    )
 
 
 @mcp.custom_route("/", methods=["GET"])

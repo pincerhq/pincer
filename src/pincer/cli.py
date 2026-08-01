@@ -151,6 +151,32 @@ def run() -> None:
     asyncio.run(_run_agent(settings))
 
 
+def _format_pdf_attachment(pages: list[str], filename: str, abs_path: str, max_chars: int = 30_000) -> str:
+    """Format a PDF attachment's extracted text for the LLM prompt.
+
+    A scanned/image-only PDF has no embedded text layer, so pymupdf's
+    `page.get_text()` returns empty/near-empty strings per page — detect that
+    case (average non-whitespace chars/page below a conservative threshold;
+    real text pages have hundreds, so this only misfires if *every* page in
+    the document is near-blank) and say so explicitly instead of silently
+    reporting a blank code block, so the agent knows to reach for an
+    OCR-capable tool rather than guessing at the contents from the filename.
+    """
+    content = "\n\n".join(pages)
+    non_ws_chars = len("".join(content.split()))
+    is_scanned = bool(pages) and non_ws_chars < 20 * len(pages)
+    if is_scanned:
+        return (
+            f"[File: {filename} — {len(pages)} pages, saved to {abs_path}]\n"
+            "No embedded text found; this PDF appears to be a scanned/image-only "
+            "document. If an OCR-capable tool is connected, use it to read this "
+            "file's content — do not guess at the contents from the filename alone."
+        )
+    if len(content) > max_chars:
+        content = content[:max_chars] + f"\n... [truncated, {len(pages)} pages total]"
+    return f"[File: {filename} — {len(pages)} pages, saved to {abs_path}]\n```\n{content}\n```"
+
+
 def _create_memory_backend(settings: Settings):  # type: ignore[return]
     """Factory: select and construct the configured memory backend."""
     if settings.memory_backend == "mcp":
@@ -594,13 +620,7 @@ async def _run_agent(settings: Settings) -> None:
                         doc = pymupdf.open(stream=raw_bytes, filetype="pdf")
                         pages = [page.get_text() for page in doc]
                         doc.close()
-                        content = "\n\n".join(pages)
-                        max_chars = 30_000
-                        if len(content) > max_chars:
-                            content = content[:max_chars] + f"\n... [truncated, {len(pages)} pages total]"
-                        file_parts.append(
-                            f"[File: {filename} — {len(pages)} pages, saved to {abs_path}]\n```\n{content}\n```"
-                        )
+                        file_parts.append(_format_pdf_attachment(pages, filename, abs_path))
                     except ImportError:
                         file_parts.append(
                             f"[File: {filename}] saved to {abs_path} "

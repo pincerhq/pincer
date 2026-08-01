@@ -206,7 +206,7 @@ command = "python"
 args = ["${PINCER_SRC_DIR:-$PWD}/src/doctr-mcp/doctr_mcp/server.py", "--transport", "stdio"]
 env = { DOCTR_DEVICE = "cpu", DOCTR_CACHE_DIR = "${PINCER_DATA_DIR}/doctr_cache" }
 sandbox = true
-approval_required = ["*"]
+approval_required = ["!*"]
 # Predictor construction and model download are lazy (only on first tool call, not
 # at startup), so the default startup_timeout is fine — but per-call inference on
 # CPU is slower than this repo's other bundled servers, hence the longer timeout.

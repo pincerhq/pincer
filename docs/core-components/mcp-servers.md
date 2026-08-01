@@ -447,6 +447,8 @@ Server-specific variables:
 | `doctr-mcp` | `DOCTR_DEFAULT_DET_ARCH` | `db_resnet50` | Default detection architecture when a tool call omits `det_arch` |
 | `doctr-mcp` | `DOCTR_DEFAULT_RECO_ARCH` | `crnn_vgg16_bn` | Default recognition architecture when a tool call omits `reco_arch` |
 | `doctr-mcp` | `DOCTR_CACHE_DIR` | `~/.cache/doctr` | Model weight cache directory (read natively by docTR itself) |
+| `doctr-mcp` | `DOCTR_LOG_TOOL_REQUESTS` | `false` | Log every tool call's request/response payload (truncated) via FastMCP's `LoggingMiddleware` |
+| `doctr-mcp` | `DOCTR_LOG_MAX_PAYLOAD_LENGTH` | `2000` | Max characters of payload logged per call when the above is on |
 | All MCP servers | `OTEL_DSN` | — | OpenTelemetry collector DSN (optional, see [Telemetry](#telemetry)) |
 
 ---

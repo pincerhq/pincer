@@ -14,6 +14,9 @@ dependencies = [
     # broken (empty `fastmcp/__init__.py`, `FastMCP` unimportable). 3.2.4 is the
     # version this whole server is built and tested against.
     "fastmcp==3.2.4",
+    # Imported directly for JSONResponse in server.py — already a transitive dep of
+    # fastmcp/starlette, but listed explicitly since it's used directly here.
+    "fastapi>=0.115.0",
     "uvicorn[standard]>=0.34.0",
     "starlette>=0.41.0",
     "pydantic>=2.4.1,<3.0",

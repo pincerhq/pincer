@@ -48,6 +48,16 @@ class DoctrSettings(BaseSettings):  # type: ignore[misc]
     default_det_arch: str = "db_resnet50"
     default_reco_arch: str = "crnn_vgg16_bn"
 
+    log_tool_requests: bool = False
+    """If True, log every tools/call request and response (tool name, truncated
+    payload, duration) via FastMCP's LoggingMiddleware. Off by default — this is
+    a debugging aid; payloads can contain OCR'd document contents."""
+
+    log_max_payload_length: int = 2000
+    """Max characters of the (JSON-serialized) request/response payload to
+    include per log line when log_tool_requests is on. Prevents a single
+    DOCTR_MAX_INPUT_MB-sized call from writing a multi-megabyte log line."""
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> DoctrSettings:

@@ -175,6 +175,7 @@ class MCPClientManager:
                     "enabled": srv.enabled,
                     "connected": session.connected if session else False,
                     "tool_count": len(session.tools) if session else 0,
+                    "instructions": session.instructions if session else None,
                     "disabled": srv.name in self._disabled,
                     "sandbox": srv.sandbox,
                     "approval_required": srv.approval_required,

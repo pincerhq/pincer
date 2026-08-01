@@ -14,6 +14,7 @@ def _make_agent():
     settings.max_tool_iterations = 5
     settings.default_provider = MagicMock(value="anthropic")
     settings.daily_budget_usd = 10.0
+    settings.mcp_instructions_max_chars = 400
 
     llm = MagicMock()
     session_mgr = MagicMock()
@@ -102,6 +103,76 @@ async def test_build_system_prompt_mcp_no_connected_servers():
 
     prompt = await agent._build_system_prompt("user1", "hello")
     assert "[Connected MCP servers" not in prompt
+
+
+async def test_build_system_prompt_includes_server_instructions():
+    """A connected server's instructions text appears under its name/tool_count line."""
+    agent = _make_agent()
+    manager = MagicMock()
+    manager.list_servers = AsyncMock(
+        return_value=[
+            {
+                "name": "doctr",
+                "connected": True,
+                "tool_count": 6,
+                "instructions": "Use ocr_document_text for a quick plain-text read of an image or PDF.",
+            },
+        ]
+    )
+    agent.mcp_manager = manager
+
+    prompt = await agent._build_system_prompt("user1", "hello")
+    assert "doctr (6 tool(s))" in prompt
+    assert "Use ocr_document_text for a quick plain-text read of an image or PDF." in prompt
+
+
+async def test_build_system_prompt_missing_instructions_key_is_backward_compatible():
+    """Server dicts without an 'instructions' key (older shape) must not crash or add a stray line."""
+    agent = _make_agent()
+    agent.mcp_manager = _make_mcp_manager(connected=True)
+
+    prompt = await agent._build_system_prompt("user1", "hello")
+    assert "github (5 tool(s))" in prompt
+    assert "→" not in prompt
+
+
+async def test_build_system_prompt_none_instructions_adds_no_line():
+    """A server with instructions=None gets no follow-up line, no crash."""
+    agent = _make_agent()
+    manager = MagicMock()
+    manager.list_servers = AsyncMock(
+        return_value=[
+            {"name": "quiet", "connected": True, "tool_count": 1, "instructions": None},
+        ]
+    )
+    agent.mcp_manager = manager
+
+    prompt = await agent._build_system_prompt("user1", "hello")
+    assert "quiet (1 tool(s))" in prompt
+    assert "→" not in prompt
+
+
+async def test_build_system_prompt_truncates_long_instructions():
+    """Instructions longer than mcp_instructions_max_chars are truncated with an ellipsis."""
+    agent = _make_agent()
+    agent._settings.mcp_instructions_max_chars = 20
+    manager = MagicMock()
+    manager.list_servers = AsyncMock(
+        return_value=[
+            {
+                "name": "verbose",
+                "connected": True,
+                "tool_count": 1,
+                "instructions": "This is a very long instructions string that exceeds the configured cap.",
+            },
+        ]
+    )
+    agent.mcp_manager = manager
+
+    prompt = await agent._build_system_prompt("user1", "hello")
+    assert "This is a very long" in prompt
+    assert "…" in prompt
+    assert "exceeds the configured cap" not in prompt
 
 
 async def test_build_system_prompt_mcp_list_servers_error_is_silent():
