@@ -110,6 +110,15 @@ services:
       MS365_TENANT_ID: "${PINCER_MS365_TENANT_ID:-common}"
       MS365_TOKEN_CACHE_DIR: "/app/data"
       MS365_TOKEN_ENCRYPTION_KEY: "${PINCER_MS365_TOKEN_ENCRYPTION_KEY}"
+
+  doctr-mcp:
+    extends:
+      file: ./src/doctr-mcp/docker-compose.yml
+      service: doctr-mcp
+    image: pincer/doctr-mcp:latest
+    profiles:
+      - http
+
   pincer-stdio:
     <<: *pincer-base
     container_name: pincer
@@ -149,12 +158,15 @@ services:
         condition: service_healthy
       ms365-mcp:
         condition: service_healthy
+      doctr-mcp:
+        condition: service_healthy
 
 volumes:
   pincer-data:
   memory-data:
   model-cache:
   ms365-data:
+  doctr-model-cache:
 
 networks:
   pincer-net:

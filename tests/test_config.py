@@ -36,6 +36,8 @@ def test_settings_no_providers_raises(tmp_path: Path) -> None:
             default_provider="anthropic",
             anthropic_api_key="",  # type: ignore[arg-type]
             openai_api_key="",  # type: ignore[arg-type]
+            openai_compatible_base_url="",
+            anthropic_compatible_base_url="",
             data_dir=tmp_path,
             _env_file=None,  # hermetic: ignore the developer's .env  # type: ignore[call-arg]
         )

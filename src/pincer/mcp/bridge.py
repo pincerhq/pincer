@@ -10,10 +10,14 @@ For each tool discovered on an MCP server, creates an async callable that:
 
 from __future__ import annotations
 
+import base64
 import fnmatch
 import logging
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from pincer.mcp.config import MCPTransport
 
 if TYPE_CHECKING:
     from pincer.mcp.audit import MCPAuditLogger
@@ -88,6 +92,41 @@ def _format_result(result: Any) -> str:
     return "\n".join(parts) if parts else "(empty response)"
 
 
+def _inline_local_file_paths(value: Any, upload_root: Path) -> Any:
+    """Recursively replace ``file_path`` arguments pointing inside our own
+    local upload cache with inline ``image_b64`` content.
+
+    Needed only for HTTP-transport MCP servers: they run in a separate,
+    isolated container/process with no shared filesystem, so a ``file_path``
+    the model copied from an attachment hint (see cli.py's image/PDF
+    attachment handling) would point at a path that doesn't exist on the
+    server's side. This is the local-disk fallback for when no shared
+    object-storage bridge (e.g. S3/MinIO) is configured — a stdio server
+    never needs this since it already shares Pincer's filesystem directly.
+
+    Scoped strictly to paths under ``upload_root`` (never arbitrary
+    filesystem paths) so a compromised or hallucinating tool call can't be
+    used to read and exfiltrate unrelated local files through this
+    "helpful" substitution.
+    """
+    if isinstance(value, dict):
+        if isinstance(value.get("file_path"), str) and "image_b64" not in value:
+            candidate = Path(value["file_path"])
+            try:
+                resolved = candidate.resolve()
+                in_upload_root = resolved.is_relative_to(upload_root.resolve())
+            except (OSError, ValueError):
+                in_upload_root = False
+            if in_upload_root and resolved.is_file():
+                inlined = {k: v for k, v in value.items() if k != "file_path"}
+                inlined["image_b64"] = base64.b64encode(resolved.read_bytes()).decode()
+                return inlined
+        return {k: _inline_local_file_paths(v, upload_root) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_inline_local_file_paths(v, upload_root) for v in value]
+    return value
+
+
 class MCPToolBridge:
     """
     Bridges MCP tools into Pincer's tool registry.
@@ -103,12 +142,17 @@ class MCPToolBridge:
         audit_logger: MCPAuditLogger,
         prefix: bool = True,
         security_gate: MCPSecurityGate | None = None,
+        local_upload_root: Path | None = None,
     ) -> None:
         self.session = session
         self.tool_registry = tool_registry
         self.audit_logger = audit_logger
         self.prefix = prefix
         self.security_gate = security_gate
+        # Pincer's own local attachment cache (settings.data_dir/workspace/uploads).
+        # Used to inline file_path arguments as base64 for HTTP-transport
+        # servers — see _inline_local_file_paths.
+        self.local_upload_root = local_upload_root
         self._registered_names: list[str] = []
 
     def register_tools(self) -> int:
@@ -180,6 +224,7 @@ class MCPToolBridge:
         session = self.session
         audit = self.audit_logger
         security = self.security_gate
+        upload_root = self.local_upload_root
 
         async def handler(context: dict[str, Any] | None = None, **kwargs: Any) -> str:
             identity = (context or {}).get("user_id")
@@ -187,6 +232,9 @@ class MCPToolBridge:
             # Rate limiting
             if security and not security.check_rate_limit(session.name, mcp_name):
                 return f"[RateLimited] Too many calls to {session.name}::{mcp_name} — slow down"
+
+            if upload_root is not None and session.config.transport == MCPTransport.STREAMABLE_HTTP:
+                kwargs = _inline_local_file_paths(kwargs, upload_root)
 
             call_key = str(uuid.uuid4())
             audit.start_call(session.name, mcp_name, call_key)

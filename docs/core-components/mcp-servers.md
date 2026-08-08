@@ -2,8 +2,9 @@
 
 Pincer supports two transports for connecting to MCP servers: **stdio** and
 **streamable-HTTP**. Every bundled MCP server in the workspace (`pomodoro-mcp`,
-`pincer-mcps`, `sqlite-vec-memory-mcp`) implements both. This document explains
-how each transport works, when to use it, and how to configure it in `pincer.toml`.
+`pincer-mcps`, `sqlite-vec-memory-mcp`, `doctr-mcp`) implements both. This document
+explains how each transport works, when to use it, and how to configure it in
+`pincer.toml`.
 
 Related: [MCP Client Guide](../guides/mcp-guide.md) · [MCP Server (outbound)](pincer-mcp-server.md)
 
@@ -369,6 +370,13 @@ name      = "memory"
 transport = "streamable-http"
 url       = "http://memory-server:8002/mcp"
 timeout   = 60
+
+# Heaviest bundled server (torch-based OCR) — HTTP, longer timeout for CPU inference
+[[mcp.servers]]
+name      = "doctr"
+transport = "streamable-http"
+url       = "http://doctr-mcp:8000/mcp"
+timeout   = 120
 ```
 
 ---
@@ -430,6 +438,17 @@ Server-specific variables:
 | `pincer-mcps` (`newsapi`) | `API_KEY` | — | NewsAPI.org API key |
 | `pincer-mcps` (`translate`) | `LIBRETRANSLATE_URL` | — | LibreTranslate instance URL |
 | `pincer-mcps` (`websearch`) | `API_KEY` | — | Tavily API key (optional — falls back to DuckDuckGo if unset) |
+| `doctr-mcp` | `TRANSPORT` | `http` | Overrides the `stdio` default above — heavy-model servers default to HTTP |
+| `doctr-mcp` | `DOCTR_DEVICE` | `cpu` | `cpu` or `cuda` — never auto-detected |
+| `doctr-mcp` | `DOCTR_MAX_WORKERS` | `1` | Max concurrent doctr inferences process-wide |
+| `doctr-mcp` | `DOCTR_TORCH_THREADS` | `0` (= `os.cpu_count()`) | Passed to `torch.set_num_threads()` at startup |
+| `doctr-mcp` | `DOCTR_MAX_CACHED_PREDICTORS` | `4` | Bounded LRU size for the predictor cache |
+| `doctr-mcp` | `DOCTR_MAX_INPUT_MB` | `20` | Reject decoded image/PDF payloads larger than this |
+| `doctr-mcp` | `DOCTR_DEFAULT_DET_ARCH` | `db_resnet50` | Default detection architecture when a tool call omits `det_arch` |
+| `doctr-mcp` | `DOCTR_DEFAULT_RECO_ARCH` | `crnn_vgg16_bn` | Default recognition architecture when a tool call omits `reco_arch` |
+| `doctr-mcp` | `DOCTR_CACHE_DIR` | `~/.cache/doctr` | Model weight cache directory (read natively by docTR itself) |
+| `doctr-mcp` | `DOCTR_LOG_TOOL_REQUESTS` | `false` | Log every tool call's request/response payload (truncated) via FastMCP's `LoggingMiddleware` |
+| `doctr-mcp` | `DOCTR_LOG_MAX_PAYLOAD_LENGTH` | `2000` | Max characters of payload logged per call when the above is on |
 | All MCP servers | `OTEL_DSN` | — | OpenTelemetry collector DSN (optional, see [Telemetry](#telemetry)) |
 
 ---
@@ -441,7 +460,7 @@ logs to an [Uptrace](https://uptrace.dev)-compatible OTLP collector. Telemetry i
 **disabled by default** and fully opt-in — no data leaves the process unless you
 set the DSN.
 
-### MCP servers (`pomodoro-mcp`, `pincer-mcps`, `sqlite-vec-memory-mcp`)
+### MCP servers (`pomodoro-mcp`, `pincer-mcps`, `sqlite-vec-memory-mcp`, `doctr-mcp`)
 
 Set `OTEL_DSN` to your collector DSN before starting the server:
 
@@ -471,6 +490,7 @@ Install the telemetry extra for each package:
 pip install "pomodoro-mcp[telemetry]"
 pip install "pincer-mcps[telemetry]"
 pip install "sqlite-vec-memory-mcp[telemetry]"
+pip install "doctr-mcp[telemetry]"
 ```
 
 ### Pincer agent
@@ -500,4 +520,5 @@ pip install "pincer-agent[telemetry]"
 | `pomodoro-mcp` | `OTEL_DSN` | — |
 | `pincer-mcps` (all servers) | `OTEL_DSN` | — |
 | `sqlite-vec-memory-mcp` | `OTEL_DSN` | — |
+| `doctr-mcp` | `OTEL_DSN` | — |
 | Pincer agent | `PINCER_TELEMETRY_DSN` | `telemetry_dsn` |

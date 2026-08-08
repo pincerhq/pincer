@@ -14,7 +14,7 @@ def test_oauth_flow_issue_and_validate():
         allowed_clients=[
             {"client_id": "cursor", "client_secret": "cursor-secret", "name": "Cursor IDE"},
         ],
-        signing_key="integration-test-key",
+        signing_key="integration-test-signing-key-32-bytes!!",
         token_expiry_seconds=3600,
     )
 
@@ -33,7 +33,7 @@ def test_oauth_flow_issue_and_validate():
 
 def test_remote_client_without_oauth_not_localhost():
     """Non-localhost address correctly identified as requiring auth."""
-    provider = MCPAuthProvider(allowed_clients=[], signing_key="k")
+    provider = MCPAuthProvider(allowed_clients=[], signing_key="test-signing-key-32-bytes-long!!")
     assert provider.is_localhost("10.0.0.5") is False
     assert provider.is_localhost("172.16.0.1") is False
 

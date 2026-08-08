@@ -77,6 +77,7 @@ mcp = [
     "pincer-mcps",
     "sqlite-vec-memory-mcp",
     "ms365-mcp",
+    "doctr-mcp",
 ]
 slack = [
     "slack-sdk>=3.27.0",
@@ -147,6 +148,7 @@ extend-ignore = ["N814", "N818"]
 "mcp_servers/**" = ["B008"]
 # Test files use pytest/stdlib imports in annotations at runtime — TC rules don't apply.
 "src/ms365-mcp/tests/**" = ["TC002", "TC003"]
+"src/doctr-mcp/tests/**" = ["TC002", "TC003"]
 "tests/**" = ["TC002", "TC003"]
 
 [tool.mypy]
@@ -206,6 +208,7 @@ members = [
     "src/pomodoro-mcp",
     "src/sqlite-vec-memory-mcp",
     "src/ms365-mcp",
+    "src/doctr-mcp",
 ]
 
 [tool.uv.sources]
@@ -213,3 +216,12 @@ pomodoro-mcp = { workspace = true }
 pincer-mcps = { workspace = true }
 sqlite-vec-memory-mcp = { workspace = true }
 ms365-mcp = { workspace = true }
+doctr-mcp = { workspace = true }
+
+# CPU-only torch/torchvision wheel index for doctr-mcp (src/doctr-mcp/pyproject.toml
+# points its `torch`/`torchvision` sources at this index) — `explicit = true` means it
+# is never used as a default index for anything else in the workspace.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

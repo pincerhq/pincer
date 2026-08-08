@@ -22,6 +22,7 @@ from pincer.mcp.client import MCPClientSession
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
     from mcp.types import LoggingMessageNotificationParams
 
@@ -52,11 +53,15 @@ class MCPClientManager:
         tool_registry: ToolRegistry,
         audit_logger: AuditLogger | None = None,
         security_gate: MCPSecurityGate | None = None,
+        local_upload_root: Path | None = None,
     ) -> None:
         self.config = config
         self.tool_registry = tool_registry
         self._audit = MCPAuditLogger(audit_logger, security_gate)
         self._security_gate = security_gate
+        # Passed through to every MCPToolBridge — lets HTTP-transport servers
+        # receive local attachments as inline base64 (see bridge.py).
+        self._local_upload_root = local_upload_root
         self._sessions: dict[str, MCPClientSession] = {}
         self._bridges: dict[str, MCPToolBridge] = {}
         self._task_group: anyio.abc.TaskGroup | None = None
@@ -117,6 +122,7 @@ class MCPClientManager:
                 audit_logger=self._audit,
                 prefix=self.config.tool_prefix,
                 security_gate=self._security_gate,
+                local_upload_root=self._local_upload_root,
             )
             bridge.register_tools()
             self._bridges[srv_config.name] = bridge
@@ -175,6 +181,7 @@ class MCPClientManager:
                     "enabled": srv.enabled,
                     "connected": session.connected if session else False,
                     "tool_count": len(session.tools) if session else 0,
+                    "instructions": session.instructions if session else None,
                     "disabled": srv.name in self._disabled,
                     "sandbox": srv.sandbox,
                     "approval_required": srv.approval_required,
@@ -243,6 +250,7 @@ class MCPClientManager:
                     audit_logger=self._audit,
                     prefix=self.config.tool_prefix,
                     security_gate=self._security_gate,
+                    local_upload_root=self._local_upload_root,
                 )
                 bridge.register_tools()
                 self._bridges[name] = bridge

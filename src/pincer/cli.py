@@ -14,6 +14,7 @@ import contextlib
 import logging
 import os
 import socket
+import uuid
 from datetime import UTC
 from typing import TYPE_CHECKING, Any
 
@@ -149,6 +150,61 @@ def run() -> None:
     console.print()
 
     asyncio.run(_run_agent(settings))
+
+
+def _format_pdf_attachment(pages: list[str], filename: str, abs_path: str, max_chars: int = 30_000) -> str:
+    """Format a PDF attachment's extracted text for the LLM prompt.
+
+    A scanned/image-only PDF has no embedded text layer, so pymupdf's
+    `page.get_text()` returns empty/near-empty strings per page — detect that
+    case (average non-whitespace chars/page below a conservative threshold;
+    real text pages have hundreds, so this only misfires if *every* page in
+    the document is near-blank) and say so explicitly instead of silently
+    reporting a blank code block, so the agent knows to reach for an
+    OCR-capable tool rather than guessing at the contents from the filename.
+    """
+    content = "\n\n".join(pages)
+    non_ws_chars = len("".join(content.split()))
+    is_scanned = bool(pages) and non_ws_chars < 20 * len(pages)
+    if is_scanned:
+        return (
+            f"[File: {filename} — {len(pages)} pages] saved to {abs_path}.\n"
+            "No embedded text found; this PDF appears to be a scanned/image-only "
+            "document (pages are images, not text). If the user wants its text "
+            f"read/extracted, call the OCR tool with file_path='{abs_path}' — "
+            "do not guess at the contents from the filename, and do not try to "
+            "transcribe it yourself."
+        )
+    if len(content) > max_chars:
+        content = content[:max_chars] + f"\n... [truncated, {len(pages)} pages total]"
+    return f"[File: {filename} — {len(pages)} pages, saved to {abs_path}]\n```\n{content}\n```"
+
+
+_IMAGE_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "image/tiff": ".tiff",
+}
+
+
+def _format_image_attachment(filename: str, abs_path: str, size_bytes: int, media_type: str) -> str:
+    """Format an image attachment note for the LLM prompt.
+
+    Images have no text layer the model can inspect ahead of time, and unlike
+    a vision content block, an OCR tool needs a concrete argument (a file
+    path here) to act on — the model cannot regenerate the original bytes
+    from having merely "seen" the image. Give it that path directly, and
+    tell it not to transcribe the image itself via vision, which is slow
+    and produces nothing an OCR tool call can use.
+    """
+    return (
+        f"[Image: {filename}] saved to {abs_path} ({size_bytes} bytes, {media_type}).\n"
+        "If the user wants text read/extracted from this image, call the OCR tool "
+        f"with file_path='{abs_path}' — do not try to transcribe it yourself."
+    )
 
 
 def _create_memory_backend(settings: Settings):  # type: ignore[return]
@@ -406,6 +462,7 @@ async def _run_agent(settings: Settings) -> None:
                 config=mcp_cfg,
                 tool_registry=tools,
                 audit_logger=audit_logger,
+                local_upload_root=settings.data_dir / "workspace" / "uploads",
             )
             connection_results = await mcp_manager.start()
             for server_name, ok in connection_results.items():
@@ -594,13 +651,7 @@ async def _run_agent(settings: Settings) -> None:
                         doc = pymupdf.open(stream=raw_bytes, filetype="pdf")
                         pages = [page.get_text() for page in doc]
                         doc.close()
-                        content = "\n\n".join(pages)
-                        max_chars = 30_000
-                        if len(content) > max_chars:
-                            content = content[:max_chars] + f"\n... [truncated, {len(pages)} pages total]"
-                        file_parts.append(
-                            f"[File: {filename} — {len(pages)} pages, saved to {abs_path}]\n```\n{content}\n```"
-                        )
+                        file_parts.append(_format_pdf_attachment(pages, filename, abs_path))
                     except ImportError:
                         file_parts.append(
                             f"[File: {filename}] saved to {abs_path} "
@@ -622,6 +673,24 @@ async def _run_agent(settings: Settings) -> None:
 
             file_context = "\n\n".join(file_parts)
             text = f"{file_context}\n\n{text}" if text else file_context
+
+        # Handle image attachments — save to disk so an OCR-capable tool can
+        # be given a concrete file_path (mirrors the file-attachment saving
+        # above; images arrive without a filename, so one is generated).
+        if incoming.images:
+            uploads_dir = settings.data_dir / "workspace" / "uploads"
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+
+            image_parts: list[str] = []
+            for raw_bytes, media_type in incoming.images:
+                ext = _IMAGE_EXTENSIONS.get(media_type, ".bin")
+                filename = f"image_{uuid.uuid4().hex[:8]}{ext}"
+                save_path = uploads_dir / filename
+                save_path.write_bytes(raw_bytes)
+                image_parts.append(_format_image_attachment(filename, str(save_path), len(raw_bytes), media_type))
+
+            image_context = "\n\n".join(image_parts)
+            text = f"{image_context}\n\n{text}" if text else image_context
 
         # The raw ID already on this message is the channel-native ID for
         # whoever we're replying to right now — guaranteed correct, and more

@@ -39,6 +39,11 @@ class CoreSettings(BaseModel):
         default=None,
         description="Soft budget for the Available Skills prompt block; None disables truncation",
     )
+    mcp_instructions_max_chars: int = Field(
+        default=400,
+        ge=0,
+        description="Per-server truncation length for MCP server 'instructions' text surfaced in the system prompt",
+    )
 
     # ── Logging ───────────────────────────────────────────
     log_level: LogLevel = LogLevel.INFO

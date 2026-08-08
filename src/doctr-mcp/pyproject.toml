@@ -1,0 +1,80 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "doctr-mcp"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    # Pinned to a released version, not `main` (unlike doctr's own `api/pyproject.toml`,
+    # which intentionally tracks its dev branch) — reproducibility matters more here.
+    "python-doctr==1.0.1",
+    # See src/ms365-mcp/pyproject.toml's comment: fastmcp 3.4.2's PyPI packaging is
+    # broken (empty `fastmcp/__init__.py`, `FastMCP` unimportable). 3.2.4 is the
+    # version this whole server is built and tested against.
+    "fastmcp==3.2.4",
+    # Imported directly for JSONResponse in server.py — already a transitive dep of
+    # fastmcp/starlette, but listed explicitly since it's used directly here.
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.34.0",
+    "starlette>=0.41.0",
+    "pydantic>=2.4.1,<3.0",
+    "pydantic-settings>=2.0.0",
+    "pillow>=10.1.0",
+    # torch/torchvision are already transitive deps of python-doctr, but uv's
+    # `[tool.uv.sources]` index redirection (below) only applies to packages listed
+    # as *direct* dependencies here — hence the explicit listing, version-aligned
+    # with python-doctr 1.0.1's own constraints.
+    "torch>=2.0.0,<3.0.0",
+    "torchvision>=0.15.0",
+]
+
+[project.optional-dependencies]
+telemetry = [
+    "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@main"
+]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+doctr-mcp-run = "doctr_mcp.server:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["doctr_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+# Force CPU-only torch/torchvision wheels — python-doctr depends on torch/torchvision
+# directly with no CPU-only extra, and letting uv resolve the default PyPI wheels here
+# would pull full CUDA builds (multi-GB) into an image that never uses a GPU by default.
+# The `platform_system != 'Darwin'` marker matters because download.pytorch.org's
+# "cpu" index does not publish macOS wheels at all (macOS-arm64 only ever gets a
+# combined CPU/MPS build from PyPI) — this is uv's documented recipe for CPU-only
+# torch: https://docs.astral.sh/uv/guides/integration/pytorch/#configuring-cpu-only-builds
+#
+# The `[[tool.uv.index]]` block below is duplicated in the workspace *root*
+# pyproject.toml. uv only reads index definitions from whichever pyproject.toml is
+# acting as the resolution root: the outer workspace root when this package is
+# resolved as a workspace member (the normal dev flow), or this file itself when
+# the Dockerfile copies only `src/doctr-mcp/` as a standalone build context (this
+# server's own build, since its image is far heavier than the other bundled
+# servers'). Both copies must stay in sync if the index URL ever changes.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "platform_system != 'Darwin'" }]
+torchvision = [{ index = "pytorch-cpu", marker = "platform_system != 'Darwin'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

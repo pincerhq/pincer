@@ -41,6 +41,7 @@ class MCPClientSession:
         self._connect_attempts = 0
         self._tmpdir: str | None = None
         self._sandbox: MCPSandbox | None = None
+        self._instructions: str | None = None
         # Set via set_notification_handler() — may be attached before or after
         # connect(), since the server-to-client push this feeds (e.g. ms365-mcp's
         # delayed auth-completion message) can arrive minutes after connection.
@@ -77,6 +78,13 @@ class MCPClientSession:
     @property
     def tools(self) -> list[Any]:
         return self._tools
+
+    @property
+    def instructions(self) -> str | None:
+        """The server's self-reported usage instructions from the MCP handshake
+        (`InitializeResult.instructions`), surfaced to the agent's system prompt
+        alongside the server's tool list — see MCPClientManager.list_servers()."""
+        return self._instructions
 
     async def connect(self) -> None:
         """Establish connection and initialize MCP session."""
@@ -117,7 +125,8 @@ class MCPClientSession:
             # first launch need a much longer window here without slowing down every
             # subsequent tool call.
             with anyio.fail_after(self.config.startup_timeout):
-                await self._session.initialize()
+                init_result = await self._session.initialize()
+                self._instructions = init_result.instructions
                 await self._discover_tools()
 
             self._connected = True
@@ -348,6 +357,7 @@ class MCPClientSession:
     async def _cleanup(self) -> None:
         self._connected = False
         self._session = None
+        self._instructions = None
         if self._exit_stack:
             with contextlib.suppress(Exception):
                 await self._exit_stack.aclose()
