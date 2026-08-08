@@ -175,9 +175,7 @@ async def test_log_tool_requests_truncates_payload(
         importlib.reload(server)
         with caplog.at_level(logging_module.INFO, logger="doctr_mcp.requests"):
             await server.mcp.call_tool("list_architectures", {"params": {}})
-        request_records = [
-            r for r in caplog.records if r.name == "doctr_mcp.requests" and "request_start" in r.message
-        ]
+        request_records = [r for r in caplog.records if r.name == "doctr_mcp.requests" and "request_start" in r.message]
         assert request_records
         # The truncated payload (20 chars + "...") must be far shorter than the
         # untruncated CallToolRequestParams JSON would be.

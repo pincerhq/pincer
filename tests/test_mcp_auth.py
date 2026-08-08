@@ -17,7 +17,7 @@ def _make_provider(**kwargs) -> MCPAuthProvider:
             {"client_id": "claude-desktop", "client_secret": "secret123", "name": "Claude Desktop"},
         ],
     )
-    return MCPAuthProvider(allowed_clients=clients, signing_key="test-signing-key", **kwargs)
+    return MCPAuthProvider(allowed_clients=clients, signing_key="test-signing-key-32-bytes-long!!", **kwargs)
 
 
 # ── Token issuance ─────────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ def test_validate_token_expired():
         "exp": int(time.time()) - 3600,
         "jti": "expiredtoken",
     }
-    expired_token = pyjwt.encode(expired_payload, "test-signing-key", algorithm="HS256")
+    expired_token = pyjwt.encode(expired_payload, "test-signing-key-32-bytes-long!!", algorithm="HS256")
     assert provider.validate_token(expired_token) is None
 
 
@@ -128,7 +128,7 @@ def test_auto_generate_secret_if_not_provided():
     """A client without a pre-set secret gets one auto-generated."""
     provider = MCPAuthProvider(
         allowed_clients=[{"client_id": "auto-client"}],
-        signing_key="test-key",
+        signing_key="test-signing-key-32-bytes-long!!",
     )
     client = provider._clients["auto-client"]
     assert len(client.client_secret) > 10
