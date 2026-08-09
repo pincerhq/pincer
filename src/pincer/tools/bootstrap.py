@@ -479,8 +479,7 @@ def _register_schedule_tools(tools: ToolRegistry, settings: Settings, report: di
                 "prompt": {
                     "type": "string",
                     "description": (
-                        "Fully self-contained instruction to run later — no conversation context "
-                        "or memory carries over"
+                        "Fully self-contained instruction to run later — no conversation context or memory carries over"
                     ),
                 },
                 "cron_expr": {

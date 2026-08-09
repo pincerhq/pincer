@@ -4,7 +4,38 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ---
 
-## [0.8.0] — Upcoming
+## [0.9.0] — Upcoming
+
+### docTR MCP Server — OCR (6 tools)
+
+**New module:** `src/doctr-mcp/` — a FastMCP server wrapping
+[mindee/doctr](https://github.com/mindee/doctr) for OCR: `ocr_document_text`,
+`ocr_document`, `detect_text`, `recognize_text`, `extract_key_info`,
+`list_architectures`. Defaults to HTTP transport (the heaviest bundled
+server, torch-based) with a lazy bounded-LRU predictor cache. Docker/compose
+setup with a pre-baked model cache volume; wired into CI and
+`docs/core-components/mcp-servers.md`.
+
+### Background task execution rework — repid + chat-driven scheduling
+
+The hand-rolled `CronScheduler` poll/fire loop is replaced by durable,
+retryable [repid](https://pypi.org/project/repid/) actors (new
+`src/pincer/tasks/` package). Schedules are now created, listed, removed,
+and toggled entirely via chat (`schedule_create`/`list`/`remove`/`toggle`
+tools) instead of the CLI, and run through a session-free `Agent.run_headless`
+execution path. A new `Deliverer`/`ResultRelay` pub-sub bridge lets a
+standalone `pincer run tasks` worker (Redis-backed) scale schedule/webhook
+execution independently of the main agent process —
+`docker-compose.yml`'s `http` profile ships a `redis` service and a
+`pincer-http-tasks` worker service as the reference topology.
+
+See [changelog/v0.9.0.md](v0.9.0.md) for the full write-up, and
+[Background Tasks](../core-components/background-tasks.md) for the
+architecture and config reference.
+
+---
+
+## [0.8.0] — 2026-07-19
 
 ### Deprecated
 

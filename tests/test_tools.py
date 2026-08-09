@@ -62,6 +62,7 @@ class TestScheduleToolRegistration:
         assert registry.requires_approval("schedule_remove") is True
         assert registry.requires_approval("schedule_toggle") is True
         assert registry.requires_approval("schedule_list") is False
+
     assert is_blocked("python --version") is None
     assert is_blocked("git status") is None
 

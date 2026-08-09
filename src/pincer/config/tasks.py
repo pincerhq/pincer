@@ -11,9 +11,9 @@ class TaskSettings(BaseModel):
         default="memory",
         description="Broker for background task execution: in-process 'memory' (default, zero infra) or 'redis'",
     )
-    task_redis_url: str = Field(
+    task_broker_url: str = Field(
         default="",
-        description="Redis connection URL, e.g. redis://localhost:6379/0 (required when task_broker=redis)",
+        description="Broker connection URL, e.g. redis://localhost:6379/0 (required when task_broker=redis)",
     )
     task_max_retries: int = Field(
         default=3,

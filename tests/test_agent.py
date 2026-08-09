@@ -158,9 +158,7 @@ async def test_tool_context_falls_back_to_user_id_when_no_channel_user_id(
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
     await agent.handle_message(user_id="user1", channel="test", text="who am i")
 
-    assert seen_contexts == [
-        {"user_id": "user1", "channel": "test", "pincer_user_id": "user1", "channel_name": "test"}
-    ]
+    assert seen_contexts == [{"user_id": "user1", "channel": "test", "pincer_user_id": "user1", "channel_name": "test"}]
 
 
 @pytest.mark.asyncio

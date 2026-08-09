@@ -515,7 +515,7 @@ Pincer doesn't just respond — it reaches out.
 
 **Morning briefing** (7 AM, configurable): weather, today's calendar, top 3 emails, habit check-in.
 
-**Scheduled tasks:** `"Remind me every Friday at 5pm to submit my timesheet"` → cron-scheduled with full cron syntax support.
+**Scheduled tasks:** `"Remind me every Friday at 5pm to submit my timesheet"` → cron-scheduled with full cron syntax support, created/removed/toggled entirely via chat. Runs on a durable, retryable [repid](https://pypi.org/project/repid/) actor system — in-process by default, or a horizontally-scalable Redis-backed worker (`pincer run tasks`) for multi-instance deployments. See [Background Tasks](docs/core-components/background-tasks.md).
 
 **Event triggers:** Gmail pub/sub for real-time email reactions, webhooks from any service.
 
@@ -606,7 +606,8 @@ pincer/
 │   ├── voice/        engine, twiml_server, stt, tts, compliance
 │   ├── security/     firewall, audit, doctor (40+ checks), rate_limiter
 │   ├── costs/        budget
-│   └── scheduler/    cron, proactive, triggers
+│   ├── scheduler/    cron (schedule store), proactive, triggers
+│   └── tasks/        repid actors, dispatch, delivery (durable background execution)
 ├── skills/           11 bundled (27 tool functions)
 ├── tests/            pytest + pytest-asyncio
 └── docs/             includes TOOLS_CATALOG.md (every tool)

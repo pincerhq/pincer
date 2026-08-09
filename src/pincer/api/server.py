@@ -155,7 +155,7 @@ def create_app() -> FastAPI:
         settings = get_settings_relaxed()
         return {
             "agent_running": True,
-            "version": "0.7.6",
+            "version": "0.8.0",
             "channels": {
                 "telegram": bool(settings.telegram_bot_token.get_secret_value()),
                 "whatsapp": settings.whatsapp_enabled,

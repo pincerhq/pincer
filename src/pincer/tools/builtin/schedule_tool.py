@@ -174,8 +174,7 @@ def make_schedule_create_handler(tool_registry: ToolRegistry) -> Callable[..., A
         if is_one_time:
             return f"Scheduled '{name}': runs once at {next_run}. Delivers to {channel_name}."
         return (
-            f"Scheduled '{name}': runs '{cron_expr}' ({resolved_tz}), next run {next_run}. "
-            f"Delivers to {channel_name}."
+            f"Scheduled '{name}': runs '{cron_expr}' ({resolved_tz}), next run {next_run}. Delivers to {channel_name}."
         )
 
     return schedule_create

@@ -26,6 +26,7 @@
 | 11 | Apr 2026 | Slack Native | 71-tool native integration (messages 18, channels 16, users 10, files 10, misc 12, reactions 5) on top of the existing Slack channel; supports bot + user tokens for full-text search |
 | 12 | Apr 2026 | MCP OAuth 2.0 | Full OAuth 2.0 Authorization Server for MCP — `/authorize`, `/token`, `/introspect`, `/revoke`, RFC 8414 metadata, PKCE, JWT tokens, scope enforcement, `token_store.py` (SQLite + keyring) |
 | 13 | Apr 17, 2026 | Tools Catalog | 304 first-party tools catalogued in `docs/TOOLS_CATALOG.md`; README + docs refreshed to reflect 600+ with popular MCP servers |
+| 14 | Aug 9, 2026 | Background Task Execution | Hand-rolled cron fire-loop replaced with durable [repid](https://pypi.org/project/repid/) actors (`tasks/`); chat-driven `schedule_create/list/remove/toggle` tools; session-free `Agent.run_headless`; `Deliverer`/`ResultRelay` pub-sub bridge; standalone `pincer run tasks` worker + Redis broker for horizontal scaling |
 
 ---
 
@@ -79,7 +80,9 @@
 ### Cron Scheduler (`scheduler/cron.py`)
 - SQLite-backed cron job persistence
 - Timezone-aware scheduling via `croniter`
-- 60-second tick interval with missed-job detection
+- As of Sprint 14, this module is store-only — polling and execution moved to
+  the `tasks/` package (durable [repid](https://pypi.org/project/repid/)
+  actors); see [Background Tasks](../core-components/background-tasks.md)
 
 ### Proactive Agent (`scheduler/proactive.py`)
 - Morning briefing: weather (OpenWeatherMap) + calendar + email + news (NewsAPI)
@@ -391,9 +394,15 @@ pincer/
 | `tools/builtin/python_exec.py` | Sandboxed Python code execution |
 | `tools/builtin/shell.py` | Shell command execution |
 | `tools/builtin/transcribe.py` | Voice note transcription (OpenAI Whisper) |
-| `scheduler/cron.py` | SQLite-backed cron scheduler with timezone support |
+| `scheduler/cron.py` | SQLite-backed cron schedule store with timezone support (polling/execution live in `tasks/`) |
 | `scheduler/proactive.py` | Morning briefing (weather, calendar, email, news) |
 | `scheduler/triggers.py` | Event triggers (email polling, calendar reminders, webhooks) |
+| `tasks/app.py` | repid app — broker registration (in-memory or Redis), actor router |
+| `tasks/dispatch.py` | `ScheduleDispatcher` — polls due cron schedules, enqueues repid messages |
+| `tasks/actors.py` | repid actors — `run_scheduled_action`, `process_webhook`, retried via tenacity |
+| `tasks/context.py` | Process-global deliverer/proactive/triggers for actor bodies |
+| `tasks/delivery.py` | `Deliverer`/`ResultEmitter`/`ResultRelay` — pub-sub result delivery bridge for split deployments |
+| `tools/builtin/schedule_tool.py` | Chat-driven `schedule_create/list/remove/toggle` tools |
 | `exceptions.py` | Custom exceptions (`BudgetExceededError`, `LLMError`, `ToolNotFoundError`, `ChannelNotConnectedError`) |
 
 | `mcp/` | MCP platform — client (consume external MCP servers) + server (expose Pincer tools via MCP); sandboxed stdio subprocesses; streamable-http transport; OAuth 2.1; audit trail; registry client (MCP Registry + ClawHub); 225 tests |

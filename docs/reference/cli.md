@@ -18,6 +18,7 @@ Complete command reference across all sprints (1–13). For the full list of too
 | `pincer run --channel telegram` | Start only Telegram channel | 1 |
 | `pincer run --channel whatsapp` | Start only WhatsApp channel | 3 |
 | `pincer run --channel discord` | Start only Discord channel | 4 |
+| `pincer run tasks` | Standalone background-task worker only — no channels/API/MCP export (requires `PINCER_TASK_BROKER=redis`) | 14 |
 | `pincer chat` | CLI chat interface (no messaging app needed) | 4 |
 | `pincer config` | Show current configuration (masked secrets) | 1 |
 | `pincer pair-whatsapp` | Pair WhatsApp via QR code | 3 |
@@ -106,11 +107,19 @@ Then switch the memory backend:
 PINCER_MEMORY_BACKEND=mcp pincer run
 ```
 
-## Proactive Agent
+## Proactive Agent / Background Tasks
 
 | Command | Description | Sprint |
 |---------|-------------|--------|
-| `pincer schedule list` | List all scheduled tasks | 5 |
+| `pincer schedule list` | List all scheduled tasks (read-only, all users) | 5 |
+| `pincer run tasks` | Standalone background-task worker for horizontal scaling | 14 |
+
+Scheduled tasks now run through a durable, retryable [repid](https://pypi.org/project/repid/)
+actor system instead of an in-process fire-loop, and are created, removed,
+and toggled entirely via chat (`schedule_create`/`list`/`remove`/`toggle`
+tools) rather than the CLI. See [Background Tasks](../core-components/background-tasks.md)
+for the full architecture, deployment topologies (single-process vs.
+Redis-backed split worker), and config reference.
 
 ## Google Workspace
 
@@ -204,6 +213,20 @@ complete list. Key variables added in Sprint 5:
 | `PINCER_RATE_MESSAGES_PER_MIN` | `30` | Per-user message rate limit |
 | `PINCER_RATE_TOOLS_PER_MIN` | `20` | Per-user tool call rate limit |
 | `PINCER_MAX_CONCURRENT_LLM` | `5` | Max concurrent LLM requests |
+
+### Background tasks
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PINCER_TASK_BROKER` | `memory` | `memory` (single-process) or `redis` (required for `pincer run tasks`) |
+| `PINCER_TASK_BROKER_URL` | (empty) | Broker URL, e.g. `redis://localhost:6379/0` (required when `task_broker=redis`) |
+| `PINCER_TASK_MAX_RETRIES` | `3` | Max attempts for a background task actor before giving up |
+| `PINCER_TASK_POLL_INTERVAL` | `60` | Seconds between checks for due cron schedules |
+| `PINCER_SCHEDULE_TOOL_ENABLED` | `true` | Enable the `schedule_create`/`list`/`remove`/`toggle` chat tools |
+| `PINCER_MAX_SCHEDULES_PER_USER` | `20` | Max active recurring schedules per user |
+| `PINCER_MIN_SCHEDULE_INTERVAL_MINUTES` | `15` | Reject schedules that would fire more often than this |
+
+See [Background Tasks](../core-components/background-tasks.md) for details.
 
 ### Identity map
 

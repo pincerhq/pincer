@@ -58,6 +58,49 @@ def test_run_calls_setup_logging(monkeypatch: pytest.MonkeyPatch) -> None:
     assert logged, "_setup_logging was not called by run()"
 
 
+def _mock_settings_for_run(monkeypatch: pytest.MonkeyPatch, *, task_broker: str) -> None:
+    from unittest.mock import MagicMock
+
+    mock_settings = MagicMock()
+    mock_settings.log_level.value = "WARNING"
+    mock_settings.telemetry_dsn = None
+    mock_settings.task_broker = task_broker
+    monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
+
+
+def test_run_tasks_requires_redis_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`pincer run tasks` exits 1 with a clear message when task_broker isn't redis."""
+    _mock_settings_for_run(monkeypatch, task_broker="memory")
+
+    result = runner.invoke(app, ["run", "tasks"])
+
+    assert result.exit_code == 1
+    assert "PINCER_TASK_BROKER=redis" in result.output
+
+
+def test_run_tasks_dispatches_to_run_tasks_worker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`pincer run tasks` calls _run_tasks_worker (not _run_agent) once the broker is redis."""
+    _mock_settings_for_run(monkeypatch, task_broker="redis")
+
+    called: list[object] = []
+
+    async def _noop(settings):  # type: ignore[no-untyped-def]
+        called.append(settings)
+
+    monkeypatch.setattr("pincer.cli._run_tasks_worker", _noop)
+
+    result = runner.invoke(app, ["run", "tasks"])
+
+    assert called, "_run_tasks_worker was not called"
+    assert result.exit_code == 0
+
+
+def test_run_bad_component_rejected() -> None:
+    """`pincer run <unknown>` is rejected by Typer's own choice validation."""
+    result = runner.invoke(app, ["run", "badvalue"])
+    assert result.exit_code == 2
+
+
 @pytest.mark.asyncio
 async def test_chat_loop_degrades_mcp_memory_backend(
     monkeypatch: pytest.MonkeyPatch,

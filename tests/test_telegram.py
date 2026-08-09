@@ -75,6 +75,26 @@ async def test_send_with_numeric_user_id_still_works() -> None:
     channel._bot.send_message.assert_called_once_with(chat_id=123456789, text="hello")
 
 
+async def test_send_converts_markdown_to_html() -> None:
+    channel = _make_channel()
+
+    await channel.send("123456789", "**bold** and `code`")
+
+    channel._bot.send_message.assert_called_once_with(chat_id=123456789, text="<b>bold</b> and <code>code</code>")
+
+
+async def test_send_falls_back_to_plain_unconverted_text_on_error() -> None:
+    channel = _make_channel()
+    channel._bot.send_message = AsyncMock(side_effect=[Exception("bad markup"), None])
+
+    await channel.send("123456789", "**bold**")
+
+    assert channel._bot.send_message.call_count == 2
+    first_call, second_call = channel._bot.send_message.call_args_list
+    assert first_call.kwargs["text"] == "<b>bold</b>"
+    assert second_call.kwargs == {"chat_id": 123456789, "text": "**bold**", "parse_mode": None}
+
+
 async def test_send_photo_fast_path_uses_chat_id() -> None:
     channel = _make_channel()
 

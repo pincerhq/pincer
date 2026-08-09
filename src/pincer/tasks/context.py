@@ -1,7 +1,7 @@
 """Runtime context for repid actor bodies.
 
 Actors are plain functions invoked by repid's worker loop — they have no
-access to the CLI's local variables (channel router, proactive agent,
+access to the CLI's local variables (result deliverer, proactive agent,
 event triggers), so those are stashed here once at process startup.
 """
 
@@ -11,29 +11,29 @@ import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pincer.channels.router import ChannelRouter
     from pincer.scheduler.proactive import ProactiveAgent
     from pincer.scheduler.triggers import EventTriggerManager
+    from pincer.tasks.delivery import Deliverer
 
 logger = logging.getLogger(__name__)
 
-_router: ChannelRouter | None = None
+_deliverer: Deliverer | None = None
 _proactive: ProactiveAgent | None = None
 _triggers: EventTriggerManager | None = None
 
 
-def set_context(router: ChannelRouter, proactive: ProactiveAgent, triggers: EventTriggerManager) -> None:
-    global _router, _proactive, _triggers
-    _router = router
+def set_context(deliverer: Deliverer, proactive: ProactiveAgent, triggers: EventTriggerManager) -> None:
+    global _deliverer, _proactive, _triggers
+    _deliverer = deliverer
     _proactive = proactive
     _triggers = triggers
-    logger.info("Task context initialized (router=%s)", type(router).__name__)
+    logger.info("Task context initialized (deliverer=%s)", type(deliverer).__name__)
 
 
-def get_router() -> ChannelRouter:
-    if _router is None:
+def get_deliverer() -> Deliverer:
+    if _deliverer is None:
         raise RuntimeError("Task context not initialized — call set_context() at worker startup")
-    return _router
+    return _deliverer
 
 
 def get_proactive() -> ProactiveAgent:

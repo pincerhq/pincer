@@ -46,9 +46,7 @@ class ToolSettings(BaseModel):
     image_daily_limit: int = Field(default=50, ge=0, description="Max image generations per day (0 = unlimited)")
 
     # ── Scheduling ────────────────────────────────────────
-    schedule_tool_enabled: bool = Field(
-        default=True, description="Enable schedule_create/list/remove/toggle tools"
-    )
+    schedule_tool_enabled: bool = Field(default=True, description="Enable schedule_create/list/remove/toggle tools")
     max_schedules_per_user: int = Field(
         default=20, ge=1, description="Max active recurring schedules per user (cost/abuse guard)"
     )

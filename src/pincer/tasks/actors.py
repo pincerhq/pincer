@@ -17,7 +17,7 @@ from pincer.channels.base import ChannelType
 from pincer.config import get_settings
 from pincer.scheduler.cron import CronScheduler
 from pincer.tasks.app import router
-from pincer.tasks.context import get_proactive, get_router, get_triggers
+from pincer.tasks.context import get_deliverer, get_proactive, get_triggers
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ async def run_scheduled_action(schedule_id: int) -> None:
         raise
 
     if result and isinstance(result, str):
-        delivered = await get_router().send_to_user(
+        delivered = await get_deliverer().send_to_user(
             schedule.pincer_user_id,
             result,
             prefer=ChannelType(schedule.channel),
