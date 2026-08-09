@@ -18,6 +18,10 @@ Named canonical ID (recommended — human-readable, stable across environments):
 Auto-generated hash ID (backward-compatible, opaque):
     PINCER_IDENTITY_MAP=telegram:johnDoe=whatsapp:491234567890
 
+Single channel — no linking needed, just registers one identity explicitly
+(useful to name/allowlist a user without requiring a second channel):
+    PINCER_IDENTITY_MAP=john@telegram:johnDoe
+
 Multiple channels per identity and multiple identities separated by commas:
     PINCER_IDENTITY_MAP=john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890,jane@telegram:janeAustin=whatsapp:491111111111
 
@@ -324,14 +328,14 @@ class IdentityResolver:
         channel: ChannelType,
         normalized_id: str,
     ) -> str | None:
-        """Check PINCER_IDENTITY_MAP for a pre-configured cross-channel link."""
+        """Check PINCER_IDENTITY_MAP for a pre-configured identity or cross-channel link."""
         if not self._identity_map_config:
             return None
 
         current_key = f"{channel.value}:{normalized_id}"
 
         for raw_entry in self._identity_map_config.split(","):
-            if "=" not in raw_entry:
+            if ":" not in raw_entry:
                 continue
             try:
                 name, pairs = self._parse_mapping(raw_entry)
@@ -404,7 +408,7 @@ class IdentityResolver:
 
         allowed: set[tuple[str, str]] = set()
         for raw_entry in self._identity_map_config.split(","):
-            if "=" not in raw_entry:
+            if ":" not in raw_entry:
                 continue
             try:
                 _, pairs = self._parse_mapping(raw_entry)
@@ -467,7 +471,7 @@ class IdentityResolver:
         async with self._get_db() as db:
             db.row_factory = aiosqlite.Row
             for raw_entry in self._identity_map_config.split(","):
-                if "=" not in raw_entry:
+                if ":" not in raw_entry:
                     continue
                 try:
                     name, pairs = self._parse_mapping(raw_entry)
@@ -663,10 +667,11 @@ class IdentityResolver:
         """Parse one config entry into (name, [(channel, id), ...]).
 
         Formats accepted:
+            name@ch1:id1                    (named canonical ID, single channel)
             name@ch1:id1=ch2:id2=ch3:id3   (named canonical ID, N channels)
             ch1:id1=ch2:id2                 (hash-based, backward compat)
 
-        Raises ValueError if fewer than 2 channel:id pairs are found.
+        Raises ValueError if no channel:id pairs are found.
         """
         entry = entry.strip()
         name: str | None = None
@@ -690,8 +695,8 @@ class IdentityResolver:
             if ch and cid:
                 pairs.append((ch, cid))
 
-        if len(pairs) < 2:
-            raise ValueError(f"Entry must have at least 2 channel:id pairs: {entry!r}")
+        if not pairs:
+            raise ValueError(f"Entry must have at least 1 channel:id pair: {entry!r}")
 
         return name, pairs
 

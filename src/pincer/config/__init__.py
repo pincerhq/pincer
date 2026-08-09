@@ -4,6 +4,7 @@ from pincer.config.core import CoreSettings, LogLevel
 from pincer.config.llm import LLMProvider, LLMSettings
 from pincer.config.main import Settings, get_settings, get_settings_relaxed
 from pincer.config.mcp import MCPSettings
+from pincer.config.tasks import TaskSettings
 from pincer.config.tools import ToolSettings
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "LLMSettings",
     "MCPSettings",
     "Settings",
+    "TaskSettings",
     "ToolSettings",
     "get_settings",
     "get_settings_relaxed",

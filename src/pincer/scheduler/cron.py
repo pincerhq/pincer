@@ -1,17 +1,19 @@
 """
-Persistent cron-based task scheduler.
+Persistent cron-based task scheduler — storage layer.
 
 - Standard cron expressions via croniter
 - SQLite persistence (survives restarts)
 - Timezone-aware (per-schedule timezone)
-- Async loop checking every 60 seconds
-- Action handlers registered by type (briefing, custom, etc.)
+
+`CronScheduler` only owns CRUD and the due-schedule query; deciding *when*
+to poll and dispatching due schedules for durable execution lives in
+`pincer.tasks.dispatch.ScheduleDispatcher` (repid has no native scheduler,
+so that poll loop is still hand-rolled — this class is the SQLite-backed
+source of truth it reads from and updates).
 """
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -21,10 +23,7 @@ from zoneinfo import ZoneInfo
 import aiosqlite
 from croniter import croniter
 
-from pincer.channels.base import ChannelType
-
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -68,23 +67,10 @@ class Schedule:
 
 
 class CronScheduler:
-    """Async cron scheduler backed by SQLite."""
+    """SQLite-backed store for cron schedules — CRUD plus the due-schedule query."""
 
-    def __init__(self, db_path: Path, router: Any) -> None:
+    def __init__(self, db_path: Path) -> None:
         self._db_path = str(db_path)
-        self._router = router
-        self._task: asyncio.Task[None] | None = None
-        self._running = False
-        self._action_handlers: dict[str, Callable[..., Coroutine[Any, Any, str | None]]] = {}
-        self._check_interval = 60
-
-    def register_action(
-        self,
-        action_type: str,
-        handler: Callable[..., Coroutine[Any, Any, str | None]],
-    ) -> None:
-        self._action_handlers[action_type] = handler
-        logger.debug("Scheduler action registered: %s", action_type)
 
     async def ensure_table(self) -> None:
         """Create schedules table if it doesn't exist."""
@@ -125,7 +111,12 @@ class CronScheduler:
         if not croniter.is_valid(cron_expr):
             raise ValueError(f"Invalid cron expression: {cron_expr}")
 
-        next_run = croniter(cron_expr, datetime.now(ZoneInfo(tz))).get_next(datetime)
+        try:
+            tzinfo = ZoneInfo(tz)
+        except Exception as e:
+            raise ValueError(f"Invalid timezone: {tz}") from e
+
+        next_run = croniter(cron_expr, datetime.now(tzinfo)).get_next(datetime)
         next_run_utc = next_run.astimezone(UTC).isoformat()
 
         async with aiosqlite.connect(self._db_path) as db:
@@ -145,7 +136,12 @@ class CronScheduler:
         async with aiosqlite.connect(self._db_path) as db:
             cursor = await db.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
             await db.commit()
-            return cursor.rowcount > 0
+            removed = cursor.rowcount > 0
+        if removed:
+            logger.info("Schedule removed: id=%s", schedule_id)
+        else:
+            logger.warning("Schedule remove no-op: id=%s not found", schedule_id)
+        return removed
 
     async def toggle(self, schedule_id: int, enabled: bool) -> bool:
         async with aiosqlite.connect(self._db_path) as db:
@@ -154,7 +150,12 @@ class CronScheduler:
                 (int(enabled), schedule_id),
             )
             await db.commit()
-            return cursor.rowcount > 0
+            toggled = cursor.rowcount > 0
+        if toggled:
+            logger.info("Schedule %s: id=%s", "enabled" if enabled else "disabled", schedule_id)
+        else:
+            logger.warning("Schedule toggle no-op: id=%s not found", schedule_id)
+        return toggled
 
     async def list_schedules(self, pincer_user_id: str) -> list[dict[str, Any]]:
         async with aiosqlite.connect(self._db_path) as db:
@@ -165,83 +166,42 @@ class CronScheduler:
             )
             return [dict(r) for r in rows]
 
-    # ── Loop ─────────────────────────────────────
-
-    async def start(self) -> None:
-        await self.ensure_table()
-        self._running = True
-        self._task = asyncio.create_task(self._loop(), name="pincer-scheduler")
-        logger.info("Scheduler started (interval=%ds)", self._check_interval)
-
-    async def stop(self) -> None:
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._task
-        logger.info("Scheduler stopped")
-
-    async def _loop(self) -> None:
-        while self._running:
-            try:
-                await self._check_and_fire()
-            except Exception:
-                logger.exception("Scheduler loop error")
-            await asyncio.sleep(self._check_interval)
-
-    async def _check_and_fire(self) -> None:
-        now_utc = datetime.now(UTC).isoformat()
-
+    async def get(self, schedule_id: int) -> Schedule | None:
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
-            due = await db.execute_fetchall(
+            rows = list(await db.execute_fetchall("SELECT * FROM schedules WHERE id = ?", (schedule_id,)))
+            if not rows:
+                logger.debug("Schedule lookup miss: id=%s", schedule_id)
+                return None
+            return Schedule(dict(rows[0]))
+
+    # ── Due-schedule query (polled by ScheduleDispatcher) ────
+
+    async def get_due(self, now: datetime | None = None) -> list[Schedule]:
+        """Enabled schedules whose next_run_at has passed. Does not mark them fired."""
+        now_utc = (now or datetime.now(UTC)).isoformat()
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await db.execute_fetchall(
                 """SELECT * FROM schedules
                    WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
                    ORDER BY next_run_at""",
                 (now_utc,),
             )
+            due = [Schedule(dict(row)) for row in rows]
+        logger.debug("Due-schedule query: %d due as of %s", len(due), now_utc)
+        return due
 
-            for row in due:
-                schedule = Schedule(dict(row))
-                logger.info("Scheduler firing: %s (user=%s)", schedule.name, schedule.pincer_user_id)
-
-                asyncio.create_task(
-                    self._execute_action(schedule),
-                    name=f"schedule-{schedule.id}",
-                )
-
-                next_run = schedule.compute_next_run()
-                await db.execute(
-                    """UPDATE schedules
-                       SET last_run_at = datetime('now'), next_run_at = ?,
-                           updated_at = datetime('now')
-                       WHERE id = ?""",
-                    (next_run.isoformat(), schedule.id),
-                )
-
-            if due:
-                await db.commit()
-
-    async def _execute_action(self, schedule: Schedule) -> None:
-        try:
-            action_type = schedule.action.get("type", "custom")
-            handler = self._action_handlers.get(action_type)
-            if not handler:
-                logger.warning("No handler for action type: %s", action_type)
-                return
-
-            result = await handler(
-                pincer_user_id=schedule.pincer_user_id,
-                action=schedule.action,
-                channel=schedule.channel,
+    async def mark_fired(self, schedule: Schedule) -> None:
+        """Advance a schedule's next_run_at after it has been dispatched."""
+        next_run = schedule.compute_next_run()
+        async with aiosqlite.connect(self._db_path) as db:
+            await db.execute(
+                """UPDATE schedules
+                   SET last_run_at = datetime('now'), next_run_at = ?,
+                       updated_at = datetime('now')
+                   WHERE id = ?""",
+                (next_run.isoformat(), schedule.id),
             )
-
-            if result and isinstance(result, str):
-                channel_type = ChannelType(schedule.channel)
-                await self._router.send_to_user(
-                    schedule.pincer_user_id,
-                    result,
-                    prefer=channel_type,
-                )
-        except Exception:
-            logger.exception("Schedule action failed: %s", schedule.name)
+            await db.commit()
+        logger.debug("Schedule marked fired: id=%s next_run_at=%s", schedule.id, next_run.isoformat())

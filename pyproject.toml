@@ -44,6 +44,9 @@ dependencies = [
     "croniter>=5.0",
     "aiosmtplib>=5.1",
     "aioimaplib>=2.0",
+    # Sprint 6: Background task execution (request-triggered + scheduled)
+    "repid>=2.1.4",
+    "tenacity>=9.0",
     "google-api-python-client>=2.160",
     "google-auth-oauthlib>=1.2",
     "google-auth-httplib2>=0.2",
@@ -92,7 +95,8 @@ local = [
 telemetry = [
     "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@main"
 ]
-all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry]"]
+tasks-redis = ["repid[redis]"]
+all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry,tasks-redis]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

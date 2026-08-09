@@ -25,15 +25,18 @@ from pincer.config import get_settings
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from pincer.core.agent import Agent
+
 logger = logging.getLogger(__name__)
 
 
 class ProactiveAgent:
     """Generates proactive messages — briefings, notifications."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, agent: Agent | None = None) -> None:
         self._db_path = str(db_path)
         self._http = httpx.AsyncClient(timeout=15)
+        self._agent = agent
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -217,4 +220,19 @@ class ProactiveAgent:
         prompt = action.get("prompt", "")
         if not prompt:
             return "Custom action has no prompt configured."
-        return f"Custom action: {prompt}"
+
+        if self._agent is None:
+            logger.warning("run_custom_action: no Agent wired — using stub response")
+            return f"Custom action: {prompt}"
+
+        try:
+            return await self._agent.run_headless(
+                prompt=prompt,
+                user_id=pincer_user_id,
+                channel=channel,
+                channel_name=channel,
+                allowed_tools=action.get("allowed_tools"),
+            )
+        except Exception:
+            logger.exception("run_custom_action: run_headless failed")
+            return f"Sorry, I couldn't complete the scheduled task: {prompt[:200]}"

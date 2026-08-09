@@ -1057,17 +1057,39 @@ async def _run_agent(settings: Settings) -> None:
     # Sprint 3: Scheduler + Proactive Agent
     from pincer.scheduler import CronScheduler, EventTriggerManager, ProactiveAgent
 
-    proactive = ProactiveAgent(settings.db_path)
+    proactive = ProactiveAgent(settings.db_path, agent=agent)
     await proactive.ensure_table()
 
-    scheduler = CronScheduler(settings.db_path, router)
-    scheduler.register_action("briefing", proactive.generate_briefing)
-    scheduler.register_action("custom", proactive.run_custom_action)
-    await scheduler.start()
+    scheduler = CronScheduler(settings.db_path)
+    await scheduler.ensure_table()
 
     # Sprint 3: Event triggers
     triggers = EventTriggerManager(settings.db_path, router)
     await triggers.start()
+
+    # Sprint 6: Background task execution (repid) — actors run scheduled and
+    # on-request work durably/retryably; the dispatcher below keeps the SQLite
+    # cron poll loop, since repid has no native scheduler to replace it with.
+    from pincer.tasks import ScheduleDispatcher, register_default_server
+    from pincer.tasks import app as task_app
+    from pincer.tasks.context import set_context
+
+    set_context(router, proactive, triggers)
+    register_default_server()
+    task_connection = task_app.servers.default.connection()
+    await task_connection.__aenter__()
+    task_worker = asyncio.create_task(
+        # register_signals=[] — repid defaults to installing its own SIGINT/SIGTERM
+        # handlers via loop.add_signal_handler(), which replaces Python's default
+        # signal handling process-wide and swallows the Ctrl+C / SIGTERM this
+        # process's own shutdown sequence (below) depends on. cli.py already owns
+        # signal handling end-to-end via task_worker.cancel() in the finally block.
+        task_app.run_worker(graceful_shutdown_time=10.0, register_signals=[]),
+        name="pincer-task-worker",
+    )
+    dispatcher = ScheduleDispatcher(scheduler, task_app, interval=settings.task_poll_interval)
+    await dispatcher.start()
+    console.print(f"[green]Task worker started (broker={settings.task_broker})[/green]")
 
     # Auto-create default morning briefing if configured
     if settings.default_user_id and settings.briefing_time:
@@ -1192,7 +1214,16 @@ async def _run_agent(settings: Settings) -> None:
         if mcp_server:
             await mcp_server.stop()
         await triggers.stop()
-        await scheduler.stop()
+        await dispatcher.stop()
+        # repid's own worker logs CRITICAL + a full traceback on CancelledError
+        # (by design — see repid/_worker.py, it re-raises after logging). That's
+        # expected noise here since this cancel() is our own intentional shutdown,
+        # not an unexpected failure — silence it for this one call.
+        logging.getLogger("repid").setLevel(logging.CRITICAL + 1)
+        task_worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task_worker
+        await task_connection.__aexit__(None, None, None)
         await proactive.close()
         for ch in router.channels.values():
             await ch.stop()

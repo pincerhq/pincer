@@ -3448,8 +3448,10 @@ dependencies = [
     { name = "python-multipart" },
     { name = "pyyaml" },
     { name = "qrcode", extra = ["pil"] },
+    { name = "repid" },
     { name = "rich" },
     { name = "structlog" },
+    { name = "tenacity" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -3473,6 +3475,7 @@ all = [
     { name = "pyjwt", extra = ["crypto"] },
     { name = "pymupdf" },
     { name = "pyngrok" },
+    { name = "repid", extra = ["redis"] },
     { name = "slack-bolt" },
     { name = "slack-sdk" },
     { name = "sqlite-vec" },
@@ -3529,6 +3532,9 @@ slack = [
     { name = "slack-bolt" },
     { name = "slack-sdk" },
 ]
+tasks-redis = [
+    { name = "repid", extra = ["redis"] },
+]
 teams = [
     { name = "microsoft-teams-apps", extra = ["graph"] },
 ]
@@ -3572,7 +3578,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13.0" },
     { name = "neonize", specifier = ">=0.3.17" },
     { name = "openai", specifier = ">=1.60.0" },
-    { name = "pincer-agent", extras = ["browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "teams", "local", "telemetry"], marker = "extra == 'all'" },
+    { name = "pincer-agent", extras = ["browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "teams", "local", "telemetry", "tasks-redis"], marker = "extra == 'all'" },
     { name = "pincer-mcps", marker = "extra == 'mcp'", editable = "src/pincer-mcps" },
     { name = "pincer-telemetry", marker = "extra == 'telemetry'", git = "https://github.com/pincerhq/pincer-telemetry.git?rev=main" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.40.0" },
@@ -3590,6 +3596,8 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "qrcode", extras = ["pil"], specifier = ">=8.0" },
+    { name = "repid", specifier = ">=2.1.4" },
+    { name = "repid", extras = ["redis"], marker = "extra == 'tasks-redis'" },
     { name = "rich", specifier = ">=13.9.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
     { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.18.0" },
@@ -3597,6 +3605,7 @@ requires-dist = [
     { name = "sqlite-vec", marker = "extra == 'memory'", specifier = ">=0.1.0" },
     { name = "sqlite-vec-memory-mcp", marker = "extra == 'mcp'", editable = "src/sqlite-vec-memory-mcp" },
     { name = "structlog", specifier = ">=24.4.0" },
+    { name = "tenacity", specifier = ">=9.0" },
     { name = "twilio", marker = "extra == 'voice'", specifier = ">=9.0" },
     { name = "typer", specifier = ">=0.12.0" },
     { name = "types-croniter", marker = "extra == 'dev'", specifier = ">=1.0.0" },
@@ -3606,7 +3615,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'voice'", specifier = ">=12.0" },
     { name = "youtube-transcript-api", marker = "extra == 'skills'" },
 ]
-provides-extras = ["browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "teams", "local", "telemetry", "all", "dev"]
+provides-extras = ["browser", "memory", "pdf", "pdfgen", "skills", "voice", "image", "mcp", "slack", "teams", "local", "telemetry", "tasks-redis", "all", "dev"]
 
 [[package]]
 name = "pincer-mcps"
@@ -4485,6 +4494,15 @@ wheels = [
 ]
 
 [[package]]
+name = "redis"
+version = "7.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/51/93/05e7d4a65285066a74f48697f9b9cde5cfce71398033d69ed83c3d98f5c9/redis-7.4.1.tar.gz", hash = "sha256:1a1df5067062cf7cbe677994e391f8ee0840f499d370f1a71266e0dd3aa9308e", size = 4945742, upload-time = "2026-06-05T09:10:06.703Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4a/2e/2677f3f93dae0497e7e33b6637302e7f3744efc553f34231183e32584885/redis-7.4.1-py3-none-any.whl", hash = "sha256:1fa4647af1c5e93a2c685aa248ee44cce092691146d41390518dabe9a99839b0", size = 410171, upload-time = "2026-06-05T09:10:05.128Z" },
+]
+
+[[package]]
 name = "referencing"
 version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4584,6 +4602,23 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/19/eb/ef32dcd2cb69b69bc0c3e55205bce94a7def48d495358946bc42186dcccc/regex-2026.4.4-cp314-cp314t-win32.whl", hash = "sha256:385edaebde5db5be103577afc8699fea73a0e36a734ba24870be7ffa61119d74", size = 275709, upload-time = "2026-04-03T20:56:20.996Z" },
     { url = "https://files.pythonhosted.org/packages/a0/86/c291bf740945acbf35ed7dbebf8e2eea2f3f78041f6bd7cdab80cb274dc0/regex-2026.4.4-cp314-cp314t-win_amd64.whl", hash = "sha256:5d354b18839328927832e2fa5f7c95b7a3ccc39e7a681529e1685898e6436d45", size = 285622, upload-time = "2026-04-03T20:56:23.641Z" },
     { url = "https://files.pythonhosted.org/packages/d5/e7/ec846d560ae6a597115153c02ca6138a7877a1748b2072d9521c10a93e58/regex-2026.4.4-cp314-cp314t-win_arm64.whl", hash = "sha256:af0384cb01a33600c49505c27c6c57ab0b27bf84a74e28524c92ca897ebdac9d", size = 275773, upload-time = "2026-04-03T20:56:26.07Z" },
+]
+
+[[package]]
+name = "repid"
+version = "2.1.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4f/9e/4e24eac5cc3d79882b37869182e91bc6de038dc956f4db5a970e514a0ed7/repid-2.1.4.tar.gz", hash = "sha256:d71381b1c39b1caff0bbe060de77799a25fe50583d4ae7e206c0855a810447d8", size = 511053, upload-time = "2026-07-16T23:33:02.777Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/78/8f/039c358c2875260d41e03112f09a1d01a624986e9544b270ee3f6923df8b/repid-2.1.4-py3-none-any.whl", hash = "sha256:f3b8eed4294d5cee3175b379abd2082f615c532e1520af950ae561a43856a81b", size = 189098, upload-time = "2026-07-16T23:33:01.223Z" },
+]
+
+[package.optional-dependencies]
+redis = [
+    { name = "redis" },
 ]
 
 [[package]]

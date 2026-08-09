@@ -63,6 +63,16 @@ class TestIdentityResolver:
         wa_id = await r.resolve(ChannelType.WHATSAPP, "491234567890")
         assert tg_id == wa_id
 
+    async def test_single_channel_named_config_resolves_live(self, tmp_path):
+        """A single channel:id pair (no linking) resolves via _check_config_mapping,
+        without needing seed_from_config() to run first."""
+        db_path = tmp_path / "single_pair.db"
+        r = IdentityResolver(db_path, identity_map_config="tamias@telegram:559020")
+        await r.ensure_table()
+
+        uid = await r.resolve(ChannelType.TELEGRAM, 559020)
+        assert uid == "tamias"
+
     async def test_get_preferred_channel(self, resolver):
         uid = await resolver.resolve(ChannelType.TELEGRAM, 55555)
         ch_type, chat_id = await resolver.get_preferred_channel(uid)
@@ -545,6 +555,18 @@ class TestNamedCanonicalId:
         await r2.seed_from_config()  # warns, keeps "dave"
         assert await r2.resolve(ChannelType.TELEGRAM, 333) == "dave"
 
+    async def test_single_channel_named_entry_seeds_identity(self, tmp_path):
+        """A single channel:id pair — no linking partner needed — seeds a named identity."""
+        db_path = tmp_path / "single_seed.db"
+        r = IdentityResolver(db_path, identity_map_config="tamias@telegram:559020")
+        await r.ensure_table()
+        await r.seed_from_config()
+
+        assert await r.resolve(ChannelType.TELEGRAM, 559020) == "tamias"
+        ch_type, chat_id = await r.get_preferred_channel("tamias")
+        assert ch_type == ChannelType.TELEGRAM
+        assert chat_id == "559020"
+
     async def test_unnamed_entry_still_works(self, tmp_path):
         """Entries without a name@ prefix keep the auto-generated hash behavior."""
         db_path = tmp_path / "unnamed.db"
@@ -566,6 +588,15 @@ class TestNamedCanonicalId:
         name, pairs = IdentityResolver._parse_mapping("telegram:12345=whatsapp:491234567890")
         assert name is None
         assert pairs[0] == ("telegram", "12345")
+
+    async def test_parse_mapping_single_pair(self):
+        name, pairs = IdentityResolver._parse_mapping("tamias@telegram:559020")
+        assert name == "tamias"
+        assert pairs == [("telegram", "559020")]
+
+    async def test_parse_mapping_empty_raises(self):
+        with pytest.raises(ValueError, match="at least 1 channel:id pair"):
+            IdentityResolver._parse_mapping("justaname@")
 
     async def test_parse_mapping_three_channels(self):
         name, pairs = IdentityResolver._parse_mapping("john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890")
