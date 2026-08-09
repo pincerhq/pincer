@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import pytest_asyncio
 
-from pincer.scheduler.cron import CronScheduler, Schedule
+from pincer.scheduler.cron import CronScheduler, Schedule, is_one_time_cron
 
 
 @pytest_asyncio.fixture
@@ -113,6 +113,13 @@ class TestCronScheduler:
 
         assert await scheduler.get_due() == []
 
+    async def test_list_all_returns_rows_across_all_users(self, scheduler):
+        await scheduler.add("job_a", "0 7 * * *", {"type": "test"}, "usr_a")
+        await scheduler.add("job_b", "0 8 * * *", {"type": "test"}, "usr_b")
+        result = await scheduler.list_all()
+        assert len(result) == 2
+        assert {r["pincer_user_id"] for r in result} == {"usr_a", "usr_b"}
+
     async def test_mark_fired_advances_next_run(self, scheduler):
         sid = await scheduler.add("advance_me", "*/5 * * * *", {"type": "test"}, "usr_test", tz="UTC")
         schedule = await scheduler.get(sid)
@@ -124,6 +131,23 @@ class TestCronScheduler:
         updated = await scheduler.get(sid)
         assert updated.last_run_at is not None
         assert datetime.fromisoformat(updated.next_run_at) > due_next_run
+
+
+class TestIsOneTimeCron:
+    def test_pinned_day_and_month_is_one_time(self):
+        assert is_one_time_cron("5 9 15 8 *") is True
+
+    def test_daily_is_recurring(self):
+        assert is_one_time_cron("0 8 * * *") is False
+
+    def test_monthly_is_recurring(self):
+        assert is_one_time_cron("0 9 15 * *") is False
+
+    def test_yearly_wildcard_month_is_recurring(self):
+        assert is_one_time_cron("0 9 * 8 *") is False
+
+    def test_malformed_expr_is_recurring(self):
+        assert is_one_time_cron("not a cron") is False
 
 
 class TestScheduleModel:

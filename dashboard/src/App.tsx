@@ -24,6 +24,9 @@ const ConversationsPage = lazy(() =>
 const AuditPage = lazy(() =>
   import("@/pages/Audit").then((m) => ({ default: m.AuditPage })),
 )
+const SchedulesPage = lazy(() =>
+  import("@/pages/Schedules").then((m) => ({ default: m.SchedulesPage })),
+)
 const SkillsPage = lazy(() =>
   import("@/pages/Skills").then((m) => ({ default: m.SkillsPage })),
 )
@@ -106,6 +109,10 @@ export default function App() {
               <Route
                 path={ROUTES.AUDIT}
                 element={<PageWrapper><AuditPage /></PageWrapper>}
+              />
+              <Route
+                path={ROUTES.SCHEDULES}
+                element={<PageWrapper><SchedulesPage /></PageWrapper>}
               />
               <Route
                 path={ROUTES.SKILLS}

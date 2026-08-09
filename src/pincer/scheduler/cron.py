@@ -29,6 +29,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def is_one_time_cron(cron_expr: str) -> bool:
+    """True if `cron_expr` is a fixed-date one-off rather than a recurring schedule.
+
+    `schedule_tool.py`'s `run_in_minutes` path pins minute/hour/day/month and
+    leaves weekday as `*` (`"{minute} {hour} {day} {month} *"`) — that's the
+    only way this codebase produces a schedule that fires exactly once. A
+    cron_expr with both day-of-month and month pinned matches that shape;
+    anything with either field wildcarded (daily/monthly/weekday-based, etc.)
+    recurs indefinitely.
+    """
+    fields = cron_expr.split()
+    if len(fields) != 5:
+        return False
+    day_of_month, month = fields[2], fields[3]
+    return day_of_month != "*" and month != "*"
+
+
 class Schedule:
     """A single scheduled task loaded from SQLite."""
 
@@ -164,6 +181,13 @@ class CronScheduler:
                 "SELECT * FROM schedules WHERE pincer_user_id = ? ORDER BY next_run_at",
                 (pincer_user_id,),
             )
+            return [dict(r) for r in rows]
+
+    async def list_all(self) -> list[dict[str, Any]]:
+        """All schedules across all users, unordered (caller classifies/sorts)."""
+        async with aiosqlite.connect(self._db_path) as db:
+            db.row_factory = aiosqlite.Row
+            rows = await db.execute_fetchall("SELECT * FROM schedules")
             return [dict(r) for r in rows]
 
     async def get(self, schedule_id: int) -> Schedule | None:

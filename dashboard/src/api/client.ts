@@ -18,6 +18,7 @@ import type {
   IntegrationDetail,
   Identity,
   IdentityListResponse,
+  ScheduledTasksResponse,
 } from "./types"
 
 function getStoredAuth(): { token?: string; apiUrl?: string } | null {
@@ -125,6 +126,11 @@ export const pincer = {
     return api().get(`api/identity${query}`).json<IdentityListResponse>()
   },
   identity: (id: string) => api().get(`api/identity/${id}`).json<Identity>(),
+
+  schedules: (params?: Record<string, string>) => {
+    const query = params ? `?${new URLSearchParams(params).toString()}` : ""
+    return api().get(`api/schedules${query}`).json<ScheduledTasksResponse>()
+  },
 
   skills: () => api().get("api/skills").json<SkillsResponse>(),
   skill: (name: string) => api().get(`api/skills/${encodeURIComponent(name)}`).json<SkillDetail>(),
