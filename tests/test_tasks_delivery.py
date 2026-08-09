@@ -93,6 +93,16 @@ class TestRedisDeliveryBackend:
 
             assert received == envelope
 
+    async def test_aclose_closes_redis_connection(self) -> None:
+        with patch("pincer.tasks.delivery.Redis") as mock_redis_cls:
+            mock_client = AsyncMock()
+            mock_redis_cls.from_url.return_value = mock_client
+
+            backend = RedisDeliveryBackend("redis://localhost:6379/0")
+            await backend.aclose()
+
+            mock_client.aclose.assert_awaited_once()
+
 
 def test_create_delivery_backend_selects_by_broker() -> None:
     memory_settings = SimpleNamespace(task_broker="memory", task_broker_url="")
@@ -183,5 +193,23 @@ class TestResultRelay:
             await asyncio.sleep(0.05)
 
             assert router.send_to_user.await_count == 2
+        finally:
+            await relay.stop()
+
+    async def test_undelivered_result_is_logged_as_error(self, caplog) -> None:
+        backend = InMemoryDeliveryBackend()
+        router = AsyncMock()
+        router.send_to_user = AsyncMock(return_value=False)
+
+        relay = ResultRelay(backend, router)
+        await relay.start()
+        try:
+            with caplog.at_level("ERROR", logger="pincer.tasks.delivery"):
+                await backend.publish(
+                    {"pincer_user_id": "u1", "text": "hi", "prefer": None, "max_active_age_seconds": None}
+                )
+                await asyncio.sleep(0.05)
+
+            assert any("no reachable channel" in r.message for r in caplog.records)
         finally:
             await relay.stop()

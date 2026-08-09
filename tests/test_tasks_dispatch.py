@@ -64,3 +64,55 @@ class TestScheduleDispatcher:
         assert dispatcher._running is True
         await dispatcher.stop()
         assert dispatcher._running is False
+
+    async def test_dispatch_failure_is_logged_and_leaves_schedule_due(self, store, caplog):
+        sid = await store.add("job", "0 7 * * *", {"type": "briefing"}, "usr_test")
+        await _backdate(store, sid)
+
+        fake_app = AsyncMock()
+        fake_app.send_message_json = AsyncMock(side_effect=RuntimeError("enqueue failed"))
+        dispatcher = ScheduleDispatcher(store, fake_app)
+
+        with caplog.at_level("ERROR", logger="pincer.tasks.dispatch"):
+            await dispatcher._check_and_dispatch()
+
+        assert any("Failed to dispatch schedule" in r.message for r in caplog.records)
+        updated = await store.get(sid)
+        assert updated.last_run_at is None
+
+    async def test_loop_calls_check_and_dispatch_until_stopped(self, store):
+        fake_app = AsyncMock()
+        dispatcher = ScheduleDispatcher(store, fake_app, interval=0)
+        calls = []
+
+        async def fake_check() -> None:
+            calls.append(1)
+            dispatcher._running = False
+
+        dispatcher._check_and_dispatch = fake_check  # type: ignore[method-assign]
+        dispatcher._running = True
+
+        await dispatcher._loop()
+
+        assert calls == [1]
+
+    async def test_loop_logs_and_continues_on_error(self, store, caplog):
+        fake_app = AsyncMock()
+        dispatcher = ScheduleDispatcher(store, fake_app, interval=0)
+        call_count = 0
+
+        async def fake_check() -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("boom")
+            dispatcher._running = False
+
+        dispatcher._check_and_dispatch = fake_check  # type: ignore[method-assign]
+        dispatcher._running = True
+
+        with caplog.at_level("ERROR", logger="pincer.tasks.dispatch"):
+            await dispatcher._loop()
+
+        assert call_count == 2
+        assert any("Schedule dispatcher loop error" in r.message for r in caplog.records)

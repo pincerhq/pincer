@@ -88,6 +88,45 @@ class TestRunScheduledAction:
 
         router.send_to_user.assert_not_awaited()
 
+    async def test_handler_failure_reraises_after_retries(self, store, tmp_path, caplog):
+        """A handler that keeps failing propagates so repid's on_error='nack' can redeliver."""
+        sid = await store.add("morning", "0 7 * * *", {"type": "briefing"}, "usr_test")
+
+        router = AsyncMock()
+        proactive = AsyncMock()
+        proactive.generate_briefing = AsyncMock(side_effect=RuntimeError("boom"))
+        triggers = AsyncMock()
+        set_context(router, proactive, triggers)
+
+        with (
+            patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path)),
+            caplog.at_level("ERROR", logger="pincer.tasks.actors"),
+            pytest.raises(RuntimeError, match="boom"),
+        ):
+            await run_scheduled_action(schedule_id=sid)
+
+        assert any("failed after retries" in r.message for r in caplog.records)
+        router.send_to_user.assert_not_awaited()
+
+    async def test_non_string_result_logged_as_no_message(self, store, tmp_path, caplog):
+        """A handler returning None (e.g. custom action) is completed without delivery."""
+        sid = await store.add("job", "0 7 * * *", {"type": "custom"}, "usr_test")
+
+        router = AsyncMock()
+        proactive = AsyncMock()
+        proactive.run_custom_action = AsyncMock(return_value=None)
+        triggers = AsyncMock()
+        set_context(router, proactive, triggers)
+
+        with (
+            patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path)),
+            caplog.at_level("INFO", logger="pincer.tasks.actors"),
+        ):
+            await run_scheduled_action(schedule_id=sid)
+
+        router.send_to_user.assert_not_awaited()
+        assert any("no message to send" in r.message for r in caplog.records)
+
 
 @pytest.mark.asyncio
 class TestProcessWebhook:
@@ -102,3 +141,19 @@ class TestProcessWebhook:
             await process_webhook(webhook_id="wh_1", payload={"a": 1}, pincer_user_id="usr_test")
 
         triggers.handle_webhook.assert_awaited_once_with("wh_1", {"a": 1}, "usr_test")
+
+    async def test_handler_failure_reraises_after_retries(self, tmp_path, caplog):
+        router = AsyncMock()
+        proactive = AsyncMock()
+        triggers = AsyncMock()
+        triggers.handle_webhook = AsyncMock(side_effect=RuntimeError("webhook boom"))
+        set_context(router, proactive, triggers)
+
+        with (
+            patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path)),
+            caplog.at_level("ERROR", logger="pincer.tasks.actors"),
+            pytest.raises(RuntimeError, match="webhook boom"),
+        ):
+            await process_webhook(webhook_id="wh_1", payload={"a": 1}, pincer_user_id="usr_test")
+
+        assert any("failed after retries" in r.message for r in caplog.records)

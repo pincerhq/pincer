@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from pincer.core.agent import Agent, AgentResponse
+from pincer.exceptions import BudgetExceededError, LLMError
 from pincer.llm.base import LLMResponse, ToolCall
 from pincer.tools.registry import ToolRegistry
 
@@ -294,3 +295,82 @@ async def test_run_headless_allowed_tools_keeps_matching_tool(
 
     call_kwargs = mock_llm.complete.call_args.kwargs
     assert [t["name"] for t in call_kwargs["tools"]] == ["greet"]
+
+
+@pytest.mark.asyncio
+async def test_run_headless_budget_exceeded_during_llm_call(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    mock_llm.complete.side_effect = BudgetExceededError(spent=100.0, limit=100.0)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    result = await agent.run_headless("hi", user_id="usr1", channel="scheduled")
+
+    assert "budget limit reached" in result.lower()
+    assert "$100.00" in result
+
+
+@pytest.mark.asyncio
+async def test_run_headless_llm_error(settings, mock_llm, session_manager, cost_tracker, tool_registry):
+    mock_llm.complete.side_effect = LLMError("connection reset")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    result = await agent.run_headless("hi", user_id="usr1", channel="scheduled")
+
+    assert "llm error" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_run_headless_budget_exceeded_during_cost_record(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with patch.object(cost_tracker, "record", side_effect=BudgetExceededError(spent=60.0, limit=100.0)):
+        result = await agent.run_headless("hi", user_id="usr1", channel="scheduled")
+
+    assert "budget limit reached" in result.lower()
+    assert "$60.00" in result
+    assert "$100.00" in result
+
+
+@pytest.mark.asyncio
+async def test_run_headless_circuit_breaker_after_repeated_tool_errors(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """A tool call that keeps failing (unknown tool name) trips the circuit breaker after 3 iterations."""
+    mock_llm.complete.return_value = LLMResponse(
+        content="still trying",
+        tool_calls=[ToolCall(id="tc1", name="nonexistent", arguments={})],
+        model="test",
+        input_tokens=10,
+        output_tokens=5,
+        stop_reason="tool_use",
+    )
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    result = await agent.run_headless("do the thing", user_id="usr1", channel="scheduled")
+
+    assert result == "still trying"
+    assert mock_llm.complete.call_count == 3
+
+
+@pytest.mark.asyncio
+async def test_run_headless_exhausts_iterations_returns_last_response(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """With max_iterations reached and no final no-tool-call response, the last response content is returned."""
+    mock_llm.complete.return_value = LLMResponse(
+        content="partial thoughts",
+        tool_calls=[ToolCall(id="tc1", name="greet", arguments={"name": "World"})],
+        model="test",
+        input_tokens=10,
+        output_tokens=5,
+        stop_reason="tool_use",
+    )
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    result = await agent.run_headless("hi", user_id="usr1", channel="scheduled", max_iterations=1)
+
+    assert result == "partial thoughts"
+    assert mock_llm.complete.call_count == 1

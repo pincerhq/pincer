@@ -144,10 +144,29 @@ class TestScheduleCreate:
         # a one-time cron is pinned to a specific day+month, so it can't be "every minute"
         assert rows[0]["cron_expr"] != "* * * * *"
 
-    async def test_run_in_minutes_rejects_non_positive(self, settings, schedule_create):
+    async def test_run_in_minutes_zero_rejected_as_neither_arg_passed(self, settings, schedule_create):
+        """run_in_minutes=0 is falsy, so it trips the 'exactly one of' check, not the >=1 check."""
         with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):
             result = await schedule_create(name="x", prompt="p", run_in_minutes=0, context=CTX)
+        assert "exactly one" in result.lower()
+
+    async def test_run_in_minutes_rejects_negative(self, settings, schedule_create):
+        with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):
+            result = await schedule_create(name="x", prompt="p", run_in_minutes=-5, context=CTX)
         assert result.startswith("Error")
+        assert "at least 1" in result
+
+    async def test_scheduler_add_value_error_surfaces_as_error_string(self, settings, schedule_create):
+        """A ValueError raised by the storage layer (e.g. a race on validation) becomes an Error string."""
+        with (
+            patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings),
+            patch(
+                "pincer.tools.builtin.schedule_tool.CronScheduler.add",
+                side_effect=ValueError("boom"),
+            ),
+        ):
+            result = await schedule_create(name="x", cron_expr="0 8 * * *", prompt="p", context=CTX)
+        assert result == "Error: boom"
 
     async def test_too_frequent_cron_expr_rejected(self, settings, schedule_create):
         """The exact incident this guards against: an LLM-hallucinated '* * * * *'."""
@@ -173,6 +192,39 @@ class TestScheduleListRemoveToggle:
         with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):
             result = await schedule_list(context=CTX)
         assert "no scheduled jobs" in result.lower()
+
+    async def test_list_no_identity_returns_error(self, settings):
+        with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):
+            result = await schedule_list(context={"channel_name": "telegram"})
+        assert result.startswith("Error")
+
+    async def test_remove_no_identity_returns_error(self, settings):
+        with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):
+            result = await schedule_remove(name="a", context={"channel_name": "telegram"})
+        assert result.startswith("Error")
+
+    async def test_toggle_no_identity_returns_error(self, settings):
+        with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):
+            result = await schedule_toggle(name="a", enabled=False, context={"channel_name": "telegram"})
+        assert result.startswith("Error")
+
+    async def test_toggle_not_found(self, settings):
+        with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):
+            result = await schedule_toggle(name="ghost", enabled=False, context=CTX)
+        assert result.startswith("Error")
+
+    async def test_remove_ambiguous_name_requires_schedule_id(self, settings, schedule_create):
+        """Two schedules sharing a name (bypassing the tool's own duplicate check) must be
+        disambiguated via schedule_id rather than silently removing the wrong one."""
+        with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):
+            store = CronScheduler(settings.db_path)
+            await store.add(name="dup", cron_expr="0 8 * * *", action={"type": "custom"}, pincer_user_id="usr_test")
+            await store.add(name="dup", cron_expr="0 9 * * *", action={"type": "custom"}, pincer_user_id="usr_test")
+
+            result = await schedule_remove(name="dup", context=CTX)
+
+        assert result.startswith("Error")
+        assert "Multiple schedules" in result
 
     async def test_list_shows_created_schedule_and_tools(self, settings, schedule_create):
         with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):

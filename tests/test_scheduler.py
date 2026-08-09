@@ -62,6 +62,9 @@ class TestCronScheduler:
         assert schedules[0]["enabled"] == 0
         assert await scheduler.toggle(sid, True) is True
 
+    async def test_toggle_missing_schedule_is_noop(self, scheduler):
+        assert await scheduler.toggle(999999, True) is False
+
     async def test_different_users_isolated(self, scheduler):
         await scheduler.add("job", "0 7 * * *", {"type": "test"}, "usr_a")
         await scheduler.add("job", "0 8 * * *", {"type": "test"}, "usr_b")
