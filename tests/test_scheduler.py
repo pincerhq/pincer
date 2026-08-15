@@ -52,18 +52,30 @@ class TestCronScheduler:
 
     async def test_remove(self, scheduler):
         sid = await scheduler.add("x", "0 7 * * *", {"type": "test"}, "usr_test")
-        assert await scheduler.remove(sid) is True
-        assert await scheduler.remove(sid) is False
+        assert await scheduler.remove(sid, "usr_test") is True
+        assert await scheduler.remove(sid, "usr_test") is False
 
     async def test_toggle(self, scheduler):
         sid = await scheduler.add("y", "0 7 * * *", {"type": "test"}, "usr_test")
-        assert await scheduler.toggle(sid, False) is True
+        assert await scheduler.toggle(sid, False, "usr_test") is True
         schedules = await scheduler.list_schedules("usr_test")
         assert schedules[0]["enabled"] == 0
-        assert await scheduler.toggle(sid, True) is True
+        assert await scheduler.toggle(sid, True, "usr_test") is True
 
     async def test_toggle_missing_schedule_is_noop(self, scheduler):
-        assert await scheduler.toggle(999999, True) is False
+        assert await scheduler.toggle(999999, True, "usr_test") is False
+
+    async def test_remove_scoped_to_owner(self, scheduler):
+        sid = await scheduler.add("x", "0 7 * * *", {"type": "test"}, "usr_a")
+        assert await scheduler.remove(sid, "usr_b") is False
+        assert await scheduler.get(sid) is not None
+        assert await scheduler.remove(sid, "usr_a") is True
+
+    async def test_toggle_scoped_to_owner(self, scheduler):
+        sid = await scheduler.add("y", "0 7 * * *", {"type": "test"}, "usr_a")
+        assert await scheduler.toggle(sid, False, "usr_b") is False
+        schedules = await scheduler.list_schedules("usr_a")
+        assert schedules[0]["enabled"] == 1
 
     async def test_different_users_isolated(self, scheduler):
         await scheduler.add("job", "0 7 * * *", {"type": "test"}, "usr_a")
@@ -100,7 +112,7 @@ class TestCronScheduler:
 
     async def test_get_due_skips_disabled(self, scheduler):
         sid = await scheduler.add("disabled_due", "0 7 * * *", {"type": "test"}, "usr_test")
-        await scheduler.toggle(sid, False)
+        await scheduler.toggle(sid, False, "usr_test")
 
         import aiosqlite
 

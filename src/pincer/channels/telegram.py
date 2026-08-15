@@ -113,13 +113,22 @@ class TelegramChannel(BaseChannel):
             ]
         )
 
-        await self._bot.send_message(
-            chat_id=self._chat_id(user_id),
-            text=markdown_to_telegram_html(
-                f"*Approval required*\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\nAllow this action?"
-            ),
-            reply_markup=keyboard,
-        )
+        prompt_text = f"*Approval required*\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\nAllow this action?"
+        chat_id = self._chat_id(user_id)
+        try:
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=markdown_to_telegram_html(prompt_text),
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            logger.warning("Approval markdown send failed, retrying plain: %s", e)
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=prompt_text,
+                parse_mode=None,
+                reply_markup=keyboard,
+            )
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()

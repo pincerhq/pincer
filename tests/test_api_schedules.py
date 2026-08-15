@@ -148,3 +148,17 @@ class TestSchedulesApi:
 
         data = resp.json()
         assert {t["pincer_user_id"] for t in data["tasks"]} == {"usr_a", "usr_b"}
+
+    async def test_db_failure_returns_500_not_empty_payload(self, client: TestClient, scheduler: CronScheduler) -> None:
+        """Regression: a DB/migration failure must surface as an error, not look like 'no schedules'."""
+        with (
+            patch("pincer.api.schedules.get_settings_relaxed", return_value=_fake_settings(scheduler._db_path)),
+            patch(
+                "pincer.api.schedules.CronScheduler.list_all",
+                side_effect=RuntimeError("db exploded"),
+            ),
+        ):
+            resp = client.get("/api/schedules")
+
+        assert resp.status_code == 500
+        assert resp.json() != {"tasks": [], "total": 0, "future_count": 0, "past_count": 0}

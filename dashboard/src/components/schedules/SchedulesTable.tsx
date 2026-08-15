@@ -25,15 +25,31 @@ const KIND_VARIANT: Record<ScheduledTask["kind"], string> = {
 interface SchedulesTableProps {
   tasks: ScheduledTask[]
   loading?: boolean
+  error?: boolean
+  onRetry?: () => void
 }
 
-export function SchedulesTable({ tasks, loading }: SchedulesTableProps) {
+export function SchedulesTable({ tasks, loading, error, onRetry }: SchedulesTableProps) {
   if (loading) {
     return (
       <div className="space-y-2">
         {Array.from({ length: 8 }).map((_, i) => (
           <Skeleton key={i} className="h-10 w-full bg-white/[0.06]" />
         ))}
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center gap-2 py-12 text-sm text-[var(--color-muted)]">
+        <span>Failed to load scheduled tasks.</span>
+        <button
+          onClick={onRetry}
+          className="text-[var(--color-foreground)] underline underline-offset-2 hover:opacity-70 transition-opacity"
+        >
+          Retry
+        </button>
       </div>
     )
   }

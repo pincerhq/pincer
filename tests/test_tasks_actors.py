@@ -20,8 +20,8 @@ async def store(tmp_path):
     return sched
 
 
-def _fake_settings(tmp_path):
-    return SimpleNamespace(db_path=tmp_path / "pincer.db", task_max_retries=1)
+def _fake_settings(tmp_path, task_max_retries=1):
+    return SimpleNamespace(db_path=tmp_path / "pincer.db", task_max_retries=task_max_retries)
 
 
 @pytest.mark.asyncio
@@ -89,7 +89,7 @@ class TestRunScheduledAction:
         router.send_to_user.assert_not_awaited()
 
     async def test_handler_failure_reraises_after_retries(self, store, tmp_path, caplog):
-        """A handler that keeps failing propagates so repid's on_error='nack' can redeliver."""
+        """A handler that keeps failing propagates so repid's on_error='nack' can ack-and-DLQ it."""
         sid = await store.add("morning", "0 7 * * *", {"type": "briefing"}, "usr_test")
 
         router = AsyncMock()
@@ -107,6 +107,24 @@ class TestRunScheduledAction:
 
         assert any("failed after retries" in r.message for r in caplog.records)
         router.send_to_user.assert_not_awaited()
+
+    async def test_handler_retries_then_succeeds(self, store, tmp_path):
+        """With task_max_retries > 1, tenacity must actually retry, not just fail once."""
+        sid = await store.add("morning", "0 7 * * *", {"type": "briefing"}, "usr_test")
+
+        router = AsyncMock()
+        proactive = AsyncMock()
+        proactive.generate_briefing = AsyncMock(
+            side_effect=[RuntimeError("transient"), RuntimeError("transient"), "Good morning!"]
+        )
+        triggers = AsyncMock()
+        set_context(router, proactive, triggers)
+
+        with patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path, task_max_retries=3)):
+            await run_scheduled_action(schedule_id=sid)
+
+        assert proactive.generate_briefing.await_count == 3
+        router.send_to_user.assert_awaited_once()
 
     async def test_non_string_result_logged_as_no_message(self, store, tmp_path, caplog):
         """A handler returning None (e.g. custom action) is completed without delivery."""
@@ -157,3 +175,16 @@ class TestProcessWebhook:
             await process_webhook(webhook_id="wh_1", payload={"a": 1}, pincer_user_id="usr_test")
 
         assert any("failed after retries" in r.message for r in caplog.records)
+
+    async def test_handler_retries_then_succeeds(self, tmp_path):
+        """With task_max_retries > 1, tenacity must actually retry, not just fail once."""
+        router = AsyncMock()
+        proactive = AsyncMock()
+        triggers = AsyncMock()
+        triggers.handle_webhook = AsyncMock(side_effect=[RuntimeError("transient"), RuntimeError("transient"), "ok"])
+        set_context(router, proactive, triggers)
+
+        with patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path, task_max_retries=3)):
+            await process_webhook(webhook_id="wh_1", payload={"a": 1}, pincer_user_id="usr_test")
+
+        assert triggers.handle_webhook.await_count == 3

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class TaskSettings(BaseModel):
@@ -25,3 +25,9 @@ class TaskSettings(BaseModel):
         ge=5,
         description="Seconds between checks for due cron schedules (repid has no native scheduler)",
     )
+
+    @model_validator(mode="after")
+    def _validate_redis_url(self) -> Self:
+        if self.task_broker == "redis" and not self.task_broker_url:
+            raise ValueError("task_broker_url is required when task_broker='redis'")
+        return self

@@ -149,6 +149,22 @@ services:
     container_name: pincer
     profiles:
       - http
+    # NOTE: environment is duplicated from x-pincer-base (not appended) — YAML
+    # merge keys (<<:) replace inherited list keys wholesale rather than merging
+    # them. PINCER_TASK_BROKER=redis must NOT be added to x-pincer-base itself,
+    # since pincer-stdio (profile: stdio) also inherits from it and has no redis.
+    environment:
+      - PINCER_DATA_DIR=/app/data
+      - PINCER_DASHBOARD_HOST=0.0.0.0
+      - PINCER_DASHBOARD_PORT=8080
+      - PINCER_DASHBOARD_DIST=/app/dashboard/dist
+      # MCP server — expose Pincer tools to Claude Desktop, Cursor, and other MCP clients
+      - PINCER_MCP_SERVER_EXPORT_ENABLED=true
+      - PINCER_MCP_SERVER_EXPORT_HOST=0.0.0.0
+      - PINCER_MCP_SERVER_EXPORT_PORT=18800
+      - PINCER_TELEMETRY_DSN=${OTEL_DSN}
+      - PINCER_TASK_BROKER=redis
+      - PINCER_TASK_BROKER_URL=redis://redis:6379/0
     env_file: .env
     volumes:
       - pincer-data:/app/data
@@ -186,6 +202,24 @@ services:
     command: ["pincer", "run", "tasks"]
     profiles:
       - http
+    # NOTE: environment is duplicated from x-pincer-base (not appended) — YAML
+    # merge keys (<<:) replace inherited list keys wholesale rather than merging
+    # them. `pincer run tasks` refuses to start unless PINCER_TASK_BROKER=redis
+    # (the in-memory broker can't be shared across processes), so this must be
+    # set here explicitly rather than relying on x-pincer-base, which pincer-stdio
+    # (profile: stdio, no redis) also inherits from.
+    environment:
+      - PINCER_DATA_DIR=/app/data
+      - PINCER_DASHBOARD_HOST=0.0.0.0
+      - PINCER_DASHBOARD_PORT=8080
+      - PINCER_DASHBOARD_DIST=/app/dashboard/dist
+      # MCP server — expose Pincer tools to Claude Desktop, Cursor, and other MCP clients
+      - PINCER_MCP_SERVER_EXPORT_ENABLED=true
+      - PINCER_MCP_SERVER_EXPORT_HOST=0.0.0.0
+      - PINCER_MCP_SERVER_EXPORT_PORT=18800
+      - PINCER_TELEMETRY_DSN=${OTEL_DSN}
+      - PINCER_TASK_BROKER=redis
+      - PINCER_TASK_BROKER_URL=redis://redis:6379/0
     env_file: .env
     volumes:
       - pincer-data:/app/data

@@ -1,10 +1,15 @@
 # Background Tasks — repid + chat-driven scheduling
 
-Pincer runs cron-style schedules and on-request background work (webhooks,
-morning briefings, custom prompts) through [repid](https://pypi.org/project/repid/),
-a durable, ack'd, retryable task-actor library. This replaced an earlier
-hand-rolled `asyncio.create_task` fire-loop that had no redelivery on failure
-and couldn't be scaled beyond a single process.
+Pincer runs cron-style schedules and on-request background work (morning
+briefings, custom prompts) through [repid](https://pypi.org/project/repid/),
+a durable, ack'd, retryable task-actor library. This replaced the hand-rolled
+`asyncio.create_task` scheduling loop that had no retry on failure and
+couldn't be scaled beyond a single process. Webhook delivery has a
+repid actor (`process_webhook`) defined but not yet wired to a production
+trigger — see the `actors.py` row below — and `EventTriggerManager`'s
+email/calendar polling loops are intentionally out of scope for this
+migration; they remain single-process `asyncio.create_task` loops by design
+(see [Split — horizontal scaling](#split--horizontal-scaling)).
 
 Related: [CLI Reference](../reference/cli.md) · [CLI](cli.md)
 
@@ -20,8 +25,11 @@ of owning two things repid deliberately doesn't provide out of the box:
   knows how to enqueue and consume messages. Pincer supplies the "when" with
   its own SQLite-backed poll loop.
 - **A retry policy.** repid acks or nacks a message; it doesn't retry a
-  handler internally. Pincer wraps each actor body in a `tenacity` retry,
-  then falls back to `on_error="nack"` (redelivery) if retries are exhausted.
+  handler internally. Pincer wraps each actor body in a `tenacity` retry, then
+  falls back to `on_error="nack"` if retries are exhausted — nack acks and
+  discards the message (the Redis broker additionally writes it once to a
+  `repid:{channel}:dlq` stream by default). This is *not* redelivery: repid's
+  `reject()` is the requeue action, and Pincer's actors don't use it.
 
 ## The pieces
 
@@ -31,7 +39,7 @@ All in `src/pincer/tasks/`:
 |---|---|
 | `app.py` | Registers the active broker (`InMemoryServer` or `RedisServer`, selected by `task_broker`) as the repid app's default server, and owns the `Router` actors register against. |
 | `dispatch.py` | `ScheduleDispatcher` — polls `CronScheduler`'s SQLite store every `task_poll_interval` seconds for due schedules, enqueues each as a repid message, and marks it fired. This is the "when" repid doesn't provide. |
-| `actors.py` | The two actor bodies: `run_scheduled_action` (fires a due cron schedule — briefing or custom prompt) and `process_webhook` (delivers a webhook-triggered notification). Both wrap their handler call in a bounded `tenacity` retry and use `on_error="nack"` for redelivery if retries are exhausted. |
+| `actors.py` | The two actor bodies: `run_scheduled_action` (fires a due cron schedule — briefing or custom prompt) and `process_webhook` (delivers a webhook-triggered notification — defined and tested, but not yet wired to a production trigger; nothing enqueues it today). Both wrap their handler call in a bounded `tenacity` retry and use `on_error="nack"` to ack-and-discard (with a Redis DLQ) if retries are exhausted. |
 | `context.py` | Actors are plain functions invoked by repid's worker loop — they have no access to a running process's local variables. `set_context()` stashes the deliverer, `ProactiveAgent`, and `EventTriggerManager` once at process startup; actor bodies fetch them via `get_deliverer()` / `get_proactive()` / `get_triggers()`. |
 | `delivery.py` | The `Deliverer` abstraction and the `ResultEmitter`/`ResultRelay` pub-sub bridge — see [Result delivery](#result-delivery-and-the-standalone-worker) below. |
 

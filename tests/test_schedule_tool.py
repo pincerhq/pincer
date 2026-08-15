@@ -269,3 +269,30 @@ class TestScheduleListRemoveToggle:
             sid = existing[0]["id"]
             result = await schedule_remove(name="a", schedule_id=sid, context=CTX)
         assert "Removed" in result
+
+    async def test_remove_by_schedule_id_rejects_other_users_schedule(self, settings, schedule_create):
+        """IDOR regression: an explicit schedule_id must not let one user delete another's schedule."""
+        with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):
+            await schedule_create(name="a", cron_expr="0 8 * * *", prompt="p", context=CTX)
+            store = CronScheduler(settings.db_path)
+            sid = (await store.list_schedules("usr_test"))[0]["id"]
+
+            other_ctx = {"pincer_user_id": "usr_attacker", "channel_name": "telegram"}
+            result = await schedule_remove(name="whatever", schedule_id=sid, context=other_ctx)
+
+        assert result.startswith("Error")
+        assert await store.get(sid) is not None
+
+    async def test_toggle_by_schedule_id_rejects_other_users_schedule(self, settings, schedule_create):
+        """IDOR regression: an explicit schedule_id must not let one user toggle another's schedule."""
+        with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):
+            await schedule_create(name="a", cron_expr="0 8 * * *", prompt="p", context=CTX)
+            store = CronScheduler(settings.db_path)
+            sid = (await store.list_schedules("usr_test"))[0]["id"]
+
+            other_ctx = {"pincer_user_id": "usr_attacker", "channel_name": "telegram"}
+            result = await schedule_toggle(name="whatever", enabled=False, schedule_id=sid, context=other_ctx)
+
+        assert result.startswith("Error")
+        schedules = await store.list_schedules("usr_test")
+        assert schedules[0]["enabled"] == 1

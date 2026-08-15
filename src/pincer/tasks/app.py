@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from repid import InMemoryServer, RedisServer, Repid, Router
+from repid import InMemoryServer, Repid, Router
 
 from pincer.config import get_settings
 
@@ -31,6 +31,8 @@ def register_default_server() -> None:
     """
     settings = get_settings()
     if settings.task_broker == "redis":
+        from repid import RedisServer
+
         app.servers.register_server("default", RedisServer(settings.task_broker_url), is_default=True)
         logger.info("Task broker registered: redis")
     else:

@@ -1,9 +1,12 @@
 """Repid actors — durable, retryable execution for scheduled and on-request work.
 
 Repid has no built-in retry policy, so each actor wraps its handler call in
-a `tenacity` retry (bounded by `settings.task_max_retries`); `on_error="nack"`
-below is the second layer, redelivering the message if an actor still fails
-after retries are exhausted.
+a `tenacity` retry (bounded by `settings.task_max_retries`). `on_error="nack"`
+below is the second layer: once tenacity's retries are exhausted and the actor
+re-raises, repid nacks the message — this acks and discards it (the Redis
+broker additionally writes it once to a `repid:{channel}:dlq` stream by
+default), it does *not* redeliver. repid's `reject()` is the requeue action;
+it's unused here.
 """
 
 from __future__ import annotations
@@ -22,6 +25,11 @@ from pincer.tasks.context import get_deliverer, get_proactive, get_triggers
 logger = logging.getLogger(__name__)
 
 
+# Retries wrap the entire handler call below, not just a narrow I/O call — a
+# transient failure after a handler's side effect (e.g. sending a briefing)
+# but before it returns will re-run that side effect on the next attempt.
+# Narrowing retry scope to the specific flaky call would mean threading it
+# through each handler in `proactive.py`; left as a follow-up, not done here.
 def _retrying() -> Any:
     settings = get_settings()
     return retry(
@@ -89,7 +97,12 @@ async def run_scheduled_action(schedule_id: int) -> None:
 
 @router.actor(confirmation_mode="auto", on_error="nack")
 async def process_webhook(webhook_id: str, payload: dict[str, Any], pincer_user_id: str) -> None:
-    """Deliver a webhook-triggered notification (on-request background execution)."""
+    """Deliver a webhook-triggered notification (on-request background execution).
+
+    Not yet wired to a production trigger — no HTTP route or dispatcher
+    enqueues this actor today; it's exercised only by tests. It exists as the
+    target for a future webhook-intake endpoint.
+    """
     logger.info("Webhook processing starting: webhook_id=%s user=%s", webhook_id, pincer_user_id)
     try:
         await _retrying()(get_triggers().handle_webhook)(webhook_id, payload, pincer_user_id)

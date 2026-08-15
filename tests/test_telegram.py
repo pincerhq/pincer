@@ -1,5 +1,6 @@
 """Tests for Telegram channel utilities."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -94,6 +95,26 @@ async def test_send_falls_back_to_plain_unconverted_text_on_error() -> None:
     first_call, second_call = channel._bot.send_message.call_args_list
     assert first_call.kwargs["text"] == "<b>bold</b>"
     assert second_call.kwargs == {"chat_id": 123456789, "text": "**bold**", "parse_mode": None}
+
+
+async def test_request_approval_falls_back_to_plain_text_on_markdown_error() -> None:
+    """Regression: a malformed-markdown args_preview must not silently drop the approval prompt."""
+    channel = _make_channel()
+    channel._bot.send_message = AsyncMock(side_effect=[Exception("bad markup"), None])
+
+    task = asyncio.ensure_future(channel.request_approval("123456789", "some_tool", {"arg": "value"}))
+    await asyncio.sleep(0)  # let request_approval register the pending future before we resolve it
+    channel._pending_approvals["123456789"].set_result(True)
+    result = await task
+
+    assert result is True
+    assert channel._bot.send_message.call_count == 2
+    first_call, second_call = channel._bot.send_message.call_args_list
+    assert first_call.kwargs["chat_id"] == 123456789
+    assert "reply_markup" in first_call.kwargs
+    assert second_call.kwargs["chat_id"] == 123456789
+    assert second_call.kwargs["parse_mode"] is None
+    assert "reply_markup" in second_call.kwargs
 
 
 async def test_send_photo_fast_path_uses_chat_id() -> None:

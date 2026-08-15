@@ -149,29 +149,32 @@ class CronScheduler:
         logger.info("Schedule added: %s (cron=%s, tz=%s)", name, cron_expr, tz)
         return sid  # type: ignore[return-value]
 
-    async def remove(self, schedule_id: int) -> bool:
+    async def remove(self, schedule_id: int, pincer_user_id: str) -> bool:
         async with aiosqlite.connect(self._db_path) as db:
-            cursor = await db.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+            cursor = await db.execute(
+                "DELETE FROM schedules WHERE id = ? AND pincer_user_id = ?",
+                (schedule_id, pincer_user_id),
+            )
             await db.commit()
             removed = cursor.rowcount > 0
         if removed:
             logger.info("Schedule removed: id=%s", schedule_id)
         else:
-            logger.warning("Schedule remove no-op: id=%s not found", schedule_id)
+            logger.warning("Schedule remove no-op: id=%s not found for user", schedule_id)
         return removed
 
-    async def toggle(self, schedule_id: int, enabled: bool) -> bool:
+    async def toggle(self, schedule_id: int, enabled: bool, pincer_user_id: str) -> bool:
         async with aiosqlite.connect(self._db_path) as db:
             cursor = await db.execute(
-                "UPDATE schedules SET enabled = ?, updated_at = datetime('now') WHERE id = ?",
-                (int(enabled), schedule_id),
+                "UPDATE schedules SET enabled = ?, updated_at = datetime('now') WHERE id = ? AND pincer_user_id = ?",
+                (int(enabled), schedule_id, pincer_user_id),
             )
             await db.commit()
             toggled = cursor.rowcount > 0
         if toggled:
             logger.info("Schedule %s: id=%s", "enabled" if enabled else "disabled", schedule_id)
         else:
-            logger.warning("Schedule toggle no-op: id=%s not found", schedule_id)
+            logger.warning("Schedule toggle no-op: id=%s not found for user", schedule_id)
         return toggled
 
     async def list_schedules(self, pincer_user_id: str) -> list[dict[str, Any]]:

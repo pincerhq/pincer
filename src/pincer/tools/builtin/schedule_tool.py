@@ -222,7 +222,7 @@ async def schedule_remove(
     except ValueError as e:
         return f"Error: {e}"
 
-    removed = await scheduler.remove(sid)
+    removed = await scheduler.remove(sid, pincer_user_id)
     return f"Removed schedule '{name}'." if removed else f"Error: schedule '{name}' not found."
 
 
@@ -244,6 +244,6 @@ async def schedule_toggle(
     except ValueError as e:
         return f"Error: {e}"
 
-    toggled = await scheduler.toggle(sid, enabled)
+    toggled = await scheduler.toggle(sid, enabled, pincer_user_id)
     state = "enabled" if enabled else "disabled"
     return f"Schedule '{name}' {state}." if toggled else f"Error: schedule '{name}' not found."

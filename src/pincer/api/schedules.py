@@ -14,7 +14,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from pincer.config import get_settings_relaxed
 from pincer.scheduler.cron import CronScheduler, is_one_time_cron
@@ -59,8 +59,8 @@ async def list_scheduled_tasks(
         await scheduler.ensure_table()
         rows = await scheduler.list_all()
     except Exception as e:
-        logger.error("Failed to list schedules: %s", e)
-        return {"tasks": [], "total": 0, "future_count": 0, "past_count": 0}
+        logger.exception("Failed to list schedules")
+        raise HTTPException(status_code=500, detail="Failed to list schedules") from e
 
     future_rows = []
     past_rows = []

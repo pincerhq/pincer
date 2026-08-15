@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button"
 
 export function SchedulesPage() {
   const [includePast, setIncludePast] = useState(false)
-  const { data, isLoading } = useSchedules(includePast)
+  const { data, isLoading, isError, refetch } = useSchedules(includePast)
 
   return (
     <PageContainer title="Schedules">
@@ -30,7 +30,12 @@ export function SchedulesPage() {
       </div>
 
       <div className="mt-4 rounded-xl border border-[var(--color-border)] bg-[var(--color-card)] overflow-hidden">
-        <SchedulesTable tasks={data?.tasks ?? []} loading={isLoading} />
+        <SchedulesTable
+          tasks={data?.tasks ?? []}
+          loading={isLoading}
+          error={isError}
+          onRetry={() => void refetch()}
+        />
       </div>
     </PageContainer>
   )

@@ -1386,10 +1386,13 @@ async def _run_tasks_worker(settings: Settings) -> None:
     delivery_backend = create_delivery_backend(settings)
     deliverer = ResultEmitter(delivery_backend)
 
-    # ensure_table() only, never .start() — EventTriggerManager's email/
-    # calendar polling loops must run in exactly one process (the main
-    # `pincer run` process); this worker only needs the manager so the
-    # process_webhook actor can call handle_webhook().
+    # ensure_table() only, never .start() — EventTriggerManager's email/calendar
+    # polling loops are intentionally NOT part of the repid migration: they
+    # remain single-process asyncio.create_task loops by design (see
+    # EventTriggerManager.start()) and must run in exactly one process (the
+    # main `pincer run` process). This worker only needs ensure_table() for the
+    # process_webhook actor's handle_webhook() call — that actor isn't wired to
+    # a production trigger yet (nothing enqueues it outside of tests).
     triggers = EventTriggerManager(settings.db_path, deliverer)
     await triggers.ensure_table()
 
