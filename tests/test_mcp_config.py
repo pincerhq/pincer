@@ -478,7 +478,7 @@ def test_env_server_args_interpolated(tmp_path: Path, monkeypatch: pytest.Monkey
 
 
 def test_local_toml_overrides_server(tmp_path: Path) -> None:
-    """local.toml server with same name replaces the base entry."""
+    """local.toml server with same name overrides the base entry fields."""
     (tmp_path / "pincer.toml").write_text("""
 [mcp]
 [[mcp.servers]]
@@ -496,6 +496,30 @@ command = "local_cmd"
     cfg = load_mcp_config(tmp_path)
     assert len(cfg.servers) == 1
     assert cfg.servers[0].command == "local_cmd"
+
+
+def test_local_toml_merges_server_fields(tmp_path: Path) -> None:
+    """local.toml merges fields into existing server rather than replacing whole entry."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "srv"
+transport = "stdio"
+command = "base_cmd"
+args = ["--flag"]
+""")
+    (tmp_path / "pincer.local.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "srv"
+enabled = false
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert len(cfg.servers) == 1
+    assert cfg.servers[0].name == "srv"
+    assert cfg.servers[0].command == "base_cmd"
+    assert cfg.servers[0].args == ["--flag"]
+    assert cfg.servers[0].enabled is False
 
 
 def test_local_toml_adds_new_server(tmp_path: Path) -> None:
