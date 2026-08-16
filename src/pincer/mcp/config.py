@@ -294,16 +294,21 @@ def _read_toml_raw(toml_path: Path) -> dict[str, Any] | None:
 def _merge_mcp_raw(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Merge two raw [mcp] section dicts. override wins for all scalar/mapping keys.
 
-    [[mcp.servers]] entries are merged by 'name': an override entry with the same
-    name as a base entry replaces it entirely; new names are appended in order.
+    [[mcp.servers]] entries are merged by 'name': fields in an override entry
+    override corresponding fields in the base entry with the same name; new names
+    are appended in order.
     [mcp.server] sub-table fields are merged shallowly (override wins per key).
     """
     merged: dict[str, Any] = dict(base)
     for key, val in override.items():
         if key == "servers":
-            by_name: dict[str, Any] = {s["name"]: s for s in base.get("servers", [])}
+            by_name: dict[str, Any] = {s["name"]: dict(s) for s in base.get("servers", [])}
             for srv in val:
-                by_name[srv["name"]] = srv
+                name = srv.get("name")
+                if name and name in by_name:
+                    by_name[name] = {**by_name[name], **srv}
+                elif name:
+                    by_name[name] = srv
             merged["servers"] = list(by_name.values())
         elif key == "server" and isinstance(val, dict):
             merged["server"] = {**base.get("server", {}), **val}
