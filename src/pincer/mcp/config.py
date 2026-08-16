@@ -295,15 +295,17 @@ def _merge_mcp_raw(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
     """Merge two raw [mcp] section dicts. override wins for all scalar/mapping keys.
 
     [[mcp.servers]] entries are merged by 'name': an override entry with the same
-    name as a base entry replaces it entirely; new names are appended in order.
-    [mcp.server] sub-table fields are merged shallowly (override wins per key).
+    name as a base entry is merged into it field by field (override wins per key,
+    unspecified fields are inherited from the base entry); new names are appended
+    in order. [mcp.server] sub-table fields are merged the same way.
     """
     merged: dict[str, Any] = dict(base)
     for key, val in override.items():
         if key == "servers":
             by_name: dict[str, Any] = {s["name"]: s for s in base.get("servers", [])}
             for srv in val:
-                by_name[srv["name"]] = srv
+                name = srv["name"]
+                by_name[name] = {**by_name[name], **srv} if name in by_name else srv
             merged["servers"] = list(by_name.values())
         elif key == "server" and isinstance(val, dict):
             merged["server"] = {**base.get("server", {}), **val}

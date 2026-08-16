@@ -89,6 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `MemoryStore.add_profile()` upserts the `profile` entry (deletes any prior one for the same user before inserting fresh).
 - 10 new unit tests in `tests/test_onboarding.py` covering the full state machine + edge cases (gibberish reply, extraction failure, retry idempotency, pre-existing session no-op, streaming path).
 
+### Fixed
+
+- **`pincer.local.toml` now merges `[[mcp.servers]]` entries per-field instead of replacing them wholesale.** Previously, a local entry matched by `name` fully replaced the base entry, so overriding a single field (e.g. `enabled = false`) for a server already defined in `pincer.toml` required repeating every other field, and omitting a required one (`command`/`url`) raised a `ValueError`. Local fields now override the base value per-key; unspecified fields are inherited from the base entry. (`_merge_mcp_raw` in `src/pincer/mcp/config.py`.)
+
 ---
 
 ## [0.8.0] — 2026-05-09
