@@ -164,6 +164,40 @@ def test_teams_path_bypasses_auth(monkeypatch, tmp_path):
         get_settings_relaxed.cache_clear()
 
 
+def test_twilio_path_bypasses_auth(monkeypatch, tmp_path):
+    """Twilio webhooks can't send our Bearer token — /api/apps/twilio/* must
+    skip auth (hotfix: status callbacks were 401ing back to Twilio)."""
+    from pincer.config import get_settings_relaxed
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "secret-token")
+    get_settings_relaxed.cache_clear()
+    try:
+        app = create_app()
+        with TestClient(app) as c:
+            resp = c.post("/api/apps/twilio/status", data={"CallSid": "CA_test", "CallStatus": "ringing"})
+            assert resp.status_code != 401
+    finally:
+        get_settings_relaxed.cache_clear()
+
+
+def test_port_in_use_detection():
+    """Single-instance guard: detects a listener on the dashboard port."""
+    import socket as socket_mod
+
+    from pincer.cli import _port_in_use
+
+    server = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_STREAM)
+    try:
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        _, port = server.getsockname()
+        assert _port_in_use("127.0.0.1", port) is True
+    finally:
+        server.close()
+    assert _port_in_use("127.0.0.1", port) is False  # released
+
+
 def test_ngrok_domain_falls_back_to_base_url_host(monkeypatch, tmp_path):
     """check_ngrok_domain fills ngrok_domain from base_url.host when authtoken is set."""
     monkeypatch.chdir(tmp_path)
@@ -203,7 +237,7 @@ def test_print_voice_webhook_urls_conversation_relay():
     _print_voice_webhook_urls(settings, console)
     joined = "\n".join(console.lines)
     assert "https://abc.ngrok.io/api/apps/twilio/webhook" in joined
-    assert "https://abc.ngrok.io/api/apps/twilio/relay-webhook" in joined
+    assert "wss://abc.ngrok.io/api/apps/twilio/relay" in joined
     assert "stream" not in joined
 
 
@@ -232,3 +266,36 @@ def test_print_voice_webhook_urls_skips_when_empty():
     console = _FakeConsole()
     _print_voice_webhook_urls(settings, console)
     assert console.lines == []
+
+
+# -- Regression: CORS preflight must not be swallowed by auth -----------------
+def test_preflight_is_not_blocked_by_auth(monkeypatch, tmp_path):
+    """OPTIONS carries no Authorization header; CORS must answer it, not auth.
+
+    Guards middleware ordering: add_middleware() inserts at index 0, so the
+    last-registered middleware is the outermost. If CORSMiddleware is ever moved
+    back above auth_middleware, this returns 401 with no CORS headers.
+    """
+    from pincer.config import get_settings_relaxed
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "test-secret-token-1234")
+    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
+    get_settings_relaxed.cache_clear()
+    try:
+        c = TestClient(create_app())
+        resp = c.options(
+            "/api/status",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+        assert resp.status_code == 200, f"preflight got {resp.status_code}, want 200"
+        assert resp.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+        # And the authenticated GET behind it still works.
+        ok = c.get("/api/status", headers={"Authorization": "Bearer test-secret-token-1234"})
+        assert ok.status_code == 200
+    finally:
+        get_settings_relaxed.cache_clear()

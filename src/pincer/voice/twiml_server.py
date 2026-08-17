@@ -112,57 +112,117 @@ async def voice_webhook(request: Request) -> Response:
             return _twiml_response("<Response><Say>This number is not authorized.</Say><Hangup/></Response>")
 
     from pincer.voice.engine import CallDirection
+    from pincer.voice.language import resolve_call_language
+    from pincer.voice.twiml_builder import build_connect_twiml
 
-    await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
+    call_language = resolve_call_language(_settings)
+    await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=call_language)
 
-    base_url = _settings.voice_webhook_base_url.strip().rstrip("/")
-    engine_type = _settings.voice_engine.lower().strip()
-
-    if engine_type == "media_streams":
-        stream_url = f"wss://{_extract_host(base_url)}/api/apps/twilio/stream/{call_sid}"
-        status_url = f"{base_url}/api/apps/twilio/status"
-        twiml = (
-            "<Response>"
-            "<Say>Connecting you now.</Say>"
-            f'<Connect><Stream url="{stream_url}" '
-            f'statusCallbackUrl="{status_url}" /></Connect>'
-            "</Response>"
-        )
-    else:
-        relay_url = f"{base_url}/api/apps/twilio/relay-webhook"
-        twiml = (
-            "<Response>"
-            "<Say>Please wait while I connect you to your assistant.</Say>"
-            f'<Connect><ConversationRelay url="{relay_url}" '
-            f'voice="Google.en-US-Neural2-F" language="{_settings.voice_language}" '
-            'transcriptionProvider="google" ttsProvider="google" /></Connect>'
-            "</Response>"
-        )
-
+    twiml = build_connect_twiml(
+        _settings,
+        call_sid=call_sid,
+        direction="inbound",
+        language=call_language,
+        counterparty=caller,
+    )
     return _twiml_response(twiml)
 
 
 @twilio_router.post("/status")
 async def voice_status(request: Request) -> PlainTextResponse:
-    """Call status callbacks (ringing, answered, completed)."""
+    """Call status callbacks (ringing, answered, completed) + AMD results."""
+    from pincer.voice.status_notify import notify_connected, notify_ended
+
     form = await request.form()
     call_sid = str(form.get("CallSid", ""))
     status = str(form.get("CallStatus", ""))
     duration = form.get("CallDuration", "0")
+    answered_by = str(form.get("AnsweredBy", ""))
 
-    logger.info("Call status: %s -> %s (duration=%s)", call_sid, status, duration)
+    logger.info(
+        "Call status: %s -> %s (duration=%s%s)",
+        call_sid,
+        status,
+        duration,
+        f", answered_by={answered_by}" if answered_by else "",
+    )
 
-    if status == "completed" and _engine:
+    from pincer.voice.status_notify import get_call_language
+
+    # Reports reach the user in the language of their initiating command (Sprint 3)
+    call_lang = get_call_language(call_sid).strip().lower()[:2]
+    user_lang = call_lang if call_lang in ("de", "uk") else "en"
+
+    # T1.3: Answering Machine Detection — voicemail is reported, not conversed with.
+    if answered_by.startswith("machine") or answered_by == "fax":
+        amd_state = _engine.get_call_state(call_sid) if _engine else None
+        if amd_state is not None and amd_state.metadata.get("caller_spoke"):
+            # AMD false positive: a human is already mid-conversation. Acting
+            # on the verdict here killed live calls 20s in — ignore it and let
+            # the status fall through to normal handling.
+            logger.info(
+                "AMD verdict '%s' ignored [%s] — caller already conversing",
+                answered_by,
+                call_sid,
+            )
+        else:
+            logger.info("Voicemail/machine detected [%s] (%s) — hanging up", call_sid, answered_by)
+            voicemail_reasons = {
+                "en": "voicemail detected, no message left",
+                "de": "Anrufbeantworter erkannt, keine Nachricht hinterlassen",
+                "uk": "виявлено автовідповідач, повідомлення не залишено",
+            }
+            voicemail_reason = voicemail_reasons[user_lang]
+            await notify_ended(call_sid, voicemail_reason)
+            if _engine:
+                await _engine.end_call(call_sid)
+            return PlainTextResponse("OK")
+
+    if status == "in-progress":
+        # Callee (a human) picked up
+        await notify_connected(call_sid)
+
+    elif status in ("busy", "no-answer", "failed", "canceled"):
+        # Call never connected — the user still gets a final status (T1.3/T1.5)
+        reasons = {
+            "en": {
+                "busy": "the line was busy",
+                "no-answer": "no answer",
+                "failed": "the call could not be placed",
+                "canceled": "the call was canceled",
+            },
+            "de": {
+                "busy": "die Leitung war besetzt",
+                "no-answer": "keine Antwort",
+                "failed": "der Anruf konnte nicht aufgebaut werden",
+                "canceled": "der Anruf wurde abgebrochen",
+            },
+            "uk": {
+                "busy": "лінія була зайнята",
+                "no-answer": "немає відповіді",
+                "failed": "не вдалося здійснити дзвінок",
+                "canceled": "дзвінок було скасовано",
+            },
+        }
+        await notify_ended(call_sid, reasons[user_lang].get(status, status))
+        if _engine and _engine.get_call_state(call_sid):
+            await _engine.end_call(call_sid)
+
+    elif status == "completed" and _engine:
         state = _engine.get_call_state(call_sid)
         if state:
             await _engine.end_call(call_sid)
+        else:
+            # Ended before any conversation state existed (e.g. hangup during AMD)
+            ended_texts = {"en": "call ended", "de": "Anruf beendet", "uk": "дзвінок завершено"}
+            await notify_ended(call_sid, ended_texts[user_lang])
 
     return PlainTextResponse("OK")
 
 
 @twilio_router.post("/fallback")
 async def voice_fallback(request: Request) -> Response:
-    """Error fallback — plays apology message, logs error."""
+    """Error fallback — plays apology message in the call language, logs error."""
     form = await request.form()
     call_sid = str(form.get("CallSid", ""))
     error_code = str(form.get("ErrorCode", ""))
@@ -175,13 +235,138 @@ async def voice_fallback(request: Request) -> Response:
         error_msg,
     )
 
-    return _twiml_response(
-        "<Response>"
-        "<Say>I'm sorry, I'm experiencing technical difficulties. "
-        "Please try again later.</Say>"
-        "<Hangup/>"
-        "</Response>"
-    )
+    from pincer.voice.status_notify import get_call_language
+
+    fallback_lang = get_call_language(call_sid).strip().lower()[:2]
+    if fallback_lang == "de":
+        apology = (
+            '<Say language="de-DE">Entschuldigung, es gibt gerade ein technisches Problem. '
+            "Bitte versuchen Sie es später noch einmal.</Say>"
+        )
+    elif fallback_lang == "uk":
+        apology = '<Say language="uk-UA">Вибачте, сталася технічна проблема. Будь ласка, спробуйте пізніше.</Say>'
+    else:
+        apology = "<Say>I'm sorry, I'm experiencing technical difficulties. Please try again later.</Say>"
+
+    return _twiml_response(f"<Response>{apology}<Hangup/></Response>")
+
+
+@twilio_router.websocket("/relay")
+async def relay_ws(websocket: WebSocket) -> None:
+    """ConversationRelay WebSocket — the TwiML `<ConversationRelay url="wss://.../relay">` target.
+
+    ConversationRelay is WebSocket-only: Twilio rejects an https URL with
+    error 64101 ("Invalid url parameter value") at <Connect> time, which
+    surfaces to the caller as "an application error has occurred" right after
+    the greeting. Twilio sends JSON messages here (setup / prompt / interrupt /
+    error); the engine speaks by sending {"type": "text", "token": ..., "last":
+    true} back over this socket (ConversationRelayEngine.send_speech).
+    """
+    await websocket.accept()
+
+    if not _engine:
+        await websocket.close(code=1011, reason="Engine not initialized")
+        return
+
+    call_sid = ""
+    state = None
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+
+            msg_type = str(msg.get("type", ""))
+
+            if msg_type == "setup":
+                call_sid = str(msg.get("callSid", ""))
+                caller = str(msg.get("from", ""))
+                logger.info("ConversationRelay connected: %s from %s", call_sid, caller)
+                state = _engine.get_call_state(call_sid)
+                if state is None:
+                    # Outbound calls were placed via REST (voice/outbound.py);
+                    # their target, purpose, and language are tracked there.
+                    from pincer.voice.engine import CallDirection
+                    from pincer.voice.status_notify import get_call_info
+
+                    info = get_call_info(call_sid)
+                    if info is not None:
+                        state = await _engine.on_call_start(
+                            call_sid,
+                            info.target_number or caller,
+                            CallDirection.OUTBOUND,
+                            target_number=info.target_number,
+                            purpose=info.purpose,
+                            language=info.language,
+                        )
+                    else:
+                        state = await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
+                state.metadata["websocket"] = websocket
+
+            elif msg_type == "prompt":
+                text = str(msg.get("voicePrompt", ""))
+                if text and call_sid:
+                    await _engine.on_speech_input(call_sid, text)
+
+            elif msg_type == "interrupt":
+                if call_sid:
+                    await _engine.interrupt_speech(call_sid)
+
+            elif msg_type == "error":
+                logger.error("ConversationRelay error [%s]: %s", call_sid, msg)
+                await _handle_relay_error(call_sid, msg)
+
+    except WebSocketDisconnect:
+        logger.info("ConversationRelay disconnected: %s", call_sid)
+    except Exception:
+        logger.exception("ConversationRelay WS error: %s", call_sid)
+    finally:
+        if state is not None and state.metadata.get("websocket") is websocket:
+            state.metadata.pop("websocket", None)
+
+
+# Consecutive Twilio-side TTS failures (error 64111, "Error converting tokens
+# to speech") tolerated before the call takes the spoken-apology fallback.
+MAX_CR_TTS_ERRORS = 2
+
+
+async def _handle_relay_error(call_sid: str, msg: dict[str, Any]) -> None:
+    """Twilio-side TTS failure resilience: repeated 64111 means the configured
+    voice cannot be synthesized by Twilio's ElevenLabs integration (e.g. a
+    voice/language pairing Twilio doesn't carry). The caller is hearing pure
+    silence while transcripts look healthy — mark the voice unusable so
+    subsequent calls build Google-fallback TwiML, and end this call with the
+    spoken apology instead of letting it stay silent.
+    """
+    if not _engine or not call_sid:
+        return
+    description = str(msg.get("description", ""))
+    if "64111" not in description and "converting tokens to speech" not in description.lower():
+        return
+    state = _engine.get_call_state(call_sid)
+    if state is None:
+        return
+
+    count = int(state.metadata.get("cr_tts_errors", 0)) + 1
+    state.metadata["cr_tts_errors"] = count
+    if count < MAX_CR_TTS_ERRORS:
+        return
+
+    from pincer.voice.language import voice_for
+    from pincer.voice.voices import mark_voice_invalid
+
+    bad_voice = voice_for(_settings, state.language) if _settings else ""
+    if bad_voice:
+        mark_voice_invalid(bad_voice)
+        logger.error(
+            "ConversationRelay TTS failing repeatedly [%s] — voice %s marked unusable; "
+            "next calls use Twilio's default ElevenLabs voice for the language",
+            call_sid,
+            bad_voice,
+        )
+    await _engine.fallback_and_end(call_sid)
 
 
 @twilio_router.post("/relay-webhook")
@@ -207,8 +392,22 @@ async def relay_webhook(request: Request) -> Response:
         caller = str(body.get("from", body.get("From", "")))
         if call_sid and not _engine.get_call_state(call_sid):
             from pincer.voice.engine import CallDirection
+            from pincer.voice.status_notify import get_call_info
 
-            await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
+            # Outbound calls were placed via REST (voice/outbound.py); their
+            # target, purpose, and per-call language are tracked there.
+            info = get_call_info(call_sid)
+            if info is not None:
+                await _engine.on_call_start(
+                    call_sid,
+                    info.target_number or caller,
+                    CallDirection.OUTBOUND,
+                    target_number=info.target_number,
+                    purpose=info.purpose,
+                    language=info.language,
+                )
+            else:
+                await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
 
     elif event_type == "interrupt":
         if call_sid:
@@ -231,6 +430,22 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
         return
 
     state = _engine.get_call_state(call_sid)
+    if state is None:
+        # Outbound media_streams call: the stream may connect before any other
+        # webhook has registered the call — recover its context (incl. language)
+        from pincer.voice.engine import CallDirection
+        from pincer.voice.status_notify import get_call_info
+
+        info = get_call_info(call_sid)
+        if info is not None:
+            state = await _engine.on_call_start(
+                call_sid,
+                info.target_number,
+                CallDirection.OUTBOUND,
+                target_number=info.target_number,
+                purpose=info.purpose,
+                language=info.language,
+            )
     if state:
         state.metadata["websocket"] = websocket
 
@@ -307,16 +522,11 @@ async def relay_webhook_legacy(request: Request) -> Response:
     return await relay_webhook(request)
 
 
+@voice_router.websocket("/relay")
+async def relay_ws_legacy(websocket: WebSocket) -> None:
+    await relay_ws(websocket)
+
+
 @voice_router.websocket("/stream/{call_sid}")
 async def media_stream_ws_legacy(websocket: WebSocket, call_sid: str) -> None:
     await media_stream_ws(websocket, call_sid)
-
-
-def _extract_host(base_url: str) -> str:
-    """Extract host from a URL (strip scheme)."""
-    host = base_url
-    for prefix in ("https://", "http://", "wss://", "ws://"):
-        if host.startswith(prefix):
-            host = host[len(prefix) :]
-            break
-    return host.rstrip("/")

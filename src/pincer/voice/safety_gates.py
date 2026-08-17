@@ -50,17 +50,28 @@ CONFIRMATION_PATTERNS: dict[ActionCategory, str] = {
     ActionCategory.OTHER: "I'm going to {details}. Is that correct?",
 }
 
+# English + German (Sprint 2). German affirmatives use lookarounds so that
+# negated forms ("passt nicht", "nicht richtig") don't double-match as both.
 AFFIRMATIVE_PATTERNS = re.compile(
     r"\b(yes|yeah|yep|yup|sure|go ahead|do it|correct|confirmed|absolutely|"
-    r"that's right|proceed|affirmative|ok|okay|sounds good|perfect|right|"
-    r"go for it|please do|of course)\b",
+    r"that's right|proceed|affirmative|ok|okay|sounds good|perfect|"
+    r"go for it|please do|of course|"
+    r"ja|jawohl|genau|klar|gerne|einverstanden|in ordnung|"
+    r"stimmt(?!\s+nicht)|korrekt|"
+    r"(?<!nicht )richtig|(?<!not )right|"
+    r"passt(?!\s+(?:mir\s+|es\s+)?nicht)|"
+    r"machen sie das|mach das|sehr gut)\b",
     re.IGNORECASE,
 )
 
 NEGATIVE_PATTERNS = re.compile(
     r"\b(no|nah|nope|don't|stop|wait|hold on|cancel|never mind|"
     r"not yet|hold off|scratch that|forget it|negative|wrong|"
-    r"that's wrong|incorrect|actually no)\b",
+    r"that's wrong|incorrect|actually no|"
+    r"nein|nee|nö|lieber nicht|bloß nicht|auf keinen fall|keinesfalls|"
+    r"stopp|warte|moment mal|abbrechen|vergessen sie es|vergiss es|"
+    r"passt (?:mir |es )?nicht|stimmt nicht|nicht richtig|falsch|"
+    r"das ist falsch|doch nicht|so nicht)\b",
     re.IGNORECASE,
 )
 

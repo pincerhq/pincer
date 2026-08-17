@@ -87,6 +87,128 @@ PSTN Caller / Outbound Target
 
 Set `PINCER_VOICE_ENGINE=conversation_relay` (default) or `PINCER_VOICE_ENGINE=media_streams`.
 
+### Engine decision & latency baseline (Sprint 1)
+
+Per-call latency is instrumented in `pincer/voice/metrics.py` and logged at call end
+(`Call latency [CAxxx]: {...}`). Three numbers matter:
+
+| Metric | Definition | Target |
+|---|---|---|
+| Time-to-first-agent-word | call start → first `send_speech` | < 2s |
+| Per-turn round trip | caller utterance received → agent speech starts | < 1.5s mean |
+| Barge-in reaction | speech onset during TTS → TTS stopped | < 500ms |
+
+**Measurement procedure** (repeat per engine, ≥ 5 calls each, same network/region):
+
+1. Set `PINCER_VOICE_ENGINE`, run `PINCER_LOG_LEVEL=DEBUG pincer run`.
+2. Place calls to a real mobile; hold a ~10-turn conversation; interrupt the agent
+   at least twice per call.
+3. Collect the `Call latency` log lines; average per engine.
+4. Record the numbers in the table below and set the production default accordingly.
+
+**Decision record (DACH production default):**
+
+| Engine | TTFW | Mean turn RTT | Barge-in | Measured on |
+|---|---|---|---|---|
+| conversation_relay | _pending live measurement_ | _pending_ | _pending_ | — |
+| media_streams | _pending live measurement_ | _pending_ | _pending_ | — |
+
+Provisional default: `conversation_relay` (fewest moving parts, no extra provider
+keys). Revisit after the live measurement — if media_streams meets its documented
+~0.8–1.5s turn latency with stable Deepgram/ElevenLabs EU connectivity, it becomes
+the DACH default. The barge-in <500ms target is only achievable on media_streams
+(custom VAD, `voice/bargein.py`); ConversationRelay barge-in is Twilio-controlled.
+
+### Call language (Sprint 2: English default, German)
+
+Language is a **parameter of the call**, not a global setting: `make_phone_call(..., language="de")`
+produces a call that is German end-to-end — greeting, conversation, confirmations, error
+recovery, timeout exits, and the consent announcement. The text agent infers it from the
+user's command ("Ruf beim Zahnarzt an…" → `language="de"`); English is the default.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PINCER_VOICE_DEFAULT_LANGUAGE` | `en` | Fallback call language |
+| `PINCER_VOICE_SUPPORTED_LANGUAGES` | `en,de` | Allowed values for the tool param |
+| `PINCER_VOICE_DE_FORMALITY` | `sie` | German register (Sie-Form default; `du` for informal) |
+| `PINCER_ELEVENLABS_VOICE_ID_DE` / `_EN` | — | Per-language TTS voices (fallback: `PINCER_ELEVENLABS_VOICE_ID`) |
+
+Plumbing per engine: ConversationRelay gets per-call `language`/`voice` TwiML attributes
+(`de-DE`, plus the language-resolved ElevenLabs voice when one is configured — Sprint 4);
+Media Streams runs Deepgram Nova-2 `de` with more generous endpointing (400ms /
+utterance-end 1200ms — German compound words and verb-final clauses pause differently),
+and ElevenLabs speaks with the German voice on the multilingual `eleven_flash_v2_5` model. All prompts live in `pincer/voice/prompts/{en,de}.py` (`get_prompt(key, lang)`,
+English fallback). German comprehension helpers (`pincer/voice/nlu_de.py`) parse relative
+dates/times deterministically ("um halb drei" = 14:30, "in acht Tagen" = one week,
+"nächste Woche Dienstag") and render dates for TTS ("Dienstag, der achtzehnte August um
+vierzehn Uhr dreißig") — raw ISO strings must never reach TTS. German yes/no variants
+("ja", "genau", "passt" / "nein", "lieber nicht", "passt nicht") resolve VERIFY.
+
+### German ASR quality spike (T2.5 — run before relying on German media_streams)
+
+Do this in the first days of German rollout; it gates the STT provider decision.
+
+1. **Setup**: `PINCER_VOICE_ENGINE=media_streams`, `language="de"` calls over real 8kHz telephony.
+2. **10 test calls**, varied speakers, at least one dialect speaker (e.g. Bavarian/Swabian).
+3. Each call reads a fixed phrase set — the phrases that matter commercially:
+   - Dates: "Dienstag, der achtzehnte August", "am dritten März", "übermorgen um halb drei"
+   - Times: "vierzehn Uhr dreißig", "Viertel vor fünf", "dreiviertel vier"
+   - Names: "Müller-Lüdenscheidt", "Schmidt", "Yilmaz", "Przybilla"
+   - Phone numbers: "null eins sieben sechs — zwölf, vierunddreißig, sechsundfünfzig"
+4. **Measure WER** on the transcripts (Levenshtein word distance / reference words); record
+   per-category WER in the table below.
+5. **Decision rule**: dates/times/numbers WER > 10% or names WER > 20% → evaluate Google STT
+   (de) behind the existing `STTProvider` abstraction (`voice/stt.py`) before continuing.
+
+| Category | Deepgram nova-2 `de` WER | Notes |
+|---|---|---|
+| Dates | _pending live spike_ | |
+| Times | _pending_ | |
+| Names | _pending_ | |
+| Phone numbers | _pending_ | |
+
+### Post-call intelligence (Sprint 3)
+
+After every terminated call — including voicemail, busy, and no-answer — the initiating
+user receives a report on their originating channel, **in the language of their command**:
+
+```
+✅ Anruf bei Dr. Müller beendet (2:40 Min) — erfolgreich
+Ergebnis: Rezept wird morgen zur Abholung bereitgelegt.
+Besprochen: …
+Zusagen: Gegenseite: Praxis ruft bei Rückfragen zurück
+➡️ Soll ich das übernehmen: den Rückruf-Termin in deinen Kalender eintragen? Antworte einfach mit Ja.
+📄 Vollständiges Transkript: /transcript CA1234
+```
+
+The pipeline (`pincer/voice/postcall.py`): one grounded LLM pass over the transcript +
+action log (`pincer/voice/outcome.py`) extracts outcome / key facts / commitments /
+follow-up suggestions. Grounding is enforced twice — the extraction prompt forbids
+inference, and a mechanical filter drops facts whose content doesn't appear in the
+transcript. The structured outcome is stored as a `call_actions` row (`action_type=outcome`)
+for audit; extraction failure never blocks the report (basic summary fallback).
+
+- **Memory**: key facts, commitments, and follow-up drafts land in cross-channel memory
+  (category `voice_call`, tags `source:voice_call`, `call:<sid>`), so "What did Dr. Müller's
+  office say last week?" works from any channel. If retention purges the transcript, the
+  notes keep the fact — only the raw transcript reference goes stale.
+- **Follow-ups**: suggestions are *proposals* in the report; when the user answers, execution
+  runs through the normal agent loop, tool registry, and approval gates — denial leaves no
+  side effects. `PINCER_VOICE_AUTO_FOLLOWUP` (default `false`) is reserved for later.
+- **Transcript on demand**: the `get_call_transcript` tool ("show me the transcript of the
+  last call", `/transcript CAxxx`) returns the persisted transcript, PII-masked.
+
+### Live-PSTN release checklist (5 manual calls)
+
+CI runs the simulated 10-scenario suite in `tests/voice_harness/`. Before a
+release, additionally sign off these five manual calls from the production number:
+
+1. **Happy path** — outbound call, callee confirms the task; user receives Dialing → Connected → ended-with-outcome messages; transcript shows the task pursued.
+2. **Voicemail** — call a number that goes to voicemail; AMD hangs up and the user is told "voicemail detected" (agent must not converse with the greeting).
+3. **No answer / busy** — user receives the final status; no stuck call in `/api/apps/twilio/health`.
+4. **Mid-call hangup** — callee hangs up mid-sentence; cleanup runs, user gets the final status within seconds.
+5. **Barge-in** — interrupt the agent mid-sentence twice; it stops speaking promptly (< 500ms subjective on media_streams) and picks up your input.
+
 ---
 
 ## Setup
@@ -305,7 +427,14 @@ The `phone_contacts` bundled skill provides tools for managing a contact directo
 | `PINCER_VOICE_WEBHOOK_BASE_URL` | Yes* | — | Public HTTPS URL |
 | `PINCER_DEEPGRAM_API_KEY` | Phase 2 | — | Deepgram STT key |
 | `PINCER_ELEVENLABS_API_KEY` | Phase 2 | — | ElevenLabs TTS key |
-| `PINCER_ELEVENLABS_VOICE_ID` | No | default | Voice selection |
+| `PINCER_ELEVENLABS_VOICE_ID` | No | default | Voice selection (global fallback) |
+| `PINCER_ELEVENLABS_VOICE_ID_EN` / `_DE` | No | — | Per-language voices |
+| `PINCER_ELEVENLABS_MODEL` | No | `eleven_flash_v2_5` | TTS model (multilingual, low latency) |
+| `PINCER_ELEVENLABS_STABILITY` / `_SIMILARITY` | No | `0.5` / `0.75` | Voice tuning (0.0–1.0) |
+| `PINCER_ELEVENLABS_SPEED` | No | `1.0` | Speaking speed (0.7–1.2) |
+| `PINCER_ELEVENLABS_STYLE` | No | `0.0` | Style exaggeration (0 = off, lowest latency) |
+| `PINCER_ELEVENLABS_OUTPUT_FORMAT` | No | `ulaw_8000` | Media Streams audio (`pcm_16000` = legacy fallback) |
+| `PINCER_CR_TTS_PROVIDER` | No | auto | ConversationRelay TTS: `google`/`amazon`/`elevenlabs` |
 | `PINCER_VOICE_LANGUAGE` | No | `en-US` | STT language |
 | `PINCER_VOICE_MAX_CALL_DURATION` | No | `600` | Max call seconds |
 | `PINCER_VOICE_MAX_HOLD_TIME` | No | `300` | Max IVR hold seconds |
@@ -327,11 +456,13 @@ A typical 3-minute outbound call costs approximately:
 |-----------|------|
 | Twilio voice | ~$0.04 |
 | STT (Deepgram) | ~$0.013 |
-| TTS (ElevenLabs) | ~$0.05 |
+| TTS (ElevenLabs Flash, $0.05/1K chars) | ~$0.05–0.10 |
 | LLM (Claude Haiku) | ~$0.02 |
-| **Total** | **~$0.12/call** |
+| **Total** | **~$0.12–0.17/call** |
 
-Budget controls apply to voice calls the same as text interactions.
+Budget controls apply to voice calls the same as text interactions. Each call's
+synthesized character count is tracked in the call metrics (`tts_characters` in the
+`Call latency` log line) so ElevenLabs spend per call is auditable.
 
 ---
 
@@ -365,9 +496,9 @@ The tool executed but returned an error. Check logs for the exact cause:
 
 3. **Tunnel** — If running locally, confirm the built-in ngrok tunnel is active (`Ngrok tunnel: https://...` in the console) and that `PINCER_VOICE_WEBHOOK_BASE_URL` matches that URL exactly (no trailing slash). Test reachability:
    ```bash
-   curl -X POST https://your-tunnel-url/api/apps/twilio/relay-webhook -H "Content-Type: application/json" -d '{}'
+   curl -X POST https://your-tunnel-url/api/apps/twilio/status -d 'CallSid=test'
    ```
-   Should return `OK` (200). ngrok free tier may show a browser interstitial on the very first request — use a static domain to avoid it. See [Local Tunnel (ngrok)](../getting-started/local-tunnel.md).
+   Should return `OK` (200). ngrok free tier may show a browser interstitial on the very first request — use a static domain to avoid it. See [Local Tunnel (ngrok)](../getting-started/local-tunnel.md). Note the ConversationRelay endpoint itself is a WebSocket (`wss://<host>/api/apps/twilio/relay`) — an `https://` URL in the `<ConversationRelay url>` attribute fails at `<Connect>` time with Twilio error 64101 ("application error" right after the greeting).
 
 4. **Twilio Debugger** — Check Twilio Console > Monitor > Logs for call attempts and any webhook or API errors.
 

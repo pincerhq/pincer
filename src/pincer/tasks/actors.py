@@ -53,9 +53,15 @@ async def run_scheduled_action(schedule_id: int) -> None:
 
     proactive = get_proactive()
     action_type = schedule.action.get("type", "custom")
+
+    from pincer.voice.retention import make_retention_handler
+
     handlers = {
         "briefing": proactive.generate_briefing,
         "custom": proactive.run_custom_action,
+        # Sprint 0 (DACH): GDPR voice transcript retention purge — the daily
+        # `voice_retention_purge` schedule created in cli.py dispatches here.
+        "retention_purge": make_retention_handler(settings),
     }
     handler = handlers.get(action_type)
     if handler is None:

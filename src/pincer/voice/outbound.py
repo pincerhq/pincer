@@ -18,16 +18,27 @@ E164_PATTERN = re.compile(r"^\+[1-9]\d{6,14}$")
 _daily_outbound_counts: dict[str, dict[str, int]] = {}
 
 
+def _today_str() -> str:
+    """Daily-limit day boundary in the configured voice timezone (not UTC)."""
+    try:
+        from pincer.config import get_settings
+        from pincer.voice.localtime import voice_today_str
+
+        return voice_today_str(get_settings())
+    except Exception:
+        return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
 def _check_daily_limit(user_id: str, max_daily: int) -> bool:
     """Check if user has exceeded daily outbound call limit."""
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    today = _today_str()
     user_counts = _daily_outbound_counts.setdefault(user_id, {})
     count = user_counts.get(today, 0)
     return count < max_daily
 
 
 def _increment_daily_count(user_id: str) -> None:
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    today = _today_str()
     user_counts = _daily_outbound_counts.setdefault(user_id, {})
     user_counts[today] = user_counts.get(today, 0) + 1
 
@@ -47,6 +58,7 @@ async def make_phone_call(
     purpose: str,
     instructions: str = "",
     max_duration: int = 300,
+    language: str = "",
     context: dict | None = None,
 ) -> str:
     """Place a phone call to a number on behalf of the user.
@@ -55,6 +67,7 @@ async def make_phone_call(
     purpose: What the call is about (e.g. 'Reschedule dentist appointment')
     instructions: Specific instructions for the agent during the call
     max_duration: Maximum call duration in seconds (default 300)
+    language: Call language ('en', 'de', or 'uk'); empty = default language setting
     """
     from pincer.config import get_settings
 
@@ -96,45 +109,58 @@ async def make_phone_call(
         )
 
         base_url = settings.voice_webhook_base_url.strip().rstrip("/")
-        status_url = f"{base_url}/voice/status"
+        status_url = f"{base_url}/api/apps/twilio/status"
 
-        engine_type = settings.voice_engine.lower().strip()
-        if engine_type == "media_streams":
-            host = base_url
-            for prefix in ("https://", "http://"):
-                if host.startswith(prefix):
-                    host = host[len(prefix) :]
-                    break
-            host = host.rstrip("/")
-            stream_url = f"wss://{host}/voice/stream/{{CallSid}}"
-            twiml_str = (
-                '<?xml version="1.0" encoding="UTF-8"?>'
-                "<Response>"
-                f'<Connect><Stream url="{stream_url}" /></Connect>'
-                "</Response>"
-            )
-        else:
-            relay_url = f"{base_url}/voice/relay-webhook"
-            twiml_str = (
-                '<?xml version="1.0" encoding="UTF-8"?>'
-                "<Response>"
-                f'<Connect><ConversationRelay url="{relay_url}" '
-                f'voice="Google.en-US-Neural2-F" language="{settings.voice_language}" '
-                'transcriptionProvider="google" ttsProvider="google" /></Connect>'
-                "</Response>"
-            )
+        from pincer.voice.language import resolve_call_language
+        from pincer.voice.twiml_builder import build_connect_twiml
 
-        call = client.calls.create(
-            to=validated,
-            from_=settings.twilio_phone_number,
-            twiml=twiml_str,
-            status_callback=status_url,
-            status_callback_event=["ringing", "answered", "completed"],
-            timeout=30,
-            time_limit=min(max_duration, settings.voice_max_call_duration),
+        # Sprint 2: language is a parameter of the call
+        call_language = resolve_call_language(settings, language)
+
+        # Consent announcement plays as soon as the callee answers; the shared
+        # builder (T4.1) picks engine, TTS provider, and voice from settings.
+        twiml_str = build_connect_twiml(
+            settings,
+            direction="outbound",
+            language=call_language,
+            counterparty=validated,
         )
 
+        call_kwargs: dict = {
+            "to": validated,
+            "from_": settings.twilio_phone_number,
+            "twiml": twiml_str,
+            "status_callback": status_url,
+            "status_callback_event": ["ringing", "answered", "completed"],
+            # TwiML execution errors play Pincer's own localized apology (and
+            # land in our logs with ErrorCode) instead of Twilio's canned
+            # "an application error has occurred".
+            "fallback_url": f"{base_url}/api/apps/twilio/fallback",
+            "fallback_method": "POST",
+            "timeout": 30,
+            "time_limit": min(max_duration, settings.voice_max_call_duration),
+        }
+        # T1.3: Answering Machine Detection — voicemail is detected and
+        # reported to the user, never conversed with (see twiml_server /status).
+        if getattr(settings, "voice_machine_detection", True):
+            call_kwargs["machine_detection"] = "Enable"
+
+        call = client.calls.create(**call_kwargs)
+
         _increment_daily_count(user_id)
+
+        # T1.5: live status updates back to the initiating user (max 3/call)
+        from pincer.voice.status_notify import notify_dialing, register_outbound_call
+
+        register_outbound_call(
+            call.sid,
+            user_id=user_id,
+            channel=ctx.get("channel", ""),
+            purpose=purpose,
+            target_number=validated,
+            language=call_language,
+        )
+        await notify_dialing(call.sid)
 
         logger.info(
             "Outbound call placed: %s -> %s (purpose: %s)",

@@ -60,9 +60,11 @@ def filter_voice_tools(tool_schemas: list[dict[str, Any]]) -> list[dict[str, Any
     return [s for s in tool_schemas if is_voice_compatible(s.get("name", ""))]
 
 
-def get_filler_phrase(custom_phrases: str = "") -> str:
-    """Get a random filler phrase to play while a tool executes."""
-    phrases = FILLER_PHRASES
+def get_filler_phrase(custom_phrases: str = "", language: str = "en") -> str:
+    """Get a random filler phrase (in the call language) while a tool executes."""
+    from pincer.voice.prompts import get_filler_phrases
+
+    phrases = get_filler_phrases(language) or FILLER_PHRASES
     if custom_phrases:
         try:
             custom = json.loads(custom_phrases)

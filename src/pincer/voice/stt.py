@@ -53,6 +53,15 @@ class STTConfig:
     vad_events: bool = True
 
 
+def stt_config_for_language(language: str) -> STTConfig:
+    """Per-call STT config (Sprint 2). German speech rhythm (long compound
+    words, verb-final clauses) needs more generous endpointing than English."""
+    lang = str(language or "en").strip().lower()[:2] or "en"
+    if lang == "de":
+        return STTConfig(language="de", endpointing=400, utterance_end_ms=1200)
+    return STTConfig(language=lang)
+
+
 class STTStream(ABC):
     """Active streaming transcription session."""
 
