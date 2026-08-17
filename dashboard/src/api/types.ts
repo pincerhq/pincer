@@ -285,3 +285,33 @@ export interface IdentityListResponse {
   identities: Identity[]
   total: number
 }
+
+export interface ScheduledTaskAction {
+  type: "briefing" | "custom" | string
+  prompt?: string
+  allowed_tools?: string[]
+}
+
+export interface ScheduledTask {
+  id: number
+  pincer_user_id: string
+  name: string
+  kind: "recurring" | "one_time"
+  timing: "future" | "past"
+  cron_expr: string
+  timezone: string
+  channel: string
+  enabled: boolean
+  action: ScheduledTaskAction
+  last_run_at: string | null
+  next_run_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ScheduledTasksResponse {
+  tasks: ScheduledTask[]
+  total: number
+  future_count: number
+  past_count: number
+}

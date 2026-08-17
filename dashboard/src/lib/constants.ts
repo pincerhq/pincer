@@ -3,6 +3,7 @@ export const ROUTES = {
   COSTS: "/costs",
   CONVERSATIONS: "/conversations",
   AUDIT: "/audit",
+  SCHEDULES: "/schedules",
   SKILLS: "/skills",
   SKILL: "/skills/:name",
   INTEGRATIONS: "/integrations",
@@ -44,6 +45,7 @@ export const REFETCH_INTERVALS = {
   AUDIT: 15_000,
   CONVERSATIONS: 15_000,
   SKILLS: 15_000,
+  SCHEDULES: 15_000,
 } as const
 
 export const CHANNEL_COLORS: Record<string, string> = {

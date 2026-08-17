@@ -1,6 +1,6 @@
 """Tests for proactive agent (morning briefing)."""
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -14,6 +14,16 @@ async def proactive(tmp_path):
     await agent.ensure_table()
     yield agent
     await agent.close()
+
+
+@pytest_asyncio.fixture
+async def proactive_with_agent(tmp_path):
+    mock_agent = AsyncMock()
+    mock_agent.run_headless.return_value = "Here's your digest: ..."
+    proactive = ProactiveAgent(tmp_path / "pincer_agent.db", agent=mock_agent)
+    await proactive.ensure_table()
+    yield proactive, mock_agent
+    await proactive.close()
 
 
 @pytest.mark.asyncio
@@ -68,6 +78,36 @@ class TestProactiveAgent:
             {"type": "custom"},
         )
         assert "no prompt" in result.lower()
+
+    async def test_custom_action_calls_run_headless_when_agent_wired(self, proactive_with_agent):
+        proactive, mock_agent = proactive_with_agent
+        result = await proactive.run_custom_action(
+            "usr_test",
+            {"type": "custom", "prompt": "Search for Ukraine war news and summarize"},
+            channel="telegram",
+        )
+        mock_agent.run_headless.assert_awaited_once_with(
+            prompt="Search for Ukraine war news and summarize",
+            user_id="usr_test",
+            channel="telegram",
+            channel_name="telegram",
+            allowed_tools=None,
+        )
+        assert result == "Here's your digest: ..."
+
+    async def test_custom_action_passes_allowed_tools_through(self, proactive_with_agent):
+        proactive, mock_agent = proactive_with_agent
+        await proactive.run_custom_action(
+            "usr_test",
+            {"type": "custom", "prompt": "p", "allowed_tools": ["websearch__search"]},
+        )
+        assert mock_agent.run_headless.call_args.kwargs["allowed_tools"] == ["websearch__search"]
+
+    async def test_custom_action_run_headless_failure_returns_error_string(self, proactive_with_agent):
+        proactive, mock_agent = proactive_with_agent
+        mock_agent.run_headless.side_effect = RuntimeError("boom")
+        result = await proactive.run_custom_action("usr_test", {"type": "custom", "prompt": "p"})
+        assert "couldn't complete" in result.lower()
 
     async def test_weather_no_api_key(self, proactive):
         with patch("pincer.scheduler.proactive.get_settings") as mock_s:

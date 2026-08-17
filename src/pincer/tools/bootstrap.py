@@ -38,6 +38,7 @@ def register_default_tools(tools: ToolRegistry, settings: Settings) -> dict[str,
     _register_google_workspace(tools, report)
     _register_slack(tools, report)
     _register_image_gen(tools, settings, report)
+    _register_schedule_tools(tools, settings, report)
 
     return report
 
@@ -437,3 +438,130 @@ def _register_image_gen(tools: ToolRegistry, settings: Settings, report: dict[st
         report["image_gen"] = 1
     except Exception:
         logger.debug("Image generation tool not loaded", exc_info=True)
+
+
+def _register_schedule_tools(tools: ToolRegistry, settings: Settings, report: dict[str, int]) -> None:
+    if not settings.schedule_tool_enabled:
+        return
+
+    from pincer.tools.builtin.schedule_tool import (
+        make_schedule_create_handler,
+        schedule_list,
+        schedule_remove,
+        schedule_toggle,
+    )
+
+    tools.register(
+        name="schedule_create",
+        description=(
+            "Create a scheduled job that runs a prompt through the agent later and delivers the "
+            "result to the user's channel. Pass EXACTLY ONE of cron_expr or run_in_minutes:\n"
+            "- run_in_minutes: for a ONE-TIME request relative to now (e.g. 'in 10 minutes', "
+            "'in an hour') — the exact future time is computed from the real clock, not guessed, "
+            "so you never need to know or compute the current date/time yourself.\n"
+            "- cron_expr: for a RECURRING request with a stated clock time (e.g. 'every day at "
+            "8am', 'every Monday at 9') — a standard 5-field cron expression.\n"
+            "Never invent a cron_expr to approximate 'soon' or 'in N minutes' — that produces "
+            "wrong, often dangerously frequent schedules (e.g. '* * * * *' fires every minute "
+            "forever). Use run_in_minutes for anything relative to 'now'.\n"
+            "Timezone defaults to this app's configured timezone. If the user's timezone is "
+            "genuinely ambiguous or important for a recurring job (e.g. crosses regions), ask "
+            "them rather than guessing.\n"
+            "The prompt runs later with NO conversation context or memory, so it must be fully "
+            "self-contained — e.g. 'search the web for the latest news about X and summarize it', "
+            "not 'the thing we discussed'."
+        ),
+        handler=make_schedule_create_handler(tools),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Short unique name for this schedule (per-user)"},
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "Fully self-contained instruction to run later — no conversation context or memory carries over"
+                    ),
+                },
+                "cron_expr": {
+                    "type": "string",
+                    "description": (
+                        "For RECURRING schedules only. Standard 5-field cron expression, "
+                        "e.g. '0 8 * * *' for daily at 8am. Omit if using run_in_minutes."
+                    ),
+                },
+                "run_in_minutes": {
+                    "type": "integer",
+                    "description": (
+                        "For ONE-TIME schedules only. Minutes from now to run once, e.g. 10 for "
+                        "'in 10 minutes'. Omit if using cron_expr."
+                    ),
+                },
+                "tz": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "IANA timezone name, e.g. 'Europe/Berlin'. Omit to use this app's "
+                        "configured default timezone — ask the user if it matters and is unclear."
+                    ),
+                },
+                "channel": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Delivery channel; defaults to the current conversation's channel",
+                },
+                "allowed_tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional allow-list restricting which tools this schedule may use — "
+                        "must match tool names as seen in this conversation (e.g. 'websearch__search'). "
+                        "Omit to allow all available tools."
+                    ),
+                },
+            },
+            "required": ["name", "prompt"],
+        },
+        require_approval=True,
+    )
+    tools.register(
+        name="schedule_list",
+        description="List your recurring scheduled jobs.",
+        handler=schedule_list,
+        parameters={"type": "object", "properties": {}, "required": []},
+    )
+    tools.register(
+        name="schedule_remove",
+        description="Remove a recurring scheduled job by name.",
+        handler=schedule_remove,
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "schedule_id": {
+                    "type": "integer",
+                    "description": "Only needed if multiple schedules share the same name",
+                },
+            },
+            "required": ["name"],
+        },
+        require_approval=True,
+    )
+    tools.register(
+        name="schedule_toggle",
+        description="Enable or disable a recurring scheduled job by name, without deleting it.",
+        handler=schedule_toggle,
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "enabled": {"type": "boolean"},
+                "schedule_id": {
+                    "type": "integer",
+                    "description": "Only needed if multiple schedules share the same name",
+                },
+            },
+            "required": ["name", "enabled"],
+        },
+        require_approval=True,
+    )
+    report["scheduling"] = 4

@@ -3,8 +3,9 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from pincer.config import LLMProvider, Settings
+from pincer.config import LLMProvider, Settings, TaskSettings
 
 
 def test_settings_load_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,6 +134,24 @@ def test_channel_settings_zero_fields() -> None:
 
     s = ChannelSettings()
     assert s.telegram_bot_token.get_secret_value() == ""
+
+
+# ── TaskSettings: redis broker requires a broker URL ──────────────────────────
+
+
+def test_task_broker_redis_requires_url() -> None:
+    with pytest.raises(ValidationError, match="task_broker_url is required"):
+        TaskSettings(task_broker="redis")
+
+
+def test_task_broker_memory_allows_empty_url() -> None:
+    s = TaskSettings(task_broker="memory")
+    assert s.task_broker_url == ""
+
+
+def test_task_broker_redis_with_url_is_valid() -> None:
+    s = TaskSettings(task_broker="redis", task_broker_url="redis://localhost:6379/0")
+    assert s.task_broker_url == "redis://localhost:6379/0"
 
 
 def test_tool_settings_zero_fields() -> None:

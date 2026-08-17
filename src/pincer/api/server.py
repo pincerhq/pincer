@@ -16,6 +16,7 @@ from pincer.api.conversations import router as conversations_router
 from pincer.api.costs import router as costs_router
 from pincer.api.identity import router as identity_router
 from pincer.api.integrations import router as integrations_router
+from pincer.api.schedules import router as schedules_router
 from pincer.api.skills import router as skills_router
 from pincer.config import get_settings_relaxed
 
@@ -136,6 +137,7 @@ def create_app() -> FastAPI:
     app.include_router(audit_router)
     app.include_router(conversations_router)
     app.include_router(identity_router)
+    app.include_router(schedules_router)
     app.include_router(skills_router)
     app.include_router(integrations_router)
     app.include_router(chat_router)
@@ -155,7 +157,7 @@ def create_app() -> FastAPI:
         settings = get_settings_relaxed()
         return {
             "agent_running": True,
-            "version": "0.7.6",
+            "version": "0.8.0",
             "channels": {
                 "telegram": bool(settings.telegram_bot_token.get_secret_value()),
                 "whatsapp": settings.whatsapp_enabled,

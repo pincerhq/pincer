@@ -25,6 +25,7 @@ pincer --version
 pincer
 ├── init                    # Interactive setup wizard
 ├── run                     # Start the agent
+│   └── tasks               # Standalone background task worker (requires PINCER_TASK_BROKER=redis)
 ├── chat                    # CLI chat interface
 ├── config                  # Show configuration
 ├── cost                    # Spending summary
@@ -50,9 +51,7 @@ pincer
 │   ├── clear               # Clear user memory
 │   └── export              # Export to JSON
 └── schedule
-    ├── list                # Scheduled tasks
-    ├── add <time> <desc>   # Add task
-    └── remove <id>         # Remove task
+    └── list                # Scheduled tasks (read-only — create/remove/toggle happen via chat)
 ```
 
 ---
@@ -141,6 +140,16 @@ pincer run --reload --port 9090
   Skills:    10 loaded
 
 ✓ Agent running. Press Ctrl+C to stop.
+```
+
+**`pincer run tasks`** starts only the background task worker — no channels,
+no API/MCP export, no live email/calendar polling. Requires
+`PINCER_TASK_BROKER=redis` (the in-memory broker can't be shared across
+processes). Used to scale schedule/webhook execution independently of the
+main agent process — see [Background Tasks](background-tasks.md).
+
+```bash
+pincer run tasks
 ```
 
 ---
@@ -532,44 +541,32 @@ pincer memory export --user USER_ID --output memories.json
 
 ### `pincer schedule list`
 
-List all scheduled proactive tasks.
+List all scheduled tasks across all users (read-only, admin/debugging use).
+To manage your own schedules, talk to the agent — see below.
 
 ```bash
 $ pincer schedule list
-⏰ Scheduled Tasks
-
-  ID   Time    Channel    Description
-  ──────────────────────────────────────
-  1    08:00   telegram   Morning briefing
-  2    18:00   telegram   Daily expense summary
-  3    */30m   discord    Check email notifications
+             Scheduled Tasks
+┏━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━┓
+┃ Name          ┃ Cron       ┃ User  ┃ Timezone ┃ Enabled ┃
+┡━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━┩
+│ daily-digest  │ 0 8 * * *  │ john  │ UTC      │ yes     │
+└───────────────┴────────────┴───────┴──────────┴─────────┘
 ```
 
 ---
 
-### `pincer schedule add`
+### Creating, removing, and toggling schedules — via chat, not the CLI
 
-Add a new scheduled task.
+There is no `pincer schedule add`/`remove` CLI command. Schedules are
+created, removed, and enabled/disabled entirely through chat, via four
+tools the agent calls on your behalf: `schedule_create`, `schedule_list`,
+`schedule_remove`, `schedule_toggle`. For example, telling the bot
+*"send me a digest every day at 8am"* triggers a `schedule_create` call.
 
-```bash
-pincer schedule add <time> <description> [--channel TEXT]
-```
-
-**Examples:**
-```bash
-pincer schedule add "08:00" "Morning briefing" --channel telegram
-pincer schedule add "*/15m" "Check for new emails"
-```
-
----
-
-### `pincer schedule remove`
-
-Remove a scheduled task.
-
-```bash
-pincer schedule remove <id>
-```
+Full details — guardrails, `cron_expr` vs `run_in_minutes`, per-schedule
+tool allow-lists, and the standalone `pincer run tasks` worker for scaling
+execution — are in [Background Tasks](background-tasks.md).
 
 ---
 
@@ -610,6 +607,20 @@ All variables use `PINCER_` prefix.
 | `PINCER_WHATSAPP_DM_POLICY` | `allowlist` | DM policy |
 | `PINCER_DISCORD_TOKEN` | | Discord bot token |
 | `PINCER_DISCORD_GUILD_ALLOWLIST` | | Comma-separated guild IDs |
+
+### Background Tasks
+
+See [Background Tasks](background-tasks.md) for the full architecture.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PINCER_TASK_BROKER` | `memory` | `memory` (single-process, zero infra) or `redis` (required for `pincer run tasks`) |
+| `PINCER_TASK_BROKER_URL` | | Broker URL, e.g. `redis://localhost:6379/0` (required when `task_broker=redis`) |
+| `PINCER_TASK_MAX_RETRIES` | `3` | Max attempts for a background task actor before giving up |
+| `PINCER_TASK_POLL_INTERVAL` | `60` | Seconds between checks for due cron schedules |
+| `PINCER_SCHEDULE_TOOL_ENABLED` | `true` | Enable the `schedule_create`/`list`/`remove`/`toggle` chat tools |
+| `PINCER_MAX_SCHEDULES_PER_USER` | `20` | Max active recurring schedules per user |
+| `PINCER_MIN_SCHEDULE_INTERVAL_MINUTES` | `15` | Reject schedules that would fire more often than this |
 
 ### Budget & Limits
 | Variable | Default | Description |

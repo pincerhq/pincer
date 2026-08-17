@@ -562,6 +562,121 @@ class Agent:
             model=last_response.model if last_response else "",
         )
 
+    async def run_headless(
+        self,
+        prompt: str,
+        user_id: str,
+        channel: str,
+        *,
+        channel_name: str | None = None,
+        channel_user_id: str | None = None,
+        allowed_tools: list[str] | None = None,
+        max_iterations: int | None = None,
+    ) -> str:
+        """Run a prompt through the LLM with tool access, outside any session.
+
+        For proactive/scheduled work (see ``ProactiveAgent.run_custom_action``)
+        — no ``Session`` is created or persisted, no long-term memory is
+        searched or written, and no onboarding logic runs. Tool calls execute
+        with ``skip_approval=True`` since there's no live user to approve
+        anything; the one-time consent is the ``schedule_create`` call that
+        set this prompt up in the first place.
+
+        ``allowed_tools``, when given, restricts which tool schemas the LLM
+        even sees (enforced by omission, not by intercepting calls after the
+        fact) — ``None`` means the full tool surface, same as live chat.
+        """
+        messages: list[LLMMessage] = [LLMMessage(role=MessageRole.USER, content=prompt)]
+        system_prompt = await self._build_system_prompt(user_id, prompt, skip_memory=True)
+
+        tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
+        if tool_schemas is not None and allowed_tools is not None:
+            tool_schemas = [s for s in tool_schemas if s.get("name") in allowed_tools] or None
+
+        final_text = ""
+        last_response: LLMResponse | None = None
+        consecutive_errors = 0
+        iterations = max_iterations or self._settings.max_tool_iterations
+
+        for _iteration in range(iterations):
+            try:
+                response: LLMResponse = await self._llm.complete(
+                    messages=messages,
+                    tools=tool_schemas,
+                    system=system_prompt,
+                )
+                last_response = response
+            except BudgetExceededError:
+                return (
+                    "Warning: Daily budget limit reached. "
+                    f"Limit: ${self._settings.daily_budget_usd:.2f}. "
+                    "Could not complete this scheduled action."
+                )
+            except LLMError:
+                logger.exception("run_headless: LLM call failed")
+                return "Sorry, I couldn't complete this scheduled action due to an LLM error."
+
+            try:
+                provider = response.provider or self._settings.default_provider
+                is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
+                await self._costs.record(
+                    provider=provider,
+                    model=response.model,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                    session_id=None,
+                    is_free=is_free,
+                )
+            except BudgetExceededError as e:
+                return f"Warning: Budget limit reached (${e.spent:.2f}/${e.limit:.2f}). Stopping."
+
+            if response.has_tool_calls:
+                messages.append(
+                    LLMMessage(role=MessageRole.ASSISTANT, content=response.content, tool_calls=response.tool_calls)
+                )
+
+                iteration_had_error = False
+                for tool_call in response.tool_calls:
+                    result = await self._execute_tool(
+                        tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True
+                    )
+                    messages.append(
+                        LLMMessage(
+                            role=MessageRole.TOOL_RESULT,
+                            content=result.content,
+                            tool_call_id=result.tool_call_id,
+                        )
+                    )
+                    if result.is_error:
+                        iteration_had_error = True
+
+                if iteration_had_error:
+                    consecutive_errors += 1
+                    if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                        logger.warning(
+                            "run_headless: circuit breaker after %d consecutive tool errors", consecutive_errors
+                        )
+                        return (
+                            response.content
+                            if response.content
+                            else "I ran into repeated tool failures completing this scheduled action."
+                        )
+                else:
+                    consecutive_errors = 0
+
+                continue
+
+            final_text = response.content
+            break
+        else:
+            final_text = (
+                last_response.content
+                if last_response and last_response.content
+                else "I seem to be going in circles trying to complete this scheduled action."
+            )
+
+        return final_text
+
     async def handle_message_stream(
         self,
         user_id: str,
@@ -745,6 +860,7 @@ class Agent:
         user_text: str,
         *,
         extra_system: str | None = None,
+        skip_memory: bool = False,
     ) -> str:
         """Build system prompt, injecting relevant memories if available."""
         base_prompt = self._settings.system_prompt + "\n\n" + PROFILE_USAGE_INSTRUCTION
@@ -794,7 +910,7 @@ class Agent:
         def _with_extra(prompt: str) -> str:
             return f"{prompt}\n\n{extra_system}" if extra_system else prompt
 
-        if not self._memory:
+        if not self._memory or skip_memory:
             return _with_extra(base_prompt)
 
         try:
@@ -872,6 +988,8 @@ class Agent:
         channel: str,
         channel_name: str | None = None,
         channel_user_id: str | None = None,
+        *,
+        skip_approval: bool = False,
     ) -> ToolResult:
         """Execute a single tool call, catching errors.
 
@@ -884,6 +1002,12 @@ class Agent:
         If the tool requires approval and a callback is configured, the user
         is prompted first.  Without a callback the tool still runs (backward
         compat with shell_require_approval) but a warning is logged.
+
+        ``skip_approval``, when True, bypasses the approval gate entirely
+        regardless of ``require_approval``/``approval_required`` config.
+        Only ``run_headless`` (proactive/scheduled execution, no live user
+        to approve anything) is allowed to set this — never from
+        ``handle_message``/``handle_message_stream``.
         """
         logger.info("Tool call: %s(%s)", tool_call.name, tool_call.arguments)
 
@@ -918,7 +1042,7 @@ class Agent:
                     is_error=True,
                 )
 
-        if self._tools.requires_approval(tool_call.name):
+        if not skip_approval and self._tools.requires_approval(tool_call.name):
             if self._approval_callback:
                 try:
                     approved = await self._approval_callback(
@@ -948,7 +1072,12 @@ class Agent:
                 result_text = await self._tools.execute(
                     tool_call.name,
                     tool_call.arguments,
-                    context={"user_id": channel_user_id or user_id, "channel": channel},
+                    context={
+                        "user_id": channel_user_id or user_id,
+                        "channel": channel,
+                        "pincer_user_id": user_id,
+                        "channel_name": channel_name or channel,
+                    },
                 )
                 if tool_call.name == "make_phone_call":
                     logger.info(

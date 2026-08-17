@@ -3,6 +3,7 @@ Pincer CLI — the main entry point.
 
 Usage:
     pincer run          Start the agent
+    pincer run tasks    Start only the background task worker (requires PINCER_TASK_BROKER=redis)
     pincer config       Show current configuration
     pincer cost         Show today's spend
 """
@@ -15,7 +16,9 @@ import logging
 import os
 import socket
 import uuid
+from dataclasses import dataclass
 from datetime import UTC
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 import typer
@@ -25,7 +28,18 @@ if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
     from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
     from pincer.config import Settings
+    from pincer.core.agent import Agent
+    from pincer.core.session import SessionManager
+    from pincer.llm.base import BaseLLMProvider
+    from pincer.llm.cost_tracker import CostTracker
+    from pincer.llm.router import LLMRouter
+    from pincer.mcp import MCPClientManager
     from pincer.memory.base import BaseMemoryBackend
+    from pincer.memory.summarizer import Summarizer
+    from pincer.security.audit import AuditLogger
+    from pincer.security.rate_limiter import RateLimiter
+    from pincer.tools.registry import ToolRegistry
+    from pincer.tools.skills.index import SkillIndex
 
 logger = logging.getLogger(__name__)
 app = typer.Typer(
@@ -108,9 +122,23 @@ def _print_voice_webhook_urls(settings: Any, console: Any) -> None:  # type: ign
         console.print(line)
 
 
+class RunComponent(StrEnum):
+    """A single component of the full agent that `pincer run` can start standalone."""
+
+    TASKS = "tasks"
+
+
 @app.command()
-def run() -> None:
-    """Start the Pincer agent."""
+def run(
+    component: RunComponent | None = typer.Argument(  # noqa: B008
+        None,
+        help=(
+            "Run a single component standalone instead of the full agent. "
+            "'tasks': background task worker only (requires PINCER_TASK_BROKER=redis)."
+        ),
+    ),
+) -> None:
+    """Start the Pincer agent, or a single component of it (see COMPONENT)."""
     from pincer.config import get_settings
 
     try:
@@ -140,6 +168,16 @@ def run() -> None:
             )
         except Exception as _tel_err:
             console.print(f"[yellow]Telemetry init failed (non-fatal): {_tel_err}[/yellow]")
+
+    if component is RunComponent.TASKS:
+        if settings.task_broker != "redis":
+            console.print(
+                "[red]pincer run tasks requires PINCER_TASK_BROKER=redis[/red] "
+                "(the in-memory broker cannot be shared across processes)."
+            )
+            raise typer.Exit(1)
+        asyncio.run(_run_tasks_worker(settings))
+        return
 
     console.print(f"[bold green]{settings.agent_name} starting...[/bold green]")
     console.print(f"   Provider: {settings.default_provider}")
@@ -218,12 +256,35 @@ def _create_memory_backend(settings: Settings):  # type: ignore[return]
     return SQLiteMemoryBackend(settings.db_path)
 
 
-async def _run_agent(settings: Settings) -> None:
+@dataclass
+class CoreComponents:
+    """LLM/memory/tools/agent core shared by the full agent process and the standalone tasks worker.
+
+    Built by `_build_core`; excludes channel-bound tools (send_file/send_image,
+    registered separately by `_register_channel_bound_tools`) since those need
+    a channel_map that only exists where channels are actually started.
+    """
+
+    session_mgr: SessionManager
+    cost_tracker: CostTracker
+    audit_logger: AuditLogger | None
+    rate_limiter: RateLimiter
+    llm_router: LLMRouter
+    llm: BaseLLMProvider
+    memory_store: BaseMemoryBackend | None
+    summarizer: Summarizer | None
+    tools: ToolRegistry
+    skill_index: SkillIndex
+    mcp_manager: MCPClientManager | None
+    agent: Agent
+
+
+async def _build_core(settings: Settings) -> CoreComponents:
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
     from pincer.llm.cost_tracker import CostTracker
     from pincer.memory.summarizer import Summarizer
-    from pincer.security.audit import AuditAction, AuditEntry, get_audit_logger
+    from pincer.security.audit import get_audit_logger
     from pincer.security.rate_limiter import get_rate_limiter
     from pincer.tools.bootstrap import register_default_tools
     from pincer.tools.registry import ToolRegistry
@@ -273,8 +334,8 @@ async def _run_agent(settings: Settings) -> None:
 
     # Register channel-independent tools (shell_exec, files, browser,
     # python_exec, email, calendar, Google Workspace, MS365, Slack,
-    # generate_image). Channel-bound tools (send_file/send_image), skills,
-    # and MCP are wired separately below.
+    # generate_image). Channel-bound tools (send_file/send_image, registered
+    # by _register_channel_bound_tools), skills, and MCP are wired separately.
     tools = ToolRegistry()
     bootstrap_report = register_default_tools(tools, settings)
     if "google" in bootstrap_report:
@@ -283,113 +344,6 @@ async def _run_agent(settings: Settings) -> None:
         console.print(f"[green]Slack tools enabled ({bootstrap_report['slack']} tools)[/green]")
     if "image_gen" in bootstrap_report:
         console.print("[green]Image generation tool registered[/green]")
-
-    # send_file / send_image are channel-bound — they need the channel_map
-    # populated by channel startup below, so they stay in cli.py rather than
-    # in pincer.tools.bootstrap.
-    # TODO: channel_map should replaced by router.channels in future but keep stay as is due send_file resolve
-    channel_map: dict[str, BaseChannel] = {}
-
-    async def send_file(path: str, caption: str = "", context: dict | None = None) -> str:
-        """Send a file to the user via their messaging channel.
-
-        path: Absolute path to the file to send
-        caption: Optional caption/description for the file
-        """
-        from pathlib import Path as _P
-
-        file_path = _P(path)
-        if not file_path.is_file():
-            return f"Error: File not found: {path}"
-
-        ctx = context or {}
-        user_id = ctx.get("user_id", "")
-        ch_name = ctx.get("channel", "")
-        channel = channel_map.get(ch_name)
-        if not channel or not user_id:
-            return f"Error: No active channel to send file (channel={ch_name})"
-
-        await channel.send_file(user_id, str(file_path), caption)
-        return f"File sent: {file_path.name}"
-
-    tools.register(
-        name="send_file",
-        description=(
-            "Send a file to the user as a document attachment (PDF, image, CSV, etc.). "
-            "Use after python_exec generates a file, or to deliver any workspace file."
-        ),
-        handler=send_file,
-        parameters={
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Absolute path to the file to send",
-                },
-                "caption": {
-                    "type": "string",
-                    "description": "Optional caption for the file",
-                    "default": "",
-                },
-            },
-            "required": ["path"],
-        },
-    )
-
-    async def send_image(url: str, caption: str = "", context: dict | None = None) -> str:
-        """Send an image or GIF to the user from a URL.
-
-        url: Direct URL to the image or GIF
-        caption: Optional caption/description
-        """
-        ctx = context or {}
-        user_id = ctx.get("user_id", "")
-        ch_name = ctx.get("channel", "")
-        channel = channel_map.get(ch_name)
-        if not channel or not user_id:
-            return f"Error: No active channel to send image (channel={ch_name})"
-
-        lower = url.lower()
-        is_gif = lower.endswith(".gif") or "giphy.com" in lower or "/gif" in lower or "tenor.com" in lower
-        try:
-            if is_gif:
-                await channel.send_animation(user_id, url, caption)
-            else:
-                await channel.send_photo(user_id, url, caption)
-            return "Image sent to user."
-        except Exception as e:
-            logging.getLogger(__name__).warning("send_image failed for %s: %s", url, e)
-            return (
-                f"Error: Failed to send image from {url} ({e}). "
-                "The URL may be broken or hotlink-protected. Try a different image URL."
-            )
-
-    tools.register(
-        name="send_image",
-        description=(
-            "Display an image or GIF inline in the chat. "
-            "You MUST call this tool for EVERY image/GIF URL you want the user to see. "
-            "Do NOT paste image URLs as plain text — they won't render. "
-            "Instead, call send_image(url=...) so the picture appears visually. "
-            "Works with direct image URLs (.jpg, .png, .gif, .webp) and GIF services (Giphy, Tenor)."
-        ),
-        handler=send_image,
-        parameters={
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "Direct URL to the image or GIF",
-                },
-                "caption": {
-                    "type": "string",
-                    "description": "Optional caption for the image",
-                    "default": "",
-                },
-            },
-            "required": ["url"],
-        },
-    )
 
     # Skills: SKILL.md-based discovery, coexists unconditionally with MCP.
     from pincer.tools.builtin.skills_tools import make_skills_tools
@@ -515,12 +469,156 @@ async def _run_agent(settings: Settings) -> None:
         if isinstance(memory_store, MCPMemoryBackend):
             memory_store.set_mcp_manager(mcp_manager)
 
+    return CoreComponents(
+        session_mgr=session_mgr,
+        cost_tracker=cost_tracker,
+        audit_logger=audit_logger,
+        rate_limiter=rate_limiter,
+        llm_router=llm_router,
+        llm=llm,
+        memory_store=memory_store,
+        summarizer=summarizer,
+        tools=tools,
+        skill_index=skill_index,
+        mcp_manager=mcp_manager,
+        agent=agent,
+    )
+
+
+def _register_channel_bound_tools(tools: ToolRegistry, channel_map: dict[str, BaseChannel]) -> None:
+    """Register send_file/send_image — channel-bound tools only the full agent process needs.
+
+    Kept out of `_build_core` because they close over `channel_map`, which is
+    only meaningful in a process that actually starts channels.
+    """
+
+    async def send_file(path: str, caption: str = "", context: dict | None = None) -> str:
+        """Send a file to the user via their messaging channel.
+
+        path: Absolute path to the file to send
+        caption: Optional caption/description for the file
+        """
+        from pathlib import Path as _P
+
+        file_path = _P(path)
+        if not file_path.is_file():
+            return f"Error: File not found: {path}"
+
+        ctx = context or {}
+        user_id = ctx.get("user_id", "")
+        ch_name = ctx.get("channel", "")
+        channel = channel_map.get(ch_name)
+        if not channel or not user_id:
+            return f"Error: No active channel to send file (channel={ch_name})"
+
+        await channel.send_file(user_id, str(file_path), caption)
+        return f"File sent: {file_path.name}"
+
+    tools.register(
+        name="send_file",
+        description=(
+            "Send a file to the user as a document attachment (PDF, image, CSV, etc.). "
+            "Use after python_exec generates a file, or to deliver any workspace file."
+        ),
+        handler=send_file,
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute path to the file to send",
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "Optional caption for the file",
+                    "default": "",
+                },
+            },
+            "required": ["path"],
+        },
+    )
+
+    async def send_image(url: str, caption: str = "", context: dict | None = None) -> str:
+        """Send an image or GIF to the user from a URL.
+
+        url: Direct URL to the image or GIF
+        caption: Optional caption/description
+        """
+        ctx = context or {}
+        user_id = ctx.get("user_id", "")
+        ch_name = ctx.get("channel", "")
+        channel = channel_map.get(ch_name)
+        if not channel or not user_id:
+            return f"Error: No active channel to send image (channel={ch_name})"
+
+        lower = url.lower()
+        is_gif = lower.endswith(".gif") or "giphy.com" in lower or "/gif" in lower or "tenor.com" in lower
+        try:
+            if is_gif:
+                await channel.send_animation(user_id, url, caption)
+            else:
+                await channel.send_photo(user_id, url, caption)
+            return "Image sent to user."
+        except Exception as e:
+            logging.getLogger(__name__).warning("send_image failed for %s: %s", url, e)
+            return (
+                f"Error: Failed to send image from {url} ({e}). "
+                "The URL may be broken or hotlink-protected. Try a different image URL."
+            )
+
+    tools.register(
+        name="send_image",
+        description=(
+            "Display an image or GIF inline in the chat. "
+            "You MUST call this tool for EVERY image/GIF URL you want the user to see. "
+            "Do NOT paste image URLs as plain text — they won't render. "
+            "Instead, call send_image(url=...) so the picture appears visually. "
+            "Works with direct image URLs (.jpg, .png, .gif, .webp) and GIF services (Giphy, Tenor)."
+        ),
+        handler=send_image,
+        parameters={
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Direct URL to the image or GIF",
+                },
+                "caption": {
+                    "type": "string",
+                    "description": "Optional caption for the image",
+                    "default": "",
+                },
+            },
+            "required": ["url"],
+        },
+    )
+
+
+async def _run_agent(settings: Settings) -> None:
+    core = await _build_core(settings)
+    session_mgr, cost_tracker, audit_logger, rate_limiter = (
+        core.session_mgr,
+        core.cost_tracker,
+        core.audit_logger,
+        core.rate_limiter,
+    )
+    llm, memory_store = core.llm, core.memory_store
+    tools, mcp_manager, agent = core.tools, core.mcp_manager, core.agent
+
+    # send_file / send_image are channel-bound — they need the channel_map
+    # populated by channel startup below, so they stay in cli.py rather than
+    # in pincer.tools.bootstrap.
+    # TODO: channel_map should replaced by router.channels in future but keep stay as is due send_file resolve
+    channel_map: dict[str, BaseChannel] = {}
+    _register_channel_bound_tools(tools, channel_map)
+
     # MCP server export (optional — exposes Pincer tools to external MCP clients)
     mcp_server = None
 
     # Message handler bridge
     async def on_message(incoming: IncomingMessage) -> str:
         from pincer.exceptions import RateLimitExceeded
+        from pincer.security.audit import AuditAction, AuditEntry
 
         canonical_id = incoming.pincer_user_id or incoming.user_id
 
@@ -1057,17 +1155,53 @@ async def _run_agent(settings: Settings) -> None:
     # Sprint 3: Scheduler + Proactive Agent
     from pincer.scheduler import CronScheduler, EventTriggerManager, ProactiveAgent
 
-    proactive = ProactiveAgent(settings.db_path)
+    proactive = ProactiveAgent(settings.db_path, agent=agent)
     await proactive.ensure_table()
 
-    scheduler = CronScheduler(settings.db_path, router)
-    scheduler.register_action("briefing", proactive.generate_briefing)
-    scheduler.register_action("custom", proactive.run_custom_action)
-    await scheduler.start()
+    scheduler = CronScheduler(settings.db_path)
+    await scheduler.ensure_table()
+
+    # #170: actors deliver results through a pub/sub bridge rather than
+    # calling the router directly — the same DeliveryBackend/ResultEmitter
+    # code path a standalone `pincer run tasks` worker uses, so this
+    # in-process default and a split deployment behave identically.
+    # See pincer.tasks.delivery.
+    from pincer.tasks.delivery import ResultEmitter, ResultRelay, create_delivery_backend
+
+    delivery_backend = create_delivery_backend(settings)
+    deliverer = ResultEmitter(delivery_backend)
 
     # Sprint 3: Event triggers
-    triggers = EventTriggerManager(settings.db_path, router)
+    triggers = EventTriggerManager(settings.db_path, deliverer)
     await triggers.start()
+
+    # Sprint 6: Background task execution (repid) — actors run scheduled and
+    # on-request work durably/retryably; the dispatcher below keeps the SQLite
+    # cron poll loop, since repid has no native scheduler to replace it with.
+    from pincer.tasks import ScheduleDispatcher, register_default_server
+    from pincer.tasks import app as task_app
+    from pincer.tasks.context import set_context
+
+    set_context(deliverer, proactive, triggers)
+    register_default_server()
+    task_connection = task_app.servers.default.connection()
+    await task_connection.__aenter__()
+    task_worker = asyncio.create_task(
+        # register_signals=[] — repid defaults to installing its own SIGINT/SIGTERM
+        # handlers via loop.add_signal_handler(), which replaces Python's default
+        # signal handling process-wide and swallows the Ctrl+C / SIGTERM this
+        # process's own shutdown sequence (below) depends on. cli.py already owns
+        # signal handling end-to-end via task_worker.cancel() in the finally block.
+        task_app.run_worker(graceful_shutdown_time=10.0, register_signals=[]),
+        name="pincer-task-worker",
+    )
+    dispatcher = ScheduleDispatcher(scheduler, task_app, interval=settings.task_poll_interval)
+    await dispatcher.start()
+
+    result_relay = ResultRelay(delivery_backend, router)
+    await result_relay.start()
+
+    console.print(f"[green]Task worker started (broker={settings.task_broker})[/green]")
 
     # Auto-create default morning briefing if configured
     if settings.default_user_id and settings.briefing_time:
@@ -1192,7 +1326,17 @@ async def _run_agent(settings: Settings) -> None:
         if mcp_server:
             await mcp_server.stop()
         await triggers.stop()
-        await scheduler.stop()
+        await dispatcher.stop()
+        await result_relay.stop()
+        # repid's own worker logs CRITICAL + a full traceback on CancelledError
+        # (by design — see repid/_worker.py, it re-raises after logging). That's
+        # expected noise here since this cancel() is our own intentional shutdown,
+        # not an unexpected failure — silence it for this one call.
+        logging.getLogger("repid").setLevel(logging.CRITICAL + 1)
+        task_worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task_worker
+        await task_connection.__aexit__(None, None, None)
         await proactive.close()
         for ch in router.channels.values():
             await ch.stop()
@@ -1212,6 +1356,94 @@ async def _run_agent(settings: Settings) -> None:
         console.print("[green]Shutdown complete[/green]")
         # Cancel any lingering asyncio tasks (e.g. in-flight LLM calls from
         # channel update handlers) before exiting so the process doesn't hang.
+        _pending = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
+        for _t in _pending:
+            _t.cancel()
+        os._exit(0)
+
+
+async def _run_tasks_worker(settings: Settings) -> None:
+    """Standalone background-task worker: consumes the repid queue, no channels/API/MCP export.
+
+    Requires `task_broker=redis` (checked by the caller) since the in-memory
+    broker can't be shared with whatever process is enqueuing work. Actors
+    deliver results through the same `ResultEmitter`/`DeliveryBackend` path
+    `_run_agent` uses — see `pincer.tasks.delivery` — so a `ResultRelay` in
+    the main `pincer run` process picks them up and delivers via its own,
+    already-started channels.
+    """
+    from pincer.scheduler import EventTriggerManager, ProactiveAgent
+    from pincer.tasks import TASK_CHANNEL, register_default_server
+    from pincer.tasks import app as task_app
+    from pincer.tasks.context import set_context
+    from pincer.tasks.delivery import TASK_RESULTS_CHANNEL, ResultEmitter, create_delivery_backend
+
+    core = await _build_core(settings)
+
+    proactive = ProactiveAgent(settings.db_path, agent=core.agent)
+    await proactive.ensure_table()
+
+    delivery_backend = create_delivery_backend(settings)
+    deliverer = ResultEmitter(delivery_backend)
+
+    # ensure_table() only, never .start() — EventTriggerManager's email/calendar
+    # polling loops are intentionally NOT part of the repid migration: they
+    # remain single-process asyncio.create_task loops by design (see
+    # EventTriggerManager.start()) and must run in exactly one process (the
+    # main `pincer run` process). This worker only needs ensure_table() for the
+    # process_webhook actor's handle_webhook() call — that actor isn't wired to
+    # a production trigger yet (nothing enqueues it outside of tests).
+    triggers = EventTriggerManager(settings.db_path, deliverer)
+    await triggers.ensure_table()
+
+    set_context(deliverer, proactive, triggers)
+    register_default_server()
+    task_connection = task_app.servers.default.connection()
+    await task_connection.__aenter__()
+    task_worker = asyncio.create_task(
+        task_app.run_worker(graceful_shutdown_time=10.0, register_signals=[]),
+        name="pincer-tasks-worker",
+    )
+
+    console.print(f"[bold green]{settings.agent_name} tasks worker starting...[/bold green]")
+    console.print(f"   Broker: redis ({settings.task_broker_url})")
+    console.print(
+        f"[green]Task worker running (channel={TASK_CHANNEL}, results relayed via {TASK_RESULTS_CHANNEL})[/green]"
+    )
+    console.print("\n[bold green]Tasks worker is running![/bold green] Press Ctrl+C to stop.\n")
+
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        console.print("\n[yellow]Shutting down...[/yellow]")
+    finally:
+        import signal as _signal
+
+        _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+        logging.getLogger("repid").setLevel(logging.CRITICAL + 1)
+        task_worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task_worker
+        await task_connection.__aexit__(None, None, None)
+        await delivery_backend.aclose()
+        await proactive.close()
+        if core.mcp_manager:
+            await core.mcp_manager.stop()
+        try:
+            from pincer.tools.builtin.browser import close_browser
+
+            await close_browser()
+        except ImportError:
+            pass
+        await core.llm.close()
+        await core.session_mgr.close()
+        await core.cost_tracker.close()
+        if core.memory_store:
+            await core.memory_store.close()
+        if core.audit_logger:
+            await core.audit_logger.shutdown()
+        console.print("[green]Tasks worker shutdown complete[/green]")
         _pending = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
         for _t in _pending:
             _t.cancel()

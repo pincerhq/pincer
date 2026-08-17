@@ -6,13 +6,14 @@ Features:
 - Typing indicator while agent thinks
 - User allowlist
 - Long message splitting at paragraph boundaries
-- Markdown formatting
+- Markdown -> Telegram HTML formatting
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import io
 import logging
 import time
@@ -25,6 +26,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
+from pincer.channels.telegram_formatters import markdown_to_telegram_html
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -111,11 +113,22 @@ class TelegramChannel(BaseChannel):
             ]
         )
 
-        await self._bot.send_message(
-            chat_id=self._chat_id(user_id),
-            text=(f"*Approval required*\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\nAllow this action?"),
-            reply_markup=keyboard,
-        )
+        prompt_text = f"*Approval required*\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\nAllow this action?"
+        chat_id = self._chat_id(user_id)
+        try:
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=markdown_to_telegram_html(prompt_text),
+                reply_markup=keyboard,
+            )
+        except Exception as e:
+            logger.warning("Approval markdown send failed, retrying plain: %s", e)
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=prompt_text,
+                parse_mode=None,
+                reply_markup=keyboard,
+            )
 
         loop = asyncio.get_running_loop()
         future: asyncio.Future[bool] = loop.create_future()
@@ -167,7 +180,7 @@ class TelegramChannel(BaseChannel):
 
         self._bot = Bot(
             token=token,
-            default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         )
         self._dp = Dispatcher()
 
@@ -220,7 +233,7 @@ class TelegramChannel(BaseChannel):
             try:
                 await self._bot.send_message(
                     chat_id=chat_id,
-                    text=chunk,
+                    text=markdown_to_telegram_html(chunk),
                 )
             except Exception as e:
                 logger.warning("Markdown send failed, retrying plain: %s", e)
@@ -369,7 +382,7 @@ class TelegramChannel(BaseChannel):
         parts = split_message(buffer)
         # First part: edit the original streaming message
         try:
-            await msg.edit_text(parts[0])
+            await msg.edit_text(markdown_to_telegram_html(parts[0]))
         except Exception:
             with contextlib.suppress(Exception):
                 await msg.edit_text(parts[0], parse_mode=None)
@@ -377,7 +390,7 @@ class TelegramChannel(BaseChannel):
         # Remaining parts: send as new messages so nothing is lost
         for part in parts[1:]:
             try:
-                await self._bot.send_message(chat_id=chat_id, text=part)
+                await self._bot.send_message(chat_id=chat_id, text=markdown_to_telegram_html(part))
             except Exception:
                 with contextlib.suppress(Exception):
                     await self._bot.send_message(chat_id=chat_id, text=part, parse_mode=None)
@@ -404,8 +417,9 @@ class TelegramChannel(BaseChannel):
             await callback.answer(label)
             if callback.message:
                 with contextlib.suppress(Exception):
+                    original = html.escape(callback.message.text or "")
                     await callback.message.edit_text(
-                        f"{callback.message.text}\n\n— *{label}*",
+                        f"{original}\n\n— <b>{html.escape(label)}</b>",
                     )
 
         @router.message(CommandStart())
@@ -413,12 +427,14 @@ class TelegramChannel(BaseChannel):
             if not message.from_user or not self._is_allowed(message.from_user.id):
                 return
             await message.answer(
-                f"*{self._settings.agent_name}* is ready!\n\n"
-                "I'm your personal AI agent. Send me a message, voice note, or photo.\n\n"
-                "Commands:\n"
-                "/clear — Reset conversation\n"
-                "/cost — Today's API spend\n"
-                "/help — Show this message"
+                markdown_to_telegram_html(
+                    f"*{self._settings.agent_name}* is ready!\n\n"
+                    "I'm your personal AI agent. Send me a message, voice note, or photo.\n\n"
+                    "Commands:\n"
+                    "/clear — Reset conversation\n"
+                    "/cost — Today's API spend\n"
+                    "/help — Show this message"
+                )
             )
 
         @router.message(Command("clear"))
@@ -449,25 +465,27 @@ class TelegramChannel(BaseChannel):
                         raw=message,
                     )
                 )
-                await message.answer(response)
+                await self.send(str(message.from_user.id), response)
 
         @router.message(Command("help"))
         async def cmd_help(message: Message) -> None:
             if not message.from_user:
                 return
             await message.answer(
-                "*Pincer Help*\n\n"
-                "Just send me a message and I'll help!\n\n"
-                "*I can:*\n"
-                "- Answer questions & chat\n"
-                "- Search the web\n"
-                "- Run shell commands (with approval)\n"
-                "- Read & write files\n"
-                "- Process voice notes & images\n\n"
-                "*Commands:*\n"
-                "/clear — Reset conversation\n"
-                "/cost — Today's API spend\n"
-                "/help — This message"
+                markdown_to_telegram_html(
+                    "*Pincer Help*\n\n"
+                    "Just send me a message and I'll help!\n\n"
+                    "*I can:*\n"
+                    "- Answer questions & chat\n"
+                    "- Search the web\n"
+                    "- Run shell commands (with approval)\n"
+                    "- Read & write files\n"
+                    "- Process voice notes & images\n\n"
+                    "*Commands:*\n"
+                    "/clear — Reset conversation\n"
+                    "/cost — Today's API spend\n"
+                    "/help — This message"
+                )
             )
 
         @router.message(F.voice)
@@ -496,8 +514,7 @@ class TelegramChannel(BaseChannel):
             )
 
             response = await self._handler(incoming)
-            for chunk in split_message(response):
-                await message.answer(chunk)
+            await self.send(str(message.from_user.id), response)
 
         @router.message(F.photo)
         async def handle_photo(message: Message) -> None:
@@ -526,8 +543,7 @@ class TelegramChannel(BaseChannel):
             )
 
             response = await self._handler(incoming)
-            for chunk in split_message(response):
-                await message.answer(chunk)
+            await self.send(str(message.from_user.id), response)
 
         @router.message(F.document)
         async def handle_document(message: Message) -> None:
@@ -571,8 +587,7 @@ class TelegramChannel(BaseChannel):
                 )
 
             response = await self._handler(incoming)
-            for chunk in split_message(response):
-                await message.answer(chunk)
+            await self.send(str(message.from_user.id), response)
 
         @router.message(F.text)
         async def handle_text(message: Message) -> None:
@@ -618,5 +633,4 @@ class TelegramChannel(BaseChannel):
             )
 
             response = await self._handler(incoming)
-            for chunk in split_message(response):
-                await message.answer(chunk)
+            await self.send(user_id, response)

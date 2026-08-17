@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from pincer.exceptions import ToolNotFoundError
+from pincer.tools.bootstrap import register_default_tools
 from pincer.tools.builtin.shell import is_blocked
 from pincer.tools.registry import ToolRegistry
 
@@ -38,6 +39,30 @@ def test_shell_blocked_commands() -> None:
 def test_shell_safe_commands() -> None:
     assert is_blocked("ls -la") is None
     assert is_blocked("echo hello") is None
+
+
+class TestScheduleToolRegistration:
+    def test_registered_by_default(self, settings) -> None:
+        registry = ToolRegistry()
+        register_default_tools(registry, settings)
+        names = registry.list_tools()
+        assert {"schedule_create", "schedule_list", "schedule_remove", "schedule_toggle"} <= set(names)
+
+    def test_disabled_via_settings(self, settings) -> None:
+        settings.schedule_tool_enabled = False
+        registry = ToolRegistry()
+        register_default_tools(registry, settings)
+        names = set(registry.list_tools())
+        assert not {"schedule_create", "schedule_list", "schedule_remove", "schedule_toggle"} & names
+
+    def test_mutating_tools_require_approval(self, settings) -> None:
+        registry = ToolRegistry()
+        register_default_tools(registry, settings)
+        assert registry.requires_approval("schedule_create") is True
+        assert registry.requires_approval("schedule_remove") is True
+        assert registry.requires_approval("schedule_toggle") is True
+        assert registry.requires_approval("schedule_list") is False
+
     assert is_blocked("python --version") is None
     assert is_blocked("git status") is None
 

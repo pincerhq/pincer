@@ -21,10 +21,6 @@ x-pincer-base: &pincer-base
     - pincer-data:/app/data
     # Optional: mount pincer.toml to configure MCP client servers
     - ./pincer.toml:/app/data/pincer.toml:ro
-  ports:
-    - "${PINCER_PORT:-8080}:8080"
-    # MCP endpoint for Claude Desktop, Cursor, VS Code, etc.
-    - "${PINCER_MCP_PORT:-18800}:18800"
   healthcheck:
     test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
     interval: 30s
@@ -38,6 +34,19 @@ x-pincer-base: &pincer-base
       max-file: "3"
 
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles:
+      - http
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   newsapi-mcp:
     extends:
       file: ./src/pincer-mcps/docker-compose.yml
@@ -124,6 +133,10 @@ services:
     container_name: pincer
     profiles:
       - stdio
+    ports:
+      - "${PINCER_PORT:-8080}:8080"
+      # MCP endpoint for Claude Desktop, Cursor, VS Code, etc.
+      - "${PINCER_MCP_PORT:-18800}:18800"
     deploy:
       resources:
         limits:
@@ -136,12 +149,85 @@ services:
     container_name: pincer
     profiles:
       - http
+    # NOTE: environment is duplicated from x-pincer-base (not appended) — YAML
+    # merge keys (<<:) replace inherited list keys wholesale rather than merging
+    # them. PINCER_TASK_BROKER=redis must NOT be added to x-pincer-base itself,
+    # since pincer-stdio (profile: stdio) also inherits from it and has no redis.
+    environment:
+      - PINCER_DATA_DIR=/app/data
+      - PINCER_DASHBOARD_HOST=0.0.0.0
+      - PINCER_DASHBOARD_PORT=8080
+      - PINCER_DASHBOARD_DIST=/app/dashboard/dist
+      # MCP server — expose Pincer tools to Claude Desktop, Cursor, and other MCP clients
+      - PINCER_MCP_SERVER_EXPORT_ENABLED=true
+      - PINCER_MCP_SERVER_EXPORT_HOST=0.0.0.0
+      - PINCER_MCP_SERVER_EXPORT_PORT=18800
+      - PINCER_TELEMETRY_DSN=${OTEL_DSN}
+      - PINCER_TASK_BROKER=redis
+      - PINCER_TASK_BROKER_URL=redis://redis:6379/0
+    env_file: .env
+    volumes:
+      - pincer-data:/app/data
+      # - ./skills:app/skils # uncomment if you want continue to work with user defined skills in anthropic format
+      # - ./pincer.local.toml:/app/pincer.local.toml:ro - uncomment this line if you want to override default pincer config
+    ports:
+      - "${PINCER_PORT:-8080}:8080"
+      # MCP endpoint for Claude Desktop, Cursor, VS Code, etc.
+      - "${PINCER_MCP_PORT:-18800}:18800"
+    depends_on:
+      redis:
+        condition: service_healthy
+      memory-mcp:
+        condition: service_healthy
+      newsapi-mcp:
+        condition: service_healthy
+      openweathermap-mcp:
+        condition: service_healthy
+      pomodoro-mcp:
+        condition: service_healthy
+      stock-price-mcp:
+        condition: service_healthy
+      summarize-mcp:
+        condition: service_healthy
+      translate-mcp:
+        condition: service_healthy
+      ms365-mcp:
+        condition: service_healthy
+      doctr-mcp:
+        condition: service_healthy
+
+  pincer-http-tasks:
+    <<: *pincer-base
+    container_name: pincer-tasks-worker
+    command: ["pincer", "run", "tasks"]
+    profiles:
+      - http
+    # NOTE: environment is duplicated from x-pincer-base (not appended) — YAML
+    # merge keys (<<:) replace inherited list keys wholesale rather than merging
+    # them. `pincer run tasks` refuses to start unless PINCER_TASK_BROKER=redis
+    # (the in-memory broker can't be shared across processes), so this must be
+    # set here explicitly rather than relying on x-pincer-base, which pincer-stdio
+    # (profile: stdio, no redis) also inherits from.
+    environment:
+      - PINCER_DATA_DIR=/app/data
+      - PINCER_DASHBOARD_HOST=0.0.0.0
+      - PINCER_DASHBOARD_PORT=8080
+      - PINCER_DASHBOARD_DIST=/app/dashboard/dist
+      # MCP server — expose Pincer tools to Claude Desktop, Cursor, and other MCP clients
+      - PINCER_MCP_SERVER_EXPORT_ENABLED=true
+      - PINCER_MCP_SERVER_EXPORT_HOST=0.0.0.0
+      - PINCER_MCP_SERVER_EXPORT_PORT=18800
+      - PINCER_TELEMETRY_DSN=${OTEL_DSN}
+      - PINCER_TASK_BROKER=redis
+      - PINCER_TASK_BROKER_URL=redis://redis:6379/0
     env_file: .env
     volumes:
       - pincer-data:/app/data
       # - ./skills:app/skils # uncomment if you want continue to work with skills instead of MCP
       # - ./pincer.local.toml:/app/pincer.local.toml:ro - uncomment this line if you want to override default pincer config
     depends_on:
+      redis:
+        condition: service_healthy
       memory-mcp:
         condition: service_healthy
       newsapi-mcp:
@@ -167,6 +253,7 @@ volumes:
   model-cache:
   ms365-data:
   doctr-model-cache:
+  redis-data:
 
 networks:
   pincer-net:
