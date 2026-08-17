@@ -121,8 +121,11 @@ class TestBargeInScenario:
         await engine.send_speech("CA006", "Let me tell you about your schedule today...")
         mock_ws.send_text.assert_called()
 
+        # ConversationRelay handles barge-in itself; interrupt must NOT push a
+        # Media-Streams-style {"type": "clear"} (invalid CR message, Twilio 64107).
+        sends_before = mock_ws.send_text.call_count
         await engine.interrupt_speech("CA006")
-        assert mock_ws.send_text.call_count >= 2
+        assert mock_ws.send_text.call_count == sends_before
 
 
 class TestErrorRecovery:

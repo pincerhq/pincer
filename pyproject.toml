@@ -93,7 +93,10 @@ local = [
     "pyngrok>=7.0",
 ]
 telemetry = [
-    "pincer-telemetry @ git+https://github.com/pincerhq/pincer-telemetry.git@main"
+    # Real location declared in [tool.uv.sources]; kept as a bare name here so the
+    # published PyPI metadata carries no direct URL reference (PEP 508 direct
+    # references are rejected by PyPI). Source installs resolve it from git via uv.
+    "pincer-telemetry",
 ]
 tasks-redis = ["repid[redis]"]
 all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry,tasks-redis]"]
@@ -221,6 +224,7 @@ pincer-mcps = { workspace = true }
 sqlite-vec-memory-mcp = { workspace = true }
 ms365-mcp = { workspace = true }
 doctr-mcp = { workspace = true }
+pincer-telemetry = { git = "https://github.com/pincerhq/pincer-telemetry.git", branch = "main" }
 
 # CPU-only torch/torchvision wheel index for doctr-mcp (src/doctr-mcp/pyproject.toml
 # points its `torch`/`torchvision` sources at this index) — `explicit = true` means it

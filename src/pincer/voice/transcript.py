@@ -6,6 +6,7 @@ report generation, and integration with the audit system.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -14,6 +15,26 @@ if TYPE_CHECKING:
     import aiosqlite
 
 logger = logging.getLogger(__name__)
+
+# T1.4: agent utterances that claim a task was completed. If no successful
+# CallAction backs such a claim, the call is flagged (feeds the reliability
+# metric — the agent must never claim success the tools didn't confirm).
+COMPLETION_CLAIM_PATTERNS = re.compile(
+    r"\b("
+    r"i(?:'ve| have) (?:booked|scheduled|sent|cancelled|canceled|ordered|created|updated|confirmed|rescheduled)"
+    r"|(?:it's|it is|that's|that is) (?:booked|scheduled|sent|cancelled|canceled|done|confirmed|all set)"
+    r"|(?:your|the) \w+ (?:is|has been) (?:booked|scheduled|sent|cancelled|canceled|created|updated|confirmed)"
+    r"|all (?:set|done|taken care of)"
+    r"|successfully (?:booked|scheduled|sent|cancelled|canceled|ordered|created|updated)"
+    # German (Sprint 2)
+    r"|ist (?:bestätigt|gebucht|erledigt|storniert|abgesagt|eingetragen|verschickt|gesendet)"
+    r"|habe ich (?:gebucht|bestätigt|storniert|abgesagt|eingetragen|verschickt|gesendet|erledigt)"
+    r"|ich habe (?:den|die|das|ihren|ihre|ihr)? ?\w* "
+    r"?(?:gebucht|bestätigt|storniert|abgesagt|eingetragen|verschickt|gesendet)"
+    r"|(?:alles|das wäre) erledigt"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 class Speaker:
@@ -138,6 +159,42 @@ class TranscriptLogger:
             parts.append(f"  {entry.speaker}: {entry.text}")
 
         return "\n".join(parts)
+
+    def _has_successful_action(self) -> bool:
+        """True if at least one tool action ran with a non-error result."""
+        for action in self._actions:
+            if action.action_type != "tool_call":
+                continue
+            if action.user_confirmed is False:
+                continue
+            output = action.output_summary.strip()
+            if output and not output.lower().startswith("error"):
+                return True
+        return False
+
+    def verify_completion_claims(self) -> list[str]:
+        """Post-call truthfulness assertion (Sprint 1, T1.4).
+
+        Returns agent utterances that claim task completion without a matching
+        successful CallAction, and logs a WARNING for each. An empty list means
+        the transcript is honest (or made no completion claims).
+        """
+        claims = [
+            entry.text
+            for entry in self._entries
+            if entry.is_final and entry.speaker == Speaker.AGENT and COMPLETION_CLAIM_PATTERNS.search(entry.text)
+        ]
+        if not claims:
+            return []
+        if self._has_successful_action():
+            return []
+        for claim in claims:
+            logger.warning(
+                "Unverified completion claim [%s]: agent said %r but no successful tool action exists",
+                self._call_sid,
+                claim[:200],
+            )
+        return claims
 
     async def save_to_db(self, db: aiosqlite.Connection) -> None:
         """Persist transcript and actions to the database."""

@@ -92,10 +92,18 @@ def _upsert_env(env_path: str, key: str, value: str) -> None:
 
 
 def _port_in_use(host: str, port: int) -> bool:
-    """Return True if something is already listening on the given host:port."""
-    check_host = "127.0.0.1" if host == "0.0.0.0" else host
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex((check_host, port)) == 0
+    """Return True if something is already listening on the given host:port.
+
+    Defensive: unresolvable inputs (e.g. mocked settings in tests) count as
+    "not in use" rather than crashing startup.
+    """
+    try:
+        check_host = "127.0.0.1" if host == "0.0.0.0" else host
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            return s.connect_ex((check_host, int(port))) == 0
+    except (TypeError, ValueError, OSError):
+        return False
 
 
 def _print_voice_webhook_urls(settings: Any, console: Any) -> None:  # type: ignore[no-untyped-def]
@@ -109,15 +117,15 @@ def _print_voice_webhook_urls(settings: Any, console: Any) -> None:  # type: ign
         f"  Fallback:          {base}/api/apps/twilio/fallback",
     ]
     engine = getattr(settings, "voice_engine", "conversation_relay").lower().strip()
+    host = base
+    for prefix in ("https://", "http://"):
+        if host.startswith(prefix):
+            host = host[len(prefix) :]
+            break
     if engine == "media_streams":
-        host = base
-        for prefix in ("https://", "http://"):
-            if host.startswith(prefix):
-                host = host[len(prefix) :]
-                break
         lines.append(f"  Media stream WS:   wss://{host}/api/apps/twilio/stream/{{CallSid}}")
     else:
-        lines.append(f"  ConversationRelay: {base}/api/apps/twilio/relay-webhook")
+        lines.append(f"  ConversationRelay: wss://{host}/api/apps/twilio/relay")
     for line in lines:
         console.print(line)
 
@@ -344,6 +352,90 @@ async def _build_core(settings: Settings) -> CoreComponents:
         console.print(f"[green]Slack tools enabled ({bootstrap_report['slack']} tools)[/green]")
     if "image_gen" in bootstrap_report:
         console.print("[green]Image generation tool registered[/green]")
+
+    # Voice tools are registered BEFORE channel startup: channels that come up
+    # early (Telegram) start answering immediately, and a slow channel connect
+    # later in the sequence (e.g. WhatsApp waiting 120s on a QR/outdated
+    # client) must not leave those first conversations without make_phone_call
+    # ("Tool not found"). The voice channel/engine wiring stays in _run_agent.
+    if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.twilio_account_sid:
+        from pincer.tools.builtin.call_transcript import get_call_transcript
+        from pincer.voice.outbound import make_phone_call
+
+        tools.register(
+            name="get_call_transcript",
+            description=(
+                "Retrieve the transcript of a phone call (PII-masked). Use when the user asks "
+                "'show me the transcript of the last call' / 'zeig mir das Transkript' or "
+                "references /transcript <CallSid>. Empty call_sid = most recent call."
+            ),
+            handler=get_call_transcript,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "call_sid": {
+                        "type": "string",
+                        "description": "Twilio Call SID (e.g. CA1234...); empty for the most recent call",
+                        "default": "",
+                    },
+                },
+                "required": [],
+            },
+            require_approval=False,
+        )
+
+        if settings.voice_outbound_enabled:
+            tools.register(
+                name="make_phone_call",
+                description=(
+                    "Place a real phone call to a number. REQUIRED when the user asks you to call someone: "
+                    "you MUST call this tool with target_number (E.164) and purpose. "
+                    "Do NOT describe or simulate a call in text. Do NOT output XML or structured call blocks. "
+                    "Only this tool can place calls. "
+                    "Set language='de' when the user writes in German or the callee is German-speaking — "
+                    "e.g. 'Ruf beim Zahnarzt an und bestätige den Termin', 'Bitte ruf Herrn Müller an', "
+                    "'Sag das Restaurant für morgen ab' → language='de'. "
+                    "Set language='uk' when the user writes in Ukrainian or the callee is Ukrainian-speaking — "
+                    "e.g. 'Зателефонуй мені', 'Подзвони до лікаря і підтверди запис' → language='uk'. "
+                    "English commands ('Call the dentist...') → language='en' (default)."
+                ),
+                handler=make_phone_call,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "target_number": {
+                            "type": "string",
+                            "description": "Phone number in E.164 format (e.g. +14155551234)",
+                        },
+                        "purpose": {
+                            "type": "string",
+                            "description": "What the call is about (write it in the call language)",
+                        },
+                        "instructions": {
+                            "type": "string",
+                            "description": "Specific instructions for the agent during the call",
+                            "default": "",
+                        },
+                        "max_duration": {
+                            "type": "integer",
+                            "description": "Maximum call duration in seconds (default 300)",
+                            "default": 300,
+                        },
+                        "language": {
+                            "type": "string",
+                            "enum": ["en", "de", "uk"],
+                            "description": (
+                                "Language the call is conducted in. 'de' for German commands/callees, "
+                                "'uk' for Ukrainian (greeting, conversation, confirmations all in that "
+                                "language), 'en' otherwise."
+                            ),
+                            "default": "en",
+                        },
+                    },
+                    "required": ["target_number", "purpose"],
+                },
+                require_approval=True,
+            )
 
     # Skills: SKILL.md-based discovery, coexists unconditionally with MCP.
     from pincer.tools.builtin.skills_tools import make_skills_tools
@@ -595,6 +687,21 @@ def _register_channel_bound_tools(tools: ToolRegistry, channel_map: dict[str, Ba
 
 
 async def _run_agent(settings: Settings) -> None:
+    # Single-instance guard: a second `pincer run` used to keep running with
+    # the API port taken — Telegram polling then fights between instances
+    # (TelegramConflictError) and Twilio webhooks land on the other process
+    # (calls with no audio and no transcript). Fail loudly instead. Lives here
+    # (not in _build_core) because `pincer run tasks` workers legitimately run
+    # alongside the main process without binding the dashboard port.
+    if _port_in_use(settings.dashboard_host, settings.dashboard_port):
+        console.print(
+            f"[bold red]Port {settings.dashboard_host}:{settings.dashboard_port} is already in use — "
+            "another Pincer instance appears to be running.[/bold red]\n"
+            "[yellow]Stop it first (e.g. `pkill -f 'pincer run'`) or set PINCER_DASHBOARD_PORT "
+            "if something else owns the port.[/yellow]"
+        )
+        raise typer.Exit(1)
+
     core = await _build_core(settings)
     session_mgr, cost_tracker, audit_logger, rate_limiter = (
         core.session_mgr,
@@ -942,6 +1049,10 @@ async def _run_agent(settings: Settings) -> None:
         if channel == "teams" and ms is not None:
             raw_id = await _raw_id(user_id, "teams")
             return await ms.request_approval(raw_id, tool_name, arguments)
+        if channel == "web":
+            from pincer.api.approvals import request_web_approval
+
+            return await request_web_approval(tool_name, arguments, user_id, channel)
         logger.warning(
             "No approval UI for channel %s; denying %s",
             channel,
@@ -1001,10 +1112,29 @@ async def _run_agent(settings: Settings) -> None:
     # Start when either inbound (voice_enabled) or outbound (voice_outbound_enabled) is enabled
     vc = None
     if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.twilio_account_sid:
+        # Sprint 4 (T4.4): validate configured ElevenLabs voice IDs once at
+        # startup — a bad ID must fail loudly here, never mid-call. Network
+        # trouble only warns; a definitively unknown ID is fatal on
+        # media_streams and falls back to the Google voice on ConversationRelay.
+        if settings.elevenlabs_api_key.get_secret_value():
+            from pincer.voice.voices import validate_configured_voices
+
+            bad_voices = validate_configured_voices(settings)
+            if bad_voices:
+                for vid, problem in bad_voices.items():
+                    console.print(f"[bold red]ElevenLabs voice {vid}: {problem}[/bold red]")
+                if settings.voice_engine.lower().strip() == "media_streams":
+                    console.print(
+                        "[bold red]Fix PINCER_ELEVENLABS_VOICE_ID / _EN / _DE "
+                        "(find IDs with `pincer voice list`).[/bold red]"
+                    )
+                    raise typer.Exit(1)
+                console.print(
+                    "[yellow]ConversationRelay will fall back to the Google voice for affected calls.[/yellow]"
+                )
         try:
             from pincer.channels.phone_calls import VoiceChannel
             from pincer.voice.engine import get_voice_engine
-            from pincer.voice.outbound import make_phone_call
             from pincer.voice.twiml_server import init_voice_routes
 
             voice_engine = get_voice_engine(settings)
@@ -1015,42 +1145,34 @@ async def _run_agent(settings: Settings) -> None:
             router.register(ChannelType.VOICE, vc)
             init_voice_routes(voice_engine, settings)
 
-            if settings.voice_outbound_enabled:
-                tools.register(
-                    name="make_phone_call",
-                    description=(
-                        "Place a real phone call to a number. REQUIRED when the user asks you to call someone: "
-                        "you MUST call this tool with target_number (E.164) and purpose. "
-                        "Do NOT describe or simulate a call in text. Do NOT output XML or structured call blocks. "
-                        "Only this tool can place calls."
-                    ),
-                    handler=make_phone_call,
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "target_number": {
-                                "type": "string",
-                                "description": "Phone number in E.164 format (e.g. +14155551234)",
-                            },
-                            "purpose": {
-                                "type": "string",
-                                "description": "What the call is about",
-                            },
-                            "instructions": {
-                                "type": "string",
-                                "description": "Specific instructions for the agent during the call",
-                                "default": "",
-                            },
-                            "max_duration": {
-                                "type": "integer",
-                                "description": "Maximum call duration in seconds (default 300)",
-                                "default": 300,
-                            },
-                        },
-                        "required": ["target_number", "purpose"],
-                    },
-                    require_approval=True,
+            # Sprint 1 (T1.5): live call status back to the initiating user's channel
+            from pincer.voice.status_notify import set_status_notifier
+
+            async def _voice_status_notifier(user_id: str, channel: str, text: str) -> bool:
+                try:
+                    channel_type = ChannelType(channel)
+                except ValueError:
+                    channel_type = None
+                if channel_type is not None and await router.send(channel_type, user_id, text):
+                    return True
+                return await router.send_to_user(user_id, text)
+
+            set_status_notifier(_voice_status_notifier)
+
+            # Sprint 3: post-call intelligence — structured report, memory
+            # notes, and follow-up proposals after every call.
+            # (make_phone_call / get_call_transcript are registered earlier,
+            # before channel startup, so early-started channels have them.)
+            from pincer.voice.postcall import PostCallProcessor
+
+            vc.set_post_call_processor(
+                PostCallProcessor(
+                    settings,
+                    llm=llm,
+                    memory=memory_store,
+                    db_path=str(settings.db_path),
                 )
+            )
 
             console.print(f"[green]Voice calling enabled ({settings.voice_engine})[/green]")
         except Exception as e:
@@ -1165,11 +1287,32 @@ async def _run_agent(settings: Settings) -> None:
     # calling the router directly — the same DeliveryBackend/ResultEmitter
     # code path a standalone `pincer run tasks` worker uses, so this
     # in-process default and a split deployment behave identically.
-    # See pincer.tasks.delivery.
+    # See pincer.tasks.delivery. (The voice retention_purge action is handled
+    # in pincer.tasks.actors alongside briefing/custom.)
     from pincer.tasks.delivery import ResultEmitter, ResultRelay, create_delivery_backend
 
     delivery_backend = create_delivery_backend(settings)
     deliverer = ResultEmitter(delivery_backend)
+
+    if settings.voice_enabled and settings.voice_transcript_retention_days > 0:
+        try:
+            purge_tz = settings.voice_timezone or settings.timezone
+            purge_user = settings.default_user_id or "system"
+            existing = await scheduler.list_schedules(purge_user)
+            if not any(s["name"] == "voice_retention_purge" for s in existing):
+                await scheduler.add(
+                    name="voice_retention_purge",
+                    cron_expr="30 3 * * *",
+                    action={"type": "retention_purge"},
+                    pincer_user_id=purge_user,
+                    tz=purge_tz,
+                )
+                console.print(
+                    f"[green]Voice transcript retention purge scheduled daily "
+                    f"(retention={settings.voice_transcript_retention_days}d, tz={purge_tz})[/green]"
+                )
+        except Exception as e:
+            console.print(f"[yellow]Retention schedule error: {e}[/yellow]")
 
     # Sprint 3: Event triggers
     triggers = EventTriggerManager(settings.db_path, deliverer)
@@ -1982,6 +2125,102 @@ async def _chat_loop() -> None:
 
 
 # ── Signal subcommands ────────────────────────
+
+# ── Voice subcommands (Sprint 4) ──────────────────────────
+
+voice_app = typer.Typer(name="voice", help="Manage ElevenLabs voices for voice calling")
+app.add_typer(voice_app, name="voice")
+
+
+@voice_app.command(name="list")
+def voice_list() -> None:
+    """List ElevenLabs voices (ID, name, category, languages) — find your cloned voice's ID here."""
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
+    from pincer.voice.voices import VoiceLookupError, configured_voice_ids, list_voices
+
+    settings = get_settings_relaxed()
+    api_key = settings.elevenlabs_api_key.get_secret_value()
+    if not api_key:
+        console.print("[red]PINCER_ELEVENLABS_API_KEY not set.[/red]")
+        raise typer.Exit(1)
+
+    try:
+        voices = list_voices(api_key)
+    except VoiceLookupError as e:
+        console.print(f"[red]Could not list voices: {e}[/red]")
+        raise typer.Exit(1) from e
+
+    configured = configured_voice_ids(settings)
+    table = Table(title=f"ElevenLabs Voices ({len(voices)})")
+    table.add_column("Voice ID", style="cyan")
+    table.add_column("Name")
+    table.add_column("Category")
+    table.add_column("Languages")
+    table.add_column("")
+    for voice in voices:
+        table.add_row(
+            voice.voice_id,
+            voice.name,
+            voice.category,
+            ", ".join(voice.languages) or "-",
+            "[green]configured[/green]" if voice.voice_id in configured else "",
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]Set PINCER_ELEVENLABS_VOICE_ID (or _EN / _DE) to a Voice ID above, "
+        "then judge it at telephony quality with `pincer voice test`.[/dim]"
+    )
+
+
+@voice_app.command(name="test")
+def voice_test(
+    voice_id: str = typer.Option("", "--voice-id", help="Voice ID to test (default: the configured voice)"),
+    language: str = typer.Option("", "--language", help="Call language the voice is resolved for (en/de)"),
+    text: str = typer.Option("", "--text", help="Custom sample text"),
+) -> None:
+    """Synthesize a sample to ~/.pincer/voice_test.wav (+ 8kHz mu-law variant at telephony quality)."""
+    from pathlib import Path
+
+    from pincer.config import get_settings_relaxed
+    from pincer.voice.language import elevenlabs_model_for, resolve_call_language, voice_for
+    from pincer.voice.voices import VoiceLookupError, synthesize_sample, ulaw_to_wav
+
+    settings = get_settings_relaxed()
+    api_key = settings.elevenlabs_api_key.get_secret_value()
+    if not api_key:
+        console.print("[red]PINCER_ELEVENLABS_API_KEY not set.[/red]")
+        raise typer.Exit(1)
+
+    lang = resolve_call_language(settings, language)
+    resolved_voice = voice_id.strip() or voice_for(settings, lang)
+    model = elevenlabs_model_for(settings, lang)
+    samples = {
+        "en": "Hello! I'm your personal assistant. This is how I sound on the phone.",
+        "de": "Guten Tag! Ich bin Ihr persönlicher Assistent. So klinge ich am Telefon.",
+        "uk": "Вітаю! Я ваш особистий асистент. Ось так я звучу по телефону.",
+    }
+    sample_text = text.strip() or samples.get(lang, samples["en"])
+
+    out_dir = Path.home() / ".pincer"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = out_dir / "voice_test.wav"
+    ulaw_path = out_dir / "voice_test_ulaw.wav"
+
+    console.print(f"Synthesizing with voice [cyan]{resolved_voice}[/cyan], model {model}, language {lang}...")
+    try:
+        wav_path.write_bytes(synthesize_sample(api_key, resolved_voice, sample_text, model, "wav_16000"))
+        ulaw_raw = synthesize_sample(api_key, resolved_voice, sample_text, model, "ulaw_8000")
+        ulaw_path.write_bytes(ulaw_to_wav(ulaw_raw))
+    except VoiceLookupError as e:
+        console.print(f"[red]Synthesis failed: {e}[/red]")
+        raise typer.Exit(1) from e
+
+    console.print(f"[green]Wrote {wav_path}[/green] (16 kHz)")
+    console.print(f"[green]Wrote {ulaw_path}[/green] (8 kHz mu-law — how callers will hear it)")
+    console.print("[dim]Some voices sound very different at telephony quality — judge the mu-law file.[/dim]")
+
 
 signal_app = typer.Typer(name="signal", help="Manage Signal messenger integration")
 app.add_typer(signal_app, name="signal")

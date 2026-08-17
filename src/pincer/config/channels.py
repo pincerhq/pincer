@@ -106,8 +106,43 @@ class ChannelSettings(BaseModel):
     voice_webhook_base_url: str = Field(default="", description="Public URL for Twilio webhooks")
     deepgram_api_key: SecretStr = Field(default=SecretStr(""), description="Deepgram STT API key")
     elevenlabs_api_key: SecretStr = Field(default=SecretStr(""), description="ElevenLabs TTS API key")
-    elevenlabs_voice_id: str = Field(default="", description="ElevenLabs voice ID")
-    voice_language: str = Field(default="en-US", description="Primary language for STT")
+    elevenlabs_voice_id: str = Field(default="", description="ElevenLabs voice ID (fallback for all languages)")
+    elevenlabs_voice_id_en: str = Field(default="", description="ElevenLabs voice for English calls")
+    elevenlabs_voice_id_de: str = Field(default="", description="ElevenLabs voice for German calls")
+    elevenlabs_voice_id_uk: str = Field(default="", description="ElevenLabs voice for Ukrainian calls")
+    elevenlabs_model: str = Field(
+        default="eleven_flash_v2_5",
+        description="ElevenLabs TTS model (multilingual, low-latency by default)",
+    )
+    elevenlabs_stability: float = Field(default=0.5, ge=0.0, le=1.0, description="ElevenLabs voice stability")
+    elevenlabs_similarity: float = Field(default=0.75, ge=0.0, le=1.0, description="ElevenLabs voice similarity boost")
+    elevenlabs_speed: float = Field(default=1.0, ge=0.7, le=1.2, description="ElevenLabs speaking speed")
+    elevenlabs_style: float = Field(
+        default=0.0, ge=0.0, le=1.0, description="ElevenLabs style exaggeration (0 = off, lowest latency)"
+    )
+    elevenlabs_output_format: str = Field(
+        default="ulaw_8000",
+        description="ElevenLabs streaming output for Media Streams: ulaw_8000 (native telephony) | "
+        "pcm_16000 (legacy resample fallback path)",
+    )
+    cr_tts_provider: str = Field(
+        default="",
+        description="ConversationRelay TTS provider: google | amazon | elevenlabs; "
+        "empty = auto (elevenlabs when an ElevenLabs voice is configured, else google)",
+    )
+    voice_language: str = Field(default="en-US", description="Primary language for STT (legacy fallback)")
+    voice_default_language: str = Field(
+        default="en",
+        description="Fallback call language when none is given or inferable (ISO 639-1)",
+    )
+    voice_supported_languages: str = Field(
+        default="en,de,uk",
+        description="Comma-separated languages accepted for the per-call language parameter",
+    )
+    voice_de_formality: str = Field(
+        default="sie",
+        description="German register: sie (formal, default) | du (informal)",
+    )
     voice_max_call_duration: int = Field(default=600, ge=30, le=3600, description="Max call seconds")
     voice_max_hold_time: int = Field(default=300, ge=30, le=600, description="Max IVR hold seconds")
     voice_recording_enabled: bool = Field(default=False, description="Enable call recording")
@@ -117,6 +152,27 @@ class ChannelSettings(BaseModel):
     )
     voice_outbound_enabled: bool = Field(default=False, description="Enable outbound calling")
     voice_outbound_max_daily: int = Field(default=10, ge=1, le=100, description="Max outbound calls/day")
+    voice_retry_attempts: int = Field(
+        default=0,
+        ge=0,
+        le=3,
+        description="Automatic redial attempts after a failed outbound call (0 = none; reserved, not yet acted on)",
+    )
+    voice_stt_min_confidence: float = Field(
+        default=0.55,
+        ge=0.0,
+        le=1.0,
+        description="Below this STT confidence the agent asks the caller to repeat instead of acting (0 = disabled)",
+    )
+    voice_machine_detection: bool = Field(
+        default=True,
+        description="Twilio Answering Machine Detection on outbound calls (voicemail is reported, not conversed with)",
+    )
+    voice_auto_followup: bool = Field(
+        default=False,
+        description="Auto-execute post-call follow-up suggestions without a user turn "
+        "(reserved; this build always proposes and waits for the user)",
+    )
     voice_allowed_callers: str = Field(
         default="*",
         description="Comma-separated E.164 numbers allowed to call (or * for all)",
@@ -124,6 +180,36 @@ class ChannelSettings(BaseModel):
     voice_filler_phrases: str = Field(
         default="",
         description="Custom filler phrases JSON array (empty = built-in)",
+    )
+    voice_consent_language: str = Field(
+        default="",
+        description="Language for consent/AI-disclosure announcements (ISO 639-1, e.g. 'de'); "
+        "empty = follow call language, fallback 'en'",
+    )
+    voice_assistant_name: str = Field(
+        default="Pincer",
+        description="Name the assistant introduces itself with at call start (empty = skip introduction)",
+    )
+    voice_assistant_org: str = Field(
+        default="3days.ai",
+        description="Organization named in the call introduction (empty = omitted)",
+    )
+    voice_assistant_owner: str = Field(
+        default="",
+        description="Person the assistant introduces itself as personal AI assistant of (empty = omitted)",
+    )
+    voice_intro_text: str = Field(
+        default="",
+        description="Verbatim override for the call introduction (bypasses name/org/owner)",
+    )
+    voice_transcript_retention_days: int = Field(
+        default=90,
+        ge=0,
+        description="Days to keep call transcripts/recordings metadata (GDPR storage limitation); 0 = keep forever",
+    )
+    voice_timezone: str = Field(
+        default="",
+        description="IANA timezone for voice-facing time rendering (e.g. Europe/Berlin); empty = settings.timezone",
     )
 
     # ── Email ─────────────────────────────────────────────

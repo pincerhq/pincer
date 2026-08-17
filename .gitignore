@@ -7,6 +7,9 @@ build/
 
 # Environment
 .env
+.env.save
+.env.*.backup
+.env.bak
 .venv/
 venv/
 
@@ -19,6 +22,7 @@ venv/
 .cursor/
 .claude/
 .agents/
+CLAUDE.md
 
 # OS
 .DS_Store

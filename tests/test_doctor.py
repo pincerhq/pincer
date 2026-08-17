@@ -24,7 +24,7 @@ def doctor_env(tmp_path):
 def test_run_all_returns_report(doctor_env):
     report = doctor_env.run_all()
     assert isinstance(report, DoctorReport)
-    assert len(report.checks) == 42  # 31 original + 7 MCP + 3 MCP security + 1 WA neonize
+    assert len(report.checks) == 46  # 31 original + 7 MCP + 3 MCP security + 1 WA neonize + 3 voice DACH + 1 ElevenLabs
     assert 0 <= report.score <= 100
 
 
@@ -1019,3 +1019,75 @@ def test_mcp_injection_alerts_always_pass():
     result = doc._check_mcp_injection_alerts()
     assert result.status == CheckStatus.PASS
     assert "injection" in result.message.lower()
+
+
+# ── Voice DACH checks (Sprint 0) ──────────────────────────────────────────────
+
+
+def _voice_cfg(**overrides):
+    from unittest.mock import MagicMock
+
+    cfg = MagicMock()
+    cfg.voice_enabled = True
+    cfg.voice_outbound_enabled = False
+    cfg.voice_recording_enabled = False
+    cfg.voice_consent_mode = "two_party"
+    cfg.voice_transcript_retention_days = 90
+    cfg.twilio_phone_number = "+4915212345678"
+    cfg.twilio_account_sid = ""
+    cfg.deepgram_api_key.get_secret_value.return_value = ""
+    cfg.elevenlabs_api_key.get_secret_value.return_value = ""
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+    return cfg
+
+
+def test_voice_dach_consent_skipped_when_disabled():
+    result = SecurityDoctor()._check_voice_dach_consent(_voice_cfg(voice_enabled=False))
+    assert result.status == CheckStatus.SKIPPED
+
+
+def test_voice_dach_consent_warns_on_one_party_outbound():
+    cfg = _voice_cfg(voice_outbound_enabled=True, voice_consent_mode="one_party")
+    result = SecurityDoctor()._check_voice_dach_consent(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert "two_party" in result.fix_hint
+
+
+def test_voice_dach_consent_passes_with_two_party():
+    cfg = _voice_cfg(voice_outbound_enabled=True, voice_consent_mode="two_party")
+    result = SecurityDoctor()._check_voice_dach_consent(cfg)
+    assert result.status == CheckStatus.PASS
+
+
+def test_voice_dach_consent_passes_non_dach_number():
+    cfg = _voice_cfg(voice_outbound_enabled=True, voice_consent_mode="one_party", twilio_phone_number="+14155551234")
+    result = SecurityDoctor()._check_voice_dach_consent(cfg)
+    assert result.status == CheckStatus.PASS
+
+
+def test_voice_retention_warns_recording_without_window():
+    cfg = _voice_cfg(voice_recording_enabled=True, voice_transcript_retention_days=0)
+    result = SecurityDoctor()._check_voice_retention(cfg)
+    assert result.status == CheckStatus.WARNING
+
+
+def test_voice_retention_passes_with_window():
+    result = SecurityDoctor()._check_voice_retention(_voice_cfg(voice_recording_enabled=True))
+    assert result.status == CheckStatus.PASS
+    assert "90" in result.message
+
+
+def test_voice_provider_regions_lists_configured():
+    cfg = _voice_cfg(twilio_account_sid="AC123")
+    cfg.deepgram_api_key.get_secret_value.return_value = "dg-key"
+    result = SecurityDoctor()._check_voice_provider_regions(cfg)
+    assert result.status == CheckStatus.PASS
+    assert "Twilio" in result.message
+    assert "Deepgram" in result.message
+
+
+def test_voice_provider_regions_none_configured():
+    result = SecurityDoctor()._check_voice_provider_regions(_voice_cfg())
+    assert result.status == CheckStatus.PASS
+    assert "No external" in result.message

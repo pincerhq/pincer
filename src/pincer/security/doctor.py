@@ -137,6 +137,12 @@ class SecurityDoctor:
         report.checks.append(self._check_voice_twilio_credentials(settings))
         report.checks.append(self._check_voice_webhook_url(settings))
         report.checks.append(self._check_voice_recording_consent(settings))
+        # Voice DACH compliance (3 checks, Sprint 0)
+        report.checks.append(self._check_voice_dach_consent(settings))
+        report.checks.append(self._check_voice_retention(settings))
+        report.checks.append(self._check_voice_provider_regions(settings))
+        # Voice ElevenLabs (1 check, Sprint 4)
+        report.checks.append(self._check_voice_elevenlabs_voices(settings))
         # Signal (3 checks, Sprint 7.5)
         report.checks.append(self._check_signal_phone_set(settings))
         report.checks.append(self._check_signal_api_local(settings))
@@ -808,6 +814,169 @@ class SecurityDoctor:
             "voice_recording_consent",
             CheckStatus.PASS,
             "Recording disabled (transcription only)",
+            category="voice",
+        )
+
+    # ── Voice DACH compliance (Sprint 0) ─────────────────
+
+    def _check_voice_dach_consent(self, cfg: Settings | None = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.voice_enabled:
+            return CheckResult(
+                "voice_dach_consent",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        number = (cfg.twilio_phone_number or "").strip()
+        is_dach = number.startswith(("+49", "+43", "+41"))
+        if cfg.voice_outbound_enabled and is_dach and cfg.voice_consent_mode == "one_party":
+            return CheckResult(
+                "voice_dach_consent",
+                CheckStatus.WARNING,
+                f"Outbound calling from DACH number {number[:4]}… with one_party consent "
+                "(recording needs all-party consent, e.g. §201 StGB in Germany)",
+                fix_hint="Set PINCER_VOICE_CONSENT_MODE=two_party for DACH deployments",
+                category="voice",
+            )
+        if is_dach:
+            return CheckResult(
+                "voice_dach_consent",
+                CheckStatus.PASS,
+                f"DACH number with {cfg.voice_consent_mode} consent mode",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_dach_consent",
+            CheckStatus.PASS,
+            "No DACH Twilio number configured",
+            category="voice",
+        )
+
+    def _check_voice_retention(self, cfg: Settings | None = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.voice_enabled:
+            return CheckResult(
+                "voice_retention",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        days = cfg.voice_transcript_retention_days
+        if cfg.voice_recording_enabled and days <= 0:
+            return CheckResult(
+                "voice_retention",
+                CheckStatus.WARNING,
+                "Recording enabled but no retention window (transcripts kept forever)",
+                fix_hint="Set PINCER_VOICE_TRANSCRIPT_RETENTION_DAYS (GDPR storage limitation)",
+                category="voice",
+            )
+        if days > 0:
+            return CheckResult(
+                "voice_retention",
+                CheckStatus.PASS,
+                f"Transcripts purged after {days} day(s)",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_retention",
+            CheckStatus.PASS,
+            "No retention window (recording disabled)",
+            category="voice",
+        )
+
+    def _check_voice_provider_regions(self, cfg: Settings | None = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.voice_enabled:
+            return CheckResult(
+                "voice_provider_regions",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        providers = []
+        if cfg.twilio_account_sid:
+            providers.append("Twilio (US default; EU/Ireland region configurable)")
+        if cfg.deepgram_api_key.get_secret_value():
+            providers.append("Deepgram STT (US default; EU endpoint available)")
+        if cfg.elevenlabs_api_key.get_secret_value():
+            providers.append("ElevenLabs TTS (US processing)")
+        if not providers:
+            return CheckResult(
+                "voice_provider_regions",
+                CheckStatus.PASS,
+                "No external voice providers configured",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_provider_regions",
+            CheckStatus.PASS,
+            "Data processing: " + "; ".join(providers),
+            fix_hint="See docs/guides/dach-compliance.md for DPA/AVV guidance",
+            category="voice",
+        )
+
+    def _check_voice_elevenlabs_voices(self, cfg: Settings | None = None) -> CheckResult:
+        """Sprint 4: configured ElevenLabs voice IDs exist in the account, and
+        the configured model speaks the supported languages."""
+        cfg = self._cfg(cfg)
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled):
+            return CheckResult(
+                "voice_elevenlabs_voices",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        api_key = cfg.elevenlabs_api_key.get_secret_value()
+        from pincer.voice.voices import VoiceLookupError, configured_voice_ids, voice_usable
+
+        voice_ids = configured_voice_ids(cfg)
+        if not api_key or not voice_ids:
+            return CheckResult(
+                "voice_elevenlabs_voices",
+                CheckStatus.PASS,
+                "No ElevenLabs voices configured (default/Google voice in use)",
+                category="voice",
+            )
+
+        # English-only models break German calls even with a valid voice ID
+        from pincer.voice.language import elevenlabs_model_for, supported_languages
+
+        model = elevenlabs_model_for(cfg)
+        english_only_models = {"eleven_flash_v2", "eleven_turbo_v2"}
+        if model in english_only_models and any(lang != "en" for lang in supported_languages(cfg)):
+            return CheckResult(
+                "voice_elevenlabs_voices",
+                CheckStatus.WARNING,
+                f"Model {model} is English-only but non-English calls are enabled",
+                fix_hint="Set PINCER_ELEVENLABS_MODEL=eleven_flash_v2_5 (multilingual, low latency)",
+                category="voice",
+            )
+
+        missing = []
+        for voice_id in sorted(voice_ids):
+            try:
+                if not voice_usable(api_key, voice_id):
+                    missing.append(voice_id)
+            except VoiceLookupError as e:
+                return CheckResult(
+                    "voice_elevenlabs_voices",
+                    CheckStatus.WARNING,
+                    f"Could not verify ElevenLabs voices: {e}",
+                    category="voice",
+                )
+        if missing:
+            return CheckResult(
+                "voice_elevenlabs_voices",
+                CheckStatus.WARNING,
+                f"Voice ID(s) not usable by this ElevenLabs account: {', '.join(missing)}",
+                fix_hint="Run `pincer voice list` and fix PINCER_ELEVENLABS_VOICE_ID / _EN / _DE",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_elevenlabs_voices",
+            CheckStatus.PASS,
+            f"{len(voice_ids)} ElevenLabs voice ID(s) verified, model {model}",
             category="voice",
         )
 

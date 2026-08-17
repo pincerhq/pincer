@@ -15,7 +15,7 @@ calendar_create behavior:
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -85,8 +85,21 @@ def _get_service():  # type: ignore[no-untyped-def]
     return build("calendar", "v3", credentials=_get_credentials())
 
 
-def _format_event(event: dict[str, Any]) -> str:
-    """Format a single calendar event into a readable string."""
+def _local_tz() -> ZoneInfo:
+    """User-facing timezone for rendering times (DST-safe)."""
+    try:
+        return ZoneInfo(get_settings().timezone)
+    except (KeyError, ValueError):
+        return ZoneInfo("Europe/Berlin")
+
+
+def _format_event(event: dict[str, Any], tz: ZoneInfo | None = None) -> str:
+    """Format a single calendar event into a readable string.
+
+    Aware event times are converted into ``tz`` so displayed times match the
+    user's clock regardless of the offset the API returned.
+    """
+    tz = tz or _local_tz()
     start = event.get("start", {})
     end = event.get("end", {})
     start_str = start.get("dateTime", start.get("date", ""))
@@ -98,6 +111,10 @@ def _format_event(event: dict[str, Any]) -> str:
         try:
             start_dt = datetime.fromisoformat(start_str)
             end_dt = datetime.fromisoformat(end.get("dateTime", ""))
+            if start_dt.tzinfo is not None:
+                start_dt = start_dt.astimezone(tz)
+            if end_dt.tzinfo is not None:
+                end_dt = end_dt.astimezone(tz)
             time_display = f"{start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')}"
         except (ValueError, TypeError):
             time_display = start_str
@@ -115,7 +132,9 @@ async def calendar_today(calendar_id: str = "primary") -> str:
     """Get today's calendar events. Returns formatted string."""
     try:
         service = _get_service()
-        now = datetime.now(UTC)
+        tz = _local_tz()
+        now = datetime.now(tz)
+        # "Today" is the user's local day, not the UTC day
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
         end_of_day = start_of_day + timedelta(days=1)
 
@@ -138,7 +157,7 @@ async def calendar_today(calendar_id: str = "primary") -> str:
 
         lines = [f"Today's schedule ({now.strftime('%A, %B %d')}) — {len(events)} event(s):\n"]
         for e in events:
-            lines.append(_format_event(e))
+            lines.append(_format_event(e, tz))
         return "\n".join(lines)
 
     except FileNotFoundError as e:
@@ -155,7 +174,8 @@ async def calendar_week(calendar_id: str = "primary") -> str:
     """Get this week's calendar events. Returns formatted string."""
     try:
         service = _get_service()
-        now = datetime.now(UTC)
+        tz = _local_tz()
+        now = datetime.now(tz)
         end = now + timedelta(days=7)
 
         result = (
@@ -183,7 +203,7 @@ async def calendar_week(calendar_id: str = "primary") -> str:
                 day_label = datetime.fromisoformat(date_str).strftime("%A, %B %d")
             except (ValueError, TypeError):
                 day_label = date_str
-            days.setdefault(day_label, []).append(_format_event(e))
+            days.setdefault(day_label, []).append(_format_event(e, tz))
 
         lines = [f"Week ahead ({now.strftime('%b %d')} - {end.strftime('%b %d')}) — {len(events)} event(s):\n"]
         for day, day_events in days.items():

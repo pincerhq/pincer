@@ -100,20 +100,6 @@ def create_app() -> FastAPI:
 
     app.openapi = _custom_openapi  # type: ignore[method-assign]
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://localhost:8080",  # 3Days.ai dev
-            settings.dashboard_url,
-            settings.web_chat_url,
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
         _dashboard_token = settings.dashboard_token.get_secret_value()
@@ -123,6 +109,11 @@ def create_app() -> FastAPI:
             return await call_next(request)
         if request.url.path.startswith("/api/apps/teams/"):
             return await call_next(request)  # Teams webhooks use their own HMAC auth
+        if request.url.path.startswith("/api/apps/twilio/"):
+            # Twilio can't send our Bearer token; these webhooks rely on the
+            # X-Twilio-Signature scheme (same exposure as the public legacy
+            # /voice/* aliases). Blocking them 401s every status callback.
+            return await call_next(request)
         if not request.url.path.startswith("/api/"):
             return await call_next(request)  # dashboard static files
         if not _dashboard_token and not _web_chat_token:
@@ -132,6 +123,30 @@ def create_app() -> FastAPI:
         if auth in allowed:
             return await call_next(request)
         return JSONResponse(status_code=401, content={"error": "Invalid token"})
+
+    # Registered last on purpose. Starlette's add_middleware() inserts at index 0
+    # and the stack is built in reverse, so the last-added middleware is the
+    # outermost one. CORS must sit outside auth: a browser preflight carries no
+    # Authorization header, so an inner CORS would let auth 401 the preflight --
+    # and a 401 without Access-Control-Allow-Origin reads as an opaque CORS
+    # failure in the browser rather than as the auth error it is.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            origin
+            for origin in (
+                "http://localhost:3000",
+                "http://localhost:5173",
+                "http://localhost:8080",  # 3Days.ai dev
+                settings.dashboard_url,
+                settings.web_chat_url,
+            )
+            if origin  # both settings default to "" -- never allow an empty origin
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.include_router(costs_router)
     app.include_router(audit_router)

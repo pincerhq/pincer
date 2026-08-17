@@ -43,6 +43,8 @@ class AuditAction(StrEnum):
     VOICE_CALL_END = "voice_call_end"
     VOICE_TOOL_CALL = "voice_tool_call"
     VOICE_TRANSFER = "voice_transfer"
+    # Sprint 0 (DACH): GDPR storage-limitation purge
+    RETENTION_PURGE = "retention_purge"
 
 
 @dataclass

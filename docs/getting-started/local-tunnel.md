@@ -136,7 +136,7 @@ Twilio dials your bot and then calls your webhook for every call event. Without 
 ```
 POST https://<tunnel-url>/api/apps/twilio/webhook       ← inbound call handler
 POST https://<tunnel-url>/api/apps/twilio/status        ← call status callbacks
-POST https://<tunnel-url>/api/apps/twilio/relay-webhook ← ConversationRelay transcript events
+WS   wss://<tunnel-url>/api/apps/twilio/relay          ← ConversationRelay WebSocket (speech in/out)
 WS   wss://<tunnel-url>/api/apps/twilio/stream/{sid}    ← Media Streams (if using that engine)
 ```
 
