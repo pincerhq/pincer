@@ -9,7 +9,9 @@ Priority (highest to lowest):
 
 pincer.local.toml supports all sections that pincer.toml supports.
 [[mcp.servers]] entries are merged by the 'name' field — a local entry with the
-same name as a base entry replaces it entirely; new names are appended.
+same name as a base entry is merged into it field by field (override wins per
+key, unspecified fields are inherited from the base entry); new names are
+appended.
 Add pincer.local.toml to .gitignore to keep machine-local overrides out of VCS.
 
 Environment variable format for a single server:
@@ -291,19 +293,35 @@ def _read_toml_raw(toml_path: Path) -> dict[str, Any] | None:
         return tomllib.load(f)  # type: ignore[return-value]
 
 
+_STDIO_ONLY_KEYS = {"command", "args", "env"}
+_STREAMABLE_HTTP_ONLY_KEYS = {"url", "headers"}
+
+
 def _merge_mcp_raw(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Merge two raw [mcp] section dicts. override wins for all scalar/mapping keys.
 
     [[mcp.servers]] entries are merged by 'name': an override entry with the same
-    name as a base entry replaces it entirely; new names are appended in order.
-    [mcp.server] sub-table fields are merged shallowly (override wins per key).
+    name as a base entry is merged into it field by field (override wins per key,
+    unspecified fields are inherited from the base entry); new names are appended
+    in order. [mcp.server] sub-table fields are merged the same way. If an override
+    entry switches 'transport', the previous transport's exclusive fields (e.g.
+    stdio's 'command'/'args'/'env' vs streamable-http's 'url'/'headers') are dropped
+    from the base entry instead of being inherited.
     """
     merged: dict[str, Any] = dict(base)
     for key, val in override.items():
         if key == "servers":
             by_name: dict[str, Any] = {s["name"]: s for s in base.get("servers", [])}
             for srv in val:
-                by_name[srv["name"]] = srv
+                name = srv["name"]
+                if name in by_name:
+                    base_srv = by_name[name]
+                    if "transport" in srv and srv["transport"] != base_srv.get("transport"):
+                        drop = _STREAMABLE_HTTP_ONLY_KEYS if srv["transport"] == "stdio" else _STDIO_ONLY_KEYS
+                        base_srv = {k: v for k, v in base_srv.items() if k not in drop}
+                    by_name[name] = {**base_srv, **srv}
+                else:
+                    by_name[name] = srv
             merged["servers"] = list(by_name.values())
         elif key == "server" and isinstance(val, dict):
             merged["server"] = {**base.get("server", {}), **val}
@@ -436,7 +454,8 @@ def load_mcp_config(config_dir: Path | None = None, pincer_vars: dict[str, str] 
     pincer.local.toml is optional. When present, its [mcp] section is merged on
     top of pincer.toml's [mcp] section before env vars are applied.
     [[mcp.servers]] entries are matched by 'name'; a local entry with the same
-    name replaces the base entry entirely.
+    name is merged into the base entry field by field, with unspecified fields
+    inherited from the base entry.
 
     Pass pincer_vars (built from get_settings() via _pincer_config_vars) to resolve
     ${PINCER_*} placeholders in server env/args/headers from Pincer's own config.

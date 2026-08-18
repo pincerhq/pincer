@@ -201,10 +201,14 @@ Place a `pincer.local.toml` file next to `pincer.toml` to override or extend the
 max_servers = 20          # raise the cap locally
 
 [[mcp.servers]]
-name      = "filesystem"  # same name as in pincer.toml — replaces that entry
+name      = "filesystem"  # same name as in pincer.toml — merged into that entry, field by field
 transport = "stdio"
 command   = "npx"
 args      = ["-y", "@modelcontextprotocol/server-filesystem", "${HOME}"]
+
+[[mcp.servers]]
+name    = "websearch"  # same name as in pincer.toml — only override enabled, keep everything else
+enabled = false
 
 [[mcp.servers]]
 name      = "local_db"    # new entry, only on this machine
@@ -216,7 +220,7 @@ args      = ["tools/local_db_server.py"]
 Merge rules:
 
 - All scalar and mapping fields (`enabled`, `max_servers`, `tool_prefix`, `[mcp.server]` sub-fields) in `pincer.local.toml` override the corresponding value from `pincer.toml`.
-- `[[mcp.servers]]` entries are matched by `name`. A local entry with the same name as a base entry **replaces** it entirely; entries with new names are appended.
+- `[[mcp.servers]]` entries are matched by `name`. A local entry with the same name as a base entry is **merged into it field by field** — fields present in the local entry override the base value, fields left out are inherited from the base entry; entries with new names are appended. The merge is one level deep: table fields such as `env` and `headers` are replaced as a whole, not merged key by key. If the local entry changes `transport`, the previous transport's exclusive fields (`command`/`args`/`env` for stdio, `url`/`headers` for streamable-http) are dropped rather than inherited.
 - Environment variables still take precedence over both files.
 
 File `pincer.local.toml` is already in `.gitignore` and does not part of this repo at any case. It is completely your local config.
