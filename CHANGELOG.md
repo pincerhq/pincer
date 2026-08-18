@@ -91,7 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`pincer.local.toml` now merges `[[mcp.servers]]` entries per-field instead of replacing them wholesale.** Previously, a local entry matched by `name` fully replaced the base entry, so overriding a single field (e.g. `enabled = false`) for a server already defined in `pincer.toml` required repeating every other field, and omitting a required one (`command`/`url`) raised a `ValueError`. Local fields now override the base value per-key; unspecified fields are inherited from the base entry. (`_merge_mcp_raw` in `src/pincer/mcp/config.py`.)
+- **`pincer.local.toml` now merges `[[mcp.servers]]` entries per-field instead of replacing them wholesale.** Previously, a local entry matched by `name` fully replaced the base entry, so overriding a single field (e.g. `enabled = false`) for a server already defined in `pincer.toml` required repeating every other field, and omitting a required one (`command`/`url`) raised a `ValueError`. Local fields now override the base value per-key; unspecified fields are inherited from the base entry, and switching `transport` drops the previous transport's exclusive fields (`command`/`args`/`env` vs `url`/`headers`) instead of inheriting them. (`_merge_mcp_raw` in `src/pincer/mcp/config.py`.) **Note:** this is a behavior change for any existing `pincer.local.toml` server entry that omitted a field expecting it to fall back to the dataclass default (e.g. leaving `args` out to get `[]`) — it now inherits the base entry's value for that field instead.
 
 ---
 

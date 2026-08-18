@@ -524,6 +524,36 @@ enabled = false
     assert srv.timeout == 99
 
 
+def test_local_toml_transport_switch_drops_stale_fields(tmp_path: Path) -> None:
+    """Switching transport in local.toml drops the previous transport's exclusive fields."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "srv"
+transport = "stdio"
+command = "uv"
+args = ["run", "x.py"]
+
+[mcp.servers.env]
+API_KEY = "k1"
+""")
+    (tmp_path / "pincer.local.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "srv"
+transport = "streamable-http"
+url = "https://x/mcp"
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert len(cfg.servers) == 1
+    srv = cfg.servers[0]
+    assert srv.transport == "streamable-http"
+    assert srv.url == "https://x/mcp"
+    assert srv.command is None
+    assert srv.args == []
+    assert srv.env == {}
+
+
 def test_local_toml_adds_new_server(tmp_path: Path) -> None:
     """local.toml server with a new name is appended."""
     (tmp_path / "pincer.toml").write_text("""
@@ -583,6 +613,26 @@ def test_merge_mcp_raw_server_partial_override() -> None:
     assert merged["servers"] == [
         {"name": "srv", "transport": "stdio", "command": "base_cmd", "timeout": 99, "enabled": False}
     ]
+
+
+def test_merge_mcp_raw_server_transport_switch_drops_stale_fields() -> None:
+    """Switching transport drops the previous transport's exclusive fields instead of inheriting them."""
+    from pincer.mcp.config import _merge_mcp_raw
+
+    base = {
+        "servers": [
+            {
+                "name": "srv",
+                "transport": "stdio",
+                "command": "uv",
+                "args": ["run", "x.py"],
+                "env": {"API_KEY": "k1"},
+            }
+        ]
+    }
+    override = {"servers": [{"name": "srv", "transport": "streamable-http", "url": "https://x/mcp"}]}
+    merged = _merge_mcp_raw(base, override)
+    assert merged["servers"] == [{"name": "srv", "transport": "streamable-http", "url": "https://x/mcp"}]
 
 
 def test_merge_mcp_raw_scalar_override() -> None:
