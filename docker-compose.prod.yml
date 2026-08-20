@@ -1,0 +1,108 @@
+# Production stack (Sprint 7) — pincer + redis task broker + Caddy TLS proxy.
+#
+# This file is ADDITIVE: local development keeps using docker-compose.yml (or
+# `uv run pincer run`) unchanged. Production is started only via
+# scripts/deploy.sh, which gates on `pincer doctor --production`.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# Topology: Caddy is the only service with public ports. It terminates TLS for
+#   https://${PINCER_API_DOMAIN}    → dashboard + REST API
+#   https://${PINCER_VOICE_DOMAIN}  → Twilio webhooks + WSS relay/stream
+# and proxies WebSockets natively (the Hotfix-2 WSS lesson, now permanent
+# infra — verify after deploy: wscat -c wss://$PINCER_VOICE_DOMAIN/api/apps/twilio/relay).
+
+x-pincer-prod: &pincer-prod
+  restart: unless-stopped
+  image: pincer/pincer:${PINCER_IMAGE_TAG:-prod}
+  build:
+    context: .
+    target: runtime
+  env_file:
+    - .env.production
+  environment:
+    - PINCER_DATA_DIR=/app/data
+    - PINCER_DASHBOARD_HOST=0.0.0.0
+    - PINCER_DASHBOARD_PORT=8080
+    - PINCER_DASHBOARD_DIST=/app/dashboard/dist
+    - PINCER_TASK_BROKER=redis
+    - PINCER_TASK_BROKER_URL=redis://redis:6379/0
+  volumes:
+    - pincer-prod-data:/app/data
+    - ./pincer.toml:/app/data/pincer.toml:ro
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      - PINCER_API_DOMAIN=${PINCER_API_DOMAIN:?set in .env.production}
+      - PINCER_VOICE_DOMAIN=${PINCER_VOICE_DOMAIN:?set in .env.production}
+      - PINCER_ACME_EMAIL=${PINCER_ACME_EMAIL:?set in .env.production}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      pincer:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-prod-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pincer:
+    <<: *pincer-prod
+    container_name: pincer-prod
+    # T7.2: SIGTERM → graceful drain — active calls get the spoken
+    # ERROR_RECOVERY ending (60s drain in VoiceChannel.stop) before exit.
+    stop_grace_period: 75s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: "2"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  pincer-tasks:
+    <<: *pincer-prod
+    container_name: pincer-prod-tasks
+    command: ["pincer", "run", "tasks"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  pincer-prod-data:
+  redis-prod-data:
+  caddy-data:
+  caddy-config:

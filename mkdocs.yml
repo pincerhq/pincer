@@ -24,14 +24,31 @@ nav:
   - Reference:
     - CLI: reference/cli.md
     - REST API: reference/rest-api.md
+    - Voice supported features: reference/voice-supported-features.md
   - Guides:
     - MCP: guides/mcp-guide.md
     - MS365 setup: guides/ms365-setup.md
     - Signal setup: guides/signal-setup.md
     - Skills guide: guides/skills-guide.md
     - Voice calling setup: guides/voice-calling-setup.md
+    - Inbound receptionist setup: guides/receptionist-setup.md
+    - Pilot quickstart (EN): guides/pilot-quickstart-en.md
+    - Pilot quickstart (DE): guides/pilot-quickstart-de.md
+    - DACH compliance: guides/dach-compliance.md
+    - AVV/DPA annex: guides/avv-annex.md
+    - Security checklist: guides/security-checklist.md
+    - Production deployment: guides/production-deployment.md
     - Whatsapp troubleshooting: guides/whatsapp-troubleshooting.md
     - Migrating from OpenClaw: guides/migration-from-openclaw.md
+  - Operations:
+    - Runbook: operations/runbook.md
+    - SLOs & error budget: operations/slo.md
+    - Capacity & scale triggers: operations/capacity.md
+    - Pilot onboarding: operations/pilot-onboarding.md
+    - Pilot expectations: operations/pilot-expectations.md
+    - Pilot feedback template: operations/pilot-feedback.md
+    - GA gate: operations/ga-gate.md
+    - Post-GA backlog: operations/post-ga-backlog.md
   - Contribute:
     - Community: contributing/community.md
     - Security policy: contributing/security-policy.md

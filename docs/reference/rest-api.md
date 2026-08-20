@@ -305,6 +305,104 @@ Get call details including transcript.
 
 Get just the transcript.
 
+### `POST /api/voice/calls`
+
+Place an outbound call. Passes through the same server-side gate as a
+chat-initiated call — do-not-call list, quiet hours, daily cap, per-target
+cooldown — so this endpoint is not a way around the limits.
+
+Body:
+
+| Field | Required | Meaning |
+|---|---|---|
+| `target_number` | yes | E.164 number to call |
+| `purpose` | yes | Why the call is being made (≤ 2000 chars). This is the agent's **call briefing**: it opens the call by explaining the reason in its own words and works towards it |
+| `instructions` | no | Extra guidance for the agent during the call — what to ask, accept, avoid (≤ 4000 chars) |
+| `target_name` | no | Who is being called; lets the agent address the person/business by name |
+| `language` | no | `en` / `de` / `uk`; empty = configured default |
+
+Statuses:
+
+| Status | Meaning |
+|---|---|
+| `201` | Call initiated |
+| `403` | Outbound disabled, number on the do-not-call list, or quiet hours |
+| `422` | Not a valid E.164 number |
+| `429` | Daily call limit reached, or the target is in its cooldown window |
+
+### `POST /api/voice/schedule`
+
+Appointment-scheduling call (free/busy → candidate slots → call → calendar
+event). Same gate and same status codes.
+
+## Do-not-call list (Sprint 8)
+
+A shared opt-out list: an entry blocks the number for **every** user of the
+instance and every channel. Callees who ask not to be called again during a
+call are added automatically by the post-call pipeline.
+
+### `GET /api/voice/do-not-call`
+
+List blocked numbers with the reason, source (`callee` | `dashboard` | `cli` |
+`manual`), originating call SID, and timestamp. Numbers are returned unmasked —
+this endpoint exists to audit and correct the list, and a masked entry could
+not be removed.
+
+### `POST /api/voice/do-not-call`
+
+```json
+{ "phone_number": "+4915112345678", "reason": "asked not to be called again" }
+```
+
+`201` on success, `422` for a non-E.164 number. Idempotent — re-posting an
+existing number updates its reason.
+
+### `DELETE /api/voice/do-not-call/:number`
+
+Unblock a number. `204` on success, `404` if it was not listed. Only ever do
+this with the callee's consent; the removal is logged.
+
+### `GET /api/voice/messages?limit=50`
+
+Messages taken by the inbound receptionist (Sprint 12), newest first,
+PII-masked: `caller_name` (+ `caller_name_unverified`), `callback_number`
+(+ `callback_unverified`), `matter`, `urgent`, `created_at`,
+`delivered_to_owner_at` (null = the owner report has not been delivered —
+an alert fires after three failed attempts). Call rows in `/api/voice/calls`
+carry `inbound_intent` (`question|message|appointment|human|unknown|after_hours`).
+
+### `GET /api/voice/approvals?call_sid=CA…`
+
+Open in-call approval requests (Sprint 11, `PINCER_VOICE_TOOL_APPROVAL=user`).
+While the call partner is on hold, the initiating user is asked whether a
+Tier W action may run. Each entry is the §6.5 payload:
+
+```json
+{
+  "type": "voice_call_action",
+  "approval_id": "…",
+  "call_sid": "CA…",
+  "tool_name": "google__create_event",
+  "summary_spoken_language": "de",
+  "summary": "den Termin „Beratung“ am Dienstag, der achtzehnte August um vierzehn Uhr eintragen",
+  "args_preview": { "start": "2026-08-18T14:00:00+02:00", "end": "…" },
+  "expires_at": "…",
+  "final_state": ""
+}
+```
+
+### `POST /api/voice/approvals/:id`
+
+```json
+{ "approved": true }
+```
+
+Answer an open request. `200` with the final payload, `404` when the request
+is unknown, already answered, expired, or the call ended. The wait is bounded
+server-side (`PINCER_VOICE_APPROVAL_TIMEOUT_S`); an unanswered request is
+spoken to the callee as "I'll sort that out afterwards" and becomes a
+post-call follow-up suggestion.
+
 ---
 
 ## WebSocket

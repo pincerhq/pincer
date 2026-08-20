@@ -72,6 +72,19 @@ class CoreSettings(BaseModel):
 
     @model_validator(mode="after")
     def check_ngrok_domain(self) -> Self:
-        if not self.ngrok_domain and self.ngrok_authtoken:
-            self.ngrok_domain = self.base_url.host or ""  # noqa: F841
+        """Default the ngrok domain when only the token is set: the ngrok host
+        of the voice webhook URL if there is one, else base_url's host. Never
+        localhost (ngrok rejects it)."""
+        if self.ngrok_domain or not self.ngrok_authtoken:
+            return self
+        from urllib.parse import urlsplit
+
+        voice_base = str(getattr(self, "voice_webhook_base_url", "") or "").strip()
+        voice_host = urlsplit(voice_base).hostname or "" if voice_base else ""
+        if voice_host and ".ngrok" in voice_host:
+            self.ngrok_domain = voice_host
+            return self
+        host = self.base_url.host or ""
+        if host and host not in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}:
+            self.ngrok_domain = host  # noqa: F841
         return self

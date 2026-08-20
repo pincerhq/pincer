@@ -54,6 +54,9 @@ async def run_scheduled_action(schedule_id: int) -> None:
     proactive = get_proactive()
     action_type = schedule.action.get("type", "custom")
 
+    from pincer.observability.alerts import make_alert_scan_handler
+    from pincer.observability.canary import make_canary_handler
+    from pincer.observability.digest import make_digest_handler
     from pincer.voice.retention import make_retention_handler
 
     handlers = {
@@ -62,6 +65,10 @@ async def run_scheduled_action(schedule_id: int) -> None:
         # Sprint 0 (DACH): GDPR voice transcript retention purge — the daily
         # `voice_retention_purge` schedule created in cli.py dispatches here.
         "retention_purge": make_retention_handler(settings),
+        # Sprint 9 (observability): the three scheduled ops jobs.
+        "ops_alert_scan": make_alert_scan_handler(settings),
+        "voice_canary": make_canary_handler(settings),
+        "voice_weekly_digest": make_digest_handler(settings),
     }
     handler = handlers.get(action_type)
     if handler is None:

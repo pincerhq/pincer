@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react"
+import { HTTPError } from "ky"
 import { useNavigate } from "react-router-dom"
 import { useAuthStore } from "@/stores/auth"
 import { pincer } from "@/api/client"
@@ -17,19 +18,28 @@ export function LoginPage() {
     e?.preventDefault()
     setLoading(true)
     setError("")
+    const baseUrl = url.trim().replace(/\/$/, "") || window.location.origin
+    const cleanToken = token.trim()
     try {
-      const baseUrl = url.trim().replace(/\/$/, "") || window.location.origin
-      const status = await pincer.validateToken(baseUrl, token)
+      const status = await pincer.validateToken(baseUrl, cleanToken)
       auth.setApiUrl(baseUrl)
-      auth.setToken(token)
+      auth.setToken(cleanToken)
       const version =
         typeof status === "object" && status && "version" in status
           ? String((status as { version?: string }).version ?? "0.5.0")
           : "0.5.0"
       auth.setConnected(true, version)
       navigate("/")
-    } catch {
-      setError("Invalid token. Check your PINCER_DASHBOARD_TOKEN.")
+    } catch (err) {
+      if (err instanceof HTTPError && err.response.status === 401) {
+        setError("Invalid token. Check your PINCER_DASHBOARD_TOKEN.")
+      } else if (err instanceof HTTPError) {
+        setError(`Agent responded with HTTP ${err.response.status}.`)
+      } else {
+        setError(
+          `Could not reach the agent at ${baseUrl}. Check that it is running and that the URL matches the one in your address bar.`,
+        )
+      }
       auth.logout()
     } finally {
       setLoading(false)

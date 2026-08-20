@@ -53,8 +53,11 @@ Respond with ONLY a JSON object, no markdown fences, matching exactly:
   "key_facts": ["..."],
   "commitments": [{"who": "callee|agent", "what": "...", "when": "ISO datetime or null"}],
   "follow_up_suggestions": [{"tool": "...", "reason": "...", "draft_args": {}}],
-  "language": "en|de"
-}\
+  "language": "en|de",
+  "abusive": false
+}
+"abusive" is true ONLY when the other party was insulting, threatening, or clearly harassing — never for \
+mere frustration or a declined request.\
 """
 
 
@@ -68,6 +71,7 @@ class CallOutcome:
     commitments: list[dict[str, Any]] = field(default_factory=list)
     follow_up_suggestions: list[dict[str, Any]] = field(default_factory=list)
     language: str = "en"
+    abusive: bool = False  # Sprint 12 §10.2: owner report suggests a blocklist entry (never auto-added)
 
     def to_json(self) -> str:
         return json.dumps(
@@ -78,6 +82,7 @@ class CallOutcome:
                 "commitments": self.commitments,
                 "follow_up_suggestions": self.follow_up_suggestions,
                 "language": self.language,
+                "abusive": self.abusive,
             },
             ensure_ascii=False,
         )
@@ -140,6 +145,7 @@ class CallOutcome:
             commitments=commitments,
             follow_up_suggestions=suggestions,
             language=str(data.get("language", "en")).strip().lower()[:2] or "en",
+            abusive=bool(data.get("abusive", False)) if isinstance(data.get("abusive", False), bool) else False,
         )
 
 

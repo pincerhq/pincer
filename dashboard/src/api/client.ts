@@ -19,6 +19,13 @@ import type {
   Identity,
   IdentityListResponse,
   ScheduledTasksResponse,
+  GoldenSignals,
+  OpsAlert,
+  SLOReport,
+  FailureBreakdown,
+  CanaryRun,
+  CanaryTriggerResult,
+  VoiceCallSummary,
 } from "./types"
 
 function getStoredAuth(): { token?: string; apiUrl?: string } | null {
@@ -144,4 +151,17 @@ export const pincer = {
   integrations: () => api().get("api/integrations").json<IntegrationsResponse>(),
   integration: (slug: string) =>
     api().get(`api/integrations/${slug}`).json<IntegrationDetail>(),
+
+  // ── Voice Ops (Sprint 9) ──
+  opsSignals: () => api().get("api/ops/signals").json<GoldenSignals>(),
+  opsAlerts: () => api().get("api/ops/alerts").json<OpsAlert[]>(),
+  opsSlo: () => api().get("api/ops/slo").json<SLOReport>(),
+  opsFailures: (hours = 168) =>
+    api().get(`api/ops/failures?hours=${hours}`).json<FailureBreakdown>(),
+  opsCanary: (limit = 20) =>
+    api().get(`api/ops/canary?limit=${limit}`).json<CanaryRun[]>(),
+  voiceCalls: (limit = 50) =>
+    api().get(`api/voice/calls?limit=${limit}`).json<VoiceCallSummary[]>(),
+  /** Places a REAL phone call to PINCER_VOICE_CANARY_NUMBER. */
+  triggerCanary: () => api().post("api/ops/canary").json<CanaryTriggerResult>(),
 }

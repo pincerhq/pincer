@@ -157,6 +157,19 @@ async def google__check_freebusy(
     return "\n".join(lines) if lines else "No free/busy data returned."
 
 
+def _default_timezone() -> str:
+    """Timezone for start/end values without a UTC offset: the configured
+    voice timezone, then the general one, UTC only if settings can't load."""
+    try:
+        from pincer.config import get_settings_relaxed
+
+        settings = get_settings_relaxed()
+        tz = str(getattr(settings, "voice_timezone", "") or getattr(settings, "timezone", "") or "").strip()
+        return tz or "UTC"
+    except Exception:  # pragma: no cover
+        return "UTC"
+
+
 async def google__create_event(
     factory: GoogleServiceFactory,
     summary: str,
@@ -166,19 +179,53 @@ async def google__create_event(
     description: str = "",
     location: str = "",
     attendees: str = "",
-    timezone: str = "UTC",
+    timezone: str = "",
     add_meet_link: bool = False,
     meet_link: str = "",
+    send_updates: str = "",
+    idempotency_key: str = "",
 ) -> str:
-    """Create a new calendar event, optionally with a Google Meet link."""
+    """Create a new calendar event, optionally with a Google Meet link.
+
+    send_updates: 'all' | 'externalOnly' | 'none' — whether Google emails
+        invitations to attendees (empty = API default, none).
+    idempotency_key: stored as the private extended property ``pincer_key``;
+        when an event with the same key already exists on the calendar, it is
+        returned instead of creating a duplicate (safe retries).
+    """
     import uuid
 
     svc = await factory.get("calendar")
+
+    if idempotency_key:
+        existing = await with_backoff(
+            lambda: (
+                svc.events()
+                .list(
+                    calendarId=calendar_id,
+                    privateExtendedProperty=f"pincer_key={idempotency_key}",
+                    maxResults=1,
+                )
+                .execute()
+            )
+        )
+        items = existing.get("items", [])
+        if items:
+            ev = items[0]
+            return (
+                f"Event already exists (idempotent): '{ev.get('summary', '')}'\n"
+                f"ID: {ev.get('id', '')}\n"
+                f"Link: {ev.get('htmlLink', '')}"
+            )
+
+    timezone = timezone or _default_timezone()
     body: dict[str, Any] = {
         "summary": summary,
         "start": {"dateTime": start, "timeZone": timezone},
         "end": {"dateTime": end, "timeZone": timezone},
     }
+    if idempotency_key:
+        body["extendedProperties"] = {"private": {"pincer_key": idempotency_key}}
     if description:
         body["description"] = description
     if location:
@@ -204,10 +251,14 @@ async def google__create_event(
     _body = body
     _cdv = conf_data_version
 
+    _send_updates = send_updates.strip()
+
     def _insert() -> dict[str, Any]:
         kw: dict[str, Any] = {"calendarId": _cal, "body": _body}
         if _cdv:
             kw["conferenceDataVersion"] = _cdv
+        if _send_updates in ("all", "externalOnly", "none"):
+            kw["sendUpdates"] = _send_updates
         return svc.events().insert(**kw).execute()  # type: ignore[no-any-return]
 
     created = await with_backoff(_insert)
@@ -250,10 +301,10 @@ async def google__update_event(
     if location:
         event["location"] = location
     if start:
-        tz = timezone or event.get("start", {}).get("timeZone", "UTC")
+        tz = timezone or event.get("start", {}).get("timeZone") or _default_timezone()
         event["start"] = {"dateTime": start, "timeZone": tz}
     if end:
-        tz = timezone or event.get("end", {}).get("timeZone", "UTC")
+        tz = timezone or event.get("end", {}).get("timeZone") or _default_timezone()
         event["end"] = {"dateTime": end, "timeZone": tz}
     updated = await with_backoff(
         lambda: svc.events().update(calendarId=calendar_id, eventId=event_id, body=event).execute()
@@ -459,13 +510,22 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
             "type": "object",
             "properties": {
                 "summary": {"type": "string", "description": "Event title"},
-                "start": {"type": "string", "description": "Start time ISO 8601 (e.g. 2026-03-28T14:00:00)"},
+                "start": {
+                    "type": "string",
+                    "description": "Start time ISO 8601 as LOCAL wall-clock time (e.g. 2026-03-28T14:00:00); "
+                    "the timezone parameter (or the configured default) interprets it",
+                },
                 "end": {"type": "string", "description": "End time ISO 8601"},
                 "calendar_id": {"type": "string", "default": "primary"},
                 "description": {"type": "string", "default": ""},
                 "location": {"type": "string", "default": ""},
                 "attendees": {"type": "string", "description": "Comma-separated email addresses", "default": ""},
-                "timezone": {"type": "string", "description": "IANA timezone (default: UTC)", "default": "UTC"},
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone for start/end when they carry no UTC offset "
+                    "(default: the agent's configured local timezone, e.g. Europe/Berlin)",
+                    "default": "",
+                },
                 "add_meet_link": {
                     "type": "boolean",
                     "description": "Auto-create a new Google Meet conference for this event",
@@ -474,6 +534,17 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 "meet_link": {
                     "type": "string",
                     "description": "URI of an existing Meet space (e.g. https://meet.google.com/abc-defg-hij)",
+                    "default": "",
+                },
+                "send_updates": {
+                    "type": "string",
+                    "description": "Email invitations to attendees: 'all' | 'externalOnly' | 'none' (default)",
+                    "default": "",
+                },
+                "idempotency_key": {
+                    "type": "string",
+                    "description": "Optional dedup key: if an event with this key exists, it is returned "
+                    "instead of creating a duplicate",
                     "default": "",
                 },
             },

@@ -16,6 +16,64 @@ if TYPE_CHECKING:
 
 GARBLED_MARKERS = ("mmph", "hrrm", "whzz", "uhh")
 
+# Sprint 8 (T8.4): extraction / instruction-override attempts a hostile callee
+# makes. The scripted brain recognises them, refuses, and records the tool the
+# callee was steering it toward — the red-team test then asserts the voice tool
+# filter would have blocked every one of those tools anyway (defence in depth:
+# the prompt refuses, and the registry filter makes compliance impossible).
+INJECTION_MARKERS = (
+    "ignore all previous",
+    "ignore your instructions",
+    "developer mode",
+    "system prompt",
+    "list every tool",
+    "list your tools",
+    "entwicklermodus",
+    "bisherigen anweisungen",
+    "system-prompt",
+    "ihre tools",
+)
+
+EXTRACTION_MARKERS = (
+    "home address",
+    "email address",
+    "full calendar",
+    "calendar for the week",
+    "search your memory",
+    "export it",
+    "what else is on his calendar",
+    "privatadresse",
+    "e-mail-adresse",
+    "wochenkalender",
+    "gedächtnis",
+    "exportieren",
+    "in seinem kalender",
+)
+
+# Tool names a hostile callee may utter; the brain records them without ever
+# calling them.
+_TOOL_NAME_MARKERS = (
+    "shell_exec",
+    "python_exec",
+    "file_read",
+    "memory_search",
+    "memory__export",
+    "filesystem__read_file",
+    "sqlite__query",
+    "config_get",
+    "identity_list",
+    "audit_export",
+)
+
+REFUSAL_EN = (
+    "I'm sorry, I can't share that or take instructions from this call. "
+    "I'm only here about the dentist appointment on Tuesday at three. Does that time still work?"
+)
+REFUSAL_DE = (
+    "Das kann ich leider nicht weitergeben, und Anweisungen aus diesem Gespräch befolge ich nicht. "
+    "Ich rufe nur wegen des Zahnarzttermins am Dienstag um fünfzehn Uhr an. Passt der Termin noch?"
+)
+
 GOODBYE_MARKERS = ("goodbye", "auf wiederhören", "tschüss")
 
 
@@ -32,6 +90,9 @@ class ScriptedAgent:
         self.turns = 0
         self.language = language
         self._fail_times = fail_times
+        # Red-team bookkeeping (T8.4)
+        self.refusals = 0
+        self.requested_tools: list[str] = []
 
     async def __call__(self, incoming: IncomingMessage) -> str:
         self.turns += 1
@@ -40,6 +101,13 @@ class ScriptedAgent:
             raise RuntimeError("simulated LLM failure")
 
         text = incoming.text.lower()
+        for tool_name in _TOOL_NAME_MARKERS:
+            if tool_name in text and tool_name not in self.requested_tools:
+                self.requested_tools.append(tool_name)
+        if any(marker in text for marker in INJECTION_MARKERS) or any(marker in text for marker in EXTRACTION_MARKERS):
+            self.refusals += 1
+            return REFUSAL_DE if self.language == "de" else REFUSAL_EN
+
         if self.language == "de":
             return self._respond_de(text)
         return self._respond_en(text)

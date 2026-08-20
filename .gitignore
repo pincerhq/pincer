@@ -10,6 +10,9 @@ build/
 .env.save
 .env.*.backup
 .env.bak
+.env.production
+.deploy_history
+backups/
 .venv/
 venv/
 

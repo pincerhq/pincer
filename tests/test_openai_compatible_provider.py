@@ -450,3 +450,122 @@ async def test_retry_on_rate_limit_exhausted(openai_settings):
             await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")])
 
     assert call_count == 3  # max_retries=3
+
+
+# ── stream_turn: tool-delta assembly + reasoning-model kwargs (Sprint 5) ──
+
+
+class TestStreamTurn:
+    def _provider(self):
+        from unittest.mock import MagicMock, patch
+
+        from pincer.config import Settings
+        from pincer.llm.openai_common import OpenAICompatibleProvider
+
+        settings = Settings(
+            anthropic_api_key="sk-ant-test",  # satisfies at-least-one-provider
+            openai_api_key="sk-oai-test",
+            telegram_bot_token="123456:TEST",
+            openai_model="gpt-4o-mini",
+        )
+        with patch("pincer.llm.openai_common.AsyncOpenAI") as mock_cls:
+            mock_cls.return_value = MagicMock()
+            return OpenAICompatibleProvider(settings, "openai")
+
+    def _chunk(self, content=None, tool_delta=None, finish=None, usage=None):
+        from unittest.mock import MagicMock
+
+        chunk = MagicMock()
+        chunk.model = "gpt-5-mini"
+        chunk.usage = usage
+        if content is None and tool_delta is None and finish is None:
+            chunk.choices = []
+            return chunk
+        choice = MagicMock()
+        choice.finish_reason = finish
+        delta = MagicMock()
+        delta.content = content
+        delta.tool_calls = tool_delta
+        choice.delta = delta
+        chunk.choices = [choice]
+        return chunk
+
+    def _tool_delta(self, index, id=None, name=None, arguments=None):
+        from unittest.mock import MagicMock
+
+        tc = MagicMock()
+        tc.index = index
+        tc.id = id
+        tc.function = MagicMock()
+        tc.function.name = name
+        tc.function.arguments = arguments
+        return tc
+
+    async def test_text_then_final_response(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = self._provider()
+        usage = MagicMock(prompt_tokens=100, completion_tokens=12)
+        chunks = [self._chunk(content="Hello "), self._chunk(content="there."), self._chunk(finish="stop", usage=usage)]
+
+        async def fake_stream(**kwargs):
+            for c in chunks:
+                yield c
+
+        provider._client = MagicMock()
+        provider._client.chat.completions.create = AsyncMock(side_effect=lambda **kw: fake_stream(**kw))
+
+        events = [e async for e in provider.stream_turn(messages=[], max_tokens=150)]
+        texts = [e.text for e in events if e.response is None]
+        assert texts == ["Hello ", "there."]
+        final = events[-1].response
+        assert final.content == "Hello there."
+        assert final.input_tokens == 100
+        assert final.provider == "openai"
+
+    async def test_tool_call_deltas_assembled(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = self._provider()
+        chunks = [
+            self._chunk(tool_delta=[self._tool_delta(0, id="call_1", name="calendar_today", arguments='{"da')]),
+            self._chunk(tool_delta=[self._tool_delta(0, arguments='y": "mon"}')]),
+            self._chunk(finish="tool_calls"),
+        ]
+
+        async def fake_stream(**kwargs):
+            for c in chunks:
+                yield c
+
+        provider._client = MagicMock()
+        provider._client.chat.completions.create = AsyncMock(side_effect=lambda **kw: fake_stream(**kw))
+
+        events = [e async for e in provider.stream_turn(messages=[])]
+        final = events[-1].response
+        assert len(final.tool_calls) == 1
+        assert final.tool_calls[0].id == "call_1"
+        assert final.tool_calls[0].name == "calendar_today"
+        assert final.tool_calls[0].arguments == {"day": "mon"}
+        assert final.stop_reason == "tool_calls"
+
+    async def test_reasoning_model_kwargs_normalized(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        provider = self._provider()
+
+        async def fake_stream(**kwargs):
+            yield self._chunk(content="ok, done here now", finish="stop")
+
+        provider._client = MagicMock()
+        create = AsyncMock(side_effect=lambda **kw: fake_stream(**kw))
+        provider._client.chat.completions.create = create
+
+        _ = [e async for e in provider.stream_turn(messages=[], model="gpt-5-mini", max_tokens=150, temperature=0.5)]
+        kwargs = create.call_args.kwargs
+        assert kwargs["max_completion_tokens"] == 150
+        assert "max_tokens" not in kwargs
+        assert "temperature" not in kwargs  # reasoning models accept only default
+
+        _ = [e async for e in provider.stream_turn(messages=[], model="gpt-4o-mini", max_tokens=150)]
+        kwargs = create.call_args.kwargs
+        assert kwargs["max_tokens"] == 150

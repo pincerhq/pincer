@@ -102,10 +102,22 @@ class LLMResponse:
     input_tokens: int = 0
     output_tokens: int = 0
     stop_reason: str = ""
+    # Prompt-cache usage (Sprint 5, T5.4) — 0 when the provider doesn't report it
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     @property
     def has_tool_calls(self) -> bool:
         return len(self.tool_calls) > 0
+
+
+@dataclass(frozen=True, slots=True)
+class StreamTurnEvent:
+    """One event from ``BaseLLMProvider.stream_turn``: a text delta while the
+    model generates, or (exactly once, last) the complete LLMResponse."""
+
+    text: str = ""
+    response: LLMResponse | None = None
 
 
 class BaseLLMProvider(ABC):
@@ -140,6 +152,33 @@ class BaseLLMProvider(ABC):
         so async-generator implementations type-check cleanly as overrides.
         """
         ...
+
+    async def stream_turn(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        system: str | None = None,
+    ) -> AsyncIterator[StreamTurnEvent]:
+        """Stream ONE turn: text tokens as they arrive, then the complete
+        LLMResponse (with tool calls and usage) as the final event.
+
+        Unlike ``stream()`` this never loses tool calls, and unlike
+        ``complete()`` the caller sees text before generation finishes —
+        the voice latency pipeline (Sprint 5) depends on both properties.
+
+        Default implementation falls back to ``complete()`` (one text event
+        with the full content, then the response) so every provider works;
+        providers with true incremental APIs override it.
+        """
+        response = await self.complete(
+            messages, tools=tools, model=model, max_tokens=max_tokens, temperature=temperature, system=system
+        )
+        if response.content:
+            yield StreamTurnEvent(text=response.content)
+        yield StreamTurnEvent(response=response)
 
     @abstractmethod
     async def close(self) -> None:

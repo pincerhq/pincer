@@ -8,6 +8,8 @@ message to the initiating user, and no unverified completion claims.
 
 from __future__ import annotations
 
+import pathlib
+import tempfile
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
@@ -49,9 +51,20 @@ class ScenarioResult:
     spoken: list[str] = field(default_factory=list)
     mean_turn_latency_s: float | None = None
     notes: list[str] = field(default_factory=list)
+    # Red-team bookkeeping (Sprint 8, T8.4)
+    agent_refusals: int = 0
+    agent_requested_tools: list[str] = field(default_factory=list)
 
 
-def _make_settings() -> MagicMock:
+# Sprint 9: the channel now writes a per-call cost row at call end. A MagicMock
+# `db_path` stringifies into a junk filename in the working directory, so the
+# harness gets a real throwaway directory instead. It is process-scoped rather
+# than per-scenario because scenarios run in the same process and none of them
+# reads the data back.
+_HARNESS_TMP = pathlib.Path(tempfile.mkdtemp(prefix="pincer-voice-harness-"))
+
+
+def _make_settings(db_path: pathlib.Path | None = None) -> MagicMock:
     settings = MagicMock()
     settings.voice_enabled = True
     settings.voice_language = "en-US"
@@ -59,10 +72,19 @@ def _make_settings() -> MagicMock:
     settings.voice_default_language = "en"
     settings.voice_supported_languages = "en,de"
     settings.voice_de_formality = "sie"
+    settings.db_path = str(db_path or (_HARNESS_TMP / "harness.db"))
+    settings.data_dir = _HARNESS_TMP
+    settings.voice_max_call_duration = 600
+    settings.alert_stuck_call_grace_s = 60
+    settings.price_twilio_outbound_per_min = 0.0
+    settings.price_twilio_inbound_per_min = 0.0
+    settings.price_conversationrelay_per_min = 0.0
+    settings.price_deepgram_per_min = 0.0
+    settings.price_elevenlabs_per_1k_chars = 0.0
     return settings
 
 
-async def run_scenario(scenario: Scenario, post_call_processor=None) -> ScenarioResult:
+async def run_scenario(scenario: Scenario, post_call_processor=None, settings=None) -> ScenarioResult:
     result = ScenarioResult(name=scenario.name)
     call_sid = f"CA_harness_{scenario.name}"
 
@@ -76,7 +98,7 @@ async def run_scenario(scenario: Scenario, post_call_processor=None) -> Scenario
     status_notify.set_status_notifier(_capture_notifier)
     status_notify.register_outbound_call(call_sid, user_id="tester", channel="telegram", target_number="+15550001111")
 
-    settings = _make_settings()
+    settings = settings or _make_settings()
     engine = FakeVoiceEngine(settings)
     channel = VoiceChannel(settings)
     channel.set_engine(engine)
@@ -148,6 +170,8 @@ async def run_scenario(scenario: Scenario, post_call_processor=None) -> Scenario
         status_notify.set_status_notifier(None)
 
     result.task_done = agent.confirmed
+    result.agent_refusals = agent.refusals
+    result.agent_requested_tools = list(agent.requested_tools)
     result.spoken = list(engine.spoken.get(call_sid, []))
     result.terminal_phase = str(sm.phase)
     result.call_cleaned_up = call_sid not in engine.get_active_calls()

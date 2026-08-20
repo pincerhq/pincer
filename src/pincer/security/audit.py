@@ -43,6 +43,8 @@ class AuditAction(StrEnum):
     VOICE_CALL_END = "voice_call_end"
     VOICE_TOOL_CALL = "voice_tool_call"
     VOICE_TRANSFER = "voice_transfer"
+    # Sprint 8 (T8.3): outbound dial refused by the abuse gate
+    VOICE_CALL_BLOCKED = "voice_call_blocked"
     # Sprint 0 (DACH): GDPR storage-limitation purge
     RETENTION_PURGE = "retention_purge"
 
@@ -279,29 +281,34 @@ class AuditLogger:
         """Get summary statistics for audit logs."""
         assert self._db is not None
 
-        time_filter = f"WHERE timestamp >= '{since}'" if since else ""
+        params: list[str] = [since] if since else []
+
+        def where(*extra: str) -> str:
+            conditions = (["timestamp >= ?"] if since else []) + list(extra)
+            return f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
         stats: dict[str, Any] = {}
 
-        async with self._db.execute(f"SELECT COUNT(*) FROM audit_log {time_filter}") as cursor:
+        async with self._db.execute(f"SELECT COUNT(*) FROM audit_log {where()}", params) as cursor:
             row = await cursor.fetchone()
             stats["total_entries"] = row[0] if row else 0
 
         async with self._db.execute(
-            f"SELECT action, COUNT(*) FROM audit_log {time_filter} GROUP BY action ORDER BY COUNT(*) DESC"
+            f"SELECT action, COUNT(*) FROM audit_log {where()} GROUP BY action ORDER BY COUNT(*) DESC", params
         ) as cursor:
             stats["by_action"] = {row[0]: row[1] async for row in cursor}
 
         async with self._db.execute(
-            f"SELECT tool, COUNT(*) FROM audit_log {time_filter} "
-            "WHERE tool IS NOT NULL GROUP BY tool ORDER BY COUNT(*) DESC"
+            f"SELECT tool, COUNT(*) FROM audit_log {where('tool IS NOT NULL')} GROUP BY tool ORDER BY COUNT(*) DESC",
+            params,
         ) as cursor:
             stats["by_tool"] = {row[0]: row[1] async for row in cursor}
 
-        async with self._db.execute(f"SELECT SUM(cost_usd) FROM audit_log {time_filter}") as cursor:
+        async with self._db.execute(f"SELECT SUM(cost_usd) FROM audit_log {where()}", params) as cursor:
             row = await cursor.fetchone()
             stats["total_cost_usd"] = round(row[0] or 0.0, 6)
 
-        async with self._db.execute(f"SELECT COUNT(*) FROM audit_log {time_filter} WHERE approved = 0") as cursor:
+        async with self._db.execute(f"SELECT COUNT(*) FROM audit_log {where('approved = 0')}", params) as cursor:
             row = await cursor.fetchone()
             stats["failed_actions"] = row[0] if row else 0
 

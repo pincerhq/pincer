@@ -1,0 +1,37 @@
+# Triaged Python advisories (Sprint 8, T8.6).
+#
+# One advisory id per line, followed by ` # owner — reason — review-by YYYY-MM-DD`.
+# A vulnerability listed here does NOT fail CI. Nothing may sit here without an
+# owner and a review date; the security review
+# (docs/guides/security-checklist.md) re-reads this file every sprint and
+# removes stale entries.
+#
+# Sprint 8 sweep result: 20 vulnerable packages found, 18 upgraded in uv.lock
+# (75 advisories → 15). The two below could not be resolved to their fixed
+# versions at lock time — `uv lock --upgrade-package aiohttp --upgrade-package
+# pynacl --refresh-package aiohttp --refresh-package pynacl` still selects the
+# versions listed here. Both are transitive (aiohttp via aiogram/discord.py/
+# twilio/aiogoogle; PyNaCl via discord.py voice), so the fix arrives with an
+# upstream release rather than a direct bump. Dependabot will open the PR;
+# these entries come out the moment it does.
+
+# ── aiohttp 3.13.5 → 3.14.3 (transitive; not resolvable at lock time) ──
+# owner: @vpu — review-by 2026-09-17
+PYSEC-2026-237
+PYSEC-2026-2104
+PYSEC-2026-2105
+PYSEC-2026-2106
+PYSEC-2026-2107
+PYSEC-2026-2108
+PYSEC-2026-2109
+PYSEC-2026-2110
+PYSEC-2026-2111
+PYSEC-2026-2112
+PYSEC-2026-2113
+PYSEC-2026-3545
+PYSEC-2026-3546
+PYSEC-2026-3547
+
+# ── PyNaCl 1.5.0 → 1.6.2 (transitive via discord.py voice) ──
+# owner: @vpu — review-by 2026-09-17
+PYSEC-2026-3002

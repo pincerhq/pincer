@@ -145,6 +145,13 @@ class ChannelSettings(BaseModel):
     )
     voice_max_call_duration: int = Field(default=600, ge=30, le=3600, description="Max call seconds")
     voice_max_hold_time: int = Field(default=300, ge=30, le=600, description="Max IVR hold seconds")
+    voice_hangup_grace_s: float = Field(
+        default=2.0,
+        ge=0.0,
+        le=10.0,
+        description="Seconds to wait after the farewell has played before hanging up "
+        "(the 'both said goodbye' window; the other party can still add something)",
+    )
     voice_recording_enabled: bool = Field(default=False, description="Enable call recording")
     voice_consent_mode: str = Field(
         default="one_party",
@@ -153,10 +160,60 @@ class ChannelSettings(BaseModel):
     voice_outbound_enabled: bool = Field(default=False, description="Enable outbound calling")
     voice_outbound_max_daily: int = Field(default=10, ge=1, le=100, description="Max outbound calls/day")
     voice_retry_attempts: int = Field(
+        default=2,
+        ge=0,
+        le=5,
+        description="Automatic redial attempts after voicemail/no-answer on appointment scheduling calls (0 = none)",
+    )
+    voice_retry_delay_min: int = Field(
+        default=30,
+        ge=1,
+        le=720,
+        description="Minutes to wait before an appointment-call redial attempt",
+    )
+    # Latency (Sprint 5)
+    voice_turn_model: str = Field(
+        default="",
+        description="Model for conversational voice turns. '' = default model; '<model>' = that model on the "
+        "default provider; '<provider>:<model>' (e.g. 'openai:gpt-5-mini') = cross-provider tiering. "
+        "Also switchable at runtime from the dashboard (PUT /api/voice/config).",
+    )
+    voice_max_response_tokens: int = Field(
+        default=150,
+        ge=32,
+        le=1024,
+        description="max_tokens per voice turn — short spoken replies keep latency and streaming granularity tight",
+    )
+    voice_stt_endpointing_ms: int = Field(
         default=0,
         ge=0,
-        le=3,
-        description="Automatic redial attempts after a failed outbound call (0 = none; reserved, not yet acted on)",
+        le=2000,
+        description="Deepgram endpointing override in ms (0 = per-language default: en 300, de 400)",
+    )
+    voice_stt_utterance_end_ms: int = Field(
+        default=0,
+        ge=0,
+        le=5000,
+        description="Deepgram utterance_end_ms override (0 = per-language default: en 800, de 1000)",
+    )
+    # Appointment scheduling (Sprint 6)
+    business_hours: str = Field(
+        default="09:00-17:00",
+        description="Business hours for proposed appointment slots (HH:MM-HH:MM, voice timezone)",
+    )
+    business_days: str = Field(
+        default="mon,tue,wed,thu,fri",
+        description="Business days for proposed appointment slots (comma-separated mon..sun)",
+    )
+    slot_buffer_min: int = Field(
+        default=15,
+        ge=0,
+        le=120,
+        description="Buffer minutes required around existing calendar events when proposing slots",
+    )
+    scheduling_calendar_id: str = Field(
+        default="primary",
+        description="Google Calendar ID used for free/busy and appointment events",
     )
     voice_stt_min_confidence: float = Field(
         default=0.55,
@@ -212,6 +269,113 @@ class ChannelSettings(BaseModel):
         description="IANA timezone for voice-facing time rendering (e.g. Europe/Berlin); empty = settings.timezone",
     )
 
+    # ── Voice security & abuse prevention (Sprint 8) ──────
+    voice_webhook_validate: bool = Field(
+        default=True,
+        description="Enforce X-Twilio-Signature validation on every /voice/* and "
+        "/api/apps/twilio/* request (T8.1). Never disable in production.",
+    )
+    voice_ws_auth_required: bool = Field(
+        default=True,
+        description="Require a signed token on the ConversationRelay / Media Streams "
+        "WebSocket upgrade; unsigned connects are refused before accept() (T8.1)",
+    )
+    voice_signature_max_age_s: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        description="Replay guard: reject signed voice requests whose timestamp is older than this (seconds)",
+    )
+    voice_daily_call_limit: int = Field(
+        default=20,
+        ge=0,
+        le=1000,
+        description="Hard server-side cap on outbound calls per day across ALL users and channels "
+        "(0 = no global cap; the per-user limit still applies)",
+    )
+    voice_target_cooldown_min: int = Field(
+        default=60,
+        ge=0,
+        le=10080,
+        description="Minutes a target number is off-limits after a call to it (0 = no cooldown). "
+        "Prevents hammering one number via retries or multiple channels.",
+    )
+    voice_quiet_hours: str = Field(
+        default="20:00-08:00",
+        description="No outbound calls during this local-time window (HH:MM-HH:MM in "
+        "PINCER_VOICE_TIMEZONE); empty = no quiet hours. §7 UWG cold-calling sensitivity.",
+    )
+    voice_quiet_hours_override_users: str = Field(
+        default="",
+        description="Comma-separated user IDs allowed to place calls during quiet hours (emergency use)",
+    )
+
+    # ── In-call tool execution (Sprint 11) ────────────────
+    voice_tool_approval: str = Field(
+        default="verbal",
+        description="Approval mode for Tier W (write) tools during a live call: "
+        "verbal (call partner confirms the exact commitment) | user (initiating user approves on their "
+        "channel) | off (autonomous within the write budget, disclosed in the post-call report)",
+    )
+    voice_tool_approval_overrides: str = Field(
+        default="",
+        description="Per-tool mode overrides, CSV of tool_name:mode "
+        "(e.g. 'google__create_event:off,send_owner_message:user'). Tier X tools cannot be configured.",
+    )
+    voice_tool_timeout_s: int = Field(
+        default=10,
+        ge=3,
+        le=60,
+        description="Per-tool execution timeout during a call (seconds); a timeout defers to a post-call follow-up",
+    )
+    voice_approval_timeout_s: int = Field(
+        default=25,
+        ge=10,
+        le=120,
+        description="How long a 'user' mode approval may keep the call partner on hold (seconds)",
+    )
+    voice_max_writes_per_call: int = Field(
+        default=3,
+        ge=0,
+        le=20,
+        description="Tier W write budget per call (0 = writes disabled)",
+    )
+    voice_tools_extra: str = Field(
+        default="",
+        description="CSV of tool names added to the per-call tool scope (Tier R/W only; never widens the allowlist)",
+    )
+
+    # ── Inbound receptionist (Sprint 12) ──────────────────
+    receptionist_enabled: bool = Field(
+        default=False,
+        description="Answer inbound calls as the AI receptionist of the business profile "
+        "(false = today's generic inbound behaviour)",
+    )
+    business_profile: str = Field(
+        default="./business_profile.yaml",
+        description="Path to the business profile YAML (validated at startup when the receptionist is enabled)",
+    )
+    receptionist_booking_approval: str = Field(
+        default="off",
+        description="Approval for google__create_event on inbound calls: off (book immediately after the "
+        "caller's yes) | user (owner approves on their channel while the caller holds). 'verbal' is rejected — "
+        "the caller's yes IS the verbal step.",
+    )
+    inbound_max_concurrent: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description="Active inbound calls above which the webhook answers with the busy line and hangs up",
+    )
+    inbound_recording: bool = Field(
+        default=False,
+        description="Record inbound receptionist calls — requires the two-party consent announcement (doctor FAIL)",
+    )
+    voice_blocklist: str = Field(
+        default="",
+        description="CSV of E.164 caller numbers that are declined with one neutral sentence",
+    )
+
     # ── Email ─────────────────────────────────────────────
     email_imap_host: str = Field(default="", description="IMAP server host")
     email_imap_port: int = Field(default=993, description="IMAP server port")
@@ -239,6 +403,38 @@ class ChannelSettings(BaseModel):
                 return []
             return [uid.strip() for uid in v.split(",") if uid.strip()]
         return v
+
+    @field_validator("voice_tool_approval", mode="before")
+    @classmethod
+    def validate_voice_tool_approval(cls, v: str) -> str:
+        """Sprint 11 §3: an unknown mode is a startup ConfigError, never a fallback."""
+        from pincer.voice.tool_policy import validate_approval_mode
+
+        return validate_approval_mode(str(v))
+
+    @field_validator("voice_tool_approval_overrides", mode="before")
+    @classmethod
+    def validate_voice_tool_overrides(cls, v: str) -> str:
+        """Sprint 11 §3: malformed entries / unknown modes fail fast; a Tier X
+        tool can never be configured ("excluded from calls")."""
+        from pincer.voice.tool_policy import validate_overrides
+
+        validate_overrides(str(v or ""))
+        return str(v or "")
+
+    @field_validator("receptionist_booking_approval", mode="before")
+    @classmethod
+    def validate_receptionist_booking_approval(cls, v: str) -> str:
+        """Sprint 12 §3: only off|user; verbal is meaningless on an inbound line."""
+        from pincer.exceptions import ConfigError
+
+        mode = str(v or "off").strip().lower()
+        if mode not in ("off", "user"):
+            raise ConfigError(
+                f"PINCER_RECEPTIONIST_BOOKING_APPROVAL={v!r} is not valid (allowed: off, user; "
+                "'verbal' is rejected — the caller's yes is the verbal step)"
+            )
+        return mode
 
     @field_validator("telegram_allowed_users", mode="before")
     @classmethod

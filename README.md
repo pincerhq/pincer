@@ -159,6 +159,14 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 | **🧪 Peripheral** | Voice calling, Signal, Microsoft 365 (62 tools, multi-user), MCP client + OAuth 2.0 server, image generation, proactive scheduler | Working, documented, community-maintained welcome |
 | **🔮 Planned** | iMessage, SMS, Zoom, Viber, WeChat, Matrix | Not yet started — [help wanted](https://github.com/pincerhq/pincer/labels/help-wanted) |
 
+Voice is mid-promotion. Everything the 🟡 tier requires is in place — the harness
+(both languages, all personas including red-team) is a release-blocking CI gate,
+the docs are complete, and the exit criteria are machine-checked. What is missing
+is the evidence: 200 real calls across pilot customers. `pincer voice ops ga-gate`
+reports exactly which criteria are still undecided, and the badge above stays 🧪
+until it says `ready`. Flipping it earlier is the one thing that would make the
+gate decorative.
+
 ---
 
 ## 📱 Channels
@@ -172,7 +180,7 @@ Pincer is solo-maintained. To set honest expectations, features are explicitly s
 | **Microsoft Teams** | 🧪 | DMs, channel @mentions, threads, group chats via microsoft-teams-apps SDK (inbound HTTP push) |
 | **Email** | 🟡 | Gmail OAuth — read, search, draft, send |
 | **Signal** | 🧪 | E2E encrypted via signal-cli-rest-api Docker sidecar; WebSocket or poll receive mode |
-| **Voice** | 🧪 | Make/receive phone calls via Twilio (~$0.12/3-min call) |
+| **Voice** | 🧪→🟡 | Make/receive phone calls via Twilio (~$0.12/3-min call). Appointment scheduling, DACH compliance, ops tooling. **Promotion to 🟡 is gated on `pincer voice ops ga-gate` passing** — see [GA gate](docs/operations/ga-gate.md) |
 | **Web UI** | 🟡 | Dashboard + chat at `localhost:8080` |
 
 **Cross-channel memory:** Tell the agent something on WhatsApp. Ask about it on Telegram. It remembers — SQLite + FTS5 full-text search, vector embeddings for semantic recall, auto-summarization, and entity extraction.

@@ -100,6 +100,45 @@ async def test_create_event(mock_factory, mock_calendar_service):
     assert "new_evt" in result
 
 
+async def test_create_event_defaults_to_configured_timezone(mock_factory, mock_calendar_service, monkeypatch):
+    """A naive start/end is the user's local wall-clock time, not UTC."""
+    from pincer.integrations.google import tools_calendar
+
+    monkeypatch.setattr(tools_calendar, "_default_timezone", lambda: "Europe/Berlin")
+    mock_calendar_service.events().insert().execute.return_value = {"id": "evt_tz", "htmlLink": "x"}
+    await google__create_event(mock_factory, summary="Investor", start="2026-08-21T12:00:00", end="2026-08-21T13:00:00")
+    body = mock_calendar_service.events().insert.call_args.kwargs["body"]
+    assert body["start"] == {"dateTime": "2026-08-21T12:00:00", "timeZone": "Europe/Berlin"}
+    assert body["end"]["timeZone"] == "Europe/Berlin"
+
+
+async def test_create_event_explicit_timezone_wins(mock_factory, mock_calendar_service, monkeypatch):
+    from pincer.integrations.google import tools_calendar
+
+    monkeypatch.setattr(tools_calendar, "_default_timezone", lambda: "Europe/Berlin")
+    mock_calendar_service.events().insert().execute.return_value = {"id": "evt_tz2", "htmlLink": "x"}
+    await google__create_event(
+        mock_factory,
+        summary="Call",
+        start="2026-08-21T09:00:00",
+        end="2026-08-21T09:30:00",
+        timezone="America/New_York",
+    )
+    body = mock_calendar_service.events().insert.call_args.kwargs["body"]
+    assert body["start"]["timeZone"] == "America/New_York"
+
+
+def test_default_timezone_reads_settings(monkeypatch):
+    from pincer.integrations.google import tools_calendar
+
+    class _S:
+        voice_timezone = ""
+        timezone = "Europe/Kyiv"
+
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: _S())
+    assert tools_calendar._default_timezone() == "Europe/Kyiv"
+
+
 async def test_update_event(mock_factory, mock_calendar_service):
     mock_calendar_service.events().get().execute.return_value = _event()
     mock_calendar_service.events().update().execute.return_value = _event(summary="Updated Meeting")

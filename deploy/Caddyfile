@@ -1,0 +1,37 @@
+# Production reverse proxy (Sprint 7, T7.1).
+#
+# Caddy terminates TLS (automatic Let's Encrypt via the ACME email below) and
+# proxies WebSockets natively — the ConversationRelay WSS endpoint
+# (/api/apps/twilio/relay) and Media Streams (/api/apps/twilio/stream/*) need
+# no extra upgrade configuration, but MUST be verified after every infra
+# change:   wscat -c wss://voice.<domain>/api/apps/twilio/relay
+# (Twilio error 64101 on calls = broken WebSocket upgrade — the Hotfix-2 lesson.)
+
+{
+	email {$PINCER_ACME_EMAIL}
+}
+
+# Dashboard + REST API
+{$PINCER_API_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy pincer:8080
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		-Server
+	}
+}
+
+# Twilio webhooks + WSS relay/stream. Kept on its own hostname so
+# PINCER_VOICE_WEBHOOK_BASE_URL=https://voice.<domain> and voice traffic can
+# be firewalled/rate-limited independently of the dashboard.
+{$PINCER_VOICE_DOMAIN} {
+	reverse_proxy pincer:8080
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}

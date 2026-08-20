@@ -24,7 +24,10 @@ def doctor_env(tmp_path):
 def test_run_all_returns_report(doctor_env):
     report = doctor_env.run_all()
     assert isinstance(report, DoctorReport)
-    assert len(report.checks) == 46  # 31 original + 7 MCP + 3 MCP security + 1 WA neonize + 3 voice DACH + 1 ElevenLabs
+    # 31 original + 7 MCP + 3 MCP security + 1 WA neonize + 3 voice DACH
+    # + 1 ElevenLabs + 4 voice security (Sprint 8) + 2 observability (Sprint 9)
+    # + 3 in-call tool execution (Sprint 11) + 2 receptionist (Sprint 12)
+    assert len(report.checks) == 57
     assert 0 <= report.score <= 100
 
 
@@ -1091,3 +1094,292 @@ def test_voice_provider_regions_none_configured():
     result = SecurityDoctor()._check_voice_provider_regions(_voice_cfg())
     assert result.status == CheckStatus.PASS
     assert "No external" in result.message
+
+
+# ── Production deploy gate (Sprint 7, T7.3) ──────────────────────────
+
+
+def _prod_cfg(**overrides):
+    from unittest.mock import MagicMock
+
+    cfg = MagicMock()
+    cfg.voice_enabled = True
+    cfg.voice_outbound_enabled = True
+    cfg.voice_webhook_base_url = "https://voice.example.com"
+    cfg.voice_consent_mode = "two_party"
+    cfg.voice_transcript_retention_days = 90
+    cfg.voice_timezone = "Europe/Berlin"
+    cfg.timezone = "Europe/Berlin"
+    cfg.ngrok_authtoken.get_secret_value.return_value = ""
+    cfg.dashboard_token.get_secret_value.return_value = "a" * 32
+    cfg.web_chat_token.get_secret_value.return_value = "b" * 32
+    cfg.twilio_auth_token.get_secret_value.return_value = "c" * 32
+    # Sprint 8 production gate
+    cfg.environment = "production"
+    cfg.dashboard_url = "https://dashboard.example.com"
+    cfg.web_chat_url = ""
+    cfg.cors_extra_origins = ""
+    cfg.voice_webhook_validate = True
+    cfg.voice_ws_auth_required = True
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+    return cfg
+
+
+def test_production_mode_adds_gate_checks(doctor_env):
+    baseline = len(doctor_env.run_all().checks)
+    doctor_env.production = True
+    prod = doctor_env.run_all()
+    assert len(prod.checks) == baseline + 7  # Sprint 7 (4) + Sprint 8 (3)
+    assert {c.category for c in prod.checks} >= {"production"}
+
+
+def test_prod_webhook_https_passes():
+    result = SecurityDoctor(production=True)._check_prod_webhook_url(_prod_cfg())
+    assert result.status == CheckStatus.PASS
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://voice.example.com",  # plain HTTP
+        "https://abc123.ngrok-free.app",  # tunnel
+        "https://tame-cat.trycloudflare.com",  # tunnel
+        "https://localhost:8080",  # localhost
+        "",  # unset
+    ],
+)
+def test_prod_webhook_rejects_dev_urls(url):
+    result = SecurityDoctor(production=True)._check_prod_webhook_url(_prod_cfg(voice_webhook_base_url=url))
+    assert result.status == CheckStatus.CRITICAL
+
+
+def test_prod_no_tunnel_critical_when_ngrok_configured():
+    cfg = _prod_cfg()
+    cfg.ngrok_authtoken.get_secret_value.return_value = "tok_123"
+    result = SecurityDoctor(production=True)._check_prod_no_tunnel(cfg)
+    assert result.status == CheckStatus.CRITICAL
+
+
+def test_prod_no_tunnel_passes_when_absent():
+    result = SecurityDoctor(production=True)._check_prod_no_tunnel(_prod_cfg())
+    assert result.status == CheckStatus.PASS
+
+
+def test_prod_auth_tokens_missing_is_critical():
+    cfg = _prod_cfg()
+    cfg.dashboard_token.get_secret_value.return_value = ""
+    result = SecurityDoctor(production=True)._check_prod_auth_tokens(cfg)
+    assert result.status == CheckStatus.CRITICAL
+
+
+def test_prod_auth_tokens_short_is_critical():
+    cfg = _prod_cfg()
+    cfg.dashboard_token.get_secret_value.return_value = "short"
+    result = SecurityDoctor(production=True)._check_prod_auth_tokens(cfg)
+    assert result.status == CheckStatus.CRITICAL
+    assert "too short" in result.message
+
+
+def test_prod_auth_tokens_pass():
+    result = SecurityDoctor(production=True)._check_prod_auth_tokens(_prod_cfg())
+    assert result.status == CheckStatus.PASS
+
+
+def test_prod_dach_compliance_pass():
+    result = SecurityDoctor(production=True)._check_prod_dach_compliance(_prod_cfg())
+    assert result.status == CheckStatus.PASS
+
+
+@pytest.mark.parametrize(
+    ("override", "expected_fragment"),
+    [
+        ({"voice_consent_mode": "one_party"}, "two_party"),
+        ({"voice_transcript_retention_days": 0}, "retention"),
+        ({"voice_timezone": "America/New_York", "timezone": "America/New_York"}, "Europe"),
+    ],
+)
+def test_prod_dach_compliance_critical_on_weakened_setting(override, expected_fragment):
+    result = SecurityDoctor(production=True)._check_prod_dach_compliance(_prod_cfg(**override))
+    assert result.status == CheckStatus.CRITICAL
+    assert expected_fragment in result.message + result.fix_hint
+
+
+def test_prod_dach_compliance_skipped_when_voice_off():
+    cfg = _prod_cfg(voice_enabled=False, voice_outbound_enabled=False)
+    result = SecurityDoctor(production=True)._check_prod_dach_compliance(cfg)
+    assert result.status == CheckStatus.SKIPPED
+
+
+# ── Sprint 8 production gate ──────────────────────────────
+
+
+def test_prod_environment_flag_pass():
+    result = SecurityDoctor(production=True)._check_prod_environment_flag(_prod_cfg())
+    assert result.status == CheckStatus.PASS
+
+
+def test_prod_environment_flag_critical_when_not_production():
+    result = SecurityDoctor(production=True)._check_prod_environment_flag(_prod_cfg(environment="development"))
+    assert result.status == CheckStatus.CRITICAL
+
+
+def test_prod_auth_tokens_critical_without_web_chat_token():
+    cfg = _prod_cfg()
+    cfg.web_chat_token.get_secret_value.return_value = ""
+    result = SecurityDoctor(production=True)._check_prod_auth_tokens(cfg)
+    assert result.status == CheckStatus.CRITICAL
+    assert "PINCER_WEB_CHAT_TOKEN" in result.message
+
+
+def test_prod_auth_tokens_critical_when_tokens_identical():
+    cfg = _prod_cfg()
+    cfg.web_chat_token.get_secret_value.return_value = "a" * 32
+    result = SecurityDoctor(production=True)._check_prod_auth_tokens(cfg)
+    assert result.status == CheckStatus.CRITICAL
+    assert "identical" in result.message
+
+
+def test_prod_cors_origins_pass():
+    result = SecurityDoctor(production=True)._check_prod_cors_origins(_prod_cfg())
+    assert result.status == CheckStatus.PASS
+
+
+def test_prod_cors_origins_critical_on_localhost():
+    result = SecurityDoctor(production=True)._check_prod_cors_origins(
+        _prod_cfg(cors_extra_origins="http://localhost:3000")
+    )
+    assert result.status == CheckStatus.CRITICAL
+
+
+def test_prod_voice_signatures_pass():
+    result = SecurityDoctor(production=True)._check_prod_voice_signatures(_prod_cfg())
+    assert result.status == CheckStatus.PASS
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"voice_webhook_validate": False},
+        {"voice_ws_auth_required": False},
+    ],
+)
+def test_prod_voice_signatures_critical_when_disabled(override):
+    result = SecurityDoctor(production=True)._check_prod_voice_signatures(_prod_cfg(**override))
+    assert result.status == CheckStatus.CRITICAL
+
+
+def test_prod_voice_signatures_critical_without_twilio_token():
+    cfg = _prod_cfg()
+    cfg.twilio_auth_token.get_secret_value.return_value = ""
+    result = SecurityDoctor(production=True)._check_prod_voice_signatures(cfg)
+    assert result.status == CheckStatus.CRITICAL
+
+
+# ── Sprint 8 voice security checks (always run) ───────────
+
+
+def test_voice_webhook_signature_critical_when_validation_off():
+    result = SecurityDoctor()._check_voice_webhook_signature(_prod_cfg(voice_webhook_validate=False))
+    assert result.status == CheckStatus.CRITICAL
+
+
+def test_voice_webhook_signature_pass():
+    assert SecurityDoctor()._check_voice_webhook_signature(_prod_cfg()).status == CheckStatus.PASS
+
+
+def test_voice_ws_auth_critical_when_disabled():
+    result = SecurityDoctor()._check_voice_ws_auth(_prod_cfg(voice_ws_auth_required=False))
+    assert result.status == CheckStatus.CRITICAL
+
+
+def test_voice_abuse_limits_pass_with_defaults():
+    cfg = _prod_cfg(voice_daily_call_limit=20, voice_target_cooldown_min=60, voice_quiet_hours="20:00-08:00")
+    assert SecurityDoctor()._check_voice_abuse_limits(cfg).status == CheckStatus.PASS
+
+
+def test_voice_abuse_limits_critical_when_all_disabled():
+    cfg = _prod_cfg(voice_daily_call_limit=0, voice_target_cooldown_min=0, voice_quiet_hours="")
+    assert SecurityDoctor()._check_voice_abuse_limits(cfg).status == CheckStatus.CRITICAL
+
+
+def test_voice_do_not_call_enforced_on_the_dial_path():
+    """Guards against a refactor that routes make_phone_call around the gate."""
+    assert SecurityDoctor()._check_voice_do_not_call_enforced().status == CheckStatus.PASS
+
+
+# ── Sprint 9 observability checks ─────────────────────────
+
+
+def _obs_cfg(**overrides):
+    from unittest.mock import MagicMock
+
+    cfg = MagicMock()
+    cfg.ops_alerts_enabled = True
+    cfg.ops_user_id = "ops"
+    cfg.ops_channel = "telegram"
+    cfg.ops_alert_email = ""
+    cfg.default_user_id = ""
+    cfg.telemetry_dsn = "https://token@otlp.example.com"
+    cfg.voice_enabled = True
+    cfg.voice_canary_enabled = True
+    cfg.voice_canary_number = "+4915100000001"
+    cfg.voice_canary_cron = "0 */6 * * *"
+    cfg.voice_quiet_hours = "20:00-08:00"
+    cfg.voice_quiet_hours_override_users = "pincer-canary"
+    for key, value in overrides.items():
+        setattr(cfg, key, value)
+    return cfg
+
+
+def test_ops_alert_routing_pass():
+    assert SecurityDoctor()._check_ops_alert_routing(_obs_cfg()).status == CheckStatus.PASS
+
+
+def test_ops_alert_routing_critical_without_a_recipient():
+    """An alert system firing into the void looks healthy from every angle."""
+    result = SecurityDoctor()._check_ops_alert_routing(_obs_cfg(ops_user_id="", default_user_id="", ops_alert_email=""))
+    assert result.status == CheckStatus.CRITICAL
+
+
+def test_ops_alert_routing_accepts_email_only():
+    result = SecurityDoctor()._check_ops_alert_routing(
+        _obs_cfg(ops_user_id="", default_user_id="", ops_alert_email="ops@example.com")
+    )
+    assert result.status == CheckStatus.PASS
+
+
+def test_ops_alert_routing_warns_without_telemetry():
+    result = SecurityDoctor()._check_ops_alert_routing(_obs_cfg(telemetry_dsn=None))
+    assert result.status == CheckStatus.WARNING
+
+
+def test_ops_alert_routing_warns_when_disabled():
+    result = SecurityDoctor()._check_ops_alert_routing(_obs_cfg(ops_alerts_enabled=False))
+    assert result.status == CheckStatus.WARNING
+
+
+def test_voice_canary_pass():
+    assert SecurityDoctor()._check_voice_canary(_obs_cfg()).status == CheckStatus.PASS
+
+
+def test_voice_canary_skipped_when_voice_off():
+    assert SecurityDoctor()._check_voice_canary(_obs_cfg(voice_enabled=False)).status == CheckStatus.SKIPPED
+
+
+def test_voice_canary_warns_when_disabled():
+    result = SecurityDoctor()._check_voice_canary(_obs_cfg(voice_canary_enabled=False))
+    assert result.status == CheckStatus.WARNING
+    assert "customer" in result.message
+
+
+def test_voice_canary_critical_without_a_target():
+    """Enabled but unable to ever run is worse than off — it reads as covered."""
+    result = SecurityDoctor()._check_voice_canary(_obs_cfg(voice_canary_number=""))
+    assert result.status == CheckStatus.CRITICAL
+
+
+def test_voice_canary_warns_about_quiet_hours_gap():
+    result = SecurityDoctor()._check_voice_canary(_obs_cfg(voice_quiet_hours_override_users=""))
+    assert result.status == CheckStatus.WARNING
+    assert "quiet hours" in result.message
