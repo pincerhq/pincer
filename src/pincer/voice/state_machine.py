@@ -38,6 +38,14 @@ class CallPhase(StrEnum):
     IVR_NAVIGATION = "ivr_navigation"
     ON_HOLD = "on_hold"
 
+    # Inbound receptionist phases (Sprint 12)
+    RECEPTION_INTENT = "reception_intent"
+    FAQ_ANSWER = "faq_answer"
+    TAKE_MESSAGE = "take_message"
+    INBOUND_BOOKING = "inbound_booking"
+    TRANSFERRING = "transferring"
+    AFTER_HOURS = "after_hours"
+
 
 # Spoken, polite exit for every phase timeout — a timeout must never be silence
 # (Sprint 1, T1.2). The message plays, then the call is ended gracefully.
@@ -64,11 +72,25 @@ PHASE_TIMEOUTS: dict[CallPhase, int] = {
     CallPhase.OUTBOUND_GREETING: 30,
     CallPhase.IVR_NAVIGATION: 120,
     CallPhase.ON_HOLD: 300,
+    # Sprint 12 (receptionist) — every timeout has a spoken exit
+    CallPhase.RECEPTION_INTENT: 30,
+    CallPhase.FAQ_ANSWER: 60,
+    CallPhase.TAKE_MESSAGE: 120,
+    CallPhase.INBOUND_BOOKING: 180,
+    CallPhase.TRANSFERRING: 30,
+    CallPhase.AFTER_HOURS: 90,
 }
 
 VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
     CallPhase.RINGING: {CallPhase.GREETING, CallPhase.OUTBOUND_GREETING, CallPhase.FAILED},
-    CallPhase.GREETING: {CallPhase.INTENT_CAPTURE, CallPhase.FAILED},
+    CallPhase.GREETING: {
+        CallPhase.INTENT_CAPTURE,
+        CallPhase.FAILED,
+        # Sprint 12: receptionist greeting spoken → intent capture / after hours
+        CallPhase.RECEPTION_INTENT,
+        CallPhase.AFTER_HOURS,
+        CallPhase.ENDING,
+    },
     CallPhase.INTENT_CAPTURE: {
         CallPhase.VERIFY,
         CallPhase.EXECUTE,
@@ -97,6 +119,7 @@ VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
         CallPhase.INTENT_CAPTURE,
         CallPhase.ENDING,
         CallPhase.ERROR_RECOVERY,
+        CallPhase.RECEPTION_INTENT,  # Sprint 12: "Kann ich sonst noch helfen?"
     },
     CallPhase.ERROR_RECOVERY: {
         CallPhase.INTENT_CAPTURE,
@@ -121,6 +144,44 @@ VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
         CallPhase.INTENT_CAPTURE,
         CallPhase.FREEFORM,
         CallPhase.FAILED,
+        CallPhase.ERROR_RECOVERY,
+    },
+    # ── Sprint 12: inbound receptionist (§6 transition table) ──
+    CallPhase.RECEPTION_INTENT: {
+        CallPhase.FAQ_ANSWER,
+        CallPhase.TAKE_MESSAGE,
+        CallPhase.INBOUND_BOOKING,
+        CallPhase.TRANSFERRING,
+        CallPhase.ENDING,
+        CallPhase.ERROR_RECOVERY,
+    },
+    CallPhase.FAQ_ANSWER: {
+        CallPhase.RECEPTION_INTENT,
+        CallPhase.TAKE_MESSAGE,
+        CallPhase.ENDING,
+        CallPhase.ERROR_RECOVERY,
+    },
+    CallPhase.TAKE_MESSAGE: {
+        CallPhase.RECEPTION_INTENT,
+        CallPhase.ENDING,
+        CallPhase.ERROR_RECOVERY,
+    },
+    CallPhase.INBOUND_BOOKING: {
+        CallPhase.VERIFY,
+        CallPhase.TAKE_MESSAGE,
+        CallPhase.RECEPTION_INTENT,
+        CallPhase.ENDING,
+        CallPhase.ERROR_RECOVERY,
+    },
+    CallPhase.TRANSFERRING: {
+        CallPhase.TAKE_MESSAGE,
+        CallPhase.ENDING,
+        CallPhase.COMPLETED,
+        CallPhase.FAILED,
+    },
+    CallPhase.AFTER_HOURS: {
+        CallPhase.TAKE_MESSAGE,
+        CallPhase.ENDING,
         CallPhase.ERROR_RECOVERY,
     },
     CallPhase.COMPLETED: set(),
@@ -246,6 +307,15 @@ class CallStateMachine:
             reason,
         )
         return True
+
+    def touch(self) -> None:
+        """Activity heartbeat: phase timeouts measure INACTIVITY within a
+        phase, not total time spent in it. Without this, a lively
+        conversation that stays in INTENT_CAPTURE is cut off mid-sentence at
+        the 120s mark (the 2-minute-drop bug) — the timeout messages
+        themselves say "I haven't heard anything", so silence is what the
+        clock must measure. Called on every caller utterance."""
+        self._state.phase_entered_at = time.monotonic()
 
     def check_timeout(self) -> bool:
         """Check if current phase has timed out."""

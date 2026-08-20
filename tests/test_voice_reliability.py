@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from voice_harness.settings import apply_test_paths
 
 from pincer.channels.phone_calls import MAX_CONSECUTIVE_ERRORS, VoiceChannel
 from pincer.voice import status_notify
@@ -187,7 +188,7 @@ class TestCompletionClaims:
 def _make_channel():
     from voice_harness.fake_engine import FakeVoiceEngine
 
-    settings = MagicMock()
+    settings = apply_test_paths(MagicMock())
     settings.voice_language = "en-US"
     engine = FakeVoiceEngine(settings)
     channel = VoiceChannel(settings)
@@ -445,7 +446,7 @@ class TestUndeliveredTranscript:
             async def close_media_stream(self, call_sid):
                 pass
 
-        settings = MagicMock()
+        settings = apply_test_paths(MagicMock())
         settings.voice_default_language = "en"
         settings.voice_supported_languages = "en,de,uk"
         settings.voice_language = "en-US"
@@ -470,7 +471,7 @@ class TestUndeliveredTranscript:
 
 
 class TestOutboundMachineDetection:
-    async def test_machine_detection_param_sent(self, monkeypatch):
+    async def test_machine_detection_param_sent(self, monkeypatch, tmp_path):
         from pincer.voice import outbound
 
         settings = MagicMock()
@@ -487,6 +488,9 @@ class TestOutboundMachineDetection:
         settings.voice_consent_language = ""
         settings.voice_assistant_name = ""
         settings.voice_intro_text = ""
+        # Sprint 8: the outbound gate persists its call log here; without a real
+        # path the MagicMock stringifies into a junk file in the repo root.
+        settings.db_path = str(tmp_path / "pincer.db")
         settings.twilio_account_sid = "AC123"
         settings.twilio_auth_token.get_secret_value.return_value = "token"
         settings.twilio_phone_number = "+15550001111"

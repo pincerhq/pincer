@@ -3,10 +3,17 @@ PII protection — masks sensitive information in transcripts and logs.
 
 Detects credit card numbers, SSNs, phone numbers, and other PII patterns,
 replacing them with safe placeholders before storage.
+
+Sprint 8 (T8.5) adds the log egress guard: `install_log_pii_filter()` attaches
+`PIILogFilter` to the root logger so no raw E.164 number ever reaches stdout,
+a log file, or a log shipper. Call SIDs, timings, and statuses are untouched —
+only the number itself is reduced to `+49…89`, which stays diagnosable
+(country code + last two digits) without identifying the person.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 
 # Credit card: 13-19 digits, optionally separated by spaces or dashes
@@ -51,6 +58,10 @@ def mask_pii(text: str) -> str:
         lambda m: m.group(0).replace(m.group(1), "[PIN_REDACTED]"),
         result,
     )
+    # T8.5: E.164 numbers spoken aloud during a call are PII too, and this is
+    # the function every transcript/action/report passes through on its way to
+    # storage and to the dashboard API.
+    result = mask_phone_numbers(result)
 
     return result
 
@@ -107,3 +118,67 @@ def sanitize_for_logs(text: str) -> str:
     result = _EMAIL_PATTERN.sub("[EMAIL_REDACTED]", result)
     result = _DOB_PATTERN.sub("[DOB_REDACTED]", result)
     return result
+
+
+# ── Phone-number egress guard (Sprint 8, T8.5) ───────────────────────
+
+# E.164 as it actually appears in our logs and Twilio payloads: a leading +,
+# country code, 6-14 more digits. Deliberately stricter than _PHONE_PATTERN
+# (which is US-shaped) so European numbers are caught too.
+_E164_PATTERN = re.compile(r"\+[1-9]\d{6,14}\b")
+
+
+def mask_phone_number(number: str) -> str:
+    """Reduce a phone number to a diagnosable, non-identifying form.
+
+    `+4915112345689` -> `+49…89`. Short or non-E.164 values are fully masked
+    rather than leaked verbatim.
+    """
+    raw = (number or "").strip()
+    match = _E164_PATTERN.fullmatch(raw) or _E164_PATTERN.match(raw)
+    if not match:
+        return "[NUMBER_REDACTED]" if any(c.isdigit() for c in raw) else raw
+    digits = match.group(0)
+    country = digits[:3]  # '+' + up to two country-code digits
+    return f"{country}…{digits[-2:]}"
+
+
+def mask_phone_numbers(text: str) -> str:
+    """Mask every E.164 number appearing in free text."""
+    return _E164_PATTERN.sub(lambda m: mask_phone_number(m.group(0)), text)
+
+
+class PIILogFilter(logging.Filter):
+    """Root-logger filter that masks phone numbers in every emitted record.
+
+    Formats the record's args into the message before masking, because the
+    numbers almost always arrive as lazy `%s` arguments
+    (`logger.info("Inbound call: %s from %s", sid, caller)`).
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # pragma: no cover — malformed record, let it through
+            return True
+        masked = mask_phone_numbers(message)
+        if masked != message:
+            record.msg = masked
+            record.args = None
+        return True
+
+
+_LOG_FILTER = PIILogFilter()
+
+
+def install_log_pii_filter(logger_obj: logging.Logger | None = None) -> None:
+    """Attach the PII filter to a logger's handlers (root by default).
+
+    Handler-level rather than logger-level: a filter on the root *logger* is
+    not consulted for records propagated up from child loggers, which is
+    exactly where the phone numbers come from.
+    """
+    target = logger_obj or logging.getLogger()
+    for handler in target.handlers:
+        if not any(isinstance(f, PIILogFilter) for f in handler.filters):
+            handler.addFilter(_LOG_FILTER)

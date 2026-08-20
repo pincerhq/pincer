@@ -77,4 +77,18 @@ A German/Austrian SMB deploying Pincer voice acts as **controller**; the provide
 
 `pincer doctor` runs three DACH checks: outbound-from-DACH-number with `one_party` consent (warns), recording without a retention window (warns), and an inventory of configured STT/TTS providers and their processing regions.
 
+## Customer-facing AVV annex
+
+The sub-processor list, technical and organisational measures (Art. 32), and
+data-subject-rights procedures are maintained as a separate, customer-facing
+draft: **[Annex: Sub-processors & Technical Measures](avv-annex.md)**. It is
+engineering input for legal review — it must be reviewed and adopted by counsel
+before it goes to a customer.
+
+Sprint 8 added the security controls that annex describes (webhook and
+WebSocket authentication, outbound abuse limits including the do-not-call list,
+in-call tool restriction, and PII masking on log egress); the control-by-control
+verification record is the
+[Voice Security Checklist](security-checklist.md).
+
 See also: [Voice Calling Setup — DACH deployment](voice-calling-setup.md#dach-deployment-germany--austria--switzerland).

@@ -56,12 +56,22 @@ class TranscriptEntry:
 
 @dataclass
 class CallAction:
-    action_type: str  # tool_call, dtmf, transfer, confirm
+    action_type: str  # tool_call, tool_execute, tool_denied, dtmf, transfer, confirm, outcome
     tool_name: str = ""
     input_summary: str = ""
     output_summary: str = ""
     user_confirmed: bool | None = None
     timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    # Sprint 11 (in-call tools): policy tier (R/W/X), the approval mode the
+    # action ran under (auto/verbal/user/off), and the stable deny reason
+    # code (§5.2) for tool_denied rows.
+    tier: str = ""
+    approval_mode: str = ""
+    deny_reason: str = ""
+
+
+# Action types whose non-error output backs a completion claim (T1.4 / §7).
+SUCCESSFUL_ACTION_TYPES = frozenset({"tool_call", "tool_execute"})
 
 
 class TranscriptLogger:
@@ -109,15 +119,23 @@ class TranscriptLogger:
         input_summary: str = "",
         output_summary: str = "",
         user_confirmed: bool | None = None,
-    ) -> None:
+        *,
+        tier: str = "",
+        approval_mode: str = "",
+        deny_reason: str = "",
+    ) -> CallAction:
         action = CallAction(
             action_type=action_type,
             tool_name=tool_name,
             input_summary=input_summary,
             output_summary=output_summary,
             user_confirmed=user_confirmed,
+            tier=tier,
+            approval_mode=approval_mode,
+            deny_reason=deny_reason,
         )
         self._actions.append(action)
+        return action
 
     def get_full_transcript(self) -> str:
         """Return the full conversation transcript as readable text."""
@@ -163,7 +181,7 @@ class TranscriptLogger:
     def _has_successful_action(self) -> bool:
         """True if at least one tool action ran with a non-error result."""
         for action in self._actions:
-            if action.action_type != "tool_call":
+            if action.action_type not in SUCCESSFUL_ACTION_TYPES:
                 continue
             if action.user_confirmed is False:
                 continue
@@ -220,8 +238,8 @@ class TranscriptLogger:
             await db.execute(
                 "INSERT INTO call_actions "
                 "(call_id, action_type, tool_name, input_summary, "
-                "output_summary, user_confirmed, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "output_summary, user_confirmed, timestamp, tier, approval_mode, deny_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     self._call_sid,
                     action.action_type,
@@ -230,6 +248,9 @@ class TranscriptLogger:
                     action.output_summary,
                     action.user_confirmed,
                     action.timestamp,
+                    action.tier,
+                    action.approval_mode,
+                    action.deny_reason,
                 ),
             )
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -114,7 +115,10 @@ class TestConversationRelayTwiml:
 
     def test_provider_and_voice_never_mixed(self):
         """Regression guard: ttsProvider and voice are resolved together —
-        an ElevenLabs provider never carries a Google voice name or vice versa."""
+        an ElevenLabs provider never carries a Google voice name or vice versa.
+        Checked per element: the main <ConversationRelay> and each nested
+        <Language> pair provider/voice independently per language."""
+        element_re = re.compile(r"<(?:ConversationRelay|Language)\b[^>]*>")
         combos = [
             _settings(),
             _settings(elevenlabs_voice_id="v1"),
@@ -125,11 +129,14 @@ class TestConversationRelayTwiml:
         for s in combos:
             for lang in ("en", "de"):
                 twiml = build_connect_twiml(s, direction="outbound", language=lang, counterparty="+1")
-                if 'ttsProvider="ElevenLabs"' in twiml:
-                    assert 'voice="Google.' not in twiml, twiml
-                else:
-                    assert 'ttsProvider="Google"' in twiml
-                    assert 'voice="Google.' in twiml, twiml
+                elements = element_re.findall(twiml)
+                assert elements, twiml
+                for element in elements:
+                    if 'ttsProvider="ElevenLabs"' in element:
+                        assert 'voice="Google.' not in element, element
+                    else:
+                        assert 'ttsProvider="Google"' in element, element
+                        assert 'voice="Google.' in element, element
 
     def test_google_fallback_without_elevenlabs_voice(self):
         twiml = build_connect_twiml(_settings(), direction="inbound", language="en", counterparty="+1555")

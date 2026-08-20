@@ -208,7 +208,7 @@ class TestConsentByCallLanguage:
 
 
 class TestGermanOutboundTwiml:
-    async def test_language_de_produces_german_call(self, monkeypatch):
+    async def test_language_de_produces_german_call(self, monkeypatch, tmp_path):
         """make_phone_call(language='de') → German consent + de-DE relay attributes."""
         from pincer.voice import outbound
 
@@ -230,6 +230,9 @@ class TestGermanOutboundTwiml:
         settings.voice_assistant_org = "3days.ai"
         settings.voice_assistant_owner = ""
         settings.voice_intro_text = ""
+        # Sprint 8: the outbound gate persists its call log here; without a real
+        # path the MagicMock stringifies into a junk file in the repo root.
+        settings.db_path = str(tmp_path / "pincer.db")
         settings.twilio_account_sid = "AC123"
         settings.twilio_auth_token.get_secret_value.return_value = "token"
         settings.twilio_phone_number = "+4915212345678"

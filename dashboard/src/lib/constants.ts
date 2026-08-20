@@ -4,6 +4,7 @@ export const ROUTES = {
   CONVERSATIONS: "/conversations",
   AUDIT: "/audit",
   SCHEDULES: "/schedules",
+  VOICE_OPS: "/voice-ops",
   SKILLS: "/skills",
   SKILL: "/skills/:name",
   INTEGRATIONS: "/integrations",
@@ -46,6 +47,8 @@ export const REFETCH_INTERVALS = {
   CONVERSATIONS: 15_000,
   SKILLS: 15_000,
   SCHEDULES: 15_000,
+  // Voice Ops: golden signals drive an on-call decision, so they refresh fast.
+  VOICE_OPS: 15_000,
 } as const
 
 export const CHANNEL_COLORS: Record<string, string> = {

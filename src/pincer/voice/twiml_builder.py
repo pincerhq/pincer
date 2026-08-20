@@ -50,9 +50,11 @@ def build_connect_twiml(
         relay_language,
         relay_voice_attr,
         resolve_call_language,
+        supported_languages,
         voice_for,
     )
     from pincer.voice.voices import is_voice_invalid
+    from pincer.voice.webhook_auth import WS_RELAY_PATH, WS_STREAM_PATH, signed_ws_query
 
     lang = resolve_call_language(settings, language)
     base_url = str(settings.voice_webhook_base_url or "").strip().rstrip("/")
@@ -66,7 +68,7 @@ def build_connect_twiml(
 
         # Consent / AI-disclosure announcement must precede the conversation;
         # media_streams has no native greeting, so it plays as a <Say>.
-        parts.append(build_consent_say_twiml(settings, counterparty, language=lang))
+        parts.append(build_consent_say_twiml(settings, counterparty, language=lang, direction=direction))
         if inbound:
             connect_lines = {
                 "en": "Please wait while I connect you to your assistant.",
@@ -76,7 +78,10 @@ def build_connect_twiml(
             connect_line = connect_lines.get(lang, connect_lines["en"])
             parts.append(f'<Say language="{relay_language(lang)}">{connect_line}</Say>')
         sid = call_sid or CALL_SID_PLACEHOLDER
-        stream_url = f"wss://{_extract_host(base_url)}/api/apps/twilio/stream/{sid}"
+        # T8.1: the WS upgrade carries its own short-lived HMAC token; the
+        # `&` separators must be XML-escaped inside the TwiML attribute.
+        stream_auth = signed_ws_query(settings, WS_STREAM_PATH).replace("&", "&amp;")
+        stream_url = f"wss://{_extract_host(base_url)}/api/apps/twilio/stream/{sid}{stream_auth}"
         if inbound:
             status_url = f"{base_url}/api/apps/twilio/status"
             parts.append(f'<Connect><Stream url="{stream_url}" statusCallbackUrl="{status_url}" /></Connect>')
@@ -86,7 +91,8 @@ def build_connect_twiml(
         # ConversationRelay is WebSocket-only: the url attribute must be
         # wss:// (an https URL is rejected with Twilio error 64101 at
         # <Connect> time — "application error" right after the greeting).
-        relay_url = f"wss://{_extract_host(base_url)}/api/apps/twilio/relay"
+        relay_auth = signed_ws_query(settings, WS_RELAY_PATH).replace("&", "&amp;")
+        relay_url = f"wss://{_extract_host(base_url)}/api/apps/twilio/relay{relay_auth}"
         provider = cr_tts_provider(settings, lang)
         voice_attr = f' voice="{relay_voice_attr(settings, lang, provider)}"'
         if provider == "elevenlabs" and is_voice_invalid(voice_for(settings, lang)):
@@ -110,14 +116,37 @@ def build_connect_twiml(
 
         from pincer.voice.compliance import build_call_opening
 
-        opening = escape(build_call_opening(settings, counterparty, language=lang), {'"': "&quot;"})
+        opening = escape(
+            build_call_opening(settings, counterparty, language=lang, direction=direction), {'"': "&quot;"}
+        )
         greeting_attr = f' welcomeGreeting="{opening}"' if opening else ""
 
-        parts.append(
-            f'<Connect><ConversationRelay url="{relay_url}"{voice_attr} '
+        # Declare the other supported languages as <Language> elements so a
+        # mid-call switch (language_guard.perform_switch sends CR's session
+        # "language" message) keeps using our configured voice per language
+        # instead of Twilio's default.
+        language_elements = ""
+        for other in supported_languages(settings):
+            if other == lang:
+                continue
+            other_provider = cr_tts_provider(settings, other)
+            other_voice = relay_voice_attr(settings, other, other_provider)
+            if other_provider == "elevenlabs" and is_voice_invalid(voice_for(settings, other)):
+                continue  # Twilio's per-language default voice is the safe fallback
+            language_elements += (
+                f'<Language code="{relay_language(other)}" '
+                f'ttsProvider="{CR_PROVIDER_ATTR[other_provider]}" voice="{other_voice}" />'
+            )
+
+        relay_attrs = (
+            f'url="{relay_url}"{voice_attr} '
             f'language="{relay_language(lang)}" '
-            f'transcriptionProvider="Google" ttsProvider="{CR_PROVIDER_ATTR[provider]}"{greeting_attr} /></Connect>'
+            f'transcriptionProvider="Google" ttsProvider="{CR_PROVIDER_ATTR[provider]}"{greeting_attr}'
         )
+        if language_elements:
+            parts.append(f"<Connect><ConversationRelay {relay_attrs}>{language_elements}</ConversationRelay></Connect>")
+        else:
+            parts.append(f"<Connect><ConversationRelay {relay_attrs} /></Connect>")
 
     parts.append("</Response>")
     return "".join(parts)

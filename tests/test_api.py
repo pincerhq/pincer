@@ -204,12 +204,46 @@ def test_ngrok_domain_falls_back_to_base_url_host(monkeypatch, tmp_path):
     monkeypatch.setenv("PINCER_BASE_URL", "https://mybot.example.com")
     monkeypatch.setenv("PINCER_NGROK_AUTHTOKEN", "tok_test")
     monkeypatch.delenv("PINCER_NGROK_DOMAIN", raising=False)
+    # an ngrok host in the voice webhook URL would (intentionally) take precedence
+    monkeypatch.delenv("PINCER_VOICE_WEBHOOK_BASE_URL", raising=False)
     from pincer.config import get_settings_relaxed
 
     get_settings_relaxed.cache_clear()
     try:
         settings = get_settings_relaxed()
         assert settings.ngrok_domain == "mybot.example.com"
+    finally:
+        get_settings_relaxed.cache_clear()
+
+
+def test_ngrok_domain_prefers_voice_webhook_ngrok_host(monkeypatch, tmp_path):
+    """An ngrok host in PINCER_VOICE_WEBHOOK_BASE_URL is the tunnel domain Twilio expects."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_BASE_URL", "https://mybot.example.com")
+    monkeypatch.setenv("PINCER_VOICE_WEBHOOK_BASE_URL", "https://my-bot.ngrok-free.dev")
+    monkeypatch.setenv("PINCER_NGROK_AUTHTOKEN", "tok_test")
+    monkeypatch.delenv("PINCER_NGROK_DOMAIN", raising=False)
+    from pincer.config import get_settings_relaxed
+
+    get_settings_relaxed.cache_clear()
+    try:
+        assert get_settings_relaxed().ngrok_domain == "my-bot.ngrok-free.dev"
+    finally:
+        get_settings_relaxed.cache_clear()
+
+
+def test_ngrok_domain_never_defaults_to_localhost(monkeypatch, tmp_path):
+    """Default base_url (localhost) must not become the ngrok domain — ngrok rejects it."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PINCER_BASE_URL", raising=False)
+    monkeypatch.delenv("PINCER_VOICE_WEBHOOK_BASE_URL", raising=False)
+    monkeypatch.setenv("PINCER_NGROK_AUTHTOKEN", "tok_test")
+    monkeypatch.delenv("PINCER_NGROK_DOMAIN", raising=False)
+    from pincer.config import get_settings_relaxed
+
+    get_settings_relaxed.cache_clear()
+    try:
+        assert get_settings_relaxed().ngrok_domain == ""
     finally:
         get_settings_relaxed.cache_clear()
 

@@ -7,15 +7,23 @@ Media Streams WebSocket connections, and fallback error handling.
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlencode
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse, Response
+
+from pincer.voice.webhook_auth import (
+    WS_RELAY_PATH,
+    WS_STREAM_PATH,
+    WebhookAuthError,
+    audit_rejection,
+    client_ip,
+    verify_http_request,
+    verify_ws_upgrade,
+)
 
 if TYPE_CHECKING:
     from pincer.config import Settings
@@ -37,41 +45,41 @@ def init_voice_routes(engine: VoiceEngine, settings: Settings) -> None:
     _settings = settings
 
 
-def _validate_twilio_signature(request: Request, body: bytes) -> bool:
-    """Validate Twilio webhook HMAC signature to prevent spoofed requests."""
-    if not _settings:
-        return False
-    auth_token = _settings.twilio_auth_token.get_secret_value()
-    if not auth_token:
-        return True  # no token configured, skip validation
+def get_engine() -> VoiceEngine | None:
+    """The live engine wired by init_voice_routes (None before startup)."""
+    return _engine
 
-    signature = request.headers.get("X-Twilio-Signature", "")
-    if not signature:
-        return False
 
-    url = str(request.url)
+async def _authenticate(request: Request) -> bytes | None:
+    """Verify the Twilio signature and return the raw body, or None on rejection.
+
+    T8.1: every /voice/* and /api/apps/twilio/* HTTP route runs through this —
+    the routes are unauthenticated by any other means, and Starlette replays a
+    body that has already been read, so `await request.form()` in the handler
+    still works afterwards.
+    """
+    body = await request.body()
     try:
-        params = dict(sorted((k, v) for k, v in ((k, request.query_params.get(k, "")) for k in request.query_params)))
-        if body:
-            from urllib.parse import parse_qs
+        await verify_http_request(request, body, _settings)
+    except WebhookAuthError as e:
+        await audit_rejection(f"twilio_webhook:{request.url.path}", client_ip(request), e.reason)
+        return None
+    return body
 
-            form_data = parse_qs(body.decode("utf-8", errors="replace"))
-            for k, v in sorted(form_data.items()):
-                params[k] = v[0] if v else ""
-    except Exception:
-        params = {}
 
-    data_str = url + urlencode(sorted(params.items()))
-    computed = hmac.new(
-        auth_token.encode("utf-8"),
-        data_str.encode("utf-8"),
-        hashlib.sha1,
-    ).digest()
+def _forbidden() -> Response:
+    return PlainTextResponse("Forbidden", status_code=403)
 
-    import base64
 
-    expected = base64.b64encode(computed).decode("utf-8")
-    return hmac.compare_digest(expected, signature)
+async def _authenticate_ws(websocket: WebSocket, surface: str, path: str) -> bool:
+    """Verify a WS upgrade BEFORE accept(); closes the handshake with 403 on failure."""
+    try:
+        verify_ws_upgrade(websocket, _settings, path)
+    except WebhookAuthError as e:
+        await audit_rejection(surface, client_ip(websocket), e.reason)
+        await websocket.close(code=1008, reason="Unauthorized")
+        return False
+    return True
 
 
 def _twiml_response(twiml: str) -> Response:
@@ -94,6 +102,9 @@ async def voice_health() -> dict[str, Any]:
 @twilio_router.post("/webhook")
 async def voice_webhook(request: Request) -> Response:
     """Inbound call handler — returns TwiML to start a stream or ConversationRelay."""
+    if await _authenticate(request) is None:
+        return _forbidden()
+
     if not _engine or not _settings:
         return _twiml_response("<Response><Say>Voice system is not configured.</Say><Hangup/></Response>")
 
@@ -116,6 +127,18 @@ async def voice_webhook(request: Request) -> Response:
     from pincer.voice.twiml_builder import build_connect_twiml
 
     call_language = resolve_call_language(_settings)
+
+    # Sprint 12: receptionist line — blocklist, capacity, profile language
+    from pincer.voice.receptionist.profile import get_profile, receptionist_active
+
+    if receptionist_active(_settings):
+        profile = get_profile()
+        assert profile is not None
+        call_language = resolve_call_language(_settings, profile.default_language)
+        declined = await _receptionist_decline(call_sid, caller, call_language)
+        if declined is not None:
+            return declined
+
     await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=call_language)
 
     twiml = build_connect_twiml(
@@ -128,9 +151,147 @@ async def voice_webhook(request: Request) -> Response:
     return _twiml_response(twiml)
 
 
+def _blocklist(settings: Any) -> set[str]:
+    raw = str(getattr(settings, "voice_blocklist", "") or "")
+    return {n.strip() for n in raw.split(",") if n.strip()}
+
+
+def _active_inbound_count() -> int:
+    if _engine is None:
+        return 0
+    from pincer.voice.engine import CallDirection
+
+    return sum(1 for st in _engine.get_active_calls().values() if st.direction == CallDirection.INBOUND)
+
+
+async def _receptionist_decline(call_sid: str, caller: str, language: str) -> Response | None:
+    """§10.2 blocklist / §10.3 concurrency: one neutral sentence + <Hangup/>,
+    a voice_calls row with the failure code, and a metric. None = proceed."""
+    from xml.sax.saxutils import escape
+
+    from pincer.observability.failure_codes import FailureCode
+    from pincer.voice.language import relay_language
+    from pincer.voice.prompts import get_prompt
+
+    assert _settings is not None
+    lines = get_prompt("RECEPTIONIST_LINES", language) or {}
+    code: FailureCode | None = None
+    line = ""
+    if caller and caller in _blocklist(_settings):
+        code, line = FailureCode.BLOCKED, str(lines.get("blocked", ""))
+        logger.warning("Inbound call %s from blocklisted caller declined", call_sid)
+    elif _active_inbound_count() >= int(getattr(_settings, "inbound_max_concurrent", 3) or 3):
+        code, line = FailureCode.BUSY_CAPACITY, str(lines.get("busy", ""))
+        logger.warning("Inbound call %s declined: capacity %s reached", call_sid, _active_inbound_count())
+    if code is None:
+        return None
+    await _record_declined_call(call_sid, caller, str(code), language)
+    say = f'<Say language="{relay_language(language)}">{escape(line)}</Say>' if line else ""
+    return _twiml_response(f"<Response>{say}<Hangup/></Response>")
+
+
+async def _record_declined_call(call_sid: str, caller: str, failure_code: str, language: str) -> None:
+    """Declined calls never reach the engine, so the row + metric are written here."""
+    try:
+        from pincer.observability.metrics import record_call_ended, record_inbound_event
+
+        record_inbound_event(failure_code, language=language)
+        record_call_ended(direction="inbound", outcome="failed", failure_code=failure_code, language=language)
+    except Exception:
+        logger.debug("declined-call metrics failed", exc_info=True)
+    if _settings is None:
+        return
+    try:
+        import aiosqlite
+
+        from pincer.voice.retention import ensure_voice_tables
+
+        now = datetime.now(UTC).isoformat()
+        async with aiosqlite.connect(str(_settings.db_path)) as db:
+            await ensure_voice_tables(db)
+            await db.execute(
+                "INSERT OR REPLACE INTO voice_calls (call_sid, direction, from_number, to_number, started_at, "
+                "ended_at, failure_code, engine, language) VALUES (?, 'inbound', ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    call_sid,
+                    caller,
+                    str(getattr(_settings, "twilio_phone_number", "") or ""),
+                    now,
+                    now,
+                    failure_code,
+                    str(getattr(_settings, "voice_engine", "") or ""),
+                    language,
+                ),
+            )
+            await db.commit()
+    except Exception:
+        logger.debug("declined-call row failed [%s]", call_sid, exc_info=True)
+
+
+@twilio_router.post("/transfer-result")
+async def voice_transfer_result(request: Request) -> Response:
+    """Sprint 12 §8.4: <Dial action> callback after a receptionist transfer.
+
+    completed → nothing to do (Twilio hangs up after the bridged leg). Anything
+    else (busy / no-answer / failed / canceled) → apology + message-taking:
+    the call is reconnected to the relay with the apology as its greeting and
+    the session already in TAKE_MESSAGE (name question asked)."""
+    if await _authenticate(request) is None:
+        return _forbidden()
+    form = await request.form()
+    call_sid = str(form.get("CallSid", ""))
+    dial_status = str(form.get("DialCallStatus", "")).lower()
+    logger.info("Transfer result [%s]: %s", call_sid, dial_status or "-")
+    if dial_status == "completed" or not _engine or not _settings:
+        return _twiml_response("<Response><Hangup/></Response>")
+
+    from xml.sax.saxutils import escape
+
+    from pincer.voice.twiml_builder import build_connect_twiml
+
+    state = _engine.get_call_state(call_sid)
+    session = _transfer_session_lookup(call_sid)
+    language = str(getattr(state, "language", "") or "en")
+    greeting = ""
+    if session is not None:
+        greeting = await session.on_transfer_failed()
+    twiml = build_connect_twiml(_settings, call_sid=call_sid, direction="inbound", language=language)
+    if greeting:
+        # Replace the welcome greeting with the apology + first question
+        import re as _re
+
+        escaped = escape(greeting, {'"': "&quot;"})
+        if "welcomeGreeting=" in twiml:
+            twiml = _re.sub(r'welcomeGreeting="[^"]*"', f'welcomeGreeting="{escaped}"', twiml, count=1)
+        else:
+            twiml = twiml.replace("<ConversationRelay ", f'<ConversationRelay welcomeGreeting="{escaped}" ', 1)
+    return _twiml_response(twiml)
+
+
+_transfer_session_resolver: Any = None
+
+
+def set_transfer_session_resolver(resolver: Any) -> None:
+    """Channel hook: call_sid → ReceptionSession (for the dial-result fallback)."""
+    global _transfer_session_resolver  # noqa: PLW0603
+    _transfer_session_resolver = resolver
+
+
+def _transfer_session_lookup(call_sid: str) -> Any:
+    if _transfer_session_resolver is None:
+        return None
+    try:
+        return _transfer_session_resolver(call_sid)
+    except Exception:
+        return None
+
+
 @twilio_router.post("/status")
 async def voice_status(request: Request) -> PlainTextResponse:
     """Call status callbacks (ringing, answered, completed) + AMD results."""
+    if await _authenticate(request) is None:
+        return PlainTextResponse("Forbidden", status_code=403)
+
     from pincer.voice.status_notify import notify_connected, notify_ended
 
     form = await request.form()
@@ -174,6 +335,13 @@ async def voice_status(request: Request) -> PlainTextResponse:
             }
             voicemail_reason = voicemail_reasons[user_lang]
             await notify_ended(call_sid, voicemail_reason)
+            # Appointment calls (Sprint 6): voicemail triggers the retry
+            # policy. Consumes the scheduling context BEFORE end_call so the
+            # post-call pipeline doesn't double-handle it.
+            if _settings is not None:
+                from pincer.voice.scheduling import handle_call_not_connected
+
+                await handle_call_not_connected(call_sid, "voicemail", _settings)
             if _engine:
                 await _engine.end_call(call_sid)
             return PlainTextResponse("OK")
@@ -205,6 +373,11 @@ async def voice_status(request: Request) -> PlainTextResponse:
             },
         }
         await notify_ended(call_sid, reasons[user_lang].get(status, status))
+        # Appointment calls (Sprint 6): busy/no-answer/failed triggers the retry policy
+        if _settings is not None:
+            from pincer.voice.scheduling import handle_call_not_connected
+
+            await handle_call_not_connected(call_sid, status, _settings)
         if _engine and _engine.get_call_state(call_sid):
             await _engine.end_call(call_sid)
 
@@ -223,6 +396,9 @@ async def voice_status(request: Request) -> PlainTextResponse:
 @twilio_router.post("/fallback")
 async def voice_fallback(request: Request) -> Response:
     """Error fallback — plays apology message in the call language, logs error."""
+    if await _authenticate(request) is None:
+        return _forbidden()
+
     form = await request.form()
     call_sid = str(form.get("CallSid", ""))
     error_code = str(form.get("ErrorCode", ""))
@@ -262,6 +438,9 @@ async def relay_ws(websocket: WebSocket) -> None:
     error); the engine speaks by sending {"type": "text", "token": ..., "last":
     true} back over this socket (ConversationRelayEngine.send_speech).
     """
+    if not await _authenticate_ws(websocket, "twilio_ws:relay", WS_RELAY_PATH):
+        return
+
     await websocket.accept()
 
     if not _engine:
@@ -285,6 +464,9 @@ async def relay_ws(websocket: WebSocket) -> None:
                 caller = str(msg.get("from", ""))
                 logger.info("ConversationRelay connected: %s from %s", call_sid, caller)
                 state = _engine.get_call_state(call_sid)
+                if state is not None:
+                    # back from a <Dial> transfer: the call is ours again
+                    state.metadata.pop("transferring", None)
                 if state is None:
                     # Outbound calls were placed via REST (voice/outbound.py);
                     # their target, purpose, and language are tracked there.
@@ -300,6 +482,8 @@ async def relay_ws(websocket: WebSocket) -> None:
                             target_number=info.target_number,
                             purpose=info.purpose,
                             language=info.language,
+                            target_name=info.target_name,
+                            instructions=info.instructions,
                         )
                     else:
                         state = await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
@@ -325,6 +509,19 @@ async def relay_ws(websocket: WebSocket) -> None:
     finally:
         if state is not None and state.metadata.get("websocket") is websocket:
             state.metadata.pop("websocket", None)
+            # socket gone = call over (inbound calls have no other end signal)
+            await _media_closed(call_sid)
+
+
+async def _media_closed(call_sid: str) -> None:
+    """Tell the engine the media session closed (idempotent)."""
+    hook = getattr(_engine, "on_media_closed", None) if _engine is not None and call_sid else None
+    if hook is None:
+        return
+    try:
+        await hook(call_sid)
+    except Exception:
+        logger.exception("on_media_closed failed [%s]", call_sid)
 
 
 # Consecutive Twilio-side TTS failures (error 64111, "Error converting tokens
@@ -372,6 +569,9 @@ async def _handle_relay_error(call_sid: str, msg: dict[str, Any]) -> None:
 @twilio_router.post("/relay-webhook")
 async def relay_webhook(request: Request) -> Response:
     """ConversationRelay text webhook — receives transcribed text, returns agent response."""
+    if await _authenticate(request) is None:
+        return _forbidden()
+
     if not _engine:
         return PlainTextResponse("Engine not initialized", status_code=503)
 
@@ -405,6 +605,8 @@ async def relay_webhook(request: Request) -> Response:
                     target_number=info.target_number,
                     purpose=info.purpose,
                     language=info.language,
+                    target_name=info.target_name,
+                    instructions=info.instructions,
                 )
             else:
                 await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
@@ -422,6 +624,9 @@ async def relay_webhook(request: Request) -> Response:
 @twilio_router.websocket("/stream/{call_sid}")
 async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
     """Media Streams WebSocket endpoint — bidirectional raw audio."""
+    if not await _authenticate_ws(websocket, "twilio_ws:stream", WS_STREAM_PATH):
+        return
+
     await websocket.accept()
     logger.info("Media stream connected: %s", call_sid)
 
@@ -445,6 +650,8 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
                 target_number=info.target_number,
                 purpose=info.purpose,
                 language=info.language,
+                target_name=info.target_name,
+                instructions=info.instructions,
             )
     if state:
         state.metadata["websocket"] = websocket
@@ -490,6 +697,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
         if state:
             state.metadata.pop("websocket", None)
             state.metadata.pop("stream_sid", None)
+            await _media_closed(call_sid)
 
 
 # ── Deprecated /voice/* aliases ───────────────────────────────────────────────

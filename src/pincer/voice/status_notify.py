@@ -33,6 +33,8 @@ class _OutboundCallInfo:
     purpose: str = ""
     target_number: str = ""
     language: str = ""
+    target_name: str = ""
+    instructions: str = ""
     notified_stages: set[str] = field(default_factory=set)
 
 
@@ -54,8 +56,11 @@ def register_outbound_call(
     purpose: str = "",
     target_number: str = "",
     language: str = "",
+    target_name: str = "",
+    instructions: str = "",
 ) -> None:
-    """Track an outbound call so status updates can reach its initiating user."""
+    """Track an outbound call so status updates can reach its initiating user
+    (name and instructions ride along into the call prompt)."""
     if not call_sid or not user_id:
         return
     _outbound_calls[call_sid] = _OutboundCallInfo(
@@ -64,6 +69,8 @@ def register_outbound_call(
         purpose=purpose,
         target_number=target_number,
         language=language,
+        target_name=target_name,
+        instructions=instructions,
     )
     while len(_outbound_calls) > _MAX_TRACKED:
         _outbound_calls.pop(next(iter(_outbound_calls)), None)
@@ -87,6 +94,19 @@ def get_call_info(call_sid: str) -> _OutboundCallInfo | None:
 def clear_call(call_sid: str) -> None:
     """Stop tracking a call (after its final message has been delivered)."""
     _outbound_calls.pop(call_sid, None)
+
+
+async def send_user_message(user_id: str, channel: str, text: str) -> bool:
+    """Deliver a one-off message through the installed notifier, outside the
+    per-call stage tracking (used by the appointment retry policy, whose
+    updates span several call SIDs)."""
+    if _notifier is None or not user_id:
+        return False
+    try:
+        return await _notifier(user_id, channel, text)
+    except Exception:
+        logger.exception("Direct user notify failed [%s]", user_id)
+        return False
 
 
 async def notify_stage(call_sid: str, stage: str, text: str) -> bool:

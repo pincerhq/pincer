@@ -16,7 +16,7 @@ import openai
 from openai import AsyncOpenAI
 
 from pincer.exceptions import LLMError, LLMRateLimitError
-from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, ToolCall
+from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -31,8 +31,22 @@ logger = logging.getLogger(__name__)
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
+# OpenAI rejects requests with more than 128 tools (error 400,
+# array_above_max_length) — Anthropic has no such cap, so callers sized for
+# the full registry must be truncated here rather than fail every request.
+OPENAI_MAX_TOOLS = 128
+
+
 def convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert Anthropic-style tool defs to OpenAI function-calling format."""
+    if len(tools) > OPENAI_MAX_TOOLS:
+        logger.warning(
+            "%d tools exceed OpenAI's %d-tool limit — sending the first %d and dropping the rest",
+            len(tools),
+            OPENAI_MAX_TOOLS,
+            OPENAI_MAX_TOOLS,
+        )
+        tools = tools[:OPENAI_MAX_TOOLS]
     oai_tools: list[dict[str, Any]] = []
     for tool in tools:
         oai_tools.append(
@@ -174,6 +188,17 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
 
+    # OpenAI reasoning models reject `max_tokens` (want `max_completion_tokens`)
+    # and any non-default temperature.
+    _REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+    def _normalize_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        model = str(kwargs.get("model", ""))
+        if model.startswith(self._REASONING_MODEL_PREFIXES):
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+            kwargs.pop("temperature", None)
+        return kwargs
+
     async def complete(
         self,
         messages: list[LLMMessage],
@@ -192,6 +217,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         }
         if tools:
             kwargs["tools"] = convert_tools_to_openai(tools)
+        self._normalize_kwargs(kwargs)
 
         try:
             response = await self._call_with_retry(kwargs)
@@ -223,6 +249,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         }
         if tools:
             kwargs["tools"] = convert_tools_to_openai(tools)
+        self._normalize_kwargs(kwargs)
 
         try:
             stream = await self._client.chat.completions.create(**kwargs)
@@ -234,6 +261,91 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             raise LLMRateLimitError(retry_after=5.0) from e
         except openai.APIStatusError as e:
             raise LLMError(f"{self._provider_name} stream error: {e.status_code}") from e
+
+    async def stream_turn(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        system: str | None = None,
+    ) -> AsyncIterator[StreamTurnEvent]:
+        """True single-generation streaming (Sprint 5): content deltas are
+        yielded as they arrive; tool-call deltas are assembled across chunks
+        and returned with usage in the final event — same contract as the
+        Anthropic implementation, so the voice pipeline can run either."""
+        api_messages = convert_messages_to_openai(messages, system)
+        kwargs: dict[str, Any] = {
+            "model": model or self._default_model,
+            "max_tokens": max_tokens or self._default_max_tokens,
+            "temperature": temperature if temperature is not None else self._default_temperature,
+            "messages": api_messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs["tools"] = convert_tools_to_openai(tools)
+        self._normalize_kwargs(kwargs)
+
+        text_parts: list[str] = []
+        tool_accum: dict[int, dict[str, str]] = {}
+        finish_reason = ""
+        model_name = ""
+        usage: Any = None
+
+        try:
+            stream = await self._client.chat.completions.create(**kwargs)
+            async for chunk in stream:
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage
+                model_name = getattr(chunk, "model", "") or model_name
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if delta and delta.content:
+                    text_parts.append(delta.content)
+                    yield StreamTurnEvent(text=delta.content)
+                if delta and delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        slot = tool_accum.setdefault(tc.index, {"id": "", "name": "", "args": ""})
+                        if tc.id:
+                            slot["id"] = tc.id
+                        if tc.function and tc.function.name:
+                            slot["name"] += tc.function.name
+                        if tc.function and tc.function.arguments:
+                            slot["args"] += tc.function.arguments
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+        except openai.RateLimitError as e:
+            raise LLMRateLimitError(retry_after=5.0) from e
+        except openai.APIStatusError as e:
+            raise LLMError(f"{self._provider_name} stream error: {e.status_code}") from e
+        except openai.APIConnectionError as e:
+            raise LLMError(f"{self._provider_name} connection error: {e}") from e
+
+        tool_calls: list[ToolCall] = []
+        for index in sorted(tool_accum):
+            slot = tool_accum[index]
+            try:
+                arguments = json.loads(slot["args"]) if slot["args"] else {}
+            except json.JSONDecodeError:
+                logger.warning("Unparseable streamed tool arguments for %s — using {}", slot["name"])
+                arguments = {}
+            tool_calls.append(ToolCall(id=slot["id"] or f"call_{index}", name=slot["name"], arguments=arguments))
+
+        yield StreamTurnEvent(
+            response=LLMResponse(
+                content="".join(text_parts),
+                tool_calls=tool_calls,
+                model=model_name,
+                provider=self._provider_name,
+                input_tokens=getattr(usage, "prompt_tokens", 0) or 0,
+                output_tokens=getattr(usage, "completion_tokens", 0) or 0,
+                stop_reason=finish_reason,
+            )
+        )
 
     async def close(self) -> None:
         await self._client.close()

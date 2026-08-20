@@ -93,6 +93,9 @@ class SessionManager:
     async def initialize(self) -> None:
         await asyncio.to_thread(ensure_schema_current, self._db_path)
         self._db = await aiosqlite.connect(str(self._db_path))
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA busy_timeout=5000")
+
 
     async def close(self) -> None:
         for session in self._cache.values():

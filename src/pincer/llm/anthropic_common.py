@@ -25,6 +25,7 @@ from pincer.llm.base import (
     LLMMessage,
     LLMResponse,
     MessageRole,
+    StreamTurnEvent,
     ToolCall,
 )
 
@@ -64,6 +65,19 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         self._default_max_tokens = settings.max_tokens
         self._default_temperature = settings.temperature
 
+    def _maybe_cache_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Prompt caching (Sprint 5, T5.4): the tool schemas are the largest
+        and fully static prefix of every request — a cache_control breakpoint
+        on the last tool caches the whole tools block across turns, cutting
+        time-to-first-token dramatically on multi-turn conversations. The
+        varying parts (system with per-turn phase/memories, messages) come
+        after the breakpoint and don't invalidate it."""
+        if not getattr(self._settings, "prompt_cache_tools", True):
+            return tools
+        cached = list(tools)
+        cached[-1] = {**cached[-1], "cache_control": {"type": "ephemeral"}}
+        return cached
+
     async def complete(
         self,
         messages: list[LLMMessage],
@@ -83,7 +97,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         if system:
             kwargs["system"] = system
         if tools:
-            kwargs["tools"] = tools
+            kwargs["tools"] = self._maybe_cache_tools(tools)
 
         try:
             response: Message = await self._call_with_retry(kwargs)
@@ -115,7 +129,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         if system:
             kwargs["system"] = system
         if tools:
-            kwargs["tools"] = tools
+            kwargs["tools"] = self._maybe_cache_tools(tools)
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:
@@ -126,6 +140,47 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             raise LLMRateLimitError(retry_after=retry_after) from e
         except anthropic.APIStatusError as e:
             raise LLMError(f"Anthropic stream error: {e.status_code}") from e
+
+    async def stream_turn(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        system: str | None = None,
+    ) -> AsyncIterator[StreamTurnEvent]:
+        """True single-generation streaming (Sprint 5): text deltas arrive as
+        the model writes; the final message (tool calls + usage) comes from the
+        same stream — tools are never lost, nothing is generated twice."""
+        api_messages = self._convert_messages(messages)
+        kwargs: dict[str, Any] = {
+            "model": model or self._default_model,
+            "max_tokens": max_tokens or self._default_max_tokens,
+            "temperature": temperature if temperature is not None else self._default_temperature,
+            "messages": api_messages,
+        }
+        if system:
+            kwargs["system"] = system
+        if tools:
+            kwargs["tools"] = self._maybe_cache_tools(tools)
+
+        try:
+            async with self._client.messages.stream(**kwargs) as stream:
+                async for text in stream.text_stream:
+                    yield StreamTurnEvent(text=text)
+                final: Message = await stream.get_final_message()
+        except anthropic.RateLimitError as e:
+            retry_after = float(e.response.headers.get("retry-after", "5"))
+            raise LLMRateLimitError(retry_after=retry_after) from e
+        except anthropic.APIStatusError as e:
+            raise LLMError(f"Anthropic stream error: {e.status_code}") from e
+        except anthropic.APIConnectionError as e:
+            raise LLMError(f"Anthropic connection error: {e}") from e
+
+        result = self._parse_response(final)
+        result.provider = self._provider_name
+        yield StreamTurnEvent(response=result)
 
     async def close(self) -> None:
         await self._client.close()
@@ -331,4 +386,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
             stop_reason=response.stop_reason or "",
+            # Cache visibility (Sprint 5): whether the tools-prefix cache hit
+            cache_read_tokens=int(getattr(response.usage, "cache_read_input_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0),
         )

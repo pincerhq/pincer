@@ -56,6 +56,7 @@ class CallState:
     target_number: str = ""
     target_name: str = ""
     purpose: str = ""
+    instructions: str = ""  # extra guidance from the user, shown to the agent on the call
     language: str = "en"
     engine_type: str = "conversation_relay"
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -84,6 +85,10 @@ class VoiceEngine(ABC):
         self._active_calls: dict[str, CallState] = {}
         self._on_speech_callback: Callable | None = None
         self._on_call_end_callback: Callable | None = None
+        # Sprint 12: lets the channel start per-call tracking (silence rule,
+        # receptionist session) the moment a call is registered, not on the
+        # first caller utterance.
+        self._on_call_start_callback: Callable | None = None
         # Optional VoiceMetricsRegistry, injected by VoiceChannel.set_engine
         self.metrics_registry: Any = None
 
@@ -92,6 +97,9 @@ class VoiceEngine(ABC):
 
     def set_on_call_end(self, callback: Callable) -> None:
         self._on_call_end_callback = callback
+
+    def set_on_call_start(self, callback: Callable) -> None:
+        self._on_call_start_callback = callback
 
     @abstractmethod
     async def on_call_start(
@@ -103,23 +111,37 @@ class VoiceEngine(ABC):
         target_name: str = "",
         purpose: str = "",
         language: str = "",
+        instructions: str = "",
     ) -> CallState: ...
 
     @abstractmethod
     async def on_speech_input(self, call_sid: str, text_or_audio: Any) -> None: ...
 
     @abstractmethod
-    async def send_speech(self, call_sid: str, text_or_audio: Any) -> bool:
+    async def send_speech(self, call_sid: str, text_or_audio: Any, *, last: bool = True) -> bool:
         """Speak on the call. Returns True only when the audio was actually
         handed to the transport — a False return means the caller heard
-        nothing (transcripts must record that honestly)."""
+        nothing (transcripts must record that honestly).
+
+        ``last=False`` marks a partial utterance in a streamed turn (Sprint 5):
+        ConversationRelay buffers tokens until a ``last=True`` token closes the
+        reply; engines with per-utterance synthesis ignore the flag."""
         ...
 
     @abstractmethod
     async def interrupt_speech(self, call_sid: str) -> None: ...
 
     @abstractmethod
-    async def transfer_call(self, call_sid: str, target_number: str) -> None: ...
+    async def transfer_call(
+        self,
+        call_sid: str,
+        target_number: str,
+        *,
+        timeout_s: int = 30,
+        action_url: str = "",
+        announce: str = "",
+        language: str = "",
+    ) -> None: ...
 
     @abstractmethod
     async def end_call(self, call_sid: str) -> None: ...
@@ -133,6 +155,22 @@ class VoiceEngine(ABC):
     @abstractmethod
     async def close_media_stream(self, call_sid: str) -> None:
         """Override in MediaStreamEngine to close STT stream and consumer."""
+
+    async def on_media_closed(self, call_sid: str) -> None:
+        """The media WebSocket closed: the call is over on Twilio's side.
+
+        Inbound calls get no status callback unless one is configured in the
+        console, so this is their end signal. No-op if we already ended the
+        call or it is being transferred; never issues a REST hangup.
+        """
+        state = self._active_calls.get(call_sid)
+        if state is None or state.metadata.get("transferring"):
+            return
+        logger.info("Media session closed by Twilio [%s] — ending call", call_sid)
+        await self.close_media_stream(call_sid)
+        ended = await self._unregister_call(call_sid)
+        if ended and self._on_call_end_callback:
+            await self._on_call_end_callback(call_sid, ended)
 
     def get_active_calls(self) -> dict[str, CallState]:
         return dict(self._active_calls)
@@ -180,6 +218,7 @@ class VoiceEngine(ABC):
         target_name: str = "",
         purpose: str = "",
         language: str = "",
+        instructions: str = "",
     ) -> CallState:
         from pincer.voice.language import resolve_call_language
 
@@ -190,11 +229,17 @@ class VoiceEngine(ABC):
             target_number=target_number,
             target_name=target_name,
             purpose=purpose,
+            instructions=instructions,
             language=resolve_call_language(self._settings, language),
             engine_type=self.engine_name,
         )
         self._active_calls[call_sid] = state
         logger.info("Call registered: %s (%s) from %s, language=%s", call_sid, direction, caller, state.language)
+        if self._on_call_start_callback is not None:
+            try:
+                await self._on_call_start_callback(call_sid, state)
+            except Exception:
+                logger.exception("on_call_start callback failed [%s]", call_sid)
         return state
 
     async def _unregister_call(self, call_sid: str) -> CallState | None:
@@ -211,6 +256,28 @@ class VoiceEngine(ABC):
     @property
     @abstractmethod
     def engine_name(self) -> str: ...
+
+
+def build_dial_twiml(
+    target_number: str,
+    *,
+    timeout_s: int = 30,
+    action_url: str = "",
+    announce: str = "",
+    language: str = "",
+) -> str:
+    """<Response>[<Say>announce</Say>]<Dial timeout=".." action="..">+49…</Dial></Response>.
+
+    The announcement rides in the same TwiML (Twilio's <Say>) so it cannot be
+    cut off by the redirect — the relay socket is gone the moment the call is
+    updated."""
+    from xml.sax.saxutils import escape
+
+    from pincer.voice.language import relay_language
+
+    say = f'<Say language="{relay_language(language or "en")}">{escape(announce)}</Say>' if announce else ""
+    action = f' action="{escape(action_url, {chr(34): "&quot;"})}" method="POST"' if action_url else ""
+    return f'<Response>{say}<Dial timeout="{int(timeout_s)}"{action}>{escape(target_number)}</Dial></Response>'
 
 
 class ConversationRelayEngine(VoiceEngine):
@@ -233,6 +300,7 @@ class ConversationRelayEngine(VoiceEngine):
         target_name: str = "",
         purpose: str = "",
         language: str = "",
+        instructions: str = "",
     ) -> CallState:
         state = await self._register_call(
             call_sid,
@@ -242,6 +310,7 @@ class ConversationRelayEngine(VoiceEngine):
             target_name,
             purpose,
             language,
+            instructions,
         )
         logger.info("ConversationRelay call started: %s", call_sid)
         return state
@@ -258,11 +327,13 @@ class ConversationRelayEngine(VoiceEngine):
         if self._on_speech_callback:
             await self._on_speech_callback(call_sid, text)
 
-    async def send_speech(self, call_sid: str, text_or_audio: Any) -> bool:
+    async def send_speech(self, call_sid: str, text_or_audio: Any, *, last: bool = True) -> bool:
         """Send text response — Twilio converts to speech.
 
         Returns True only when the token was handed to the ConversationRelay
         WebSocket; a False return means the caller heard nothing.
+        ``last=False`` streams a partial sentence of the current reply
+        (Sprint 5): CR synthesizes it immediately while the LLM keeps writing.
         """
         text = str(text_or_audio)
         state = self._active_calls.get(call_sid)
@@ -273,7 +344,12 @@ class ConversationRelayEngine(VoiceEngine):
         delivered = False
         ws = state.metadata.get("websocket")
         if ws:
-            msg = json.dumps({"type": "text", "token": text, "last": True})
+            from pincer.voice.language import relay_language
+
+            # Per-token language attribute pins TTS to the call language
+            # (state.language is the single source of truth; it only changes
+            # via language_guard.perform_switch on explicit caller request).
+            msg = json.dumps({"type": "text", "token": text, "last": last, "lang": relay_language(state.language)})
             try:
                 await ws.send_text(msg)
                 delivered = True
@@ -290,7 +366,23 @@ class ConversationRelayEngine(VoiceEngine):
         # is an invalid CR message (Twilio error 64107) — nothing to send.
         logger.debug("CR interrupt [%s]", call_sid)
 
-    async def transfer_call(self, call_sid: str, target_number: str) -> None:
+    async def transfer_call(
+        self,
+        call_sid: str,
+        target_number: str,
+        *,
+        timeout_s: int = 30,
+        action_url: str = "",
+        announce: str = "",
+        language: str = "",
+    ) -> None:
+        """Redirect the live call into <Dial>. With ``action_url`` (Sprint 12
+        receptionist) Twilio reports the dial result there, so a busy / no-answer
+        target can fall back to message-taking instead of dropping the caller."""
+        # the media socket closes on the <Dial> redirect; that is not a hangup
+        live = self._active_calls.get(call_sid)
+        if live is not None:
+            live.metadata["transferring"] = True
         try:
             from twilio.rest import Client
 
@@ -299,7 +391,9 @@ class ConversationRelayEngine(VoiceEngine):
                 self._settings.twilio_auth_token.get_secret_value(),
             )
             call = client.calls(call_sid)
-            twiml = f"<Response><Dial>{target_number}</Dial></Response>"
+            twiml = build_dial_twiml(
+                target_number, timeout_s=timeout_s, action_url=action_url, announce=announce, language=language
+            )
             call.update(twiml=twiml)
             logger.info("Call %s transferred to %s", call_sid, target_number)
         except Exception:
@@ -393,6 +487,7 @@ class MediaStreamEngine(VoiceEngine):
         target_name: str = "",
         purpose: str = "",
         language: str = "",
+        instructions: str = "",
     ) -> CallState:
         await self._ensure_providers()
         state = await self._register_call(
@@ -403,6 +498,7 @@ class MediaStreamEngine(VoiceEngine):
             target_name,
             purpose,
             language,
+            instructions,
         )
         logger.info("MediaStream call started: %s", call_sid)
         return state
@@ -421,7 +517,7 @@ class MediaStreamEngine(VoiceEngine):
 
         from pincer.voice.stt import stt_config_for_language
 
-        config = stt_config_for_language(state.language)
+        config = stt_config_for_language(state.language, self._settings)
         stt_stream = await self._stt_provider.start_stream(config)
         state.metadata["stt_stream"] = stt_stream
 
@@ -530,12 +626,14 @@ class MediaStreamEngine(VoiceEngine):
         if stt_stream:
             await stt_stream.send_audio(pcm_16k)
 
-    async def send_speech(self, call_sid: str, text_or_audio: Any) -> bool:
+    async def send_speech(self, call_sid: str, text_or_audio: Any, *, last: bool = True) -> bool:
         """Synthesize text to speech and send audio to Twilio.
 
         T4.5: a failed synthesis is retried once; a second failure takes the
         fallback path (spoken apology via Twilio <Say>, graceful hangup) —
         never dead air. Returns True only when audio was streamed.
+        ``last`` is accepted for interface parity (Sprint 5 streaming) — each
+        utterance is synthesized independently here, so it is a no-op.
         """
         state = self._active_calls.get(call_sid)
         if not state:
@@ -624,7 +722,20 @@ class MediaStreamEngine(VoiceEngine):
 
         logger.debug("MS interrupt [%s]", call_sid)
 
-    async def transfer_call(self, call_sid: str, target_number: str) -> None:
+    async def transfer_call(
+        self,
+        call_sid: str,
+        target_number: str,
+        *,
+        timeout_s: int = 30,
+        action_url: str = "",
+        announce: str = "",
+        language: str = "",
+    ) -> None:
+        # the media socket closes on the <Dial> redirect; that is not a hangup
+        live = self._active_calls.get(call_sid)
+        if live is not None:
+            live.metadata["transferring"] = True
         try:
             from twilio.rest import Client
 
@@ -632,7 +743,9 @@ class MediaStreamEngine(VoiceEngine):
                 self._settings.twilio_account_sid,
                 self._settings.twilio_auth_token.get_secret_value(),
             )
-            twiml = f"<Response><Dial>{target_number}</Dial></Response>"
+            twiml = build_dial_twiml(
+                target_number, timeout_s=timeout_s, action_url=action_url, announce=announce, language=language
+            )
             client.calls(call_sid).update(twiml=twiml)
             logger.info("Call %s transferred to %s", call_sid, target_number)
         except Exception:

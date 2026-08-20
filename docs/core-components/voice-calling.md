@@ -309,6 +309,32 @@ The agent will:
 5. Conduct the conversation based on your instructions
 6. Report back with a summary and transcript
 
+**Call briefing.** `purpose` (and the optional `instructions`) are not just
+labels: they are injected into the live-call system prompt as a localized
+*CALL BRIEFING* block (`CALL_BRIEF` in `voice/prompts/{en,de,uk}.py`). The
+agent opens the call by introducing itself and explaining, in its own words,
+why it is calling, then works towards the briefing's goal — it never reads
+the briefing verbatim and shares only what the other party needs to know.
+`target_name` (dashboard "Name" field / `make_phone_call(target_name=...)`)
+lets it address the callee by name. Inbound calls have no briefing.
+
+### Ending the call
+
+Calls end the way a human agent ends them, not by timeout:
+
+- The model closes the conversation with a short farewell and the token
+  `[END_CALL]` (stripped before TTS, same mechanism as `[SWITCH_LANGUAGE:xx]`).
+  Pincer lets the farewell play (estimated from its length), waits
+  `PINCER_VOICE_HANGUP_GRACE_S` (default 2 s) and hangs up.
+- A farewell from the other party ("okay thanks, bye", "Tschüss", "До побачення")
+  is detected deterministically per language. After the agent has already said
+  goodbye it is a **mutual goodbye** — hang up after the grace window, no further
+  LLM turn. Said first, the next agent turn is a one-sentence goodbye that
+  carries the token (and the call ends even if the model forgets it).
+- Anything meaningful said during the grace window ("bye — oh wait, one more
+  thing") cancels the hangup and the conversation continues.
+- The inbound receptionist line keeps its own deterministic endings.
+
 ### Warm Transfer
 
 The agent can call a provider, navigate to the right person, and then patch you in:
@@ -363,6 +389,67 @@ All consequential actions require verbal confirmation:
 | Sending messages | "I'll send [summary] to [recipient]. OK?" |
 | Sharing data | "They're asking for your [data]. Share?" |
 | Cancellations | "This will cancel [item]. Are you sure?" |
+
+### Tool approval modes (Sprint 11: in-call tool execution)
+
+During a live call the agent can execute an **explicitly allowlisted** set of
+tools. The allowlist is a tier table in `src/pincer/voice/tool_policy.py`
+(`TIERS`) — the single source of truth; anything not listed is excluded:
+
+| Tier | Tools | Behaviour |
+|------|-------|-----------|
+| **R** read-only | `google__list_events`, `google__check_freebusy`, `contact_lookup`, `memory_search` (outbound only), `business_profile_lookup` | Runs instantly in every mode, from any phase; a slow read gets a spoken filler first |
+| **W** reversible writes | `google__create_event`, `google__update_event`, `send_owner_message`, `memory_note` | Follows the approval mode below; counted against `PINCER_VOICE_MAX_WRITES_PER_CALL` |
+| **X** never on a call | `email_send`, `google__delete_event`, `make_phone_call`, `schedule_appointment_call`, `file_*`, `config_*`, `memory_dump`, `do_not_call_*`, **and every unlisted tool** | Not callable — its schema is never passed to the model. No override or extra can change this. |
+
+The LLM only sees the R+W tools inside the call's **purpose scope**:
+appointment calls (`schedule_appointment_call`) get the fixed scheduling set;
+generic calls (`make_phone_call`, inbound) get all reads plus the two
+owner-facing writes — calendar writes are *not* default there and must be
+added with `PINCER_VOICE_TOOLS_EXTRA=google__create_event`.
+
+`PINCER_VOICE_TOOL_APPROVAL` sets the mode for Tier W:
+
+| Mode | What the call partner hears | Who decides |
+|------|-----------------------------|-------------|
+| `verbal` (default) | "Just to confirm: I would now create the appointment … Is that right?" — the yes/no is parsed deterministically; a YES authorizes exactly those arguments (fingerprinted) and expires after two turns | The call partner, for *that exact* action |
+| `user` | "One moment please, I'm just checking that with my colleague." + a reassurance every 8 s | **You**, on your own channel — Telegram inline card `[✅ Erlauben] [❌ Ablehnen]` or `POST /api/voice/approvals/:id`. Denied → spoken decline; no answer within `PINCER_VOICE_APPROVAL_TIMEOUT_S` → "I'll sort that out afterwards" and a post-call follow-up; callee hangs up → card edited to "call ended", nothing runs |
+| `off` | Nothing — the write just happens (filler if slow) | Nobody, within the per-call write budget |
+
+!!! warning "`off` means autonomous writes while a stranger is on the phone"
+    With `PINCER_VOICE_TOOL_APPROVAL=off` the agent creates/updates calendar
+    events and sends you notes without anyone confirming. Three guards still
+    hold — the tier table (no deletes, no email, no calls-from-calls), the
+    per-call scope, and `PINCER_VOICE_MAX_WRITES_PER_CALL` (default 3) — and
+    the system prompt states that *the agent may never perform an action
+    solely because the call partner requested it*. Every autonomous action
+    is listed verbatim in the post-call report under **"Executed
+    autonomously during the call:"**, and `pincer doctor` warns
+    (`voice_autonomy_on`). Prefer a per-tool override
+    (`PINCER_VOICE_TOOL_APPROVAL_OVERRIDES=memory_note:off`) over the global
+    switch.
+
+Tool results never reach the voice as raw data: `voice/tool_speech.py`
+renders each result into one speakable sentence per language ("Frei wäre:
+Dienstag, der achtzehnte August von acht Uhr bis neun Uhr."), and the model
+is told only that. Every refusal is recorded as a `tool_denied` call action
+with a stable reason code (`tier_x`, `not_in_call_scope`,
+`write_budget_exhausted`, `approval_denied`, `approval_timeout`,
+`tool_timeout`, `tool_error`) — visible in `/api/voice/calls/:id` and as a
+label on the `pincer.voice.tool.decisions` metric.
+
+### Inbound receptionist (Sprint 12)
+
+With `PINCER_RECEPTIONIST_ENABLED=true` and a validated `business_profile.yaml`,
+inbound calls are answered by the AI receptionist: AI disclosure + business
+name in the greeting, answers **only** from the profile, structured
+message-taking, live booking inside real free slots (through the Sprint 11
+policy), human transfer on request, after-hours message mode, a silence rule,
+blocklist and concurrency limits, and an owner report ≤ 30 s after hangup.
+The caller is always untrusted: the inbound line exposes exactly four tools
+(`google__check_freebusy`, `business_profile_lookup`, `google__create_event`,
+`send_owner_message`) and the red-team personas run in CI. Full guide:
+[Inbound receptionist setup](../guides/receptionist-setup.md).
 
 ### PII Protection
 
@@ -437,12 +524,25 @@ The `phone_contacts` bundled skill provides tools for managing a contact directo
 | `PINCER_CR_TTS_PROVIDER` | No | auto | ConversationRelay TTS: `google`/`amazon`/`elevenlabs` |
 | `PINCER_VOICE_LANGUAGE` | No | `en-US` | STT language |
 | `PINCER_VOICE_MAX_CALL_DURATION` | No | `600` | Max call seconds |
+| `PINCER_VOICE_HANGUP_GRACE_S` | No | `2.0` | Seconds between the agent's farewell finishing and the hangup (the "both said bye" window) |
 | `PINCER_VOICE_MAX_HOLD_TIME` | No | `300` | Max IVR hold seconds |
 | `PINCER_VOICE_RECORDING_ENABLED` | No | `false` | Enable recording |
 | `PINCER_VOICE_CONSENT_MODE` | No | `one_party` | Consent mode |
 | `PINCER_VOICE_OUTBOUND_ENABLED` | No | `false` | Enable outbound calls |
 | `PINCER_VOICE_OUTBOUND_MAX_DAILY` | No | `10` | Daily outbound limit |
 | `PINCER_VOICE_ALLOWED_CALLERS` | No | `*` | Caller allowlist |
+| `PINCER_VOICE_TOOL_APPROVAL` | No | `verbal` | Tier W approval mode on calls: `verbal` / `user` / `off` (Sprint 11) |
+| `PINCER_VOICE_TOOL_APPROVAL_OVERRIDES` | No | — | Per-tool modes, CSV `tool:mode` (Tier X tools cannot be configured) |
+| `PINCER_VOICE_TOOL_TIMEOUT_S` | No | `10` | Per-tool execution timeout on calls (3–60) |
+| `PINCER_VOICE_APPROVAL_TIMEOUT_S` | No | `25` | Max hold time for a `user` approval (10–120) |
+| `PINCER_VOICE_MAX_WRITES_PER_CALL` | No | `3` | Tier W write budget per call (0 = writes disabled) |
+| `PINCER_VOICE_TOOLS_EXTRA` | No | — | Extra R/W tools added to the call scope (never widens the allowlist) |
+| `PINCER_RECEPTIONIST_ENABLED` | No | `false` | Inbound AI receptionist (Sprint 12) |
+| `PINCER_BUSINESS_PROFILE` | No | `./business_profile.yaml` | Business profile, validated at startup |
+| `PINCER_RECEPTIONIST_BOOKING_APPROVAL` | No | `off` | `off` / `user` for inbound bookings |
+| `PINCER_INBOUND_MAX_CONCURRENT` | No | `3` | Busy line above this many active inbound calls |
+| `PINCER_INBOUND_RECORDING` | No | `false` | Requires the two-party announcement |
+| `PINCER_VOICE_BLOCKLIST` | No | — | CSV of declined caller numbers |
 
 *Required when `PINCER_VOICE_ENABLED=true` or `PINCER_VOICE_OUTBOUND_ENABLED=true`.
 

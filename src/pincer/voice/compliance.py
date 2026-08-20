@@ -336,7 +336,26 @@ def build_intro_text(settings: Settings, language: str = "en") -> str:
     return text + "."
 
 
-def build_call_opening(settings: Settings, remote_number: str, language: str = "") -> str:
+def build_receptionist_opening(settings: Settings, language: str = "") -> str:
+    """Sprint 12 §7.1: the receptionist greeting (AI disclosure + business name,
+    after-hours note + first question when closed). With
+    PINCER_INBOUND_RECORDING=true the two-party recording announcement is
+    spoken BEFORE the greeting. '' when the receptionist is not active."""
+    from pincer.voice.receptionist.profile import get_profile, receptionist_active
+    from pincer.voice.receptionist.session import opening_text
+
+    profile = get_profile()
+    if profile is None or not receptionist_active(settings):
+        return ""
+    lang = language.strip().lower()[:2] if language else profile.default_language
+    greeting, _is_open = opening_text(profile, lang)
+    if bool(getattr(settings, "inbound_recording", False)):
+        announcement = get_consent_announcement(ConsentMode.TWO_PARTY, "", language=lang, recording=True)
+        return f"{announcement} {greeting}".strip()
+    return greeting
+
+
+def build_call_opening(settings: Settings, remote_number: str, language: str = "", direction: str = "") -> str:
     """Full spoken call opening: introduction, then consent/AI-disclosure.
 
     The introduction plays regardless of consent mode; the consent announcement
@@ -344,8 +363,15 @@ def build_call_opening(settings: Settings, remote_number: str, language: str = "
     configured, the separate AI-disclosure line is skipped — the introduction
     already discloses the AI assistant. ``language`` (per-call, Sprint 2)
     overrides the settings/jurisdiction-based language when given.
+
+    Sprint 12: for inbound calls with the receptionist active, the opening IS
+    the receptionist greeting (§7.1) — never the outbound-style introduction.
     """
     language = language.strip().lower()[:2] if language else resolve_consent_language(settings, remote_number)
+    if direction and direction != "outbound":
+        receptionist = build_receptionist_opening(settings, language)
+        if receptionist:
+            return receptionist
     intro = build_intro_text(settings, language)
 
     mode = get_consent_mode(settings, remote_number)
@@ -357,7 +383,7 @@ def build_call_opening(settings: Settings, remote_number: str, language: str = "
     return " ".join(part for part in (intro, announcement) if part)
 
 
-def build_consent_say_twiml(settings: Settings, remote_number: str, language: str = "") -> str:
+def build_consent_say_twiml(settings: Settings, remote_number: str, language: str = "", direction: str = "") -> str:
     """TwiML ``<Say>`` for the call opening (introduction + consent/disclosure).
 
     Played before ``<Connect>`` so it precedes the conversation. Returns ''
@@ -367,7 +393,7 @@ def build_consent_say_twiml(settings: Settings, remote_number: str, language: st
     """
     from xml.sax.saxutils import escape
 
-    text = build_call_opening(settings, remote_number, language=language)
+    text = build_call_opening(settings, remote_number, language=language, direction=direction)
     if not text:
         return ""
     resolved = language.strip().lower()[:2] if language else resolve_consent_language(settings, remote_number)

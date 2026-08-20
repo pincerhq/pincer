@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,29 @@ def validate_e164(number: str) -> str | None:
     return None
 
 
+async def _audit_block(decision: Any, number: str, user_id: str, channel: str) -> None:
+    """Record a gate-blocked dial attempt (best effort — never breaks the tool)."""
+    try:
+        from pincer.security.audit import AuditAction, AuditEntry, get_audit_logger
+        from pincer.voice.pii_guard import mask_phone_number
+
+        audit = await get_audit_logger()
+        await audit.log(
+            AuditEntry(
+                user_id=user_id or "unknown",
+                action=AuditAction.VOICE_CALL_BLOCKED,
+                tool="make_phone_call",
+                input_summary=f"blocked: {decision.reason}",
+                output_summary=mask_phone_number(number),
+                approved=False,
+                channel=channel or "voice",
+                metadata={"reason": str(decision.reason), "retry_after_min": decision.retry_after_min},
+            )
+        )
+    except Exception:  # pragma: no cover — auditing must not break the gate
+        logger.debug("Audit logging of blocked call failed", exc_info=True)
+
+
 async def make_phone_call(
     target_number: str,
     purpose: str,
@@ -60,6 +84,7 @@ async def make_phone_call(
     max_duration: int = 300,
     language: str = "",
     context: dict | None = None,
+    target_name: str = "",
 ) -> str:
     """Place a phone call to a number on behalf of the user.
 
@@ -68,6 +93,9 @@ async def make_phone_call(
     instructions: Specific instructions for the agent during the call
     max_duration: Maximum call duration in seconds (default 300)
     language: Call language ('en', 'de', or 'uk'); empty = default language setting
+    target_name: Who is being called (optional)
+
+    purpose and instructions are the agent's briefing for the call.
     """
     from pincer.config import get_settings
 
@@ -97,8 +125,26 @@ async def make_phone_call(
     user_id = ctx.get("user_id", "unknown")
 
     if not _check_daily_limit(user_id, settings.voice_outbound_max_daily):
-        logger.info("make_phone_call aborted: daily limit reached for user %s", user_id)
+        logger.info("make_phone_call aborted: per-user daily limit reached for user %s", user_id)
         return f"Error: Daily outbound call limit reached ({settings.voice_outbound_max_daily}). Try again tomorrow."
+
+    # T8.3: the single server-side abuse gate — do-not-call list, quiet hours,
+    # global daily cap, per-target cooldown. Every channel reaches Twilio
+    # through this function, so there is no path around it, and automatic
+    # retries consume the same budget (no retry storms).
+    from pincer.voice.language import resolve_call_language
+    from pincer.voice.safety_gates import check_outbound_allowed, record_outbound_call
+
+    gate_language = resolve_call_language(settings, language)
+    decision = await check_outbound_allowed(settings, validated, user_id=user_id, language=gate_language)
+    if not decision.allowed:
+        logger.warning(
+            "make_phone_call blocked by outbound gate [%s] for user %s",
+            decision.reason,
+            user_id,
+        )
+        await _audit_block(decision, validated, user_id, ctx.get("channel", ""))
+        return f"Error: {decision.message}"
 
     try:
         from twilio.rest import Client
@@ -111,11 +157,10 @@ async def make_phone_call(
         base_url = settings.voice_webhook_base_url.strip().rstrip("/")
         status_url = f"{base_url}/api/apps/twilio/status"
 
-        from pincer.voice.language import resolve_call_language
         from pincer.voice.twiml_builder import build_connect_twiml
 
         # Sprint 2: language is a parameter of the call
-        call_language = resolve_call_language(settings, language)
+        call_language = gate_language
 
         # Consent announcement plays as soon as the callee answers; the shared
         # builder (T4.1) picks engine, TTS provider, and voice from settings.
@@ -148,6 +193,13 @@ async def make_phone_call(
         call = client.calls.create(**call_kwargs)
 
         _increment_daily_count(user_id)
+        await record_outbound_call(
+            settings,
+            validated,
+            user_id=user_id,
+            channel=ctx.get("channel", ""),
+            call_sid=call.sid,
+        )
 
         # T1.5: live status updates back to the initiating user (max 3/call)
         from pincer.voice.status_notify import notify_dialing, register_outbound_call
@@ -159,6 +211,8 @@ async def make_phone_call(
             purpose=purpose,
             target_number=validated,
             language=call_language,
+            target_name=str(target_name or "").strip(),
+            instructions=str(instructions or "").strip(),
         )
         await notify_dialing(call.sid)
 
