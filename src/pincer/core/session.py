@@ -7,6 +7,7 @@ Stores message history, supports trimming, and provides context for the agent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import aiosqlite
 
+from pincer.db import ensure_schema_current
 from pincer.llm.base import LLMMessage, MessageRole
 
 if TYPE_CHECKING:
@@ -89,23 +91,8 @@ class SessionManager:
         self._cache: dict[str, Session] = {}
 
     async def initialize(self) -> None:
+        await asyncio.to_thread(ensure_schema_current, self._db_path)
         self._db = await aiosqlite.connect(str(self._db_path))
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                channel TEXT NOT NULL,
-                messages TEXT NOT NULL DEFAULT '[]',
-                metadata TEXT NOT NULL DEFAULT '{}',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            )
-        """)
-        await self._db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_session_user
-            ON sessions(user_id, channel)
-        """)
-        await self._db.commit()
 
     async def close(self) -> None:
         for session in self._cache.values():

@@ -6,6 +6,7 @@ Pricing is per 1M tokens, updated Feb 2026. Add new models as needed.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
+from pincer.db import ensure_schema_current
 from pincer.exceptions import BudgetExceededError
 
 if TYPE_CHECKING:
@@ -64,36 +66,9 @@ class CostTracker:
         self._db: aiosqlite.Connection | None = None
 
     async def initialize(self) -> None:
-        """Open database and create tables."""
+        """Open database, ensuring schema is at head (see pincer.db.migrations)."""
+        await asyncio.to_thread(ensure_schema_current, self._db_path)
         self._db = await aiosqlite.connect(str(self._db_path))
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS cost_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp REAL NOT NULL,
-                provider TEXT NOT NULL,
-                model TEXT NOT NULL,
-                input_tokens INTEGER NOT NULL,
-                output_tokens INTEGER NOT NULL,
-                cost_usd REAL NOT NULL,
-                session_id TEXT
-            )
-        """)
-        await self._db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_cost_timestamp ON cost_log(timestamp)
-        """)
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS image_cost_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp REAL NOT NULL,
-                provider TEXT NOT NULL,
-                model TEXT NOT NULL,
-                cost_usd REAL NOT NULL
-            )
-        """)
-        await self._db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_image_cost_timestamp ON image_cost_log(timestamp)
-        """)
-        await self._db.commit()
 
     async def close(self) -> None:
         if self._db:

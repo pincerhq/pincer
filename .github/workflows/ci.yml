@@ -13,19 +13,19 @@ jobs:
         run: uv run pytest --cov=pincer --cov-report=xml tests/
 
       - name: Run ms365-mcp tests
-        run: uv run pytest src/ms365-mcp/tests/
+        run: uv run pytest src/ms365-mcp/tests
 
       - name: Run doctr-mcp tests
         run: uv run pytest src/doctr-mcp/tests
 
       - name: Type check
-        run: uv run mypy src/ --exclude '(ms365-mcp|doctr-mcp)/tests/'
+        run: uv run mypy src/ --exclude '(ms365-mcp|doctr-mcp)'
 
       - name: Type check ms365-mcp tests
-        run: uv run mypy src/ms365-mcp/tests
+        run: uv run mypy src/ms365-mcp
 
       - name: Type check doctr-mcp tests
-        run: uv run mypy src/doctr-mcp/tests
+        run: uv run mypy src/doctr-mcp
 
       - name: Lint
         run: uv run ruff check .
