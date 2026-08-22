@@ -29,7 +29,6 @@ Environment variable format for a single server:
 
 from __future__ import annotations
 
-import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -37,10 +36,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pincer.config.toml_loader import read_toml_raw as _read_toml_raw
+
 if TYPE_CHECKING:
     from pincer.config.main import Settings
-
-logger = logging.getLogger(__name__)
 
 # Mirrors Settings.model_config["env_file"] in pincer/config/main.py: ".env" takes
 # priority over "../.env" (monorepo layout — commands run from a subdirectory
@@ -274,23 +273,6 @@ def _parse_server_from_toml(raw: dict[str, Any], pincer_vars: dict[str, str] | N
         startup_timeout=int(raw.get("startup_timeout", 30)),
         max_retries=int(raw.get("max_retries", 2)),
     )
-
-
-def _read_toml_raw(toml_path: Path) -> dict[str, Any] | None:
-    """Read a TOML file and return the parsed dict. Returns None if absent or no TOML parser."""
-    if not toml_path.exists():
-        logger.warning(f"Pincer {toml_path} not found. Ommit it")
-        return None
-    try:
-        import tomllib  # Python 3.11+
-    except ImportError:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            return None
-
-    with open(toml_path, "rb") as f:
-        return tomllib.load(f)  # type: ignore[return-value]
 
 
 _STDIO_ONLY_KEYS = {"command", "args", "env"}

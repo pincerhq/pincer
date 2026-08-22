@@ -38,7 +38,7 @@ async def list_identities(
                 async with db.execute(
                     """
                     SELECT DISTINCT m.pincer_user_id, m.preferred_channel, m.display_name, m.created_at,
-                        m.active_channel, m.active_channel_updated_at
+                        m.active_channel, m.active_channel_updated_at, m.timezone
                     FROM identity_meta m
                     LEFT JOIN channel_identities ci ON ci.pincer_user_id = m.pincer_user_id
                     WHERE m.pincer_user_id LIKE ? OR ci.channel_user_id LIKE ?
@@ -52,7 +52,7 @@ async def list_identities(
                 async with db.execute(
                     """
                     SELECT pincer_user_id, preferred_channel, display_name, created_at,
-                        active_channel, active_channel_updated_at
+                        active_channel, active_channel_updated_at, timezone
                     FROM identity_meta
                     ORDER BY created_at
                     LIMIT ?
@@ -89,6 +89,7 @@ async def list_identities(
                         "active_channel": meta["active_channel"],
                         "active_channel_updated_at": meta["active_channel_updated_at"],
                         "display_name": meta["display_name"],
+                        "timezone": meta["timezone"],
                         "created_at": meta["created_at"],
                         "channels": channels,
                     }
@@ -115,7 +116,7 @@ async def get_identity(pincer_user_id: str) -> dict[str, Any]:
 
             async with db.execute(
                 "SELECT pincer_user_id, preferred_channel, display_name, created_at, "
-                "active_channel, active_channel_updated_at "
+                "active_channel, active_channel_updated_at, timezone "
                 "FROM identity_meta WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             ) as cur:
@@ -153,6 +154,7 @@ async def get_identity(pincer_user_id: str) -> dict[str, Any]:
         "active_channel": meta["active_channel"],
         "active_channel_updated_at": meta["active_channel_updated_at"],
         "display_name": meta["display_name"],
+        "timezone": meta["timezone"],
         "created_at": meta["created_at"],
         "channels": channels,
     }

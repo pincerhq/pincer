@@ -830,9 +830,11 @@ async def _run_agent(settings: Settings) -> None:
 
     # Sprint 3: Identity resolver
     from pincer.channels.middleware import IdentityMiddleware, build_pipeline
+    from pincer.config.identity import resolve_identity_map_config
     from pincer.core.identity import IdentityResolver
 
-    identity = IdentityResolver(settings.db_path, settings.identity_map)
+    identity_map_config, identity_profiles = resolve_identity_map_config(settings.identity_map)
+    identity = IdentityResolver(settings.db_path, identity_map_config, identity_profiles)
     await identity.ensure_table()
 
     _identity_pipeline = build_pipeline(IdentityMiddleware(identity))

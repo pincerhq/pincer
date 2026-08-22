@@ -139,6 +139,18 @@ def test_legacy_identity_map_is_migrated_and_dropped(tmp_path: Path) -> None:
         con.close()
 
 
+def test_identity_meta_has_email_timezone_columns(tmp_path: Path) -> None:
+    db_path = tmp_path / "pincer.db"
+    ensure_schema_current(db_path)
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        cols = {row[1] for row in con.execute("PRAGMA table_info(identity_meta)").fetchall()}
+    finally:
+        con.close()
+    assert {"email", "timezone"} <= cols
+
+
 def test_legacy_audit_db_is_imported_into_unified_db(tmp_path: Path) -> None:
     db_path = tmp_path / "pincer.db"
     legacy_audit_path = tmp_path / "audit.db"

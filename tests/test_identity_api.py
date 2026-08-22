@@ -83,6 +83,34 @@ class TestIdentityApi:
         assert data["active_channel"] == "whatsapp"
         assert data["active_channel_updated_at"] is not None
 
+    async def test_list_includes_timezone(self, client: TestClient, resolver: IdentityResolver) -> None:
+        import aiosqlite
+
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 77777)
+        async with aiosqlite.connect(resolver._db_path) as db:
+            await db.execute("UPDATE identity_meta SET timezone = ? WHERE pincer_user_id = ?", ("Europe/Berlin", uid))
+            await db.commit()
+
+        with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):
+            resp = client.get("/api/identity")
+
+        data = resp.json()
+        entry = next(i for i in data["identities"] if i["pincer_user_id"] == uid)
+        assert entry["timezone"] == "Europe/Berlin"
+
+    async def test_get_single_identity_includes_timezone(self, client: TestClient, resolver: IdentityResolver) -> None:
+        import aiosqlite
+
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 88888)
+        async with aiosqlite.connect(resolver._db_path) as db:
+            await db.execute("UPDATE identity_meta SET timezone = ? WHERE pincer_user_id = ?", ("Europe/Berlin", uid))
+            await db.commit()
+
+        with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):
+            resp = client.get(f"/api/identity/{uid}")
+
+        assert resp.json()["timezone"] == "Europe/Berlin"
+
     async def test_search_includes_active_channel_fields(self, client: TestClient, resolver: IdentityResolver) -> None:
         uid = await resolver.resolve(ChannelType.TELEGRAM, 66666)
         await resolver.touch_active_channel(uid, ChannelType.TELEGRAM)

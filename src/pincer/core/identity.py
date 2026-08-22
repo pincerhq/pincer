@@ -29,6 +29,18 @@ The optional name prefix sets the pincer_user_id directly (e.g. "user:john" in
 memory tags) instead of the auto-generated "user:usr_abc123..." hash.
 Memory stored under a named ID is portable across DB rebuilds as long as the
 config entry stays the same.
+
+Config mapping (pincer.toml / pincer.local.toml)
+-------------------------------------------------
+For rosters too large to comfortably manage as one PINCER_IDENTITY_MAP
+string, the same mapping can be expressed as a `[identity]` TOML section
+instead — see `pincer.config.identity` for the schema. PINCER_IDENTITY_MAP,
+when set, always takes full precedence over the TOML section (no merging
+between the two). `pincer.config.identity.resolve_identity_map_config`
+converts TOML entries into two things: this module's own string grammar
+(channel-linking, same as PINCER_IDENTITY_MAP) and a `pincer_user_id ->
+IdentityProfile` dict for the fields that string grammar has no room for
+(display_name, preferred_channel, email, timezone) — see `IdentityProfile`.
 """
 
 from __future__ import annotations
@@ -36,6 +48,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -54,12 +67,34 @@ logger = logging.getLogger(__name__)
 _PHONE_CHANNELS = {ChannelType.WHATSAPP, ChannelType.VOICE, ChannelType.SIGNAL}
 
 
+@dataclass(frozen=True)
+class IdentityProfile:
+    """Optional profile fields sourced from the [identity] TOML section (see
+    `pincer.config.identity`) — PINCER_IDENTITY_MAP's string grammar has no
+    field for any of these, so entries seeded from the env var never get a
+    profile and these all stay unset. All fields are optional; a profile
+    with everything None is valid (e.g. a TOML person entry that only sets
+    channels).
+    """
+
+    display_name: str | None = None
+    preferred_channel: str | None = None
+    email: str | None = None
+    timezone: str | None = None
+
+
 class IdentityResolver:
     """Resolves channel-specific user IDs to a unified Pincer user ID."""
 
-    def __init__(self, db_path: Path, identity_map_config: str = "") -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        identity_map_config: str = "",
+        profiles: dict[str, IdentityProfile] | None = None,
+    ) -> None:
         self._db_path = str(db_path)
         self._identity_map_config = identity_map_config
+        self._profiles = profiles or {}
 
     @property
     def has_config(self) -> bool:
@@ -441,10 +476,29 @@ class IdentityResolver:
                         pincer_uid = self._generate_user_id(first_ch_type, first_norm)
 
                 first_channel = resolved[0][0]
+                profile = self._profiles.get(pincer_uid, IdentityProfile())
+                preferred_channel = profile.preferred_channel or first_channel
                 await db.execute(
-                    "INSERT OR IGNORE INTO identity_meta (pincer_user_id, preferred_channel) VALUES (?, ?)",
-                    (pincer_uid, first_channel),
+                    "INSERT OR IGNORE INTO identity_meta "
+                    "(pincer_user_id, preferred_channel, display_name, email, timezone) VALUES (?, ?, ?, ?, ?)",
+                    (pincer_uid, preferred_channel, profile.display_name, profile.email, profile.timezone),
                 )
+                if profile != IdentityProfile():
+                    # INSERT OR IGNORE above is a no-op for an identity that already
+                    # existed (e.g. created earlier via resolve()); COALESCE here
+                    # backfills profile fields onto it without clobbering an
+                    # existing value with NULL when only some are set. preferred_channel
+                    # is otherwise write-once (see touch_active_channel's docstring for
+                    # why active_channel, not this, tracks day-to-day channel use).
+                    await db.execute(
+                        "UPDATE identity_meta SET "
+                        "display_name = COALESCE(?, display_name), "
+                        "preferred_channel = COALESCE(?, preferred_channel), "
+                        "email = COALESCE(?, email), "
+                        "timezone = COALESCE(?, timezone) "
+                        "WHERE pincer_user_id = ?",
+                        (profile.display_name, profile.preferred_channel, profile.email, profile.timezone, pincer_uid),
+                    )
                 for ch_str, _ch_type, norm in resolved:
                     await db.execute(
                         "INSERT OR IGNORE INTO channel_identities "

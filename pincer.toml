@@ -211,3 +211,19 @@ approval_required = ["!*"]
 # at startup), so the default startup_timeout is fine — but per-call inference on
 # CPU is slower than this repo's other bundled servers, hence the longer timeout.
 timeout = 120
+
+# ── Cross-channel identity ─────────────────────────────────────────────────
+# Alternative to PINCER_IDENTITY_MAP for rosters too large for one env-var
+# string — one [identity.<key>] table per person, <key> becomes their
+# pincer_user_id. PINCER_IDENTITY_MAP, if set, fully overrides this section.
+# Put real names/IDs in pincer.local.toml (gitignored), not here.
+#
+# [identity.johndoe]
+# display_name      = "John Doe"
+# email             = "john.doe@domain.tld"
+# timezone          = "Europe/Berlin"
+# preferred_channel = "telegram"
+#
+# [[identity.johndoe.channels]]
+# channel         = "telegram"
+# channel_user_id = 123456
