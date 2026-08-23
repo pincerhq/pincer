@@ -124,7 +124,10 @@ def load_identity_config(config_dir: Path | None = None) -> dict[str, IdentityTo
             except ValueError as e:
                 raise ValueError(f"identity.{person_key}: unknown channel '{channel}'") from e
 
-            channel_user_id = str(channel_user_id_raw)
+            channel_user_id = str(channel_user_id_raw).strip()
+            if not channel_user_id:
+                raise ValueError(f"identity.{person_key}: channel '{channel}' has an empty channel_user_id")
+
             pair = (channel, channel_user_id)
             if pair in seen_pairs:
                 raise ValueError(

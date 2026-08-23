@@ -784,6 +784,26 @@ class TestCleanup:
         r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
         await r.cleanup()  # must not raise
 
+    async def test_cleanup_skips_wipe_when_config_has_no_usable_pairs(self, tmp_path):
+        """A config string that's non-empty but parses to zero usable pairs (e.g. an
+        empty channel_user_id, as in 'jane@telegram:') must not be treated as an
+        authoritative empty whitelist — that would delete every pre-existing identity."""
+        import aiosqlite
+
+        db_path = tmp_path / "no_usable_pairs.db"
+        r = IdentityResolver(db_path, identity_map_config="jane@telegram:")
+        await r.ensure_table()
+        uid = await r.resolve(ChannelType.TELEGRAM, 12345)
+
+        await r.cleanup()
+
+        async with (
+            aiosqlite.connect(str(db_path)) as db,
+            db.execute("SELECT COUNT(*) FROM channel_identities WHERE channel_user_id = '12345'") as cur,
+        ):
+            assert (await cur.fetchone())[0] == 1
+        assert await r.resolve(ChannelType.TELEGRAM, 12345) == uid
+
 
 @pytest.mark.asyncio
 class TestLegacyMigration:

@@ -360,6 +360,13 @@ class IdentityResolver:
                     norm = await self._resolve_via_channel(ch_type, norm, channels)
                 allowed.add((ch, norm))
 
+        if not allowed:
+            logger.error(
+                "Identity config produced no usable channel:id pairs — "
+                "skipping cleanup to avoid wiping the identity tables"
+            )
+            return
+
         async with self._get_db() as db:
             cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='identity_meta'")
             if not await cursor.fetchone():

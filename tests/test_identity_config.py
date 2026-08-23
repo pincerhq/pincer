@@ -157,6 +157,34 @@ channel = "telegram"
         load_identity_config(tmp_path)
 
 
+def test_empty_channel_user_id_raises(tmp_path: Path) -> None:
+    """An empty string channel_user_id must be rejected: str("") is still "",
+    so it would otherwise pass the "needs at least one channel" guard while
+    stringifying to 'jane@telegram:' — a segment that survives IdentityResolver's
+    skip-guards but yields zero usable pairs, hitting the same empty-whitelist
+    wipe as test_channelless_entry_raises."""
+    (tmp_path / "pincer.toml").write_text("""
+[identity.jane]
+[[identity.jane.channels]]
+channel         = "telegram"
+channel_user_id = ""
+""")
+    with pytest.raises(ValueError, match="identity.jane: channel 'telegram' has an empty channel_user_id"):
+        load_identity_config(tmp_path)
+
+
+def test_whitespace_only_channel_user_id_raises(tmp_path: Path) -> None:
+    """Whitespace-only channel_user_id is stripped to empty and rejected the same way."""
+    (tmp_path / "pincer.toml").write_text("""
+[identity.jane]
+[[identity.jane.channels]]
+channel         = "telegram"
+channel_user_id = "   "
+""")
+    with pytest.raises(ValueError, match="identity.jane: channel 'telegram' has an empty channel_user_id"):
+        load_identity_config(tmp_path)
+
+
 def test_single_channel_entry_is_allowed(tmp_path: Path) -> None:
     """Unlike PINCER_IDENTITY_MAP's typical usage, a TOML person may have just one channel."""
     (tmp_path / "pincer.toml").write_text("""
