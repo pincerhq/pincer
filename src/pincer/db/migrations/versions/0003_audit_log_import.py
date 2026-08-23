@@ -15,10 +15,13 @@ Create Date: 2026-08-22
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from alembic import op
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
 
 revision = "0003"
 down_revision = "0002"
@@ -72,8 +75,10 @@ def upgrade() -> None:
         text("SELECT name FROM legacy_audit.sqlite_master WHERE type='table' AND name='audit_log'")
     ).fetchone()
     if has_table:
-        cols = ", ".join(_AUDIT_LOG_COLUMNS)
-        bind.execute(text(f"INSERT INTO audit_log ({cols}) SELECT {cols} FROM legacy_audit.audit_log"))
+        legacy_cols = {r[1] for r in bind.execute(text("PRAGMA legacy_audit.table_info(audit_log)")).fetchall()}
+        cols = ", ".join(c for c in _AUDIT_LOG_COLUMNS if c in legacy_cols)
+        result = bind.execute(text(f"INSERT INTO audit_log ({cols}) SELECT {cols} FROM legacy_audit.audit_log"))
+        logger.info("Imported %d audit rows from %s", result.rowcount, legacy_audit_db)
 
 
 def downgrade() -> None:

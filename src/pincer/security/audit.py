@@ -69,7 +69,7 @@ class AuditLogger:
 
     MAX_SUMMARY_LENGTH = 2000
 
-    def __init__(self, db_path: str | Path = "data/audit.db") -> None:
+    def __init__(self, db_path: str | Path = "data/pincer.db") -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db: aiosqlite.Connection | None = None
@@ -355,7 +355,7 @@ async def get_audit_logger(db_path: str | Path | None = None) -> AuditLogger:
 
                     db_path = get_settings_relaxed().db_path
                 except Exception:
-                    db_path = Path("data/audit.db")
+                    db_path = Path("data/pincer.db")
             _audit_logger = AuditLogger(db_path=db_path)
         await _audit_logger.initialize()
     return _audit_logger

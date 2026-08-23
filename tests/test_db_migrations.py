@@ -5,7 +5,7 @@ from pathlib import Path
 
 from alembic import command
 
-from pincer.db import build_config, ensure_schema_current
+from pincer.db import build_config, ensure_schema_current, engine
 
 EXPECTED_TABLES = {
     "conversations",
@@ -55,6 +55,7 @@ def test_ensure_schema_current_creates_all_tables(tmp_path: Path) -> None:
 def test_ensure_schema_current_is_idempotent(tmp_path: Path) -> None:
     db_path = tmp_path / "pincer.db"
     ensure_schema_current(db_path)
+    engine._ensured_paths.clear()  # force a genuine second Alembic run, not the in-process cache guard
     ensure_schema_current(db_path)  # must not raise or duplicate anything
 
     con = sqlite3.connect(str(db_path))

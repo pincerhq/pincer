@@ -13,8 +13,12 @@ Create Date: 2026-08-22
 
 from __future__ import annotations
 
+import logging
+
 from alembic import op
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
 
 revision = "0002"
 down_revision = "0001"
@@ -89,6 +93,7 @@ def upgrade() -> None:
 
     if migrated:
         bind.execute(text("DROP TABLE identity_map"))
+        logger.info("Imported %d legacy identity_map rows; dropped identity_map", migrated)
 
 
 def downgrade() -> None:

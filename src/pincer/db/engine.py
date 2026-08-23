@@ -36,20 +36,29 @@ _ensured_paths: set[str] = set()
 def get_sync_url(db_path: Path) -> str:
     """Build the synchronous SQLAlchemy URL Alembic runs migrations against.
 
-    Honors `PINCER_DATABASE_URL` as a forward-compatible override (e.g. a
-    future `postgresql+psycopg://...`) so migrations can target Postgres
-    without any code changes here once that driver is added as a dependency.
+    `PINCER_DATABASE_URL` is accepted as an override so the migrations
+    themselves can be exercised against Postgres (e.g. in CI), but the
+    runtime layer — every module under `pincer.memory`/`pincer.core`/etc. —
+    still talks to `db_path` directly via `aiosqlite`. Pointing the override
+    at Postgres would migrate a database nothing reads while the app keeps
+    querying an empty SQLite file, so it's rejected here rather than left to
+    fail confusingly downstream.
     """
     override = os.environ.get("PINCER_DATABASE_URL")
     if override:
+        if not override.startswith("sqlite"):
+            raise RuntimeError(
+                "PINCER_DATABASE_URL targets a non-SQLite database, but the runtime "
+                "layer is still aiosqlite. Postgres support is migrations-only for now."
+            )
         return override
     return f"sqlite:///{db_path}"
 
 
 def build_config(db_path: Path) -> Config:
-    # Built programmatically rather than via alembic.ini's relative
-    # `script_location` default, which breaks once the package is installed
-    # and run from an arbitrary working directory.
+    # Built programmatically rather than relying on alembic.ini's on-disk
+    # `script_location` discovery, so migrations can run without an ini file
+    # present on the filesystem next to wherever the package is installed.
     cfg = Config()
     cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
     cfg.set_main_option("sqlalchemy.url", get_sync_url(db_path))

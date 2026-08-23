@@ -45,9 +45,21 @@ depends_on = None
 _AUTOPK = {"sqlite": "INTEGER PRIMARY KEY AUTOINCREMENT", "postgresql": "SERIAL PRIMARY KEY"}
 _BLOB = {"sqlite": "BLOB", "postgresql": "BYTEA"}
 
+# Postgres has no assignment cast from `timestamptz` to `text`, so a column
+# typed TEXT with a bare `DEFAULT CURRENT_TIMESTAMP` fails at CREATE TABLE
+# time there. The `CURRENT_TIMESTAMP` default expression itself is valid
+# verbatim on both dialects once the column type matches it, so only the
+# type needs to flip per dialect (mirroring `phone_contacts.created_at`
+# below, which is already `TIMESTAMP DEFAULT CURRENT_TIMESTAMP` on both).
+_NOW_COL = {"sqlite": "TEXT", "postgresql": "TIMESTAMP"}
+
 
 def _sql(template: str, dialect: str) -> str:
-    return template.replace("{AUTOPK}", _AUTOPK[dialect]).replace("{BLOB}", _BLOB[dialect])
+    return (
+        template.replace("{AUTOPK}", _AUTOPK[dialect])
+        .replace("{BLOB}", _BLOB[dialect])
+        .replace("{NOW_COL}", _NOW_COL[dialect])
+    )
 
 
 # ── memory/sqlite.py ─────────────────────────────────────────────
@@ -151,7 +163,7 @@ _IDENTITY_TABLES = [
         display_name TEXT,
         active_channel TEXT,
         active_channel_updated_at TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP
     )
     """,
     """
@@ -159,7 +171,7 @@ _IDENTITY_TABLES = [
         channel TEXT NOT NULL,
         channel_user_id TEXT NOT NULL,
         pincer_user_id TEXT NOT NULL REFERENCES identity_meta(pincer_user_id),
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        created_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (channel, channel_user_id)
     )
     """,
@@ -206,8 +218,8 @@ _SCHEDULER_TABLES = [
         enabled INTEGER NOT NULL DEFAULT 1,
         last_run_at TEXT,
         next_run_at TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP,
+        updated_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_schedules_next_run ON schedules(next_run_at) WHERE enabled = 1",
@@ -217,7 +229,7 @@ _SCHEDULER_TABLES = [
         trigger_type TEXT NOT NULL,
         trigger_key TEXT NOT NULL,
         pincer_user_id TEXT NOT NULL,
-        processed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        processed_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP,
         result TEXT,
         UNIQUE(trigger_type, trigger_key)
     )
@@ -230,8 +242,8 @@ _SCHEDULER_TABLES = [
         custom_sections TEXT DEFAULT '[]',
         weather_location TEXT DEFAULT 'Berlin,DE',
         news_topics TEXT DEFAULT '["technology","business"]',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP,
+        updated_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP
     )
     """,
 ]
@@ -280,8 +292,8 @@ _SKILLS_TABLES = [
         safety_score INTEGER DEFAULT 100,
         install_path TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
-        installed_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        installed_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP,
+        updated_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP
     )
     """,
     """
@@ -292,7 +304,7 @@ _SKILLS_TABLES = [
         currency TEXT NOT NULL DEFAULT 'USD',
         category TEXT NOT NULL DEFAULT 'general',
         description TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_expenses_user ON expenses(pincer_user_id, created_at)",
@@ -301,7 +313,7 @@ _SKILLS_TABLES = [
         id {AUTOPK},
         pincer_user_id TEXT NOT NULL,
         habit_name TEXT NOT NULL,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        created_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(pincer_user_id, habit_name)
     )
     """,
@@ -309,7 +321,7 @@ _SKILLS_TABLES = [
     CREATE TABLE IF NOT EXISTS habit_checkins (
         id {AUTOPK},
         habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
-        checked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        checked_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP,
         note TEXT DEFAULT ''
     )
     """,
@@ -319,7 +331,7 @@ _SKILLS_TABLES = [
         pincer_user_id TEXT NOT NULL,
         task TEXT NOT NULL DEFAULT 'Focus session',
         duration_min INTEGER NOT NULL DEFAULT 25,
-        started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        started_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP,
         completed INTEGER NOT NULL DEFAULT 1
     )
     """,
@@ -330,7 +342,7 @@ _SKILLS_TABLES = [
         guild_id TEXT,
         pincer_user_id TEXT,
         session_id TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        created_at {NOW_COL} DEFAULT CURRENT_TIMESTAMP
     )
     """,
 ]
@@ -338,6 +350,15 @@ _SKILLS_TABLES = [
 # One habit per calendar day, expressed as an expression index rather than a
 # table-level UNIQUE(...) constraint (not portably supported there) — the
 # underlying "current day" expression itself still differs per dialect.
+#
+# `checked_at` is TEXT on SQLite and TIMESTAMP (no timezone) on Postgres (see
+# `_NOW_COL`). On Postgres, casting a `timestamp without time zone` to `date`
+# is a pure truncation with no DateStyle/timezone dependency, so it's
+# IMMUTABLE — unlike casting *text* to `date`, which depends on the
+# session's DateStyle setting (parsing ambiguity) and is only STABLE, or
+# casting the timestamp to text first, which depends on DateStyle for
+# output formatting and is likewise only STABLE. `checked_at::date` is the
+# only one of the three that Postgres accepts in an index expression.
 _HABIT_CHECKINS_DAILY_UNIQUE = {
     "sqlite": (
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_habit_checkins_daily ON habit_checkins(habit_id, date(checked_at))"
