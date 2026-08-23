@@ -5,7 +5,7 @@ from pathlib import Path
 
 from alembic import command
 
-from pincer.db import build_config, ensure_schema_current, engine
+from pincer.db import build_config, engine, ensure_schema_current
 
 EXPECTED_TABLES = {
     "conversations",
