@@ -134,6 +134,29 @@ channel_user_id = 1
         load_identity_config(tmp_path)
 
 
+def test_channelless_entry_raises(tmp_path: Path) -> None:
+    """A person with zero [[channels]] entries must be rejected: stringified via
+    PINCER_IDENTITY_MAP's grammar it becomes non-empty ("jane@"), which flips
+    IdentityResolver.has_config to True and makes cleanup() treat the (empty)
+    resulting whitelist as authoritative — wiping every other identity."""
+    (tmp_path / "pincer.toml").write_text("""
+[identity.jane]
+display_name = "Jane Austin"
+""")
+    with pytest.raises(ValueError, match="needs at least one"):
+        load_identity_config(tmp_path)
+
+
+def test_channel_entry_missing_key_raises_with_context(tmp_path: Path) -> None:
+    (tmp_path / "pincer.toml").write_text("""
+[identity.johndoe]
+[[identity.johndoe.channels]]
+channel = "telegram"
+""")
+    with pytest.raises(ValueError, match="identity.johndoe: channel entry missing 'channel_user_id'"):
+        load_identity_config(tmp_path)
+
+
 def test_single_channel_entry_is_allowed(tmp_path: Path) -> None:
     """Unlike PINCER_IDENTITY_MAP's typical usage, a TOML person may have just one channel."""
     (tmp_path / "pincer.toml").write_text("""

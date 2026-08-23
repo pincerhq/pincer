@@ -113,13 +113,18 @@ def load_identity_config(config_dir: Path | None = None) -> dict[str, IdentityTo
 
         channels: list[tuple[str, str]] = []
         for ch_raw in person_raw.get("channels", []):
-            channel = ch_raw["channel"]
+            try:
+                channel = ch_raw["channel"]
+                channel_user_id_raw = ch_raw["channel_user_id"]
+            except KeyError as e:
+                raise ValueError(f"identity.{person_key}: channel entry missing {e.args[0]!r}") from e
+
             try:
                 ChannelType(channel)
             except ValueError as e:
                 raise ValueError(f"identity.{person_key}: unknown channel '{channel}'") from e
 
-            channel_user_id = str(ch_raw["channel_user_id"])
+            channel_user_id = str(channel_user_id_raw)
             pair = (channel, channel_user_id)
             if pair in seen_pairs:
                 raise ValueError(
@@ -128,6 +133,11 @@ def load_identity_config(config_dir: Path | None = None) -> dict[str, IdentityTo
                 )
             seen_pairs[pair] = person_key
             channels.append(pair)
+
+        if not channels:
+            raise ValueError(
+                f"identity.{person_key}: needs at least one [[identity.{person_key}.channels]] entry"
+            )
 
         entries[person_key] = IdentityTomlEntry(
             pincer_user_id=person_key,
