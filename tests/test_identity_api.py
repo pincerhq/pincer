@@ -116,9 +116,7 @@ class TestIdentityApi:
 
         uid = await resolver.resolve(ChannelType.TELEGRAM, 79797)
         async with aiosqlite.connect(resolver._db_path) as db:
-            await db.execute(
-                "UPDATE identity_meta SET email = ? WHERE pincer_user_id = ?", ("jane@example.com", uid)
-            )
+            await db.execute("UPDATE identity_meta SET email = ? WHERE pincer_user_id = ?", ("jane@example.com", uid))
             await db.commit()
 
         with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):
@@ -133,9 +131,7 @@ class TestIdentityApi:
 
         uid = await resolver.resolve(ChannelType.TELEGRAM, 89898)
         async with aiosqlite.connect(resolver._db_path) as db:
-            await db.execute(
-                "UPDATE identity_meta SET email = ? WHERE pincer_user_id = ?", ("jane@example.com", uid)
-            )
+            await db.execute("UPDATE identity_meta SET email = ? WHERE pincer_user_id = ?", ("jane@example.com", uid))
             await db.commit()
 
         with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):

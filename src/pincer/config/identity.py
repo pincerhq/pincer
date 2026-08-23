@@ -135,9 +135,7 @@ def load_identity_config(config_dir: Path | None = None) -> dict[str, IdentityTo
             channels.append(pair)
 
         if not channels:
-            raise ValueError(
-                f"identity.{person_key}: needs at least one [[identity.{person_key}.channels]] entry"
-            )
+            raise ValueError(f"identity.{person_key}: needs at least one [[identity.{person_key}.channels]] entry")
 
         entries[person_key] = IdentityTomlEntry(
             pincer_user_id=person_key,
