@@ -16,14 +16,13 @@ import json
 import logging
 import re
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import aiosqlite
 
 from pincer.config import get_settings
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pincer.db import ensure_schema_current
 
 _UID_RE = re.compile(r"UID:\s*(\d+)")
 
@@ -41,19 +40,8 @@ class EventTriggerManager:
         self._seen_email_uids: set[str] | None = None
 
     async def ensure_table(self) -> None:
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS event_triggers (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    trigger_type TEXT NOT NULL,
-                    trigger_key TEXT NOT NULL,
-                    pincer_user_id TEXT NOT NULL,
-                    processed_at TEXT DEFAULT (datetime('now')),
-                    result TEXT,
-                    UNIQUE(trigger_type, trigger_key)
-                )
-            """)
-            await db.commit()
+        """Ensure the event_triggers table is at head (see pincer.db.migrations)."""
+        await asyncio.to_thread(ensure_schema_current, Path(self._db_path))
 
     async def start(self) -> None:
         await self.ensure_table()

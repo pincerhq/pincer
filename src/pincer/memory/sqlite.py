@@ -9,6 +9,7 @@ Tables:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import aiosqlite
 
+from pincer.db import ensure_schema_current
 from pincer.memory.base import (
     PINCER_MEMORY_CATEGORY_TAG_PREFIX,
     PINCER_MEMORY_USER_TAG_PREFIX,
@@ -72,94 +74,9 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         self._db: aiosqlite.Connection | None = None
 
     async def initialize(self) -> None:
+        await asyncio.to_thread(ensure_schema_current, self._db_path)
         self._db = await aiosqlite.connect(str(self._db_path))
         await self._db.execute("PRAGMA journal_mode=WAL")
-
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                channel TEXT NOT NULL,
-                messages_json TEXT NOT NULL DEFAULT '[]',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            )
-        """)
-        await self._db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_conv_user
-            ON conversations(user_id, channel)
-        """)
-
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS memories (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                content TEXT NOT NULL,
-                category TEXT NOT NULL DEFAULT 'general',
-                tags TEXT NOT NULL DEFAULT '[]',
-                embedding_blob BLOB,
-                created_at REAL NOT NULL
-            )
-        """)
-        await self._db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_mem_user
-            ON memories(user_id, category)
-        """)
-
-        # Migrate existing databases: add tags column if absent.
-        async with self._db.execute("PRAGMA table_info(memories)") as cur:
-            existing_columns = {row[1] async for row in cur}
-        if "tags" not in existing_columns:
-            await self._db.execute("ALTER TABLE memories ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
-            logger.info("Migrated memories table: added tags column")
-
-        # FTS5 index for full-text search on memories
-        await self._db.execute("""
-            CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
-                content, category,
-                content=memories, content_rowid=rowid,
-                tokenize='porter unicode61'
-            )
-        """)
-
-        # Triggers to keep FTS in sync
-        await self._db.execute("""
-            CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
-                INSERT INTO memories_fts(rowid, content, category)
-                VALUES (new.rowid, new.content, new.category);
-            END
-        """)
-        await self._db.execute("""
-            CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
-                INSERT INTO memories_fts(memories_fts, rowid, content, category)
-                VALUES ('delete', old.rowid, old.content, old.category);
-            END
-        """)
-        await self._db.execute("""
-            CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
-                INSERT INTO memories_fts(memories_fts, rowid, content, category)
-                VALUES ('delete', old.rowid, old.content, old.category);
-                INSERT INTO memories_fts(rowid, content, category)
-                VALUES (new.rowid, new.content, new.category);
-            END
-        """)
-
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS entities (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                type TEXT NOT NULL,
-                attributes_json TEXT NOT NULL DEFAULT '{}',
-                last_seen REAL NOT NULL
-            )
-        """)
-        await self._db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_ent_user
-            ON entities(user_id, type)
-        """)
-
-        await self._db.commit()
         logger.info("MemoryStore initialized at %s", self._db_path)
 
     async def close(self) -> None:

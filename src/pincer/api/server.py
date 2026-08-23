@@ -43,9 +43,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     try:
         settings = get_settings_relaxed()
-        audit_db = settings.data_dir / "audit.db"
+        audit_db = settings.db_path
     except Exception:
-        audit_db = Path("data/audit.db")
+        audit_db = Path("data/pincer.db")
     audit = await get_audit_logger(audit_db)
 
     if not getattr(app.state, "agent", None):

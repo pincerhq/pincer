@@ -14,17 +14,18 @@ source of truth it reads from and updates).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import aiosqlite
 from croniter import croniter
 
-if TYPE_CHECKING:
-    from pathlib import Path
+from pincer.db import ensure_schema_current
 
 logger = logging.getLogger(__name__)
 
@@ -90,29 +91,8 @@ class CronScheduler:
         self._db_path = str(db_path)
 
     async def ensure_table(self) -> None:
-        """Create schedules table if it doesn't exist."""
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS schedules (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pincer_user_id TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    cron_expr TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    channel TEXT NOT NULL DEFAULT 'telegram',
-                    timezone TEXT NOT NULL DEFAULT 'UTC',
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    last_run_at TEXT,
-                    next_run_at TEXT,
-                    created_at TEXT DEFAULT (datetime('now')),
-                    updated_at TEXT DEFAULT (datetime('now'))
-                )
-            """)
-            await db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_schedules_next_run
-                ON schedules(next_run_at) WHERE enabled = 1
-            """)
-            await db.commit()
+        """Ensure the schedules table is at head (see pincer.db.migrations)."""
+        await asyncio.to_thread(ensure_schema_current, Path(self._db_path))
 
     # ── CRUD ─────────────────────────────────────
 

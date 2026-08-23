@@ -33,18 +33,19 @@ config entry stays the same.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiosqlite
 
 from pincer.channels.base import ChannelType
+from pincer.db import ensure_schema_current
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from pincer.channels.base import BaseChannel
 
 logger = logging.getLogger(__name__)
@@ -75,105 +76,8 @@ class IdentityResolver:
         return s.lstrip("+") if ch in _PHONE_CHANNELS else s
 
     async def ensure_table(self) -> None:
-        """Create schema tables and migrate from legacy identity_map if present."""
-        async with self._get_db() as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS identity_meta (
-                    pincer_user_id TEXT PRIMARY KEY,
-                    preferred_channel TEXT,
-                    display_name TEXT,
-                    created_at TEXT DEFAULT (datetime('now'))
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS channel_identities (
-                    channel TEXT NOT NULL,
-                    channel_user_id TEXT NOT NULL,
-                    pincer_user_id TEXT NOT NULL
-                        REFERENCES identity_meta(pincer_user_id),
-                    created_at TEXT DEFAULT (datetime('now')),
-                    PRIMARY KEY (channel, channel_user_id)
-                )
-            """)
-            await db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_ci_pincer
-                ON channel_identities(pincer_user_id)
-            """)
-            await db.commit()
-            await self._migrate_legacy(db)
-            await self._migrate_active_channel(db)
-
-    async def _migrate_active_channel(self, db: aiosqlite.Connection) -> None:
-        """Add active_channel tracking columns to identity_meta if missing.
-
-        Separate from `preferred_channel` (a write-once value set at identity
-        creation / config-seed time, never updated afterward) — this tracks
-        whichever channel most recently sent a message for this identity, kept
-        current by `touch_active_channel()`. `get_preferred_channel()` prefers
-        this when present, since for a multi-channel identity (linked via
-        PINCER_IDENTITY_MAP) `preferred_channel` alone goes stale the moment the
-        user messages from a different linked channel than the one that
-        created the identity row.
-        """
-        cursor = await db.execute("PRAGMA table_info(identity_meta)")
-        col_names = {row[1] for row in await cursor.fetchall()}
-
-        if "active_channel" not in col_names:
-            await db.execute("ALTER TABLE identity_meta ADD COLUMN active_channel TEXT")
-        if "active_channel_updated_at" not in col_names:
-            await db.execute("ALTER TABLE identity_meta ADD COLUMN active_channel_updated_at TEXT")
-
-        await db.commit()
-
-    async def _migrate_legacy(self, db: aiosqlite.Connection) -> None:
-        """Migrate old identity_map rows into the new schema (no-op if absent)."""
-        cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='identity_map'")
-        if not await cursor.fetchone():
-            return
-
-        cursor = await db.execute("PRAGMA table_info(identity_map)")
-        col_names = {row[1] for row in await cursor.fetchall()}
-
-        def _sel(col: str, default: str = "NULL") -> str:
-            return col if col in col_names else default
-
-        query = (
-            f"SELECT pincer_user_id, telegram_user_id, whatsapp_phone, discord_user_id, "
-            f"{_sel('phone_number')}, {_sel('signal_phone')}, {_sel('slack_user_id')}, "
-            f"{_sel('display_name')}, {_sel('preferred_channel', repr('telegram'))} "
-            f"FROM identity_map"
-        )
-        cursor = await db.execute(query)
-        rows = await cursor.fetchall()
-        if not rows:
-            return
-
-        migrated = 0
-        for row in rows:
-            pincer_uid, tg, wa, dc, ph, sig, slk, dname, preferred = row
-            await db.execute(
-                "INSERT OR IGNORE INTO identity_meta "
-                "(pincer_user_id, preferred_channel, display_name) VALUES (?, ?, ?)",
-                (pincer_uid, preferred, dname),
-            )
-            for channel_name, val in (
-                ("telegram", str(tg) if tg is not None else None),
-                ("whatsapp", wa),
-                ("discord", dc),
-                ("voice", ph),
-                ("signal", sig),
-                ("slack", slk),
-            ):
-                if val:
-                    await db.execute(
-                        "INSERT OR IGNORE INTO channel_identities "
-                        "(channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
-                        (channel_name, val, pincer_uid),
-                    )
-            migrated += 1
-
-        await db.commit()
-        logger.info("Migrated %d legacy identity rows to new schema", migrated)
+        """Ensure the identity schema is at head (see pincer.db.migrations)."""
+        await asyncio.to_thread(ensure_schema_current, Path(self._db_path))
 
     async def find(
         self,
