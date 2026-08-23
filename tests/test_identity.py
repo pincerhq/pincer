@@ -4,7 +4,7 @@ import pytest
 import pytest_asyncio
 
 from pincer.channels.base import ChannelType
-from pincer.core.identity import IdentityResolver
+from pincer.core.identity import IdentityProfile, IdentityResolver
 
 
 @pytest_asyncio.fixture
@@ -67,11 +67,11 @@ class TestIdentityResolver:
         """A single channel:id pair (no linking) resolves via _check_config_mapping,
         without needing seed_from_config() to run first."""
         db_path = tmp_path / "single_pair.db"
-        r = IdentityResolver(db_path, identity_map_config="tamias@telegram:559020")
+        r = IdentityResolver(db_path, identity_map_config="johndoe@telegram:100100")
         await r.ensure_table()
 
-        uid = await r.resolve(ChannelType.TELEGRAM, 559020)
-        assert uid == "tamias"
+        uid = await r.resolve(ChannelType.TELEGRAM, 100100)
+        assert uid == "johndoe"
 
     async def test_get_preferred_channel(self, resolver):
         uid = await resolver.resolve(ChannelType.TELEGRAM, 55555)
@@ -558,14 +558,85 @@ class TestNamedCanonicalId:
     async def test_single_channel_named_entry_seeds_identity(self, tmp_path):
         """A single channel:id pair — no linking partner needed — seeds a named identity."""
         db_path = tmp_path / "single_seed.db"
-        r = IdentityResolver(db_path, identity_map_config="tamias@telegram:559020")
+        r = IdentityResolver(db_path, identity_map_config="johndoe@telegram:100100")
         await r.ensure_table()
         await r.seed_from_config()
 
-        assert await r.resolve(ChannelType.TELEGRAM, 559020) == "tamias"
-        ch_type, chat_id = await r.get_preferred_channel("tamias")
+        assert await r.resolve(ChannelType.TELEGRAM, 100100) == "johndoe"
+        ch_type, chat_id = await r.get_preferred_channel("johndoe")
         assert ch_type == ChannelType.TELEGRAM
-        assert chat_id == "559020"
+        assert chat_id == "100100"
+
+    async def test_profile_persisted_on_seed(self, tmp_path):
+        """A profile (TOML-sourced display_name/preferred_channel/email/timezone) is written on seed_from_config."""
+        import aiosqlite
+
+        db_path = tmp_path / "profile.db"
+        r = IdentityResolver(
+            db_path,
+            identity_map_config="johndoe@telegram:100100=whatsapp:491234567890",
+            profiles={
+                "johndoe": IdentityProfile(
+                    display_name="John Doe",
+                    preferred_channel="whatsapp",
+                    email="johndoe@example.com",
+                    timezone="Europe/Berlin",
+                )
+            },
+        )
+        await r.ensure_table()
+        await r.seed_from_config()
+
+        async with aiosqlite.connect(str(db_path)) as db:
+            cursor = await db.execute(
+                "SELECT display_name, preferred_channel, email, timezone "
+                "FROM identity_meta WHERE pincer_user_id = 'johndoe'",
+            )
+            row = await cursor.fetchone()
+        assert row == ("John Doe", "whatsapp", "johndoe@example.com", "Europe/Berlin")
+
+    async def test_profile_without_preferred_channel_falls_back_to_first_pair(self, tmp_path):
+        """A profile that leaves preferred_channel unset doesn't override the first channel:id pair."""
+        import aiosqlite
+
+        db_path = tmp_path / "profile_no_preferred.db"
+        r = IdentityResolver(
+            db_path,
+            identity_map_config="johndoe@telegram:100100=whatsapp:491234567890",
+            profiles={"johndoe": IdentityProfile(display_name="John Doe")},
+        )
+        await r.ensure_table()
+        await r.seed_from_config()
+
+        async with aiosqlite.connect(str(db_path)) as db:
+            cursor = await db.execute(
+                "SELECT preferred_channel FROM identity_meta WHERE pincer_user_id = 'johndoe'",
+            )
+            row = await cursor.fetchone()
+        assert row == ("telegram",)
+
+    async def test_profile_backfilled_onto_existing_identity(self, tmp_path):
+        """Profile fields are backfilled via COALESCE even if the identity row already existed."""
+        import aiosqlite
+
+        db_path = tmp_path / "profile_backfill.db"
+        r_first = IdentityResolver(db_path, identity_map_config="johndoe@telegram:100100")
+        await r_first.ensure_table()
+        await r_first.resolve(ChannelType.TELEGRAM, 100100)  # creates the identity with no profile
+
+        r_second = IdentityResolver(
+            db_path,
+            identity_map_config="johndoe@telegram:100100",
+            profiles={"johndoe": IdentityProfile(email="johndoe@example.com")},
+        )
+        await r_second.seed_from_config()
+
+        async with aiosqlite.connect(str(db_path)) as db:
+            cursor = await db.execute(
+                "SELECT email, timezone FROM identity_meta WHERE pincer_user_id = 'johndoe'",
+            )
+            row = await cursor.fetchone()
+        assert row == ("johndoe@example.com", None)
 
     async def test_unnamed_entry_still_works(self, tmp_path):
         """Entries without a name@ prefix keep the auto-generated hash behavior."""
@@ -590,9 +661,9 @@ class TestNamedCanonicalId:
         assert pairs[0] == ("telegram", "12345")
 
     async def test_parse_mapping_single_pair(self):
-        name, pairs = IdentityResolver._parse_mapping("tamias@telegram:559020")
-        assert name == "tamias"
-        assert pairs == [("telegram", "559020")]
+        name, pairs = IdentityResolver._parse_mapping("johndoe@telegram:100100")
+        assert name == "johndoe"
+        assert pairs == [("telegram", "100100")]
 
     async def test_parse_mapping_empty_raises(self):
         with pytest.raises(ValueError, match="at least 1 channel:id pair"):
@@ -712,6 +783,26 @@ class TestCleanup:
 
         r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
         await r.cleanup()  # must not raise
+
+    async def test_cleanup_skips_wipe_when_config_has_no_usable_pairs(self, tmp_path):
+        """A config string that's non-empty but parses to zero usable pairs (e.g. an
+        empty channel_user_id, as in 'jane@telegram:') must not be treated as an
+        authoritative empty whitelist — that would delete every pre-existing identity."""
+        import aiosqlite
+
+        db_path = tmp_path / "no_usable_pairs.db"
+        r = IdentityResolver(db_path, identity_map_config="jane@telegram:")
+        await r.ensure_table()
+        uid = await r.resolve(ChannelType.TELEGRAM, 12345)
+
+        await r.cleanup()
+
+        async with (
+            aiosqlite.connect(str(db_path)) as db,
+            db.execute("SELECT COUNT(*) FROM channel_identities WHERE channel_user_id = '12345'") as cur,
+        ):
+            assert (await cur.fetchone())[0] == 1
+        assert await r.resolve(ChannelType.TELEGRAM, 12345) == uid
 
 
 @pytest.mark.asyncio

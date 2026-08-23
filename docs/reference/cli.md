@@ -252,6 +252,38 @@ PINCER_IDENTITY_MAP=telegram:12345=whatsapp:491234567890
 
 The optional `name@` prefix sets the `pincer_user_id` used as the memory tag (e.g. `user:john`). Named IDs are stable across DB rebuilds; hash IDs (`usr_abc123...`) are auto-generated and opaque. Channel-specific identifiers (email addresses for Slack, phone numbers for WhatsApp, @usernames for Telegram) are resolved to internal IDs by each channel driver at startup before being stored.
 
+#### TOML alternative for large rosters
+
+For a roster too large to comfortably manage as one `PINCER_IDENTITY_MAP` string, the same mapping can be expressed as an `[identity]` section in `pincer.toml` / `pincer.local.toml` instead — one table per person, keyed by their `pincer_user_id`:
+
+```toml
+[identity.johndoe]
+display_name      = "John Doe"
+email             = "john.doe@domain.tld"
+timezone          = "Europe/Berlin"
+preferred_channel = "telegram"
+
+[[identity.johndoe.channels]]
+channel         = "telegram"
+channel_user_id = 123456
+
+[identity.jane]
+display_name      = "Jane Austin"
+preferred_channel = "whatsapp"
+
+[[identity.jane.channels]]
+channel         = "telegram"
+channel_user_id = "janeAustin"
+
+[[identity.jane.channels]]
+channel         = "whatsapp"
+channel_user_id = "491111111111"
+```
+
+Unlike `PINCER_IDENTITY_MAP`, a person may have just one `[[...channels]]` entry — useful for pre-registering a roster incrementally as new channel IDs become known. `pincer.local.toml`'s `[identity]` section merges into `pincer.toml`'s per person, per field, appending new person keys and leaving unspecified fields inherited from the base entry — see [Local overrides — pincer.local.toml](../guides/mcp-guide.md#local-overrides--pincerlocaltoml) for the same merge pattern applied to `[[mcp.servers]]`. As with those entries, `channels` is replaced wholesale by an override rather than merged per-channel.
+
+**`PINCER_IDENTITY_MAP`, when set (non-empty), always fully overrides the TOML `[identity]` section** — the two are not merged; the TOML section is simply ignored while the env var is set.
+
 ## API Endpoints
 
 The API server starts automatically with `pincer run` on the configured
