@@ -170,6 +170,11 @@ MONITOR_ANNOUNCEMENT_UK = "Ця розмова може прослуховува
 # Jurisdictions where German-language announcements are appropriate by default
 GERMAN_SPEAKING_JURISDICTIONS = {"DE", "AT", "CH"}
 
+# Substrings (lowercase) whose presence in an introduction means it already
+# discloses the AI assistant, making the separate AI-disclosure line redundant.
+# Covers every phrasing build_intro_text generates plus common override wording.
+AI_INTRO_MARKERS = ("ai assistant", "ki-assistent", "ki assistent", "ші-асистент")
+
 
 @dataclass
 class ConsentResult:
@@ -398,10 +403,12 @@ def build_call_opening(settings: Settings, remote_number: str, language: str = "
     """Full spoken call opening: introduction, then consent/AI-disclosure.
 
     The introduction plays regardless of consent mode; the consent announcement
-    follows when one applies. When recording is off and an introduction is
-    configured, the separate AI-disclosure line is skipped — the introduction
-    already discloses the AI assistant. ``language`` (per-call, Sprint 2)
-    overrides the settings/jurisdiction-based language when given.
+    follows when one applies. When recording is off, the separate AI-disclosure
+    line is skipped only if the introduction itself already discloses the AI
+    assistant (a bare "This is Pincer." or a verbatim voice_intro_text override
+    may not — EU AI Act Art. 50 requires the callee be told either way).
+    ``language`` (per-call, Sprint 2) overrides the settings/jurisdiction-based
+    language when given.
 
     Sprint 12: for inbound calls with the receptionist active, the opening IS
     the receptionist greeting (§7.1) — never the outbound-style introduction.
@@ -414,9 +421,10 @@ def build_call_opening(settings: Settings, remote_number: str, language: str = "
     intro = build_intro_text(settings, language)
 
     mode = get_consent_mode(settings, remote_number)
-    recording = bool(getattr(settings, "voice_recording_enabled", False))
+    recording = bool(settings.voice_recording_enabled)
     announcement = get_consent_announcement(mode, remote_number, language=language, recording=recording)
-    if announcement and not recording and intro:
+    intro_discloses_ai = any(marker in intro.lower() for marker in AI_INTRO_MARKERS)
+    if announcement and not recording and intro_discloses_ai:
         announcement = None
 
     # Sprint 15: live listen-in notice, after the recording/AI line.
@@ -464,7 +472,7 @@ class ComplianceChecker:
             mode,
             caller_number,
             language=resolve_consent_language(self._settings, caller_number),
-            recording=bool(getattr(self._settings, "voice_recording_enabled", True)),
+            recording=bool(self._settings.voice_recording_enabled),
         )
         jurisdiction = detect_jurisdiction(caller_number)
 

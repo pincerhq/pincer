@@ -27,6 +27,11 @@ RUN uv sync --no-cache --no-dev --all-extras
 COPY --chown=pomodoro:pomodoro state.py ./
 COPY --chown=pomodoro:pomodoro pomodoro_server.py ./server.py
 
+# `uv run` re-syncs the project at startup, so the venv built as root above
+# must be writable by the runtime user — without this the container only
+# starts as root.
+RUN chown -R pomodoro:pomodoro /app
+
 USER pomodoro
 
 # Healthcheck: poll the health endpoint

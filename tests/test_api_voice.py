@@ -33,7 +33,8 @@ def client(monkeypatch, tmp_path):
 async def _seed_db(db_path):
     async with aiosqlite.connect(db_path) as db:
         await db.executescript(VOICE_TABLES_SQL)
-        started = datetime(2026, 8, 18, 10, 0, 0, tzinfo=UTC)
+        # Relative to now so the calls stay inside the stats endpoints' 7-day window.
+        started = datetime.now(UTC) - timedelta(days=1)
         for sid, direction, offset_min, ended in [
             ("CA001", "inbound", 0, True),
             ("CA002", "outbound", 5, True),

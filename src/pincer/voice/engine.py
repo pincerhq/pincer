@@ -46,6 +46,13 @@ class CallDirection(StrEnum):
     OUTBOUND = "outbound"
 
 
+# An answering machine's outgoing greeting is transcribed like any speech, so
+# text alone can't distinguish "human replied to us" from "machine talked at
+# us". Twilio's sync AMD verdict lands within the first seconds of the call;
+# only speech after this window counts as a demonstrably conversing human.
+AMD_GRACE_SECONDS = 10.0
+
+
 @dataclass
 class CallState:
     """Runtime state for an active voice call."""
@@ -71,6 +78,14 @@ class CallState:
     def duration_seconds(self) -> int:
         end = self.ended_at or datetime.now(UTC)
         return int((end - self.started_at).total_seconds())
+
+    def mark_caller_spoke(self) -> None:
+        """Flag a demonstrably conversing counterpart — shields the call from
+        late/false AMD "machine" verdicts in the status webhook. Speech inside
+        the AMD grace window does not count: a voicemail greeting is
+        transcribed too, and it must not suppress the AMD hangup."""
+        if (datetime.now(UTC) - self.started_at).total_seconds() > AMD_GRACE_SECONDS:
+            self.metadata["caller_spoke"] = True
 
 
 class VoiceEngine(ABC):
@@ -475,10 +490,7 @@ class ConversationRelayEngine(VoiceEngine):
         logger.info("CR speech input [%s]: %s", call_sid, text[:80])
         state = self._active_calls.get(call_sid)
         if state and text.strip():
-            # A conversing counterpart — lets the status webhook ignore
-            # late/false AMD "machine" verdicts instead of killing the call.
-            state.metadata["caller_spoke"] = True
-        if state and text.strip():
+            state.mark_caller_spoke()
             from pincer.voice.analytics import get_accumulator
 
             accumulator = get_accumulator(state)
@@ -698,9 +710,7 @@ class MediaStreamEngine(VoiceEngine):
             text = transcript.text.strip()
             if not text or not self._on_speech_callback:
                 return
-            # See ConversationRelayEngine.on_speech_input: shields a live
-            # conversation from late/false AMD "machine" verdicts.
-            state.metadata["caller_spoke"] = True
+            state.mark_caller_spoke()
             # Deepgram word timings are real measurements of when the caller
             # spoke, which is what makes this engine's talk time `exact`.
             # Recorded before the confidence gate: a mumbled utterance the
@@ -830,22 +840,26 @@ class MediaStreamEngine(VoiceEngine):
             return False
 
         try:
-            await self._stream_tts(call_sid, state, text)
+            delivered = await self._stream_tts(call_sid, state, text)
         except Exception:
             logger.warning("TTS synthesis failed [%s] — retrying utterance once", call_sid)
             try:
-                await self._stream_tts(call_sid, state, text)
+                delivered = await self._stream_tts(call_sid, state, text)
             except Exception:
                 logger.exception("TTS retry failed [%s] — spoken fallback + hangup", call_sid)
                 await self.fallback_and_end(call_sid)
                 return False
+        if not delivered:
+            return False
 
         logger.info("MS speech output [%s] delivered=True: %s", call_sid, text[:80])
         return True
 
-    async def _stream_tts(self, call_sid: str, state: CallState, text: str) -> None:
+    async def _stream_tts(self, call_sid: str, state: CallState, text: str) -> bool:
         """One synthesis attempt: stream audio chunks to the Twilio WebSocket.
 
+        Returns True only when at least one audio chunk was written to the
+        socket — no socket means no synthesis (and no ElevenLabs spend).
         With ulaw_8000 output the ElevenLabs bytes go to Twilio as-is; the
         Python resample only runs on the legacy pcm_16000 fallback path.
         """
@@ -855,6 +869,9 @@ class MediaStreamEngine(VoiceEngine):
         from pincer.voice.tts import OUTPUT_PCM_16000
 
         ws = state.metadata.get("websocket")
+        if not ws:
+            logger.warning("send_speech with no MS websocket [%s] — agent output DROPPED", call_sid)
+            return False
         stream_sid = state.metadata.get("stream_sid", "")
         voice_id = voice_for(self._settings, state.language)
         tts_model = elevenlabs_model_for(self._settings, state.language)
@@ -866,6 +883,7 @@ class MediaStreamEngine(VoiceEngine):
 
         started = time.monotonic()
         first_chunk_ms: float | None = None
+        wrote_audio = False
         async for audio_chunk in self._tts_provider.synthesize_stream(text, voice=voice_id, model=tts_model):
             if first_chunk_ms is None:
                 first_chunk_ms = (time.monotonic() - started) * 1000.0
@@ -877,7 +895,7 @@ class MediaStreamEngine(VoiceEngine):
                 from pincer.voice.audio import pcm16k_to_mulaw8k
 
                 mulaw_data = pcm16k_to_mulaw8k(audio_chunk)
-            if ws and mulaw_data:
+            if mulaw_data:
                 payload = base64.b64encode(mulaw_data).decode("ascii")
                 msg = json.dumps(
                     {
@@ -887,6 +905,7 @@ class MediaStreamEngine(VoiceEngine):
                     }
                 )
                 await ws.send_text(msg)
+                wrote_audio = True
             if accumulator is not None and mulaw_data:
                 # μ-law at 8 kHz: one byte is 0.125 ms of audio. This is the
                 # measurement the `exact` method is named for.
@@ -899,6 +918,7 @@ class MediaStreamEngine(VoiceEngine):
             metrics.record_tts_characters(len(text))
             if first_chunk_ms is not None:
                 metrics.record_tts_first_chunk(first_chunk_ms)
+        return wrote_audio
 
     async def interrupt_speech(self, call_sid: str) -> None:
         state = self._active_calls.get(call_sid)

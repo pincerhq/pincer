@@ -7,7 +7,7 @@ goes through the ordinary outbound path, guardrails included.
 """
 
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest

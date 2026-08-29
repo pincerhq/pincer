@@ -371,6 +371,25 @@ class TestGroundingFilter:
         transcript = "AGENT: about the appointment. CALLER: Tuesday works fine."
         assert filter_ungrounded(outcome, transcript).commitments == []
 
+    def test_fabricated_time_dropped(self):
+        """Word overlap alone can't see '14:30' — a claim whose number the
+        transcript never mentions must not survive."""
+        outcome = CallOutcome(key_facts=["The appointment is confirmed for Tuesday at 14:30"])
+        transcript = "AGENT: confirming the appointment for Tuesday at 15:00. CALLER: yes, confirmed."
+        assert filter_ungrounded(outcome, transcript).key_facts == []
+
+    def test_matching_time_kept_across_separator_styles(self):
+        outcome = CallOutcome(key_facts=["The appointment is confirmed for Tuesday at 14.30"])
+        transcript = "AGENT: confirming the appointment for Tuesday at 14:30. CALLER: yes, confirmed."
+        assert filter_ungrounded(outcome, transcript).key_facts
+
+    def test_numeric_claim_kept_when_transcript_spells_numbers_out(self):
+        """Some STT paths write numbers as words; the number requirement only
+        applies when the transcript contains digits at all."""
+        outcome = CallOutcome(key_facts=["The appointment is confirmed for Tuesday at 14:30"])
+        transcript = "AGENT: confirming the appointment for Tuesday at half past two. CALLER: yes, confirmed."
+        assert filter_ungrounded(outcome, transcript).key_facts
+
 
 class TestExtractOutcome:
     async def test_llm_failure_returns_none(self):
@@ -383,6 +402,28 @@ class TestExtractOutcome:
         llm = FakeLLM(_json())
         assert await extract_outcome(llm, "", "") is None
         assert not llm.calls  # no wasted LLM call
+
+    async def test_long_transcript_keeps_the_tail(self, caplog):
+        """The outcome lives at the end of a call — truncation must drop the
+        greeting, not the agreement, and must not be silent."""
+        from pincer.voice.outcome import MAX_TRANSCRIPT_CHARS
+
+        filler = "CALLER: still thinking about it.\n" * (MAX_TRANSCRIPT_CHARS // 30)
+        transcript = "AGENT: opening greeting here.\n" + filler + "CALLER: booked for Tuesday at 14:30, goodbye."
+        llm = FakeLLM(_json())
+        with caplog.at_level("WARNING"):
+            await extract_outcome(llm, transcript, "")
+        sent = llm.calls[0]["messages"][0].content
+        assert "booked for Tuesday at 14:30" in sent
+        assert "opening greeting here" not in sent
+        assert "Transcript truncated" in caplog.text
+
+    async def test_short_transcript_not_truncated(self, caplog):
+        llm = FakeLLM(_json())
+        with caplog.at_level("WARNING"):
+            await extract_outcome(llm, "AGENT: hi\nCALLER: bye", "")
+        assert "AGENT: hi" in llm.calls[0]["messages"][0].content
+        assert "Transcript truncated" not in caplog.text
 
     async def test_prompt_contains_grounding_rules(self):
         llm = FakeLLM(_json())

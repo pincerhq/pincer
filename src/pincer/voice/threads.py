@@ -402,10 +402,12 @@ def merge_commitments(
     expiry sweep is pure arithmetic. `due` in the past and not done becomes
     `expired` and is only FLAGGED — acting on it is out of scope (§14).
     """
-    from pincer.voice.outcome import _is_grounded, _significant_words
+    from pincer.voice.outcome import _is_grounded, _numbers, _significant_words
 
     moment = now or datetime.now(UTC)
-    evidence_words = _significant_words(_evidence_text(outcome))
+    evidence_text = _evidence_text(outcome)
+    evidence_words = _significant_words(evidence_text)
+    evidence_numbers = _numbers(evidence_text)
     merged = [dict(c) for c in existing]
     changed = False
 
@@ -416,7 +418,7 @@ def merge_commitments(
         target = merged[index]
         if target.get("status") != COMMITMENT_OPEN:
             continue
-        if not _is_grounded(str(target.get("what", "")), evidence_words):
+        if not _is_grounded(str(target.get("what", "")), evidence_words, evidence_numbers):
             logger.info(
                 "Thread commitment %r claimed done without evidence in the new call — kept open",
                 str(target.get("what", ""))[:60],

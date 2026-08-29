@@ -87,6 +87,7 @@ SIGNED_ROUTES = [
     ("/api/apps/twilio/webhook", {"CallSid": "CA1", "From": "+15551110000", "To": "+15552220000"}),
     ("/api/apps/twilio/status", {"CallSid": "CA1", "CallStatus": "completed", "CallDuration": "12"}),
     ("/api/apps/twilio/fallback", {"CallSid": "CA1", "ErrorCode": "64111"}),
+    ("/api/apps/twilio/transfer-result", {"CallSid": "CA1", "DialCallStatus": "completed"}),
     # Deprecated aliases are exactly as exposed as the current paths.
     ("/voice/webhook", {"CallSid": "CA1", "From": "+15551110000", "To": "+15552220000"}),
     ("/voice/status", {"CallSid": "CA1", "CallStatus": "completed"}),
@@ -129,9 +130,35 @@ def test_relay_webhook_json_requires_signature(client):
     assert client.post("/api/apps/twilio/relay-webhook", json=body).status_code == 403
 
 
+def test_legacy_relay_webhook_json_requires_signature(client):
+    body = {"CallSid": "CA1", "type": "prompt", "voicePrompt": "hello"}
+    assert client.post("/voice/relay-webhook", json=body).status_code == 403
+
+
 def test_health_endpoint_stays_public(client):
     """Twilio's own console health probe has no signature to give."""
     assert client.get("/api/apps/twilio/health").status_code == 200
+
+
+def test_uninitialized_routes_fail_closed(monkeypatch):
+    """Routes mounted while `init_voice_routes` has not run (settings=None)
+    must refuse — the Bearer-auth exemption's replacement may never be absent,
+    so an uninitialized voice surface rejects rather than running unsigned."""
+    from starlette.websockets import WebSocketDisconnect
+
+    monkeypatch.setattr(twiml_server, "_settings", None)
+    monkeypatch.setattr(twiml_server, "_engine", None)
+    app = FastAPI()
+    app.include_router(twiml_server.twilio_router)
+    client = TestClient(app)
+
+    form = {"CallSid": "CA1", "CallStatus": "completed"}
+    assert client.post("/api/apps/twilio/status", data=form).status_code == 403
+    signed = compute_signature("", "http://testserver/api/apps/twilio/status", form)
+    assert client.post("/api/apps/twilio/status", data=form, headers={"X-Twilio-Signature": signed}).status_code == 403
+
+    with pytest.raises(WebSocketDisconnect), client.websocket_connect("/api/apps/twilio/relay"):
+        pass  # pragma: no cover — refused before accept
 
 
 @pytest.mark.parametrize("client", [{"voice_webhook_validate": False}], indirect=True)

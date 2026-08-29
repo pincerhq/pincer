@@ -96,9 +96,19 @@ def _signed(path: str, ws_path: str = WS_RELAY_PATH) -> str:
     return path + signed_ws_query(_ws_settings(), ws_path)
 
 
+def _register(engine: FakeEngine, call_sid: str, caller: str = "+1") -> CallState:
+    """Pre-register call state, as the signature-verified /webhook (inbound)
+    or the dialer (outbound) does before any TwiML — and hence any socket —
+    exists. A setup for a SID with no such state is refused."""
+    state = CallState(call_sid=call_sid, direction=CallDirection.INBOUND, caller_number=caller)
+    engine.states[call_sid] = state
+    return state
+
+
 class TestRelayWebSocket:
     def test_setup_prompt_interrupt_flow(self):
         engine = FakeEngine()
+        _register(engine, "CA_ws", "+15551234567")
         client = _app_with_engine(engine)
 
         with client.websocket_connect(_signed("/api/apps/twilio/relay")) as ws:
@@ -108,7 +118,7 @@ class TestRelayWebSocket:
             # give the server loop a chance to process before disconnect
             ws.send_text(json.dumps({"type": "prompt", "voicePrompt": "Second turn"}))
 
-        assert engine.started and engine.started[0][0] == "CA_ws"
+        assert engine.answered == ["CA_ws"]
         assert ("CA_ws", "Hello there") in engine.speech_inputs
         assert ("CA_ws", "Second turn") in engine.speech_inputs
         assert engine.interrupts == ["CA_ws"]
@@ -169,6 +179,7 @@ class TestRelayWebSocket:
 
     def test_legacy_voice_path_alias(self):
         engine = FakeEngine()
+        _register(engine, "CA_legacy")
         client = _app_with_engine(engine)
         with client.websocket_connect(_signed("/voice/relay")) as ws:
             ws.send_text(json.dumps({"type": "setup", "callSid": "CA_legacy", "from": "+1"}))
@@ -185,6 +196,7 @@ class TestRelayWebSocket:
 
         voices._reset_validation_cache_for_tests()
         engine = FakeEngine()
+        _register(engine, "CA_tts_err")
         settings = SimpleNamespace(
             elevenlabs_voice_id="cr-bad-voice",
             elevenlabs_voice_id_en="",
@@ -214,6 +226,7 @@ class TestRelayWebSocket:
 
     def test_single_tts_error_does_not_end_call(self):
         engine = FakeEngine()
+        _register(engine, "CA_one_err")
         client = _app_with_engine(engine)
         with client.websocket_connect(_signed("/api/apps/twilio/relay")) as ws:
             ws.send_text(json.dumps({"type": "setup", "callSid": "CA_one_err", "from": "+1"}))
@@ -224,6 +237,7 @@ class TestRelayWebSocket:
 
     def test_garbage_messages_ignored(self):
         engine = FakeEngine()
+        _register(engine, "CA_g")
         client = _app_with_engine(engine)
         with client.websocket_connect(_signed("/api/apps/twilio/relay")) as ws:
             ws.send_text("not json at all")
@@ -231,6 +245,61 @@ class TestRelayWebSocket:
             ws.send_text(json.dumps({"type": "dtmf", "digit": "1"}))  # unknown type: ignored
             ws.send_text(json.dumps({"type": "prompt", "voicePrompt": "still alive"}))
         assert ("CA_g", "still alive") in engine.speech_inputs
+
+
+class TestRelaySetupHardening:
+    """A socket may only join a call that /webhook or the dialer registered:
+    an unknown SID must not mint conversation state under a socket-supplied
+    caller identity, and a live call's socket must not be overwritten."""
+
+    def test_setup_with_unknown_sid_is_refused(self):
+        engine = FakeEngine()
+        client = _app_with_engine(engine)
+        with client.websocket_connect(_signed("/api/apps/twilio/relay")) as ws:
+            ws.send_text(json.dumps({"type": "setup", "callSid": "CA_spoof", "from": "+15550001111"}))
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_text()
+        assert exc.value.code == 1011
+        assert engine.started == []
+        assert engine.states == {}
+        assert engine.speech_inputs == []
+
+    def test_stream_with_unknown_sid_is_refused(self):
+        engine = FakeEngine()
+        client = _app_with_engine(engine)
+        with (
+            client.websocket_connect(_signed("/api/apps/twilio/stream/CA_spoof", WS_STREAM_PATH)) as ws,
+            pytest.raises(WebSocketDisconnect) as exc,
+        ):
+            ws.receive_text()
+        assert exc.value.code == 1008
+        assert engine.started == []
+        assert engine.states == {}
+
+    def test_second_socket_for_live_call_is_refused(self):
+        """With a live socket attached, a setup for the same SID must not
+        steal the call — overwriting `metadata['websocket']` would redirect
+        the agent's speech and leave the genuine caller silent."""
+        engine = FakeEngine()
+        state = _register(engine, "CA_live")
+        client = _app_with_engine(engine)
+        with client.websocket_connect(_signed("/api/apps/twilio/relay")) as ws1:
+            ws1.send_text(json.dumps({"type": "setup", "callSid": "CA_live", "from": "+1"}))
+            deadline = time.time() + 2
+            while "websocket" not in state.metadata and time.time() < deadline:
+                time.sleep(0.01)
+            assert "websocket" in state.metadata
+            owner = state.metadata["websocket"]
+
+            with client.websocket_connect(_signed("/api/apps/twilio/relay")) as ws2:
+                ws2.send_text(json.dumps({"type": "setup", "callSid": "CA_live", "from": "+6660001111"}))
+                with pytest.raises(WebSocketDisconnect) as exc:
+                    ws2.receive_text()
+            assert exc.value.code == 1008
+            assert state.metadata["websocket"] is owner  # the call still belongs to its socket
+
+            ws1.send_text(json.dumps({"type": "prompt", "voicePrompt": "still mine"}))
+        assert ("CA_live", "still mine") in engine.speech_inputs
 
 
 class TestRelayWebSocketAuth:
@@ -280,6 +349,7 @@ class TestRelayWebSocketAuth:
 
     def test_signed_media_stream_is_accepted(self):
         engine = FakeEngine()
+        _register(engine, "CA_sig")
         client = _app_with_engine(engine)
         with client.websocket_connect(_signed("/api/apps/twilio/stream/CA_sig", WS_STREAM_PATH)) as ws:
             ws.send_text(json.dumps({"event": "connected"}))
@@ -288,6 +358,7 @@ class TestRelayWebSocketAuth:
     def test_auth_disabled_allows_unsigned_connect(self):
         """Dev escape hatch still works — and doctor reports it CRITICAL."""
         engine = FakeEngine()
+        _register(engine, "CA_open", "+15551234567")
         settings = _ws_settings()
         settings.voice_ws_auth_required = False
         app = FastAPI()
@@ -296,4 +367,6 @@ class TestRelayWebSocketAuth:
         client = TestClient(app)
         with client.websocket_connect("/api/apps/twilio/relay") as ws:
             ws.send_text(json.dumps({"type": "setup", "callSid": "CA_open", "from": "+15551234567"}))
-        assert engine.started and engine.started[0][0] == "CA_open"
+            ws.send_text(json.dumps({"type": "prompt", "voicePrompt": "hi"}))
+        assert engine.answered == ["CA_open"]
+        assert ("CA_open", "hi") in engine.speech_inputs

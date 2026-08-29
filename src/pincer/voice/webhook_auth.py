@@ -170,7 +170,11 @@ async def verify_http_request(request: Request, body: bytes, settings: Settings 
     Skipped only when validation is explicitly disabled or no Twilio auth token
     is configured (a dev box with no Twilio account cannot receive real
     webhooks anyway); `pincer doctor --production` flags both states CRITICAL.
+    `settings=None` (routes mounted before/without `init_voice_routes`) fails
+    CLOSED — an uninitialized voice surface must refuse, not run unsigned.
     """
+    if settings is None:
+        raise WebhookAuthError("voice settings not initialized")
     if not validation_enabled(settings):
         return
     token = _auth_token(settings)
@@ -241,9 +245,12 @@ def verify_ws_upgrade(websocket: WebSocket, settings: Settings | None, path: str
     """Authenticate a WS upgrade before `accept()`. Raises `WebhookAuthError`.
 
     Accepts either our signed `?t=&s=` token or a valid `X-Twilio-Signature`
-    on the upgrade request (Twilio adds one on some integrations).
+    on the upgrade request (Twilio adds one on some integrations). Like the
+    HTTP check, `settings=None` fails closed.
     """
-    if settings is None or not getattr(settings, "voice_ws_auth_required", True):
+    if settings is None:
+        raise WebhookAuthError("voice settings not initialized")
+    if not getattr(settings, "voice_ws_auth_required", True):
         return
     secret = _ws_secret(settings)
     if not secret:

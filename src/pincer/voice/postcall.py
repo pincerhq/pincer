@@ -151,6 +151,12 @@ class PostCallProcessor:
         else:
             report = render_fallback_report(target_label, state.duration_seconds, call_sid, completed, language)
 
+        # Voicemail/not-connected endings stash their reason in metadata
+        # instead of pre-empting the ENDED stage (which would drop this report)
+        end_reason = str(state.metadata.get("end_reason") or "")
+        if end_reason:
+            report = f"{report}\nℹ️ {end_reason}"
+
         # Sprint 6: appointment scheduling calls get their post-call chain —
         # confirmed slot → idempotent calendar write + invitations; every
         # failure path lands in the report honestly, never silently.

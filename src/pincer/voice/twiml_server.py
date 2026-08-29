@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse, Response
+from starlette.websockets import WebSocketState
 
 from pincer.voice.twiml_builder import CALL_SID_PLACEHOLDER
 from pincer.voice.webhook_auth import (
@@ -341,7 +342,6 @@ async def voice_status(request: Request) -> PlainTextResponse:
                 "uk": "виявлено автовідповідач, повідомлення не залишено",
             }
             voicemail_reason = voicemail_reasons[user_lang]
-            await notify_ended(call_sid, voicemail_reason)
             # Appointment calls (Sprint 6): voicemail triggers the retry
             # policy. Consumes the scheduling context BEFORE end_call so the
             # post-call pipeline doesn't double-handle it.
@@ -349,7 +349,17 @@ async def voice_status(request: Request) -> PlainTextResponse:
                 from pincer.voice.scheduling import handle_call_not_connected
 
                 await handle_call_not_connected(call_sid, "voicemail", _settings)
+            vm_state = _engine.get_call_state(call_sid) if _engine else None
+            if vm_state is not None:
+                # The post-call pipeline owns the final message: sending the
+                # ENDED stage here would pop the call from tracking and the
+                # structured report would be built but never delivered.
+                vm_state.metadata["end_reason"] = voicemail_reason
+            else:
+                # No conversation state -> end_call fires no post-call pipeline
+                await notify_ended(call_sid, voicemail_reason)
             if _engine:
+                # The call is live (greeting a voicemail box) — always hang up
                 await _engine.end_call(call_sid)
             return PlainTextResponse("OK")
 
@@ -379,14 +389,22 @@ async def voice_status(request: Request) -> PlainTextResponse:
                 "canceled": "дзвінок було скасовано",
             },
         }
-        await notify_ended(call_sid, reasons[user_lang].get(status, status))
+        not_connected_reason = reasons[user_lang].get(status, status)
         # Appointment calls (Sprint 6): busy/no-answer/failed triggers the retry policy
         if _settings is not None:
             from pincer.voice.scheduling import handle_call_not_connected
 
             await handle_call_not_connected(call_sid, status, _settings)
-        if _engine and _engine.get_call_state(call_sid):
+        nc_state = _engine.get_call_state(call_sid) if _engine else None
+        if _engine is not None and nc_state is not None:
+            # Conversation state exists (e.g. a late failure) -> the post-call
+            # pipeline sends the final report; pre-empting it here would
+            # consume the ENDED stage and drop that report.
+            nc_state.metadata["end_reason"] = not_connected_reason
             await _engine.end_call(call_sid)
+        else:
+            # Usual shape: the call never connected, no pipeline will run
+            await notify_ended(call_sid, not_connected_reason)
 
     elif status == "completed" and _engine:
         state = _engine.get_call_state(call_sid)
@@ -475,13 +493,30 @@ async def relay_ws(websocket: WebSocket) -> None:
                     # back from a <Dial> transfer: the call is ours again
                     state.metadata.pop("transferring", None)
                 if state is None:
-                    state = await _resolve_setup_state(call_sid, caller, str(msg.get("direction", "")))
+                    state = await _resolve_setup_state(
+                        call_sid, caller, str(msg.get("direction", "")), client=client_ip(websocket)
+                    )
                     if state is None:
-                        # Outbound with no retrievable briefing: terminated,
-                        # never improvised (§2). The initiating user gets the
-                        # standard failure report.
+                        # Outbound with no retrievable briefing (terminated,
+                        # never improvised, §2) or an unknown SID (refused —
+                        # only /webhook and the dialer may create call state).
                         await websocket.close(code=1011)
                         return
+                existing_ws = state.metadata.get("websocket")
+                if (
+                    existing_ws is not None
+                    and existing_ws is not websocket
+                    and getattr(existing_ws, "client_state", None) == WebSocketState.CONNECTED
+                ):
+                    # A live socket already speaks for this call. Overwriting
+                    # it would redirect the agent's audio to whoever supplied
+                    # this SID and leave the genuine caller silent.
+                    await audit_rejection(
+                        "twilio_ws:relay", client_ip(websocket), "live socket takeover refused", call_sid=call_sid
+                    )
+                    state = None
+                    await websocket.close(code=1008, reason="Already connected")
+                    return
                 state.metadata["websocket"] = websocket
                 # `setup` is Twilio's "the callee picked up". Every clock in
                 # the call starts from here — an outbound state exists from
@@ -512,7 +547,7 @@ async def relay_ws(websocket: WebSocket) -> None:
             await _media_closed(call_sid)
 
 
-async def _resolve_setup_state(call_sid: str, caller: str, direction: str = "") -> Any:
+async def _resolve_setup_state(call_sid: str, caller: str, direction: str = "", client: str = "") -> Any:
     """The call state a `setup` message belongs to, or None to refuse the call.
 
     Order matters, and each step exists because the previous one can lose a
@@ -526,7 +561,13 @@ async def _resolve_setup_state(call_sid: str, caller: str, direction: str = "") 
        and the caller hangs up: an outbound call whose briefing cannot be
        found MUST NOT run, because what it runs instead is a generic assistant
        persona on a call the user gave a task to.
-    5. Otherwise it is genuinely inbound and gets an inbound state.
+    5. Otherwise refuse: an unknown SID on a voice socket is never a
+       legitimate Twilio call. Genuine inbound calls are registered by the
+       signature-verified /webhook before their TwiML (and hence this socket)
+       exists, and genuine outbound calls leave a state or a status record.
+       Creating state from socket-supplied callSid/from here would let anyone
+       who reaches the endpoint mint a conversation with the agent under an
+       attacker-chosen caller identity.
     """
     if _engine is None:
         return None
@@ -563,7 +604,9 @@ async def _resolve_setup_state(call_sid: str, caller: str, direction: str = "") 
         await _record_briefing_lost(call_sid, info)
         return None
 
-    return await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
+    logger.warning("setup for unknown call SID [%s] from %r refused", call_sid, caller)
+    await audit_rejection("twilio_setup", client or "unknown", "unknown call SID", call_sid=call_sid)
+    return None
 
 
 async def _record_briefing_lost(call_sid: str, info: Any = None) -> None:
@@ -710,7 +753,7 @@ async def relay_webhook(request: Request) -> Response:
         if call_sid and not _engine.get_call_state(call_sid):
             # Same resolver as the relay socket, so the briefing rules cannot
             # differ between the two transports.
-            await _resolve_setup_state(call_sid, caller, str(body.get("direction", "")))
+            await _resolve_setup_state(call_sid, caller, str(body.get("direction", "")), client=client_ip(request))
         if call_sid:
             await _engine.mark_call_answered(call_sid)
 
@@ -742,11 +785,27 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
         # Media Streams: the audio socket can connect before any other webhook
         # has registered the call. The stream carries no direction field, so
         # the resolver falls through to the status record (which knows the
-        # briefing) and only then to inbound.
-        state = await _resolve_setup_state(call_sid, "", "")
-    if state:
-        state.metadata["websocket"] = websocket
-        await _engine.mark_call_answered(call_sid)
+        # briefing); an unknown SID is refused — only /webhook and the dialer
+        # may create call state.
+        state = await _resolve_setup_state(call_sid, "", "", client=client_ip(websocket))
+    if state is None:
+        await websocket.close(code=1008, reason="Unknown call")
+        return
+    existing_ws = state.metadata.get("websocket")
+    if (
+        existing_ws is not None
+        and existing_ws is not websocket
+        and getattr(existing_ws, "client_state", None) == WebSocketState.CONNECTED
+    ):
+        # A live socket already carries this call's audio — never hand the
+        # call to a second socket claiming the same SID.
+        await audit_rejection(
+            "twilio_ws:stream", client_ip(websocket), "live socket takeover refused", call_sid=call_sid
+        )
+        await websocket.close(code=1008, reason="Already connected")
+        return
+    state.metadata["websocket"] = websocket
+    await _engine.mark_call_answered(call_sid)
 
     try:
         while True:

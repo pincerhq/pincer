@@ -279,7 +279,6 @@ _STDIO_ONLY_KEYS = {"command", "args", "env"}
 _STREAMABLE_HTTP_ONLY_KEYS = {"url", "headers"}
 
 
-
 def _merge_mcp_raw(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Merge two raw [mcp] section dicts. override wins for all scalar/mapping keys.
 

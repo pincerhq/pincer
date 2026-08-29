@@ -9,6 +9,8 @@ x-pincer-base: &pincer-base
       required: false
   environment:
     - PINCER_DATA_DIR=/app/data
+    # Not a pydantic Settings field: consumed by ${PINCER_SRC_DIR:-$PWD}
+    # interpolation in pincer.toml's stdio MCP server args (mcp/config.py).
     - PINCER_SRC_DIR=/app
     - PINCER_DASHBOARD_HOST=0.0.0.0
     - PINCER_DASHBOARD_PORT=8080
@@ -69,7 +71,6 @@ services:
       API_KEY: ${PINCER_OPENWEATHERMAP_API_KEY:-}
 
   pomodoro-mcp:
-    user: "0:0"
     extends:
       file: ./src/pomodoro-mcp/docker-compose.yml
       service: pomodoro-mcp
@@ -106,8 +107,12 @@ services:
       file: ./src/sqlite-vec-memory-mcp/docker-compose.yml
       service: sqlite-vec-memory-mcp
     image: pincer/memory-mcp:latest
+    # Opt-in profile to reduce memory usage: the default pincer.toml reaches
+    # memory over stdio (sqlite_vec_memory), so this container only matters
+    # when the streamable-http [[mcp.servers]] block is enabled.
+    # Enable with: docker compose --profile http --profile memory up
     profiles:
-      - http
+      - memory
 
   ms365-mcp:
     extends:
@@ -201,9 +206,9 @@ services:
         condition: service_healthy
       doctr-mcp:
         condition: service_healthy
-      # memory-mcp intentionally disabled to reduce memory usage
-      # ms365-mcp intentionally omitted — it lives in the opt-in `ms365`
-      # profile; a depends_on here would pull it in and block startup.
+      # memory-mcp and ms365-mcp intentionally omitted — they live in the
+      # opt-in `memory` / `ms365` profiles; a depends_on here would pull
+      # them into `--profile http` and block startup.
 
   pincer-http-tasks:
     <<: *pincer-base
@@ -251,9 +256,9 @@ services:
         condition: service_healthy
       doctr-mcp:
         condition: service_healthy
-      # memory-mcp intentionally disabled to reduce memory usage
-      # ms365-mcp intentionally omitted — it lives in the opt-in `ms365`
-      # profile; a depends_on here would pull it in and block startup.
+      # memory-mcp and ms365-mcp intentionally omitted — they live in the
+      # opt-in `memory` / `ms365` profiles; a depends_on here would pull
+      # them into `--profile http` and block startup.
 
 volumes:
   pincer-data:
