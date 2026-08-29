@@ -6,9 +6,12 @@ from pydantic import BaseModel, Field, SecretStr, field_validator
 class ChannelSettings(BaseModel):
     # ── Telegram ─────────────────────────────────────────
     telegram_bot_token: SecretStr = Field(default=SecretStr(""), description="Telegram bot token")
-    telegram_allowed_users: list[int] = Field(
-        default_factory=list,
-        description="Telegram user IDs allowed to use the bot (empty = allow all)",
+    telegram_guests_allowed: bool = Field(
+        default=False,
+        description=(
+            "When PINCER_IDENTITY_MAP is configured, allow senders not in the map through as "
+            "disposable guests instead of rejecting them. No-op if no identity map is configured."
+        ),
     )
 
     # ── Discord ───────────────────────────────────────────
@@ -24,9 +27,12 @@ class ChannelSettings(BaseModel):
         default=True,
         description="When True, only self-chat and group mentions get a reply; DMs from others ignored.",
     )
-    whatsapp_dm_allowlist: str = Field(
-        default="",
-        description="Comma-separated phone numbers allowed to DM; empty = self-chat and group mentions only.",
+    whatsapp_guests_allowed: bool = Field(
+        default=False,
+        description=(
+            "When PINCER_IDENTITY_MAP is configured, allow senders not in the map through as "
+            "disposable guests instead of rejecting them. No-op if no identity map is configured."
+        ),
     )
     whatsapp_group_trigger: str = Field(
         default="pincer",
@@ -42,10 +48,6 @@ class ChannelSettings(BaseModel):
     slack_app_token: SecretStr = Field(
         default=SecretStr(""),
         description="Slack App-Level Token for Socket Mode (xapp-...)",
-    )
-    slack_user_allowlist: list[str] = Field(
-        default_factory=list,
-        description="Optional Slack user IDs allowed to use the bot (empty = allow all)",
     )
 
     # ── Microsoft Teams ───────────────────────────────────
@@ -80,9 +82,12 @@ class ChannelSettings(BaseModel):
         description="URL for browser-based pairing (host-facing); use when signal-api is in Docker",
     )
     signal_phone_number: str = Field(default="", description="Registered Signal phone number (E.164)")
-    signal_allowlist: str = Field(
-        default="",
-        description="Comma-separated phone numbers allowed to DM; empty = allow all",
+    signal_guests_allowed: bool = Field(
+        default=False,
+        description=(
+            "When PINCER_IDENTITY_MAP is configured, allow senders not in the map through as "
+            "disposable guests instead of rejecting them. No-op if no identity map is configured."
+        ),
     )
     signal_group_reply: str = Field(
         default="mention_only",
@@ -145,22 +150,11 @@ class ChannelSettings(BaseModel):
         description="Default pincer_user_id for proactive messages",
     )
 
-    @field_validator("slack_user_allowlist", "teams_user_allowlist", mode="before")
+    @field_validator("teams_user_allowlist", mode="before")
     @classmethod
     def parse_slack_allowlist(cls, v: str | list[str]) -> list[str]:
         if isinstance(v, str):
             if not v.strip():
                 return []
             return [uid.strip() for uid in v.split(",") if uid.strip()]
-        return v
-
-    @field_validator("telegram_allowed_users", mode="before")
-    @classmethod
-    def parse_allowed_users(cls, v: list[int] | str) -> list[int]:
-        if isinstance(v, int):
-            return [v]
-        elif isinstance(v, str):
-            if not v.strip():
-                return []
-            return [int(uid.strip()) for uid in v.split(",") if uid.strip()]
         return v

@@ -379,7 +379,7 @@ pincer/
 | `cli.py` | Typer CLI (`run`, `config`, `cost`, `auth-google`, `pair-whatsapp`) |
 | `channels/base.py` | Abstract channel interface (`BaseChannel`, `IncomingMessage`, `ChannelType`) |
 | `channels/telegram.py` | Full Telegram bot — text, voice, photos, documents, streaming, message splitting |
-| `channels/whatsapp.py` | WhatsApp via neonize — QR pairing, self-chat (LID-aware), DM allowlist, groups, voice/image/docs |
+| `channels/whatsapp.py` | WhatsApp via neonize — QR pairing, self-chat (LID-aware), identity-map guest gating, groups, voice/image/docs |
 | `channels/router.py` | Cross-channel message router for proactive delivery |
 | `llm/base.py` | Abstract LLM interface, unified message types |
 | `llm/anthropic_common.py` | Anthropic-wire provider — complete + stream with tool use, message validation |
@@ -501,7 +501,7 @@ enables random failover.
 | Variable | Purpose |
 |----------|---------|
 | `PINCER_WHATSAPP_ENABLED` | Enable WhatsApp channel (`true`/`false`) |
-| `PINCER_WHATSAPP_DM_ALLOWLIST` | Comma-separated phone numbers allowed to DM |
+| `PINCER_WHATSAPP_GUESTS_ALLOWED` | Once `PINCER_IDENTITY_MAP` is configured, allow unmapped senders through as disposable guests (default `false`; no-op if no identity map is configured) |
 | `PINCER_WHATSAPP_GROUP_TRIGGER` | Trigger word for group messages (default: `pincer`) |
 
 ### Optional — Email & Calendar
@@ -510,7 +510,7 @@ enables random failover.
 |----------|---------|
 | `PINCER_EMAIL_USERNAME` | Gmail address |
 | `PINCER_EMAIL_PASSWORD` | Gmail App Password (not regular password) |
-| `PINCER_IDENTITY_MAP` | Cross-channel identity mapping — format: `[name@]ch1:id1=ch2:id2[=ch3:id3]`, multiple entries comma-separated |
+| `PINCER_IDENTITY_MAP` | Cross-channel identity mapping — format: `[name@]ch1:id1=ch2:id2[=ch3:id3]`, multiple entries comma-separated. Also gates guest access on Telegram/WhatsApp/Signal — see `*_GUESTS_ALLOWED` above and [Guest access control](../reference/cli.md#guest-access-control) |
 | `PINCER_MEMORY_BACKEND` | Memory storage engine: `sqlite` (default, local DB) or `mcp` (external MCP server) |
 | `PINCER_MEMORY_MCP_SERVER` | MCP server name when `PINCER_MEMORY_BACKEND=mcp` (default: `sqlite-vec-memory`) |
 | `PINCER_OPENWEATHERMAP_API_KEY` | Weather for morning briefings |

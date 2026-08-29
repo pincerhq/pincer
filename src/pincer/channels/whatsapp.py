@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     )
 
     from pincer.config import Settings
+    from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -140,12 +141,13 @@ class WhatsAppChannel(BaseChannel):
 
     channel_type = ChannelType.WHATSAPP
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, identity: IdentityResolver | None = None) -> None:
         if not HAS_NEONIZE:
             raise ImportError(
                 "neonize is required for WhatsApp support. Install it with: pip install neonize (requires libmagic)"
             )
         self._settings = settings
+        self._identity = identity
         self._client: NewAClient | None = None
         self._handler: MessageHandler | None = None
         self._own_jid: str | None = None
@@ -166,13 +168,6 @@ class WhatsAppChannel(BaseChannel):
         # the "@lid" server — `build_jid(lid_user)` defaults to "@s.whatsapp.net"
         # and the WA server rejects it with "no LID found".
         self._reply_targets: dict[str, tuple[str, str]] = {}
-
-        self._dm_allowlist: set[str] = set()
-        if settings.whatsapp_dm_allowlist:
-            self._dm_allowlist = {
-                phone.strip().lstrip("+") for phone in settings.whatsapp_dm_allowlist.split(",") if phone.strip()
-            }
-            logger.info("WhatsApp allowlist: %d numbers", len(self._dm_allowlist))
 
         # Echo prevention: skip processing messages Pincer just sent.
         self._recent_sent_ids: set[str] = set()
@@ -785,12 +780,16 @@ class WhatsAppChannel(BaseChannel):
                         return
                     logger.info("WA routing: group mention")
                 else:
-                    # Rule 5: Incoming DM — only process if allowlisted (and not self-chat-only).
+                    # Rule 5: Incoming DM — only process if not self-chat-only and not a guest.
                     if self._settings.whatsapp_self_chat_only:
                         logger.info("WA skip: incoming DM from %s (self-chat-only mode)", sender_phone)
                         return
-                    if sender_phone not in self._dm_allowlist:
-                        logger.info("WA skip: DM from %s not in allowlist", sender_phone)
+                    if (
+                        self._identity is not None
+                        and not self._settings.whatsapp_guests_allowed
+                        and await self._identity.is_guest(ChannelType.WHATSAPP, sender_phone)
+                    ):
+                        logger.info("WA skip: DM from %s not in identity map (guest)", sender_phone)
                         return
                     logger.info("WA routing: DM from %s", sender_phone)
 

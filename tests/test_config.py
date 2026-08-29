@@ -77,14 +77,14 @@ def test_parse_fallback_providers_list_passthrough() -> None:
     assert Settings.parse_fallback_providers(["openai", "grok"]) == ["openai", "grok"]
 
 
-def test_parse_allowed_users() -> None:
-    result = Settings.parse_allowed_users("123,456,789")
-    assert result == [123, 456, 789]
-
-
-def test_parse_allowed_users_empty() -> None:
-    result = Settings.parse_allowed_users("")
-    assert result == []
+def test_guests_allowed_defaults_false(tmp_path: Path) -> None:
+    s = Settings(
+        anthropic_api_key="sk-test",  # type: ignore[arg-type]
+        data_dir=tmp_path / "guests-allowed-defaults",
+    )
+    assert s.telegram_guests_allowed is False
+    assert s.whatsapp_guests_allowed is False
+    assert s.signal_guests_allowed is False
 
 
 def test_data_dir_created(tmp_path: Path) -> None:

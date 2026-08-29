@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from aiogram.types import Message
 
     from pincer.config import Settings
+    from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -77,13 +78,13 @@ class TelegramChannel(BaseChannel):
 
     channel_type = ChannelType.TELEGRAM
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, identity: IdentityResolver | None = None) -> None:
         self._settings = settings
+        self._identity = identity
         self._bot: Bot | None = None
         self._dp: Dispatcher | None = None
         self._handler: MessageHandler | None = None
         self._stream_agent: Any = None
-        self._allowed_users = set(settings.telegram_allowed_users)
         self._polling_task: asyncio.Task[None] | None = None
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
 
@@ -395,10 +396,10 @@ class TelegramChannel(BaseChannel):
                 with contextlib.suppress(Exception):
                     await self._bot.send_message(chat_id=chat_id, text=part, parse_mode=None)
 
-    def _is_allowed(self, user_id: int) -> bool:
-        if not self._allowed_users:
-            return True  # Empty = allow all
-        return user_id in self._allowed_users
+    async def _is_guest_blocked(self, user_id: int) -> bool:
+        if self._identity is None or self._settings.telegram_guests_allowed:
+            return False
+        return await self._identity.is_guest(ChannelType.TELEGRAM, user_id)
 
     def _register_handlers(self, router: Router) -> None:
         """Register all message handlers on the router."""
@@ -424,7 +425,10 @@ class TelegramChannel(BaseChannel):
 
         @router.message(CommandStart())
         async def cmd_start(message: Message) -> None:
-            if not message.from_user or not self._is_allowed(message.from_user.id):
+            if not message.from_user:
+                return
+            if await self._is_guest_blocked(message.from_user.id):
+                logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)
                 return
             await message.answer(
                 markdown_to_telegram_html(
@@ -439,7 +443,10 @@ class TelegramChannel(BaseChannel):
 
         @router.message(Command("clear"))
         async def cmd_clear(message: Message) -> None:
-            if not message.from_user or not self._is_allowed(message.from_user.id):
+            if not message.from_user:
+                return
+            if await self._is_guest_blocked(message.from_user.id):
+                logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)
                 return
             if self._handler:
                 await self._handler(
@@ -454,7 +461,10 @@ class TelegramChannel(BaseChannel):
 
         @router.message(Command("cost"))
         async def cmd_cost(message: Message) -> None:
-            if not message.from_user or not self._is_allowed(message.from_user.id):
+            if not message.from_user:
+                return
+            if await self._is_guest_blocked(message.from_user.id):
+                logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)
                 return
             if self._handler:
                 response = await self._handler(
@@ -490,7 +500,10 @@ class TelegramChannel(BaseChannel):
 
         @router.message(F.voice)
         async def handle_voice(message: Message) -> None:
-            if not message.from_user or not self._is_allowed(message.from_user.id):
+            if not message.from_user:
+                return
+            if await self._is_guest_blocked(message.from_user.id):
+                logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)
                 return
             assert self._bot is not None and self._handler is not None
 
@@ -518,7 +531,10 @@ class TelegramChannel(BaseChannel):
 
         @router.message(F.photo)
         async def handle_photo(message: Message) -> None:
-            if not message.from_user or not self._is_allowed(message.from_user.id):
+            if not message.from_user:
+                return
+            if await self._is_guest_blocked(message.from_user.id):
+                logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)
                 return
             assert self._bot is not None and self._handler is not None
 
@@ -547,7 +563,10 @@ class TelegramChannel(BaseChannel):
 
         @router.message(F.document)
         async def handle_document(message: Message) -> None:
-            if not message.from_user or not self._is_allowed(message.from_user.id):
+            if not message.from_user:
+                return
+            if await self._is_guest_blocked(message.from_user.id):
+                logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)
                 return
             assert self._bot is not None and self._handler is not None
 
@@ -591,7 +610,10 @@ class TelegramChannel(BaseChannel):
 
         @router.message(F.text)
         async def handle_text(message: Message) -> None:
-            if not message.from_user or not self._is_allowed(message.from_user.id):
+            if not message.from_user:
+                return
+            if await self._is_guest_blocked(message.from_user.id):
+                logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)
                 return
             if not message.text:
                 return

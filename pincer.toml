@@ -218,6 +218,11 @@ timeout = 120
 # pincer_user_id. PINCER_IDENTITY_MAP, if set, fully overrides this section.
 # Put real names/IDs in pincer.local.toml (gitignored), not here.
 #
+# Once any identity map is configured (here or via PINCER_IDENTITY_MAP),
+# Telegram/WhatsApp/Signal senders not listed below are "guests" and are
+# rejected by default — set PINCER_TELEGRAM_GUESTS_ALLOWED / _WHATSAPP_ / _SIGNAL_
+# to true per channel to let them through with a disposable identity instead.
+#
 # [identity.johndoe]
 # display_name      = "John Doe"
 # email             = "john.doe@domain.tld"

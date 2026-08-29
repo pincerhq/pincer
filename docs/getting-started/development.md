@@ -61,7 +61,6 @@ Minimal `.env` for development:
 ```env
 PINCER_ANTHROPIC_API_KEY=sk-ant-...
 PINCER_TELEGRAM_BOT_TOKEN=123456:AAx...
-PINCER_TELEGRAM_ALLOWED_USERS=your_telegram_user_id
 PINCER_DAILY_BUDGET_USD=5.0
 ```
 

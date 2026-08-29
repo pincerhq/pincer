@@ -72,12 +72,10 @@ OTHER_PHONE = "4917612345678"
 
 
 def _make_settings(
-    dm_allowlist: str = "",
     whatsapp_self_chat_only: bool = True,
     whatsapp_group_trigger: str = "pincer",
 ):
     settings = MagicMock()
-    settings.whatsapp_dm_allowlist = dm_allowlist
     settings.whatsapp_self_chat_only = whatsapp_self_chat_only
     settings.whatsapp_group_trigger = whatsapp_group_trigger
     settings.data_dir = "/tmp/test"
@@ -141,8 +139,8 @@ def _make_message_event(
 
 @pytest.fixture
 def routing_channel():
-    """Channel with empty allowlist, self-chat-only, handler and _extract_message mocked."""
-    settings = _make_settings(dm_allowlist="", whatsapp_self_chat_only=True)
+    """Channel with self-chat-only, no identity configured; handler and _extract_message mocked."""
+    settings = _make_settings(whatsapp_self_chat_only=True)
     ch = WhatsAppChannel(settings)
     ch._own_jid = OWNER_PHONE
     ch._handler = AsyncMock(return_value="ok")
@@ -241,8 +239,8 @@ class TestWhatsAppRouting:
         ch._handler.assert_not_called()
         ch._extract_message.assert_not_called()
 
-    async def test_incoming_dm_no_allowlist_ignored(self, routing_channel):
-        """Someone DMs owner, not on allowlist (empty allowlist) → ignored."""
+    async def test_incoming_dm_self_chat_only_ignored(self, routing_channel):
+        """With self_chat_only=True, an incoming DM is always ignored, regardless of identity config."""
         ch = routing_channel
         event, _, _ = _make_message_event(
             from_me=False,
@@ -254,10 +252,10 @@ class TestWhatsAppRouting:
         ch._handler.assert_not_called()
         ch._extract_message.assert_not_called()
 
-    async def test_incoming_dm_self_chat_only_ignored_even_if_allowlisted(self):
-        """With self_chat_only=True, allowlisted contact DM is still ignored."""
-        settings = _make_settings(dm_allowlist=OTHER_PHONE, whatsapp_self_chat_only=True)
-        ch = WhatsAppChannel(settings)
+    async def test_incoming_dm_self_chat_only_ignored_with_identity_configured(self):
+        """self_chat_only=True still blocks the DM even when an identity map exists."""
+        settings = _make_settings(whatsapp_self_chat_only=True)
+        ch = WhatsAppChannel(settings, identity=AsyncMock())
         ch._own_jid = OWNER_PHONE
         ch._handler = AsyncMock(return_value="ok")
         ch._extract_message = AsyncMock(
@@ -279,13 +277,39 @@ class TestWhatsAppRouting:
         ch._handler.assert_not_called()
         ch._extract_message.assert_not_called()
 
-    async def test_incoming_dm_allowlisted_responds(self):
-        """Allowlisted contact DMs owner when self_chat_only=False → Pincer responds."""
-        settings = _make_settings(
-            dm_allowlist=OTHER_PHONE,
-            whatsapp_self_chat_only=False,
+    async def test_incoming_dm_guest_rejected_when_identity_configured(self):
+        """Sender not in identity map, guests not allowed → rejected."""
+        settings = _make_settings(whatsapp_self_chat_only=False)
+        settings.whatsapp_guests_allowed = False
+        ch = WhatsAppChannel(settings, identity=AsyncMock())
+        ch._identity.is_guest = AsyncMock(return_value=True)
+        ch._own_jid = OWNER_PHONE
+        ch._handler = AsyncMock(return_value="ok")
+        ch._extract_message = AsyncMock(
+            return_value=IncomingMessage(
+                user_id=OTHER_PHONE,
+                channel="whatsapp",
+                text="hi",
+                channel_type=ChannelType.WHATSAPP,
+                reply_to_message_id="x",
+            )
         )
-        ch = WhatsAppChannel(settings)
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user=OWNER_PHONE,
+            sender_user=OTHER_PHONE,
+            is_group=False,
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_not_called()
+        ch._extract_message.assert_not_called()
+
+    async def test_incoming_dm_guest_allowed_when_flag_true(self):
+        """Sender not in identity map, guests allowed → responds."""
+        settings = _make_settings(whatsapp_self_chat_only=False)
+        settings.whatsapp_guests_allowed = True
+        ch = WhatsAppChannel(settings, identity=AsyncMock())
+        ch._identity.is_guest = AsyncMock(return_value=True)
         ch._own_jid = OWNER_PHONE
         ch._handler = AsyncMock(return_value="ok")
         ch._extract_message = AsyncMock(
@@ -305,7 +329,36 @@ class TestWhatsAppRouting:
         )
         await ch._on_message(MagicMock(), event)
         ch._handler.assert_called_once()
-        ch._extract_message.assert_called_once()
+        ch._identity.is_guest.assert_not_called()
+
+    async def test_incoming_dm_no_identity_map_accepts_any_sender(self):
+        """No IdentityResolver wired in (identity=None) → guest gate is a no-op, so
+        self_chat_only=False with no identity map accepts DMs from anyone. This is an
+        intentional behavior change from the old empty-DM-allowlist default (which
+        blocked everyone) now that the legacy allowlist has been removed."""
+        settings = _make_settings(whatsapp_self_chat_only=False)
+        settings.whatsapp_guests_allowed = False
+        ch = WhatsAppChannel(settings)
+        assert ch._identity is None
+        ch._own_jid = OWNER_PHONE
+        ch._handler = AsyncMock(return_value="ok")
+        ch._extract_message = AsyncMock(
+            return_value=IncomingMessage(
+                user_id=OTHER_PHONE,
+                channel="whatsapp",
+                text="hi",
+                channel_type=ChannelType.WHATSAPP,
+                reply_to_message_id="x",
+            )
+        )
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user=OWNER_PHONE,
+            sender_user=OTHER_PHONE,
+            is_group=False,
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_called_once()
 
     async def test_status_broadcast_ignored(self, routing_channel):
         """Status broadcasts always ignored."""

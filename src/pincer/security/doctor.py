@@ -113,8 +113,8 @@ class SecurityDoctor:
         report.checks.append(self._check_gitignore_has_env())
         report.checks.append(self._check_no_hardcoded_secrets())
         # Access Control (4 checks)
-        report.checks.append(self._check_telegram_allowlist(settings))
-        report.checks.append(self._check_whatsapp_dm_policy(settings))
+        report.checks.append(self._check_telegram_access_control(settings))
+        report.checks.append(self._check_whatsapp_access_control(settings))
         report.checks.append(self._check_whatsapp_neonize_version())
         report.checks.append(self._check_discord_allowlist(settings))
         report.checks.append(self._check_dashboard_auth_token(settings))
@@ -140,7 +140,7 @@ class SecurityDoctor:
         # Signal (3 checks, Sprint 7.5)
         report.checks.append(self._check_signal_phone_set(settings))
         report.checks.append(self._check_signal_api_local(settings))
-        report.checks.append(self._check_signal_allowlist(settings))
+        report.checks.append(self._check_signal_access_control(settings))
         # Runtime (4 checks)
         report.checks.append(self._check_not_running_as_root())
         report.checks.append(self._check_audit_logging_enabled(settings))
@@ -349,51 +349,70 @@ class SecurityDoctor:
 
     # ── Access Control ────────────────────────────────────
 
-    def _check_telegram_allowlist(self, cfg: Settings | None = None) -> CheckResult:
+    def _check_telegram_access_control(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
-        al = cfg.telegram_allowed_users
-        if al:
+        if not cfg.telegram_bot_token.get_secret_value():
             return CheckResult(
-                "telegram_allowlist",
-                CheckStatus.PASS,
-                f"Telegram allowlist configured ({len(al)} users)",
+                "telegram_access_control",
+                CheckStatus.SKIPPED,
+                "Telegram not configured",
                 category="access",
             )
-        if cfg.telegram_bot_token.get_secret_value():
+        from pincer.config.identity import resolve_identity_map_config
+
+        identity_map_config, _ = resolve_identity_map_config(cfg.identity_map, self.config_dir)
+        if identity_map_config:
             return CheckResult(
-                "telegram_allowlist",
-                CheckStatus.CRITICAL,
-                "Telegram bot has no allowlist!",
-                fix_hint="Set PINCER_TELEGRAM_ALLOWED_USERS=your_id",
+                "telegram_access_control",
+                CheckStatus.PASS,
+                "Telegram access controlled by PINCER_IDENTITY_MAP",
                 category="access",
             )
         return CheckResult(
-            "telegram_allowlist",
-            CheckStatus.SKIPPED,
-            "Telegram not configured",
+            "telegram_access_control",
+            CheckStatus.CRITICAL,
+            "Telegram bot has no PINCER_IDENTITY_MAP configured — any Telegram user can message it",
+            fix_hint=(
+                "Set PINCER_IDENTITY_MAP (or configure the [identity] TOML section), "
+                "then set PINCER_TELEGRAM_GUESTS_ALLOWED=false"
+            ),
             category="access",
         )
 
-    def _check_whatsapp_dm_policy(self, cfg: Settings | None = None) -> CheckResult:
+    def _check_whatsapp_access_control(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
-        if cfg.whatsapp_dm_allowlist.strip():
+        if not cfg.whatsapp_enabled:
             return CheckResult(
-                "whatsapp_dm_policy",
-                CheckStatus.PASS,
-                "WhatsApp DM allowlist configured",
+                "whatsapp_access_control",
+                CheckStatus.SKIPPED,
+                "WhatsApp not configured",
                 category="access",
             )
-        if cfg.whatsapp_enabled:
+        if cfg.whatsapp_self_chat_only:
             return CheckResult(
-                "whatsapp_dm_policy",
+                "whatsapp_access_control",
                 CheckStatus.PASS,
-                "WhatsApp in self-chat-only mode (no DM allowlist)",
+                "WhatsApp in self-chat-only mode (no other access control needed)",
+                category="access",
+            )
+        from pincer.config.identity import resolve_identity_map_config
+
+        identity_map_config, _ = resolve_identity_map_config(cfg.identity_map, self.config_dir)
+        if identity_map_config:
+            return CheckResult(
+                "whatsapp_access_control",
+                CheckStatus.PASS,
+                "WhatsApp access controlled by PINCER_IDENTITY_MAP",
                 category="access",
             )
         return CheckResult(
-            "whatsapp_dm_policy",
-            CheckStatus.SKIPPED,
-            "WhatsApp not configured",
+            "whatsapp_access_control",
+            CheckStatus.CRITICAL,
+            "WhatsApp accepts DMs from anyone — no self-chat-only mode and no identity map configured",
+            fix_hint=(
+                "Set PINCER_WHATSAPP_SELF_CHAT_ONLY=true, or set PINCER_IDENTITY_MAP "
+                "(or configure the [identity] TOML section) and PINCER_WHATSAPP_GUESTS_ALLOWED=false"
+            ),
             category="access",
         )
 
@@ -870,28 +889,33 @@ class SecurityDoctor:
             category="signal",
         )
 
-    def _check_signal_allowlist(self, cfg: Settings | None = None) -> CheckResult:
+    def _check_signal_access_control(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if not cfg.signal_enabled:
             return CheckResult(
-                "signal_allowlist",
+                "signal_access_control",
                 CheckStatus.SKIPPED,
                 "Signal not enabled",
                 category="signal",
             )
-        allowlist = cfg.signal_allowlist
-        if allowlist.strip():
+        from pincer.config.identity import resolve_identity_map_config
+
+        identity_map_config, _ = resolve_identity_map_config(cfg.identity_map, self.config_dir)
+        if identity_map_config:
             return CheckResult(
-                "signal_allowlist",
+                "signal_access_control",
                 CheckStatus.PASS,
-                "Signal DM allowlist configured",
+                "Signal access controlled by PINCER_IDENTITY_MAP",
                 category="signal",
             )
         return CheckResult(
-            "signal_allowlist",
+            "signal_access_control",
             CheckStatus.WARNING,
-            "Signal DM allowlist is empty (any phone can DM)",
-            fix_hint="Set PINCER_SIGNAL_ALLOWLIST=+1234567890",
+            "Signal has no PINCER_IDENTITY_MAP configured — any phone number can DM it",
+            fix_hint=(
+                "Set PINCER_IDENTITY_MAP (or configure the [identity] TOML section), "
+                "then set PINCER_SIGNAL_GUESTS_ALLOWED=false"
+            ),
             category="signal",
         )
 

@@ -188,6 +188,10 @@ If you consistently see this (e.g. a user messages the bot the instant it restar
 
 This is a known limitation; a readiness gate that queues messages until the identity map is seeded is tracked as a future improvement.
 
+**Interaction with `PINCER_WHATSAPP_GUESTS_ALLOWED`**
+
+`PINCER_WHATSAPP_GUESTS_ALLOWED=false` (the default) rejects unmapped senders once an identity map is configured — see [Guest access control](../reference/cli.md#guest-access-control). The guest check deliberately fails open (never rejects) until the same startup seeding step described above (`seed_from_config`) has completed, so this rejection gate does not add a new failure mode on top of the downgrade race described here: during the startup gap, mapped senders may still land under the wrong fallback identity as described above, but they will not be rejected outright.
+
 ## Keeping an eye on this
 
 `pincer doctor` includes a `whatsapp_neonize_version` check. It reports PASS

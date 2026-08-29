@@ -134,6 +134,47 @@ class TestIdentityResolver:
 
 
 @pytest.mark.asyncio
+class TestIsGuest:
+    async def test_is_guest_false_when_no_config(self, resolver):
+        """No identity map configured at all → never a guest (no-op)."""
+        assert resolver.has_config is False
+        resolver.mark_seeding_complete()
+        assert await resolver.is_guest(ChannelType.TELEGRAM, 12345) is False
+
+    async def test_is_guest_false_when_seeding_not_complete(self, tmp_path):
+        """Identity map configured but seeding hasn't run yet → fail open."""
+        db_path = tmp_path / "guest_seeding.db"
+        r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        await r.ensure_table()
+        assert r.has_config is True
+        assert await r.is_guest(ChannelType.TELEGRAM, 99999) is False
+
+    async def test_is_guest_true_when_configured_and_not_found(self, tmp_path):
+        db_path = tmp_path / "guest_notfound.db"
+        r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        await r.ensure_table()
+        r.mark_seeding_complete()
+        assert await r.is_guest(ChannelType.TELEGRAM, 99999) is True
+
+    async def test_is_guest_false_when_configured_and_found(self, tmp_path):
+        # Named single-channel entry resolves live via _check_config_mapping,
+        # same as test_single_channel_named_config_resolves_live above.
+        db_path = tmp_path / "guest_found.db"
+        r = IdentityResolver(db_path, identity_map_config="johndoe@telegram:100100")
+        await r.ensure_table()
+        r.mark_seeding_complete()
+        assert await r.is_guest(ChannelType.TELEGRAM, 100100) is False
+
+    async def test_mark_seeding_complete_idempotent(self, tmp_path):
+        db_path = tmp_path / "guest_idempotent.db"
+        r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        await r.ensure_table()
+        r.mark_seeding_complete()
+        r.mark_seeding_complete()
+        assert await r.is_guest(ChannelType.TELEGRAM, 99999) is True
+
+
+@pytest.mark.asyncio
 class TestActiveChannel:
     async def test_touch_sets_active_channel(self, resolver):
         uid = await resolver.resolve(ChannelType.TELEGRAM, 11111)

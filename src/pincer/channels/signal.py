@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from pincer.channels.base import MessageHandler
     from pincer.channels.signal_client import SignalClient
     from pincer.config import Settings
+    from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,9 @@ class SignalChannel(BaseChannel):
 
     channel_type = ChannelType.SIGNAL
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, identity: IdentityResolver | None = None) -> None:
         self._settings = settings
+        self._identity = identity
         self._client: SignalClient | None = None
         self._handler: MessageHandler | None = None
         self._tasks: list[asyncio.Task[Any]] = []
@@ -164,14 +166,15 @@ class SignalChannel(BaseChannel):
             if len(self._seen) > 10000:
                 self._seen = set(list(self._seen)[-5000:])
 
-        # DM allowlist check
-        allowlist_raw: str = getattr(self._settings, "signal_allowlist", "")
-        if not msg.is_group and allowlist_raw.strip():
-            allowed = {p.strip().lstrip("+") for p in allowlist_raw.split(",") if p.strip()}
-            sender_clean = msg.source.lstrip("+")
-            if sender_clean not in allowed:
-                logger.debug("Signal: DM from %s not in allowlist — ignored", msg.source)
-                return
+        # Guest check (identity map)
+        if (
+            not msg.is_group
+            and self._identity is not None
+            and not getattr(self._settings, "signal_guests_allowed", False)
+            and await self._identity.is_guest(ChannelType.SIGNAL, msg.source)
+        ):
+            logger.debug("Signal: DM from %s not in identity map (guest) — ignored", msg.source)
+            return
 
         # Group mention check
         if msg.is_group:

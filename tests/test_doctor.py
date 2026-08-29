@@ -24,7 +24,9 @@ def doctor_env(tmp_path):
 def test_run_all_returns_report(doctor_env):
     report = doctor_env.run_all()
     assert isinstance(report, DoctorReport)
-    assert len(report.checks) == 42  # 31 original + 7 MCP + 3 MCP security + 1 WA neonize
+    # 31 original + 7 MCP + 3 MCP security + 1 WA neonize - 3 (allowlist checks replaced 1:1
+    # with access-control checks, net -3 after collapsing the deprecation-pair checks)
+    assert len(report.checks) == 42
     assert 0 <= report.score <= 100
 
 
@@ -347,19 +349,21 @@ def test_dashboard_auth_token_pass_from_dotenv_only(tmp_path, monkeypatch):
         get_settings_relaxed.cache_clear()
 
 
-def test_telegram_allowlist_pass_from_dotenv_only(tmp_path, monkeypatch):
-    """Telegram allowlist configured only in .env must show as configured."""
+def test_telegram_access_control_pass_from_dotenv_only(tmp_path, monkeypatch):
+    """Telegram identity map configured only in .env must show as configured."""
     from pincer.config import get_settings_relaxed
 
-    (tmp_path / ".env").write_text("PINCER_TELEGRAM_BOT_TOKEN=123456:TEST\nPINCER_TELEGRAM_ALLOWED_USERS=[111,222]\n")
+    (tmp_path / ".env").write_text(
+        "PINCER_TELEGRAM_BOT_TOKEN=123456:TEST\nPINCER_IDENTITY_MAP=telegram:111=whatsapp:491111111111\n"
+    )
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("PINCER_TELEGRAM_BOT_TOKEN", raising=False)
-    monkeypatch.delenv("PINCER_TELEGRAM_ALLOWED_USERS", raising=False)
+    monkeypatch.delenv("PINCER_IDENTITY_MAP", raising=False)
 
     get_settings_relaxed.cache_clear()
     try:
         doc = SecurityDoctor(config_dir=tmp_path, data_dir=tmp_path)
-        result = doc._check_telegram_allowlist()
+        result = doc._check_telegram_access_control()
         assert result.status == CheckStatus.PASS
     finally:
         get_settings_relaxed.cache_clear()
@@ -368,57 +372,82 @@ def test_telegram_allowlist_pass_from_dotenv_only(tmp_path, monkeypatch):
 # ── Additional coverage: access control checks ────────────────────────────────
 
 
-def test_telegram_allowlist_critical_no_list():
+def test_telegram_access_control_critical_no_identity_map(tmp_path):
     from unittest.mock import MagicMock
 
-    doc = SecurityDoctor()
+    doc = SecurityDoctor(config_dir=tmp_path)
     cfg = MagicMock()
-    cfg.telegram_allowed_users = []
+    cfg.identity_map = ""
     cfg.telegram_bot_token.get_secret_value.return_value = "123456:TOKEN"
-    result = doc._check_telegram_allowlist(cfg)
+    result = doc._check_telegram_access_control(cfg)
     assert result.status == CheckStatus.CRITICAL
 
 
-def test_telegram_allowlist_skipped_not_configured():
+def test_telegram_access_control_pass_with_identity_map(tmp_path):
     from unittest.mock import MagicMock
 
-    doc = SecurityDoctor()
+    doc = SecurityDoctor(config_dir=tmp_path)
     cfg = MagicMock()
-    cfg.telegram_allowed_users = []
+    cfg.identity_map = "telegram:111=whatsapp:491111111111"
+    cfg.telegram_bot_token.get_secret_value.return_value = "123456:TOKEN"
+    result = doc._check_telegram_access_control(cfg)
+    assert result.status == CheckStatus.PASS
+
+
+def test_telegram_access_control_skipped_not_configured(tmp_path):
+    from unittest.mock import MagicMock
+
+    doc = SecurityDoctor(config_dir=tmp_path)
+    cfg = MagicMock()
+    cfg.identity_map = ""
     cfg.telegram_bot_token.get_secret_value.return_value = ""
-    result = doc._check_telegram_allowlist(cfg)
+    result = doc._check_telegram_access_control(cfg)
     assert result.status == CheckStatus.SKIPPED
 
 
-def test_whatsapp_dm_policy_pass_with_allowlist():
+def test_whatsapp_access_control_pass_self_chat_only(tmp_path):
     from unittest.mock import MagicMock
 
-    doc = SecurityDoctor()
+    doc = SecurityDoctor(config_dir=tmp_path)
     cfg = MagicMock()
-    cfg.whatsapp_dm_allowlist = "+1234567890"
-    result = doc._check_whatsapp_dm_policy(cfg)
-    assert result.status == CheckStatus.PASS
-
-
-def test_whatsapp_dm_policy_pass_self_chat_only():
-    from unittest.mock import MagicMock
-
-    doc = SecurityDoctor()
-    cfg = MagicMock()
-    cfg.whatsapp_dm_allowlist = "  "
     cfg.whatsapp_enabled = True
-    result = doc._check_whatsapp_dm_policy(cfg)
+    cfg.whatsapp_self_chat_only = True
+    cfg.identity_map = ""
+    result = doc._check_whatsapp_access_control(cfg)
     assert result.status == CheckStatus.PASS
 
 
-def test_whatsapp_dm_policy_skipped_not_configured():
+def test_whatsapp_access_control_pass_with_identity_map(tmp_path):
     from unittest.mock import MagicMock
 
-    doc = SecurityDoctor()
+    doc = SecurityDoctor(config_dir=tmp_path)
     cfg = MagicMock()
-    cfg.whatsapp_dm_allowlist = ""
+    cfg.whatsapp_enabled = True
+    cfg.whatsapp_self_chat_only = False
+    cfg.identity_map = "telegram:111=whatsapp:491111111111"
+    result = doc._check_whatsapp_access_control(cfg)
+    assert result.status == CheckStatus.PASS
+
+
+def test_whatsapp_access_control_critical_open_to_anyone(tmp_path):
+    from unittest.mock import MagicMock
+
+    doc = SecurityDoctor(config_dir=tmp_path)
+    cfg = MagicMock()
+    cfg.whatsapp_enabled = True
+    cfg.whatsapp_self_chat_only = False
+    cfg.identity_map = ""
+    result = doc._check_whatsapp_access_control(cfg)
+    assert result.status == CheckStatus.CRITICAL
+
+
+def test_whatsapp_access_control_skipped_not_configured(tmp_path):
+    from unittest.mock import MagicMock
+
+    doc = SecurityDoctor(config_dir=tmp_path)
+    cfg = MagicMock()
     cfg.whatsapp_enabled = False
-    result = doc._check_whatsapp_dm_policy(cfg)
+    result = doc._check_whatsapp_access_control(cfg)
     assert result.status == CheckStatus.SKIPPED
 
 
@@ -955,35 +984,35 @@ def test_signal_api_local_critical_public():
     assert result.status == CheckStatus.CRITICAL
 
 
-def test_signal_allowlist_skipped():
+def test_signal_access_control_skipped(tmp_path):
     from unittest.mock import MagicMock
 
-    doc = SecurityDoctor()
+    doc = SecurityDoctor(config_dir=tmp_path)
     cfg = MagicMock()
     cfg.signal_enabled = False
-    result = doc._check_signal_allowlist(cfg)
+    result = doc._check_signal_access_control(cfg)
     assert result.status == CheckStatus.SKIPPED
 
 
-def test_signal_allowlist_pass():
+def test_signal_access_control_pass_with_identity_map(tmp_path):
     from unittest.mock import MagicMock
 
-    doc = SecurityDoctor()
+    doc = SecurityDoctor(config_dir=tmp_path)
     cfg = MagicMock()
     cfg.signal_enabled = True
-    cfg.signal_allowlist = "+1234567890"
-    result = doc._check_signal_allowlist(cfg)
+    cfg.identity_map = "telegram:111=signal:+1234567890"
+    result = doc._check_signal_access_control(cfg)
     assert result.status == CheckStatus.PASS
 
 
-def test_signal_allowlist_warning_empty():
+def test_signal_access_control_warning_no_identity_map(tmp_path):
     from unittest.mock import MagicMock
 
-    doc = SecurityDoctor()
+    doc = SecurityDoctor(config_dir=tmp_path)
     cfg = MagicMock()
     cfg.signal_enabled = True
-    cfg.signal_allowlist = ""
-    result = doc._check_signal_allowlist(cfg)
+    cfg.identity_map = ""
+    result = doc._check_signal_access_control(cfg)
     assert result.status == CheckStatus.WARNING
 
 

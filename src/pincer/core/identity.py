@@ -95,10 +95,20 @@ class IdentityResolver:
         self._db_path = str(db_path)
         self._identity_map_config = identity_map_config
         self._profiles = profiles or {}
+        self._seeding_complete = False
 
     @property
     def has_config(self) -> bool:
         return bool(self._identity_map_config)
+
+    def mark_seeding_complete(self) -> None:
+        """Signal that startup identity-map seeding (see seed_from_config) has finished.
+
+        Until this is called, is_guest() fails open so channels don't reject senders
+        during the brief startup window before channel-specific IDs (e.g. WhatsApp LIDs)
+        have been resolved against the configured identity map.
+        """
+        self._seeding_complete = True
 
     def _get_db(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self._db_path)
@@ -130,6 +140,16 @@ class IdentityResolver:
             if existing:
                 return existing
             return await self._check_config_mapping(db, channel, normalized)
+
+    async def is_guest(self, channel: ChannelType, channel_user_id: str | int) -> bool:
+        """True if an identity map is configured and this sender is not in it.
+
+        No-op (always False) when no identity map is configured for the deployment,
+        or while startup seeding is still in progress (see mark_seeding_complete).
+        """
+        if not self.has_config or not self._seeding_complete:
+            return False
+        return await self.find(channel, channel_user_id) is None
 
     async def resolve(
         self,

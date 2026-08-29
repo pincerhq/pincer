@@ -39,6 +39,7 @@ class ChannelRouter:
     async def rebuild_identity_map(self) -> None:
         await self._identity.seed_from_config(self._channels)
         await self._identity.cleanup(self._channels)
+        self._identity.mark_seeding_complete()
 
     async def send(self, channel_type: ChannelType, chat_id: str, text: str) -> bool:
         """Send a message via the specified channel. Returns True on success."""

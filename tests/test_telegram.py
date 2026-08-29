@@ -37,7 +37,6 @@ def test_split_preserves_content() -> None:
 
 def _make_channel() -> TelegramChannel:
     settings = MagicMock()
-    settings.telegram_allowed_users = []
     channel = TelegramChannel(settings)
     channel._bot = AsyncMock()
     return channel
@@ -328,6 +327,46 @@ async def test_handle_text_sends_response_via_send() -> None:
     await handle_text(_mock_message(text="hello bot"))
 
     channel.send.assert_awaited_once_with("123456789", "hi there")
+
+
+async def test_is_guest_blocked_false_when_no_identity_configured() -> None:
+    channel = _make_channel()
+    assert channel._identity is None
+    assert await channel._is_guest_blocked(123456789) is False
+
+
+async def test_is_guest_blocked_true_when_guest_and_not_allowed() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_guests_allowed = False
+    channel._identity = AsyncMock()
+    channel._identity.is_guest = AsyncMock(return_value=True)
+
+    assert await channel._is_guest_blocked(123456789) is True
+
+
+async def test_is_guest_blocked_false_when_guests_allowed() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_guests_allowed = True
+    channel._identity = AsyncMock()
+    channel._identity.is_guest = AsyncMock(return_value=True)
+
+    assert await channel._is_guest_blocked(123456789) is False
+    channel._identity.is_guest.assert_not_called()
+
+
+async def test_handle_text_blocked_for_unmapped_sender() -> None:
+    channel, router = _registered_handlers()
+    channel._handler = AsyncMock(return_value="hi there")
+    channel.send = AsyncMock()
+    channel._settings.telegram_guests_allowed = False
+    channel._identity = AsyncMock()
+    channel._identity.is_guest = AsyncMock(return_value=True)
+
+    handle_text = router.message.handlers[7].callback
+    await handle_text(_mock_message(text="hello bot"))
+
+    channel._handler.assert_not_called()
+    channel.send.assert_not_called()
 
 
 async def test_tool_approval_callback_edits_message_with_escaped_label() -> None:

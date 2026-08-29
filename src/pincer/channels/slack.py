@@ -300,11 +300,6 @@ class SlackChannel(BaseChannel):
         channel_id = event.get("channel", "")
         text = event.get("text", "") or ""
 
-        # Allowlist check
-        if self._settings.slack_user_allowlist and slack_user_id not in self._settings.slack_user_allowlist:
-            logger.debug("Slack user %s not in allowlist, ignoring", slack_user_id)
-            return
-
         # Strip bot mention from text
         text = re.sub(rf"<@{re.escape(self._bot_user_id)}>\s*", "", text).strip()
 
