@@ -67,6 +67,12 @@ language; `language_drift` codes on inbound calls.
 
 ## 4. Live listen-in
 
+> **Shipped in Sprint 15** behind `PINCER_LISTEN_IN_ENABLED` (default off):
+> listen-only Twilio media fork → dashboard player, announced on the call,
+> audited, never recorded. See
+> [voice-calling.md → Live listen-in](../core-components/voice-calling.md#live-listen-in-sprint-15).
+> The ranking below is kept for the record.
+
 **Why fourth:** repeatedly requested in the abstract ("can I hear it working?"),
 but it is a trust feature, not a capability one — and the same trust need may be
 served far more cheaply by the existing live transcript view plus the post-call

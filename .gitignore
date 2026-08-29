@@ -5,12 +5,11 @@ __pycache__/
 dist/
 build/
 
-# Environment
+# Environment — ignore all .env variants except checked-in examples
 .env
-.env.save
-.env.*.backup
-.env.bak
-.env.production
+.env.*
+!.env.example
+!.env.*.example
 .deploy_history
 backups/
 .venv/

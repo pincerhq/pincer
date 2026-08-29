@@ -26,6 +26,7 @@ import type {
   CanaryRun,
   CanaryTriggerResult,
   VoiceCallSummary,
+  VoiceActiveCall,
 } from "./types"
 
 function getStoredAuth(): { token?: string; apiUrl?: string } | null {
@@ -39,14 +40,14 @@ function getStoredAuth(): { token?: string; apiUrl?: string } | null {
   }
 }
 
-function getBaseUrl(): string {
+export function getBaseUrl(): string {
   const auth = getStoredAuth()
   const url = auth?.apiUrl?.trim()
   if (url) return url.replace(/\/$/, "")
   return window.location.origin
 }
 
-function getToken(): string | null {
+export function getToken(): string | null {
   const auth = getStoredAuth()
   return auth?.token ?? null
 }
@@ -162,6 +163,7 @@ export const pincer = {
     api().get(`api/ops/canary?limit=${limit}`).json<CanaryRun[]>(),
   voiceCalls: (limit = 50) =>
     api().get(`api/voice/calls?limit=${limit}`).json<VoiceCallSummary[]>(),
+  voiceActive: () => api().get("api/voice/active").json<VoiceActiveCall[]>(),
   /** Places a REAL phone call to PINCER_VOICE_CANARY_NUMBER. */
   triggerCanary: () => api().post("api/ops/canary").json<CanaryTriggerResult>(),
 }

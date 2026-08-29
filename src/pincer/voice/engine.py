@@ -89,6 +89,10 @@ class VoiceEngine(ABC):
         # receptionist session) the moment a call is registered, not on the
         # first caller utterance.
         self._on_call_start_callback: Callable | None = None
+        # Outbound calls briefed and registered BEFORE the Twilio REST dial,
+        # keyed by a temporary id until the real CallSid comes back. See
+        # register_pending_outbound().
+        self._pending_outbound: dict[str, CallState] = {}
         # Optional VoiceMetricsRegistry, injected by VoiceChannel.set_engine
         self.metrics_registry: Any = None
 
@@ -209,6 +213,137 @@ class VoiceEngine(ABC):
         if ended and self._on_call_end_callback:
             await self._on_call_end_callback(call_sid, ended)
 
+    # ── Outbound registration, before the dial ────────────
+    #
+    # The briefing used to be registered AFTER `client.calls.create()`
+    # returned. Twilio can connect the ConversationRelay socket before that
+    # call even returns, and the setup handler that then found no state
+    # invented a fresh INBOUND one — an unbriefed generic persona on a call
+    # the user had given a task. The briefed state was orphaned, and nothing
+    # anywhere reported a problem.
+    #
+    # So the state is now built first, parked under a temporary key, and
+    # re-keyed to the real CallSid when the REST call returns. A setup that
+    # arrives in between waits for the promotion (await_call_state) instead of
+    # improvising.
+
+    async def register_pending_outbound(
+        self,
+        briefing: Any,
+        target_number: str,
+        language: str = "",
+        instructions: str = "",
+    ) -> CallState:
+        """Register a briefed outbound call before it is dialled.
+
+        Returns a CallState under a temporary ``pending:<uuid>`` key. It is NOT
+        in `_active_calls` and the on_call_start callback has NOT fired: the
+        per-call machinery (state machine, transcript, thread context) is keyed
+        by CallSid, and starting it under a temporary id would produce tracking
+        for a call that may never exist.
+        """
+        import uuid
+
+        from pincer.voice.language import resolve_call_language
+
+        pending_sid = f"pending:{uuid.uuid4().hex}"
+        state = CallState(
+            call_sid=pending_sid,
+            direction=CallDirection.OUTBOUND,
+            caller_number=target_number,
+            target_number=target_number,
+            target_name=str(getattr(briefing, "target_name", "") or ""),
+            purpose=str(getattr(briefing, "task", "") or ""),
+            instructions=instructions or str(getattr(briefing, "instructions", "") or ""),
+            language=resolve_call_language(self._settings, language),
+            engine_type=self.engine_name,
+        )
+        state.metadata["briefing"] = briefing
+        self._pending_outbound[pending_sid] = state
+        logger.info("Outbound call pre-registered %s -> %s", pending_sid, target_number)
+        return state
+
+    async def promote_pending(self, pre_state: CallState, call_sid: str) -> CallState | None:
+        """Re-key a pre-registered outbound call to its real CallSid.
+
+        Publishing the state is all this does — a relay `setup` racing the
+        promotion then finds the briefed call instead of inventing an
+        unbriefed one. The call is still RINGING at this point, so no clock
+        starts here; see mark_call_answered(). Idempotent: a second promotion
+        of the same pending state is a no-op that returns the live call.
+        """
+        if not call_sid:
+            return None
+        pending = self._pending_outbound.pop(pre_state.call_sid, None)
+        state = pending or self._active_calls.get(call_sid)
+        if state is None:
+            return self._active_calls.get(call_sid)
+        state.call_sid = call_sid
+        self._active_calls[call_sid] = state
+        logger.info("Outbound call promoted to %s (language=%s)", call_sid, state.language)
+        # NOTE: the on_call_start callback is deliberately NOT fired here.
+        # Promotion happens the moment the REST dial returns — the phone is
+        # still ringing. Starting per-call tracking now would start the
+        # conversation phase clock during the ring, and the watchdog would
+        # speak its timeout goodbye and hang up before the callee had even
+        # answered. Tracking starts in mark_call_answered().
+        return state
+
+    async def mark_call_answered(self, call_sid: str) -> CallState | None:
+        """The callee picked up: start per-call tracking, once.
+
+        This is the moment every clock should start from — the state machine's
+        phase timeouts, the talk-time accumulator, the call-started metric. For
+        a pre-registered outbound call the state has existed since before the
+        dial, so "registered" and "answered" are different events and only this
+        one means a conversation is happening.
+
+        Idempotent: a `setup` that arrives again (coming back from a <Dial>
+        transfer, or a reconnect) must not restart the clocks.
+        """
+        state = self._active_calls.get(call_sid)
+        if state is None or state.metadata.get("answered_at") is not None:
+            return state
+
+        state.metadata["answered_at"] = datetime.now(UTC)
+        # Ringing is not silence: the talk-time clock is re-anchored here so
+        # the wait for an answer does not land in the call's silence figure.
+        from pincer.voice.analytics import TalkTimeAccumulator
+
+        state.metadata["talktime"] = TalkTimeAccumulator(method=self.analytics_method)
+
+        if self._on_call_start_callback is not None:
+            try:
+                await self._on_call_start_callback(call_sid, state)
+            except Exception:
+                logger.exception("on_call_start callback failed [%s]", call_sid)
+        return state
+
+    def discard_pending(self, pre_state: CallState) -> None:
+        """Drop a pre-registration whose dial never happened (Twilio raised)."""
+        if self._pending_outbound.pop(pre_state.call_sid, None) is not None:
+            logger.info("Outbound pre-registration discarded: %s", pre_state.call_sid)
+
+    async def await_call_state(self, call_sid: str, timeout: float = 3.0, interval: float = 0.1) -> CallState | None:
+        """Wait up to `timeout` for a call's state to be registered.
+
+        For the setup-before-registration race: the dial is in flight and the
+        promotion is microseconds away, so a short poll turns a lost briefing
+        into a slightly later one.
+        """
+        state = self._active_calls.get(call_sid)
+        if state is not None or timeout <= 0:
+            return state
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            await asyncio.sleep(interval)
+            state = self._active_calls.get(call_sid)
+            if state is not None:
+                logger.info("Outbound state for %s arrived after the relay setup", call_sid)
+                return state
+        return None
+
     async def _register_call(
         self,
         call_sid: str,
@@ -234,6 +369,17 @@ class VoiceEngine(ABC):
             engine_type=self.engine_name,
         )
         self._active_calls[call_sid] = state
+        # This path registers a call that is already live (inbound, or an
+        # outbound state recovered at setup), so it counts as answered and
+        # fires the callback below; mark_call_answered() then no-ops.
+        state.metadata["answered_at"] = datetime.now(UTC)
+        # Conversation analytics start counting the moment the call exists.
+        # `analytics_method` is a per-engine class attribute, so the record
+        # carries its own provenance rather than being labelled later by
+        # whoever happens to read it.
+        from pincer.voice.analytics import ensure_accumulator
+
+        ensure_accumulator(state, self.analytics_method)
         logger.info("Call registered: %s (%s) from %s, language=%s", call_sid, direction, caller, state.language)
         if self._on_call_start_callback is not None:
             try:
@@ -256,6 +402,12 @@ class VoiceEngine(ABC):
     @property
     @abstractmethod
     def engine_name(self) -> str: ...
+
+    # Talk-time provenance for this engine (analytics.METHOD_EXACT/ESTIMATED).
+    # Media Streams sees real μ-law byte counts and STT word timings;
+    # ConversationRelay hands audio to Twilio and never reports playout, so
+    # its numbers can only ever be estimates from character counts.
+    analytics_method: str = "estimated"
 
 
 def build_dial_twiml(
@@ -291,6 +443,8 @@ class ConversationRelayEngine(VoiceEngine):
     def engine_name(self) -> str:
         return "conversation_relay"
 
+    analytics_method = "estimated"
+
     async def on_call_start(
         self,
         call_sid: str,
@@ -324,6 +478,12 @@ class ConversationRelayEngine(VoiceEngine):
             # A conversing counterpart — lets the status webhook ignore
             # late/false AMD "machine" verdicts instead of killing the call.
             state.metadata["caller_spoke"] = True
+        if state and text.strip():
+            from pincer.voice.analytics import get_accumulator
+
+            accumulator = get_accumulator(state)
+            if accumulator is not None:
+                accumulator.caller_text(text, state.language)
         if self._on_speech_callback:
             await self._on_speech_callback(call_sid, text)
 
@@ -353,6 +513,11 @@ class ConversationRelayEngine(VoiceEngine):
             try:
                 await ws.send_text(msg)
                 delivered = True
+                from pincer.voice.analytics import get_accumulator
+
+                accumulator = get_accumulator(state)
+                if accumulator is not None:
+                    accumulator.agent_text(text, state.language)
             except Exception:
                 logger.exception("CR websocket send failed [%s] — agent output DROPPED", call_sid)
         else:
@@ -364,6 +529,12 @@ class ConversationRelayEngine(VoiceEngine):
         # ConversationRelay handles barge-in natively; its "interrupt" message
         # is informational. Sending Media-Streams-style {"type": "clear"} here
         # is an invalid CR message (Twilio error 64107) — nothing to send.
+        # The count is exact on both engines even though the timing is not.
+        from pincer.voice.analytics import get_accumulator
+
+        accumulator = get_accumulator(self._active_calls.get(call_sid))
+        if accumulator is not None:
+            accumulator.interruption()
         logger.debug("CR interrupt [%s]", call_sid)
 
     async def transfer_call(
@@ -453,6 +624,8 @@ class MediaStreamEngine(VoiceEngine):
     def engine_name(self) -> str:
         return "media_streams"
 
+    analytics_method = "exact"
+
     async def _ensure_providers(self) -> None:
         if self._stt_provider is None:
             from pincer.voice.stt import DeepgramSTT
@@ -528,6 +701,16 @@ class MediaStreamEngine(VoiceEngine):
             # See ConversationRelayEngine.on_speech_input: shields a live
             # conversation from late/false AMD "machine" verdicts.
             state.metadata["caller_spoke"] = True
+            # Deepgram word timings are real measurements of when the caller
+            # spoke, which is what makes this engine's talk time `exact`.
+            # Recorded before the confidence gate: a mumbled utterance the
+            # agent asks to repeat was still time the caller spent talking.
+            from pincer.voice.analytics import get_accumulator
+
+            accumulator = get_accumulator(state)
+            words = list(getattr(transcript, "words", None) or [])
+            if accumulator is not None and words:
+                accumulator.caller_span(words[0].start, words[-1].end)
             # Misheard-input policy (Sprint 1): on low STT confidence ask to
             # repeat instead of acting on a guess. Confidence 0.0 means the
             # provider sent none — treat as trustworthy rather than looping.
@@ -677,11 +860,18 @@ class MediaStreamEngine(VoiceEngine):
         tts_model = elevenlabs_model_for(self._settings, state.language)
         needs_resample = getattr(self._tts_provider, "output_format", OUTPUT_PCM_16000) == OUTPUT_PCM_16000
 
+        from pincer.voice.analytics import get_accumulator
+
+        accumulator = get_accumulator(state)
+
         started = time.monotonic()
         first_chunk_ms: float | None = None
         async for audio_chunk in self._tts_provider.synthesize_stream(text, voice=voice_id, model=tts_model):
             if first_chunk_ms is None:
                 first_chunk_ms = (time.monotonic() - started) * 1000.0
+                if accumulator is not None:
+                    # Playout begins when Twilio receives the first chunk.
+                    accumulator.agent_audio_begin()
             mulaw_data = audio_chunk
             if needs_resample:
                 from pincer.voice.audio import pcm16k_to_mulaw8k
@@ -697,6 +887,10 @@ class MediaStreamEngine(VoiceEngine):
                     }
                 )
                 await ws.send_text(msg)
+            if accumulator is not None and mulaw_data:
+                # μ-law at 8 kHz: one byte is 0.125 ms of audio. This is the
+                # measurement the `exact` method is named for.
+                accumulator.agent_audio_bytes(len(mulaw_data))
 
         # Latency guard + per-call character count for cost tracking (T4.2/T4.5)
         state.metadata["tts_characters"] = int(state.metadata.get("tts_characters", 0)) + len(text)
@@ -710,6 +904,15 @@ class MediaStreamEngine(VoiceEngine):
         state = self._active_calls.get(call_sid)
         if not state:
             return
+
+        # Twilio's `clear` drops whatever is still buffered, so only the audio
+        # that had time to play counts as agent speech.
+        from pincer.voice.analytics import get_accumulator
+
+        accumulator = get_accumulator(state)
+        if accumulator is not None:
+            accumulator.agent_audio_cancelled()
+            accumulator.interruption()
 
         if self._tts_provider:
             await self._tts_provider.cancel()

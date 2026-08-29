@@ -15,7 +15,9 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse, Response
 
+from pincer.voice.twiml_builder import CALL_SID_PLACEHOLDER
 from pincer.voice.webhook_auth import (
+    WS_MONITOR_PATH,
     WS_RELAY_PATH,
     WS_STREAM_PATH,
     WebhookAuthError,
@@ -30,6 +32,11 @@ if TYPE_CHECKING:
     from pincer.voice.engine import VoiceEngine
 
 logger = logging.getLogger(__name__)
+
+# How long a relay `setup` waits for an outbound call's state to be
+# registered before the call is refused. The dial and the promotion are
+# milliseconds apart; this is the margin, not a retry budget.
+SETUP_STATE_WAIT_S = 3.0
 
 twilio_router = APIRouter(prefix="/api/apps/twilio", tags=["apps", "twilio"])
 voice_router = APIRouter(prefix="/voice", tags=["voice"])
@@ -468,26 +475,18 @@ async def relay_ws(websocket: WebSocket) -> None:
                     # back from a <Dial> transfer: the call is ours again
                     state.metadata.pop("transferring", None)
                 if state is None:
-                    # Outbound calls were placed via REST (voice/outbound.py);
-                    # their target, purpose, and language are tracked there.
-                    from pincer.voice.engine import CallDirection
-                    from pincer.voice.status_notify import get_call_info
-
-                    info = get_call_info(call_sid)
-                    if info is not None:
-                        state = await _engine.on_call_start(
-                            call_sid,
-                            info.target_number or caller,
-                            CallDirection.OUTBOUND,
-                            target_number=info.target_number,
-                            purpose=info.purpose,
-                            language=info.language,
-                            target_name=info.target_name,
-                            instructions=info.instructions,
-                        )
-                    else:
-                        state = await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
+                    state = await _resolve_setup_state(call_sid, caller, str(msg.get("direction", "")))
+                    if state is None:
+                        # Outbound with no retrievable briefing: terminated,
+                        # never improvised (§2). The initiating user gets the
+                        # standard failure report.
+                        await websocket.close(code=1011)
+                        return
                 state.metadata["websocket"] = websocket
+                # `setup` is Twilio's "the callee picked up". Every clock in
+                # the call starts from here — an outbound state exists from
+                # before the dial, so registration is NOT an answer.
+                await _engine.mark_call_answered(call_sid)
 
             elif msg_type == "prompt":
                 text = str(msg.get("voicePrompt", ""))
@@ -511,6 +510,124 @@ async def relay_ws(websocket: WebSocket) -> None:
             state.metadata.pop("websocket", None)
             # socket gone = call over (inbound calls have no other end signal)
             await _media_closed(call_sid)
+
+
+async def _resolve_setup_state(call_sid: str, caller: str, direction: str = "") -> Any:
+    """The call state a `setup` message belongs to, or None to refuse the call.
+
+    Order matters, and each step exists because the previous one can lose a
+    briefing:
+
+    1. The state registered before the dial (the normal outbound path).
+    2. A short wait — `setup` can arrive before `calls.create()` has even
+       returned, so the promotion may be milliseconds away.
+    3. The status_notify record, which also carries purpose and language.
+    4. Give up. If Twilio told us this is an outbound API call, we return None
+       and the caller hangs up: an outbound call whose briefing cannot be
+       found MUST NOT run, because what it runs instead is a generic assistant
+       persona on a call the user gave a task to.
+    5. Otherwise it is genuinely inbound and gets an inbound state.
+    """
+    if _engine is None:
+        return None
+    from pincer.voice.engine import CallDirection
+    from pincer.voice.status_notify import get_call_info
+
+    is_outbound = str(direction or "").lower().startswith("outbound")
+
+    state = _engine.get_call_state(call_sid)
+    if state is not None:
+        return state
+
+    if is_outbound:
+        state = await _engine.await_call_state(call_sid, timeout=SETUP_STATE_WAIT_S)
+        if state is not None:
+            return state
+
+    info = get_call_info(call_sid)
+    if info is not None and info.purpose:
+        logger.info("Recovered outbound briefing for %s from the status record", call_sid)
+        return await _engine.on_call_start(
+            call_sid,
+            info.target_number or caller,
+            CallDirection.OUTBOUND,
+            target_number=info.target_number,
+            purpose=info.purpose,
+            language=info.language,
+            target_name=info.target_name,
+            instructions=info.instructions,
+        )
+
+    if is_outbound:
+        logger.error("outbound setup with no registered state [%s] — ending call", call_sid)
+        await _record_briefing_lost(call_sid, info)
+        return None
+
+    return await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
+
+
+async def _record_briefing_lost(call_sid: str, info: Any = None) -> None:
+    """Persist and report an outbound call refused for a lost briefing.
+
+    The user asked for a call and must be told it did not happen, with the
+    same failure taxonomy every other terminated call uses — silence here
+    would be indistinguishable from the bug this rule exists to prevent.
+    """
+    from pincer.observability.failure_codes import FailureCode
+
+    language = str(getattr(info, "language", "") or "") if info is not None else ""
+    try:
+        from pincer.observability.metrics import record_call_ended
+
+        record_call_ended(
+            direction="outbound",
+            outcome="failed",
+            failure_code=str(FailureCode.BRIEFING_LOST),
+            engine=str(getattr(_settings, "voice_engine", "") or ""),
+            language=language,
+            duration_s=0.0,
+        )
+    except Exception:
+        logger.debug("briefing-lost metric failed", exc_info=True)
+
+    if _settings is not None:
+        try:
+            import aiosqlite
+
+            from pincer.voice.retention import ensure_voice_tables
+
+            now = datetime.now(UTC).isoformat()
+            async with aiosqlite.connect(str(_settings.db_path)) as db:
+                await ensure_voice_tables(db)
+                await db.execute(
+                    "INSERT OR REPLACE INTO voice_calls (call_sid, direction, from_number, to_number, "
+                    "started_at, ended_at, failure_code, engine, language) "
+                    "VALUES (?, 'outbound', ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        call_sid,
+                        str(getattr(_settings, "twilio_phone_number", "") or ""),
+                        str(getattr(info, "target_number", "") or "") if info is not None else "",
+                        now,
+                        now,
+                        str(FailureCode.BRIEFING_LOST),
+                        str(getattr(_settings, "voice_engine", "") or ""),
+                        language,
+                    ),
+                )
+                await db.commit()
+        except Exception:
+            logger.debug("briefing-lost row failed [%s]", call_sid, exc_info=True)
+
+    try:
+        from pincer.voice.status_notify import notify_ended
+
+        await notify_ended(
+            call_sid,
+            "the call was ended because the task you gave it could not be recovered — nothing was said. "
+            "Please try again.",
+        )
+    except Exception:
+        logger.debug("briefing-lost notify failed [%s]", call_sid, exc_info=True)
 
 
 async def _media_closed(call_sid: str) -> None:
@@ -591,25 +708,11 @@ async def relay_webhook(request: Request) -> Response:
     elif event_type == "setup":
         caller = str(body.get("from", body.get("From", "")))
         if call_sid and not _engine.get_call_state(call_sid):
-            from pincer.voice.engine import CallDirection
-            from pincer.voice.status_notify import get_call_info
-
-            # Outbound calls were placed via REST (voice/outbound.py); their
-            # target, purpose, and per-call language are tracked there.
-            info = get_call_info(call_sid)
-            if info is not None:
-                await _engine.on_call_start(
-                    call_sid,
-                    info.target_number or caller,
-                    CallDirection.OUTBOUND,
-                    target_number=info.target_number,
-                    purpose=info.purpose,
-                    language=info.language,
-                    target_name=info.target_name,
-                    instructions=info.instructions,
-                )
-            else:
-                await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND)
+            # Same resolver as the relay socket, so the briefing rules cannot
+            # differ between the two transports.
+            await _resolve_setup_state(call_sid, caller, str(body.get("direction", "")))
+        if call_sid:
+            await _engine.mark_call_answered(call_sid)
 
     elif event_type == "interrupt":
         if call_sid:
@@ -636,25 +739,14 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
 
     state = _engine.get_call_state(call_sid)
     if state is None:
-        # Outbound media_streams call: the stream may connect before any other
-        # webhook has registered the call — recover its context (incl. language)
-        from pincer.voice.engine import CallDirection
-        from pincer.voice.status_notify import get_call_info
-
-        info = get_call_info(call_sid)
-        if info is not None:
-            state = await _engine.on_call_start(
-                call_sid,
-                info.target_number,
-                CallDirection.OUTBOUND,
-                target_number=info.target_number,
-                purpose=info.purpose,
-                language=info.language,
-                target_name=info.target_name,
-                instructions=info.instructions,
-            )
+        # Media Streams: the audio socket can connect before any other webhook
+        # has registered the call. The stream carries no direction field, so
+        # the resolver falls through to the status record (which knows the
+        # briefing) and only then to inbound.
+        state = await _resolve_setup_state(call_sid, "", "")
     if state:
         state.metadata["websocket"] = websocket
+        await _engine.mark_call_answered(call_sid)
 
     try:
         while True:
@@ -700,6 +792,81 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
             await _media_closed(call_sid)
 
 
+# ── Live listen-in: Twilio media fork ingress (Sprint 15) ────────────────────
+
+
+@twilio_router.websocket("/monitor/{call_sid}")
+async def monitor_ws(websocket: WebSocket, call_sid: str) -> None:
+    """`<Start><Stream track="both_tracks">` target — the rx-only listen-in fork.
+
+    Twilio streams base64 μ-law frames for both tracks here; they are fanned
+    out to dashboard listeners by `MonitorHub` and never persisted. This
+    socket is one-way by protocol (a `<Start><Stream>` accepts no audio back),
+    so nothing here can speak on the call. It is independent of the
+    conversation engine: an error here only ends monitoring, never the call.
+    """
+    from pincer.voice.monitor import END_CALL_ENDED, get_monitor_hub, listen_in_enabled, parse_monitor_frame
+
+    if not await _authenticate_ws(websocket, "twilio_ws:monitor", WS_MONITOR_PATH):
+        return
+    if not listen_in_enabled(_settings):
+        # Feature off: the TwiML never emits the fork, so a connect here is
+        # either stale TwiML or a probe. Refuse before accept.
+        await audit_rejection("twilio_ws:monitor", client_ip(websocket), "listen-in disabled")
+        await websocket.close(code=1008, reason="Listen-in disabled")
+        return
+
+    await websocket.accept()
+    hub = get_monitor_hub()
+    hub.configure(_settings)
+    # Outbound TwiML is built before the SID exists ({CallSid} placeholder);
+    # the `start` event carries the real SID and wins over the path.
+    sid = "" if call_sid == CALL_SID_PLACEHOLDER else call_sid
+    attached = False
+    if sid:
+        hub.attach_source(sid, websocket)
+        attached = True
+    logger.info("Listen-in monitor connected: %s", sid or "(sid pending)")
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            event = str(msg.get("event", ""))
+            if event == "start":
+                start = msg.get("start") or {}
+                real_sid = str(start.get("callSid", "") or "")
+                stream_sid = str(msg.get("streamSid", "") or start.get("streamSid", "") or "")
+                if real_sid and real_sid != sid:
+                    if attached and sid:
+                        hub.end(sid, END_CALL_ENDED)
+                    sid = real_sid
+                    attached = False
+                if sid and not attached:
+                    hub.attach_source(sid, websocket, stream_sid=stream_sid)
+                    attached = True
+                elif sid and stream_sid:
+                    hub.attach_source(sid, websocket, stream_sid=stream_sid)
+            elif event == "media":
+                parsed = parse_monitor_frame(msg)
+                if parsed is not None and sid:
+                    _event, track, payload, ts = parsed
+                    hub.publish(sid, track, payload, ts)
+            elif event == "stop":
+                logger.info("Listen-in monitor stopped: %s", sid)
+                break
+    except WebSocketDisconnect:
+        logger.info("Listen-in monitor disconnected: %s", sid)
+    except Exception:
+        logger.exception("Listen-in monitor error: %s", sid)
+    finally:
+        if sid:
+            hub.end(sid, END_CALL_ENDED)
+
+
 # ── Deprecated /voice/* aliases ───────────────────────────────────────────────
 # These remain fully functional so existing Twilio webhook configs keep working.
 # Migrate to /api/apps/twilio/* at your convenience.
@@ -738,3 +905,8 @@ async def relay_ws_legacy(websocket: WebSocket) -> None:
 @voice_router.websocket("/stream/{call_sid}")
 async def media_stream_ws_legacy(websocket: WebSocket, call_sid: str) -> None:
     await media_stream_ws(websocket, call_sid)
+
+
+@voice_router.websocket("/monitor/{call_sid}")
+async def monitor_ws_legacy(websocket: WebSocket, call_sid: str) -> None:
+    await monitor_ws(websocket, call_sid)

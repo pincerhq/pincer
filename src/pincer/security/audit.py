@@ -47,6 +47,10 @@ class AuditAction(StrEnum):
     VOICE_CALL_BLOCKED = "voice_call_blocked"
     # Sprint 0 (DACH): GDPR storage-limitation purge
     RETENTION_PURGE = "retention_purge"
+    # Sprint 13: every call-thread status transition (§5)
+    VOICE_THREAD_LIFECYCLE = "voice_thread_lifecycle"
+    # Sprint 15: one row per live listen-in session (who listened to which call, how long)
+    LISTEN_IN_SESSION = "listen_in_session"
 
 
 @dataclass

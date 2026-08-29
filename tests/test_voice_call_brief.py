@@ -64,13 +64,16 @@ async def test_outbound_prompt_contains_the_briefing():
         target_number="+4930123456", target_name="Dr. Müller", purpose=PURPOSE, instructions=INSTRUCTIONS
     )
     system = channel._build_voice_system(state, sm)
-    assert "CALL BRIEFING" in system
+    assert "YOUR TASK FOR THIS CALL (binding):" in system
     assert PURPOSE in system
     assert INSTRUCTIONS in system
     assert "You are calling Dr. Müller on behalf of Jane Doe." in system
-    assert "OUTBOUND call" in system and "why you are calling" in system
-    # the briefing sits before the phase instruction so the opening is anchored on it
-    assert system.index("CALL BRIEFING") < system.index(en_pack.PHASE_INSTRUCTIONS[sm.phase.value])
+    assert "FIRST sentence after the greeting" in system
+    # The task sits directly after the persona and before everything else, so
+    # it outranks the conversation rules instead of reading as background.
+    assert system.index("YOUR TASK FOR THIS CALL") < system.index(en_pack.PHASE_INSTRUCTIONS[sm.phase.value])
+    assert system.index(en_pack.VOICE_SYSTEM_PROMPT) < system.index("YOUR TASK FOR THIS CALL")
+    assert system.index("YOUR TASK FOR THIS CALL") < system.index(en_pack.LANGUAGE_POLICY)
 
 
 async def test_briefing_without_name_uses_number_and_default_owner():
@@ -90,21 +93,33 @@ async def test_briefing_is_localised():
         instructions=INSTRUCTIONS,
     )
     system = channel._build_voice_system(state, sm)
-    assert "ANRUF-BRIEFING" in system
+    assert "IHRE AUFGABE FÜR DIESEN ANRUF (verbindlich):" in system
     assert "Sie rufen Praxis Müller im Auftrag von Jane Doe an." in system
     assert "Zusätzliche Anweisungen Ihres Nutzers: " + INSTRUCTIONS in system
-    assert "CALL BRIEFING" not in system
-    assert de_pack.CALL_BRIEF.split("{who}")[0] in system
+    assert "YOUR TASK FOR THIS CALL" not in system
+    assert de_pack.CALL_BRIEF.split("{task}")[0] in system
 
 
 async def test_inbound_call_has_no_briefing():
     channel, state, sm = await _channel_and_state(direction=CallDirection.INBOUND, purpose=PURPOSE)
-    assert "CALL BRIEFING" not in channel._build_voice_system(state, sm)
+    assert "YOUR TASK FOR THIS CALL" not in channel._build_voice_system(state, sm)
 
 
 async def test_outbound_without_purpose_has_no_briefing():
     channel, state, sm = await _channel_and_state(target_number="+4930123456")
-    assert "CALL BRIEFING" not in channel._build_voice_system(state, sm)
+    assert "YOUR TASK FOR THIS CALL" not in channel._build_voice_system(state, sm)
+
+
+async def test_persona_forbids_capability_talk_in_every_pack():
+    """The guard that still applies when everything else has degraded."""
+    from pincer.voice.prompts import get_prompt
+
+    for language, marker in (("en", "MUST NOT enumerate features"), ("de", "DÜRFEN NICHT Ihre Funktionen")):
+        persona = str(get_prompt("VOICE_SYSTEM_PROMPT", language))
+        assert marker in persona, language
+
+    channel, state, sm = await _channel_and_state(target_number="+4930123456", purpose=PURPOSE)
+    assert "MUST NOT enumerate features" in channel._build_voice_system(state, sm)
 
 
 def test_briefing_purpose_is_capped():

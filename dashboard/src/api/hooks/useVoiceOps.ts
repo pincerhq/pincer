@@ -50,6 +50,16 @@ export function useVoiceCalls(limit = 25) {
   })
 }
 
+/** Live calls, including whether the listen-in fork is attached. Polls fast:
+ *  a call that just connected should show its 🎧 button within seconds. */
+export function useActiveCalls() {
+  return useQuery({
+    queryKey: ["ops", "active"],
+    queryFn: () => pincer.voiceActive(),
+    refetchInterval: 5_000,
+  })
+}
+
 /** Places a REAL phone call — the button that uses this must say so. */
 export function useTriggerCanary() {
   const queryClient = useQueryClient()

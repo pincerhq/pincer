@@ -46,6 +46,17 @@ field is correct; an invented one is a failure.
 agreement or request in the transcript.
 5. Write task_result, key_facts, and commitments in the language given by "language" below.
 
+SENTIMENT RULES (same grounding requirements as everything above):
+6. "sentiment" is the CALLER's stance toward THIS CALL and the matter it is about — nothing else. \
+"frustrated about the repeated delay" is a stance; "an angry person" is a character judgement and is \
+FORBIDDEN. Never infer personality, mood disorders, or anything about the person beyond this conversation.
+7. Every sentiment MUST be supported by something that actually happened in the transcript, and \
+"sentiment_rationale" MUST reference it in one sentence. With no clear signals either way, use "neutral" \
+with the rationale "no clear signals".
+8. "sentiment_trajectory" compares the LAST third of the call with the FIRST third: "improving", \
+"stable", or "declining".
+9. Judge only the caller. The agent's own tone is not sentiment.
+
 Respond with ONLY a JSON object, no markdown fences, matching exactly:
 {
   "outcome": "completed | partial | declined | callback_requested | voicemail | no_answer | failed",
@@ -54,7 +65,10 @@ Respond with ONLY a JSON object, no markdown fences, matching exactly:
   "commitments": [{"who": "callee|agent", "what": "...", "when": "ISO datetime or null"}],
   "follow_up_suggestions": [{"tool": "...", "reason": "...", "draft_args": {}}],
   "language": "en|de",
-  "abusive": false
+  "abusive": false,
+  "sentiment": "positive | neutral | negative | mixed | null",
+  "sentiment_trajectory": "improving | stable | declining | null",
+  "sentiment_rationale": "one sentence citing what in the call supports this, or null"
 }
 "abusive" is true ONLY when the other party was insulting, threatening, or clearly harassing — never for \
 mere frustration or a declined request.\
@@ -72,6 +86,12 @@ class CallOutcome:
     follow_up_suggestions: list[dict[str, Any]] = field(default_factory=list)
     language: str = "en"
     abusive: bool = False  # Sprint 12 §10.2: owner report suggests a blocklist entry (never auto-added)
+    # Conversation analytics: the caller's stance toward THIS call, read from
+    # the transcript in the same pass. None when the model gave nothing usable
+    # — a missing reading is never silently rounded to "neutral".
+    sentiment: str | None = None
+    sentiment_trajectory: str | None = None
+    sentiment_rationale: str | None = None
 
     def to_json(self) -> str:
         return json.dumps(
@@ -83,6 +103,9 @@ class CallOutcome:
                 "follow_up_suggestions": self.follow_up_suggestions,
                 "language": self.language,
                 "abusive": self.abusive,
+                "sentiment": self.sentiment,
+                "sentiment_trajectory": self.sentiment_trajectory,
+                "sentiment_rationale": self.sentiment_rationale,
             },
             ensure_ascii=False,
         )
@@ -138,6 +161,19 @@ class CallOutcome:
                     }
                 )
 
+        def _enum(key: str, allowed: tuple[str, ...]) -> str | None:
+            value = str(data.get(key) or "").strip().lower()
+            return value if value in allowed else None
+
+        from pincer.voice.analytics import SENTIMENTS, TRAJECTORIES
+
+        sentiment = _enum("sentiment", SENTIMENTS)
+        rationale = str(data.get("sentiment_rationale") or "").strip()
+        # A label with no rationale is exactly the over-claiming this feature is
+        # supposed to avoid, so the pair travels together or not at all.
+        if sentiment is None:
+            rationale = ""
+
         return cls(
             outcome=outcome,
             task_result=str(data.get("task_result", "")).strip(),
@@ -146,6 +182,9 @@ class CallOutcome:
             follow_up_suggestions=suggestions,
             language=str(data.get("language", "en")).strip().lower()[:2] or "en",
             abusive=bool(data.get("abusive", False)) if isinstance(data.get("abusive", False), bool) else False,
+            sentiment=sentiment,
+            sentiment_trajectory=_enum("sentiment_trajectory", TRAJECTORIES) if sentiment else None,
+            sentiment_rationale=rationale or None,
         )
 
 
@@ -188,6 +227,7 @@ async def extract_outcome(
     actions_text: str,
     language: str = "en",
     purpose: str = "",
+    talk_time: str = "",
 ) -> CallOutcome | None:
     """One LLM pass over transcript + actions. None on any failure —
     the caller falls back to the basic summary report."""
@@ -197,8 +237,12 @@ async def extract_outcome(
 
     user_content = (
         f"language: {language}\n"
-        f"call purpose: {purpose or '(not stated)'}\n\n"
-        f"TRANSCRIPT:\n{transcript_text[:8000]}\n\n"
+        f"call purpose: {purpose or '(not stated)'}\n"
+        # Speaking-time context helps the sentiment read (a caller who barely
+        # got a word in, long silences) — labelled with its method so an
+        # estimate is not mistaken for a measurement.
+        + (f"{talk_time}\n" if talk_time else "")
+        + f"\nTRANSCRIPT:\n{transcript_text[:8000]}\n\n"
         f"TOOL ACTIONS DURING CALL:\n{actions_text or '(none)'}"
     )
     try:

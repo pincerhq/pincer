@@ -30,7 +30,15 @@ logger = logging.getLogger(__name__)
 MAX_LOCKOUT_SECONDS = 3600.0
 
 # Public routes: no bearer token required (and therefore never a 401 to count).
-PUBLIC_PATHS = ("/api/health", "/api/docs", "/api/openapi.json")
+PUBLIC_PATHS = (
+    "/api/health",
+    "/api/docs",
+    "/api/openapi.json",
+    # The website's "try it now" call: there is no token on a marketing page.
+    # It defends itself instead — feature flag, explicit consent, and three
+    # rate limits (see pincer.api.public_demo).
+    "/api/public/demo-call",
+)
 
 # Sub-apps and webhooks with their own authentication scheme.
 SELF_AUTHENTICATED_PREFIXES = (

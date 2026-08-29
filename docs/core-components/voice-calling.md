@@ -335,6 +335,65 @@ Calls end the way a human agent ends them, not by timeout:
   thing") cancels the hangup and the conversation continues.
 - The inbound receptionist line keeps its own deterministic endings.
 
+### Call briefing — the task binds the agent
+
+Every outbound call carries a **briefing**: the task the user typed, verbatim.
+It is not optional and not advisory.
+
+**Validated at the door.** `make_phone_call`, `POST /api/voice/calls`,
+`POST /api/voice/schedule` and the retry scheduler all run the same
+`voice/briefing.py::validate_task`. A purpose under 10 characters is refused
+with *"Purpose too short — tell the agent concretely what to do on this call."*
+(422 from the API, `Error: …` from the tool) and **no call is placed**. There
+is no such thing as an outbound call without a task.
+
+**Registered before the dial.** The briefed call state is created *before*
+`calls.create()`, parked under a temporary key, and re-keyed to the real
+CallSid when Twilio answers. This closes a race that silently broke the
+product promise: Twilio can open the ConversationRelay socket before
+`calls.create()` returns, and the setup handler that found no state used to
+invent a fresh **inbound** one — a generic assistant persona on a call the user
+had given a task to, with the briefed state orphaned and nothing logged.
+
+A `setup` that still arrives first waits up to 3 s for the registration, then
+falls back to the status record. If the briefing cannot be found at all and
+Twilio says the call is `outbound-api`, **the call is terminated** with
+`failure_code=briefing_lost` and the user gets the standard failure report. An
+unbriefed outbound call is never improvised.
+
+**Binding in the prompt.** `voice/prompt_assembly.py` is the single assembly
+function for live-call system prompts — the chat-tool path and the dashboard
+path go through it, and a test asserts both produce byte-identical prompts for
+identical input. The task renders directly **after the persona and before every
+other rule**, as:
+
+```
+YOUR TASK FOR THIS CALL (binding):
+{the user's text, verbatim}
+Rules:
+- You made this call to accomplish exactly this task. State the reason for
+  your call in your FIRST sentence after the greeting.
+- Never describe your general capabilities. Never offer unrelated help.
+- …
+```
+
+The persona itself also forbids capability talk ("MUST NOT enumerate
+features…"), so even a degraded call does not turn into a feature tour. The
+TwiML `welcomeGreeting` stays short and generic — the task is stated by the
+briefed model on the first turn, never by a static template, so a broken
+briefing shows up immediately instead of being papered over.
+
+**Verifiable after the fact.** Each briefed dial logs
+`BRIEFING_BOUND call=<sid> chars=<n> source=<s>`; the briefing is persisted
+verbatim in `voice_calls.briefing_json` and served at
+`GET /api/voice/calls/{sid}` as `briefing`; `GET /api/voice/active` carries
+`briefing_task_preview`; and the transcript's first line is
+`[BRIEFING] <first 200 chars>`. After the call, a cheap keyword check asks
+whether the agent's first three turns referenced the task — if not, it logs
+`briefing_adherence_low` and counts it on `pincer.voice.briefing.adherence`.
+That check never blocks anything; it is the smoke detector for this whole
+mechanism regressing again.
+
 ### Warm Transfer
 
 The agent can call a provider, navigate to the right person, and then patch you in:
@@ -451,6 +510,236 @@ The caller is always untrusted: the inbound line exposes exactly four tools
 `send_owner_message`) and the red-team personas run in CI. Full guide:
 [Inbound receptionist setup](../guides/receptionist-setup.md).
 
+### Call threads (Sprint 13)
+
+Related calls about one *matter* — the first attempt, its retries, an explicit
+follow-up, a matched inbound callback — group into a **thread**. A thread is
+not a contact timeline: one contact can have several open matters at once, and
+a matter can span numbers (office and mobile), so `primary_number` is an
+attribute of the thread, never its identity.
+
+Each thread carries two derived artefacts, regenerated after every attached
+call from that call's Sprint 3 outcome (never from old transcripts):
+
+- **`rolling_summary`** — ≤ 1200 characters, chronological, ending in a
+  one-line current state (`Stand: wartet auf Rückruf der Praxis bis Fr.`).
+- **`open_commitments`** — `who / what / due / status`, aggregated across the
+  thread. A commitment is only marked `done` when the *new* call contains
+  evidence for it; a `due` date in the past flips it to `expired`, which is
+  flagged in reports and never acted on automatically.
+
+**Why it exists.** On the next outbound call of the matter, the summary and
+open commitments are injected into the live prompt as a `THREAD CONTEXT`
+block, so the agent can say "wie am Dienstag besprochen" instead of starting
+from zero. The block is added after the language pack is chosen and is bounded
+by construction (≤ 1600 chars), so prompt growth is capped no matter how long
+the matter runs. The first call of a thread gets no block at all.
+
+**How calls get linked**, certain to fuzzy:
+
+| Mechanism | Attach kind | Certainty |
+|---|---|---|
+| New outbound task call | `origin` | Certain — creates the thread |
+| Sprint 6 retry of the same booking | `retry` | Certain — inherits the origin call's thread |
+| `thread_id` passed to `make_phone_call` / `schedule_appointment_call` / the API | `followup` | Certain — user or agent said so |
+| Inbound call whose caller ID matches **exactly one** open thread | `inbound_matched` | Heuristic — marked as such |
+| Dashboard reassign / merge | `manual` | Certain — a human said so |
+
+Zero matches and two-or-more matches both attach nothing: ambiguity never
+guesses, because a silently wrong grouping is worse than no grouping. The same
+rule applies in chat — if two open threads match a contact, the agent asks
+which one rather than picking.
+
+**Inbound calls are a security boundary.** Caller ID is spoofable, so matching
+an inbound call to a thread affects *grouping and reporting only*.
+`PINCER_THREAD_INBOUND_CONTEXT` decides what the conversation may know:
+
+- `off` (default) — the receptionist behaves exactly as in Sprint 12: zero
+  thread knowledge, nothing spoken.
+- `ack` — at most one neutral line ("Ich sehe, wir hatten dazu bereits
+  Kontakt."). Never the subject, the summary, dates, or commitments.
+
+A caller who asks what was discussed gets the Sprint 12 privacy deflection in
+**both** modes — that is a deterministic tripwire in
+`receptionist/session.py`, asserted by the `inbound_thread_probe` red-team
+persona, not a prompt instruction the model might talk itself out of.
+
+**Lifecycle.** `open → resolved` when the task succeeds with no open
+commitments left (or a human says so); a new attached call reopens a resolved
+thread; anything inactive for `PINCER_THREAD_AUTOCLOSE_DAYS` is closed by the
+daily `voice_thread_autoclose` job. **Closed is final** — a follow-up on a
+closed matter starts a new thread that references the old one in its subject.
+
+**Retention.** Threads follow retention independently of transcripts. The
+rolling summary and commitments are derived facts and survive the purge (the
+Sprint 3 memory-note precedent); a purged call stays listed in its thread as a
+stub (SID, date, outcome code) with no transcript.
+
+**Where to see them.** `GET /api/voice/threads` (`status` takes one value, a
+list, or `all`, so a combined "open + resolved" view is one request;
+`has_expired_commitments=true` narrows to matters with an overdue commitment),
+`GET /api/voice/threads/{id}`
+(thread + ordered calls, purged ones flagged), `PATCH` to rename or move
+status, `POST …/assign` and `…/merge` for manual corrections. Each thread's
+summary is also written to memory under the tag `thread:{id}`, so "Was ist der
+Stand bei Dr. Müller?" is answered by ordinary memory search from any channel;
+the `thread_lookup` tool finds the `thread_id` to pass to the next call. That
+tool is Tier X on calls — the person on the phone must never be able to
+enumerate the user's open matters.
+
+### Conversation analytics — talk ratio & sentiment
+
+Every finished call gets a `call_analytics` row: who spoke how much, how often
+the caller cut in, and how the caller seemed about the call. It costs no extra
+LLM call (sentiment is three more fields on the Sprint 3 outcome pass) and no
+audio model.
+
+**The measurement half.**
+
+| Field | Meaning |
+|---|---|
+| `agent_speech_ms` / `caller_speech_ms` | Audible speech per side |
+| `overlap_ms` | Both talking at once — credited to **both**, nobody arbitrates who had the floor |
+| `silence_ms` | `duration − (agent + caller − overlap)`, floored at 0 |
+| `interruptions` | Barge-in events; exact on both engines |
+| `talk_ratio` | `agent / (agent + caller)`, rendered as "Agent 62% · Caller 38%" |
+| `method` | `exact` or `estimated` — **always display it** |
+
+`method` is the field that keeps this honest, and it is a property of the
+engine, not a label applied afterwards:
+
+- **Media Streams → `exact`.** Agent time is measured from μ-law bytes handed
+  to Twilio (8000 bytes = 1 s), minus whatever a barge-in cancelled before it
+  could play; caller time comes from Deepgram word timings. Not counting the
+  cancelled remainder matters: it would inflate the agent's share precisely on
+  the calls where the caller was cutting in.
+- **ConversationRelay → `estimated`.** Twilio owns playout and reports nothing
+  about it, so durations are inferred from character counts at a per-language
+  speaking rate (de 14.5, en 15.5, uk 14.0 chars/s — the only knobs behind
+  every estimated number). The UI MUST mark these; an estimate presented as a
+  measurement is a claim the interface cannot walk back.
+
+**The sentiment half** is the caller's stance toward *this call and this
+matter* — `positive` / `neutral` / `negative` / `mixed`, plus a trajectory
+(last third vs first third) and a one-sentence rationale grounded in the
+transcript. The extraction prompt forbids character judgements outright:
+"frustrated about the repeated delay" is a stance; "an angry person" is not
+something this system is allowed to say. A label without a rationale is
+discarded rather than shown, because a bare label invites exactly the
+over-trust the rationale exists to prevent.
+
+**Absence is never rounded to neutral.** Each of these is a distinct, stored
+state (`sentiment_reason`), and the UI must render each of them rather than an
+empty box:
+
+| Reason | What happened | Suggested copy |
+|---|---|---|
+| `not_conversed` | Voicemail, no answer — speech fields are NULL too | "no conversation" |
+| `too_short` | Under 10 s of total speech | "call too short to assess" |
+| `extraction_failed` | The pass returned nothing usable | "not assessed" |
+| *(none)* | Sentiment present | the label + its rationale |
+
+**Copy rules.** "The caller seemed…", never "the caller is…". The word
+*estimated* appears wherever `method='estimated'`. No emoji faces — they read
+differently across cultures; use a coloured dot and the word.
+
+**Where it surfaces.** `GET /api/voice/calls/{sid}` carries the full
+`analytics` object; `GET /api/voice/calls` carries compact `sentiment`,
+`talk_ratio` and `method` for list chips; `GET /api/voice/receptionist/stats`
+returns the inbound `sentiment_distribution` (counting only assessed calls —
+pooling the unassessed would quietly flatter it); thread detail shows each
+call's sentiment, with no thread-level synthesis (a thread's story is the
+rolling summary's job). Metrics: `pincer.voice.talk_ratio` (labelled by
+method), `pincer.voice.sentiment`, `pincer.voice.interruptions`.
+
+**Reporting and alerting are deliberately quiet.** The post-call report adds a
+line *only* for a negative reading — a note on every call is noise the owner
+learns to skip, and then misses the one that mattered. Three negative calls in
+24 h raises a NOTIFY alert (never a page): see the
+[runbook](../operations/runbook.md#negative-sentiment).
+
+**Retention.** The numbers and the label are derived facts and survive the
+transcript purge. `sentiment_rationale` does not — it quotes what was said, so
+the purge NULLs it on the same schedule as the transcript it came from.
+
+Analytics start at deploy. Older calls show "not assessed" rather than being
+backfilled from data that was never measured.
+
+### Live listen-in (Sprint 15)
+
+The owner can listen to an active call live from the dashboard — **listen-only,
+auditable, compliance-gated, engine-independent**. Off by default.
+
+```
+Twilio call ──<Connect> ConversationRelay / Stream──► conversation engine (untouched)
+     └──────<Start><Stream track="both_tracks">─────► /api/apps/twilio/monitor/{call_sid}  (rx-only)
+                                                        │ per-call fan-out hub (voice/monitor.py)
+                                                        ▼
+                     browser ◄── WSS /api/voice/listen/{call_sid} (dashboard bearer, listen-only)
+```
+
+- **Audio source is a separate Twilio media fork, not the engine.** With
+  `PINCER_LISTEN_IN_ENABLED=true` the shared TwiML builder prepends
+  `<Start><Stream url="wss://…/api/apps/twilio/monitor/{CallSid}" track="both_tracks"/>`
+  to every inbound and outbound call (both engines). The fork is
+  fire-and-forget on Twilio's side: our monitor endpoint failing only kills
+  monitoring, never the call. A `<Start><Stream>` carries no audio back, so
+  barge-in/whisper is impossible by construction.
+- **Codec path:** Twilio sends base64 μ-law 8 kHz frames per track
+  (`inbound` = the other party, `outbound` = the agent). The server relays
+  them untranscoded; the browser decodes μ-law → PCM and plays through an
+  `AudioWorklet` with a 300 ms jitter buffer. Target glass-to-ear delay ≤ 1 s.
+- **Backpressure:** 50 frames (~1 s) per listener, drop-oldest on a slow
+  consumer — audio skips, memory never grows (`pincer.voice.listen.frames_dropped`).
+- **Listener cap:** `PINCER_LISTEN_IN_MAX_LISTENERS` (default 2) per call;
+  the next listener gets `{"type":"end","reason":"capacity"}` and close code
+  4001 ("listener limit reached" in the UI).
+- **Auth:** the monitor ingress is Twilio-signed like the relay/stream
+  sockets (T8.1 token); the listener socket requires the dashboard bearer on
+  the upgrade (`Authorization: Bearer …` or `?token=` — browsers cannot set
+  the header on a WebSocket) and is denied with 401 **before** accept. Failed
+  attempts count against the T8.2 brute-force guard.
+- **Audit, no persistence:** every listen session writes one
+  `listen_in_session` audit row `{user, call_sid, started_at, ended_at,
+  duration_s, reason, frames, frames_dropped}`. No audio is ever written to
+  disk or the database by this path (tested).
+- **Compliance:** see [DACH compliance — live listen-in](../guides/dach-compliance.md#live-listen-in-monitoring).
+  With `PINCER_LISTEN_IN_ANNOUNCE=true` (default) the call opening gains
+  *"This call may be monitored for quality assurance."* / *"Dieses Gespräch
+  kann zur Qualitätssicherung mitgehört werden."* Turning the notice off while
+  the fork is on is a `pincer doctor` **FAIL** unless two-party recording is
+  already announced.
+- **API:** `GET /api/voice/active` rows gain `listen_available` (feature on ∧
+  fork attached for that call) and `listener_count`; `GET /api/voice/status`
+  gains `listen_in_enabled`.
+- **Dashboard:** Voice Ops → *Active calls* shows a 🎧 Listen button per call
+  (disabled with a tooltip when the feature is off or at capacity). The
+  player has Caller/Agent level meters, per-track mute, master mute and stop;
+  audio starts only from the click (no auto-listen). On call end it shows
+  "Call ended" for 3 s and collapses; on a dropped socket it retries once,
+  then shows an error (no reconnect loop).
+
+Wire protocol v1 (JSON text frames, server → client only):
+
+```json
+{"type":"start","call_sid":"CA…","tracks":["inbound","outbound"],"codec":"mulaw","sample_rate":8000,"listener_count":1}
+{"type":"media","track":"inbound","payload":"<base64 μ-law>","ts":"1234"}
+{"type":"end","reason":"call_ended|capacity|unavailable|error"}
+```
+
+Not built on purpose: no record/download button, no barge-in or whisper (the
+architecture cannot), no listening on ended calls (that is the transcript's
+job), no server-side transcoding.
+
+**Manual release checklist (run once per release with listen-in enabled):**
+
+1. Place a live call; the monitoring notice is audible on the call.
+2. Open Voice Ops on a second machine, click 🎧 Listen; both tracks play.
+3. Measured glass-to-ear delay ≤ 1 s (say a word, time it in the player).
+4. Open a third listener: "listener limit reached".
+5. Hang up: the player shows "Call ended" and collapses.
+6. `SELECT * FROM audit_log WHERE action='listen_in_session'` shows the session row(s).
+
 ### PII Protection
 
 Transcripts are automatically scanned for PII and masked before storage:
@@ -515,6 +804,9 @@ The `phone_contacts` bundled skill provides tools for managing a contact directo
 | `PINCER_DEEPGRAM_API_KEY` | Phase 2 | — | Deepgram STT key |
 | `PINCER_ELEVENLABS_API_KEY` | Phase 2 | — | ElevenLabs TTS key |
 | `PINCER_ELEVENLABS_VOICE_ID` | No | default | Voice selection (global fallback) |
+| `PINCER_LISTEN_IN_ENABLED` | No | `false` | Live listen-in: add the rx-only `<Start><Stream>` fork to every call |
+| `PINCER_LISTEN_IN_MAX_LISTENERS` | No | `2` | Max concurrent dashboard listeners per call |
+| `PINCER_LISTEN_IN_ANNOUNCE` | No | `true` | Add the monitoring notice to the call opening (doctor FAIL if off without two-party recording) |
 | `PINCER_ELEVENLABS_VOICE_ID_EN` / `_DE` | No | — | Per-language voices |
 | `PINCER_ELEVENLABS_MODEL` | No | `eleven_flash_v2_5` | TTS model (multilingual, low latency) |
 | `PINCER_ELEVENLABS_STABILITY` / `_SIMILARITY` | No | `0.5` / `0.75` | Voice tuning (0.0–1.0) |
@@ -543,6 +835,9 @@ The `phone_contacts` bundled skill provides tools for managing a contact directo
 | `PINCER_INBOUND_MAX_CONCURRENT` | No | `3` | Busy line above this many active inbound calls |
 | `PINCER_INBOUND_RECORDING` | No | `false` | Requires the two-party announcement |
 | `PINCER_VOICE_BLOCKLIST` | No | — | CSV of declined caller numbers |
+| `PINCER_THREAD_MATCH_WINDOW_DAYS` | No | `7` | Window for matching an inbound call to an open thread by caller ID (0 = never) |
+| `PINCER_THREAD_INBOUND_CONTEXT` | No | `off` | What a matched inbound call may know: `off` / `ack` (Sprint 13) |
+| `PINCER_THREAD_AUTOCLOSE_DAYS` | No | `30` | Close a thread after this many days of inactivity (0 = never) |
 
 *Required when `PINCER_VOICE_ENABLED=true` or `PINCER_VOICE_OUTBOUND_ENABLED=true`.
 
@@ -612,3 +907,17 @@ Sprint 7 adds four tables (migration `005_sprint7_voice.sql`):
 - `call_transcripts` — Real-time utterance log with speaker, confidence, state
 - `call_actions` — Tool calls, DTMF, transfers during voice sessions
 - `phone_contacts` — Contact directory for outbound calling
+
+`voice_calls.briefing_json` (migration `014_call_briefing.sql`) stores the
+task each outbound call was given, verbatim.
+
+`call_analytics` (migration `015_call_analytics.sql`) holds per-call talk time,
+interruptions and sentiment.
+
+Sprint 13 adds two more (migration `013_call_threads.sql`). Both the API and
+the post-call writer run `ensure_voice_tables` before their first query, so a
+database whose last write predates the sprint migrates on read rather than
+serving an empty call history:
+
+- `call_threads` — One row per matter: subject, status, rolling summary, open commitments
+- `call_thread_members` — Which call belongs to which thread; survives the transcript purge

@@ -53,7 +53,7 @@ async def _seed(db_path, rows: list[tuple[str, str, float]]) -> None:
 # ── Golden signals ───────────────────────────────────────────────────
 
 
-def test_signals_endpoint_returns_all_five(client):
+def test_signals_endpoint_returns_every_signal(client):
     body = client.get("/api/ops/signals").json()
     assert set(body["signals"]) == {
         "call_success_rate",
@@ -62,6 +62,7 @@ def test_signals_endpoint_returns_all_five(client):
         "stuck_calls",
         "cost_per_call",
         "busy_capacity",  # Sprint 12 §10.3
+        "negative_sentiment",  # conversation analytics
     }
     assert body["generated_at"]
 

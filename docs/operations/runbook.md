@@ -446,6 +446,46 @@ against the Twilio bill before chasing a phantom.
 
 ---
 
+## 16. Dissatisfied callers {#negative-sentiment}
+
+**Symptom.** NOTIFY: `N call(s) with a dissatisfied caller in 24h` (threshold 3/day).
+
+This is not a system failure — it is a prompt to go listen. Nothing is broken;
+somebody was unhappy on the phone.
+
+```bash
+sqlite3 $PINCER_DATA_DIR/pincer.db \
+  "SELECT a.call_sid, c.started_at, c.direction, a.sentiment_trajectory,
+          a.talk_ratio, a.interruptions, a.sentiment_rationale
+   FROM call_analytics a JOIN voice_calls c ON c.call_sid = a.call_sid
+   WHERE a.sentiment = 'negative'
+   ORDER BY c.started_at DESC LIMIT 10"
+```
+
+The `sentiment_rationale` says what the reading was based on — read it before
+opening the transcript, and treat it as a pointer, not a verdict. Then
+`/transcript <CallSid>` for the call itself.
+
+What the other columns usually tell you:
+
+| Pattern | Likely cause | Action |
+|---|---|---|
+| `talk_ratio` > 0.8 with `declining` | The agent monologued and the caller disengaged | Prompt regression — replies should be 1-2 sentences |
+| High `interruptions` | The agent talked over the caller, or endpointing is too slow | Check `PINCER_VOICE_STT_ENDPOINTING_MS` |
+| `declining` on appointment calls | The offered slots did not work and the flow kept pushing | Check the candidate-slot window |
+| Several on one number/matter | A thread that is going badly | `GET /api/voice/threads?q=<contact>` — the rolling summary has the history |
+
+**Before acting on a run of these, check the method.** On the
+ConversationRelay engine the talk-time numbers are `estimated` from character
+counts, so a ratio near a threshold is not evidence. Sentiment itself is a
+text-grounded reading of one conversation, not a measurement of a person — it
+is a reason to listen, never a reason to conclude.
+
+**No alert does not mean no unhappy callers**: calls under ten seconds of
+speech and calls that never connected are recorded as unassessed, not as fine.
+
+---
+
 # Operational procedures
 
 ## Deploy

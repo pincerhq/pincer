@@ -400,6 +400,26 @@ export interface CanaryTriggerResult {
   duration_s: number
 }
 
+/** GET /api/voice/active — one live call (Sprint 15 adds the listen fields). */
+export interface VoiceActiveCall {
+  call_sid: string
+  direction: string
+  caller_number: string
+  target_number: string
+  target_name: string
+  purpose: string
+  briefing_task_preview: string
+  language: string
+  engine: string
+  started_at: string
+  duration_seconds: number
+  /** listen-in enabled AND the Twilio monitor fork for this call is attached */
+  listen_available: boolean
+  listener_count: number
+  /** PINCER_LISTEN_IN_MAX_LISTENERS (0 when the feature is off) */
+  listener_capacity: number
+}
+
 export interface VoiceCallSummary {
   call_sid: string
   direction: string

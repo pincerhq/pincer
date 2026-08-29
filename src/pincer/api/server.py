@@ -26,6 +26,7 @@ from pincer.api.costs import router as costs_router
 from pincer.api.identity import router as identity_router
 from pincer.api.integrations import router as integrations_router
 from pincer.api.ops import router as ops_router
+from pincer.api.public_demo import router as public_demo_router
 from pincer.api.schedules import router as schedules_router
 from pincer.api.skills import router as skills_router
 from pincer.api.voice import router as voice_api_router
@@ -192,6 +193,8 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(voice_api_router)
     app.include_router(ops_router)
+    # The website's demo call: unauthenticated on purpose, rate-limited hard.
+    app.include_router(public_demo_router)
 
     if settings.voice_enabled:
         from pincer.voice.twiml_server import twilio_router, voice_router

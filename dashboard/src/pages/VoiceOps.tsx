@@ -2,11 +2,13 @@ import { useState } from "react"
 import { PageContainer } from "@/components/layout/PageContainer"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
+import { ActiveCalls } from "@/components/voiceops/ActiveCalls"
 import { AlertList } from "@/components/voiceops/AlertList"
 import { CallsTable } from "@/components/voiceops/CallsTable"
 import { SignalCards } from "@/components/voiceops/SignalCards"
 import { SloTable } from "@/components/voiceops/SloTable"
 import {
+  useActiveCalls,
   useCanaryRuns,
   useFailureBreakdown,
   useGoldenSignals,
@@ -33,11 +35,24 @@ export function VoiceOpsPage() {
   const failures = useFailureBreakdown(windowHours)
   const canary = useCanaryRuns()
   const calls = useVoiceCalls(25)
+  const active = useActiveCalls()
   const triggerCanary = useTriggerCanary()
 
   return (
     <PageContainer title="Voice Ops">
       <div className="space-y-6">
+        <section>
+          <div className="mb-3 flex items-center gap-3">
+            <h2 className="text-sm font-medium text-[var(--color-muted)]">Active calls</h2>
+            {active.data && active.data.length > 0 && (
+              <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-400">
+                {active.data.length} live
+              </span>
+            )}
+          </div>
+          <ActiveCalls calls={active.data ?? []} loading={active.isLoading} />
+        </section>
+
         <section>
           <h2 className="mb-3 text-sm font-medium text-[var(--color-muted)]">Golden signals</h2>
           <SignalCards signals={signals.data?.signals} loading={signals.isLoading} />

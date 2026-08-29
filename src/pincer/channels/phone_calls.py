@@ -123,6 +123,52 @@ class VoiceChannel(BaseChannel):
             self._ensure_call_tracking(call_sid, state)
         except Exception:
             logger.exception("Call-start tracking failed [%s]", call_sid)
+        try:
+            await self._prepare_thread_context(call_sid, state)
+        except Exception:
+            logger.exception("Thread context preparation failed [%s]", call_sid)
+        # The briefing goes into the call's own transcript, so "what was the
+        # agent told to do?" is answerable from the record the user can open,
+        # not only from the logs of the process that placed the call.
+        from pincer.voice.briefing import briefing_from_state, record_briefing
+
+        record_briefing(self._transcripts.get(call_sid), briefing_from_state(state))
+
+    async def _prepare_thread_context(self, call_sid: str, state: CallState) -> None:
+        """Sprint 13 §4.3/§7: resolve this call's thread and freeze its prompt
+        block onto the call state.
+
+        Computed ONCE, at call start, for two reasons: the per-turn system
+        prompt is built synchronously, and a block that cannot change mid-call
+        is a bounded prompt by construction.
+
+        For inbound calls this also performs the caller-ID match — which
+        affects grouping and reporting only. What the *conversation* may know
+        is decided by ``build_context`` from PINCER_THREAD_INBOUND_CONTEXT,
+        and in the default `off` mode that is nothing at all.
+        """
+        from pincer.voice.engine import CallDirection
+        from pincer.voice.threads import KIND_INBOUND_MATCHED, ThreadError, get_thread_manager
+
+        manager = get_thread_manager(self._settings)
+        direction = "inbound" if state.direction == CallDirection.INBOUND else "outbound"
+        thread_id = await manager.thread_for_call(call_sid)
+
+        if not thread_id and direction == "inbound":
+            window = int(getattr(self._settings, "thread_match_window_days", 7) or 0)
+            match = await manager.find_open_by_number(state.caller_number, within_days=window)
+            if match is not None:
+                try:
+                    await manager.attach(call_sid, match.thread_id, KIND_INBOUND_MATCHED)
+                    thread_id = match.thread_id
+                    logger.info("Inbound call %s matched thread %s", call_sid, thread_id)
+                except ThreadError as e:
+                    logger.info("Inbound thread match not attached [%s]: %s", call_sid, e)
+
+        state.metadata["thread_id"] = thread_id
+        state.metadata["thread_context"] = (
+            await manager.build_context(thread_id, direction, self._settings) if thread_id else ""
+        )
 
     def set_post_call_processor(self, processor: Any) -> None:
         """Install the Sprint 3 post-call pipeline (report/memory/follow-ups)."""
@@ -435,61 +481,25 @@ class VoiceChannel(BaseChannel):
     # ── Live conversation ─────────────────────────────────
 
     def _build_voice_system(self, state: CallState, sm: CallStateMachine) -> str:
-        """Per-turn system-prompt addition, entirely from the call-language
-        pack: live-call rules, the strict language policy (the only path to a
-        language switch is its [SWITCH_LANGUAGE:xx] token), and the current
-        phase instruction. state.language is the single source of truth."""
-        from pincer.voice.language import de_formality
-        from pincer.voice.prompts import get_prompt
-        from pincer.voice.scheduling import build_call_context
+        """Per-turn system prompt. Delegates to the single assembly function so
+        every surface that can start a call — chat tool, dashboard API,
+        scheduler retry — produces the same prompt for the same call."""
+        from pincer.voice.prompt_assembly import build_voice_system_prompt
 
-        language = state.language
-        formality = de_formality(self._settings)
         session = self._reception_sessions.get(state.call_sid)
-        parts = (
-            str(get_prompt("VOICE_SYSTEM_PROMPT", language, formality) or ""),
-            str(get_prompt("LANGUAGE_POLICY", language, formality) or ""),
-            # Sprint 11: in-call tool rules (scope binding, honest results)
-            str(get_prompt("IN_CALL_TOOL_RULES", language, formality) or ""),
-            # local date/time + zone, so "tomorrow at 12:00" means local noon
-            self._time_context(language, formality),
-            # outbound only: why we are calling (purpose/instructions from the user)
-            self._call_brief(state, language, formality),
-            # Sprint 12: receptionist rules + business profile (the only knowledge)
-            session.system_block() if session is not None else "",
-            # Appointment negotiation block (Sprint 6) — empty for normal calls
-            build_call_context(state.call_sid, self._settings, language),
-            sm.get_phase_instruction(language),
+        return build_voice_system_prompt(
+            state,
+            self._settings,
+            sm,
+            reception_block=session.system_block() if session is not None else "",
         )
-        return "\n\n".join(p for p in parts if p)
 
     def _call_brief(self, state: CallState, language: str, formality: str) -> str:
-        """Briefing block for outbound calls; empty for inbound or without a purpose."""
-        from pincer.voice.engine import CallDirection
+        """The binding task block (kept as a method for callers that want just
+        this part; the assembly itself lives in voice/prompt_assembly.py)."""
+        from pincer.voice.prompt_assembly import build_call_briefing_block
 
-        if state.direction != CallDirection.OUTBOUND:
-            return ""
-        purpose = str(state.purpose or "").strip()[:2000]
-        if not purpose:
-            return ""
-        from pincer.voice.prompts import get_prompt
-
-        template = str(get_prompt("CALL_BRIEF", language, formality) or "")
-        if not template:
-            return ""
-        owner = str(getattr(self._settings, "voice_assistant_owner", "") or "").strip() or str(
-            get_prompt("CALL_BRIEF_OWNER_DEFAULT", language, formality) or "your user"
-        )
-        target = str(state.target_name or "").strip() or str(state.target_number or "").strip()
-        who_template = str(get_prompt("CALL_BRIEF_WHO", language, formality) or "")
-        who = who_template.format(target=target, owner=owner) if target and who_template else ""
-        instructions = str(state.instructions or "").strip()[:4000]
-        instructions_block = ""
-        if instructions:
-            instructions_block = str(get_prompt("CALL_BRIEF_INSTRUCTIONS", language, formality) or "").format(
-                instructions=instructions
-            )
-        return template.format(who=who, purpose=purpose, instructions_block=instructions_block)
+        return build_call_briefing_block(state, self._settings, language, formality)
 
     # ── Ending the call ───────────────────────────────────
 
@@ -540,22 +550,9 @@ class VoiceChannel(BaseChannel):
             await self._engine.end_call(call_sid)
 
     def _time_context(self, language: str, formality: str) -> str:
-        """Current local date/time + timezone for the system prompt (best effort)."""
-        try:
-            from pincer.voice.localtime import get_voice_timezone, voice_now
-            from pincer.voice.prompts import get_prompt
-            from pincer.voice.tool_speech import spoken_datetime
+        from pincer.voice.prompt_assembly import build_time_context
 
-            now = voice_now(self._settings)
-            tz = str(get_voice_timezone(self._settings))
-            template = str(get_prompt("TIME_CONTEXT", language, formality) or "")
-            if not template:
-                return ""
-            stamp = f"{spoken_datetime(now, language)} ({now:%Y-%m-%d %H:%M})"
-            return template.format(now=stamp, tz=tz)
-        except Exception:
-            logger.debug("time context unavailable", exc_info=True)
-            return ""
+        return build_time_context(self._settings, language, formality)
 
     async def _handle_speech(self, call_sid: str, text: str) -> None:
         """Called when the caller speaks (STT output or ConversationRelay text).
@@ -1122,6 +1119,13 @@ class VoiceChannel(BaseChannel):
         sm = self._state_machines.pop(call_sid, None)
         transcript = self._transcripts.pop(call_sid, None)
         self._response_queues.pop(call_sid, None)
+        # Sprint 15: the listen-in fork normally ends itself (Twilio stops the
+        # stream when the call ends); this is the belt-and-braces close so no
+        # dashboard listener can outlive the call.
+        with contextlib.suppress(Exception):
+            from pincer.voice.monitor import get_monitor_hub
+
+            get_monitor_hub().end(call_sid)
         self._error_counts.pop(call_sid, None)
         self._cancel_hangup(call_sid)
         self._farewell_turns.discard(call_sid)

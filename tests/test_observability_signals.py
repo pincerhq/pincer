@@ -328,7 +328,7 @@ async def test_cost_per_call_without_a_baseline_is_none(settings):
 # ── collect() ────────────────────────────────────────────────────────
 
 
-async def test_collect_returns_all_five_signals(settings):
+async def test_collect_returns_every_signal(settings):
     signals = await collect(settings, active_calls={})
     names = {s.name for s in signals.all()}
     assert names == {
@@ -338,6 +338,7 @@ async def test_collect_returns_all_five_signals(settings):
         "stuck_calls",
         "cost_per_call",
         "busy_capacity",  # Sprint 12 §10.3
+        "negative_sentiment",  # conversation analytics
     }
     payload = signals.to_dict()
     assert payload["generated_at"]

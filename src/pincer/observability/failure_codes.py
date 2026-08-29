@@ -36,6 +36,10 @@ class FailureCode(StrEnum):
     TWILIO_API = "twilio_api"
     TWIML_ERROR = "twiml_error"
     CALL_SETUP = "call_setup"
+    # Outbound call whose briefing could not be recovered at relay setup.
+    # Refused rather than run: an unbriefed outbound call is a generic
+    # assistant monologue on a call the user gave a task to.
+    BRIEFING_LOST = "briefing_lost"
 
     # ── Media pipeline ─────────────────────────────────────────────
     STT_ERROR = "stt_error"
@@ -129,6 +133,7 @@ DESCRIPTIONS: dict[FailureCode, str] = {
     FailureCode.TWILIO_API: "Twilio REST API rejected or failed the request",
     FailureCode.TWIML_ERROR: "Twilio could not execute our TwiML (fallback handler fired)",
     FailureCode.CALL_SETUP: "Call could not be placed at all",
+    FailureCode.BRIEFING_LOST: "Outbound call refused: the task it was given could not be recovered",
     FailureCode.STT_ERROR: "Speech recognition failed or returned nothing usable",
     FailureCode.TTS_ERROR: "Speech synthesis failed (voice unusable or provider error)",
     FailureCode.NO_AUDIO: "Agent turns were produced but never reached the caller",

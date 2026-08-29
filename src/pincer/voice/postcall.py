@@ -19,7 +19,9 @@ from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
-from pincer.voice import scheduling, status_notify
+from pincer.voice import analytics as an
+from pincer.voice import scheduling, status_notify, threads
+from pincer.voice.briefing import briefing_from_state, report_adherence
 from pincer.voice.outcome import (
     CallOutcome,
     extract_outcome,
@@ -37,6 +39,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 MEMORY_CATEGORY = "voice_call"
+
+
+def _talk_time_context(call_analytics: an.CallAnalytics) -> str:
+    """Speaking-time summary for the extraction prompt.
+
+    Labelled with its method, because an estimate presented to the model as a
+    measurement invites conclusions the data cannot carry.
+    """
+    if call_analytics.agent_speech_ms is None or call_analytics.caller_speech_ms is None:
+        return ""
+    parts = [
+        f"agent spoke {call_analytics.agent_speech_ms / 1000:.0f}s",
+        f"caller spoke {call_analytics.caller_speech_ms / 1000:.0f}s",
+        f"silence {(call_analytics.silence_ms or 0) / 1000:.0f}s",
+        f"{call_analytics.interruptions} interruption(s)",
+    ]
+    return f"SPEAKING TIME ({call_analytics.method}): " + ", ".join(parts)
 
 
 class PostCallProcessor:
@@ -76,6 +95,11 @@ class PostCallProcessor:
         if isinstance(state.metadata, dict) and state.metadata.get("receptionist") is True:
             return await self._process_receptionist(call_sid, state, transcript, completed)
 
+        # Talk time is closed BEFORE extraction so the sentiment pass can see
+        # it: long silences and a lopsided ratio are signals about how the call
+        # went, and the extractor gets them as context rather than guessing.
+        call_analytics = self._finalize_analytics(state, completed)
+
         outcome: CallOutcome | None = None
         if transcript is not None and self._llm is not None:
             transcript_text = transcript.get_full_transcript()
@@ -89,6 +113,7 @@ class PostCallProcessor:
                 actions_text,
                 language=language,
                 purpose=state.purpose,
+                talk_time=_talk_time_context(call_analytics),
             )
 
         if outcome is not None and transcript is not None:
@@ -104,6 +129,22 @@ class PostCallProcessor:
 
         if outcome is not None:
             await self._write_memory_notes(call_sid, user_id, target_label, outcome)
+
+        # Did the agent actually open the call with the task it was given?
+        # A smoke detector, never a gate: it only logs and counts.
+        briefing = briefing_from_state(state)
+        if briefing is not None:
+            report_adherence(
+                call_sid,
+                briefing.task,
+                transcript,
+                task_result=outcome.task_result if outcome is not None else "",
+            )
+
+        # Sprint 13 §6: fold this call into its thread (rolling summary,
+        # commitments, derived lifecycle step). Runs AFTER outcome extraction
+        # because the outcome IS its input, and never blocks the report.
+        thread_update = await self._update_thread(call_sid, outcome, language)
 
         if outcome is not None:
             report = render_report(outcome, target_label, state.duration_seconds, call_sid, language)
@@ -162,6 +203,26 @@ class PostCallProcessor:
             # supports it. This build always proposes and waits for the user.
             logger.info("voice_auto_followup=true is reserved; proposing follow-ups instead of executing")
 
+        # Sentiment rides on the extraction that just ran — no second LLM call.
+        an.apply_sentiment(call_analytics, outcome)
+        await an.save_analytics(self._db_path, call_sid, call_analytics)
+        an.record_metrics(
+            call_analytics,
+            engine=state.engine_type,
+            direction=state.direction.value,
+            language=language,
+        )
+        # §5: only a negative reading earns a line. A note on every call is
+        # noise the owner learns to skip, and then misses the one that mattered.
+        negative_line = an.render_report_line(call_analytics, language)
+        if negative_line:
+            report = f"{report}\n{negative_line}"
+
+        # Sprint 13 §10: which matter this call belongs to, what is still
+        # open, and whether the matter is now settled — wrapped around the
+        # Sprint 3 report rather than replacing any of it.
+        report = threads.decorate_report(report, thread_update, self._settings, language)
+
         # Final user message — replaces the plain "call ended" status (still ≤3 msgs/call)
         delivered = await status_notify.notify_stage(call_sid, status_notify.STAGE_ENDED, report)
         status_notify.clear_call(call_sid)
@@ -173,6 +234,46 @@ class PostCallProcessor:
             await self._stamp_report_delivered(call_sid)
 
         return report
+
+    # ── Conversation analytics ────────────────────────────
+
+    def _finalize_analytics(self, state: CallState, completed: bool) -> an.CallAnalytics:
+        """Close the talk-time books for this call.
+
+        A call nobody had a conversation on (voicemail, no answer) still gets a
+        row — with null speech fields, saying "nothing to measure" rather than
+        leaving the UI to guess whether zero means silent or unmeasured.
+        """
+        accumulator = an.get_accumulator(state)
+        conversed = an.was_conversational(failure_code=str(state.metadata.get("failure_code", "") or ""))
+        if accumulator is None:
+            return an.CallAnalytics(
+                method=an.METHOD_ESTIMATED,
+                sentiment_reason=an.REASON_NOT_CONVERSED if not conversed else an.REASON_EXTRACTION_FAILED,
+                created_at=datetime.now(UTC).isoformat(),
+            )
+        return accumulator.finalize(state.duration_seconds * 1000.0, conversed=conversed)
+
+    # ── Call threads (Sprint 13) ──────────────────────────
+
+    async def _update_thread(
+        self,
+        call_sid: str,
+        outcome: CallOutcome | None,
+        language: str,
+    ) -> threads.ThreadUpdate | None:
+        """Fold the finished call into its thread; None when threadless.
+
+        Best effort on purpose: thread bookkeeping is a convenience layer over
+        the call, and a failure in it must never cost the user the report they
+        are waiting for.
+        """
+        try:
+            manager = threads.get_thread_manager(self._settings)
+            return await manager.update_after_call(call_sid, outcome=outcome, llm=self._llm, language=language)
+        except Exception:
+            logger.exception("Thread update failed for call %s", call_sid)
+            return None
 
     async def _stamp_report_delivered(self, call_sid: str) -> None:
         if not self._db_path:
@@ -389,6 +490,32 @@ class PostCallProcessor:
                         state.language,
                     ),
                 )
+                # Sprint 13: INSERT OR REPLACE rewrites the whole row, so the
+                # thread columns have to be re-derived from call_thread_members
+                # (the durable membership record) rather than carried along.
+                # The same statement backfills the member row's start date, so
+                # a purged call still shows a date in its thread.
+                await db.execute(
+                    "UPDATE voice_calls SET "
+                    "thread_id = COALESCE((SELECT m.thread_id FROM call_thread_members m "
+                    "                      WHERE m.call_sid = voice_calls.call_sid), ''), "
+                    "thread_attach_kind = COALESCE((SELECT m.attach_kind FROM call_thread_members m "
+                    "                               WHERE m.call_sid = voice_calls.call_sid), '') "
+                    "WHERE call_sid = ?",
+                    (call_sid,),
+                )
+                await db.execute(
+                    "UPDATE call_thread_members SET call_started_at = ?, direction = ? WHERE call_sid = ?",
+                    (state.started_at.isoformat(), state.direction.value, call_sid),
+                )
+                # The briefing is stored verbatim so the dashboard can show
+                # exactly what the agent was told — not our rendering of it.
+                briefing = briefing_from_state(state)
+                if briefing is not None:
+                    await db.execute(
+                        "UPDATE voice_calls SET briefing_json = ? WHERE call_sid = ?",
+                        (briefing.to_json(), call_sid),
+                    )
                 await db.commit()
                 if transcript is not None:
                     await transcript.save_to_db(db)

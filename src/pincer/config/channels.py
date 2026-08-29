@@ -158,6 +158,14 @@ class ChannelSettings(BaseModel):
         description="Recording consent: one_party | two_party | none",
     )
     voice_outbound_enabled: bool = Field(default=False, description="Enable outbound calling")
+    demo_call_enabled: bool = Field(
+        default=False,
+        description=(
+            "Let the public website request a demo call (POST /api/public/demo-call). "
+            "Unauthenticated by design and rate-limited per number, per client and "
+            "globally — leave off unless the marketing site needs it"
+        ),
+    )
     voice_outbound_max_daily: int = Field(default=10, ge=1, le=100, description="Max outbound calls/day")
     voice_retry_attempts: int = Field(
         default=2,
@@ -286,6 +294,24 @@ class ChannelSettings(BaseModel):
         le=3600,
         description="Replay guard: reject signed voice requests whose timestamp is older than this (seconds)",
     )
+    # ── Live listen-in (Sprint 15) ─────────────────────
+    listen_in_enabled: bool = Field(
+        default=False,
+        description="Let dashboard users listen to active calls live (listen-only). Adds a "
+        "<Start><Stream> media fork to every call's TwiML; false = no fork at all",
+    )
+    listen_in_max_listeners: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Maximum concurrent listeners per call",
+    )
+    listen_in_announce: bool = Field(
+        default=True,
+        description="Extend the call announcement with the monitoring notice "
+        "('this call may be monitored for quality assurance'). false with listen-in "
+        "enabled is a doctor FAIL unless two-party recording is already announced",
+    )
     voice_daily_call_limit: int = Field(
         default=20,
         ge=0,
@@ -376,6 +402,27 @@ class ChannelSettings(BaseModel):
         description="CSV of E.164 caller numbers that are declined with one neutral sentence",
     )
 
+    # ── Call threads (Sprint 13) ──────────────────────────
+    thread_match_window_days: int = Field(
+        default=7,
+        ge=0,
+        le=365,
+        description="Window in which an inbound call may be matched to an open thread by caller ID "
+        "(0 = never match). Ambiguity never guesses: only EXACTLY one open match attaches.",
+    )
+    thread_inbound_context: str = Field(
+        default="off",
+        description="What a matched inbound call may know about its thread: off (nothing — the Sprint 12 "
+        "receptionist behaviour) | ack (at most the neutral 'we have been in touch about this' line). "
+        "Caller ID is spoofable, so subject, summary, dates and commitments are never spoken inbound.",
+    )
+    thread_autoclose_days: int = Field(
+        default=30,
+        ge=0,
+        le=3650,
+        description="Close a thread after this many days without activity (0 = never)",
+    )
+
     # ── Email ─────────────────────────────────────────────
     email_imap_host: str = Field(default="", description="IMAP server host")
     email_imap_port: int = Field(default=993, description="IMAP server port")
@@ -421,6 +468,18 @@ class ChannelSettings(BaseModel):
 
         validate_overrides(str(v or ""))
         return str(v or "")
+
+    @field_validator("thread_inbound_context", mode="before")
+    @classmethod
+    def validate_thread_inbound_context(cls, v: str) -> str:
+        """Sprint 13 §4.3: only off|ack. An unknown value must fail at startup,
+        never silently fall back to the more disclosing mode."""
+        from pincer.exceptions import ConfigError
+
+        mode = str(v or "off").strip().lower()
+        if mode not in ("off", "ack"):
+            raise ConfigError(f"PINCER_THREAD_INBOUND_CONTEXT={v!r} is not valid (allowed: off, ack)")
+        return mode
 
     @field_validator("receptionist_booking_approval", mode="before")
     @classmethod

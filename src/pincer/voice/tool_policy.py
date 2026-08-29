@@ -71,6 +71,10 @@ TIERS: dict[str, str] = {
     "do_not_call_remove": TIER_X,
     "make_phone_call": TIER_X,  # no call-from-call chains in v1
     "schedule_appointment_call": TIER_X,
+    # Sprint 13 §8: thread lookup is a CHAT tool. On a call it would let the
+    # person on the phone enumerate the user's open matters, so it is X — and
+    # therefore never even appears in the call's tool array.
+    "thread_lookup": TIER_X,
 }
 
 # Any tool not listed is EXCLUDED. Unknown = denied. MUST NOT default to allow.

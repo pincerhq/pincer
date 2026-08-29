@@ -428,6 +428,14 @@ async def _build_core(settings: Settings) -> CoreComponents:
         from pincer.tools.builtin.call_transcript import get_call_transcript
         from pincer.voice.call_tools import register_call_tools
         from pincer.voice.outbound import make_phone_call
+        from pincer.voice.threads import init_thread_manager, register_thread_tools
+
+        # Sprint 13: exactly ONE ThreadManager per process (the Hotfix-3
+        # lesson — two instances would mean two truths about one thread). It
+        # owns the rolling-summary merge, so it gets the same LLM and memory
+        # store the post-call pipeline uses.
+        init_thread_manager(settings, llm=llm, memory=memory_store)
+        register_thread_tools(tools, settings)
 
         # Sprint 11: the Pincer-owned in-call tools (send_owner_message,
         # memory_note, contact_lookup). Whether the LLM sees them on a call is
@@ -476,6 +484,15 @@ async def _build_core(settings: Settings) -> CoreComponents:
         )
 
         if settings.voice_outbound_enabled:
+
+            async def _make_phone_call_from_chat(**kwargs: Any) -> str:
+                """The chat-tool entry point. Only difference from the API path
+                is the briefing's `source`; both go through make_phone_call."""
+                from pincer.voice.briefing import SOURCE_CHAT
+
+                kwargs.setdefault("source", SOURCE_CHAT)
+                return await make_phone_call(**kwargs)
+
             tools.register(
                 name="make_phone_call",
                 description=(
@@ -490,7 +507,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
                     "e.g. 'Зателефонуй мені', 'Подзвони до лікаря і підтверди запис' → language='uk'. "
                     "English commands ('Call the dentist...') → language='en' (default)."
                 ),
-                handler=make_phone_call,
+                handler=_make_phone_call_from_chat,
                 parameters={
                     "type": "object",
                     "properties": {
@@ -501,8 +518,11 @@ async def _build_core(settings: Settings) -> CoreComponents:
                         "purpose": {
                             "type": "string",
                             "description": (
-                                "Why the call is being made — the agent opens the call by explaining this "
-                                "to the other party in its own words (write it in the call language)"
+                                "REQUIRED, at least 10 characters: the concrete task for this call. The "
+                                "agent is bound to it and states it in its first sentence after the "
+                                "greeting, so write what should actually be achieved or asked "
+                                '("Ask what time they close today"), not a topic label ("opening '
+                                'hours"). Write it in the call language.'
                             ),
                         },
                         "instructions": {
@@ -533,6 +553,16 @@ async def _build_core(settings: Settings) -> CoreComponents:
                             ),
                             "default": "en",
                         },
+                        "thread_id": {
+                            "type": "string",
+                            "description": (
+                                "Continue an existing call thread when this call follows up on an earlier "
+                                "one ('call him again about the appointment'). Find it with thread_lookup. "
+                                "If two or more open threads match the contact, ASK the user which one — "
+                                "never guess. Empty starts a new thread."
+                            ),
+                            "default": "",
+                        },
                     },
                     "required": ["target_number", "purpose"],
                 },
@@ -541,6 +571,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
 
             # Sprint 6: appointment scheduling — free/busy → candidate slots →
             # bounded in-call negotiation → calendar event + invitations.
+            from pincer.voice.briefing import SOURCE_CHAT
             from pincer.voice.scheduling import schedule_appointment_call as _schedule_impl
 
             async def _schedule_appointment_handler(
@@ -552,6 +583,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
                 language: str = "",
                 attendees: str = "",
                 location_or_meet: str = "",
+                thread_id: str = "",
                 context: dict | None = None,
             ) -> str:
                 ctx = context or {}
@@ -568,6 +600,8 @@ async def _build_core(settings: Settings) -> CoreComponents:
                     location_or_meet=location_or_meet,
                     user_id=ctx.get("user_id", ""),
                     channel=ctx.get("channel", ""),
+                    thread_id=thread_id,
+                    source=SOURCE_CHAT,
                 )
 
             tools.register(
@@ -624,6 +658,13 @@ async def _build_core(settings: Settings) -> CoreComponents:
                         "location_or_meet": {
                             "type": "string",
                             "description": "Event location, or 'meet' to attach a Google Meet link",
+                            "default": "",
+                        },
+                        "thread_id": {
+                            "type": "string",
+                            "description": (
+                                "Continue an existing call thread (find it with thread_lookup); empty starts a new one"
+                            ),
                             "default": "",
                         },
                     },
@@ -1566,6 +1607,27 @@ async def _run_agent(settings: Settings) -> None:
                 )
         except Exception as e:
             console.print(f"[yellow]Retention schedule error: {e}[/yellow]")
+
+    # Sprint 13 §5: threads with no activity for PINCER_THREAD_AUTOCLOSE_DAYS
+    # are closed automatically. Idempotent by name, like every schedule here.
+    if settings.voice_enabled and settings.thread_autoclose_days > 0:
+        try:
+            thread_user = settings.default_user_id or "system"
+            existing = await scheduler.list_schedules(thread_user)
+            if not any(s["name"] == "voice_thread_autoclose" for s in existing):
+                await scheduler.add(
+                    name="voice_thread_autoclose",
+                    cron_expr="45 3 * * *",
+                    action={"type": "thread_autoclose"},
+                    pincer_user_id=thread_user,
+                    tz=settings.voice_timezone or settings.timezone,
+                )
+                console.print(
+                    f"[green]Call-thread auto-close scheduled daily "
+                    f"(after {settings.thread_autoclose_days}d of inactivity)[/green]"
+                )
+        except Exception as e:
+            console.print(f"[yellow]Thread auto-close schedule error: {e}[/yellow]")
 
     # Sprint 9 (T9.2): the three scheduled observability jobs. Each is
     # idempotent by name, so a restart never duplicates a schedule, and each is

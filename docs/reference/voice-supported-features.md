@@ -23,7 +23,7 @@ anything marked ⚠️ works but has a caveat you must read.
 | Automatic redial after no-answer | ✅ | `PINCER_VOICE_RETRY_ATTEMPTS`; shares the abuse-gate budget |
 | Call transfer to a human | ⚠️ | Implemented (`voice/transfer.py`), not exercised by a pilot yet |
 | DTMF / IVR navigation | ⚠️ | `voice/ivr_navigator.py` exists; menu coverage is best-effort |
-| **Live listen-in on an active call** | ❌ | Not built. The dashboard shows live *state*, not live audio |
+| **Live listen-in on an active call** | ⚠️ | Built (Sprint 15), **off by default**: `PINCER_LISTEN_IN_ENABLED=true`. Listen-only, announced on the call, audited, never recorded — see [DACH compliance](../guides/dach-compliance.md#live-listen-in-monitoring) |
 | **Call recording playback** | ❌ | Recording is off by default and audio is never stored by us |
 
 ## Languages
@@ -87,7 +87,7 @@ If a pilot customer asks "can it…":
 - **…book appointments by phone in German?** Yes, and that is the best-tested path.
 - **…move or cancel an appointment it booked?** No. It books; a human moves.
 - **…take a call from my customer and book them in?** It will have a conversation. It will not run the booking workflow.
-- **…let me listen in live?** No.
+- **…let me listen in live?** Yes, if the operator enables `PINCER_LISTEN_IN_ENABLED` — listen-only from the dashboard, the call announces that it may be monitored, every session is audited, nothing is recorded.
 - **…work out which language the caller speaks?** No — you choose when the call is placed.
 - **…handle two of my locations on one instance?** One instance per customer, and that is a deliberate boundary, not a bug.
 

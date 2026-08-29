@@ -80,6 +80,13 @@ class AppointmentTask:
     proposed_out_of_slot: str = ""  # raw callee counter-proposal we deferred on
     attempts: int = 0  # dial attempts so far (initial call = 1)
     calendar_event_link: str = ""
+    # Sprint 13: the matter this booking belongs to. Set from the first dial
+    # attempt onward, so every redial of the SAME task lands in the SAME
+    # thread (§4.1) instead of starting a new one per attempt.
+    thread_id: str = ""
+    # Which surface asked for this booking (dashboard | chat | api); redials
+    # are attributed to the scheduler.
+    source: str = ""
 
 
 _tasks: dict[str, AppointmentTask] = {}
@@ -352,6 +359,8 @@ async def schedule_appointment_call(
     location_or_meet: str = "",
     user_id: str = "",
     channel: str = "",
+    thread_id: str = "",
+    source: str = "",
 ) -> str:
     """Full pre-call phase: free/busy → candidates → place the call.
 
@@ -367,6 +376,17 @@ async def schedule_appointment_call(
         return (
             "Error: Google Calendar is not connected — free slots cannot be computed. Run `pincer setup-google` first."
         )
+
+    # The briefing is validated here, before the free/busy round trip: a call
+    # the agent cannot open with a task should fail on the user's screen, not
+    # after we have queried their calendar.
+    from pincer.voice.briefing import BriefingError, validate_task, validate_topic
+
+    try:
+        validate_topic(topic)
+        validate_task(f"Schedule appointment with {contact_name or target_number}: {topic}")
+    except BriefingError as e:
+        return f"Error: {e}"
 
     duration_minutes = max(5, min(int(duration_minutes or 30), 480))
     now = voice_now(settings)
@@ -427,6 +447,8 @@ async def schedule_appointment_call(
         attendees=attendees,
         location_or_meet=location_or_meet,
         candidates=[c.isoformat() for c in candidates],
+        thread_id=str(thread_id or "").strip(),
+        source=str(source or "").strip(),
     )
     result = await _place_call(task, settings)
     if result.startswith("Error"):
@@ -440,15 +462,34 @@ async def schedule_appointment_call(
 
 async def _place_call(task: AppointmentTask, settings: Any) -> str:
     """One dial attempt through the validated make_phone_call path; registers
-    the appointment context for the new call SID on success."""
+    the appointment context for the new call SID on success.
+
+    Sprint 13 §4.1: the FIRST attempt opens the thread (kind `origin`, or
+    `followup` when the user pointed this booking at an existing matter) and
+    the thread id is remembered on the task, so every later redial attaches to
+    it as a `retry` rather than fragmenting one booking across N threads.
+    """
+    from pincer.voice.briefing import SOURCE_CHAT, SOURCE_SCHEDULER
     from pincer.voice.outbound import make_phone_call
+    from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, KIND_RETRY, get_thread_manager
 
     purpose = f"Schedule appointment with {task.contact_name or task.target_number}: {task.topic}"
+    # A redial is placed by the scheduler, not by the user who is asleep.
+    source = SOURCE_SCHEDULER if task.attempts >= 1 else (task.source or SOURCE_CHAT)
+    kind = KIND_ORIGIN
+    if task.thread_id:
+        kind = KIND_RETRY if task.attempts >= 1 else KIND_FOLLOWUP
+    subject = f"{task.topic} — {task.contact_name}".strip(" —") if task.contact_name else task.topic
     result = await make_phone_call(
         target_number=task.target_number,
         purpose=purpose,
         language=task.language,
         context={"user_id": task.user_id, "channel": task.channel},
+        target_name=task.contact_name,
+        thread_id=task.thread_id,
+        thread_kind=kind,
+        thread_subject=subject,
+        source=source,
     )
     if result.startswith("Error"):
         return result
@@ -456,6 +497,9 @@ async def _place_call(task: AppointmentTask, settings: Any) -> str:
     sid_match = re.search(r"Call SID: (\S+)", result)
     if sid_match:
         register_appointment(sid_match.group(1), task)
+        if not task.thread_id:
+            with contextlib.suppress(Exception):
+                task.thread_id = await get_thread_manager(settings).thread_for_call(sid_match.group(1))
     else:  # pragma: no cover — make_phone_call always reports the SID on success
         logger.error("Appointment call placed but no Call SID parsed — context not attached")
     return result

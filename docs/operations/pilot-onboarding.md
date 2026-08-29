@@ -66,7 +66,7 @@ email it. The out-of-scope list is the part that prevents a bad week three:
 
 - it books but does not reschedule
 - inbound converses but does not book
-- no live listen-in
+- live listen-in only if enabled for them (`PINCER_LISTEN_IN_ENABLED`), and then the call says so
 - language is chosen when the call is placed
 
 Hand over the quickstart in their language

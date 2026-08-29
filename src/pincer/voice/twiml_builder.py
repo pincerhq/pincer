@@ -54,7 +54,7 @@ def build_connect_twiml(
         voice_for,
     )
     from pincer.voice.voices import is_voice_invalid
-    from pincer.voice.webhook_auth import WS_RELAY_PATH, WS_STREAM_PATH, signed_ws_query
+    from pincer.voice.webhook_auth import WS_MONITOR_PATH, WS_RELAY_PATH, WS_STREAM_PATH, signed_ws_query
 
     lang = resolve_call_language(settings, language)
     base_url = str(settings.voice_webhook_base_url or "").strip().rstrip("/")
@@ -62,6 +62,17 @@ def build_connect_twiml(
     inbound = direction != "outbound"
 
     parts = [XML_DECL, "<Response>"]
+
+    # Sprint 15: live listen-in. A SEPARATE rx-only media fork, started before
+    # anything is said so the announcement is audible to the listener too. It
+    # is fire-and-forget on Twilio's side: our monitor endpoint failing only
+    # kills monitoring, never the call. Nothing is emitted when the feature is
+    # off — no fork, no endpoint traffic.
+    if getattr(settings, "listen_in_enabled", False) is True:
+        monitor_sid = call_sid or CALL_SID_PLACEHOLDER
+        monitor_auth = signed_ws_query(settings, WS_MONITOR_PATH).replace("&", "&amp;")
+        monitor_url = f"wss://{_extract_host(base_url)}/api/apps/twilio/monitor/{monitor_sid}{monitor_auth}"
+        parts.append(f'<Start><Stream url="{monitor_url}" track="both_tracks" /></Start>')
 
     if engine_type == "media_streams":
         from pincer.voice.compliance import build_consent_say_twiml
