@@ -1574,7 +1574,7 @@ class SecurityDoctor:
 
     def _check_voice_dach_consent(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
-        if not cfg.voice_enabled:
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled):
             return CheckResult(
                 "voice_dach_consent",
                 CheckStatus.SKIPPED,
@@ -1608,7 +1608,7 @@ class SecurityDoctor:
 
     def _check_voice_retention(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
-        if not cfg.voice_enabled:
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled):
             return CheckResult(
                 "voice_retention",
                 CheckStatus.SKIPPED,
@@ -1640,7 +1640,7 @@ class SecurityDoctor:
 
     def _check_voice_provider_regions(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
-        if not cfg.voice_enabled:
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled):
             return CheckResult(
                 "voice_provider_regions",
                 CheckStatus.SKIPPED,

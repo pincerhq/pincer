@@ -17,9 +17,9 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 from croniter import croniter
-from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from pincer.config import Settings

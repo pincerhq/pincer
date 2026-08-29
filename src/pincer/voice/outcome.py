@@ -64,7 +64,7 @@ Respond with ONLY a JSON object, no markdown fences, matching exactly:
   "key_facts": ["..."],
   "commitments": [{"who": "callee|agent", "what": "...", "when": "ISO datetime or null"}],
   "follow_up_suggestions": [{"tool": "...", "reason": "...", "draft_args": {}}],
-  "language": "en|de",
+  "language": "en|de|uk",
   "abusive": false,
   "sentiment": "positive | neutral | negative | mixed | null",
   "sentiment_trajectory": "improving | stable | declining | null",
@@ -189,13 +189,33 @@ class CallOutcome:
 
 
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
+_NUM_RE = re.compile(r"\d[\d:.,]*")
 
 
 def _significant_words(text: str) -> set[str]:
     return {w.lower() for w in _WORD_RE.findall(text) if len(w) > 3}
 
 
-def _is_grounded(claim: str, transcript_words: set[str], threshold: float = 0.5) -> bool:
+def _numbers(text: str) -> set[str]:
+    """Digit runs with the separators stripped, so 14:30 / 14.30 / 1430
+    compare equal (and a sentence-final '14:30.' matches '14:30')."""
+    return {re.sub(r"[:.,]", "", n) for n in _NUM_RE.findall(text)}
+
+
+def _is_grounded(
+    claim: str,
+    transcript_words: set[str],
+    transcript_numbers: set[str],
+    threshold: float = 0.5,
+) -> bool:
+    # Times, dates and prices are the values a fabricated claim most needs to
+    # get right, and the word check can't see them (\w+ splits "14:30" into
+    # tokens too short to keep). Every number in a claim must appear in the
+    # transcript — enforced only when the transcript contains digits at all,
+    # because some STT paths spell numbers out in words and wholesale-dropping
+    # true numeric facts would be worse than the word check alone.
+    if transcript_numbers and _numbers(claim) - transcript_numbers:
+        return False
     words = _significant_words(claim)
     if not words:
         return False
@@ -205,13 +225,21 @@ def _is_grounded(claim: str, transcript_words: set[str], threshold: float = 0.5)
 
 def filter_ungrounded(outcome: CallOutcome, transcript_text: str) -> CallOutcome:
     """Mechanical grounding check: drop key facts and commitments whose
-    significant words don't substantially appear in the transcript. A belt to
-    the extraction prompt's suspenders — invented facts must not survive."""
-    transcript_words = _significant_words(transcript_text)
+    significant words don't substantially appear in the transcript, or whose
+    numbers (times, dates, prices) the transcript never mentions.
 
-    kept_facts = [f for f in outcome.key_facts if _is_grounded(f, transcript_words)]
+    A belt to the extraction prompt's suspenders, not a semantic verifier:
+    bag-of-words overlap is blind to negation and entity swaps ("not
+    available on Tuesday" grounds "available on Tuesday"), so the prompt
+    remains the primary defense against invented facts."""
+    transcript_words = _significant_words(transcript_text)
+    transcript_numbers = _numbers(transcript_text)
+
+    kept_facts = [f for f in outcome.key_facts if _is_grounded(f, transcript_words, transcript_numbers)]
     dropped = len(outcome.key_facts) - len(kept_facts)
-    kept_commitments = [c for c in outcome.commitments if _is_grounded(str(c.get("what", "")), transcript_words)]
+    kept_commitments = [
+        c for c in outcome.commitments if _is_grounded(str(c.get("what", "")), transcript_words, transcript_numbers)
+    ]
     dropped += len(outcome.commitments) - len(kept_commitments)
 
     if dropped:
@@ -219,6 +247,10 @@ def filter_ungrounded(outcome: CallOutcome, transcript_text: str) -> CallOutcome
     outcome.key_facts = kept_facts
     outcome.commitments = kept_commitments
     return outcome
+
+
+# ~10-15 minutes of dialogue; voice_max_call_duration allows far longer.
+MAX_TRANSCRIPT_CHARS = 8000
 
 
 async def extract_outcome(
@@ -235,6 +267,18 @@ async def extract_outcome(
         return None
     from pincer.llm.base import LLMMessage, MessageRole
 
+    # Long calls exceed the excerpt budget; keep the tail — the outcome,
+    # agreement, and goodbyes live at the end, the greeting is expendable.
+    # (filter_ungrounded still runs against the full text.)
+    excerpt = transcript_text
+    if len(excerpt) > MAX_TRANSCRIPT_CHARS:
+        logger.warning(
+            "Transcript truncated for outcome extraction: %d -> %d chars (keeping the tail)",
+            len(excerpt),
+            MAX_TRANSCRIPT_CHARS,
+        )
+        excerpt = excerpt[-MAX_TRANSCRIPT_CHARS:]
+
     user_content = (
         f"language: {language}\n"
         f"call purpose: {purpose or '(not stated)'}\n"
@@ -242,7 +286,7 @@ async def extract_outcome(
         # got a word in, long silences) — labelled with its method so an
         # estimate is not mistaken for a measurement.
         + (f"{talk_time}\n" if talk_time else "")
-        + f"\nTRANSCRIPT:\n{transcript_text[:8000]}\n\n"
+        + f"\nTRANSCRIPT:\n{excerpt}\n\n"
         f"TOOL ACTIONS DURING CALL:\n{actions_text or '(none)'}"
     )
     try:

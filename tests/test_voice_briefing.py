@@ -299,10 +299,22 @@ async def test_setup_recovers_the_briefing_from_the_status_record(voice):
 
 
 async def test_inbound_setup_is_untouched_by_the_termination_rule(voice):
-    """A genuine inbound call has no briefing and must still be answered."""
+    """A genuine inbound call was registered by the signature-verified
+    /webhook before its TwiML — and hence its socket — existed; setup must
+    find and reuse that state."""
+    registered = await voice.engine.on_call_start("CA_in", "+4917612345", CallDirection.INBOUND)
     state = await voice.server._resolve_setup_state("CA_in", "+4917612345", "")
-    assert state is not None
+    assert state is registered
     assert state.direction == CallDirection.INBOUND
+
+
+async def test_setup_with_unknown_sid_is_refused(voice):
+    """No registered state and no status record → refused. Creating state
+    from socket-supplied callSid/from would let anyone who reaches the relay
+    endpoint mint a conversation under a chosen caller identity."""
+    state = await voice.server._resolve_setup_state("CA_unknown", "+15550001111", "")
+    assert state is None
+    assert voice.engine.get_call_state("CA_unknown") is None
 
 
 async def test_failed_dial_discards_the_pre_registration(voice, monkeypatch):
@@ -494,12 +506,15 @@ async def test_talk_time_excludes_the_ringing(voice):
     pre = await voice.engine.register_pending_outbound(briefing, TARGET, language="en")
     await voice.engine.promote_pending(pre, "CA_ring2")
 
-    await asyncio.sleep(0.05)  # stand-in for the ring
+    # The ring must dwarf mark_call_answered's own cost (the on_call_start
+    # callback runs cold on a standalone test run, ~50ms) so a dial-anchored
+    # clock (>= the full ring) stays distinguishable from a fresh one.
+    await asyncio.sleep(0.5)  # stand-in for the ring
     await voice.engine.mark_call_answered("CA_ring2")
 
     accumulator = get_accumulator(voice.engine.get_call_state("CA_ring2"))
     assert accumulator is not None
-    assert accumulator._now_ms() < 20, "the talk-time clock starts at answer, not at dial"
+    assert accumulator._now_ms() < 400, "the talk-time clock starts at answer, not at dial"
 
 
 async def test_inbound_calls_are_answered_on_registration(voice):

@@ -256,7 +256,7 @@ class ChannelSettings(BaseModel):
         description="Name the assistant introduces itself with at call start (empty = skip introduction)",
     )
     voice_assistant_org: str = Field(
-        default="3days.ai",
+        default="",
         description="Organization named in the call introduction (empty = omitted)",
     )
     voice_assistant_owner: str = Field(

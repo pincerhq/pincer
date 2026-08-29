@@ -275,21 +275,8 @@ def _parse_server_from_toml(raw: dict[str, Any], pincer_vars: dict[str, str] | N
     )
 
 
-def _read_toml_raw(toml_path: Path) -> dict[str, Any] | None:
-    """Read a TOML file and return the parsed dict. Returns None if absent or no TOML parser."""
-    if not toml_path.exists():
-        logger.warning(f"Pincer {toml_path} not found — omitting it")
-        return None
-    try:
-        import tomllib  # Python 3.11+
-    except ImportError:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            return None
-
-    with open(toml_path, "rb") as f:
-        return tomllib.load(f)  # type: ignore[return-value]
+_STDIO_ONLY_KEYS = {"command", "args", "env"}
+_STREAMABLE_HTTP_ONLY_KEYS = {"url", "headers"}
 
 
 def _merge_mcp_raw(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:

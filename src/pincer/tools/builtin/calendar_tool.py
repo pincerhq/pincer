@@ -90,7 +90,7 @@ def _local_tz() -> ZoneInfo:
     try:
         return ZoneInfo(get_settings().timezone)
     except (KeyError, ValueError):
-        return ZoneInfo("Europe/Berlin")
+        return ZoneInfo("UTC")
 
 
 def _format_event(event: dict[str, Any], tz: ZoneInfo | None = None) -> str:
@@ -198,11 +198,16 @@ async def calendar_week(calendar_id: str = "primary") -> str:
         days: dict[str, list[str]] = {}
         for e in events:
             start = e.get("start", {})
-            date_str = start.get("dateTime", start.get("date", ""))[:10]
+            date_str = start.get("dateTime", start.get("date", ""))
             try:
-                day_label = datetime.fromisoformat(date_str).strftime("%A, %B %d")
+                # The day heading must agree with the times _format_event
+                # renders, so aware starts are converted into the same tz.
+                day_dt = datetime.fromisoformat(date_str)
+                if day_dt.tzinfo is not None:
+                    day_dt = day_dt.astimezone(tz)
+                day_label = day_dt.strftime("%A, %B %d")
             except (ValueError, TypeError):
-                day_label = date_str
+                day_label = date_str[:10]
             days.setdefault(day_label, []).append(_format_event(e, tz))
 
         lines = [f"Week ahead ({now.strftime('%b %d')} - {end.strftime('%b %d')}) — {len(events)} event(s):\n"]

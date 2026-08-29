@@ -98,24 +98,9 @@ class SessionManager:
         # pincer.db) covers every later connection from any module or the
         # tasks-worker process. busy_timeout is per-connection: this long-lived
         # writer must wait, not fail, when a short-lived reader holds the lock.
+        # Schema DDL itself lives in the Alembic migrations (ensure_schema_current).
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA busy_timeout=5000")
-        await self._db.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                channel TEXT NOT NULL,
-                messages TEXT NOT NULL DEFAULT '[]',
-                metadata TEXT NOT NULL DEFAULT '{}',
-                created_at REAL NOT NULL,
-                updated_at REAL NOT NULL
-            )
-        """)
-        await self._db.execute("""
-            CREATE INDEX IF NOT EXISTS idx_session_user
-            ON sessions(user_id, channel)
-        """)
-        await self._db.commit()
 
     async def close(self) -> None:
         for session in self._cache.values():

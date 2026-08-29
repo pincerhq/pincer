@@ -62,6 +62,9 @@ WATCHDOG_INTERVAL_S = 2.0
 # ending (never dead air), bounded so shutdown can't hang on a broken call.
 SHUTDOWN_DRAIN_TIMEOUT_S = 60.0
 SHUTDOWN_SPEECH_TIMEOUT_S = 10.0
+# Post-call reports run an LLM request; a hung provider must not block
+# shutdown forever.
+POSTCALL_DRAIN_TIMEOUT_S = 30.0
 
 
 class VoiceChannel(BaseChannel):
@@ -204,10 +207,14 @@ class VoiceChannel(BaseChannel):
                     with contextlib.suppress(Exception):
                         await self._engine.end_call(call_sid)
         # The drained calls' failure reports are user-facing (the initiator
-        # must learn the call was cut) — let them finish before exiting.
-        for task in list(self._postcall_tasks.values()):
-            with contextlib.suppress(Exception):
-                await task
+        # must learn the call was cut) — let them finish before exiting,
+        # bounded so a hung LLM request can't block shutdown indefinitely.
+        tasks = list(self._postcall_tasks.values())
+        if tasks:
+            _done, pending = await asyncio.wait(tasks, timeout=POSTCALL_DRAIN_TIMEOUT_S)
+            for task in pending:
+                logger.warning("Post-call report did not finish before shutdown — cancelling: %s", task.get_name())
+                task.cancel()
         logger.info("Voice channel stopped")
 
     async def _speak_shutdown_ending(self, call_sid: str) -> None:
@@ -384,11 +391,19 @@ class VoiceChannel(BaseChannel):
                 for session in list(self._reception_sessions.values()):
                     with contextlib.suppress(Exception):
                         await session.check_silence()
+                # Per-call guard: one bad call must not stop timeout
+                # enforcement for every other concurrently active call.
                 for call_sid, sm in list(self._state_machines.items()):
                     if sm.is_terminal or not sm.check_timeout():
                         continue
-                    await self._handle_phase_timeout(call_sid, sm)
-                await self._reap_stuck_calls()
+                    try:
+                        await self._handle_phase_timeout(call_sid, sm)
+                    except Exception:
+                        logger.exception("Phase timeout handling failed [%s]", call_sid)
+                try:
+                    await self._reap_stuck_calls()
+                except Exception:
+                    logger.exception("Stuck-call reaper failed")
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -737,7 +752,7 @@ class VoiceChannel(BaseChannel):
                 transcript.log_utterance(
                     Speaker.AGENT,
                     response,
-                    state=str(sm.phase) if delivered is not False else "undelivered",
+                    state=str(sm.phase) if delivered else "undelivered",
                 )
             self._after_agent_turn(call_sid, sm, response or "", end_requested)
         except Exception:
@@ -815,13 +830,13 @@ class VoiceChannel(BaseChannel):
                 stamp("first_dispatch_ms")
                 metrics.mark_agent_speech_start()
             delivered = await engine.send_speech(call_sid, sentence, last=last)
-            if delivered is not False and buffering_engine:
+            if delivered and buffering_engine:
                 open_stream = not last
             if sentence:
                 spoken_any = True
                 spoken_text = f"{spoken_text} {sentence}".strip()
                 transcript.log_utterance(
-                    Speaker.AGENT, sentence, state=str(sm.phase) if delivered is not False else "undelivered"
+                    Speaker.AGENT, sentence, state=str(sm.phase) if delivered else "undelivered"
                 )
 
         async def gate_first_sentence(sentence: str) -> str:
@@ -1015,7 +1030,7 @@ class VoiceChannel(BaseChannel):
             metrics.mark_agent_speech_start()
             delivered = await self._engine.send_speech(call_sid, response)
             transcript.log_utterance(
-                Speaker.AGENT, response, state=str(sm.phase) if delivered is not False else "undelivered"
+                Speaker.AGENT, response, state=str(sm.phase) if delivered else "undelivered"
             )
         self._after_agent_turn(call_sid, sm, response or "", end_requested)
 
@@ -1189,6 +1204,9 @@ class VoiceChannel(BaseChannel):
         from pincer.voice.status_notify import notify_ended
 
         outcome = f"{'completed' if completed else 'did not complete'} ({state.duration_seconds}s)"
+        end_reason = str(state.metadata.get("end_reason") or "")
+        if end_reason:
+            outcome = f"{end_reason} ({state.duration_seconds}s)"
         if unverified:
             outcome += " — note: the agent made a completion claim I could not verify against tool results"
         with contextlib.suppress(Exception):

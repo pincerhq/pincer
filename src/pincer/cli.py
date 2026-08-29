@@ -1361,7 +1361,9 @@ async def _run_agent(settings: Settings) -> None:
         if settings.elevenlabs_api_key.get_secret_value():
             from pincer.voice.voices import validate_configured_voices
 
-            bad_voices = validate_configured_voices(settings)
+            # Sync httpx under the hood — off the event loop, so the already-
+            # running channels (Telegram polling, webhooks) keep serving.
+            bad_voices = await asyncio.to_thread(validate_configured_voices, settings)
             if bad_voices:
                 for vid, problem in bad_voices.items():
                     console.print(f"[bold red]ElevenLabs voice {vid}: {problem}[/bold red]")
@@ -1589,7 +1591,7 @@ async def _run_agent(settings: Settings) -> None:
     delivery_backend = create_delivery_backend(settings)
     deliverer = ResultEmitter(delivery_backend)
 
-    if settings.voice_enabled and settings.voice_transcript_retention_days > 0:
+    if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.voice_transcript_retention_days > 0:
         try:
             purge_tz = settings.voice_timezone or settings.timezone
             purge_user = settings.default_user_id or "system"
@@ -1611,7 +1613,7 @@ async def _run_agent(settings: Settings) -> None:
 
     # Sprint 13 §5: threads with no activity for PINCER_THREAD_AUTOCLOSE_DAYS
     # are closed automatically. Idempotent by name, like every schedule here.
-    if settings.voice_enabled and settings.thread_autoclose_days > 0:
+    if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.thread_autoclose_days > 0:
         try:
             thread_user = settings.default_user_id or "system"
             existing = await scheduler.list_schedules(thread_user)

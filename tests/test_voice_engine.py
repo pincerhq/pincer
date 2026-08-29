@@ -86,6 +86,19 @@ class TestConversationRelayEngine:
         assert state.duration_seconds >= 0
 
 
+class _FakeTTS:
+    """Minimal TTS provider double: μ-law output, records whether it ran."""
+
+    output_format = "ulaw_8000"
+
+    def __init__(self):
+        self.synthesized = 0
+
+    async def synthesize_stream(self, text, *, voice="", model=""):
+        self.synthesized += 1
+        yield b"\x00" * 160
+
+
 class TestMediaStreamEngine:
     @pytest.fixture
     def engine(self, mock_settings):
@@ -102,6 +115,22 @@ class TestMediaStreamEngine:
         )
         assert state.call_sid == "CA456"
         assert state.direction == CallDirection.OUTBOUND
+
+    async def test_send_speech_with_websocket_returns_true(self, engine):
+        state = await engine.on_call_start("CA456", "+15559876543", CallDirection.OUTBOUND)
+        state.metadata["websocket"] = AsyncMock()
+        engine._tts_provider = _FakeTTS()
+        assert await engine.send_speech("CA456", "Hello!") is True
+        state.metadata["websocket"].send_text.assert_called_once()
+
+    async def test_send_speech_without_websocket_returns_false(self, engine):
+        # Honest transcripts: no socket means the caller heard nothing, so
+        # this must not report delivered — and must not bill a synthesis.
+        await engine.on_call_start("CA456", "+15559876543", CallDirection.OUTBOUND)
+        tts = _FakeTTS()
+        engine._tts_provider = tts
+        assert await engine.send_speech("CA456", "Hello!") is False
+        assert tts.synthesized == 0
 
 
 class TestEngineFactory:

@@ -320,3 +320,25 @@ class TestBuildCallOpening:
 
     def test_silent_when_intro_disabled_and_mode_none(self):
         assert build_call_opening(_twiml_settings(mode="none", name=""), "+12125551234") == ""
+
+    def test_bare_name_intro_keeps_ai_disclosure(self):
+        # "This is Pincer." mentions no AI, so the disclosure must still play.
+        opening = build_call_opening(_twiml_settings(recording=False, org="", owner=""), "+12125551234")
+        assert opening == "This is Pincer. Please note: you are speaking with an automated AI assistant."
+
+    def test_override_without_ai_mention_keeps_ai_disclosure(self):
+        settings = _twiml_settings(recording=False, intro_text="Hi, this is Pincer calling on behalf of Jane.")
+        opening = build_call_opening(settings, "+12125551234")
+        assert opening == (
+            "Hi, this is Pincer calling on behalf of Jane. "
+            "Please note: you are speaking with an automated AI assistant."
+        )
+
+    def test_override_with_ai_mention_suppresses_disclosure(self):
+        settings = _twiml_settings(recording=False, intro_text="Hi, this is Pincer, Jane's AI assistant.")
+        opening = build_call_opening(settings, "+12125551234")
+        assert opening == "Hi, this is Pincer, Jane's AI assistant."
+
+    def test_german_intro_suppresses_disclosure(self):
+        opening = build_call_opening(_twiml_settings(recording=False, consent_language="de"), "+491761234567")
+        assert opening == "Hier spricht Pincer, der KI-Assistent von 3days.ai."

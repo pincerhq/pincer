@@ -223,8 +223,9 @@ class TestTranscriptTool:
         async with aiosqlite.connect(str(db_path)) as db:
             await ensure_voice_tables(db)
             await db.execute(
-                "INSERT INTO voice_calls (call_sid, direction, to_number, started_at) VALUES (?, ?, ?, ?)",
-                ("CA_t1", "outbound", "+491761234567", "2026-08-16T10:00:00+00:00"),
+                "INSERT INTO voice_calls (call_sid, direction, to_number, pincer_user_id, started_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("CA_t1", "outbound", "+491761234567", "tester", "2026-08-16T10:00:00+00:00"),
             )
             await db.execute(
                 "INSERT INTO call_transcripts (call_id, speaker, text, timestamp) VALUES (?, ?, ?, ?)",
@@ -245,7 +246,7 @@ class TestTranscriptTool:
         )
         from pincer.tools.builtin.call_transcript import get_call_transcript
 
-        result = await get_call_transcript("CA_t1")
+        result = await get_call_transcript("CA_t1", context={"pincer_user_id": "tester"})
         assert "4111 1111 1111 1111" not in result  # PII masked
         assert "Der Termin ist bestätigt." in result
         assert "AGENT:" in result and "CALLER:" in result
@@ -259,7 +260,7 @@ class TestTranscriptTool:
         )
         from pincer.tools.builtin.call_transcript import get_call_transcript
 
-        result = await get_call_transcript()
+        result = await get_call_transcript(context={"pincer_user_id": "tester"})
         assert "CA_t1" in result
 
     async def test_missing_call(self, tmp_path, monkeypatch):
@@ -271,7 +272,9 @@ class TestTranscriptTool:
         )
         from pincer.tools.builtin.call_transcript import get_call_transcript
 
-        assert "No transcript found" in await get_call_transcript("CA_nope")
+        assert "No transcript found" in await get_call_transcript(
+            "CA_nope", context={"pincer_user_id": "tester"}
+        )
 
     async def test_no_db_yet(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -280,5 +283,43 @@ class TestTranscriptTool:
         )
         from pincer.tools.builtin.call_transcript import get_call_transcript
 
-        result = await get_call_transcript()
+        result = await get_call_transcript(context={"pincer_user_id": "tester"})
         assert "No calls found" in result or "No call transcripts" in result
+
+    async def test_other_users_sid_is_not_found(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "pincer.db"
+        await self._seed(db_path)
+        monkeypatch.setattr(
+            "pincer.tools.builtin.call_transcript.get_settings",
+            lambda: SimpleNamespace(db_path=db_path),
+        )
+        from pincer.tools.builtin.call_transcript import get_call_transcript
+
+        result = await get_call_transcript("CA_t1", context={"pincer_user_id": "intruder"})
+        assert "No transcript found" in result
+        assert "Termin" not in result
+
+    async def test_latest_call_scoped_to_user(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "pincer.db"
+        await self._seed(db_path)
+        monkeypatch.setattr(
+            "pincer.tools.builtin.call_transcript.get_settings",
+            lambda: SimpleNamespace(db_path=db_path),
+        )
+        from pincer.tools.builtin.call_transcript import get_call_transcript
+
+        result = await get_call_transcript(context={"pincer_user_id": "intruder"})
+        assert "No calls found" in result
+
+    async def test_no_identity_is_rejected(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "pincer.db"
+        await self._seed(db_path)
+        monkeypatch.setattr(
+            "pincer.tools.builtin.call_transcript.get_settings",
+            lambda: SimpleNamespace(db_path=db_path),
+        )
+        from pincer.tools.builtin.call_transcript import get_call_transcript
+
+        result = await get_call_transcript("CA_t1")
+        assert "no user identity" in result
+        assert "Termin" not in result

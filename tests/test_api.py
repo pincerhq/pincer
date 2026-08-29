@@ -181,6 +181,38 @@ def test_twilio_path_bypasses_auth(monkeypatch, tmp_path):
         get_settings_relaxed.cache_clear()
 
 
+def test_twilio_path_hands_off_to_signature_auth(monkeypatch, tmp_path):
+    """The Bearer exemption is a hand-off, not a hole: with the voice routes
+    mounted and a Twilio auth token configured, an unsigned request that
+    skipped Bearer auth is rejected by X-Twilio-Signature validation — 403
+    from the route, not 401 from the middleware, and never 200."""
+    from unittest.mock import MagicMock
+
+    from pincer.config import get_settings_relaxed
+    from pincer.voice import twiml_server
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "secret-token")
+    monkeypatch.setenv("PINCER_VOICE_ENABLED", "true")
+    get_settings_relaxed.cache_clear()
+
+    voice_settings = MagicMock()
+    voice_settings.twilio_auth_token.get_secret_value.return_value = "twilio-token"
+    voice_settings.voice_webhook_validate = True
+    voice_settings.voice_signature_max_age_s = 300
+    voice_settings.voice_webhook_base_url = "https://voice.example.com"
+    monkeypatch.setattr(twiml_server, "_settings", voice_settings)
+    monkeypatch.setattr(twiml_server, "_engine", MagicMock())
+
+    try:
+        app = create_app()
+        with TestClient(app) as c:
+            resp = c.post("/api/apps/twilio/status", data={"CallSid": "CA_test", "CallStatus": "ringing"})
+            assert resp.status_code == 403
+    finally:
+        get_settings_relaxed.cache_clear()
+
+
 def test_port_in_use_detection():
     """Single-instance guard: detects a listener on the dashboard port."""
     import socket as socket_mod

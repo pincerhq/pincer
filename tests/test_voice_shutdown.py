@@ -80,6 +80,27 @@ class TestGracefulShutdown:
 
         assert processed == [("CA_shutdown", False)]  # shutdown => not completed
 
+    async def test_hung_postcall_report_does_not_block_shutdown(self, monkeypatch):
+        """The post-call pipeline awaits a live LLM request; a hung provider
+        must be cancelled at the drain timeout, not block shutdown forever."""
+        import asyncio
+
+        monkeypatch.setattr("pincer.channels.phone_calls.POSTCALL_DRAIN_TIMEOUT_S", 0.05)
+        channel, engine = await _live_call("en")
+
+        class _HungProcessor:
+            async def process(self, call_sid, state, transcript, completed, unverified):
+                await asyncio.sleep(3600)
+
+        channel.set_post_call_processor(_HungProcessor())
+        await asyncio.wait_for(channel.stop(), timeout=5)
+
+        assert "CA_shutdown" in engine.ended
+        task = channel._postcall_tasks.get("CA_shutdown")
+        assert task is not None
+        await asyncio.wait([task], timeout=1)  # let the cancellation land
+        assert task.cancelled()
+
     async def test_stop_without_active_calls_is_clean(self):
         from voice_harness.fake_engine import FakeVoiceEngine
 

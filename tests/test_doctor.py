@@ -1051,6 +1051,32 @@ def test_voice_dach_consent_skipped_when_disabled():
     assert result.status == CheckStatus.SKIPPED
 
 
+def test_voice_dach_consent_warns_on_outbound_only_deployment():
+    """voice_enabled=False must not skip the check the outbound flag needs —
+    an outbound-only DACH deployment is exactly the scenario it exists for."""
+    cfg = _voice_cfg(voice_enabled=False, voice_outbound_enabled=True, voice_consent_mode="one_party")
+    result = SecurityDoctor()._check_voice_dach_consent(cfg)
+    assert result.status == CheckStatus.WARNING
+
+
+def test_voice_retention_runs_on_outbound_only_deployment():
+    cfg = _voice_cfg(
+        voice_enabled=False,
+        voice_outbound_enabled=True,
+        voice_recording_enabled=True,
+        voice_transcript_retention_days=0,
+    )
+    result = SecurityDoctor()._check_voice_retention(cfg)
+    assert result.status == CheckStatus.WARNING
+
+
+def test_voice_provider_regions_runs_on_outbound_only_deployment():
+    cfg = _voice_cfg(voice_enabled=False, voice_outbound_enabled=True, twilio_account_sid="AC123")
+    result = SecurityDoctor()._check_voice_provider_regions(cfg)
+    assert result.status == CheckStatus.PASS
+    assert "Twilio" in result.message
+
+
 def test_voice_dach_consent_warns_on_one_party_outbound():
     cfg = _voice_cfg(voice_outbound_enabled=True, voice_consent_mode="one_party")
     result = SecurityDoctor()._check_voice_dach_consent(cfg)

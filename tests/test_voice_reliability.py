@@ -214,6 +214,40 @@ class TestVoiceChannelHardening:
         assert any("goodbye" in s.lower() for s in engine.spoken["CA1"])
         await channel.stop()
 
+    async def test_watchdog_survives_one_failing_call(self, monkeypatch):
+        """A failure handling one call's timeout must not stop timeout
+        enforcement for the other concurrently active calls."""
+        import asyncio
+
+        from pincer.voice.engine import CallDirection
+
+        monkeypatch.setattr("pincer.channels.phone_calls.WATCHDOG_INTERVAL_S", 0.01)
+        channel, engine = _make_channel()
+        await channel.start(AsyncMock(return_value="Hello! How can I help?"))
+        state_bad = await engine.on_call_start("CA_bad", "+1", CallDirection.INBOUND)
+        state_good = await engine.on_call_start("CA_good", "+2", CallDirection.INBOUND)
+        sm_bad = channel._ensure_call_tracking("CA_bad", state_bad)
+        sm_good = channel._ensure_call_tracking("CA_good", state_good)
+
+        original = channel._handle_phase_timeout
+
+        async def exploding(call_sid, sm):
+            if call_sid == "CA_bad":
+                raise RuntimeError("unexpected phase")
+            await original(call_sid, sm)
+
+        channel._handle_phase_timeout = exploding
+
+        # Both time out; CA_bad is first in iteration order and raises.
+        sm_bad._state.phase_entered_at -= PHASE_TIMEOUTS[sm_bad.phase] + 1
+        sm_good._state.phase_entered_at -= PHASE_TIMEOUTS[sm_good.phase] + 1
+
+        await asyncio.sleep(0.1)
+        assert sm_good.is_terminal
+        assert "CA_good" in engine.ended
+        assert not channel._watchdog_task.done()
+        await channel.stop()
+
     async def test_brain_errors_escalate_to_graceful_end(self):
         from pincer.voice.engine import CallDirection
 
@@ -337,6 +371,29 @@ class TestAnsweringMachineDetection:
         assert not any("voicemail" in msg for msg in sent)
         assert "📞 Connected" in sent  # falls through to normal in-progress handling
 
+    def test_machine_verdict_hangs_up_despite_transcribed_greeting(self, webhook_client):
+        """The transcribed voicemail greeting arrives within the AMD grace
+        window, so it must not count as a conversing caller — the machine
+        verdict still hangs up."""
+        from pincer.voice.engine import CallDirection, CallState
+
+        client, engine = webhook_client
+        self._setup_notify()
+
+        state = CallState(call_sid="CA_amd", direction=CallDirection.OUTBOUND, caller_number="+1")
+        state.mark_caller_spoke()  # greeting transcribed seconds after answer
+        engine.get_call_state = MagicMock(return_value=state)
+
+        response = client.post(
+            "/api/apps/twilio/status",
+            data={"CallSid": "CA_amd", "CallStatus": "in-progress", "AnsweredBy": "machine_start"},
+        )
+        assert response.status_code == 200
+        engine.end_call.assert_called_once_with("CA_amd")
+        # Live state -> the post-call pipeline delivers the report; the webhook
+        # records the reason instead of notifying directly.
+        assert state.metadata["end_reason"] == "voicemail detected, no message left"
+
     def test_human_answer_notifies_connected(self, webhook_client):
         client, engine = webhook_client
         sent = self._setup_notify()
@@ -377,14 +434,27 @@ class TestConversationRelayProtocol:
         await engine.interrupt_speech("CA_cr")
         ws.send_text.assert_not_called()
 
-    async def test_speech_input_marks_caller_spoke(self):
-        from pincer.voice.engine import CallDirection, ConversationRelayEngine
+    async def test_speech_input_marks_caller_spoke_after_amd_grace(self):
+        from datetime import UTC, datetime, timedelta
+
+        from pincer.voice.engine import AMD_GRACE_SECONDS, CallDirection, ConversationRelayEngine
 
         engine = ConversationRelayEngine(MagicMock())
         state = await engine.on_call_start("CA_cr2", "+1", CallDirection.OUTBOUND)
         assert "caller_spoke" not in state.metadata
+        state.started_at = datetime.now(UTC) - timedelta(seconds=AMD_GRACE_SECONDS + 1)
         await engine.on_speech_input("CA_cr2", "Hello?")
         assert state.metadata["caller_spoke"] is True
+
+    async def test_speech_input_within_amd_grace_does_not_mark_caller_spoke(self):
+        """A voicemail greeting is transcribed like any speech — speech inside
+        the AMD grace window must not shield the call from the AMD verdict."""
+        from pincer.voice.engine import CallDirection, ConversationRelayEngine
+
+        engine = ConversationRelayEngine(MagicMock())
+        state = await engine.on_call_start("CA_cr3", "+1", CallDirection.OUTBOUND)
+        await engine.on_speech_input("CA_cr3", "You've reached Jane, please leave a message.")
+        assert "caller_spoke" not in state.metadata
 
     async def test_send_speech_reports_delivery(self):
         """F4: True only when the token reached the socket — silence is never
