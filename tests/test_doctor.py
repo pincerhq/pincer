@@ -24,10 +24,11 @@ def doctor_env(tmp_path):
 def test_run_all_returns_report(doctor_env):
     report = doctor_env.run_all()
     assert isinstance(report, DoctorReport)
-    # 42 checks from dev + 3 voice DACH + 1 ElevenLabs
-    # + 4 voice security + 2 observability
-    # + 3 in-call tool execution + 2 receptionist.
-    assert len(report.checks) == 57
+    # 31 original + 7 MCP + 3 MCP security + 1 WA neonize + 3 voice DACH
+    # + 1 ElevenLabs + 4 voice security (Sprint 8) + 2 observability (Sprint 9)
+    # + 3 in-call tool execution (Sprint 11) + 2 receptionist (Sprint 12)
+    # + 1 live listen-in announce gate (Sprint 15)
+    assert len(report.checks) == 58
 
     assert 0 <= report.score <= 100
 

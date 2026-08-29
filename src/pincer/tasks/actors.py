@@ -58,6 +58,8 @@ async def run_scheduled_action(schedule_id: int) -> None:
     from pincer.observability.canary import make_canary_handler
     from pincer.observability.digest import make_digest_handler
     from pincer.voice.retention import make_retention_handler
+    from pincer.voice.scheduled_calls import make_scheduled_call_handler
+    from pincer.voice.threads import make_autoclose_handler
 
     handlers = {
         "briefing": proactive.generate_briefing,
@@ -69,6 +71,12 @@ async def run_scheduled_action(schedule_id: int) -> None:
         "ops_alert_scan": make_alert_scan_handler(settings),
         "voice_canary": make_canary_handler(settings),
         "voice_weekly_digest": make_digest_handler(settings),
+        # Sprint 13 §5: close threads that have gone quiet — the daily
+        # `voice_thread_autoclose` schedule created in cli.py dispatches here.
+        "thread_autoclose": make_autoclose_handler(settings),
+        # A call the owner asked for later: one-off schedules created by
+        # POST /api/voice/calls/scheduled land here when they come due.
+        "voice_call": make_scheduled_call_handler(settings),
     }
     handler = handlers.get(action_type)
     if handler is None:

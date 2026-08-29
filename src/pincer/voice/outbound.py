@@ -12,6 +12,9 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from pincer.voice.briefing import BriefingError, CallBriefing, log_briefing_bound
+from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, truncate
+
 logger = logging.getLogger(__name__)
 
 E164_PATTERN = re.compile(r"^\+[1-9]\d{6,14}$")
@@ -77,6 +80,65 @@ async def _audit_block(decision: Any, number: str, user_id: str, channel: str) -
         logger.debug("Audit logging of blocked call failed", exc_info=True)
 
 
+def _voice_engine() -> Any:
+    """The live engine, or None when voice is not running in this process
+    (API-only deployments, tests). Pre-registration is best effort: without an
+    engine there is no relay socket to race with."""
+    try:
+        from pincer.voice.twiml_server import get_engine
+
+        return get_engine()
+    except Exception:  # pragma: no cover — voice extra not installed
+        return None
+
+
+async def _validate_thread(settings: Any, thread_id: str) -> None:
+    """Sprint 13 §4.2: a supplied thread must exist and must not be closed —
+    checked BEFORE dialling, so a rejected follow-up never costs a phone call."""
+    from pincer.voice.threads import get_thread_manager
+
+    thread = await get_thread_manager(settings).get(thread_id)
+    if thread is None:
+        raise ThreadError(f"Thread {thread_id} does not exist.")
+    if thread.status == "closed":
+        raise ThreadError(
+            f"Thread {thread_id} is closed and cannot take further calls. "
+            "Start a new thread and reference this one in its subject."
+        )
+
+
+async def _attach_thread(
+    settings: Any,
+    call_sid: str,
+    *,
+    thread_id: str,
+    kind: str,
+    subject: str,
+    number: str,
+    contact_name: str,
+    language: str,
+) -> None:
+    """Sprint 13 §2/§4: put the new call in its thread, creating the thread for
+    a fresh task call. Best effort — thread bookkeeping must never turn a
+    placed call into a reported failure."""
+    from pincer.voice.threads import KIND_ORIGIN, ORIGIN_USER_TASK, get_thread_manager
+
+    manager = get_thread_manager(settings)
+    try:
+        if not thread_id:
+            thread = await manager.create(
+                subject=subject,
+                origin=ORIGIN_USER_TASK,
+                primary_number=number,
+                contact_name=contact_name,
+                language=language,
+            )
+            thread_id, kind = thread.thread_id, KIND_ORIGIN
+        await manager.attach(call_sid, thread_id, kind or KIND_ORIGIN)
+    except Exception:
+        logger.exception("Thread attach failed for call %s — the call itself is unaffected", call_sid)
+
+
 async def make_phone_call(
     target_number: str,
     purpose: str,
@@ -85,6 +147,10 @@ async def make_phone_call(
     language: str = "",
     context: dict | None = None,
     target_name: str = "",
+    thread_id: str = "",
+    thread_kind: str = "",
+    thread_subject: str = "",
+    source: str = "",
 ) -> str:
     """Place a phone call to a number on behalf of the user.
 
@@ -94,8 +160,14 @@ async def make_phone_call(
     max_duration: Maximum call duration in seconds (default 300)
     language: Call language ('en', 'de', or 'uk'); empty = default language setting
     target_name: Who is being called (optional)
+    thread_id: Continue an existing call thread (Sprint 13 §4.2); empty starts a new one
+    thread_kind: Internal — how the call attaches (origin | retry | followup); callers
+        that pass a thread_id but no kind get `followup`
+    thread_subject: Internal — title for the thread created when thread_id is empty
+    source: Internal — which surface asked for the call (dashboard | chat | api | scheduler)
 
-    purpose and instructions are the agent's briefing for the call.
+    purpose and instructions are the agent's briefing for the call: purpose is
+    the binding task the agent opens the call with, and it is REQUIRED.
     """
     from pincer.config import get_settings
 
@@ -120,6 +192,30 @@ async def make_phone_call(
     if not validated:
         logger.info("make_phone_call aborted: invalid E.164 format for %s", target_number)
         return f"Error: Invalid phone number format: {target_number}. Use E.164 format (e.g. +14155551234)."
+
+    # The briefing is validated BEFORE the gate, the thread and the dial: a
+    # call the agent cannot open with a task is not worth placing, and an
+    # empty-purpose call has never been anything but a generic monologue.
+    try:
+        briefing = CallBriefing.create(
+            purpose,
+            target_name=target_name,
+            language=language,
+            source=source,
+            instructions=instructions,
+        )
+    except BriefingError as e:
+        logger.info("make_phone_call aborted: %s", e)
+        return f"Error: {e}"
+
+    thread_id = str(thread_id or "").strip()
+    attach_kind = str(thread_kind or "").strip() or (KIND_FOLLOWUP if thread_id else KIND_ORIGIN)
+    if thread_id:
+        try:
+            await _validate_thread(settings, thread_id)
+        except ThreadError as e:
+            logger.info("make_phone_call aborted: %s", e)
+            return f"Error: {e}"
 
     ctx = context or {}
     user_id = ctx.get("user_id", "unknown")
@@ -190,7 +286,26 @@ async def make_phone_call(
         if getattr(settings, "voice_machine_detection", True):
             call_kwargs["machine_detection"] = "Enable"
 
-        call = client.calls.create(**call_kwargs)
+        # §2 Fix A: the briefed state exists BEFORE the dial, so a relay
+        # `setup` that beats the REST response finds a briefed call instead of
+        # inventing an unbriefed inbound one.
+        engine = _voice_engine()
+        pre_state = None
+        if engine is not None:
+            pre_state = await engine.register_pending_outbound(
+                briefing, validated, language=call_language, instructions=briefing.instructions
+            )
+
+        try:
+            call = client.calls.create(**call_kwargs)
+        except Exception:
+            if engine is not None and pre_state is not None:
+                engine.discard_pending(pre_state)
+            raise
+
+        if engine is not None and pre_state is not None:
+            await engine.promote_pending(pre_state, call.sid)
+        log_briefing_bound(call.sid, briefing)
 
         _increment_daily_count(user_id)
         await record_outbound_call(
@@ -199,6 +314,20 @@ async def make_phone_call(
             user_id=user_id,
             channel=ctx.get("channel", ""),
             call_sid=call.sid,
+        )
+
+        # Sprint 13: the call joins (or starts) the thread for this matter
+        # before any status update, so the thread id is already on the call row
+        # when the engine builds the first turn's THREAD CONTEXT block.
+        await _attach_thread(
+            settings,
+            call.sid,
+            thread_id=thread_id,
+            kind=attach_kind,
+            subject=str(thread_subject or "").strip() or truncate(purpose, 120),
+            number=validated,
+            contact_name=str(target_name or "").strip(),
+            language=call_language,
         )
 
         # T1.5: live status updates back to the initiating user (max 3/call)

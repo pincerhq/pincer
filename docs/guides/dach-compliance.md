@@ -65,6 +65,49 @@ A German/Austrian SMB deploying Pincer voice acts as **controller**; the provide
 6. **Retention** — keep the default 90 days unless you have a documented reason; `0` (keep forever) conflicts with storage limitation and triggers a `pincer doctor` warning when recording is enabled.
 7. **Data subject requests** — transcripts are plain SQLite rows keyed by call SID and phone number; export with any SQLite client, delete by `DELETE FROM call_transcripts WHERE call_id = …` (deletions land in the audit log).
 
+## Live listen-in (monitoring)
+
+> Engineering documentation — **flag for legal review** before enabling for a
+> customer. Monitoring is legally distinct from recording, but in DACH it sits
+> next to §201 StGB (confidentiality of the spoken word) and, for employees,
+> BDSG / works-council co-determination (§87 BetrVG).
+
+`PINCER_LISTEN_IN_ENABLED=true` lets the owner listen to an active call live
+from the dashboard. What it is and is not:
+
+- **Listen-only, by construction.** The audio comes from a separate Twilio
+  `<Start><Stream>` fork that cannot carry audio back into the call; nobody can
+  speak, whisper or barge in through it.
+- **No audio is stored.** Frames are relayed from Twilio to the browser and
+  never written to disk or the database (`test_no_audio_persisted`). This path
+  does **not** create a recording; the recording controls
+  (`PINCER_VOICE_RECORDING_ENABLED`, consent mode) are unchanged.
+- **Announced.** With `PINCER_LISTEN_IN_ANNOUNCE=true` (default) the call
+  opening is extended per language:
+  - DE: *"Dieses Gespräch kann zur Qualitätssicherung mitgehört werden."*
+  - EN: *"This call may be monitored for quality assurance."*
+  - UK: *"Ця розмова може прослуховуватися для контролю якості."*
+
+  It plays after the recording / AI-disclosure line (and before the
+  receptionist greeting on inbound calls). Setting `PINCER_LISTEN_IN_ANNOUNCE=false`
+  while listen-in is enabled is a `pincer doctor` **FAIL** (check
+  `listen_in_announce`) unless `PINCER_VOICE_CONSENT_MODE=two_party` with
+  `PINCER_VOICE_RECORDING_ENABLED=true` — i.e. the two-party recording
+  announcement is already playing and covers monitoring.
+- **Audited.** Every listen session is one `listen_in_session` row in the
+  audit log: `{user, call_sid, started_at, ended_at, duration_s}` (plus
+  frame counts and the end reason). Include it in the Art. 30 record and in
+  the access-control section of the TOMs; it answers "who listened to which
+  call, when, for how long".
+- **Capped and authenticated.** At most `PINCER_LISTEN_IN_MAX_LISTENERS`
+  (default 2) listeners per call; the listener socket requires the dashboard
+  bearer token and is refused before the handshake completes without it.
+
+For the DPA / AVV: no new processor is involved (Twilio already carries the
+call audio); add *live monitoring by the controller's own staff, announced to
+the caller, not recorded* to the processing description, and — where employees
+are on the line — clear it with the works council first.
+
 ## Related configuration
 
 | Variable | Default | Purpose |
@@ -74,8 +117,10 @@ A German/Austrian SMB deploying Pincer voice acts as **controller**; the provide
 | `PINCER_VOICE_TRANSCRIPT_RETENTION_DAYS` | `90` | Auto-purge window; `0` = keep forever |
 | `PINCER_VOICE_TIMEZONE` | `PINCER_TIMEZONE` (default `Europe/Berlin`) | Voice-facing time rendering |
 | `PINCER_VOICE_RECORDING_ENABLED` | `false` | Keep off unless recording is actually needed |
+| `PINCER_LISTEN_IN_ENABLED` | `false` | Live listen-in media fork (listen-only, never recorded) |
+| `PINCER_LISTEN_IN_ANNOUNCE` | `true` | Monitoring notice in the call opening; `false` is a doctor FAIL without two-party recording |
 
-`pincer doctor` runs three DACH checks: outbound-from-DACH-number with `one_party` consent (warns), recording without a retention window (warns), and an inventory of configured STT/TTS providers and their processing regions.
+`pincer doctor` runs the listen-in announce gate (`listen_in_announce`, FAIL) and three DACH checks: outbound-from-DACH-number with `one_party` consent (warns), recording without a retention window (warns), and an inventory of configured STT/TTS providers and their processing regions.
 
 ## Customer-facing AVV annex
 

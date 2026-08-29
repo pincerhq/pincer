@@ -2,6 +2,7 @@
 
 import os
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import aiosqlite
 import pytest
@@ -261,13 +262,41 @@ def test_initiate_call_error_mapping(client, monkeypatch, error, expected_status
         return error
 
     monkeypatch.setattr("pincer.voice.outbound.make_phone_call", fake_make_phone_call)
-    r = client.post("/api/voice/calls", json={"target_number": "+15550004444", "purpose": "x"})
+    r = client.post(
+        "/api/voice/calls",
+        json={"target_number": "+15550004444", "purpose": "Ask what time they close today"},
+    )
     assert r.status_code == expected_status
 
 
 def test_initiate_call_validation(client):
     assert client.post("/api/voice/calls", json={"target_number": "+15550004444"}).status_code == 422
-    assert client.post("/api/voice/calls", json={"target_number": "+1", "purpose": "x"}).status_code == 422
+    assert (
+        client.post("/api/voice/calls", json={"target_number": "+1", "purpose": "Ask when they close"}).status_code
+        == 422
+    )
+
+
+@pytest.mark.parametrize("purpose", ["x", "call mum", "         "])
+def test_initiate_call_rejects_an_unusable_task(client, purpose):
+    """A call the agent cannot open with a task is refused at the door — it used
+    to be accepted and turned into a generic assistant monologue on the phone."""
+    r = client.post("/api/voice/calls", json={"target_number": "+15550004444", "purpose": purpose})
+    assert r.status_code == 422
+    assert "Purpose too short" in r.json()["detail"]
+
+
+def test_initiate_call_rejects_an_oversized_task(client):
+    r = client.post("/api/voice/calls", json={"target_number": "+15550004444", "purpose": "y" * 2001})
+    assert r.status_code == 422
+
+
+def test_schedule_rejects_an_unusable_task(client):
+    r = client.post(
+        "/api/voice/schedule",
+        json={"target_number": "+15550004444", "contact_name": "A", "topic": "x"},
+    )
+    assert r.status_code == 422
 
 
 def test_voice_api_requires_auth(monkeypatch, tmp_path):
@@ -364,3 +393,291 @@ async def test_messages_endpoint_lists_masked_rows(client, tmp_path):
     assert row["matter"] == "Rückruf wegen Rechnung"
     assert "4917212345678" not in row["callback_number"]  # PII-masked on every read surface
     assert row["delivered_to_owner_at"]
+
+
+# ── Sprint 13: call threads (§9) ────────────────────────────────────
+
+
+@pytest.fixture
+async def threads_api(client, tmp_path):
+    """A seeded thread with two calls, one of which has been purged."""
+    from pincer.voice import threads as th
+
+    settings = SimpleNamespace(db_path=str(tmp_path / "pincer.db"))
+    manager = th.ThreadManager(settings.db_path, settings=settings)
+    th.set_thread_manager(manager)
+
+    await _seed_db(tmp_path / "pincer.db")
+    thread = await manager.create(
+        "Termin Dr. Müller", primary_number="+15550002222", contact_name="Dr. Müller", language="de"
+    )
+    await manager.attach("CA002", thread.thread_id, th.KIND_ORIGIN)
+    await manager.attach("CA_gone", thread.thread_id, th.KIND_FOLLOWUP)  # no voice_calls row = purged
+    async with aiosqlite.connect(str(tmp_path / "pincer.db")) as db:
+        await db.execute(
+            "UPDATE call_threads SET rolling_summary = ?, open_commitments = ? WHERE thread_id = ?",
+            (
+                "Dienstag angerufen.\nStand: wartet auf Rückruf.",
+                '[{"who":"callee","what":"ruft am Freitag zurück","due":null,'
+                '"status":"open","source_call_sid":"CA002"}]',
+                thread.thread_id,
+            ),
+        )
+        await db.commit()
+    return SimpleNamespace(client=client, manager=manager, thread=thread)
+
+
+async def test_list_threads_and_search(threads_api):
+    client = threads_api.client
+    rows = client.get("/api/voice/threads").json()
+    assert [r["thread_id"] for r in rows] == [threads_api.thread.thread_id]
+    assert rows[0]["call_count"] == 2
+    assert rows[0]["open_commitments"][0]["what"] == "ruft am Freitag zurück"
+
+    assert client.get("/api/voice/threads", params={"q": "Müller"}).json()
+    assert client.get("/api/voice/threads", params={"q": "nothing here"}).json() == []
+    assert client.get("/api/voice/threads", params={"status": "closed"}).json() == []
+
+
+async def test_thread_detail_lists_purged_stub(threads_api):
+    body = threads_api.client.get(f"/api/voice/threads/{threads_api.thread.thread_id}").json()
+    assert body["rolling_summary"].startswith("Dienstag angerufen")
+    by_sid = {c["call_sid"]: c for c in body["calls"]}
+    assert by_sid["CA002"]["purged"] is False
+    assert by_sid["CA002"]["thread_attach_kind"] == "origin"
+    assert by_sid["CA_gone"]["purged"] is True
+
+
+async def test_thread_detail_404(threads_api):
+    assert threads_api.client.get("/api/voice/threads/thr_nope").status_code == 404
+
+
+async def test_patch_thread_subject_and_status(threads_api):
+    client, tid = threads_api.client, threads_api.thread.thread_id
+    assert client.patch(f"/api/voice/threads/{tid}", json={"subject": "Neuer Titel"}).json()["subject"] == (
+        "Neuer Titel"
+    )
+    assert client.patch(f"/api/voice/threads/{tid}", json={"status": "resolved"}).json()["status"] == "resolved"
+    assert client.patch(f"/api/voice/threads/{tid}", json={"status": "closed"}).json()["status"] == "closed"
+    # Closed is final — the API refuses, it does not silently reopen.
+    response = client.patch(f"/api/voice/threads/{tid}", json={"status": "open"})
+    assert response.status_code == 409 and "closed is final" in response.json()["detail"]
+    assert client.patch(f"/api/voice/threads/{tid}", json={"status": "archived"}).status_code == 422
+
+
+async def test_create_assign_and_merge(threads_api):
+    client = threads_api.client
+    created = client.post("/api/voice/threads", json={"subject": "Manuelles Anliegen", "contact_name": "Praxis"})
+    assert created.status_code == 201
+    new_id = created.json()["thread_id"]
+
+    # Reassigning a call moves it out of its previous thread (§4.4).
+    detail = client.post(f"/api/voice/threads/{new_id}/assign", json={"call_sid": "CA002"}).json()
+    assert [c["call_sid"] for c in detail["calls"]] == ["CA002"]
+    assert [c["thread_attach_kind"] for c in detail["calls"]] == ["manual"]
+    old = client.get(f"/api/voice/threads/{threads_api.thread.thread_id}").json()
+    assert [c["call_sid"] for c in old["calls"]] == ["CA_gone"]
+
+    # Merging folds the source in and closes it.
+    merged = client.post(
+        f"/api/voice/threads/{new_id}/merge", json={"source_thread_id": threads_api.thread.thread_id}
+    ).json()
+    assert sorted(c["call_sid"] for c in merged["calls"]) == ["CA002", "CA_gone"]
+    assert client.get(f"/api/voice/threads/{threads_api.thread.thread_id}").json()["status"] == "closed"
+
+
+async def test_calls_surface_carries_thread_fields(threads_api):
+    client = threads_api.client
+    rows = {r["call_sid"]: r for r in client.get("/api/voice/calls").json()}
+    assert rows["CA002"]["thread_id"] == threads_api.thread.thread_id
+    assert rows["CA002"]["thread_subject"] == "Termin Dr. Müller"
+    assert rows["CA002"]["thread_attach_kind"] == "origin"
+    assert rows["CA001"]["thread_id"] == ""
+
+    filtered = client.get("/api/voice/calls", params={"thread_id": threads_api.thread.thread_id}).json()
+    assert [r["call_sid"] for r in filtered] == ["CA002"]
+
+    detail = client.get("/api/voice/calls/CA002").json()
+    assert detail["thread_subject"] == "Termin Dr. Müller"
+
+
+def test_threads_endpoint_requires_auth(monkeypatch, tmp_path):
+    from pincer.config import get_settings_relaxed
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "secret-token")
+    get_settings_relaxed.cache_clear()
+    with TestClient(create_app()) as guarded:
+        assert guarded.get("/api/voice/threads").status_code == 401
+        assert guarded.get("/api/voice/threads", headers={"Authorization": "Bearer secret-token"}).status_code == 200
+    get_settings_relaxed.cache_clear()
+
+
+# ── Regression: the API reads a database the writer has not migrated ─
+
+
+async def test_calls_survive_a_pre_sprint13_database(client, tmp_path):
+    """A voice_calls table from before Sprint 13 must still serve its rows.
+
+    The API is a reader; the migration runs on the writer side. Between
+    deploying and the next call ending, `voice_calls` has no `thread_id` and
+    `call_threads` does not exist — and the thread JOIN would raise
+    OperationalError, which the handlers below turn into "no calls". That is
+    the whole call history disappearing, reported as an empty list.
+    """
+    db_path = tmp_path / "pincer.db"
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "CREATE TABLE voice_calls ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, call_sid TEXT NOT NULL UNIQUE, "
+            "direction TEXT NOT NULL DEFAULT 'inbound', from_number TEXT DEFAULT '', "
+            "to_number TEXT DEFAULT '', pincer_user_id TEXT DEFAULT '', "
+            "recording_enabled INTEGER DEFAULT 0, consent_given INTEGER DEFAULT 0, "
+            "started_at TEXT NOT NULL, ended_at TEXT)"
+        )
+        await db.execute(
+            "INSERT INTO voice_calls (call_sid, direction, started_at, ended_at) "
+            "VALUES ('CA_legacy', 'outbound', '2026-08-20T16:43:37+00:00', '2026-08-20T16:44:00+00:00')"
+        )
+        await db.commit()
+
+    rows = client.get("/api/voice/calls").json()
+    assert [r["call_sid"] for r in rows] == ["CA_legacy"]
+    assert rows[0]["thread_id"] == ""  # threadless, and stays that way
+
+    detail = client.get("/api/voice/calls/CA_legacy").json()
+    assert detail["call_sid"] == "CA_legacy"
+    assert client.get("/api/voice/threads").json() == []
+
+
+# ── Thread list filters as the dashboard sends them ─────────────────
+
+
+async def test_thread_status_filter_accepts_combined_views(threads_api):
+    """ "Open + resolved" is one dashboard view; every encoding of it works."""
+    client, tid = threads_api.client, threads_api.thread.thread_id
+    resolved = client.post("/api/voice/threads", json={"subject": "Erledigte Sache"}).json()["thread_id"]
+    client.patch(f"/api/voice/threads/{resolved}", json={"status": "resolved"})
+    closed = client.post("/api/voice/threads", json={"subject": "Geschlossene Sache"}).json()["thread_id"]
+    client.patch(f"/api/voice/threads/{closed}", json={"status": "closed"})
+
+    def ids(**params):
+        return sorted(t["thread_id"] for t in client.get("/api/voice/threads", params=params).json())
+
+    assert ids(status="open") == sorted([tid])
+    assert ids(status="open,resolved") == sorted([tid, resolved])
+    assert ids(status="open resolved") == sorted([tid, resolved])  # what "open+resolved" decodes to
+    assert ids(status=["open", "resolved"]) == sorted([tid, resolved])
+    assert ids(status="all") == sorted([tid, resolved, closed])
+    assert ids() == sorted([tid, resolved, closed])
+
+    bad = client.get("/api/voice/threads", params={"status": "archived"})
+    assert bad.status_code == 422 and "archived" in bad.json()["detail"]
+
+
+async def test_expired_commitment_filter(threads_api):
+    """The dashboard's "has expired commitments" chip (§6.2: flagged, not acted on)."""
+    client = threads_api.client
+    expired_id = client.post("/api/voice/threads", json={"subject": "Überfällig"}).json()["thread_id"]
+    async with aiosqlite.connect(str(threads_api.manager.db_path)) as db:
+        await db.execute(
+            "UPDATE call_threads SET open_commitments = ? WHERE thread_id = ?",
+            (
+                '[{"who":"callee","what":"schickt die Unterlagen","due":"2026-01-01T10:00:00+00:00",'
+                '"status":"expired","source_call_sid":"CA002"}]',
+                expired_id,
+            ),
+        )
+        await db.commit()
+
+    rows = client.get("/api/voice/threads", params={"has_expired_commitments": "true"}).json()
+    assert [t["thread_id"] for t in rows] == [expired_id]
+    assert rows[0]["open_commitments"][0]["status"] == "expired"
+
+    # Off by default: the unfiltered list still holds both threads.
+    assert len(client.get("/api/voice/threads").json()) == 2
+
+
+# ── Conversation analytics (§6) ─────────────────────────────────────
+
+
+@pytest.fixture
+async def analytics_seed(client, tmp_path):
+    from pincer.voice import analytics as an
+
+    db_path = str(tmp_path / "pincer.db")
+    await _seed_db(tmp_path / "pincer.db")
+    await an.save_analytics(
+        db_path,
+        "CA001",
+        an.CallAnalytics(
+            agent_speech_ms=12_000,
+            caller_speech_ms=8_000,
+            silence_ms=4_000,
+            overlap_ms=500,
+            interruptions=3,
+            talk_ratio=0.6,
+            method=an.METHOD_EXACT,
+            sentiment="negative",
+            sentiment_trajectory="declining",
+            sentiment_rationale="Said the delay was unacceptable; left +4917212345678 for a callback.",
+            created_at=datetime.now(UTC).isoformat(),
+        ),
+    )
+    await an.save_analytics(
+        db_path,
+        "CA002",
+        an.CallAnalytics(method=an.METHOD_ESTIMATED, sentiment_reason=an.REASON_TOO_SHORT),
+    )
+    return SimpleNamespace(client=client, db_path=db_path)
+
+
+async def test_call_detail_exposes_analytics(analytics_seed):
+    body = analytics_seed.client.get("/api/voice/calls/CA001").json()
+    analytics = body["analytics"]
+    assert analytics["method"] == "exact"
+    assert analytics["talk_ratio"] == 0.6
+    assert analytics["interruptions"] == 3
+    assert analytics["sentiment"] == "negative"
+    assert analytics["sentiment_trajectory"] == "declining"
+    assert analytics["sentiment_reason"] == ""
+    # The rationale quotes the call, so it is masked like every read surface.
+    assert "4917212345678" not in analytics["sentiment_rationale"]
+    assert "delay was unacceptable" in analytics["sentiment_rationale"]
+
+
+async def test_call_detail_analytics_null_states(analytics_seed):
+    short = analytics_seed.client.get("/api/voice/calls/CA002").json()["analytics"]
+    assert short["sentiment"] is None
+    assert short["sentiment_reason"] == "too_short"
+    assert short["talk_ratio"] is None
+    assert short["method"] == "estimated"
+
+    # A call from before the feature has no record at all — and must not 500.
+    assert analytics_seed.client.get("/api/voice/calls/CA003").json()["analytics"] is None
+
+
+async def test_calls_list_carries_compact_analytics(analytics_seed):
+    rows = {r["call_sid"]: r for r in analytics_seed.client.get("/api/voice/calls").json()}
+    assert rows["CA001"]["sentiment"] == "negative"
+    assert rows["CA001"]["talk_ratio"] == 0.6
+    assert rows["CA001"]["method"] == "exact"
+    # Null-safe for calls with no analytics.
+    assert rows["CA003"]["sentiment"] is None
+    assert rows["CA003"]["talk_ratio"] is None
+
+
+async def test_receptionist_stats_sentiment_distribution(analytics_seed):
+    body = analytics_seed.client.get("/api/voice/receptionist/stats", params={"days": 7}).json()
+    distribution = body["sentiment_distribution"]
+    assert body["window_days"] == 7
+    # CA001 is the inbound call in the seed; CA002 was never assessed.
+    assert distribution["negative"] == 1
+    assert distribution["assessed"] == 1
+    assert distribution["neutral"] == 0
+
+
+async def test_receptionist_stats_is_empty_not_broken_without_data(client):
+    body = client.get("/api/voice/receptionist/stats").json()
+    assert body["sentiment_distribution"]["assessed"] == 0

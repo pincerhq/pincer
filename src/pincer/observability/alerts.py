@@ -220,6 +220,33 @@ def evaluate(signals: GoldenSignals, settings: Settings | Any) -> list[Alert]:
             )
         )
 
+    # 7. Callers who seemed unhappy. Not a system failure — which is exactly
+    #    why it notifies rather than pages: it is a prompt to go listen, and
+    #    the rationale for each call is in its analytics record.
+    negative = getattr(signals, "negative_sentiment", None)
+    if (
+        negative is not None
+        and negative.value is not None
+        and negative.target is not None
+        and negative.value >= negative.target
+    ):
+        alerts.append(
+            Alert(
+                rule="negative_sentiment",
+                severity=Severity.NOTIFY,
+                title=f"{int(negative.value)} call(s) with a dissatisfied caller in {negative.window}",
+                detail=(
+                    f"{int(negative.value)} call(s) were read as negative "
+                    f"(threshold {int(negative.target)}/day). Open their transcripts — the sentiment "
+                    "rationale on each call says what the reading was based on."
+                ),
+                value=negative.value,
+                threshold=negative.target,
+                runbook=_anchor("negative-sentiment"),
+                context=negative.detail,
+            )
+        )
+
     alerts.sort(key=lambda a: 0 if a.severity is Severity.PAGE else 1)
     return alerts
 

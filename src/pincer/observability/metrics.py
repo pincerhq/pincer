@@ -38,6 +38,8 @@ TURN_LATENCY_BUCKETS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0
 STAGE_LATENCY_BUCKETS = [25.0, 50.0, 100.0, 200.0, 400.0, 800.0, 1200.0, 2000.0, 3000.0, 5000.0]
 CALL_DURATION_BUCKETS = [5.0, 15.0, 30.0, 60.0, 120.0, 180.0, 300.0, 600.0, 900.0]
 CALL_COST_BUCKETS = [0.01, 0.025, 0.05, 0.1, 0.2, 0.35, 0.5, 1.0, 2.0, 5.0]
+# Talk ratio is a proportion; even tenths make the "agent dominates" tail readable.
+TALK_RATIO_BUCKETS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
 _instruments: dict[str, Any] | None = None
 _unavailable = False
@@ -128,6 +130,45 @@ def _build_instruments() -> dict[str, Any] | None:
                 unit="1",
                 description="In-call tool policy decisions (execute/deny/need_verbal/need_user_approval), "
                 "with the stable deny reason code as a label",
+            ),
+            # Conversation analytics: who spoke how much, and how the caller
+            # seemed about it. `method` is a label on the ratio histogram so an
+            # estimated distribution is never silently pooled with measured one.
+            "talk_ratio": meter.create_histogram(
+                "pincer.voice.talk_ratio",
+                unit="1",
+                description="Agent share of speaking time per call, 0-1 (label: method=exact|estimated)",
+                explicit_bucket_boundaries_advisory=TALK_RATIO_BUCKETS,
+            ),
+            "sentiment": meter.create_counter(
+                "pincer.voice.sentiment",
+                unit="1",
+                description="Caller sentiment per finished call (positive/neutral/negative/mixed)",
+            ),
+            "interruptions": meter.create_counter(
+                "pincer.voice.interruptions",
+                unit="1",
+                description="Barge-in events: the caller started while agent audio was playing",
+            ),
+            # Call briefing: did the agent's opening turns reference its task?
+            # The smoke detector for "the purpose stopped reaching the agent".
+            "briefing_adherence": meter.create_counter(
+                "pincer.voice.briefing.adherence",
+                unit="1",
+                description="Outbound calls whose opening turns did (adhered=true) or did not "
+                "(adhered=false) reference the task the user gave",
+            ),
+            # Sprint 15: live listen-in. Frames dropped by the fan-out hub
+            # because a listener was too slow — audio skips, memory never grows.
+            "listen_frames_dropped": meter.create_counter(
+                "pincer.voice.listen.frames_dropped",
+                unit="1",
+                description="Listen-in media frames dropped on a slow dashboard listener (drop-oldest)",
+            ),
+            "listen_sessions": meter.create_counter(
+                "pincer.voice.listen.sessions",
+                unit="1",
+                description="Listen-in sessions ended, by end reason (call_ended/stopped/capacity/error)",
             ),
         }
         meter.create_observable_gauge(
@@ -285,6 +326,41 @@ def record_tool_decision(*, tool: str, action: str, reason: str = "", tier: str 
     _safe(lambda: inst["tool_decisions"].add(1, _dims(tool=tool, action=action, reason=reason, tier=tier, mode=mode)))
 
 
+def record_call_analytics(
+    *,
+    talk_ratio: float | None,
+    sentiment: str = "",
+    interruptions: int = 0,
+    method: str = "",
+    engine: str = "",
+    direction: str = "",
+    language: str = "",
+) -> None:
+    """One call's conversation analytics. Absent values are simply not recorded
+    — a call with no measurable speech must not land in the ratio histogram as
+    a zero, which would read as "the agent said nothing"."""
+    inst = _get()
+    if inst is None:
+        return
+    dims = _dims(engine=engine, direction=direction, language=language)
+    if talk_ratio is not None:
+        _record(inst["talk_ratio"], float(talk_ratio), {**dims, "method": method})
+    if sentiment:
+        _add(inst["sentiment"], 1, {**dims, "sentiment": sentiment})
+    if interruptions > 0:
+        _add(inst["interruptions"], int(interruptions), dims)
+
+
+def record_briefing_adherence(*, adhered: bool, language: str = "") -> None:
+    """One datapoint per finished outbound call. A rising `adhered=false` rate
+    means briefings stopped reaching the agent — the regression this whole
+    mechanism exists to make loud."""
+    inst = _get()
+    if inst is None:
+        return
+    _safe(lambda: inst["briefing_adherence"].add(1, _dims(adhered=str(adhered).lower(), language=language)))
+
+
 def record_booking(*, result: str, language: str = "", attempts: int = 1) -> None:
     """Appointment outcome — `confirmed`, `declined`, `unreachable`, `failed`."""
     inst = _get()
@@ -341,6 +417,22 @@ def record_canary_run(*, ok: bool, reason: str = "", duration_s: float | None = 
     _safe(lambda: inst["canary_runs"].add(1, _dims(result="ok" if ok else "failed", reason=reason if not ok else "")))
     if duration_s is not None and ok:
         _safe(lambda: inst["call_duration"].record(float(duration_s), _dims(direction="canary")))
+
+
+def record_listen_frames_dropped(count: int = 1, *, track: str = "") -> None:
+    """Sprint 15: a slow listener lost `count` frames (drop-oldest backpressure)."""
+    inst = _get()
+    if inst is None or count <= 0:
+        return
+    _add(inst["listen_frames_dropped"], float(count), _dims(track=track))
+
+
+def record_listen_session(*, reason: str, duration_s: float | None = None) -> None:
+    """Sprint 15: one listen-in session ended (`reason`: call_ended/stopped/capacity/error)."""
+    inst = _get()
+    if inst is None:
+        return
+    _add(inst["listen_sessions"], 1.0, _dims(reason=reason))
 
 
 def record_alert_fired(*, rule: str, severity: str) -> None:

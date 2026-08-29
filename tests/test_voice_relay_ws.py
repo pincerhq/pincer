@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -25,6 +26,7 @@ class FakeEngine:
         self.started: list[tuple[str, str, CallDirection]] = []
         self.fallbacks: list[str] = []
         self.media_closed: list[str] = []
+        self.answered: list[str] = []
 
     async def fallback_and_end(self, call_sid: str) -> None:
         self.fallbacks.append(call_sid)
@@ -37,6 +39,16 @@ class FakeEngine:
         state = CallState(call_sid=call_sid, direction=direction, caller_number=caller)
         self.states[call_sid] = state
         self.started.append((call_sid, caller, direction))
+        return state
+
+    async def mark_call_answered(self, call_sid: str) -> CallState | None:
+        """Twilio's `setup` = the callee picked up. Mirrors VoiceEngine: this
+        is where per-call tracking starts, and it is idempotent."""
+        state = self.states.get(call_sid)
+        if state is None or state.metadata.get("answered_at") is not None:
+            return state
+        state.metadata["answered_at"] = datetime.now(UTC)
+        self.answered.append(call_sid)
         return state
 
     async def on_speech_input(self, call_sid: str, text: str) -> None:

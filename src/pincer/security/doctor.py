@@ -163,6 +163,8 @@ class SecurityDoctor:
         # Inbound receptionist (2 checks, Sprint 12)
         report.checks.append(self._check_receptionist_profile(settings))
         report.checks.append(self._check_inbound_recording_consent(settings))
+        # Live listen-in (1 check, Sprint 15)
+        report.checks.append(self._check_listen_in_announce(settings))
         # Signal (3 checks, Sprint 7.5)
         report.checks.append(self._check_signal_phone_set(settings))
         report.checks.append(self._check_signal_api_local(settings))
@@ -874,6 +876,46 @@ class SecurityDoctor:
             name="inbound_recording_consent",
             status=CheckStatus.PASS,
             message="Inbound recording announces two-party consent before the greeting",
+            category="voice",
+        )
+
+    def _check_listen_in_announce(self, cfg: Settings | None = None) -> CheckResult:
+        """Sprint 15 §2.1: live monitoring must be announced. ANNOUNCE=false with
+        ENABLED=true is a FAIL unless two-party recording is already announced
+        (that announcement covers monitoring)."""
+        settings = self._cfg(cfg)
+        if getattr(settings, "listen_in_enabled", False) is not True:
+            return CheckResult(
+                name="listen_in_announce",
+                status=CheckStatus.SKIPPED,
+                message="Live listen-in disabled (no media fork)",
+                category="voice",
+            )
+        if getattr(settings, "listen_in_announce", True):
+            return CheckResult(
+                name="listen_in_announce",
+                status=CheckStatus.PASS,
+                message="Live listen-in is announced in the call opening",
+                category="voice",
+            )
+        mode = str(getattr(settings, "voice_consent_mode", "") or "")
+        recording = bool(getattr(settings, "voice_recording_enabled", False))
+        if mode == "two_party" and recording:
+            return CheckResult(
+                name="listen_in_announce",
+                status=CheckStatus.PASS,
+                message="Live listen-in not separately announced — covered by the active two-party "
+                "recording announcement",
+                category="voice",
+            )
+        return CheckResult(
+            name="listen_in_announce",
+            status=CheckStatus.CRITICAL,
+            message="PINCER_LISTEN_IN_ENABLED=true with PINCER_LISTEN_IN_ANNOUNCE=false and no active "
+            f"two-party recording announcement (consent mode={mode or 'unset'}, recording={recording}) — "
+            "callers are monitored without being told",
+            fix_hint="Remove PINCER_LISTEN_IN_ANNOUNCE=false, or set PINCER_VOICE_CONSENT_MODE=two_party "
+            "and PINCER_VOICE_RECORDING_ENABLED=true, or disable PINCER_LISTEN_IN_ENABLED",
             category="voice",
         )
 

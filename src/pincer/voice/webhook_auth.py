@@ -206,6 +206,8 @@ async def verify_http_request(request: Request, body: bytes, settings: Settings 
 # handlers, so signing the literal path would never verify.
 WS_RELAY_PATH = "/api/apps/twilio/relay"
 WS_STREAM_PATH = "/api/apps/twilio/stream"
+# Sprint 15: the listen-in media fork (<Start><Stream>), rx-only.
+WS_MONITOR_PATH = "/api/apps/twilio/monitor"
 
 
 def _ws_secret(settings: Settings | None) -> str:

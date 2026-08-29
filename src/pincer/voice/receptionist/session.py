@@ -114,6 +114,27 @@ _EXTRACTION_MARKERS = (
     "які зустрічі",
     "прочитай мені",
     "його розклад",
+    # Sprint 13 §4.3: a matched thread must never become a disclosure channel.
+    # Caller ID is spoofable, so "what did we discuss last time?" from a
+    # matched number is exactly the attack the ack line invites — and it gets
+    # the same privacy deflection as any other extraction attempt, in every
+    # PINCER_THREAD_INBOUND_CONTEXT mode.
+    "what did we discuss",
+    "what did we talk about",
+    "what we discussed",
+    "what was it about",
+    "last time we spoke",
+    "our last call",
+    "our previous call",
+    "was haben wir besprochen",
+    "worüber haben wir",
+    "worum ging es",
+    "beim letzten mal",
+    "letztes gespräch",
+    "letzten telefonat",
+    "про що ми говорили",
+    "минулого разу",
+    "попередньої розмови",
 )
 _GOODBYE_MARKERS = (
     "auf wiederhören",

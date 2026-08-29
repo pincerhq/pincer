@@ -70,6 +70,8 @@ class GoldenSignals:
     generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     # Sprint 12 §10.3: inbound calls declined for capacity in the last 24h (alarm > 5/day)
     busy_capacity: Signal | None = None
+    # Negative-sentiment calls in the last 24h (alarm at 3/day)
+    negative_sentiment: Signal | None = None
 
     def all(self) -> list[Signal]:
         signals = [
@@ -81,6 +83,8 @@ class GoldenSignals:
         ]
         if self.busy_capacity is not None:
             signals.append(self.busy_capacity)
+        if self.negative_sentiment is not None:
+            signals.append(self.negative_sentiment)
         return signals
 
     def to_dict(self) -> dict[str, Any]:
@@ -451,6 +455,36 @@ async def busy_capacity(settings: Settings | Any, window_hours: float = 24.0) ->
     )
 
 
+NEGATIVE_SENTIMENT_DAILY_THRESHOLD = 3
+
+
+async def negative_sentiment(settings: Settings | Any, window_hours: float = 24.0) -> Signal:
+    """Calls the caller seemed unhappy about, in the window.
+
+    Three in a day is not a statistical claim — it is "go listen to these".
+    The signal deliberately counts calls, not a rate: on a low-volume line a
+    rate would swing wildly and either scream or stay silent for the wrong
+    reasons.
+    """
+    from pincer.voice.analytics import count_negative_since
+
+    count = 0
+    try:
+        count = await count_negative_since(settings.db_path, _cutoff(window_hours))
+    except Exception:
+        logger.debug("negative_sentiment signal failed", exc_info=True)
+    return Signal(
+        name="negative_sentiment",
+        value=float(count),
+        unit="count",
+        sample_size=count,
+        min_sample=0,
+        target=float(NEGATIVE_SENTIMENT_DAILY_THRESHOLD),
+        window=f"{int(window_hours)}h",
+        detail={"negative_calls": count, "threshold_per_day": NEGATIVE_SENTIMENT_DAILY_THRESHOLD},
+    )
+
+
 async def collect(settings: Settings | Any, active_calls: dict[str, Any] | None = None) -> GoldenSignals:
     """Every golden signal, each in its own configured window."""
     return GoldenSignals(
@@ -460,4 +494,5 @@ async def collect(settings: Settings | Any, active_calls: dict[str, Any] | None 
         stuck_calls=stuck_calls(settings, active_calls),
         cost_per_call=await cost_per_call(settings),
         busy_capacity=await busy_capacity(settings),
+        negative_sentiment=await negative_sentiment(settings),
     )

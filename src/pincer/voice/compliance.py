@@ -158,6 +158,15 @@ AI_DISCLOSURE_UK = "Зверніть увагу: ви розмовляєте з 
 
 OUTBOUND_RECORDING_DISCLOSURE = "I should let you know that this call may be recorded."
 
+# Sprint 15: live listen-in. Monitoring is legally distinct from recording
+# (no audio is stored) but equally sensitive in DACH, so the call opening
+# must say so whenever the media fork is on (PINCER_LISTEN_IN_ANNOUNCE).
+MONITOR_ANNOUNCEMENT_EN = "This call may be monitored for quality assurance."
+
+MONITOR_ANNOUNCEMENT_DE = "Dieses Gespräch kann zur Qualitätssicherung mitgehört werden."
+
+MONITOR_ANNOUNCEMENT_UK = "Ця розмова може прослуховуватися для контролю якості."
+
 # Jurisdictions where German-language announcements are appropriate by default
 GERMAN_SPEAKING_JURISDICTIONS = {"DE", "AT", "CH"}
 
@@ -246,6 +255,29 @@ def get_ai_disclosure(language: str = "en") -> str:
     if language.lower().startswith("uk"):
         return AI_DISCLOSURE_UK
     return AI_DISCLOSURE_EN
+
+
+def get_monitoring_announcement(settings: Settings | None, language: str = "en") -> str:
+    """Sprint 15 §2.1: the listen-in notice, or '' when no notice is due.
+
+    Due exactly when the media fork is on (``listen_in_enabled``) and
+    ``listen_in_announce`` has not been switched off. Switching the notice off
+    while the fork is on is a ``pincer doctor`` FAIL unless two-party recording
+    is already announced — the gate lives in the doctor, not here.
+    """
+    if settings is None:
+        return ""
+    # `is True` on purpose: MagicMock settings in tests have every attribute.
+    if getattr(settings, "listen_in_enabled", False) is not True:
+        return ""
+    if getattr(settings, "listen_in_announce", True) is False:
+        return ""
+    lang = (language or "en").lower()
+    if lang.startswith("de"):
+        return MONITOR_ANNOUNCEMENT_DE
+    if lang.startswith("uk"):
+        return MONITOR_ANNOUNCEMENT_UK
+    return MONITOR_ANNOUNCEMENT_EN
 
 
 def get_consent_announcement(
@@ -349,10 +381,17 @@ def build_receptionist_opening(settings: Settings, language: str = "") -> str:
         return ""
     lang = language.strip().lower()[:2] if language else profile.default_language
     greeting, _is_open = opening_text(profile, lang)
+    notices: list[str] = []
     if bool(getattr(settings, "inbound_recording", False)):
         announcement = get_consent_announcement(ConsentMode.TWO_PARTY, "", language=lang, recording=True)
-        return f"{announcement} {greeting}".strip()
-    return greeting
+        if announcement:
+            notices.append(announcement)
+    # Sprint 15: the monitoring notice precedes the greeting like the
+    # recording announcement does.
+    monitoring = get_monitoring_announcement(settings, lang)
+    if monitoring:
+        notices.append(monitoring)
+    return " ".join([*notices, greeting]).strip()
 
 
 def build_call_opening(settings: Settings, remote_number: str, language: str = "", direction: str = "") -> str:
@@ -380,7 +419,10 @@ def build_call_opening(settings: Settings, remote_number: str, language: str = "
     if announcement and not recording and intro:
         announcement = None
 
-    return " ".join(part for part in (intro, announcement) if part)
+    # Sprint 15: live listen-in notice, after the recording/AI line.
+    monitoring = get_monitoring_announcement(settings, language)
+
+    return " ".join(part for part in (intro, announcement, monitoring) if part)
 
 
 def build_consent_say_twiml(settings: Settings, remote_number: str, language: str = "", direction: str = "") -> str:
