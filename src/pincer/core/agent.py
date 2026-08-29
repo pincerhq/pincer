@@ -336,6 +336,7 @@ class Agent:
         images: list[tuple[bytes, str]] | None = None,
         channel_user_id: str | None = None,
         channel_name: str | None = None,
+        extra_system: str | None = None,
     ) -> AgentResponse:
         """
         Main entry point: process a user message and return agent's response.
@@ -358,6 +359,8 @@ class Agent:
                 the cross-channel canonical ``user_id``.
             channel_name: Stable channel name for memory tagging when it differs
                 from the session key.  Defaults to ``channel`` when omitted.
+            extra_system: Channel-supplied system-prompt addition for this turn
+                (e.g. voice live-call rules in the call language).
         """
         self._last_active = (user_id, channel_name or channel)
         session = await self._sessions.get_or_create(user_id, channel)
@@ -385,11 +388,23 @@ class Agent:
 
         # Build system prompt with relevant memories — inject the onboarding
         # followup instruction only on the turn that handles the user's reply.
-        extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if awaiting_onboarding_reply else None
-        system_prompt = await self._build_system_prompt(user_id, text, extra_system=extra_system)
+        extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if awaiting_onboarding_reply else []
+        if extra_system:
+            extra_parts.append(extra_system)
+        system_prompt = await self._build_system_prompt(user_id, text, extra_system="\n\n".join(extra_parts) or None)
 
-        # Get tool schemas
-        tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
+        # Get tool schemas. In call context (Sprint 11) the bound in-call gate
+        # owns the EXACT tool set — the blocking voice path (guard regeneration,
+        # harness) must never see more than the streaming path does.
+        from pincer.voice.in_call_tools import current_gate
+
+        call_gate = current_gate()
+        if not self._tools.has_tools:
+            tool_schemas = None
+        elif call_gate is not None:
+            tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
+        else:
+            tool_schemas = self._tools.get_schemas()
         logger.debug(
             "Tools available: %s",
             [t.get("name") for t in (tool_schemas or [])],
@@ -484,7 +499,12 @@ class Agent:
                 iteration_had_error = False
                 for tool_call in response.tool_calls:
                     tool_calls_count += 1
-                    result = await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id)
+                    if call_gate is not None:
+                        result = await self._execute_call_tool(
+                            tool_call, user_id, channel, channel_user_id, call_gate, channel_name=channel_name
+                        )
+                    else:
+                        result = await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id)
 
                     result_msg = LLMMessage(
                         role=MessageRole.TOOL_RESULT,
@@ -854,6 +874,180 @@ class Agent:
 
         yield StreamChunk(StreamEventType.DONE, full_text)
 
+    async def stream_voice_turn(
+        self,
+        user_id: str,
+        channel: str,
+        text: str,
+        *,
+        extra_system: str | None = None,
+        channel_user_id: str | None = None,
+        timings: dict[str, Any] | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """One live phone-call turn, streamed (Sprint 5, T5.2).
+
+        Differences from handle_message_stream, all latency- or call-driven:
+        - single generation per iteration via ``stream_turn`` (text deltas AND
+          tool calls from the same request — nothing is generated twice);
+        - ``extra_system`` carries the per-turn voice context (call rules,
+          language policy, phase instruction, appointment block);
+        - tools filtered to the voice-compatible set (smaller schemas, no
+          shell/file tools mid-call);
+        - short outputs: ``voice_max_response_tokens`` (default 150) and an
+          optional fast ``voice_turn_model``;
+        - no onboarding flow (nobody onboards mid-phone-call).
+
+        Yields TEXT deltas, TOOL_START/TOOL_DONE around tool execution, and a
+        final DONE carrying the full turn text. LLM errors propagate so the
+        voice channel's brain-error path (spoken retry/goodbye) applies.
+        """
+        import time
+
+        from pincer.voice.voice_tools import filter_voice_tools
+
+        turn_started = time.monotonic()
+        self._last_active = (user_id, channel)
+        session = await self._sessions.get_or_create(user_id, channel)
+        user_msg = LLMMessage(role=MessageRole.USER, content=text)
+        await self._sessions.add_message(session, user_msg)
+        # NOTE: no summarizer here — it is an LLM call on the voice critical
+        # path (seconds of dead air when it triggers mid-conversation).
+        # add_message auto-trims to max_session_messages, so context stays
+        # bounded; text channels keep the richer summarize-then-trim flow.
+
+        system_prompt = await self._build_system_prompt(user_id, text, extra_system=extra_system)
+        # Sprint 11: in call context the bound gate owns the EXACT tool set
+        # (tier table ∩ call scope); the Sprint-8 name filter is the fallback
+        # when no gate is bound (legacy callers, tests).
+        from pincer.voice.in_call_tools import current_gate
+
+        call_gate = current_gate()
+        if not self._tools.has_tools:
+            tool_schemas = None
+        elif call_gate is not None:
+            tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
+        else:
+            tool_schemas = filter_voice_tools(self._tools.get_schemas())
+        max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 150) or 150)
+
+        # Voice turn model (Sprint 5 T5.4): "" = default provider+model;
+        # "claude-..." = default provider, that model; "openai:gpt-5-mini" =
+        # that provider AND model — cross-provider tiering, chosen at runtime
+        # from the dashboard (/api/voice/config).
+        voice_llm: BaseLLMProvider = self._llm
+        raw_turn_model = str(getattr(self._settings, "voice_turn_model", "") or "")
+        voice_model: str | None = raw_turn_model or None
+        if ":" in raw_turn_model:
+            provider_name, _, model_part = raw_turn_model.partition(":")
+            voice_model = model_part.strip() or None
+            if isinstance(self._llm, LLMRouter):
+                specific = self._llm.get_provider(provider_name.strip(), model_hint=voice_model or "")
+                if specific is not None:
+                    voice_llm = specific
+                else:
+                    logger.warning(
+                        "voice_turn_model provider %r unavailable — using the default provider", provider_name
+                    )
+                    voice_model = None  # a foreign model id would 404 on the default provider
+        if timings is not None:
+            # T5.1 stage split: everything before the LLM request (session I/O,
+            # memory search, prompt assembly) vs. actual provider TTFT.
+            timings["prep_ms"] = (time.monotonic() - turn_started) * 1000.0
+
+        full_text = ""
+        consecutive_errors = 0
+        sanitize_attempts = 0
+
+        for _iteration in range(self._settings.max_tool_iterations):
+            clean = _sanitize_tool_pairs(session.messages)
+            if len(clean) != len(session.messages):
+                session.messages = clean
+                await self._sessions._persist(session)  # noqa: SLF001
+
+            response: LLMResponse | None = None
+            try:
+                async for event in voice_llm.stream_turn(
+                    messages=session.messages,
+                    tools=tool_schemas,
+                    system=system_prompt,
+                    model=voice_model,
+                    max_tokens=max_tokens,
+                ):
+                    if event.response is not None:
+                        response = event.response
+                    elif event.text:
+                        full_text += event.text
+                        yield StreamChunk(StreamEventType.TEXT, event.text)
+            except BudgetExceededError:
+                budget_note = f"Warning: Daily budget limit reached. Limit: ${self._settings.daily_budget_usd:.2f}."
+                yield StreamChunk(StreamEventType.DONE, full_text or budget_note)
+                return
+            except LLMError as e:
+                if "tool_use" in str(e) and "tool_result" in str(e) and sanitize_attempts < _MAX_SANITIZE_ATTEMPTS:
+                    sanitize_attempts += 1
+                    session.messages = _sanitize_tool_pairs(session.messages)
+                    await self._sessions._persist(session)  # noqa: SLF001
+                    continue
+                raise
+            if response is None:  # provider stream ended without a final event
+                raise LLMError("stream_turn ended without a final response")
+
+            if timings is not None:
+                # Cache visibility: did the tools-prefix prompt cache hit?
+                timings.setdefault("cache_read_tokens", float(response.cache_read_tokens))
+                timings.setdefault("cache_write_tokens", float(response.cache_write_tokens))
+                timings.setdefault("input_tokens", float(response.input_tokens))
+                # Which model actually served the turn (A/B attribution in the
+                # latency log — the runtime override can change mid-session).
+                if response.model:
+                    timings.setdefault("turn_model", response.model)
+
+            try:
+                provider = response.provider or self._settings.default_provider
+                is_free = self._llm.is_free(provider) if isinstance(self._llm, LLMRouter) else False
+                await self._costs.record(
+                    provider=provider,
+                    model=response.model,
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                    session_id=session.session_id,
+                    is_free=is_free,
+                )
+            except BudgetExceededError:
+                pass  # this turn already ran; the next turn hits the budget gate
+
+            if not response.has_tool_calls:
+                break
+
+            assistant_msg = LLMMessage(
+                role=MessageRole.ASSISTANT, content=response.content, tool_calls=response.tool_calls
+            )
+            await self._sessions.add_message(session, assistant_msg)
+
+            iteration_had_error = False
+            for tool_call in response.tool_calls:
+                yield StreamChunk(StreamEventType.TOOL_START, tool_call.name)
+                result = await self._execute_call_tool(tool_call, user_id, channel, channel_user_id, call_gate)
+                await self._sessions.add_message(
+                    session,
+                    LLMMessage(role=MessageRole.TOOL_RESULT, content=result.content, tool_call_id=result.tool_call_id),
+                )
+                yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name)
+                if result.is_error:
+                    iteration_had_error = True
+
+            if iteration_had_error:
+                consecutive_errors += 1
+                if consecutive_errors >= _MAX_CONSECUTIVE_ERRORS:
+                    logger.warning("Voice turn circuit breaker: %d consecutive tool errors", consecutive_errors)
+                    break
+            else:
+                consecutive_errors = 0
+
+        if full_text:
+            await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=full_text))
+        yield StreamChunk(StreamEventType.DONE, full_text)
+
     async def _build_system_prompt(
         self,
         user_id: str,
@@ -1006,8 +1200,9 @@ class Agent:
         ``skip_approval``, when True, bypasses the approval gate entirely
         regardless of ``require_approval``/``approval_required`` config.
         Only ``run_headless`` (proactive/scheduled execution, no live user
-        to approve anything) is allowed to set this — never from
-        ``handle_message``/``handle_message_stream``.
+        to approve anything) and the Sprint 11 in-call gate (which IS the
+        approval authority during a phone call) may set this — never the
+        plain ``handle_message``/``handle_message_stream`` paths.
         """
         logger.info("Tool call: %s(%s)", tool_call.name, tool_call.arguments)
 
@@ -1106,6 +1301,34 @@ class Agent:
                 )
         finally:
             await self._fire_tool_event("end", tool_call, user_id, channel)
+
+    async def _execute_call_tool(
+        self,
+        tool_call: ToolCall,
+        user_id: str,
+        channel: str,
+        channel_user_id: str | None,
+        call_gate: Any,
+        *,
+        channel_name: str | None = None,
+    ) -> ToolResult:
+        """Sprint 11: run one tool_use through the in-call gate.
+
+        The gate is the approval authority in call context (tiers, verbal /
+        user / off modes, write budget, timeouts) — so the registry's generic
+        approval prompt is skipped; without a gate the normal path applies.
+        """
+        if call_gate is None:
+            return await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id)
+
+        async def _run() -> tuple[str, bool]:
+            inner = await self._execute_tool(
+                tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True
+            )
+            return inner.content, inner.is_error
+
+        gate_result = await call_gate.run(tool_call.name, tool_call.arguments, _run)
+        return ToolResult(tool_call_id=tool_call.id, content=gate_result.content, is_error=gate_result.is_error)
 
     async def _fire_tool_event(
         self,

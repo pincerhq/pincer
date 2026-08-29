@@ -9,6 +9,9 @@ x-pincer-base: &pincer-base
       required: false
   environment:
     - PINCER_DATA_DIR=/app/data
+    # Not a pydantic Settings field: consumed by ${PINCER_SRC_DIR:-$PWD}
+    # interpolation in pincer.toml's stdio MCP server args (mcp/config.py).
+    - PINCER_SRC_DIR=/app
     - PINCER_DASHBOARD_HOST=0.0.0.0
     - PINCER_DASHBOARD_PORT=8080
     - PINCER_DASHBOARD_DIST=/app/dashboard/dist
@@ -104,16 +107,23 @@ services:
       file: ./src/sqlite-vec-memory-mcp/docker-compose.yml
       service: sqlite-vec-memory-mcp
     image: pincer/memory-mcp:latest
+    # Opt-in profile to reduce memory usage: the default pincer.toml reaches
+    # memory over stdio (sqlite_vec_memory), so this container only matters
+    # when the streamable-http [[mcp.servers]] block is enabled.
+    # Enable with: docker compose --profile http --profile memory up
     profiles:
-      - http
+      - memory
 
   ms365-mcp:
     extends:
       file: ./src/ms365-mcp/docker-compose.yml
       service: ms365-mcp
     image: pincer/ms365-mcp:latest
+    # Opt-in profile: the server exits at boot without MS365_CLIENT_ID, so it
+    # must not be part of `--profile http` or it blocks the whole stack.
+    # Enable with: docker compose --profile http --profile ms365 up
     profiles:
-      - http
+      - ms365
     environment:
       MS365_CLIENT_ID: "${PINCER_MS365_CLIENT_ID}"
       MS365_TENANT_ID: "${PINCER_MS365_TENANT_ID:-common}"
@@ -166,6 +176,11 @@ services:
       - PINCER_TASK_BROKER=redis
       - PINCER_TASK_BROKER_URL=redis://redis:6379/0
     env_file: .env
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: "2"
     volumes:
       - pincer-data:/app/data
       # - ./skills:app/skils # uncomment if you want continue to work with user defined skills in anthropic format
@@ -176,8 +191,6 @@ services:
       - "${PINCER_MCP_PORT:-18800}:18800"
     depends_on:
       redis:
-        condition: service_healthy
-      memory-mcp:
         condition: service_healthy
       newsapi-mcp:
         condition: service_healthy
@@ -191,10 +204,11 @@ services:
         condition: service_healthy
       translate-mcp:
         condition: service_healthy
-      ms365-mcp:
-        condition: service_healthy
       doctr-mcp:
         condition: service_healthy
+      # memory-mcp and ms365-mcp intentionally omitted — they live in the
+      # opt-in `memory` / `ms365` profiles; a depends_on here would pull
+      # them into `--profile http` and block startup.
 
   pincer-http-tasks:
     <<: *pincer-base
@@ -228,8 +242,6 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      memory-mcp:
-        condition: service_healthy
       newsapi-mcp:
         condition: service_healthy
       openweathermap-mcp:
@@ -242,10 +254,11 @@ services:
         condition: service_healthy
       translate-mcp:
         condition: service_healthy
-      ms365-mcp:
-        condition: service_healthy
       doctr-mcp:
         condition: service_healthy
+      # memory-mcp and ms365-mcp intentionally omitted — they live in the
+      # opt-in `memory` / `ms365` profiles; a depends_on here would pull
+      # them into `--profile http` and block startup.
 
 volumes:
   pincer-data:

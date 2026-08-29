@@ -7,6 +7,7 @@ across secrets, access control, budget, filesystem, network, and runtime categor
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -88,10 +89,14 @@ class SecurityDoctor:
         data_dir: Path | None = None,
         config_dir: Path | None = None,
         skills_dir: Path | None = None,
+        production: bool = False,
     ) -> None:
         self.data_dir = data_dir or Path("data")
         self.config_dir = config_dir or Path(".")
         self.skills_dir = skills_dir or Path.home() / ".pincer" / "skills"
+        # `pincer doctor --production` (Sprint 7, T7.3): extra deploy-gate
+        # checks; the deploy script refuses to start on any CRITICAL.
+        self.production = production
 
     def _cfg(self, cfg: Settings | None) -> Settings:
         if cfg is None:
@@ -137,6 +142,29 @@ class SecurityDoctor:
         report.checks.append(self._check_voice_twilio_credentials(settings))
         report.checks.append(self._check_voice_webhook_url(settings))
         report.checks.append(self._check_voice_recording_consent(settings))
+        # Voice DACH compliance (3 checks, Sprint 0)
+        report.checks.append(self._check_voice_dach_consent(settings))
+        report.checks.append(self._check_voice_retention(settings))
+        report.checks.append(self._check_voice_provider_regions(settings))
+        # Voice ElevenLabs (1 check, Sprint 4)
+        report.checks.append(self._check_voice_elevenlabs_voices(settings))
+        # Observability (2 checks, Sprint 9)
+        report.checks.append(self._check_ops_alert_routing(settings))
+        report.checks.append(self._check_voice_canary(settings))
+        # Voice security hardening (4 checks, Sprint 8)
+        report.checks.append(self._check_voice_webhook_signature(settings))
+        report.checks.append(self._check_voice_ws_auth(settings))
+        report.checks.append(self._check_voice_abuse_limits(settings))
+        report.checks.append(self._check_voice_do_not_call_enforced())
+        # Voice in-call tool execution (3 checks, Sprint 11)
+        report.checks.append(self._check_voice_autonomy_on(settings))
+        report.checks.append(self._check_voice_tier_x_reachable(settings))
+        report.checks.append(self._check_voice_override_unknown_tool(settings))
+        # Inbound receptionist (2 checks, Sprint 12)
+        report.checks.append(self._check_receptionist_profile(settings))
+        report.checks.append(self._check_inbound_recording_consent(settings))
+        # Live listen-in (1 check, Sprint 15)
+        report.checks.append(self._check_listen_in_announce(settings))
         # Signal (3 checks, Sprint 7.5)
         report.checks.append(self._check_signal_phone_set(settings))
         report.checks.append(self._check_signal_api_local(settings))
@@ -158,7 +186,738 @@ class SecurityDoctor:
         report.checks.append(self._check_mcp_oauth_enabled())
         report.checks.append(self._check_mcp_server_not_exposed())
         report.checks.append(self._check_mcp_injection_alerts())
+        # Production deploy gate (7 checks, Sprint 7 T7.3 + Sprint 8) — only with --production
+        if self.production:
+            report.checks.append(self._check_prod_webhook_url(settings))
+            report.checks.append(self._check_prod_no_tunnel(settings))
+            report.checks.append(self._check_prod_auth_tokens(settings))
+            report.checks.append(self._check_prod_dach_compliance(settings))
+            report.checks.append(self._check_prod_environment_flag(settings))
+            report.checks.append(self._check_prod_cors_origins(settings))
+            report.checks.append(self._check_prod_voice_signatures(settings))
         return report
+
+    # ── Production deploy gate (Sprint 7, T7.3) ───────────
+
+    _TUNNEL_MARKERS = ("ngrok", "trycloudflare", "loca.lt", "localtunnel", "serveo", "localhost.run")
+
+    def _check_prod_webhook_url(self, cfg: Settings | None = None) -> CheckResult:
+        """Production voice webhooks must be a real HTTPS domain — no tunnel,
+        no localhost, no plain HTTP (Twilio signature + WSS relay depend on it)."""
+        settings = self._cfg(cfg)
+        url = str(getattr(settings, "voice_webhook_base_url", "") or "").strip().lower()
+        problems: list[str] = []
+        if not url.startswith("https://"):
+            problems.append("not HTTPS")
+        if any(marker in url for marker in self._TUNNEL_MARKERS):
+            problems.append("tunnel domain")
+        if "localhost" in url or "127.0.0.1" in url:
+            problems.append("localhost")
+        if problems:
+            return CheckResult(
+                name="prod_webhook_url",
+                status=CheckStatus.CRITICAL,
+                message=f"Voice webhook base URL unfit for production ({', '.join(problems)}): {url or '(empty)'}",
+                fix_hint="Set PINCER_VOICE_WEBHOOK_BASE_URL=https://voice.<your-domain> behind the TLS proxy",
+                category="production",
+            )
+        return CheckResult(
+            name="prod_webhook_url",
+            status=CheckStatus.PASS,
+            message=f"Voice webhook base URL is production HTTPS: {url}",
+            category="production",
+        )
+
+    def _check_prod_no_tunnel(self, cfg: Settings | None = None) -> CheckResult:
+        """The built-in ngrok tunnel is a dev convenience — it must be off in
+        production (latency, availability, and a moving public URL)."""
+        settings = self._cfg(cfg)
+        token = ""
+        with contextlib.suppress(AttributeError):
+            token = settings.ngrok_authtoken.get_secret_value()
+        if token:
+            return CheckResult(
+                name="prod_no_tunnel",
+                status=CheckStatus.CRITICAL,
+                message="ngrok tunnel is configured (PINCER_NGROK_AUTHTOKEN set)",
+                fix_hint="Remove PINCER_NGROK_AUTHTOKEN from the production environment",
+                category="production",
+            )
+        return CheckResult(
+            name="prod_no_tunnel",
+            status=CheckStatus.PASS,
+            message="No dev tunnel configured",
+            category="production",
+        )
+
+    def _check_prod_auth_tokens(self, cfg: Settings | None = None) -> CheckResult:
+        """Every HTTP surface must be authenticated in production."""
+        settings = self._cfg(cfg)
+        missing: list[str] = []
+        # T8.2: an empty token means allow-all in the API middleware. Both the
+        # dashboard and the web-chat surface must carry their own strong token
+        # in production — a shared or absent one is a full API bypass.
+        for field_name, env in (
+            ("dashboard_token", "PINCER_DASHBOARD_TOKEN"),
+            ("web_chat_token", "PINCER_WEB_CHAT_TOKEN"),
+        ):
+            try:
+                value = getattr(settings, field_name).get_secret_value()
+            except AttributeError:
+                value = ""
+            if not value:
+                missing.append(env)
+            elif len(value) < 16:
+                missing.append(f"{env} (too short, use 32+ chars)")
+        try:
+            if (
+                settings.dashboard_token.get_secret_value()
+                and settings.dashboard_token.get_secret_value() == settings.web_chat_token.get_secret_value()
+            ):
+                missing.append("PINCER_WEB_CHAT_TOKEN (identical to the dashboard token — issue separate ones)")
+        except AttributeError:
+            pass
+        if missing:
+            return CheckResult(
+                name="prod_auth_tokens",
+                status=CheckStatus.CRITICAL,
+                message=f"API auth token missing or weak: {', '.join(missing)}",
+                fix_hint="Generate one: python -c 'import secrets; print(secrets.token_urlsafe(32))'",
+                category="production",
+            )
+        return CheckResult(
+            name="prod_auth_tokens",
+            status=CheckStatus.PASS,
+            message="Dashboard API token set",
+            category="production",
+        )
+
+    def _check_prod_dach_compliance(self, cfg: Settings | None = None) -> CheckResult:
+        """Sprint 0 compliance settings must be ACTIVE in production, not just
+        available: two-party consent, retention purge, EU timezone."""
+        settings = self._cfg(cfg)
+        if not getattr(settings, "voice_enabled", False) and not getattr(settings, "voice_outbound_enabled", False):
+            return CheckResult(
+                name="prod_dach_compliance",
+                status=CheckStatus.SKIPPED,
+                message="Voice disabled — DACH compliance gate not applicable",
+                category="production",
+            )
+        problems: list[str] = []
+        if str(getattr(settings, "voice_consent_mode", "")) != "two_party":
+            problems.append("voice_consent_mode != two_party")
+        if int(getattr(settings, "voice_transcript_retention_days", 0) or 0) <= 0:
+            problems.append("transcript retention disabled (keep-forever)")
+        tz = str(getattr(settings, "voice_timezone", "") or getattr(settings, "timezone", "") or "")
+        if not tz.startswith("Europe/"):
+            problems.append(f"timezone not Europe/* ({tz or 'unset'})")
+        if problems:
+            return CheckResult(
+                name="prod_dach_compliance",
+                status=CheckStatus.CRITICAL,
+                message="DACH compliance settings inactive: " + "; ".join(problems),
+                fix_hint="PINCER_VOICE_CONSENT_MODE=two_party, PINCER_VOICE_TRANSCRIPT_RETENTION_DAYS=90, "
+                "PINCER_VOICE_TIMEZONE=Europe/Berlin (see .env.production.example)",
+                category="production",
+            )
+        return CheckResult(
+            name="prod_dach_compliance",
+            status=CheckStatus.PASS,
+            message="Two-party consent, retention purge, and EU timezone active",
+            category="production",
+        )
+
+    def _check_prod_environment_flag(self, cfg: Settings | None = None) -> CheckResult:
+        """PINCER_ENVIRONMENT drives the CORS policy and the auth hardening —
+        deploying with it unset silently keeps the developer defaults."""
+        settings = self._cfg(cfg)
+        env = str(getattr(settings, "environment", "") or "").strip().lower()
+        if env != "production":
+            return CheckResult(
+                name="prod_environment_flag",
+                status=CheckStatus.CRITICAL,
+                message=f"PINCER_ENVIRONMENT is {env or '(unset)'}, not 'production' — "
+                "localhost CORS origins are still allowed",
+                fix_hint="Set PINCER_ENVIRONMENT=production in .env.production",
+                category="production",
+            )
+        return CheckResult(
+            name="prod_environment_flag",
+            status=CheckStatus.PASS,
+            message="Environment is production",
+            category="production",
+        )
+
+    def _check_prod_cors_origins(self, cfg: Settings | None = None) -> CheckResult:
+        """No localhost origin may be credential-allowed by a production API."""
+        settings = self._cfg(cfg)
+        from pincer.api.auth_guard import cors_origins
+
+        origins = cors_origins(settings)
+        local = [o for o in origins if "localhost" in o or "127.0.0.1" in o]
+        if local:
+            return CheckResult(
+                name="prod_cors_origins",
+                status=CheckStatus.CRITICAL,
+                message=f"Localhost CORS origins allowed in production: {', '.join(local)}",
+                fix_hint="Set PINCER_ENVIRONMENT=production and list real origins in "
+                "PINCER_DASHBOARD_URL / PINCER_WEB_CHAT_URL / PINCER_CORS_EXTRA_ORIGINS",
+                category="production",
+            )
+        if not origins:
+            return CheckResult(
+                name="prod_cors_origins",
+                status=CheckStatus.WARNING,
+                message="No CORS origins configured — a browser dashboard on another host cannot reach the API",
+                fix_hint="Set PINCER_DASHBOARD_URL=https://<dashboard-host>",
+                category="production",
+            )
+        return CheckResult(
+            name="prod_cors_origins",
+            status=CheckStatus.PASS,
+            message=f"CORS restricted to production origins: {', '.join(origins)}",
+            category="production",
+        )
+
+    def _check_prod_voice_signatures(self, cfg: Settings | None = None) -> CheckResult:
+        """Webhook signature + WS token validation must be ON and usable."""
+        settings = self._cfg(cfg)
+        if not getattr(settings, "voice_enabled", False):
+            return CheckResult(
+                name="prod_voice_signatures",
+                status=CheckStatus.SKIPPED,
+                message="Voice disabled — webhook signature gate not applicable",
+                category="production",
+            )
+        problems: list[str] = []
+        if not getattr(settings, "voice_webhook_validate", True):
+            problems.append("PINCER_VOICE_WEBHOOK_VALIDATE=false")
+        if not getattr(settings, "voice_ws_auth_required", True):
+            problems.append("PINCER_VOICE_WS_AUTH_REQUIRED=false")
+        try:
+            token = settings.twilio_auth_token.get_secret_value()
+        except AttributeError:
+            token = ""
+        if not token:
+            problems.append("PINCER_TWILIO_AUTH_TOKEN empty (validation silently no-ops)")
+        if problems:
+            return CheckResult(
+                name="prod_voice_signatures",
+                status=CheckStatus.CRITICAL,
+                message="Voice webhooks are unauthenticated: " + "; ".join(problems),
+                fix_hint="Leave PINCER_VOICE_WEBHOOK_VALIDATE / PINCER_VOICE_WS_AUTH_REQUIRED at their "
+                "defaults (true) and set PINCER_TWILIO_AUTH_TOKEN",
+                category="production",
+            )
+        return CheckResult(
+            name="prod_voice_signatures",
+            status=CheckStatus.PASS,
+            message="Twilio signature + WebSocket token validation enforced",
+            category="production",
+        )
+
+    # ── Observability (Sprint 9) ──────────────────────────
+
+    def _check_ops_alert_routing(self, cfg: Settings | None = None) -> CheckResult:
+        """T9.2: alerts must have somewhere to go.
+
+        An alert system that fires into the void is worse than none — it looks
+        healthy from every angle while nobody is being told anything.
+        """
+        settings = self._cfg(cfg)
+        if not getattr(settings, "ops_alerts_enabled", True):
+            return CheckResult(
+                name="ops_alert_routing",
+                status=CheckStatus.WARNING,
+                message="Ops alerting is disabled (PINCER_OPS_ALERTS_ENABLED=false) — "
+                "stuck calls and provider outages will not notify anyone",
+                fix_hint="Remove PINCER_OPS_ALERTS_ENABLED=false",
+                category="observability",
+            )
+
+        recipient = str(getattr(settings, "ops_user_id", "") or getattr(settings, "default_user_id", "") or "")
+        email = str(getattr(settings, "ops_alert_email", "") or "")
+        if not recipient and not email:
+            return CheckResult(
+                name="ops_alert_routing",
+                status=CheckStatus.CRITICAL,
+                message="Alerts are enabled but have no recipient — every alert will only reach the log",
+                fix_hint="Set PINCER_OPS_USER_ID (and PINCER_OPS_CHANNEL), or PINCER_OPS_ALERT_EMAIL as a fallback",
+                category="observability",
+            )
+
+        channel = str(getattr(settings, "ops_channel", "") or "")
+        details = f"channel={channel or 'unset'}"
+        if email:
+            details += f", email fallback={email}"
+        if not getattr(settings, "telemetry_dsn", None):
+            return CheckResult(
+                name="ops_alert_routing",
+                status=CheckStatus.WARNING,
+                message=f"Alerts route to {details}, but PINCER_TELEMETRY_DSN is unset — "
+                "no metrics dashboard, only alerts and the CLI",
+                fix_hint="Set PINCER_TELEMETRY_DSN to your OTLP collector for the Voice Ops dashboard",
+                category="observability",
+            )
+        return CheckResult(
+            name="ops_alert_routing",
+            status=CheckStatus.PASS,
+            message=f"Ops alerts route to {details}; metrics export configured",
+            category="observability",
+        )
+
+    def _check_voice_canary(self, cfg: Settings | None = None) -> CheckResult:
+        """T9.2: the canary is the probe that catches provider outages first."""
+        settings = self._cfg(cfg)
+        if not getattr(settings, "voice_enabled", False):
+            return CheckResult(
+                name="voice_canary",
+                status=CheckStatus.SKIPPED,
+                message="Voice disabled — canary not applicable",
+                category="observability",
+            )
+        if not getattr(settings, "voice_canary_enabled", False):
+            return CheckResult(
+                name="voice_canary",
+                status=CheckStatus.WARNING,
+                message="Synthetic canary is off — a Twilio/STT/TTS outage will first be noticed "
+                "by a customer rather than by us",
+                fix_hint="Set PINCER_VOICE_CANARY_ENABLED=true and PINCER_VOICE_CANARY_NUMBER=<staging responder>",
+                category="observability",
+            )
+
+        number = str(getattr(settings, "voice_canary_number", "") or "").strip()
+        if not number:
+            return CheckResult(
+                name="voice_canary",
+                status=CheckStatus.CRITICAL,
+                message="Canary is enabled but PINCER_VOICE_CANARY_NUMBER is empty — it can never run",
+                fix_hint="Set PINCER_VOICE_CANARY_NUMBER to a staging responder you control (never a customer)",
+                category="observability",
+            )
+
+        # A canary that runs only inside quiet hours would be skipped forever.
+        from pincer.voice.safety_gates import parse_quiet_hours
+
+        quiet = parse_quiet_hours(str(getattr(settings, "voice_quiet_hours", "") or ""))
+        overrides = str(getattr(settings, "voice_quiet_hours_override_users", "") or "")
+        if quiet is not None and "pincer-canary" not in overrides:
+            return CheckResult(
+                name="voice_canary",
+                status=CheckStatus.WARNING,
+                message="Canary runs will be skipped during quiet hours — overnight coverage has a gap",
+                fix_hint="Add pincer-canary to PINCER_VOICE_QUIET_HOURS_OVERRIDE_USERS "
+                "(it dials a responder you own, not a customer)",
+                category="observability",
+            )
+        return CheckResult(
+            name="voice_canary",
+            status=CheckStatus.PASS,
+            message=f"Canary enabled ({getattr(settings, 'voice_canary_cron', '')}) against a configured target",
+            category="observability",
+        )
+
+    # ── Voice security hardening (Sprint 8) ───────────────
+
+    def _check_voice_webhook_signature(self, cfg: Settings | None = None) -> CheckResult:
+        """T8.1: every /voice/* route validates X-Twilio-Signature."""
+        settings = self._cfg(cfg)
+        if not getattr(settings, "voice_enabled", False):
+            return CheckResult(
+                name="voice_webhook_signature",
+                status=CheckStatus.SKIPPED,
+                message="Voice disabled",
+                category="voice",
+            )
+        if not getattr(settings, "voice_webhook_validate", True):
+            return CheckResult(
+                name="voice_webhook_signature",
+                status=CheckStatus.CRITICAL,
+                message="Twilio webhook signature validation is DISABLED — anyone can spoof calls, "
+                "status callbacks, and TwiML requests",
+                fix_hint="Remove PINCER_VOICE_WEBHOOK_VALIDATE=false",
+                category="voice",
+            )
+        try:
+            token = settings.twilio_auth_token.get_secret_value()
+        except AttributeError:
+            token = ""
+        if not token:
+            return CheckResult(
+                name="voice_webhook_signature",
+                status=CheckStatus.CRITICAL,
+                message="Voice is enabled but PINCER_TWILIO_AUTH_TOKEN is empty — "
+                "signature validation cannot run and every webhook is accepted",
+                fix_hint="Set PINCER_TWILIO_AUTH_TOKEN from the Twilio console",
+                category="voice",
+            )
+        max_age = int(getattr(settings, "voice_signature_max_age_s", 300) or 300)
+        return CheckResult(
+            name="voice_webhook_signature",
+            status=CheckStatus.PASS,
+            message=f"Twilio signature validation enforced (replay window {max_age}s)",
+            category="voice",
+        )
+
+    def _check_voice_ws_auth(self, cfg: Settings | None = None) -> CheckResult:
+        """T8.1: the relay/stream WebSocket upgrade is token-authenticated."""
+        settings = self._cfg(cfg)
+        if not getattr(settings, "voice_enabled", False):
+            return CheckResult(
+                name="voice_ws_auth",
+                status=CheckStatus.SKIPPED,
+                message="Voice disabled",
+                category="voice",
+            )
+        if not getattr(settings, "voice_ws_auth_required", True):
+            return CheckResult(
+                name="voice_ws_auth",
+                status=CheckStatus.CRITICAL,
+                message="WebSocket auth is DISABLED — anyone can open /voice/relay and speak on a live call",
+                fix_hint="Remove PINCER_VOICE_WS_AUTH_REQUIRED=false",
+                category="voice",
+            )
+        return CheckResult(
+            name="voice_ws_auth",
+            status=CheckStatus.PASS,
+            message="ConversationRelay / Media Streams upgrades require a signed token",
+            category="voice",
+        )
+
+    def _check_voice_abuse_limits(self, cfg: Settings | None = None) -> CheckResult:
+        """T8.3: the outbound abuse limits are actually set to something."""
+        settings = self._cfg(cfg)
+        if not getattr(settings, "voice_outbound_enabled", False):
+            return CheckResult(
+                name="voice_abuse_limits",
+                status=CheckStatus.SKIPPED,
+                message="Outbound calling disabled",
+                category="voice",
+            )
+        from pincer.voice.safety_gates import parse_quiet_hours
+
+        daily = int(getattr(settings, "voice_daily_call_limit", 0) or 0)
+        cooldown = int(getattr(settings, "voice_target_cooldown_min", 0) or 0)
+        quiet = parse_quiet_hours(str(getattr(settings, "voice_quiet_hours", "") or ""))
+
+        gaps: list[str] = []
+        if daily <= 0:
+            gaps.append("no global daily cap (PINCER_VOICE_DAILY_CALL_LIMIT=0)")
+        if cooldown <= 0:
+            gaps.append("no per-target cooldown (PINCER_VOICE_TARGET_COOLDOWN_MIN=0)")
+        if quiet is None:
+            gaps.append("no quiet hours (PINCER_VOICE_QUIET_HOURS empty) — §7 UWG exposure")
+        if gaps:
+            return CheckResult(
+                name="voice_abuse_limits",
+                status=CheckStatus.WARNING if len(gaps) < 3 else CheckStatus.CRITICAL,
+                message="Outbound abuse limits weakened: " + "; ".join(gaps),
+                fix_hint="Restore the defaults: PINCER_VOICE_DAILY_CALL_LIMIT=20, "
+                "PINCER_VOICE_TARGET_COOLDOWN_MIN=60, PINCER_VOICE_QUIET_HOURS=20:00-08:00",
+                category="voice",
+            )
+        return CheckResult(
+            name="voice_abuse_limits",
+            status=CheckStatus.PASS,
+            message=f"Outbound limits active: {daily}/day, {cooldown}min target cooldown, "
+            f"quiet hours {getattr(settings, 'voice_quiet_hours', '')}",
+            category="voice",
+        )
+
+    def _check_voice_do_not_call_enforced(self) -> CheckResult:
+        """T8.3: prove the do-not-call list is consulted on the dial path.
+
+        Source-level rather than config-level on purpose — the risk is a
+        refactor that routes around `check_outbound_allowed`, which no amount
+        of configuration would reveal.
+        """
+        import inspect
+
+        try:
+            from pincer.voice import outbound
+            from pincer.voice.safety_gates import check_outbound_allowed
+
+            dial_src = inspect.getsource(outbound.make_phone_call)
+            gate_src = inspect.getsource(check_outbound_allowed)
+        except Exception as e:  # pragma: no cover — source unavailable (frozen build)
+            return CheckResult(
+                name="voice_do_not_call",
+                status=CheckStatus.WARNING,
+                message=f"Could not verify the do-not-call enforcement path: {e}",
+                category="voice",
+            )
+
+        problems: list[str] = []
+        if "check_outbound_allowed" not in dial_src:
+            problems.append("make_phone_call does not call check_outbound_allowed")
+        if "is_do_not_call" not in gate_src:
+            problems.append("check_outbound_allowed does not consult the do-not-call list")
+        if "record_outbound_call" not in dial_src:
+            problems.append("placed calls are not recorded (daily cap and cooldown would never trigger)")
+        if problems:
+            return CheckResult(
+                name="voice_do_not_call",
+                status=CheckStatus.CRITICAL,
+                message="Outbound gate bypassed: " + "; ".join(problems),
+                fix_hint="Every dial must go through voice.safety_gates.check_outbound_allowed",
+                category="voice",
+            )
+        return CheckResult(
+            name="voice_do_not_call",
+            status=CheckStatus.PASS,
+            message="Do-not-call list, daily cap, and target cooldown enforced on every outbound dial",
+            category="voice",
+        )
+
+    # ── In-call tool execution (Sprint 11) ────────────────
+
+    def _check_voice_autonomy_on(self, cfg: Settings | None = None) -> CheckResult:
+        """§10.1: WARN when Tier W writes run autonomously (mode `off`) on outbound calls."""
+        settings = self._cfg(cfg)
+        from pincer.voice.tool_policy import global_mode, tool_overrides
+
+        if not getattr(settings, "voice_outbound_enabled", False):
+            return CheckResult(
+                name="voice_autonomy_on",
+                status=CheckStatus.SKIPPED,
+                message="Outbound calling disabled",
+                category="voice",
+            )
+        mode = global_mode(settings)
+        off_overrides = sorted(name for name, m in tool_overrides(settings).items() if m == "off")
+        if mode == "off":
+            return CheckResult(
+                name="voice_autonomy_on",
+                status=CheckStatus.WARNING,
+                message="Autonomous writes during calls are enabled — intended? "
+                "(PINCER_VOICE_TOOL_APPROVAL=off: Tier W tools run without any confirmation, "
+                f"budget {getattr(settings, 'voice_max_writes_per_call', 3)}/call)",
+                fix_hint="Use PINCER_VOICE_TOOL_APPROVAL=verbal (default) or user; "
+                "narrow autonomy to single tools with PINCER_VOICE_TOOL_APPROVAL_OVERRIDES=tool:off",
+                category="voice",
+            )
+        if off_overrides:
+            return CheckResult(
+                name="voice_autonomy_on",
+                status=CheckStatus.WARNING,
+                message="Autonomous writes during calls are enabled for: " + ", ".join(off_overrides) + " — intended?",
+                fix_hint="Remove the ':off' entries from PINCER_VOICE_TOOL_APPROVAL_OVERRIDES if not intended",
+                category="voice",
+            )
+        return CheckResult(
+            name="voice_autonomy_on",
+            status=CheckStatus.PASS,
+            message=f"In-call writes require {mode} approval",
+            category="voice",
+        )
+
+    def _check_voice_tier_x_reachable(self, cfg: Settings | None = None) -> CheckResult:
+        """§10.2: self-test — build the call-context schema set for every call
+        kind and assert no Tier X tool is in it. FAIL (critical) if one is."""
+        settings = self._cfg(cfg)
+        from pincer.voice.tool_policy import (
+            TIER_X,
+            TIERS,
+            allowed_tools_for_call,
+            call_context_schemas,
+            callable_tools,
+            ignored_extra_tools,
+        )
+
+        # The probe registry: every known tool plus the configured extras and
+        # a few never-listed names (unknown must be denied, never admitted).
+        probe_names = set(TIERS) | set(callable_tools()) | {"shell_exec", "python_exec", "unknown__tool"}
+        probe_names |= set(
+            n.strip() for n in str(getattr(settings, "voice_tools_extra", "") or "").split(",") if n.strip()
+        )
+        schemas = [{"name": name} for name in sorted(probe_names)]
+
+        leaks: list[str] = []
+        for kind in ("appointment", "generic"):
+            for direction in ("outbound", "inbound"):
+                allowed = allowed_tools_for_call(settings, kind=kind, direction=direction)
+                visible = {str(s["name"]) for s in call_context_schemas(schemas, allowed)}
+                for name in sorted(visible):
+                    if TIERS.get(name, TIER_X) == TIER_X:
+                        leaks.append(f"{name} ({kind}/{direction})")
+        if leaks:
+            return CheckResult(
+                name="voice_tier_x_reachable",
+                status=CheckStatus.CRITICAL,
+                message="Tier X tool(s) reachable from call context: " + ", ".join(leaks),
+                fix_hint="pincer.voice.tool_policy must never admit a Tier X or unlisted tool — fix the code",
+                category="voice",
+            )
+        ignored = ignored_extra_tools(str(getattr(settings, "voice_tools_extra", "") or ""))
+        if ignored:
+            return CheckResult(
+                name="voice_tier_x_reachable",
+                status=CheckStatus.WARNING,
+                message="PINCER_VOICE_TOOLS_EXTRA names Tier X / unknown tools that are ignored: " + ", ".join(ignored),
+                fix_hint="Only Tier R/W tools can be added to the call scope; remove the others",
+                category="voice",
+            )
+        return CheckResult(
+            name="voice_tier_x_reachable",
+            status=CheckStatus.PASS,
+            message="Call-context tool schemas contain no Tier X tool (all call kinds)",
+            category="voice",
+        )
+
+    def _check_voice_override_unknown_tool(self, cfg: Settings | None = None) -> CheckResult:
+        """§10.3 / §3.2: overrides naming tools outside the tier table are ignored at runtime."""
+        settings = self._cfg(cfg)
+        from pincer.voice.tool_policy import parse_overrides, unknown_override_tools
+
+        raw = str(getattr(settings, "voice_tool_approval_overrides", "") or "")
+        if not raw.strip():
+            return CheckResult(
+                name="voice_override_unknown_tool",
+                status=CheckStatus.PASS,
+                message="No per-tool approval overrides configured",
+                category="voice",
+            )
+        try:
+            parse_overrides(raw)
+        except Exception as e:
+            return CheckResult(
+                name="voice_override_unknown_tool",
+                status=CheckStatus.CRITICAL,
+                message=f"PINCER_VOICE_TOOL_APPROVAL_OVERRIDES is invalid: {e}",
+                fix_hint="Use tool_name:mode entries with mode in verbal|user|off",
+                category="voice",
+            )
+        unknown = unknown_override_tools(raw)
+        if unknown:
+            return CheckResult(
+                name="voice_override_unknown_tool",
+                status=CheckStatus.WARNING,
+                message="Override(s) reference tools not in the in-call tier table (ignored): " + ", ".join(unknown),
+                fix_hint="Check the spelling against pincer.voice.tool_policy.TIERS",
+                category="voice",
+            )
+        return CheckResult(
+            name="voice_override_unknown_tool",
+            status=CheckStatus.PASS,
+            message="All approval overrides reference known in-call tools",
+            category="voice",
+        )
+
+    # ── Inbound receptionist (Sprint 12) ──────────────────
+
+    def _check_receptionist_profile(self, cfg: Settings | None = None) -> CheckResult:
+        """§4: with the receptionist enabled the business profile must load and validate."""
+        settings = self._cfg(cfg)
+        if not getattr(settings, "receptionist_enabled", False):
+            return CheckResult(
+                name="receptionist_profile",
+                status=CheckStatus.SKIPPED,
+                message="Receptionist disabled",
+                category="voice",
+            )
+        from pincer.voice.receptionist.profile import ProfileError, load_business_profile
+
+        path = str(getattr(settings, "business_profile", "") or "./business_profile.yaml")
+        try:
+            profile = load_business_profile(path)
+        except ProfileError as e:
+            return CheckResult(
+                name="receptionist_profile",
+                status=CheckStatus.CRITICAL,
+                message=str(e),
+                fix_hint="Fix the named field in the business profile (see docs/guides/receptionist-setup.md)",
+                category="voice",
+            )
+        except Exception as e:  # pragma: no cover — unexpected loader failure
+            return CheckResult(
+                name="receptionist_profile",
+                status=CheckStatus.CRITICAL,
+                message=f"business profile could not be loaded: {e}",
+                category="voice",
+            )
+        return CheckResult(
+            name="receptionist_profile",
+            status=CheckStatus.PASS,
+            message=f"Business profile valid: {profile.business.name} ({path}), booking="
+            f"{'on' if profile.booking.enabled else 'off'}, transfer={'on' if profile.transfer.enabled else 'off'}",
+            category="voice",
+        )
+
+    def _check_inbound_recording_consent(self, cfg: Settings | None = None) -> CheckResult:
+        """§3: PINCER_INBOUND_RECORDING=true requires the two-party announcement (FAIL otherwise)."""
+        settings = self._cfg(cfg)
+        if not getattr(settings, "receptionist_enabled", False):
+            return CheckResult(
+                name="inbound_recording_consent",
+                status=CheckStatus.SKIPPED,
+                message="Receptionist disabled",
+                category="voice",
+            )
+        if not getattr(settings, "inbound_recording", False):
+            return CheckResult(
+                name="inbound_recording_consent",
+                status=CheckStatus.PASS,
+                message="Inbound receptionist calls are not recorded",
+                category="voice",
+            )
+        mode = str(getattr(settings, "voice_consent_mode", "") or "")
+        if mode != "two_party" or not getattr(settings, "voice_recording_enabled", False):
+            return CheckResult(
+                name="inbound_recording_consent",
+                status=CheckStatus.CRITICAL,
+                message="PINCER_INBOUND_RECORDING=true but the mandatory two-party recording announcement is not "
+                f"configured (consent mode={mode or 'unset'}, recording_enabled="
+                f"{getattr(settings, 'voice_recording_enabled', False)})",
+                fix_hint="Set PINCER_VOICE_CONSENT_MODE=two_party and PINCER_VOICE_RECORDING_ENABLED=true, "
+                "or disable PINCER_INBOUND_RECORDING",
+                category="voice",
+            )
+        return CheckResult(
+            name="inbound_recording_consent",
+            status=CheckStatus.PASS,
+            message="Inbound recording announces two-party consent before the greeting",
+            category="voice",
+        )
+
+    def _check_listen_in_announce(self, cfg: Settings | None = None) -> CheckResult:
+        """Sprint 15 §2.1: live monitoring must be announced. ANNOUNCE=false with
+        ENABLED=true is a FAIL unless two-party recording is already announced
+        (that announcement covers monitoring)."""
+        settings = self._cfg(cfg)
+        if getattr(settings, "listen_in_enabled", False) is not True:
+            return CheckResult(
+                name="listen_in_announce",
+                status=CheckStatus.SKIPPED,
+                message="Live listen-in disabled (no media fork)",
+                category="voice",
+            )
+        if getattr(settings, "listen_in_announce", True):
+            return CheckResult(
+                name="listen_in_announce",
+                status=CheckStatus.PASS,
+                message="Live listen-in is announced in the call opening",
+                category="voice",
+            )
+        mode = str(getattr(settings, "voice_consent_mode", "") or "")
+        recording = bool(getattr(settings, "voice_recording_enabled", False))
+        if mode == "two_party" and recording:
+            return CheckResult(
+                name="listen_in_announce",
+                status=CheckStatus.PASS,
+                message="Live listen-in not separately announced — covered by the active two-party "
+                "recording announcement",
+                category="voice",
+            )
+        return CheckResult(
+            name="listen_in_announce",
+            status=CheckStatus.CRITICAL,
+            message="PINCER_LISTEN_IN_ENABLED=true with PINCER_LISTEN_IN_ANNOUNCE=false and no active "
+            f"two-party recording announcement (consent mode={mode or 'unset'}, recording={recording}) — "
+            "callers are monitored without being told",
+            fix_hint="Remove PINCER_LISTEN_IN_ANNOUNCE=false, or set PINCER_VOICE_CONSENT_MODE=two_party "
+            "and PINCER_VOICE_RECORDING_ENABLED=true, or disable PINCER_LISTEN_IN_ENABLED",
+            category="voice",
+        )
 
     # ── Secrets ───────────────────────────────────────────
 
@@ -808,6 +1567,169 @@ class SecurityDoctor:
             "voice_recording_consent",
             CheckStatus.PASS,
             "Recording disabled (transcription only)",
+            category="voice",
+        )
+
+    # ── Voice DACH compliance (Sprint 0) ─────────────────
+
+    def _check_voice_dach_consent(self, cfg: Settings | None = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled):
+            return CheckResult(
+                "voice_dach_consent",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        number = (cfg.twilio_phone_number or "").strip()
+        is_dach = number.startswith(("+49", "+43", "+41"))
+        if cfg.voice_outbound_enabled and is_dach and cfg.voice_consent_mode == "one_party":
+            return CheckResult(
+                "voice_dach_consent",
+                CheckStatus.WARNING,
+                f"Outbound calling from DACH number {number[:4]}… with one_party consent "
+                "(recording needs all-party consent, e.g. §201 StGB in Germany)",
+                fix_hint="Set PINCER_VOICE_CONSENT_MODE=two_party for DACH deployments",
+                category="voice",
+            )
+        if is_dach:
+            return CheckResult(
+                "voice_dach_consent",
+                CheckStatus.PASS,
+                f"DACH number with {cfg.voice_consent_mode} consent mode",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_dach_consent",
+            CheckStatus.PASS,
+            "No DACH Twilio number configured",
+            category="voice",
+        )
+
+    def _check_voice_retention(self, cfg: Settings | None = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled):
+            return CheckResult(
+                "voice_retention",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        days = cfg.voice_transcript_retention_days
+        if cfg.voice_recording_enabled and days <= 0:
+            return CheckResult(
+                "voice_retention",
+                CheckStatus.WARNING,
+                "Recording enabled but no retention window (transcripts kept forever)",
+                fix_hint="Set PINCER_VOICE_TRANSCRIPT_RETENTION_DAYS (GDPR storage limitation)",
+                category="voice",
+            )
+        if days > 0:
+            return CheckResult(
+                "voice_retention",
+                CheckStatus.PASS,
+                f"Transcripts purged after {days} day(s)",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_retention",
+            CheckStatus.PASS,
+            "No retention window (recording disabled)",
+            category="voice",
+        )
+
+    def _check_voice_provider_regions(self, cfg: Settings | None = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled):
+            return CheckResult(
+                "voice_provider_regions",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        providers = []
+        if cfg.twilio_account_sid:
+            providers.append("Twilio (US default; EU/Ireland region configurable)")
+        if cfg.deepgram_api_key.get_secret_value():
+            providers.append("Deepgram STT (US default; EU endpoint available)")
+        if cfg.elevenlabs_api_key.get_secret_value():
+            providers.append("ElevenLabs TTS (US processing)")
+        if not providers:
+            return CheckResult(
+                "voice_provider_regions",
+                CheckStatus.PASS,
+                "No external voice providers configured",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_provider_regions",
+            CheckStatus.PASS,
+            "Data processing: " + "; ".join(providers),
+            fix_hint="See docs/guides/dach-compliance.md for DPA/AVV guidance",
+            category="voice",
+        )
+
+    def _check_voice_elevenlabs_voices(self, cfg: Settings | None = None) -> CheckResult:
+        """Sprint 4: configured ElevenLabs voice IDs exist in the account, and
+        the configured model speaks the supported languages."""
+        cfg = self._cfg(cfg)
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled):
+            return CheckResult(
+                "voice_elevenlabs_voices",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        api_key = cfg.elevenlabs_api_key.get_secret_value()
+        from pincer.voice.voices import VoiceLookupError, configured_voice_ids, voice_usable
+
+        voice_ids = configured_voice_ids(cfg)
+        if not api_key or not voice_ids:
+            return CheckResult(
+                "voice_elevenlabs_voices",
+                CheckStatus.PASS,
+                "No ElevenLabs voices configured (default/Google voice in use)",
+                category="voice",
+            )
+
+        # English-only models break German calls even with a valid voice ID
+        from pincer.voice.language import elevenlabs_model_for, supported_languages
+
+        model = elevenlabs_model_for(cfg)
+        english_only_models = {"eleven_flash_v2", "eleven_turbo_v2"}
+        if model in english_only_models and any(lang != "en" for lang in supported_languages(cfg)):
+            return CheckResult(
+                "voice_elevenlabs_voices",
+                CheckStatus.WARNING,
+                f"Model {model} is English-only but non-English calls are enabled",
+                fix_hint="Set PINCER_ELEVENLABS_MODEL=eleven_flash_v2_5 (multilingual, low latency)",
+                category="voice",
+            )
+
+        missing = []
+        for voice_id in sorted(voice_ids):
+            try:
+                if not voice_usable(api_key, voice_id):
+                    missing.append(voice_id)
+            except VoiceLookupError as e:
+                return CheckResult(
+                    "voice_elevenlabs_voices",
+                    CheckStatus.WARNING,
+                    f"Could not verify ElevenLabs voices: {e}",
+                    category="voice",
+                )
+        if missing:
+            return CheckResult(
+                "voice_elevenlabs_voices",
+                CheckStatus.WARNING,
+                f"Voice ID(s) not usable by this ElevenLabs account: {', '.join(missing)}",
+                fix_hint="Run `pincer voice list` and fix PINCER_ELEVENLABS_VOICE_ID / _EN / _DE",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_elevenlabs_voices",
+            CheckStatus.PASS,
+            f"{len(voice_ids)} ElevenLabs voice ID(s) verified, model {model}",
             category="voice",
         )
 

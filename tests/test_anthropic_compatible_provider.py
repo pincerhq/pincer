@@ -204,7 +204,10 @@ async def test_complete_passes_system_and_tools(anthropic_settings):
 
     kwargs = mock_client.messages.create.call_args.kwargs
     assert kwargs["system"] == "be nice"
-    assert kwargs["tools"] == tools
+    # tools pass through with the Sprint-5 cache breakpoint on the last one
+    sent = kwargs["tools"]
+    assert [{k: v for k, v in t_.items() if k != "cache_control"} for t_ in sent] == tools
+    assert sent[-1]["cache_control"] == {"type": "ephemeral"}
 
 
 @pytest.mark.asyncio
@@ -427,3 +430,43 @@ async def test_close(anthropic_settings):
         await provider.close()
 
     mock_client.close.assert_awaited_once()
+
+
+# ── Prompt caching on tool schemas (Sprint 5, T5.4) ──────────────────
+
+
+class TestToolPromptCaching:
+    def _provider(self, settings):
+        from pincer.llm.anthropic_common import AnthropicCompatibleProvider
+
+        with patch(f"{MODULE}.AsyncAnthropic"):
+            return AnthropicCompatibleProvider(settings, "anthropic")
+
+    def test_last_tool_carries_cache_control(self, anthropic_settings):
+        provider = self._provider(anthropic_settings)
+        tools = [
+            {"name": "a", "description": "x", "input_schema": {}},
+            {"name": "b", "description": "y", "input_schema": {}},
+        ]
+        cached = provider._maybe_cache_tools(tools)
+        assert "cache_control" not in cached[0]
+        assert cached[-1]["cache_control"] == {"type": "ephemeral"}
+        # the caller's list and dicts are never mutated
+        assert "cache_control" not in tools[-1]
+
+    def test_disabled_via_setting(self, anthropic_settings):
+        anthropic_settings.prompt_cache_tools = False
+        provider = self._provider(anthropic_settings)
+        tools = [{"name": "a", "description": "x", "input_schema": {}}]
+        assert provider._maybe_cache_tools(tools) is tools
+
+    async def test_complete_sends_cached_tools(self, anthropic_settings):
+        provider = self._provider(anthropic_settings)
+        provider._client = MagicMock()
+        provider._client.messages.create = AsyncMock(return_value=_make_message())
+        tools = [{"name": "a", "description": "x", "input_schema": {}}]
+
+        await provider.complete([LLMMessage(role=MessageRole.USER, content="hi")], tools=tools)
+
+        sent_tools = provider._client.messages.create.call_args.kwargs["tools"]
+        assert sent_tools[-1]["cache_control"] == {"type": "ephemeral"}

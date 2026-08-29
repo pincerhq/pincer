@@ -50,6 +50,12 @@ class IncomingMessage:
     # session_id; channel is used only for identity and memory tagging.
     session_id: str | None = None
 
+    # Channel-supplied system-prompt addition for this turn (appended to the
+    # agent's system prompt). Voice uses it for the live-call rules, the
+    # language policy, and the current phase instruction — all in the call
+    # language pinned in CallState.language.
+    extra_system: str | None = None
+
     # Sprint 3: generic media fields (used by WhatsApp)
     media_type: str | None = None  # "image", "audio", "document", None
     media_data: bytes | None = None

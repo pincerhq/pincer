@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -142,6 +143,90 @@ class TelegramChannel(BaseChannel):
         finally:
             self._pending_approvals.pop(user_id, None)
 
+    # ── Sprint 11: in-call approval card (`user` mode) ──────────────
+
+    _VOICE_APPROVAL_TEXT = {
+        "de": ("📞 *Freigabe während des Anrufs*", "Erlauben?", "✅ Erlauben", "❌ Ablehnen"),
+        "uk": ("📞 *Підтвердження під час дзвінка*", "Дозволити?", "✅ Дозволити", "❌ Відхилити"),
+        "en": ("📞 *Approval needed during the call*", "Allow this action?", "✅ Allow", "❌ Deny"),
+    }
+    _VOICE_APPROVAL_FINAL = {
+        "de": {
+            "approved": "✅ Erlaubt",
+            "denied": "❌ Abgelehnt",
+            "expired": "⌛ Abgelaufen — nicht ausgeführt, wird im Nachgang geklärt",
+            "call_ended": "📞 Anruf beendet — nicht ausgeführt",
+        },
+        "uk": {
+            "approved": "✅ Дозволено",
+            "denied": "❌ Відхилено",
+            "expired": "⌛ Час вийшов — не виконано, з'ясуємо після дзвінка",
+            "call_ended": "📞 Дзвінок завершено — не виконано",
+        },
+        "en": {
+            "approved": "✅ Approved",
+            "denied": "❌ Denied",
+            "expired": "⌛ Expired — not executed, deferred to follow-up",
+            "call_ended": "📞 Call ended — not executed",
+        },
+    }
+
+    async def present_voice_approval(self, req: Any) -> bool:
+        """Show the §6.5 approval card ([✅ Erlauben] [❌ Ablehnen]) to the
+        initiating user. Returns True when the card was sent."""
+        if self._bot is None:
+            return False
+        lang = str(getattr(req, "summary_spoken_language", "") or "en")[:2]
+        title, question, allow, deny = self._VOICE_APPROVAL_TEXT.get(lang, self._VOICE_APPROVAL_TEXT["en"])
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text=allow, callback_data=f"vcall_ok:{req.approval_id}"),
+                    InlineKeyboardButton(text=deny, callback_data=f"vcall_no:{req.approval_id}"),
+                ]
+            ]
+        )
+        text = f"{title}\n\n{req.summary}\n\n`{req.tool_name}`\n\n{question}"
+        try:
+            chat_id = self._chat_id(req.user_id)
+        except ValueError:
+            logger.warning("Voice approval: %r is not a Telegram chat id", req.user_id)
+            return False
+        try:
+            message = await self._bot.send_message(
+                chat_id=chat_id, text=markdown_to_telegram_html(text), reply_markup=keyboard
+            )
+        except Exception as e:
+            logger.warning("Voice approval card send failed (%s), retrying plain", e)
+            try:
+                message = await self._bot.send_message(
+                    chat_id=chat_id, text=text, parse_mode=None, reply_markup=keyboard
+                )
+            except Exception:
+                logger.exception("Voice approval card could not be sent")
+                return False
+        req.extra["telegram_chat_id"] = chat_id
+        req.extra["telegram_message_id"] = getattr(message, "message_id", None)
+        return True
+
+    async def finalize_voice_approval(self, req: Any, final_state: str) -> None:
+        """Edit the card to its final state so no stale 'allow?' lingers."""
+        if self._bot is None:
+            return
+        chat_id = req.extra.get("telegram_chat_id")
+        message_id = req.extra.get("telegram_message_id")
+        if chat_id is None or message_id is None:
+            return
+        lang = str(getattr(req, "summary_spoken_language", "") or "en")[:2]
+        labels = self._VOICE_APPROVAL_FINAL.get(lang, self._VOICE_APPROVAL_FINAL["en"])
+        label = labels.get(final_state, final_state)
+        title, _q, _a, _d = self._VOICE_APPROVAL_TEXT.get(lang, self._VOICE_APPROVAL_TEXT["en"])
+        text = f"{title}\n\n{req.summary}\n\n`{req.tool_name}`\n\n— {label}"
+        with contextlib.suppress(Exception):
+            await self._bot.edit_message_text(
+                chat_id=chat_id, message_id=message_id, text=markdown_to_telegram_html(text), reply_markup=None
+            )
+
     @property
     def name(self) -> str:
         return "telegram"
@@ -208,6 +293,19 @@ class TelegramChannel(BaseChannel):
         if self._bot:
             await self._bot.session.close()
         logger.info("Telegram channel stopped")
+
+    async def _typing(self, chat_id: int) -> None:
+        """Send a typing indicator, ignoring failures.
+
+        The indicator is cosmetic: a transient network blip talking to
+        api.telegram.org must not abort handling of the user's message.
+        """
+        if self._bot is None:
+            return
+        try:
+            await self._bot.send_chat_action(chat_id, ChatAction.TYPING)
+        except TelegramAPIError as e:
+            logger.debug("Typing indicator failed: %s", e)
 
     @staticmethod
     def _chat_id(user_id: str) -> int:
@@ -422,6 +520,22 @@ class TelegramChannel(BaseChannel):
                         f"{original}\n\n— <b>{html.escape(label)}</b>",
                     )
 
+        @router.callback_query(F.data.startswith("vcall_ok:") | F.data.startswith("vcall_no:"))
+        async def handle_voice_call_approval(callback: CallbackQuery) -> None:
+            """Sprint 11: answer to an in-call approval card. The card is
+            edited to its final state by the broker's finalizer."""
+            from pincer.voice import approvals as voice_approvals
+
+            data = callback.data or ""
+            action, _, approval_id = data.partition(":")
+            approved = action == "vcall_ok"
+            by_user = str(callback.from_user.id) if callback.from_user else None
+            accepted = voice_approvals.resolve(approval_id, approved, by_user_id=by_user)
+            if accepted:
+                await callback.answer("Approved" if approved else "Denied")
+            else:
+                await callback.answer("This request is no longer open.", show_alert=False)
+
         @router.message(CommandStart())
         async def cmd_start(message: Message) -> None:
             if not message.from_user or not self._is_allowed(message.from_user.id):
@@ -494,7 +608,7 @@ class TelegramChannel(BaseChannel):
                 return
             assert self._bot is not None and self._handler is not None
 
-            await self._bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+            await self._typing(message.chat.id)
 
             voice = message.voice
             assert voice is not None
@@ -522,7 +636,7 @@ class TelegramChannel(BaseChannel):
                 return
             assert self._bot is not None and self._handler is not None
 
-            await self._bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+            await self._typing(message.chat.id)
 
             photo = message.photo[-1] if message.photo else None
             if not photo:
@@ -555,7 +669,7 @@ class TelegramChannel(BaseChannel):
             if not doc:
                 return
 
-            await self._bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+            await self._typing(message.chat.id)
 
             file = await self._bot.get_file(doc.file_id)
             assert file.file_path is not None
@@ -597,7 +711,7 @@ class TelegramChannel(BaseChannel):
                 return
             assert self._bot is not None and self._handler is not None
 
-            await self._bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+            await self._typing(message.chat.id)
 
             user_id = str(message.from_user.id)
 

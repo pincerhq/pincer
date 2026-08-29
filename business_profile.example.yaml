@@ -1,0 +1,37 @@
+# Pincer inbound receptionist — business profile (Sprint 12, §4).
+# Copy to ./business_profile.yaml (or point PINCER_BUSINESS_PROFILE at it),
+# set PINCER_RECEPTIONIST_ENABLED=true, restart. Validated at startup: an
+# invalid file refuses to start and names the exact field.
+version: 1
+business:
+  name: "Praxis Dr. Müller"         # required, 1–80 chars — spoken verbatim in the greeting
+  languages: ["de", "en"]           # required; first entry = greeting/default language (en|de|uk)
+  timezone: "Europe/Berlin"         # required, IANA
+hours:                              # required; per-weekday list of ranges, [] = closed
+  mon: ["08:00-12:00", "14:00-17:00"]
+  tue: ["08:00-12:00", "14:00-17:00"]
+  wed: ["08:00-12:00"]
+  thu: ["08:00-12:00", "14:00-17:00"]
+  fri: ["08:00-12:00"]
+  sat: []
+  sun: []
+services:                           # optional — speakable on request
+  - "Allgemeinmedizin"
+  - "Vorsorgeuntersuchungen"
+faq:                                # optional, max 50 pairs; answers ≤ 300 chars, spoken content-identical
+  - q: "Wo kann ich parken?"
+    a: "Direkt hinter dem Haus, Einfahrt Gartenstraße."
+  - q: "Nehmen Sie neue Patienten auf?"
+    a: "Ja, aktuell nehmen wir neue Patienten auf."
+address: "Gartenstraße 12, 32257 Bünde"   # optional
+booking:
+  enabled: true                     # false → appointment requests become messages (callback)
+  event_duration_min: 30
+  ask_email: false                  # true → ask the caller to spell an email for the invitation
+  event_title_template: "Termin: {caller_name}"
+transfer:
+  enabled: true
+  target: "+4952233344455"          # required if enabled; E.164
+  announce: "Ich verbinde Sie."     # spoken before <Dial>
+after_hours:
+  message: "Sie erreichen uns Montag bis Freitag vormittags. Ich nehme gern eine Nachricht auf."

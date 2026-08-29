@@ -5,8 +5,13 @@ __pycache__/
 dist/
 build/
 
-# Environment
+# Environment — ignore all .env variants except checked-in examples
 .env
+.env.*
+!.env.example
+!.env.*.example
+.deploy_history
+backups/
 .venv/
 venv/
 
@@ -19,6 +24,7 @@ venv/
 .cursor/
 .claude/
 .agents/
+CLAUDE.md
 
 # OS
 .DS_Store

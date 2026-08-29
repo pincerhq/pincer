@@ -12,6 +12,13 @@ jobs:
       - name: Run tests with coverage
         run: uv run pytest --cov=pincer --cov-report=xml tests/
 
+      # Sprint 10 (T10.5): the voice reliability + red-team harness is a
+      # release-blocking gate now that voice is a stable-tier surface. Run it
+      # as its own step so a harness failure is instantly distinguishable from
+      # an unrelated unit-test failure in the log.
+      - name: Voice harness (both languages, all personas incl. red-team)
+        run: uv run pytest tests/voice_harness/ -v --no-cov
+
       - name: Run ms365-mcp tests
         run: uv run pytest src/ms365-mcp/tests
 
@@ -42,6 +49,28 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+  # Sprint 8, T8.6: known-vulnerable dependencies fail the build. Untriaged
+  # advisories block; triaged ones live in .security/pip-audit-ignore.txt with
+  # an owner and a review date.
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+      - run: uv sync --all-extras
+      - run: pnpm install --frozen-lockfile
+        working-directory: dashboard
+      - name: Audit dependencies
+        run: scripts/audit-deps.sh
 
   dashboard:
     runs-on: ubuntu-latest

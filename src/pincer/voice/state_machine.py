@@ -38,6 +38,26 @@ class CallPhase(StrEnum):
     IVR_NAVIGATION = "ivr_navigation"
     ON_HOLD = "on_hold"
 
+    # Inbound receptionist phases (Sprint 12)
+    RECEPTION_INTENT = "reception_intent"
+    FAQ_ANSWER = "faq_answer"
+    TAKE_MESSAGE = "take_message"
+    INBOUND_BOOKING = "inbound_booking"
+    TRANSFERRING = "transferring"
+    AFTER_HOURS = "after_hours"
+
+
+# Spoken, polite exit for every phase timeout — a timeout must never be silence
+# (Sprint 1, T1.2). The message plays, then the call is ended gracefully.
+# Canonical text lives in pincer/voice/prompts/{en,de}.py (Sprint 2 i18n);
+# this module-level dict remains the English view for backward compatibility.
+from pincer.voice.prompts import get_prompt as _get_prompt  # noqa: E402
+
+PHASE_TIMEOUT_MESSAGES: dict[CallPhase, str] = {
+    CallPhase(key): value for key, value in _get_prompt("PHASE_TIMEOUT_MESSAGES", "en").items()
+}
+
+DEFAULT_TIMEOUT_MESSAGE: str = _get_prompt("DEFAULT_TIMEOUT_MESSAGE", "en")
 
 PHASE_TIMEOUTS: dict[CallPhase, int] = {
     CallPhase.RINGING: 30,
@@ -52,11 +72,25 @@ PHASE_TIMEOUTS: dict[CallPhase, int] = {
     CallPhase.OUTBOUND_GREETING: 30,
     CallPhase.IVR_NAVIGATION: 120,
     CallPhase.ON_HOLD: 300,
+    # Sprint 12 (receptionist) — every timeout has a spoken exit
+    CallPhase.RECEPTION_INTENT: 30,
+    CallPhase.FAQ_ANSWER: 60,
+    CallPhase.TAKE_MESSAGE: 120,
+    CallPhase.INBOUND_BOOKING: 180,
+    CallPhase.TRANSFERRING: 30,
+    CallPhase.AFTER_HOURS: 90,
 }
 
 VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
     CallPhase.RINGING: {CallPhase.GREETING, CallPhase.OUTBOUND_GREETING, CallPhase.FAILED},
-    CallPhase.GREETING: {CallPhase.INTENT_CAPTURE, CallPhase.FAILED},
+    CallPhase.GREETING: {
+        CallPhase.INTENT_CAPTURE,
+        CallPhase.FAILED,
+        # Sprint 12: receptionist greeting spoken → intent capture / after hours
+        CallPhase.RECEPTION_INTENT,
+        CallPhase.AFTER_HOURS,
+        CallPhase.ENDING,
+    },
     CallPhase.INTENT_CAPTURE: {
         CallPhase.VERIFY,
         CallPhase.EXECUTE,
@@ -85,6 +119,7 @@ VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
         CallPhase.INTENT_CAPTURE,
         CallPhase.ENDING,
         CallPhase.ERROR_RECOVERY,
+        CallPhase.RECEPTION_INTENT,  # Sprint 12: "Kann ich sonst noch helfen?"
     },
     CallPhase.ERROR_RECOVERY: {
         CallPhase.INTENT_CAPTURE,
@@ -109,6 +144,44 @@ VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
         CallPhase.INTENT_CAPTURE,
         CallPhase.FREEFORM,
         CallPhase.FAILED,
+        CallPhase.ERROR_RECOVERY,
+    },
+    # ── Sprint 12: inbound receptionist (§6 transition table) ──
+    CallPhase.RECEPTION_INTENT: {
+        CallPhase.FAQ_ANSWER,
+        CallPhase.TAKE_MESSAGE,
+        CallPhase.INBOUND_BOOKING,
+        CallPhase.TRANSFERRING,
+        CallPhase.ENDING,
+        CallPhase.ERROR_RECOVERY,
+    },
+    CallPhase.FAQ_ANSWER: {
+        CallPhase.RECEPTION_INTENT,
+        CallPhase.TAKE_MESSAGE,
+        CallPhase.ENDING,
+        CallPhase.ERROR_RECOVERY,
+    },
+    CallPhase.TAKE_MESSAGE: {
+        CallPhase.RECEPTION_INTENT,
+        CallPhase.ENDING,
+        CallPhase.ERROR_RECOVERY,
+    },
+    CallPhase.INBOUND_BOOKING: {
+        CallPhase.VERIFY,
+        CallPhase.TAKE_MESSAGE,
+        CallPhase.RECEPTION_INTENT,
+        CallPhase.ENDING,
+        CallPhase.ERROR_RECOVERY,
+    },
+    CallPhase.TRANSFERRING: {
+        CallPhase.TAKE_MESSAGE,
+        CallPhase.ENDING,
+        CallPhase.COMPLETED,
+        CallPhase.FAILED,
+    },
+    CallPhase.AFTER_HOURS: {
+        CallPhase.TAKE_MESSAGE,
+        CallPhase.ENDING,
         CallPhase.ERROR_RECOVERY,
     },
     CallPhase.COMPLETED: set(),
@@ -235,6 +308,15 @@ class CallStateMachine:
         )
         return True
 
+    def touch(self) -> None:
+        """Activity heartbeat: phase timeouts measure INACTIVITY within a
+        phase, not total time spent in it. Without this, a lively
+        conversation that stays in INTENT_CAPTURE is cut off mid-sentence at
+        the 120s mark (the 2-minute-drop bug) — the timeout messages
+        themselves say "I haven't heard anything", so silence is what the
+        clock must measure. Called on every caller utterance."""
+        self._state.phase_entered_at = time.monotonic()
+
     def check_timeout(self) -> bool:
         """Check if current phase has timed out."""
         timeout = PHASE_TIMEOUTS.get(self._state.phase, 60)
@@ -277,48 +359,37 @@ class CallStateMachine:
         else:
             self.transition(CallPhase.GREETING, "call_answered")
 
-    def get_phase_instruction(self) -> str:
-        """Return the behavioral instruction for the current phase."""
-        return _PHASE_INSTRUCTIONS.get(self._state.phase, "")
+    def get_phase_instruction(self, language: str = "en") -> str:
+        """Behavioral instruction for the current phase, in the call language."""
+        instructions = _get_prompt("PHASE_INSTRUCTIONS", language) or {}
+        return instructions.get(self._state.phase.value, "")
+
+    def get_timeout_message(self, language: str = "en", formality: str = "sie") -> str:
+        """Spoken, polite exit line for the current phase timing out."""
+        messages = _get_prompt("PHASE_TIMEOUT_MESSAGES", language, formality) or {}
+        default = _get_prompt("DEFAULT_TIMEOUT_MESSAGE", language, formality) or DEFAULT_TIMEOUT_MESSAGE
+        return messages.get(self._state.phase.value, default)
+
+    def force_terminal(self, phase: CallPhase = CallPhase.FAILED, reason: str = "forced") -> None:
+        """Force the machine into a terminal state, bypassing transition rules.
+
+        Cleanup paths (hangup, provider failure, watchdog) must always leave
+        the machine in COMPLETED or FAILED — never a stuck intermediate phase.
+        The forced jump is still recorded in the transition history.
+        """
+        if phase not in (CallPhase.COMPLETED, CallPhase.FAILED):
+            phase = CallPhase.FAILED
+        if self.is_terminal:
+            return
+        current = self._state.phase
+        self._state.transitions.append(PhaseTransition(from_phase=current, to_phase=phase, reason=reason))
+        self._state.phase = phase
+        self._state.phase_entered_at = time.monotonic()
+        self._state.pending_action = None
+        logger.info("State forced terminal [%s]: %s -> %s (%s)", self._state.call_sid, current, phase, reason)
 
 
+# English view of the localized phase instructions (canonical text in prompts/en.py)
 _PHASE_INSTRUCTIONS: dict[CallPhase, str] = {
-    CallPhase.GREETING: ("Greet the caller warmly and briefly. Ask how you can help. Keep it to 1-2 sentences."),
-    CallPhase.INTENT_CAPTURE: (
-        "Listen to what the caller wants. Ask clarifying questions if needed. "
-        "Once you understand the intent, either take action (transition to VERIFY) "
-        "or answer directly (stay in FREEFORM)."
-    ),
-    CallPhase.FREEFORM: (
-        "Have an open conversation. Answer questions, provide information, "
-        "give briefings. No confirmation needed for read-only actions."
-    ),
-    CallPhase.VERIFY: (
-        "Confirm the details before taking action. State exactly what you will do "
-        "and ask for explicit yes/no confirmation."
-    ),
-    CallPhase.EXECUTE: (
-        "Execute the confirmed action. Keep the caller informed with filler phrases while the action runs."
-    ),
-    CallPhase.CONFIRM: ("Report the result of the action to the caller. Ask if there's anything else."),
-    CallPhase.ERROR_RECOVERY: (
-        "Something went wrong. Apologize briefly, explain what happened, "
-        "and offer alternatives or ask if the caller wants to try again."
-    ),
-    CallPhase.ENDING: (
-        "Summarize what was accomplished during the call. Say goodbye warmly. "
-        "Ask 'Is there anything else?' before ending."
-    ),
-    CallPhase.OUTBOUND_GREETING: (
-        "You are calling on behalf of the user. Introduce yourself politely: "
-        "'Hi, I'm calling on behalf of [user_name] regarding [purpose].' "
-        "Be professional and concise."
-    ),
-    CallPhase.IVR_NAVIGATION: (
-        "You are navigating an automated phone menu. Listen to the options "
-        "and select the correct one by sending DTMF tones."
-    ),
-    CallPhase.ON_HOLD: (
-        "You are on hold. Wait patiently. If hold time exceeds the limit, hang up and notify the user."
-    ),
+    CallPhase(key): value for key, value in _get_prompt("PHASE_INSTRUCTIONS", "en").items()
 }

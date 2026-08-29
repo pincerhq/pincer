@@ -58,6 +58,72 @@ def _setup_logging(level: str) -> None:
     )
     # format="%(message)s",
 
+    # T8.5: no raw E.164 number reaches any log sink. Installed on the root
+    # handlers right after basicConfig so it covers every module's logger,
+    # including third-party ones (twilio, httpx) that echo call metadata.
+    from pincer.voice.pii_guard import install_log_pii_filter
+
+    install_log_pii_filter()
+
+
+async def _ensure_ops_schedules(scheduler: Any, settings: Any) -> None:
+    """Create the Sprint 9 ops schedules if they don't exist yet.
+
+    Idempotent by schedule name. Each job is gated on its own prerequisite:
+    the alert scanner needs somewhere to deliver, the canary needs a target
+    number, and the digest needs a recipient.
+    """
+    ops_user = settings.ops_user_id or settings.default_user_id or ""
+    tz = settings.voice_timezone or settings.timezone
+    if not ops_user:
+        return
+
+    try:
+        existing = {s["name"] for s in await scheduler.list_schedules(ops_user)}
+    except Exception as e:
+        console.print(f"[yellow]Ops schedule lookup failed: {e}[/yellow]")
+        return
+
+    jobs: list[tuple[str, str, dict[str, Any], bool, str]] = [
+        (
+            "ops_alert_scan",
+            f"*/{max(1, int(settings.ops_alert_scan_interval_min))} * * * *",
+            {"type": "ops_alert_scan"},
+            bool(settings.ops_alerts_enabled),
+            f"Ops alert scan every {settings.ops_alert_scan_interval_min}min",
+        ),
+        (
+            "voice_canary",
+            settings.voice_canary_cron,
+            {"type": "voice_canary"},
+            bool(settings.voice_canary_enabled and settings.voice_canary_number),
+            f"Voice canary scheduled ({settings.voice_canary_cron})",
+        ),
+        (
+            "voice_weekly_digest",
+            settings.ops_digest_cron,
+            {"type": "voice_weekly_digest"},
+            bool(settings.ops_alerts_enabled),
+            f"Weekly failure digest scheduled ({settings.ops_digest_cron})",
+        ),
+    ]
+
+    for name, cron_expr, action, enabled, message in jobs:
+        if not enabled or name in existing:
+            continue
+        try:
+            await scheduler.add(
+                name=name,
+                cron_expr=cron_expr,
+                action=action,
+                pincer_user_id=ops_user,
+                tz=tz,
+                channel=settings.ops_channel or "telegram",
+            )
+            console.print(f"[green]{message}[/green]")
+        except Exception as e:
+            console.print(f"[yellow]Could not schedule {name}: {e}[/yellow]")
+
 
 def _find_env_file() -> str:
     """Return the path to the .env file (project root preferred, else home dir)."""
@@ -92,10 +158,18 @@ def _upsert_env(env_path: str, key: str, value: str) -> None:
 
 
 def _port_in_use(host: str, port: int) -> bool:
-    """Return True if something is already listening on the given host:port."""
-    check_host = "127.0.0.1" if host == "0.0.0.0" else host
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex((check_host, port)) == 0
+    """Return True if something is already listening on the given host:port.
+
+    Defensive: unresolvable inputs (e.g. mocked settings in tests) count as
+    "not in use" rather than crashing startup.
+    """
+    try:
+        check_host = "127.0.0.1" if host == "0.0.0.0" else host
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            return s.connect_ex((check_host, int(port))) == 0
+    except (TypeError, ValueError, OSError):
+        return False
 
 
 def _print_voice_webhook_urls(settings: Any, console: Any) -> None:  # type: ignore[no-untyped-def]
@@ -109,15 +183,15 @@ def _print_voice_webhook_urls(settings: Any, console: Any) -> None:  # type: ign
         f"  Fallback:          {base}/api/apps/twilio/fallback",
     ]
     engine = getattr(settings, "voice_engine", "conversation_relay").lower().strip()
+    host = base
+    for prefix in ("https://", "http://"):
+        if host.startswith(prefix):
+            host = host[len(prefix) :]
+            break
     if engine == "media_streams":
-        host = base
-        for prefix in ("https://", "http://"):
-            if host.startswith(prefix):
-                host = host[len(prefix) :]
-                break
         lines.append(f"  Media stream WS:   wss://{host}/api/apps/twilio/stream/{{CallSid}}")
     else:
-        lines.append(f"  ConversationRelay: {base}/api/apps/twilio/relay-webhook")
+        lines.append(f"  ConversationRelay: wss://{host}/api/apps/twilio/relay")
     for line in lines:
         console.print(line)
 
@@ -343,6 +417,260 @@ async def _build_core(settings: Settings) -> CoreComponents:
         console.print(f"[green]Slack tools enabled ({bootstrap_report['slack']} tools)[/green]")
     if "image_gen" in bootstrap_report:
         console.print("[green]Image generation tool registered[/green]")
+
+    # Voice tools are registered BEFORE channel startup: channels that come up
+    # early (Telegram) start answering immediately, and a slow channel connect
+    # later in the sequence (e.g. WhatsApp waiting 120s on a QR/outdated
+    # client) must not leave those first conversations without make_phone_call
+    # ("Tool not found"). The voice channel/engine wiring stays in _run_agent.
+    if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.twilio_account_sid:
+        from pincer.tools.builtin.call_transcript import get_call_transcript
+        from pincer.voice.call_tools import register_call_tools
+        from pincer.voice.outbound import make_phone_call
+        from pincer.voice.threads import init_thread_manager, register_thread_tools
+
+        # Sprint 13: exactly ONE ThreadManager per process (the Hotfix-3
+        # lesson — two instances would mean two truths about one thread). It
+        # owns the rolling-summary merge, so it gets the same LLM and memory
+        # store the post-call pipeline uses.
+        init_thread_manager(settings, llm=llm, memory=memory_store)
+        register_thread_tools(tools, settings)
+
+        # Sprint 11: the Pincer-owned in-call tools (send_owner_message,
+        # memory_note, contact_lookup). Whether the LLM sees them on a call is
+        # decided per call by voice.tool_policy (tiers + call scope).
+        register_call_tools(tools, settings, memory=memory_store)
+
+        # Sprint 12: the inbound receptionist — the business profile is loaded
+        # and validated here (fail fast: a bad profile refuses to start), and
+        # business_profile_lookup becomes the line's only knowledge tool.
+        if getattr(settings, "receptionist_enabled", False) is True:
+            from pincer.voice.receptionist.profile import ProfileError, load_from_settings
+            from pincer.voice.receptionist.tools import register_receptionist_tools
+
+            try:
+                _profile = load_from_settings(settings)
+            except ProfileError as e:
+                console.print(f"[red]Receptionist: {e}[/red]")
+                raise typer.Exit(1) from e
+            register_receptionist_tools(tools)
+            if _profile is not None:
+                console.print(
+                    f"[green]Receptionist enabled for {_profile.business.name} "
+                    f"(languages {','.join(_profile.business.languages)})[/green]"
+                )
+
+        tools.register(
+            name="get_call_transcript",
+            description=(
+                "Retrieve the transcript of a phone call (PII-masked). Use when the user asks "
+                "'show me the transcript of the last call' / 'zeig mir das Transkript' or "
+                "references /transcript <CallSid>. Empty call_sid = most recent call."
+            ),
+            handler=get_call_transcript,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "call_sid": {
+                        "type": "string",
+                        "description": "Twilio Call SID (e.g. CA1234...); empty for the most recent call",
+                        "default": "",
+                    },
+                },
+                "required": [],
+            },
+            require_approval=False,
+        )
+
+        if settings.voice_outbound_enabled:
+
+            async def _make_phone_call_from_chat(**kwargs: Any) -> str:
+                """The chat-tool entry point. Only difference from the API path
+                is the briefing's `source`; both go through make_phone_call."""
+                from pincer.voice.briefing import SOURCE_CHAT
+
+                kwargs.setdefault("source", SOURCE_CHAT)
+                return await make_phone_call(**kwargs)
+
+            tools.register(
+                name="make_phone_call",
+                description=(
+                    "Place a real phone call to a number. REQUIRED when the user asks you to call someone: "
+                    "you MUST call this tool with target_number (E.164) and purpose. "
+                    "Do NOT describe or simulate a call in text. Do NOT output XML or structured call blocks. "
+                    "Only this tool can place calls. "
+                    "Set language='de' when the user writes in German or the callee is German-speaking — "
+                    "e.g. 'Ruf beim Zahnarzt an und bestätige den Termin', 'Bitte ruf Herrn Müller an', "
+                    "'Sag das Restaurant für morgen ab' → language='de'. "
+                    "Set language='uk' when the user writes in Ukrainian or the callee is Ukrainian-speaking — "
+                    "e.g. 'Зателефонуй мені', 'Подзвони до лікаря і підтверди запис' → language='uk'. "
+                    "English commands ('Call the dentist...') → language='en' (default)."
+                ),
+                handler=_make_phone_call_from_chat,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "target_number": {
+                            "type": "string",
+                            "description": "Phone number in E.164 format (e.g. +14155551234)",
+                        },
+                        "purpose": {
+                            "type": "string",
+                            "description": (
+                                "REQUIRED, at least 10 characters: the concrete task for this call. The "
+                                "agent is bound to it and states it in its first sentence after the "
+                                "greeting, so write what should actually be achieved or asked "
+                                '("Ask what time they close today"), not a topic label ("opening '
+                                'hours"). Write it in the call language.'
+                            ),
+                        },
+                        "instructions": {
+                            "type": "string",
+                            "description": (
+                                "Specific instructions the agent follows during the call "
+                                "(what to ask, what to accept, what to avoid)"
+                            ),
+                            "default": "",
+                        },
+                        "target_name": {
+                            "type": "string",
+                            "description": "Name of the person or business being called (optional)",
+                            "default": "",
+                        },
+                        "max_duration": {
+                            "type": "integer",
+                            "description": "Maximum call duration in seconds (default 300)",
+                            "default": 300,
+                        },
+                        "language": {
+                            "type": "string",
+                            "enum": ["en", "de", "uk"],
+                            "description": (
+                                "Language the call is conducted in. 'de' for German commands/callees, "
+                                "'uk' for Ukrainian (greeting, conversation, confirmations all in that "
+                                "language), 'en' otherwise."
+                            ),
+                            "default": "en",
+                        },
+                        "thread_id": {
+                            "type": "string",
+                            "description": (
+                                "Continue an existing call thread when this call follows up on an earlier "
+                                "one ('call him again about the appointment'). Find it with thread_lookup. "
+                                "If two or more open threads match the contact, ASK the user which one — "
+                                "never guess. Empty starts a new thread."
+                            ),
+                            "default": "",
+                        },
+                    },
+                    "required": ["target_number", "purpose"],
+                },
+                require_approval=True,
+            )
+
+            # Sprint 6: appointment scheduling — free/busy → candidate slots →
+            # bounded in-call negotiation → calendar event + invitations.
+            from pincer.voice.briefing import SOURCE_CHAT
+            from pincer.voice.scheduling import schedule_appointment_call as _schedule_impl
+
+            async def _schedule_appointment_handler(
+                target_number: str,
+                contact_name: str,
+                topic: str,
+                timeframe: str,
+                duration_minutes: int = 30,
+                language: str = "",
+                attendees: str = "",
+                location_or_meet: str = "",
+                thread_id: str = "",
+                context: dict | None = None,
+            ) -> str:
+                ctx = context or {}
+                return await _schedule_impl(
+                    tools,
+                    settings,
+                    target_number=target_number,
+                    contact_name=contact_name,
+                    topic=topic,
+                    timeframe=timeframe,
+                    duration_minutes=duration_minutes,
+                    language=language,
+                    attendees=attendees,
+                    location_or_meet=location_or_meet,
+                    user_id=ctx.get("user_id", ""),
+                    channel=ctx.get("channel", ""),
+                    thread_id=thread_id,
+                    source=SOURCE_CHAT,
+                )
+
+            tools.register(
+                name="schedule_appointment_call",
+                description=(
+                    "Call someone to schedule an appointment, negotiating only within the user's real "
+                    "free Google Calendar slots, then create the calendar event with invitations and "
+                    "report back. Use for commands like 'Call Dr. Smith and schedule an appointment "
+                    "next week, 30 minutes' / 'Ruf Dr. Müller an und vereinbare einen Termin nächste "
+                    "Woche, 30 Min' (→ language='de') / 'Book a call with the tax advisor tomorrow'. "
+                    "Requires Google Calendar to be connected. Prefer this over make_phone_call "
+                    "whenever the goal of the call is agreeing on a date/time."
+                ),
+                handler=_schedule_appointment_handler,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "target_number": {
+                            "type": "string",
+                            "description": "Phone number in E.164 format (e.g. +4930123456)",
+                        },
+                        "contact_name": {
+                            "type": "string",
+                            "description": "Who is being called (e.g. 'Dr. Müller')",
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "What the appointment is about, in the call language",
+                        },
+                        "timeframe": {
+                            "type": "string",
+                            "description": (
+                                "'tomorrow' | 'this_week' | 'next_week' | ISO range "
+                                "'YYYY-MM-DD/YYYY-MM-DD' (empty = next 7 days)"
+                            ),
+                            "default": "",
+                        },
+                        "duration_minutes": {
+                            "type": "integer",
+                            "description": "Appointment length in minutes (default 30)",
+                            "default": 30,
+                        },
+                        "language": {
+                            "type": "string",
+                            "enum": ["en", "de", "uk"],
+                            "description": "Call language; 'de' for German commands/callees",
+                            "default": "en",
+                        },
+                        "attendees": {
+                            "type": "string",
+                            "description": "Comma-separated emails to invite to the calendar event",
+                            "default": "",
+                        },
+                        "location_or_meet": {
+                            "type": "string",
+                            "description": "Event location, or 'meet' to attach a Google Meet link",
+                            "default": "",
+                        },
+                        "thread_id": {
+                            "type": "string",
+                            "description": (
+                                "Continue an existing call thread (find it with thread_lookup); empty starts a new one"
+                            ),
+                            "default": "",
+                        },
+                    },
+                    "required": ["target_number", "contact_name", "topic"],
+                },
+                require_approval=True,
+            )
 
     # Skills: SKILL.md-based discovery, coexists unconditionally with MCP.
     from pincer.tools.builtin.skills_tools import make_skills_tools
@@ -594,6 +922,21 @@ def _register_channel_bound_tools(tools: ToolRegistry, channel_map: dict[str, Ba
 
 
 async def _run_agent(settings: Settings) -> None:
+    # Single-instance guard: a second `pincer run` used to keep running with
+    # the API port taken — Telegram polling then fights between instances
+    # (TelegramConflictError) and Twilio webhooks land on the other process
+    # (calls with no audio and no transcript). Fail loudly instead. Lives here
+    # (not in _build_core) because `pincer run tasks` workers legitimately run
+    # alongside the main process without binding the dashboard port.
+    if _port_in_use(settings.dashboard_host, settings.dashboard_port):
+        console.print(
+            f"[bold red]Port {settings.dashboard_host}:{settings.dashboard_port} is already in use — "
+            "another Pincer instance appears to be running.[/bold red]\n"
+            "[yellow]Stop it first (e.g. `pkill -f 'pincer run'`) or set PINCER_DASHBOARD_PORT "
+            "if something else owns the port.[/yellow]"
+        )
+        raise typer.Exit(1)
+
     core = await _build_core(settings)
     session_mgr, cost_tracker, audit_logger, rate_limiter = (
         core.session_mgr,
@@ -823,8 +1166,13 @@ async def _run_agent(settings: Settings) -> None:
             text=text,
             images=incoming.images if incoming.images else None,
             channel_user_id=ch_user_id,
+            extra_system=incoming.extra_system,
         )
 
+        # Voice responses are SPOKEN — a cost suffix would be read aloud as
+        # "dollar zero point zero zero…" on every turn. Text channels keep it.
+        if incoming.channel_type == ChannelType.VOICE:
+            return response.text
         cost_str = f"\n\n`${response.cost_usd:.4f}`" if response.cost_usd > 0 else ""
         return response.text + cost_str
 
@@ -943,6 +1291,10 @@ async def _run_agent(settings: Settings) -> None:
         if channel == "teams" and ms is not None:
             raw_id = await _raw_id(user_id, "teams")
             return await ms.request_approval(raw_id, tool_name, arguments)
+        if channel == "web":
+            from pincer.api.approvals import request_web_approval
+
+            return await request_web_approval(tool_name, arguments, user_id, channel)
         logger.warning(
             "No approval UI for channel %s; denying %s",
             channel,
@@ -1002,56 +1354,122 @@ async def _run_agent(settings: Settings) -> None:
     # Start when either inbound (voice_enabled) or outbound (voice_outbound_enabled) is enabled
     vc = None
     if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.twilio_account_sid:
+        # Sprint 4 (T4.4): validate configured ElevenLabs voice IDs once at
+        # startup — a bad ID must fail loudly here, never mid-call. Network
+        # trouble only warns; a definitively unknown ID is fatal on
+        # media_streams and falls back to the Google voice on ConversationRelay.
+        if settings.elevenlabs_api_key.get_secret_value():
+            from pincer.voice.voices import validate_configured_voices
+
+            # Sync httpx under the hood — off the event loop, so the already-
+            # running channels (Telegram polling, webhooks) keep serving.
+            bad_voices = await asyncio.to_thread(validate_configured_voices, settings)
+            if bad_voices:
+                for vid, problem in bad_voices.items():
+                    console.print(f"[bold red]ElevenLabs voice {vid}: {problem}[/bold red]")
+                if settings.voice_engine.lower().strip() == "media_streams":
+                    console.print(
+                        "[bold red]Fix PINCER_ELEVENLABS_VOICE_ID / _EN / _DE "
+                        "(find IDs with `pincer voice list`).[/bold red]"
+                    )
+                    raise typer.Exit(1)
+                console.print(
+                    "[yellow]ConversationRelay will fall back to the Google voice for affected calls.[/yellow]"
+                )
         try:
             from pincer.channels.phone_calls import VoiceChannel
             from pincer.voice.engine import get_voice_engine
-            from pincer.voice.outbound import make_phone_call
+
+            # Dashboard-set runtime overrides (voice turn model) survive restarts
+            from pincer.voice.runtime_config import apply_overrides
             from pincer.voice.twiml_server import init_voice_routes
+
+            apply_overrides(settings)
 
             voice_engine = get_voice_engine(settings)
             vc = VoiceChannel(settings)
             vc.set_engine(voice_engine)
+            # Sprint 5: streaming turn pipeline (LLM tokens → sentence
+            # boundaries → TTS while the model still writes). The blocking
+            # on_message handler stays wired as the guard-regeneration path.
+            vc.set_stream_agent(agent)
+            vc.set_tool_registry(tools)  # Sprint 12: receptionist free/busy + booking writes
             await vc.start(on_message)
             channel_map[vc.name] = vc
             router.register(ChannelType.VOICE, vc)
             init_voice_routes(voice_engine, settings)
+            if getattr(settings, "receptionist_enabled", False) is True:
+                from pincer.voice.twiml_server import set_transfer_session_resolver
 
-            if settings.voice_outbound_enabled:
-                tools.register(
-                    name="make_phone_call",
-                    description=(
-                        "Place a real phone call to a number. REQUIRED when the user asks you to call someone: "
-                        "you MUST call this tool with target_number (E.164) and purpose. "
-                        "Do NOT describe or simulate a call in text. Do NOT output XML or structured call blocks. "
-                        "Only this tool can place calls."
-                    ),
-                    handler=make_phone_call,
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "target_number": {
-                                "type": "string",
-                                "description": "Phone number in E.164 format (e.g. +14155551234)",
-                            },
-                            "purpose": {
-                                "type": "string",
-                                "description": "What the call is about",
-                            },
-                            "instructions": {
-                                "type": "string",
-                                "description": "Specific instructions for the agent during the call",
-                                "default": "",
-                            },
-                            "max_duration": {
-                                "type": "integer",
-                                "description": "Maximum call duration in seconds (default 300)",
-                                "default": 300,
-                            },
-                        },
-                        "required": ["target_number", "purpose"],
-                    },
-                    require_approval=True,
+                set_transfer_session_resolver(vc.get_reception_session)
+
+            # Sprint 9 (T9.1): both call gauges read live engine state.
+            from pincer.observability.golden_signals import stuck_calls as _stuck_calls
+            from pincer.observability.metrics import set_active_calls_provider, set_stuck_calls_provider
+
+            set_active_calls_provider(lambda: len(voice_engine.get_active_calls()))
+            set_stuck_calls_provider(lambda: int(_stuck_calls(settings, voice_engine.get_active_calls()).value or 0))
+
+            # Sprint 1 (T1.5): live call status back to the initiating user's channel
+            from pincer.voice.status_notify import set_status_notifier
+
+            async def _voice_status_notifier(user_id: str, channel: str, text: str) -> bool:
+                # Dashboard-initiated calls have no push channel — the web UI
+                # observes live state and reports via /api/voice. Treat as
+                # delivered instead of erroring through the router.
+                if channel == "web" or user_id == "dashboard":
+                    logging.getLogger("pincer.voice").debug("Dashboard call status (observed via API): %s", text[:120])
+                    return True
+                try:
+                    channel_type = ChannelType(channel)
+                except ValueError:
+                    channel_type = None
+                if channel_type is not None and await router.send(channel_type, user_id, text):
+                    return True
+                return await router.send_to_user(user_id, text)
+
+            set_status_notifier(_voice_status_notifier)
+
+            # Sprint 11 (`user` mode): the in-call approval card goes to the
+            # initiating user's channel; Telegram renders buttons, the
+            # dashboard polls /api/voice/approvals, other channels get a
+            # text note (no answer path → the gate defers to a follow-up).
+            from pincer.voice import approvals as voice_approvals
+
+            async def _present_voice_approval(req: Any) -> bool:
+                # Telegram card for telegram-initiated calls — and for inbound
+                # (receptionist) calls whose owner id is a Telegram chat id.
+                if tg is not None and (req.channel == "telegram" or (not req.channel and str(req.user_id).isdigit())):
+                    return await tg.present_voice_approval(req)
+                if req.channel == "web" or req.user_id == "dashboard":
+                    return True  # answered via POST /api/voice/approvals/{id}
+                note = f"📞 In-call approval needed ({req.tool_name}): {req.summary} — answer in the dashboard."
+                with contextlib.suppress(Exception):
+                    await router.send_to_user(req.user_id, note)
+                return False
+
+            async def _finalize_voice_approval(req: Any, final_state: str) -> None:
+                if req.channel == "telegram" and tg is not None:
+                    await tg.finalize_voice_approval(req, final_state)
+
+            voice_approvals.set_presenter(_present_voice_approval)
+            voice_approvals.set_finalizer(_finalize_voice_approval)
+
+            # Sprint 3: post-call intelligence — structured report, memory
+            # notes, and follow-up proposals after every call.
+            # (make_phone_call / get_call_transcript are registered earlier,
+            # before channel startup, so early-started channels have them.)
+            from pincer.voice.postcall import PostCallProcessor
+
+            vc.set_post_call_processor(
+                PostCallProcessor(
+                    settings,
+                    llm=llm,
+                    memory=memory_store,
+                    db_path=str(settings.db_path),
+                    tool_registry=tools,  # Sprint 6: appointment calendar executor
                 )
+            )
 
             console.print(f"[green]Voice calling enabled ({settings.voice_engine})[/green]")
         except Exception as e:
@@ -1166,11 +1584,59 @@ async def _run_agent(settings: Settings) -> None:
     # calling the router directly — the same DeliveryBackend/ResultEmitter
     # code path a standalone `pincer run tasks` worker uses, so this
     # in-process default and a split deployment behave identically.
-    # See pincer.tasks.delivery.
+    # See pincer.tasks.delivery. (The voice retention_purge action is handled
+    # in pincer.tasks.actors alongside briefing/custom.)
     from pincer.tasks.delivery import ResultEmitter, ResultRelay, create_delivery_backend
 
     delivery_backend = create_delivery_backend(settings)
     deliverer = ResultEmitter(delivery_backend)
+
+    if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.voice_transcript_retention_days > 0:
+        try:
+            purge_tz = settings.voice_timezone or settings.timezone
+            purge_user = settings.default_user_id or "system"
+            existing = await scheduler.list_schedules(purge_user)
+            if not any(s["name"] == "voice_retention_purge" for s in existing):
+                await scheduler.add(
+                    name="voice_retention_purge",
+                    cron_expr="30 3 * * *",
+                    action={"type": "retention_purge"},
+                    pincer_user_id=purge_user,
+                    tz=purge_tz,
+                )
+                console.print(
+                    f"[green]Voice transcript retention purge scheduled daily "
+                    f"(retention={settings.voice_transcript_retention_days}d, tz={purge_tz})[/green]"
+                )
+        except Exception as e:
+            console.print(f"[yellow]Retention schedule error: {e}[/yellow]")
+
+    # Sprint 13 §5: threads with no activity for PINCER_THREAD_AUTOCLOSE_DAYS
+    # are closed automatically. Idempotent by name, like every schedule here.
+    if (settings.voice_enabled or settings.voice_outbound_enabled) and settings.thread_autoclose_days > 0:
+        try:
+            thread_user = settings.default_user_id or "system"
+            existing = await scheduler.list_schedules(thread_user)
+            if not any(s["name"] == "voice_thread_autoclose" for s in existing):
+                await scheduler.add(
+                    name="voice_thread_autoclose",
+                    cron_expr="45 3 * * *",
+                    action={"type": "thread_autoclose"},
+                    pincer_user_id=thread_user,
+                    tz=settings.voice_timezone or settings.timezone,
+                )
+                console.print(
+                    f"[green]Call-thread auto-close scheduled daily "
+                    f"(after {settings.thread_autoclose_days}d of inactivity)[/green]"
+                )
+        except Exception as e:
+            console.print(f"[yellow]Thread auto-close schedule error: {e}[/yellow]")
+
+    # Sprint 9 (T9.2): the three scheduled observability jobs. Each is
+    # idempotent by name, so a restart never duplicates a schedule, and each is
+    # only created when its prerequisite is actually configured — an alert
+    # scanner with nowhere to deliver is worse than no scanner.
+    await _ensure_ops_schedules(scheduler, settings)
 
     # Sprint 3: Event triggers
     triggers = EventTriggerManager(settings.db_path, deliverer)
@@ -1305,6 +1771,19 @@ async def _run_agent(settings: Settings) -> None:
         f"\n[bold green]{settings.agent_name} is running![/bold green] "
         f"Channels: {', '.join(active)}. Press Ctrl+C to stop.\n"
     )
+
+    # T7.2: `docker stop` / a deploy sends SIGTERM. Without a handler Python
+    # dies mid-call (no spoken ending, no report). Route it into the same
+    # graceful path as Ctrl+C: cancel the main task -> finally block ->
+    # channel.stop() drains active calls with a spoken ending.
+    import signal as _sigterm_mod
+
+    _main_task = asyncio.current_task()
+    with contextlib.suppress(NotImplementedError, RuntimeError):  # Windows / nested loops
+        asyncio.get_running_loop().add_signal_handler(
+            _sigterm_mod.SIGTERM,
+            lambda: _main_task.cancel() if _main_task and not _main_task.done() else None,
+        )
 
     try:
         while True:
@@ -1791,6 +2270,11 @@ def init() -> None:
 @app.command()
 def doctor(
     output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+    production: bool = typer.Option(
+        False,
+        "--production",
+        help="Deploy gate (Sprint 7): adds production checks and exits non-zero on any CRITICAL",
+    ),
 ) -> None:
     """Run 25+ security checks with traffic-light report."""
     import json as _json
@@ -1801,11 +2285,14 @@ def doctor(
     doc = SecurityDoctor(
         data_dir=_P("data"),
         config_dir=_P("."),
+        production=production,
     )
     report = doc.run_all()
 
     if output_json:
         console.print(_json.dumps(report.to_dict(), indent=2))
+        if production and report.critical > 0:
+            raise typer.Exit(1)
         return
 
     from rich.table import Table
@@ -1847,6 +2334,9 @@ def doctor(
         f"[yellow]{report.warnings} warnings[/yellow]  "
         f"[red]{report.critical} critical[/red]\n"
     )
+    if production and report.critical > 0:
+        console.print("[bold red]Production gate: RED — refusing (deploy scripts must not start).[/bold red]")
+        raise typer.Exit(1)
 
 
 @app.command()
@@ -1983,6 +2473,782 @@ async def _chat_loop() -> None:
 
 
 # ── Signal subcommands ────────────────────────
+
+# ── Voice subcommands (Sprint 4) ──────────────────────────
+
+voice_app = typer.Typer(name="voice", help="Manage ElevenLabs voices for voice calling")
+app.add_typer(voice_app, name="voice")
+
+
+pilot_app = typer.Typer(name="pilot", help="Pilot onboarding and review tooling (Sprint 10)")
+app.add_typer(pilot_app, name="pilot")
+
+
+@pilot_app.command(name="preflight")
+def pilot_preflight(output_json: bool = typer.Option(False, "--json", help="Output as JSON")) -> None:
+    """Check every onboarding prerequisite against the live configuration.
+
+    Run this BEFORE the customer is on the call — discovering a missing Twilio
+    number mid-session is what turns a 2h onboarding into a 4h one."""
+    import json as _json
+
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
+    from pincer.onboarding import (
+        TARGET_MINUTES,
+        StepStatus,
+        blocking,
+        manual_minutes,
+        preflight,
+        total_minutes,
+    )
+
+    results = preflight(get_settings_relaxed())
+    if output_json:
+        console.print(_json.dumps([r.to_dict() for r in results], indent=2))
+        raise typer.Exit(1 if blocking(results) else 0)
+
+    icons = {
+        StepStatus.READY: "[green]✅[/green]",
+        StepStatus.MISSING: "[red]❌[/red]",
+        StepStatus.MANUAL: "[cyan]☐[/cyan]",
+        StepStatus.SKIPPED: "[dim]–[/dim]",
+    }
+    table = Table(show_header=True, title="Onboarding preflight")
+    table.add_column("")
+    table.add_column("Step")
+    table.add_column("Min", justify="right")
+    table.add_column("Detail")
+    for result in results:
+        table.add_row(icons[result.status], result.step.title, str(result.step.minutes), result.message)
+    console.print(table)
+
+    missing = blocking(results)
+    console.print(
+        f"\nEstimated: [bold]{total_minutes()} min[/bold] "
+        f"({manual_minutes()} manual) against a {TARGET_MINUTES} min target."
+    )
+    if missing:
+        console.print(f"\n[red]{len(missing)} blocking item(s) — fix before the onboarding session.[/red]\n")
+    else:
+        console.print("\n[green]No blocking items. Manual steps (☐) still need a human.[/green]\n")
+    raise typer.Exit(1 if missing else 0)
+
+
+@pilot_app.command(name="checklist")
+def pilot_checklist(
+    customer: str = typer.Argument(..., help="Customer name, used as the document title"),
+    out: str = typer.Option("", "--out", "-o", help="Write to this file instead of stdout"),
+) -> None:
+    """Emit a per-customer onboarding checklist with a time-tracking table."""
+    from pathlib import Path as _Path
+
+    from pincer.config import get_settings_relaxed
+    from pincer.onboarding import preflight, render_checklist
+
+    markdown = render_checklist(customer, preflight(get_settings_relaxed()))
+    if out:
+        _Path(out).write_text(markdown, encoding="utf-8")
+        console.print(f"[green]Checklist written to {out}[/green]")
+    else:
+        console.print(markdown)
+
+
+@pilot_app.command(name="spot-check")
+def pilot_spot_check(
+    count: int = typer.Option(10, "--count", "-n", help="Calls to sample"),
+    days: int = typer.Option(7, "--days", "-d", help="Window in days"),
+    seed: int = typer.Option(0, "--seed", help="Sampling seed — same seed, same calls"),
+    language: str = typer.Option("", "--language", "-l", help="Only calls in this language"),
+    failures_only: bool = typer.Option(False, "--failures-only", help="Only calls that did not complete"),
+    week: str = typer.Option("", "--week", help="Label for the sheet (e.g. 'week 2')"),
+    out: str = typer.Option("", "--out", "-o", help="Write to this file instead of stdout"),
+) -> None:
+    """Weekly transcript spot-check sheet (T10.2).
+
+    Ten calls, PII-masked, with the review questions attached. The sample is
+    deterministic from --seed so two reviewers argue about the same calls."""
+    import asyncio as _asyncio
+    from pathlib import Path as _Path
+
+    from pincer.config import get_settings_relaxed
+    from pincer.observability.pilot_review import render_spot_check, sample_calls
+
+    calls = _asyncio.run(
+        sample_calls(
+            get_settings_relaxed(),
+            count=count,
+            days=days,
+            seed=seed,
+            language=language or None,
+            only_failures=failures_only,
+        )
+    )
+    if not calls:
+        console.print(f"[yellow]No calls in the last {days} day(s) matching the filter.[/yellow]")
+        raise typer.Exit(1)
+
+    sheet = render_spot_check(calls, week=week)
+    if out:
+        _Path(out).write_text(sheet, encoding="utf-8")
+        console.print(f"[green]Spot-check sheet ({len(calls)} calls) written to {out}[/green]")
+    else:
+        console.print(sheet)
+
+
+@pilot_app.command(name="export-fixture")
+def pilot_export_fixture(
+    call_sid: str = typer.Argument(..., help="Call SID to turn into a harness persona"),
+    name: str = typer.Option("", "--name", help="Fixture name (default: derived from the SID)"),
+    notes: str = typer.Option("", "--notes", help="Why this call is worth replaying"),
+    out: str = typer.Option("", "--out", "-o", help="Directory or file to write the fixture to"),
+) -> None:
+    """Export a real call as a PII-masked harness persona fixture (T10.3).
+
+    Review the flagged names before committing — mask_pii handles numbers and
+    emails, but personal names are not a pattern."""
+    import asyncio as _asyncio
+    from pathlib import Path as _Path
+
+    from pincer.config import get_settings_relaxed
+    from pincer.observability.pilot_review import export_persona_fixture, fixture_to_json
+
+    try:
+        fixture = _asyncio.run(export_persona_fixture(get_settings_relaxed(), call_sid, name=name, notes=notes))
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1) from e
+
+    payload = fixture_to_json(fixture)
+    if out:
+        target = _Path(out)
+        if target.is_dir():
+            target = target / f"{fixture['name']}.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(payload, encoding="utf-8")
+        console.print(f"[green]Fixture written to {target}[/green]")
+    else:
+        console.print(payload)
+
+    flagged = fixture["review_required"]["possible_names"]
+    if flagged:
+        console.print(
+            f"\n[yellow]⚠️  Possible personal names detected: {', '.join(flagged)}[/yellow]\n"
+            "[yellow]Replace them with placeholders and empty `review_required.possible_names` "
+            "before committing — the loader refuses an unreviewed fixture.[/yellow]\n"
+        )
+    else:
+        console.print("\n[green]No personal names detected. Still read it once before committing.[/green]\n")
+
+
+@pilot_app.command(name="automation-candidates")
+def pilot_automation_candidates() -> None:
+    """Manual onboarding steps ranked by minutes saved (T10.3 input).
+
+    This is the list "automate the top 3 manual steps" refers to. It is derived
+    from the step timings, so it changes when reality does."""
+    from rich.table import Table
+
+    from pincer.onboarding import (
+        TARGET_MINUTES,
+        automatable_minutes,
+        automation_candidates,
+        manual_minutes,
+        total_minutes,
+    )
+
+    candidates = automation_candidates()
+    table = Table(show_header=True, title="Onboarding automation candidates")
+    table.add_column("Min saved", justify="right")
+    table.add_column("Step")
+    table.add_column("What automating it takes")
+    for step in candidates:
+        table.add_row(str(step.minutes), step.title, step.automation_note)
+    console.print(table)
+
+    remaining = total_minutes() - automatable_minutes()
+    console.print(
+        f"\nNow: [bold]{total_minutes()} min[/bold] ({manual_minutes()} manual). "
+        f"Automating all {len(candidates)} candidates would reach ~{remaining} min "
+        f"against the {TARGET_MINUTES} min target.\n"
+    )
+
+
+ops_app = typer.Typer(name="ops", help="Voice operations: golden signals, SLOs, canary, digest (Sprint 9)")
+voice_app.add_typer(ops_app, name="ops")
+
+
+def _signal_row(signal: dict) -> tuple[str, str, str, str]:
+    """(name, value, target, sample) formatted for the golden-signal table."""
+    value, unit, target = signal.get("value"), signal.get("unit", ""), signal.get("target")
+    if not signal.get("sufficient_data"):
+        shown = f"[dim]n/a ({signal.get('sample_size', 0)}/{signal.get('min_sample', 1)} samples)[/dim]"
+    elif unit == "ratio":
+        shown = f"{value:.1%}"
+    elif unit == "count":
+        shown = str(int(value or 0))
+    elif unit == "ratio_to_baseline":
+        shown = f"{value:.2f}×"
+    else:
+        shown = f"{value:.2f}{unit}"
+    goal = ""
+    if target is not None:
+        if unit == "ratio":
+            goal = f"{target:.0%}"
+        elif unit == "ratio_to_baseline":
+            goal = f"{target:g}× baseline"
+        elif unit == "count":
+            goal = f"{target:g}"
+        else:
+            goal = f"{target:g}{unit}"
+    return signal.get("name", ""), shown, goal, f"{signal.get('sample_size', 0)} / {signal.get('window', '')}"
+
+
+@ops_app.command(name="status")
+def voice_ops_status(output_json: bool = typer.Option(False, "--json", help="Output as JSON")) -> None:
+    """The five golden signals and any alert that would fire right now.
+
+    First command on the on-call quick card — one screen that answers
+    "is voice healthy?" without a browser or a metrics backend."""
+    import asyncio as _asyncio
+    import json as _json
+
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
+    from pincer.observability import golden_signals as _gs
+    from pincer.observability.alerts import disk_alert, evaluate
+
+    settings = get_settings_relaxed()
+
+    async def _collect():
+        signals = await _gs.collect(settings)
+        alerts = evaluate(signals, settings)
+        host = disk_alert(settings)
+        if host is not None:
+            alerts.insert(0, host)
+        return signals, alerts
+
+    signals, alerts = _asyncio.run(_collect())
+
+    if output_json:
+        console.print(
+            _json.dumps(
+                {
+                    **signals.to_dict(),
+                    "alerts": [
+                        {"rule": a.rule, "severity": str(a.severity), "title": a.title, "detail": a.detail}
+                        for a in alerts
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    table = Table(show_header=True, title="Voice golden signals")
+    table.add_column("Signal")
+    table.add_column("Value", justify="right")
+    table.add_column("Threshold", justify="right")
+    table.add_column("Sample / window")
+    for signal in signals.to_dict()["signals"].values():
+        table.add_row(*_signal_row(signal))
+    console.print(table)
+
+    if not alerts:
+        console.print("\n[green]No alerts firing.[/green]\n")
+        return
+    console.print("")
+    for alert in alerts:
+        color = "red" if str(alert.severity) == "page" else "yellow"
+        console.print(f"[{color}]{alert.render()}[/{color}]\n")
+
+
+@ops_app.command(name="slo")
+def voice_ops_slo(output_json: bool = typer.Option(False, "--json", help="Output as JSON")) -> None:
+    """Month-to-date SLO status and error-budget burn (T9.5)."""
+    import asyncio as _asyncio
+    import json as _json
+
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
+    from pincer.observability.slo import collect
+
+    report = _asyncio.run(collect(get_settings_relaxed()))
+    if output_json:
+        console.print(_json.dumps(report, indent=2))
+        return
+
+    table = Table(show_header=True, title=f"SLOs — {report['slos'][0]['window'] if report['slos'] else ''}")
+    table.add_column("SLO")
+    table.add_column("Actual", justify="right")
+    table.add_column("Target", justify="right")
+    table.add_column("Budget burned", justify="right")
+    table.add_column("n", justify="right")
+    for slo in report["slos"]:
+        actual, unit = slo["actual"], slo["unit"]
+        if actual is None:
+            shown = "[dim]no data[/dim]"
+        elif unit == "ratio":
+            shown = f"{actual:.2%}"
+        else:
+            shown = f"{actual:.2f}{unit}"
+        target = f"{slo['target']:.1%}" if unit == "ratio" else f"{slo['target']:g}{unit}"
+        burn = slo["burn_pct"]
+        burn_text = "[dim]—[/dim]" if burn is None else f"{'[red]' if burn > 100 else ''}{burn:.0f}%"
+        label = slo["name"] + (" [dim](inferred)[/dim]" if slo["confidence"] == "inferred" else "")
+        table.add_row(label, shown, target, burn_text, str(slo["sample_size"]))
+    console.print(table)
+
+    if report["feature_freeze"]:
+        console.print(f"\n[red]🧊 Feature freeze in effect: {report['freeze_reason']}[/red]\n")
+    else:
+        console.print(
+            f"\n[green]No feature freeze[/green] "
+            f"[dim](threshold {report['freeze_threshold_pct']:.0f}% burn, "
+            f"min {report['freeze_min_sample']} samples)[/dim]\n"
+        )
+
+
+@ops_app.command(name="canary")
+def voice_ops_canary(
+    history: bool = typer.Option(False, "--history", help="Show recent runs instead of placing a call"),
+) -> None:
+    """Run the synthetic canary call now, or show recent runs.
+
+    Without --history this places a REAL phone call to
+    PINCER_VOICE_CANARY_NUMBER through the normal abuse gate."""
+    import asyncio as _asyncio
+
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
+    from pincer.observability.canary import recent_runs, run_canary
+
+    settings = get_settings_relaxed()
+
+    if history:
+        runs = _asyncio.run(recent_runs(settings, limit=20))
+        if not runs:
+            console.print("[yellow]No canary runs recorded yet.[/yellow]")
+            return
+        table = Table(show_header=True, title="Canary runs")
+        table.add_column("When")
+        table.add_column("Result")
+        table.add_column("Turns", justify="right")
+        table.add_column("Duration", justify="right")
+        table.add_column("Reason")
+        for run in runs:
+            if run["skipped"]:
+                result = "[yellow]skipped[/yellow]"
+            elif run["ok"]:
+                result = "[green]ok[/green]"
+            else:
+                result = "[red]FAILED[/red]"
+            table.add_row(
+                str(run["ran_at"])[:19],
+                result,
+                str(run["turns"]),
+                f"{run['duration_s']:.0f}s",
+                str(run["reason"] or "")[:60],
+            )
+        console.print(table)
+        return
+
+    if not settings.voice_canary_enabled:
+        console.print("[yellow]Canary is disabled. Set PINCER_VOICE_CANARY_ENABLED=true.[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(f"[cyan]Placing canary call to {settings.voice_canary_number}...[/cyan]")
+    result = _asyncio.run(run_canary(settings))
+    console.print(result.render())
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+@ops_app.command(name="ga-gate")
+def voice_ops_ga_gate(
+    days: int = typer.Option(14, "--days", "-d", help="Pilot window in days"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+    markdown: bool = typer.Option(False, "--markdown", "-m", help="Output the sign-off document"),
+    out: str = typer.Option("", "--out", "-o", help="Write the markdown report to this file"),
+) -> None:
+    """Evaluate the GA exit criteria against real pilot data (Sprint 10, T10.4).
+
+    Exit code 0 only when EVERY criterion passes — 'insufficient data' is not a
+    pass, so this is safe to wire into a release gate."""
+    import asyncio as _asyncio
+    import json as _json
+
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
+    from pincer.observability.ga_gate import Verdict, evaluate, render_markdown
+
+    report = _asyncio.run(evaluate(get_settings_relaxed(), days=days))
+
+    if out:
+        from pathlib import Path as _Path
+
+        _Path(out).write_text(render_markdown(report), encoding="utf-8")
+        console.print(f"[green]Sign-off document written to {out}[/green]")
+    if output_json:
+        console.print(_json.dumps(report.to_dict(), indent=2, default=str))
+    elif markdown:
+        console.print(render_markdown(report))
+    else:
+        icons = {
+            Verdict.PASS: "[green]✅ pass[/green]",
+            Verdict.FAIL: "[red]❌ fail[/red]",
+            Verdict.INSUFFICIENT: "[yellow]⏳ no data[/yellow]",
+            Verdict.MANUAL: "[cyan]🧑 manual[/cyan]",
+        }
+        table = Table(show_header=True, title=f"GA gate — last {days} days")
+        table.add_column("Result")
+        table.add_column("Criterion")
+        table.add_column("Evidence")
+        for criterion in report.criteria:
+            table.add_row(icons[criterion.verdict], criterion.title, criterion.summary)
+        console.print(table)
+
+        if report.ready:
+            console.print("\n[green]✅ READY FOR GA — every criterion met.[/green]\n")
+        else:
+            console.print(
+                f"\n[red]🚫 NOT READY[/red] — {len(report.failed)} failed, {len(report.blocked)} undecided.\n"
+            )
+            for criterion in report.failed + report.blocked:
+                if criterion.needed:
+                    console.print(f"  [dim]{criterion.key}:[/dim] {criterion.needed}")
+            console.print("")
+
+    raise typer.Exit(0 if report.ready else 1)
+
+
+@ops_app.command(name="digest")
+def voice_ops_digest() -> None:
+    """Render the weekly failure digest without sending it."""
+    import asyncio as _asyncio
+
+    from pincer.config import get_settings_relaxed
+    from pincer.observability.digest import build_digest
+
+    console.print(_asyncio.run(build_digest(get_settings_relaxed())))
+
+
+@ops_app.command(name="failures")
+def voice_ops_failures(
+    hours: float = typer.Option(168.0, "--hours", "-h", help="Window in hours (default: 7 days)"),
+) -> None:
+    """Failure codes over a window, ranked (T9.3)."""
+    import asyncio as _asyncio
+
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
+    from pincer.observability.failure_codes import describe
+    from pincer.observability.golden_signals import call_success_rate
+
+    signal = _asyncio.run(call_success_rate(get_settings_relaxed(), window_hours=hours))
+    by_code = signal.detail.get("by_failure_code") or {}
+    if not by_code:
+        console.print(f"[yellow]No terminated calls in the last {hours:g}h.[/yellow]")
+        return
+
+    table = Table(show_header=True, title=f"Failure codes — last {hours:g}h ({signal.sample_size} calls)")
+    table.add_column("Code")
+    table.add_column("Count", justify="right")
+    table.add_column("Share", justify="right")
+    table.add_column("Meaning")
+    for code, count in sorted(by_code.items(), key=lambda kv: kv[1], reverse=True):
+        share = count / signal.sample_size if signal.sample_size else 0.0
+        table.add_row(code, str(count), f"{share:.0%}", describe(code))
+    console.print(table)
+
+
+dnc_app = typer.Typer(name="dnc", help="Do-not-call list — numbers Pincer will never dial (Sprint 8, T8.3)")
+voice_app.add_typer(dnc_app, name="dnc")
+
+
+@dnc_app.command(name="list")
+def voice_dnc_list() -> None:
+    """Show the shared do-not-call list (blocks every user and channel)."""
+    import asyncio as _asyncio
+
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
+    from pincer.voice.safety_gates import list_do_not_call
+
+    entries = _asyncio.run(list_do_not_call(get_settings_relaxed()))
+    if not entries:
+        console.print("[green]Do-not-call list is empty.[/green]")
+        return
+
+    table = Table(show_header=True, title=f"Do-not-call list ({len(entries)} number(s))")
+    table.add_column("Number")
+    table.add_column("Source")
+    table.add_column("Reason")
+    table.add_column("Added")
+    for entry in entries:
+        table.add_row(
+            entry.get("phone_number", ""),
+            entry.get("source", "") or "-",
+            entry.get("reason", "") or "-",
+            (entry.get("added_at", "") or "")[:19],
+        )
+    console.print(table)
+
+
+@dnc_app.command(name="add")
+def voice_dnc_add(
+    number: str = typer.Argument(..., help="Phone number in E.164 format, e.g. +4915112345678"),
+    reason: str = typer.Option("", "--reason", "-r", help="Why this number is blocked"),
+) -> None:
+    """Block a number. Applies immediately to every channel and every user."""
+    import asyncio as _asyncio
+
+    from pincer.config import get_settings_relaxed
+    from pincer.voice.outbound import validate_e164
+    from pincer.voice.safety_gates import add_do_not_call
+
+    validated = validate_e164(number)
+    if not validated:
+        console.print(f"[red]Invalid phone number: {number}. Use E.164 format (e.g. +4915112345678).[/red]")
+        raise typer.Exit(1)
+
+    added = _asyncio.run(add_do_not_call(get_settings_relaxed(), validated, reason=reason, source="cli"))
+    if added:
+        console.print(f"[green]{validated} added to the do-not-call list.[/green]")
+    else:
+        console.print(f"[yellow]{validated} was already on the do-not-call list (reason updated).[/yellow]")
+
+
+@dnc_app.command(name="remove")
+def voice_dnc_remove(
+    number: str = typer.Argument(..., help="Phone number to unblock"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+) -> None:
+    """Unblock a number — only ever do this with the callee's consent."""
+    import asyncio as _asyncio
+
+    from pincer.config import get_settings_relaxed
+    from pincer.voice.safety_gates import remove_do_not_call
+
+    if not yes and not typer.confirm(f"Remove {number} from the do-not-call list?"):
+        raise typer.Abort
+
+    removed = _asyncio.run(remove_do_not_call(get_settings_relaxed(), number))
+    if removed:
+        console.print(f"[green]{number} removed from the do-not-call list.[/green]")
+    else:
+        console.print(f"[yellow]{number} was not on the do-not-call list.[/yellow]")
+        raise typer.Exit(1)
+
+
+@voice_app.command(name="latency-report")
+def voice_latency_report(
+    calls: int = typer.Option(20, "--calls", "-n", help="Number of most recent calls to analyze"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """p50/p95 per latency stage from recent voice turns (Sprint 5, T5.1).
+
+    Reads data/logs/voice_latency.jsonl, written one line per streamed turn."""
+    import json as _json
+
+    from pincer.config import get_settings_relaxed
+    from pincer.voice.latency_report import build_latency_report, read_turn_records
+
+    settings = get_settings_relaxed()
+    path = settings.data_dir / "logs" / "voice_latency.jsonl"
+    records = read_turn_records(path, last_calls=calls)
+    if not records:
+        console.print(f"[yellow]No turn records in {path} — run some calls first.[/yellow]")
+        raise typer.Exit(1)
+
+    report = build_latency_report(records)
+    if output_json:
+        console.print(_json.dumps(report, indent=2))
+        return
+
+    from rich.table import Table
+
+    header = (
+        f"\n[bold]Voice latency report[/bold] — {report['turns']} turn(s) "
+        f"across {report['calls']} call(s), engines: {', '.join(report['engines']) or '-'}\n"
+    )
+    console.print(header)
+    table = Table(show_header=True)
+    table.add_column("Stage")
+    table.add_column("p50 ms", justify="right")
+    table.add_column("p95 ms", justify="right")
+    table.add_column("n", justify="right")
+    for stage, stats in report["stages"].items():
+        table.add_row(stage, f"{stats['p50']:.0f}", f"{stats['p95']:.0f}", str(stats["n"]))
+    console.print(table)
+    total = report["stages"].get("total_ms")
+    if total:
+        target_ok = total["p50"] <= 1200 and total["p95"] <= 2000
+        color = "green" if target_ok else "red"
+        console.print(f"\n[{color}]Target p50 ≤ 1200ms / p95 ≤ 2000ms: {'MET' if target_ok else 'NOT MET'}[/{color}]\n")
+
+
+@voice_app.command(name="latency-model")
+def voice_latency_model(
+    calls: int = typer.Option(20, "--calls", "-n", help="Number of most recent calls to analyze"),
+    sort: str = typer.Option("p50", "--sort", help="Row order: 'p50' (fastest total first) or 'name'"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """Latency per LLM model — p50/p95 of each stage grouped by the model that served the turn.
+
+    Reads data/logs/voice_latency.jsonl (the ``turn_model`` stamp on each turn);
+    turns without a model stamp are reported under 'unknown'."""
+    import json as _json
+
+    from pincer.config import get_settings_relaxed
+    from pincer.voice.latency_report import MODEL_STAGES, build_model_report, read_turn_records
+
+    if sort not in ("p50", "name"):
+        console.print(f"[red]--sort must be 'p50' or 'name', got {sort!r}[/red]")
+        raise typer.Exit(2)
+
+    settings = get_settings_relaxed()
+    path = settings.data_dir / "logs" / "voice_latency.jsonl"
+    records = read_turn_records(path, last_calls=calls)
+    if not records:
+        console.print(f"[yellow]No turn records in {path} — run some calls first.[/yellow]")
+        raise typer.Exit(1)
+
+    rows = build_model_report(records, sort=sort)
+    if output_json:
+        console.print(_json.dumps(rows, indent=2))
+        return
+
+    from rich.table import Table
+
+    total_turns = sum(row["turns"] for row in rows)
+    total_calls = len({str(r.get("call_sid")) for r in records})
+    console.print(
+        f"\n[bold]Voice latency by model[/bold] — {total_turns} turn(s) across {total_calls} call(s), "
+        f"{len(rows)} model(s)\n"
+    )
+    stage_labels = {
+        "total_ms": "total",
+        "llm_first_token_ms": "first token",
+        "first_dispatch_ms": "first dispatch",
+        "llm_done_ms": "llm done",
+    }
+    table = Table(show_header=True)
+    table.add_column("Model", no_wrap=True)
+    table.add_column("Turns", justify="right")
+    table.add_column("Calls", justify="right")
+    table.add_column("Err", justify="right")
+    for stage in MODEL_STAGES:
+        table.add_column(f"{stage_labels.get(stage, stage)}\np50 / p95", justify="right")
+    for row in rows:
+        cells = [row["model"], str(row["turns"]), str(row["calls"]), str(row["errors"])]
+        for stage in MODEL_STAGES:
+            stats = row["stages"].get(stage)
+            cells.append(f"{stats['p50']:.0f} / {stats['p95']:.0f}" if stats else "-")
+        table.add_row(*cells)
+    console.print(table)
+    console.print(
+        "\n[dim]Times in ms, fastest total p50 first. "
+        "'unknown' = turns recorded before the model stamp or that failed pre-LLM.[/dim]\n"
+    )
+
+
+@voice_app.command(name="list")
+def voice_list() -> None:
+    """List ElevenLabs voices (ID, name, category, languages) — find your cloned voice's ID here."""
+    from rich.table import Table
+
+    from pincer.config import get_settings_relaxed
+    from pincer.voice.voices import VoiceLookupError, configured_voice_ids, list_voices
+
+    settings = get_settings_relaxed()
+    api_key = settings.elevenlabs_api_key.get_secret_value()
+    if not api_key:
+        console.print("[red]PINCER_ELEVENLABS_API_KEY not set.[/red]")
+        raise typer.Exit(1)
+
+    try:
+        voices = list_voices(api_key)
+    except VoiceLookupError as e:
+        console.print(f"[red]Could not list voices: {e}[/red]")
+        raise typer.Exit(1) from e
+
+    configured = configured_voice_ids(settings)
+    table = Table(title=f"ElevenLabs Voices ({len(voices)})")
+    table.add_column("Voice ID", style="cyan")
+    table.add_column("Name")
+    table.add_column("Category")
+    table.add_column("Languages")
+    table.add_column("")
+    for voice in voices:
+        table.add_row(
+            voice.voice_id,
+            voice.name,
+            voice.category,
+            ", ".join(voice.languages) or "-",
+            "[green]configured[/green]" if voice.voice_id in configured else "",
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]Set PINCER_ELEVENLABS_VOICE_ID (or _EN / _DE) to a Voice ID above, "
+        "then judge it at telephony quality with `pincer voice test`.[/dim]"
+    )
+
+
+@voice_app.command(name="test")
+def voice_test(
+    voice_id: str = typer.Option("", "--voice-id", help="Voice ID to test (default: the configured voice)"),
+    language: str = typer.Option("", "--language", help="Call language the voice is resolved for (en/de)"),
+    text: str = typer.Option("", "--text", help="Custom sample text"),
+) -> None:
+    """Synthesize a sample to ~/.pincer/voice_test.wav (+ 8kHz mu-law variant at telephony quality)."""
+    from pathlib import Path
+
+    from pincer.config import get_settings_relaxed
+    from pincer.voice.language import elevenlabs_model_for, resolve_call_language, voice_for
+    from pincer.voice.voices import VoiceLookupError, synthesize_sample, ulaw_to_wav
+
+    settings = get_settings_relaxed()
+    api_key = settings.elevenlabs_api_key.get_secret_value()
+    if not api_key:
+        console.print("[red]PINCER_ELEVENLABS_API_KEY not set.[/red]")
+        raise typer.Exit(1)
+
+    lang = resolve_call_language(settings, language)
+    resolved_voice = voice_id.strip() or voice_for(settings, lang)
+    model = elevenlabs_model_for(settings, lang)
+    samples = {
+        "en": "Hello! I'm your personal assistant. This is how I sound on the phone.",
+        "de": "Guten Tag! Ich bin Ihr persönlicher Assistent. So klinge ich am Telefon.",
+        "uk": "Вітаю! Я ваш особистий асистент. Ось так я звучу по телефону.",
+    }
+    sample_text = text.strip() or samples.get(lang, samples["en"])
+
+    out_dir = Path.home() / ".pincer"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    wav_path = out_dir / "voice_test.wav"
+    ulaw_path = out_dir / "voice_test_ulaw.wav"
+
+    console.print(f"Synthesizing with voice [cyan]{resolved_voice}[/cyan], model {model}, language {lang}...")
+    try:
+        wav_path.write_bytes(synthesize_sample(api_key, resolved_voice, sample_text, model, "wav_16000"))
+        ulaw_raw = synthesize_sample(api_key, resolved_voice, sample_text, model, "ulaw_8000")
+        ulaw_path.write_bytes(ulaw_to_wav(ulaw_raw))
+    except VoiceLookupError as e:
+        console.print(f"[red]Synthesis failed: {e}[/red]")
+        raise typer.Exit(1) from e
+
+    console.print(f"[green]Wrote {wav_path}[/green] (16 kHz)")
+    console.print(f"[green]Wrote {ulaw_path}[/green] (8 kHz mu-law — how callers will hear it)")
+    console.print("[dim]Some voices sound very different at telephony quality — judge the mu-law file.[/dim]")
+
 
 signal_app = typer.Typer(name="signal", help="Manage Signal messenger integration")
 app.add_typer(signal_app, name="signal")

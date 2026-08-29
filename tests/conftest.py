@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -17,6 +18,7 @@ from pincer.config import Settings
 from pincer.core.session import SessionManager
 from pincer.llm.base import BaseLLMProvider, LLMResponse
 from pincer.llm.cost_tracker import CostTracker
+from pincer.security.audit import AuditLogger
 from pincer.tools.registry import ToolRegistry
 
 
@@ -30,6 +32,64 @@ def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     kwarg overrides this).
     """
     monkeypatch.setitem(Settings.model_config, "env_file", None)
+
+
+@pytest.fixture(autouse=True)
+def _reset_thread_manager() -> None:
+    """Sprint 13: the ThreadManager is a process-wide singleton keyed to one
+    database. Without a reset between tests, the first tmp_path's DB would be
+    reused by every later test that touches threads."""
+    from pincer.voice import threads
+
+    threads._reset_for_tests()
+    yield
+    threads._reset_for_tests()
+
+
+class _InMemoryAuditLogger(AuditLogger):
+    """The global audit sink for the test suite — no database, no threads.
+
+    The real `AuditLogger` is a process-wide singleton that opens an aiosqlite
+    connection (a NON-daemon thread, which keeps the interpreter from exiting
+    at the end of a run) and a background flush task bound to whichever event
+    loop first touched it. Production code audits from many paths — call
+    threads, the outbound gate, retention, MCP — so leaving that singleton real
+    means every one of those tests leaks a thread and a dead-loop task.
+
+    Nothing asserts on the *global* logger's rows: tests that care about audit
+    persistence build their own `AuditLogger(db_path=...)`. So the global one
+    collects entries in memory and stays out of the way.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        super().__init__(db_path=db_path)
+        self.entries: list[Any] = []
+
+    async def initialize(self) -> None:
+        self._running = True  # deliberately no connection and no flush task
+
+    async def log(self, entry: Any) -> None:
+        self.entries.append(entry)
+
+    async def shutdown(self) -> None:
+        self._running = False
+
+
+@pytest.fixture(autouse=True)
+def _isolate_audit_logger(tmp_path: Path) -> None:
+    """Install the in-memory global audit logger for every test.
+
+    Also stops `get_audit_logger()` from deriving its path from
+    `get_settings_relaxed()`, which several tests monkeypatch to a MagicMock —
+    whose `data_dir / "audit.db"` would mkdir a junk `MagicMock/...` tree into
+    the repository.
+    """
+    from pincer.security import audit
+
+    previous = audit._audit_logger
+    audit._audit_logger = _InMemoryAuditLogger(tmp_path / "audit.db")
+    yield audit._audit_logger
+    audit._audit_logger = previous
 
 
 @pytest.fixture

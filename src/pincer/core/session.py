@@ -93,6 +93,14 @@ class SessionManager:
     async def initialize(self) -> None:
         await asyncio.to_thread(ensure_schema_current, self._db_path)
         self._db = await aiosqlite.connect(str(self._db_path))
+        # Production DB discipline (Sprint 7, T7.4): WAL is a persistent,
+        # database-level setting — setting it here (the primary owner of
+        # pincer.db) covers every later connection from any module or the
+        # tasks-worker process. busy_timeout is per-connection: this long-lived
+        # writer must wait, not fail, when a short-lived reader holds the lock.
+        # Schema DDL itself lives in the Alembic migrations (ensure_schema_current).
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA busy_timeout=5000")
 
     async def close(self) -> None:
         for session in self._cache.values():

@@ -7,8 +7,10 @@ services:
     #ports:
     #  - "${MCP_PORT:-8000}:8000"
     environment:
-      # Passed through to the server if you later add env-based config
-      - PYTHONUNBUFFERED=1
+      TRANSPORT: http
+      HOST: 0.0.0.0
+      PORT: ${MCP_PORT:-8000}
+      PYTHONUNBUFFERED: 1
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:${MCP_PORT:-8000}/health"]
       interval: 30s

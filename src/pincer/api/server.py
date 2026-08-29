@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -11,13 +12,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from pincer.api.audit import router as audit_router
+from pincer.api.auth_guard import (
+    PUBLIC_PATHS,
+    SELF_AUTHENTICATED_PREFIXES,
+    AuthGuard,
+    audit_auth_failure,
+    client_ip,
+    cors_origins,
+)
 from pincer.api.chat import router as chat_router
 from pincer.api.conversations import router as conversations_router
 from pincer.api.costs import router as costs_router
 from pincer.api.identity import router as identity_router
 from pincer.api.integrations import router as integrations_router
+from pincer.api.ops import router as ops_router
+from pincer.api.public_demo import router as public_demo_router
 from pincer.api.schedules import router as schedules_router
 from pincer.api.skills import router as skills_router
+from pincer.api.voice import router as voice_api_router
 from pincer.config import get_settings_relaxed
 
 if TYPE_CHECKING:
@@ -40,6 +52,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from pincer.api._deps import build_agent_from_settings
     from pincer.config import get_settings_relaxed
     from pincer.security.audit import get_audit_logger
+    from pincer.voice.pii_guard import install_log_pii_filter
+
+    # T8.5: uvicorn configures its own handlers, and `pincer serve` does not go
+    # through cli._setup_logging — install the phone-number filter here too so
+    # no log sink of a running API server can carry a raw E.164 number.
+    install_log_pii_filter()
 
     try:
         settings = get_settings_relaxed()
@@ -100,38 +118,70 @@ def create_app() -> FastAPI:
 
     app.openapi = _custom_openapi  # type: ignore[method-assign]
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://localhost:8080",  # 3Days.ai dev
-            settings.dashboard_url,
-            settings.web_chat_url,
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+    auth_guard = AuthGuard(
+        max_failures=int(getattr(settings, "auth_max_failures", 10)),
+        lockout_seconds=int(getattr(settings, "auth_lockout_seconds", 300)),
     )
+    app.state.auth_guard = auth_guard
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
         _dashboard_token = settings.dashboard_token.get_secret_value()
         _web_chat_token = settings.web_chat_token.get_secret_value()
-        public_paths = ("/api/health", "/api/docs", "/api/openapi.json")
-        if request.url.path in public_paths:
+        path = request.url.path
+        if path in PUBLIC_PATHS:
             return await call_next(request)
-        if request.url.path.startswith("/api/apps/teams/"):
-            return await call_next(request)  # Teams webhooks use their own HMAC auth
-        if not request.url.path.startswith("/api/"):
+        if path.startswith(SELF_AUTHENTICATED_PREFIXES):
+            # Teams webhooks carry their own HMAC; Twilio webhooks are verified
+            # by X-Twilio-Signature in voice/webhook_auth.py (T8.1). They cannot
+            # send our Bearer token — blocking them 401s every status callback.
+            return await call_next(request)
+        if not path.startswith("/api/"):
             return await call_next(request)  # dashboard static files
         if not _dashboard_token and not _web_chat_token:
-            return await call_next(request)  # no token configured: allow (dev/tests)
+            # No token configured: allow (dev/tests). `pincer doctor
+            # --production` reports this state CRITICAL, so it cannot ship.
+            return await call_next(request)
+
+        # T8.2 brute-force guard: an IP that keeps guessing the shared bearer
+        # token is locked out with exponential backoff before the comparison.
+        ip = client_ip(request)
+        wait = auth_guard.retry_after(ip)
+        if wait:
+            await audit_auth_failure(ip, path, "locked_out", locked_for=wait)
+            return JSONResponse(
+                status_code=429,
+                content={"error": "Too many failed authentication attempts"},
+                headers={"Retry-After": str(wait)},
+            )
+
         auth = request.headers.get("Authorization", "")
         allowed = {f"Bearer {t}" for t in (_dashboard_token, _web_chat_token) if t}
-        if auth in allowed:
+        if auth and any(secrets.compare_digest(auth, candidate) for candidate in allowed):
+            auth_guard.record_success(ip)
             return await call_next(request)
+
+        locked_for = auth_guard.record_failure(ip)
+        await audit_auth_failure(ip, path, "invalid_token", locked_for=locked_for)
         return JSONResponse(status_code=401, content={"error": "Invalid token"})
+
+    # Registered last on purpose. Starlette's add_middleware() inserts at index 0
+    # and the stack is built in reverse, so the last-added middleware is the
+    # outermost one. CORS must sit outside auth: a browser preflight carries no
+    # Authorization header, so an inner CORS would let auth 401 the preflight --
+    # and a 401 without Access-Control-Allow-Origin reads as an opaque CORS
+    # failure in the browser rather than as the auth error it is.
+    #
+    # T8.2: `cors_origins` drops every localhost entry when
+    # PINCER_ENVIRONMENT=production, so a page served from a developer machine
+    # can never make credentialed calls against the production API.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins(settings),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.include_router(costs_router)
     app.include_router(audit_router)
@@ -141,6 +191,10 @@ def create_app() -> FastAPI:
     app.include_router(skills_router)
     app.include_router(integrations_router)
     app.include_router(chat_router)
+    app.include_router(voice_api_router)
+    app.include_router(ops_router)
+    # The website's demo call: unauthenticated on purpose, rate-limited hard.
+    app.include_router(public_demo_router)
 
     if settings.voice_enabled:
         from pincer.voice.twiml_server import twilio_router, voice_router
@@ -181,7 +235,14 @@ def create_app() -> FastAPI:
         async def _spa(full_path: str) -> FileResponse:
             candidate = dist / full_path
             if candidate.is_file():
-                return FileResponse(str(candidate))
-            return FileResponse(str(dist / "index.html"))
+                # Vite content-hashes filenames under assets/, so they can be cached
+                # forever; everything else (index.html, favicons) must revalidate or
+                # a stale index.html keeps pointing at asset files a rebuild deleted.
+                if full_path.startswith("assets/"):
+                    headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+                else:
+                    headers = {"Cache-Control": "no-cache"}
+                return FileResponse(str(candidate), headers=headers)
+            return FileResponse(str(dist / "index.html"), headers={"Cache-Control": "no-cache"})
 
     return app
