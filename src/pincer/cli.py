@@ -373,8 +373,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
     # Sprint 5: Security components
     audit_logger = None
     if not settings.audit_disabled:
-        audit_db = settings.data_dir / "audit.db"
-        audit_logger = await get_audit_logger(audit_db)
+        audit_logger = await get_audit_logger(settings.db_path)
         console.print("[green]Audit logging enabled[/green]")
 
     rate_limiter = get_rate_limiter(
@@ -1179,9 +1178,11 @@ async def _run_agent(settings: Settings) -> None:
 
     # Sprint 3: Identity resolver
     from pincer.channels.middleware import IdentityMiddleware, build_pipeline
+    from pincer.config.identity import resolve_identity_map_config
     from pincer.core.identity import IdentityResolver
 
-    identity = IdentityResolver(settings.db_path, settings.identity_map)
+    identity_map_config, identity_profiles = resolve_identity_map_config(settings.identity_map)
+    identity = IdentityResolver(settings.db_path, identity_map_config, identity_profiles)
     await identity.ensure_table()
 
     _identity_pipeline = build_pipeline(IdentityMiddleware(identity))
@@ -3383,8 +3384,7 @@ async def _show_audit(
     from pincer.security.audit import AuditAction, AuditLogger
 
     settings = get_settings_relaxed()
-    audit_db = settings.data_dir / "audit.db"
-    logger = AuditLogger(db_path=audit_db)
+    logger = AuditLogger(db_path=settings.db_path)
     await logger.initialize()
 
     if export:
@@ -3635,6 +3635,53 @@ async def _schedule_list() -> None:
     for name, cron, user, tz, enabled in rows:
         table.add_row(name, cron, user or "", tz or "", "yes" if enabled else "no")
     console.print(table)
+
+
+# ── DB subcommands ─────────────────────────────
+
+db_app = typer.Typer(name="db", help="Manage the Pincer database schema")
+app.add_typer(db_app, name="db")
+
+
+@db_app.command(name="upgrade")
+def db_upgrade() -> None:
+    """Apply any pending schema migrations.
+
+    Runs automatically whenever the app starts — this is for manual/ops use
+    (e.g. applying migrations ahead of a deploy).
+    """
+    from alembic import command as alembic_command
+
+    from pincer.config import get_settings_relaxed
+    from pincer.db import build_config
+
+    settings = get_settings_relaxed()
+    alembic_command.upgrade(build_config(settings.db_path), "head")
+    console.print(f"[green]Database at head: {settings.db_path}[/green]")
+
+
+@db_app.command(name="current")
+def db_current() -> None:
+    """Show the currently applied migration revision."""
+    from alembic import command as alembic_command
+
+    from pincer.config import get_settings_relaxed
+    from pincer.db import build_config
+
+    settings = get_settings_relaxed()
+    alembic_command.current(build_config(settings.db_path), verbose=True)
+
+
+@db_app.command(name="history")
+def db_history() -> None:
+    """Show the full migration history."""
+    from alembic import command as alembic_command
+
+    from pincer.config import get_settings_relaxed
+    from pincer.db import build_config
+
+    settings = get_settings_relaxed()
+    alembic_command.history(build_config(settings.db_path), verbose=True)
 
 
 # ── MCP subcommands ───────────────────────────

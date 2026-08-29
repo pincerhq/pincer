@@ -498,6 +498,62 @@ command = "local_cmd"
     assert cfg.servers[0].command == "local_cmd"
 
 
+def test_local_toml_partial_override_server(tmp_path: Path) -> None:
+    """local.toml can override a single field (e.g. enabled) without repeating the rest."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "srv"
+transport = "stdio"
+command = "base_cmd"
+args = ["--flag"]
+timeout = 99
+""")
+    (tmp_path / "pincer.local.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "srv"
+enabled = false
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert len(cfg.servers) == 1
+    srv = cfg.servers[0]
+    assert srv.enabled is False
+    assert srv.command == "base_cmd"
+    assert srv.args == ["--flag"]
+    assert srv.timeout == 99
+
+
+def test_local_toml_transport_switch_drops_stale_fields(tmp_path: Path) -> None:
+    """Switching transport in local.toml drops the previous transport's exclusive fields."""
+    (tmp_path / "pincer.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "srv"
+transport = "stdio"
+command = "uv"
+args = ["run", "x.py"]
+
+[mcp.servers.env]
+API_KEY = "k1"
+""")
+    (tmp_path / "pincer.local.toml").write_text("""
+[mcp]
+[[mcp.servers]]
+name = "srv"
+transport = "streamable-http"
+url = "https://x/mcp"
+""")
+    cfg = load_mcp_config(tmp_path)
+    assert len(cfg.servers) == 1
+    srv = cfg.servers[0]
+    assert srv.transport == "streamable-http"
+    assert srv.url == "https://x/mcp"
+    assert srv.command is None
+    assert srv.args == []
+    assert srv.env == {}
+
+
 def test_local_toml_adds_new_server(tmp_path: Path) -> None:
     """local.toml server with a new name is appended."""
     (tmp_path / "pincer.toml").write_text("""
@@ -545,6 +601,38 @@ def test_merge_mcp_raw_server_subtable() -> None:
     assert merged["server"]["host"] == "127.0.0.1"
     assert merged["server"]["port"] == 9000
     assert merged["server"]["enabled"] is False
+
+
+def test_merge_mcp_raw_server_partial_override() -> None:
+    """[[mcp.servers]] entries are merged per-field by name, not replaced wholesale."""
+    from pincer.mcp.config import _merge_mcp_raw
+
+    base = {"servers": [{"name": "srv", "transport": "stdio", "command": "base_cmd", "timeout": 99}]}
+    override = {"servers": [{"name": "srv", "enabled": False}]}
+    merged = _merge_mcp_raw(base, override)
+    assert merged["servers"] == [
+        {"name": "srv", "transport": "stdio", "command": "base_cmd", "timeout": 99, "enabled": False}
+    ]
+
+
+def test_merge_mcp_raw_server_transport_switch_drops_stale_fields() -> None:
+    """Switching transport drops the previous transport's exclusive fields instead of inheriting them."""
+    from pincer.mcp.config import _merge_mcp_raw
+
+    base = {
+        "servers": [
+            {
+                "name": "srv",
+                "transport": "stdio",
+                "command": "uv",
+                "args": ["run", "x.py"],
+                "env": {"API_KEY": "k1"},
+            }
+        ]
+    }
+    override = {"servers": [{"name": "srv", "transport": "streamable-http", "url": "https://x/mcp"}]}
+    merged = _merge_mcp_raw(base, override)
+    assert merged["servers"] == [{"name": "srv", "transport": "streamable-http", "url": "https://x/mcp"}]
 
 
 def test_merge_mcp_raw_scalar_override() -> None:

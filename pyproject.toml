@@ -21,6 +21,7 @@ dependencies = [
     "httpx>=0.27.0",
     "aiogram>=3.25.0",
     "aiosqlite>=0.22.0",
+    "alembic>=1.13.0",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.0.0",
@@ -32,7 +33,7 @@ dependencies = [
     # WhatsApp frequently invalidates older protocol versions; keep floor at a
     # release that carries a known-accepted whatsmeow build. Bump when the
     # server returns `err-client-outdated` (see docs/whatsapp-troubleshooting.md).
-    "neonize>=0.3.17",
+    "neonize>=0.4.3",
     # neonize 0.3.16 ships protobuf gencode 7.34.1 without pinning a runtime
     # floor; older protobuf runtimes raise `incompatible Protobuf Gencode/Runtime
     # versions` at pairing time. Keep this aligned with neonize's gencode.

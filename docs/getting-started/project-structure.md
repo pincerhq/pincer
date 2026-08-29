@@ -106,12 +106,12 @@
 - Trim logic prevents orphaned tool_use at session boundaries
 - Summarizer split-point logic keeps tool_use/tool_result pairs together
 
-### Database Migration (`data/migrations/003_sprint3.sql`)
-- `identity_map` — cross-channel user identity
-- `schedules` — cron job persistence
-- `briefing_config` — per-user briefing preferences
-- `event_triggers` — trigger deduplication
-- `sessions.pincer_user_id` column backfill
+### Database Migrations (`pincer/db/migrations/`)
+Schema is managed by Alembic, applied automatically on startup. Migrations
+are raw SQL (`op.execute()`) so they stay portable between SQLite (used
+today) and Postgres (a future target) — see `pincer/db/engine.py` and
+`pincer/db/migrations/versions/`. Manual/ops commands: `pincer db upgrade`,
+`pincer db current`, `pincer db history`.
 
 ---
 
@@ -247,9 +247,7 @@ pincer/
 │   └── PROJECT_STRUCTURE.md        # ← You are here
 │
 ├── data/
-│   ├── google_credentials.json     # Google OAuth client (gitignored)
-│   └── migrations/
-│       └── 003_sprint3.sql         # Sprint 3 DB schema migration
+│   └── google_credentials.json     # Google OAuth client (gitignored)
 │
 ├── src/pincer/                     # Main Python package (~10,600 lines)
 │   ├── __init__.py
@@ -263,6 +261,10 @@ pincer/
 │   │   ├── events.py               # Event system (stub)
 │   │   ├── identity.py             # Cross-channel identity resolver + config seeding
 │   │   └── session.py              # Session management (SQLite-backed, trim-safe)
+│   │
+│   ├── db/                         # Alembic-managed schema (raw SQL, SQLite/Postgres-portable)
+│   │   ├── engine.py                # URL resolution + ensure_schema_current()
+│   │   └── migrations/versions/     # 0001_baseline.py, 0002_..., 0003_...
 │   │
 │   ├── channels/                   # Communication channels
 │   │   ├── base.py                 # Abstract BaseChannel, IncomingMessage, ChannelType

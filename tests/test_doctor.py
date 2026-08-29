@@ -290,12 +290,12 @@ def test_whatsapp_neonize_version_passes_on_recent(monkeypatch):
     from types import ModuleType
 
     fake = ModuleType("neonize")
-    fake.__version__ = "0.3.16.post0"  # type: ignore[attr-defined]
+    fake.__version__ = "0.4.3.post0"  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "neonize", fake)
 
     result = SecurityDoctor()._check_whatsapp_neonize_version()
     assert result.status == CheckStatus.PASS
-    assert "0.3.16" in result.message
+    assert "0.4.3" in result.message
 
 
 def test_whatsapp_neonize_version_warns_on_old(monkeypatch):

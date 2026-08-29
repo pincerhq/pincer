@@ -244,6 +244,10 @@ itself before a customer does; nothing here required a customer to notice first.
 - New `MemoryStore.add_profile()` upserts the `profile` entry (deletes any prior one for the same user before inserting fresh).
 - 10 new unit tests in `tests/test_onboarding.py` covering the full state machine + edge cases (gibberish reply, extraction failure, retry idempotency, pre-existing session no-op, streaming path).
 
+### Fixed
+
+- **`pincer.local.toml` now merges `[[mcp.servers]]` entries per-field instead of replacing them wholesale.** Previously, a local entry matched by `name` fully replaced the base entry, so overriding a single field (e.g. `enabled = false`) for a server already defined in `pincer.toml` required repeating every other field, and omitting a required one (`command`/`url`) raised a `ValueError`. Local fields now override the base value per-key; unspecified fields are inherited from the base entry, and switching `transport` drops the previous transport's exclusive fields (`command`/`args`/`env` vs `url`/`headers`) instead of inheriting them. (`_merge_mcp_raw` in `src/pincer/mcp/config.py`.) **Note:** this is a behavior change for any existing `pincer.local.toml` server entry that omitted a field expecting it to fall back to the dataclass default (e.g. leaving `args` out to get `[]`) — it now inherits the base entry's value for that field instead.
+
 ---
 
 ## [0.8.0] — 2026-05-09

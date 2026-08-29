@@ -12,19 +12,20 @@ Users customize via briefing_config table.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 import httpx
 
 from pincer.config import get_settings
+from pincer.db import ensure_schema_current
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from pincer.core.agent import Agent
 
 logger = logging.getLogger(__name__)
@@ -42,20 +43,8 @@ class ProactiveAgent:
         await self._http.aclose()
 
     async def ensure_table(self) -> None:
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS briefing_config (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    pincer_user_id TEXT NOT NULL UNIQUE,
-                    sections TEXT NOT NULL DEFAULT '["weather","calendar","email","news"]',
-                    custom_sections TEXT DEFAULT '[]',
-                    weather_location TEXT DEFAULT 'Berlin,DE',
-                    news_topics TEXT DEFAULT '["technology","business"]',
-                    created_at TEXT DEFAULT (datetime('now')),
-                    updated_at TEXT DEFAULT (datetime('now'))
-                )
-            """)
-            await db.commit()
+        """Ensure the briefing_config table is at head (see pincer.db.migrations)."""
+        await asyncio.to_thread(ensure_schema_current, Path(self._db_path))
 
     # ── Main briefing generator ──────────────────
 

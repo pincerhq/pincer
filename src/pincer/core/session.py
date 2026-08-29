@@ -7,6 +7,7 @@ Stores message history, supports trimming, and provides context for the agent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -15,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import aiosqlite
 
+from pincer.db import ensure_schema_current
 from pincer.llm.base import LLMMessage, MessageRole
 
 if TYPE_CHECKING:
@@ -89,6 +91,7 @@ class SessionManager:
         self._cache: dict[str, Session] = {}
 
     async def initialize(self) -> None:
+        await asyncio.to_thread(ensure_schema_current, self._db_path)
         self._db = await aiosqlite.connect(str(self._db_path))
         # Production DB discipline (Sprint 7, T7.4): WAL is a persistent,
         # database-level setting — setting it here (the primary owner of

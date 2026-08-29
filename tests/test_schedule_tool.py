@@ -63,7 +63,7 @@ class TestScheduleCreate:
                 name="x",
                 cron_expr="0 8 * * *",
                 prompt="p",
-                context={"pincer_user_id": "telegram:559020", "channel_name": "telegram"},
+                context={"pincer_user_id": "telegram:100100", "channel_name": "telegram"},
             )
         assert result.startswith("Error")
         assert "identity isn't fully linked" in result

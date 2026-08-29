@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
+from pincer.db import ensure_schema_current
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -73,32 +75,9 @@ class AuditEntry:
 class AuditLogger:
     """Async audit logger backed by SQLite with batched writes."""
 
-    SCHEMA_SQL = """
-    CREATE TABLE IF NOT EXISTS audit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT NOT NULL,
-        user_id TEXT NOT NULL,
-        session_id TEXT,
-        action TEXT NOT NULL,
-        tool TEXT,
-        input_summary TEXT,
-        output_summary TEXT,
-        approved INTEGER DEFAULT 1,
-        cost_usd REAL DEFAULT 0.0,
-        duration_ms INTEGER,
-        ip_address TEXT,
-        channel TEXT,
-        metadata_json TEXT
-    );
-    CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
-    CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id);
-    CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_log(action);
-    CREATE INDEX IF NOT EXISTS idx_audit_tool ON audit_log(tool);
-    """
-
     MAX_SUMMARY_LENGTH = 2000
 
-    def __init__(self, db_path: str | Path = "data/audit.db") -> None:
+    def __init__(self, db_path: str | Path = "data/pincer.db") -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db: aiosqlite.Connection | None = None
@@ -107,11 +86,10 @@ class AuditLogger:
         self._running = False
 
     async def initialize(self) -> None:
+        await asyncio.to_thread(ensure_schema_current, self.db_path)
         self._db = await aiosqlite.connect(str(self.db_path))
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
-        await self._db.executescript(self.SCHEMA_SQL)
-        await self._db.commit()
         self._running = True
         self._flush_task = asyncio.create_task(self._flush_loop())
 
@@ -388,9 +366,9 @@ async def get_audit_logger(db_path: str | Path | None = None) -> AuditLogger:
                 try:
                     from pincer.config import get_settings_relaxed
 
-                    db_path = get_settings_relaxed().data_dir / "audit.db"
+                    db_path = get_settings_relaxed().db_path
                 except Exception:
-                    db_path = Path("data/audit.db")
+                    db_path = Path("data/pincer.db")
             _audit_logger = AuditLogger(db_path=db_path)
         await _audit_logger.initialize()
     return _audit_logger

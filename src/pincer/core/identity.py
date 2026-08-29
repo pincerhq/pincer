@@ -29,22 +29,36 @@ The optional name prefix sets the pincer_user_id directly (e.g. "user:john" in
 memory tags) instead of the auto-generated "user:usr_abc123..." hash.
 Memory stored under a named ID is portable across DB rebuilds as long as the
 config entry stays the same.
+
+Config mapping (pincer.toml / pincer.local.toml)
+-------------------------------------------------
+For rosters too large to comfortably manage as one PINCER_IDENTITY_MAP
+string, the same mapping can be expressed as a `[identity]` TOML section
+instead — see `pincer.config.identity` for the schema. PINCER_IDENTITY_MAP,
+when set, always takes full precedence over the TOML section (no merging
+between the two). `pincer.config.identity.resolve_identity_map_config`
+converts TOML entries into two things: this module's own string grammar
+(channel-linking, same as PINCER_IDENTITY_MAP) and a `pincer_user_id ->
+IdentityProfile` dict for the fields that string grammar has no room for
+(display_name, preferred_channel, email, timezone) — see `IdentityProfile`.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiosqlite
 
 from pincer.channels.base import ChannelType
+from pincer.db import ensure_schema_current
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from pincer.channels.base import BaseChannel
 
 logger = logging.getLogger(__name__)
@@ -53,12 +67,34 @@ logger = logging.getLogger(__name__)
 _PHONE_CHANNELS = {ChannelType.WHATSAPP, ChannelType.VOICE, ChannelType.SIGNAL}
 
 
+@dataclass(frozen=True)
+class IdentityProfile:
+    """Optional profile fields sourced from the [identity] TOML section (see
+    `pincer.config.identity`) — PINCER_IDENTITY_MAP's string grammar has no
+    field for any of these, so entries seeded from the env var never get a
+    profile and these all stay unset. All fields are optional; a profile
+    with everything None is valid (e.g. a TOML person entry that only sets
+    channels).
+    """
+
+    display_name: str | None = None
+    preferred_channel: str | None = None
+    email: str | None = None
+    timezone: str | None = None
+
+
 class IdentityResolver:
     """Resolves channel-specific user IDs to a unified Pincer user ID."""
 
-    def __init__(self, db_path: Path, identity_map_config: str = "") -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        identity_map_config: str = "",
+        profiles: dict[str, IdentityProfile] | None = None,
+    ) -> None:
         self._db_path = str(db_path)
         self._identity_map_config = identity_map_config
+        self._profiles = profiles or {}
 
     @property
     def has_config(self) -> bool:
@@ -75,105 +111,8 @@ class IdentityResolver:
         return s.lstrip("+") if ch in _PHONE_CHANNELS else s
 
     async def ensure_table(self) -> None:
-        """Create schema tables and migrate from legacy identity_map if present."""
-        async with self._get_db() as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS identity_meta (
-                    pincer_user_id TEXT PRIMARY KEY,
-                    preferred_channel TEXT,
-                    display_name TEXT,
-                    created_at TEXT DEFAULT (datetime('now'))
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS channel_identities (
-                    channel TEXT NOT NULL,
-                    channel_user_id TEXT NOT NULL,
-                    pincer_user_id TEXT NOT NULL
-                        REFERENCES identity_meta(pincer_user_id),
-                    created_at TEXT DEFAULT (datetime('now')),
-                    PRIMARY KEY (channel, channel_user_id)
-                )
-            """)
-            await db.execute("""
-                CREATE INDEX IF NOT EXISTS idx_ci_pincer
-                ON channel_identities(pincer_user_id)
-            """)
-            await db.commit()
-            await self._migrate_legacy(db)
-            await self._migrate_active_channel(db)
-
-    async def _migrate_active_channel(self, db: aiosqlite.Connection) -> None:
-        """Add active_channel tracking columns to identity_meta if missing.
-
-        Separate from `preferred_channel` (a write-once value set at identity
-        creation / config-seed time, never updated afterward) — this tracks
-        whichever channel most recently sent a message for this identity, kept
-        current by `touch_active_channel()`. `get_preferred_channel()` prefers
-        this when present, since for a multi-channel identity (linked via
-        PINCER_IDENTITY_MAP) `preferred_channel` alone goes stale the moment the
-        user messages from a different linked channel than the one that
-        created the identity row.
-        """
-        cursor = await db.execute("PRAGMA table_info(identity_meta)")
-        col_names = {row[1] for row in await cursor.fetchall()}
-
-        if "active_channel" not in col_names:
-            await db.execute("ALTER TABLE identity_meta ADD COLUMN active_channel TEXT")
-        if "active_channel_updated_at" not in col_names:
-            await db.execute("ALTER TABLE identity_meta ADD COLUMN active_channel_updated_at TEXT")
-
-        await db.commit()
-
-    async def _migrate_legacy(self, db: aiosqlite.Connection) -> None:
-        """Migrate old identity_map rows into the new schema (no-op if absent)."""
-        cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='identity_map'")
-        if not await cursor.fetchone():
-            return
-
-        cursor = await db.execute("PRAGMA table_info(identity_map)")
-        col_names = {row[1] for row in await cursor.fetchall()}
-
-        def _sel(col: str, default: str = "NULL") -> str:
-            return col if col in col_names else default
-
-        query = (
-            f"SELECT pincer_user_id, telegram_user_id, whatsapp_phone, discord_user_id, "
-            f"{_sel('phone_number')}, {_sel('signal_phone')}, {_sel('slack_user_id')}, "
-            f"{_sel('display_name')}, {_sel('preferred_channel', repr('telegram'))} "
-            f"FROM identity_map"
-        )
-        cursor = await db.execute(query)
-        rows = await cursor.fetchall()
-        if not rows:
-            return
-
-        migrated = 0
-        for row in rows:
-            pincer_uid, tg, wa, dc, ph, sig, slk, dname, preferred = row
-            await db.execute(
-                "INSERT OR IGNORE INTO identity_meta "
-                "(pincer_user_id, preferred_channel, display_name) VALUES (?, ?, ?)",
-                (pincer_uid, preferred, dname),
-            )
-            for channel_name, val in (
-                ("telegram", str(tg) if tg is not None else None),
-                ("whatsapp", wa),
-                ("discord", dc),
-                ("voice", ph),
-                ("signal", sig),
-                ("slack", slk),
-            ):
-                if val:
-                    await db.execute(
-                        "INSERT OR IGNORE INTO channel_identities "
-                        "(channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
-                        (channel_name, val, pincer_uid),
-                    )
-            migrated += 1
-
-        await db.commit()
-        logger.info("Migrated %d legacy identity rows to new schema", migrated)
+        """Ensure the identity schema is at head (see pincer.db.migrations)."""
+        await asyncio.to_thread(ensure_schema_current, Path(self._db_path))
 
     async def find(
         self,
@@ -421,6 +360,13 @@ class IdentityResolver:
                     norm = await self._resolve_via_channel(ch_type, norm, channels)
                 allowed.add((ch, norm))
 
+        if not allowed:
+            logger.error(
+                "Identity config produced no usable channel:id pairs — "
+                "skipping cleanup to avoid wiping the identity tables"
+            )
+            return
+
         async with self._get_db() as db:
             cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='identity_meta'")
             if not await cursor.fetchone():
@@ -537,10 +483,29 @@ class IdentityResolver:
                         pincer_uid = self._generate_user_id(first_ch_type, first_norm)
 
                 first_channel = resolved[0][0]
+                profile = self._profiles.get(pincer_uid, IdentityProfile())
+                preferred_channel = profile.preferred_channel or first_channel
                 await db.execute(
-                    "INSERT OR IGNORE INTO identity_meta (pincer_user_id, preferred_channel) VALUES (?, ?)",
-                    (pincer_uid, first_channel),
+                    "INSERT OR IGNORE INTO identity_meta "
+                    "(pincer_user_id, preferred_channel, display_name, email, timezone) VALUES (?, ?, ?, ?, ?)",
+                    (pincer_uid, preferred_channel, profile.display_name, profile.email, profile.timezone),
                 )
+                if profile != IdentityProfile():
+                    # INSERT OR IGNORE above is a no-op for an identity that already
+                    # existed (e.g. created earlier via resolve()); COALESCE here
+                    # backfills profile fields onto it without clobbering an
+                    # existing value with NULL when only some are set. preferred_channel
+                    # is otherwise write-once (see touch_active_channel's docstring for
+                    # why active_channel, not this, tracks day-to-day channel use).
+                    await db.execute(
+                        "UPDATE identity_meta SET "
+                        "display_name = COALESCE(?, display_name), "
+                        "preferred_channel = COALESCE(?, preferred_channel), "
+                        "email = COALESCE(?, email), "
+                        "timezone = COALESCE(?, timezone) "
+                        "WHERE pincer_user_id = ?",
+                        (profile.display_name, profile.preferred_channel, profile.email, profile.timezone, pincer_uid),
+                    )
                 for ch_str, _ch_type, norm in resolved:
                     await db.execute(
                         "INSERT OR IGNORE INTO channel_identities "
