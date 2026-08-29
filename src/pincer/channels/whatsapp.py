@@ -768,30 +768,51 @@ class WhatsAppChannel(BaseChannel):
             is_self_chat = not is_group and is_from_me and self._is_self_chat(chat_user)
             if is_self_chat:
                 logger.info("WA routing: self-chat (chat_user=%s own_jid=%s)", chat_user, self._own_jid)
-            else:
-                # Rule 3: Outgoing to others → always ignore.
-                if is_from_me:
-                    logger.debug("WA skip: outgoing message to %s → ignoring", chat_jid)
+            elif is_from_me and not is_group:
+                # Rule 3: Outgoing DM to someone else → always ignore.
+                logger.debug("WA skip: outgoing message to %s → ignoring", chat_jid)
+                return
+            elif is_group:
+                # Rule 4: Group — only process if @mentioned or trigger word used.
+                # This also covers the owner's own messages when Pincer is linked
+                # to the owner's own WhatsApp number (is_from_me=True): previously
+                # Rule 3 dropped these unconditionally, so the owner could never
+                # summon Pincer in a group the way any other member could.
+                if not self._is_mentioned_in_group(msg, client):
+                    logger.debug("WA skip: group message without mention")
                     return
-                # Rule 4: Group — only process if @mentioned or trigger.
-                if is_group:
-                    if not self._is_mentioned_in_group(msg, client):
-                        logger.debug("WA skip: group message without mention")
-                        return
-                    logger.info("WA routing: group mention")
+                if is_from_me:
+                    # Unambiguously the owner — bypass the guest gate, which
+                    # exists to vet other senders, not the owner.
+                    logger.info("WA routing: group mention (from owner's own number)")
                 else:
-                    # Rule 5: Incoming DM — only process if not self-chat-only and not a guest.
-                    if self._settings.whatsapp_self_chat_only:
-                        logger.info("WA skip: incoming DM from %s (self-chat-only mode)", sender_phone)
-                        return
+                    # Rule 4a: Guest gate, keyed on the sender (not the chat/group).
+                    # whatsapp_self_chat_only is deliberately not consulted here —
+                    # its docstring says group mentions work regardless of that flag.
                     if (
                         self._identity is not None
                         and not self._settings.whatsapp_guests_allowed
                         and await self._identity.is_guest(ChannelType.WHATSAPP, sender_phone)
                     ):
-                        logger.info("WA skip: DM from %s not in identity map (guest)", sender_phone)
+                        logger.info(
+                            "WA skip: group message from %s not in identity map (guest)",
+                            sender_phone,
+                        )
                         return
-                    logger.info("WA routing: DM from %s", sender_phone)
+                    logger.info("WA routing: group mention")
+            else:
+                # Rule 5: Incoming DM — only process if not self-chat-only and not a guest.
+                if self._settings.whatsapp_self_chat_only:
+                    logger.info("WA skip: incoming DM from %s (self-chat-only mode)", sender_phone)
+                    return
+                if (
+                    self._identity is not None
+                    and not self._settings.whatsapp_guests_allowed
+                    and await self._identity.is_guest(ChannelType.WHATSAPP, sender_phone)
+                ):
+                    logger.info("WA skip: DM from %s not in identity map (guest)", sender_phone)
+                    return
+                logger.info("WA routing: DM from %s", sender_phone)
 
             # Defensive unwrap: the Go library should unwrap these, but
             # if for any reason the raw wrapper arrives, extract the inner

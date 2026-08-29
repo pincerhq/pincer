@@ -496,6 +496,13 @@ For Grok, Ollama, or any other endpoint, configure a *compatible* provider inste
 `PINCER_DEFAULT_PROVIDER` to that name. `PINCER_FALLBACK_PROVIDERS` (≤3, comma-separated)
 enables random failover.
 
+### Optional — Telegram
+
+| Variable | Purpose |
+|----------|---------|
+| `PINCER_TELEGRAM_GUESTS_ALLOWED` | Once `PINCER_IDENTITY_MAP` is configured, allow unmapped senders through as disposable guests (default `false`; no-op if no identity map is configured) |
+| `PINCER_TELEGRAM_GROUP_TRIGGER` | In group chats, only reply when @mentioned, replied to, or this word appears (default: `pincer`) |
+
 ### Optional — WhatsApp
 
 | Variable | Purpose |

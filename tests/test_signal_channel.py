@@ -216,6 +216,84 @@ async def test_group_mention_only_processes_mention() -> None:
     handler.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_group_mention_guest_rejected_when_identity_configured() -> None:
+    """Group mention from a sender not in the identity map, guests not allowed → rejected."""
+    from pincer.channels.base import ChannelType
+    from pincer.channels.signal_client import SignalMessage
+
+    settings = _make_settings(signal_guests_allowed=False, signal_group_reply="mention_only")
+    identity = AsyncMock()
+    identity.is_guest = AsyncMock(return_value=True)
+    ch = SignalChannel(settings, identity=identity)
+    handler = AsyncMock(return_value="reply")
+    ch._handler = handler
+    ch._client = AsyncMock()
+
+    msg = SignalMessage(
+        source="+491111111111",
+        timestamp=6,
+        text="Hey Pincer, what's up?",
+        is_group=True,
+        group_id="grp-1",
+    )
+    await ch._process_signal_message(msg)
+
+    handler.assert_not_awaited()
+    identity.is_guest.assert_awaited_once_with(ChannelType.SIGNAL, "+491111111111")
+
+
+@pytest.mark.asyncio
+async def test_group_mention_guest_allowed_when_flag_true() -> None:
+    """Group mention from a sender not in the identity map, guests allowed → responds."""
+    from pincer.channels.signal_client import SignalMessage
+
+    settings = _make_settings(signal_guests_allowed=True, signal_group_reply="mention_only")
+    identity = AsyncMock()
+    identity.is_guest = AsyncMock(return_value=True)
+    ch = SignalChannel(settings, identity=identity)
+    handler = AsyncMock(return_value="reply")
+    ch._handler = handler
+    ch._client = AsyncMock()
+
+    msg = SignalMessage(
+        source="+491111111111",
+        timestamp=7,
+        text="Hey Pincer, what's up?",
+        is_group=True,
+        group_id="grp-1",
+    )
+    await ch._process_signal_message(msg)
+
+    handler.assert_awaited_once()
+    identity.is_guest.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_group_mention_only_ignores_unreferenced_even_with_identity_configured() -> None:
+    """Unmentioned group chatter is dropped by the mention filter before any identity lookup."""
+    from pincer.channels.signal_client import SignalMessage
+
+    settings = _make_settings(signal_guests_allowed=False, signal_group_reply="mention_only")
+    identity = AsyncMock()
+    ch = SignalChannel(settings, identity=identity)
+    handler = AsyncMock(return_value="reply")
+    ch._handler = handler
+    ch._client = AsyncMock()
+
+    msg = SignalMessage(
+        source="+491111111111",
+        timestamp=8,
+        text="Hello everyone",
+        is_group=True,
+        group_id="grp-1",
+    )
+    await ch._process_signal_message(msg)
+
+    handler.assert_not_awaited()
+    identity.is_guest.assert_not_called()
+
+
 # ── deduplication ─────────────────────────────────────────────────────────────
 
 

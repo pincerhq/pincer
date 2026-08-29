@@ -388,13 +388,6 @@ class SecurityDoctor:
                 "WhatsApp not configured",
                 category="access",
             )
-        if cfg.whatsapp_self_chat_only:
-            return CheckResult(
-                "whatsapp_access_control",
-                CheckStatus.PASS,
-                "WhatsApp in self-chat-only mode (no other access control needed)",
-                category="access",
-            )
         from pincer.config.identity import resolve_identity_map_config
 
         identity_map_config, _ = resolve_identity_map_config(cfg.identity_map, self.config_dir)
@@ -402,7 +395,21 @@ class SecurityDoctor:
             return CheckResult(
                 "whatsapp_access_control",
                 CheckStatus.PASS,
-                "WhatsApp access controlled by PINCER_IDENTITY_MAP",
+                "WhatsApp access controlled by PINCER_IDENTITY_MAP (covers DMs and group mentions)",
+                category="access",
+            )
+        if cfg.whatsapp_self_chat_only:
+            return CheckResult(
+                "whatsapp_access_control",
+                CheckStatus.WARNING,
+                "WhatsApp is in self-chat-only mode, but group mentions/trigger-word messages "
+                "are answered for any group member regardless of this setting, and no "
+                "PINCER_IDENTITY_MAP is configured to gate them",
+                fix_hint=(
+                    "Set PINCER_IDENTITY_MAP (or configure the [identity] TOML section) and "
+                    "PINCER_WHATSAPP_GUESTS_ALLOWED=false to restrict who can trigger Pincer "
+                    "from a group; self-chat-only alone does not protect group chats."
+                ),
                 category="access",
             )
         return CheckResult(

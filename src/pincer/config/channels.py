@@ -13,6 +13,10 @@ class ChannelSettings(BaseModel):
             "disposable guests instead of rejecting them. No-op if no identity map is configured."
         ),
     )
+    telegram_group_trigger: str = Field(
+        default="pincer",
+        description="Trigger word for group chat mentions",
+    )
 
     # ── Discord ───────────────────────────────────────────
     discord_bot_token: SecretStr = Field(default=SecretStr(""), description="Discord bot token")

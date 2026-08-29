@@ -166,17 +166,9 @@ class SignalChannel(BaseChannel):
             if len(self._seen) > 10000:
                 self._seen = set(list(self._seen)[-5000:])
 
-        # Guest check (identity map)
-        if (
-            not msg.is_group
-            and self._identity is not None
-            and not getattr(self._settings, "signal_guests_allowed", False)
-            and await self._identity.is_guest(ChannelType.SIGNAL, msg.source)
-        ):
-            logger.debug("Signal: DM from %s not in identity map (guest) — ignored", msg.source)
-            return
-
-        # Group mention check
+        # Group reply-mode / mention check. Runs before the guest gate below so a
+        # group message that wouldn't get a reply anyway (disabled mode, or
+        # mention_only with no mention) short-circuits without a DB lookup.
         if msg.is_group:
             group_reply = getattr(self._settings, "signal_group_reply", "mention_only")
             if group_reply == "disabled":
@@ -187,6 +179,21 @@ class SignalChannel(BaseChannel):
                 text_lower = msg.text.lower()
                 if agent_name not in text_lower and own_phone not in text_lower:
                     return
+
+        # Guest check (identity map) — applies to DMs and group messages alike.
+        # msg.source is the actual sender's number in both cases (never the
+        # group ID), so it's the right identity to vet either way.
+        if (
+            self._identity is not None
+            and not getattr(self._settings, "signal_guests_allowed", False)
+            and await self._identity.is_guest(ChannelType.SIGNAL, msg.source)
+        ):
+            logger.debug(
+                "Signal: %s from %s not in identity map (guest) — ignored",
+                "group message" if msg.is_group else "DM",
+                msg.source,
+            )
+            return
 
         text = msg.text or ""
 

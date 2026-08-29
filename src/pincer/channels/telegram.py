@@ -87,6 +87,7 @@ class TelegramChannel(BaseChannel):
         self._stream_agent: Any = None
         self._polling_task: asyncio.Task[None] | None = None
         self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
+        self._own_username: str | None = None
 
     def set_stream_agent(self, agent: Any) -> None:
         """Set the Agent instance for streaming support."""
@@ -183,6 +184,9 @@ class TelegramChannel(BaseChannel):
             token=token,
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         )
+        me = await self._bot.get_me()
+        self._own_username = me.username
+
         self._dp = Dispatcher()
 
         router = Router()
@@ -401,6 +405,37 @@ class TelegramChannel(BaseChannel):
             return False
         return await self._identity.is_guest(ChannelType.TELEGRAM, user_id)
 
+    @staticmethod
+    def _is_group_chat(message: Message) -> bool:
+        return message.chat.type in ("group", "supergroup")
+
+    def _is_triggered_in_group(self, message: Message) -> bool:
+        """Return True when a group message is directed at Pincer.
+
+        Mirrors the WhatsApp channel's group gating: a mention of the bot's
+        own @username, a reply to one of the bot's own messages, or the
+        configured trigger word appearing in the text/caption.
+        """
+        text = message.text or message.caption or ""
+        entities = message.entities or message.caption_entities or []
+        if self._own_username:
+            own_mention = f"@{self._own_username.lower()}"
+            for entity in entities:
+                if (
+                    entity.type == "mention"
+                    and text[entity.offset : entity.offset + entity.length].lower() == own_mention
+                ):
+                    return True
+        if (
+            message.reply_to_message
+            and message.reply_to_message.from_user
+            and self._bot
+            and message.reply_to_message.from_user.id == self._bot.id
+        ):
+            return True
+        trigger = self._settings.telegram_group_trigger
+        return bool(trigger and trigger.lower() in text.lower())
+
     def _register_handlers(self, router: Router) -> None:
         """Register all message handlers on the router."""
 
@@ -481,6 +516,9 @@ class TelegramChannel(BaseChannel):
         async def cmd_help(message: Message) -> None:
             if not message.from_user:
                 return
+            if await self._is_guest_blocked(message.from_user.id):
+                logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)
+                return
             await message.answer(
                 markdown_to_telegram_html(
                     "*Pincer Help*\n\n"
@@ -501,6 +539,9 @@ class TelegramChannel(BaseChannel):
         @router.message(F.voice)
         async def handle_voice(message: Message) -> None:
             if not message.from_user:
+                return
+            if self._is_group_chat(message) and not self._is_triggered_in_group(message):
+                logger.debug("Telegram skip: group message without mention/trigger")
                 return
             if await self._is_guest_blocked(message.from_user.id):
                 logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)
@@ -533,6 +574,9 @@ class TelegramChannel(BaseChannel):
         async def handle_photo(message: Message) -> None:
             if not message.from_user:
                 return
+            if self._is_group_chat(message) and not self._is_triggered_in_group(message):
+                logger.debug("Telegram skip: group message without mention/trigger")
+                return
             if await self._is_guest_blocked(message.from_user.id):
                 logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)
                 return
@@ -564,6 +608,9 @@ class TelegramChannel(BaseChannel):
         @router.message(F.document)
         async def handle_document(message: Message) -> None:
             if not message.from_user:
+                return
+            if self._is_group_chat(message) and not self._is_triggered_in_group(message):
+                logger.debug("Telegram skip: group message without mention/trigger")
                 return
             if await self._is_guest_blocked(message.from_user.id):
                 logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)
@@ -611,6 +658,9 @@ class TelegramChannel(BaseChannel):
         @router.message(F.text)
         async def handle_text(message: Message) -> None:
             if not message.from_user:
+                return
+            if self._is_group_chat(message) and not self._is_triggered_in_group(message):
+                logger.debug("Telegram skip: group message without mention/trigger")
                 return
             if await self._is_guest_blocked(message.from_user.id):
                 logger.debug("Telegram skip: %s not in identity map (guest)", message.from_user.id)

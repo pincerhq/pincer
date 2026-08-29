@@ -405,7 +405,9 @@ def test_telegram_access_control_skipped_not_configured(tmp_path):
     assert result.status == CheckStatus.SKIPPED
 
 
-def test_whatsapp_access_control_pass_self_chat_only(tmp_path):
+def test_whatsapp_access_control_warning_self_chat_only_no_identity_map(tmp_path):
+    """self-chat-only alone doesn't gate group mentions, so without an identity
+    map this should warn rather than pass."""
     from unittest.mock import MagicMock
 
     doc = SecurityDoctor(config_dir=tmp_path)
@@ -413,6 +415,18 @@ def test_whatsapp_access_control_pass_self_chat_only(tmp_path):
     cfg.whatsapp_enabled = True
     cfg.whatsapp_self_chat_only = True
     cfg.identity_map = ""
+    result = doc._check_whatsapp_access_control(cfg)
+    assert result.status == CheckStatus.WARNING
+
+
+def test_whatsapp_access_control_pass_self_chat_only_with_identity_map(tmp_path):
+    from unittest.mock import MagicMock
+
+    doc = SecurityDoctor(config_dir=tmp_path)
+    cfg = MagicMock()
+    cfg.whatsapp_enabled = True
+    cfg.whatsapp_self_chat_only = True
+    cfg.identity_map = "telegram:111=whatsapp:491111111111"
     result = doc._check_whatsapp_access_control(cfg)
     assert result.status == CheckStatus.PASS
 

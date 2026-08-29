@@ -403,6 +403,97 @@ class TestWhatsAppRouting:
         ch._handler.assert_called_once()
         ch._extract_message.assert_called_once()
 
+    async def test_group_mention_guest_rejected_when_identity_configured(self):
+        """Group mention from a sender not in the identity map, guests not allowed → rejected."""
+        settings = _make_settings(whatsapp_self_chat_only=False)
+        settings.whatsapp_guests_allowed = False
+        ch = WhatsAppChannel(settings, identity=AsyncMock())
+        ch._identity.is_guest = AsyncMock(return_value=True)
+        ch._own_jid = OWNER_PHONE
+        ch._handler = AsyncMock(return_value="ok")
+        ch._extract_message = AsyncMock(
+            return_value=IncomingMessage(
+                user_id=OTHER_PHONE,
+                channel="whatsapp",
+                text="hi",
+                channel_type=ChannelType.WHATSAPP,
+                reply_to_message_id="x",
+            )
+        )
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user="group123",
+            sender_user=OTHER_PHONE,
+            is_group=True,
+            message_text=f"hey {OWNER_PHONE} what's up?",
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_not_called()
+        ch._extract_message.assert_not_called()
+        ch._identity.is_guest.assert_awaited_once_with(ChannelType.WHATSAPP, OTHER_PHONE)
+
+    async def test_group_mention_guest_allowed_when_flag_true(self):
+        """Group mention from a sender not in the identity map, guests allowed → responds."""
+        settings = _make_settings(whatsapp_self_chat_only=False)
+        settings.whatsapp_guests_allowed = True
+        ch = WhatsAppChannel(settings, identity=AsyncMock())
+        ch._identity.is_guest = AsyncMock(return_value=True)
+        ch._own_jid = OWNER_PHONE
+        ch._handler = AsyncMock(return_value="ok")
+        ch._extract_message = AsyncMock(
+            return_value=IncomingMessage(
+                user_id=OTHER_PHONE,
+                channel="whatsapp",
+                text="hi",
+                channel_type=ChannelType.WHATSAPP,
+                reply_to_message_id="x",
+            )
+        )
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user="group123",
+            sender_user=OTHER_PHONE,
+            is_group=True,
+            message_text=f"hey {OWNER_PHONE} what's up?",
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_called_once()
+        ch._identity.is_guest.assert_not_called()
+
+    async def test_group_mention_from_owner_from_me_responds(self, routing_channel):
+        """Owner's own number posts a mention in a group (from_me=True) → responds.
+
+        Regression test: this previously hit Rule 3's unconditional
+        `if is_from_me: return` before the mention check ever ran, so the
+        owner could never summon Pincer in a group when Pincer is linked to
+        the owner's own WhatsApp number.
+        """
+        ch = routing_channel
+        event, _, _ = _make_message_event(
+            from_me=True,
+            chat_user="group123",
+            sender_user=OWNER_PHONE,
+            is_group=True,
+            message_text=f"hey {OWNER_PHONE} what's up?",
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_called_once()
+        ch._extract_message.assert_called_once()
+
+    async def test_group_from_me_without_mention_still_ignored(self, routing_channel):
+        """Owner's own number posts in a group without a mention/trigger → still ignored."""
+        ch = routing_channel
+        event, _, _ = _make_message_event(
+            from_me=True,
+            chat_user="group123",
+            sender_user=OWNER_PHONE,
+            is_group=True,
+            message_text="hey everyone",
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_not_called()
+        ch._extract_message.assert_not_called()
+
     async def test_echo_of_own_message_ignored(self, routing_channel):
         """Message ID in recent_sent_ids is skipped (echo prevention)."""
         ch = routing_channel
