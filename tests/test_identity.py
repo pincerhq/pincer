@@ -1,5 +1,7 @@
 """Tests for cross-channel identity resolver."""
 
+import asyncio
+
 import pytest
 import pytest_asyncio
 
@@ -141,12 +143,29 @@ class TestIsGuest:
         resolver.mark_seeding_complete()
         assert await resolver.is_guest(ChannelType.TELEGRAM, 12345) is False
 
-    async def test_is_guest_false_when_seeding_not_complete(self, tmp_path):
-        """Identity map configured but seeding hasn't run yet → fail open."""
+    async def test_is_guest_blocks_until_seeding_complete(self, tmp_path):
+        """Identity map configured but seeding hasn't run yet → is_guest() blocks
+        rather than failing open; it only resolves once mark_seeding_complete() runs."""
         db_path = tmp_path / "guest_seeding.db"
         r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
         await r.ensure_table()
         assert r.has_config is True
+
+        task = asyncio.create_task(r.is_guest(ChannelType.TELEGRAM, 99999))
+        await asyncio.sleep(0)
+        assert task.done() is False
+
+        r.mark_seeding_complete()
+        result = await asyncio.wait_for(task, timeout=1.0)
+        assert result is True  # 99999 is not in the configured map
+
+    async def test_is_guest_fails_open_after_seeding_timeout(self, tmp_path, monkeypatch):
+        """If mark_seeding_complete() is never called, is_guest() fails open after
+        the bounded timeout rather than hanging forever."""
+        db_path = tmp_path / "guest_seeding_timeout.db"
+        r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        await r.ensure_table()
+        monkeypatch.setattr(IdentityResolver, "_SEEDING_WAIT_TIMEOUT", 0.05)
         assert await r.is_guest(ChannelType.TELEGRAM, 99999) is False
 
     async def test_is_guest_true_when_configured_and_not_found(self, tmp_path):

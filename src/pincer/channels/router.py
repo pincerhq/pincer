@@ -37,9 +37,19 @@ class ChannelRouter:
         logger.info("Router registered channel: %s", channel_type.value)
 
     async def rebuild_identity_map(self) -> None:
-        await self._identity.seed_from_config(self._channels)
-        await self._identity.cleanup(self._channels)
-        self._identity.mark_seeding_complete()
+        """Seed/cleanup the identity map, then unblock is_guest() for all channels.
+
+        mark_seeding_complete() always runs, even on failure, so a seeding error
+        degrades to "treated as complete despite partial data" (logged loudly)
+        rather than hanging every channel's guest check.
+        """
+        try:
+            await self._identity.seed_from_config(self._channels)
+            await self._identity.cleanup(self._channels)
+        except Exception:
+            logger.exception("rebuild_identity_map: seeding/cleanup failed — guest gate unblocking anyway")
+        finally:
+            self._identity.mark_seeding_complete()
 
     async def send(self, channel_type: ChannelType, chat_id: str, text: str) -> bool:
         """Send a message via the specified channel. Returns True on success."""

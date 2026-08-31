@@ -700,6 +700,23 @@ class WhatsAppChannel(BaseChannel):
             return True
         return bool(self._own_lid and chat_user == self._own_lid)
 
+    async def _sender_is_guest(self, sender_phone: str, chat_user: str) -> bool:
+        """True only if every LID/phone candidate for this sender is unmapped.
+
+        On LID-based WhatsApp accounts sender_phone may be a LID while chat_user
+        carries the phone-number form of the same peer (or vice versa) — mirrors
+        IdentityMiddleware's OR-across-candidates resolution (middleware.py) so a
+        contact mapped under either form is never rejected here before reaching
+        the middleware that would otherwise back-link their LID.
+        """
+        if self._identity is None:
+            return False
+        candidates = list(dict.fromkeys(c for c in (sender_phone, chat_user) if c))
+        for candidate in candidates:
+            if not await self._identity.is_guest(ChannelType.WHATSAPP, candidate):
+                return False
+        return True
+
     async def _on_message(self, client: NewAClient, event: MessageEv) -> None:
         """Route incoming WhatsApp messages to the handler callback."""
         try:
@@ -789,10 +806,11 @@ class WhatsAppChannel(BaseChannel):
                     # Rule 4a: Guest gate, keyed on the sender (not the chat/group).
                     # whatsapp_self_chat_only is deliberately not consulted here —
                     # its docstring says group mentions work regardless of that flag.
-                    if (
-                        self._identity is not None
-                        and not self._settings.whatsapp_guests_allowed
-                        and await self._identity.is_guest(ChannelType.WHATSAPP, sender_phone)
+                    # No fail-closed-without-map here: pre-PR groups had no allowlist
+                    # at all (just the @mention requirement), so a no-op when no
+                    # identity map is configured is not a regression for groups.
+                    if not self._settings.whatsapp_guests_allowed and await self._sender_is_guest(
+                        sender_phone, chat_user
                     ):
                         logger.info(
                             "WA skip: group message from %s not in identity map (guest)",
@@ -805,13 +823,21 @@ class WhatsAppChannel(BaseChannel):
                 if self._settings.whatsapp_self_chat_only:
                     logger.info("WA skip: incoming DM from %s (self-chat-only mode)", sender_phone)
                     return
-                if (
-                    self._identity is not None
-                    and not self._settings.whatsapp_guests_allowed
-                    and await self._identity.is_guest(ChannelType.WHATSAPP, sender_phone)
-                ):
-                    logger.info("WA skip: DM from %s not in identity map (guest)", sender_phone)
-                    return
+                if not self._settings.whatsapp_guests_allowed:
+                    if self._identity is None or not self._identity.has_config:
+                        # Unlike Telegram/Signal, WhatsApp DMs fail CLOSED without a
+                        # map: pre-PR the removed PINCER_WHATSAPP_DM_ALLOWLIST rejected
+                        # all DMs by default when empty, so a no-op-without-config guest
+                        # gate here would silently flip that default open on upgrade.
+                        # See whatsapp_guests_allowed docstring (config/channels.py).
+                        logger.info(
+                            "WA skip: DM from %s rejected (no identity map configured, guests not allowed)",
+                            sender_phone,
+                        )
+                        return
+                    if await self._sender_is_guest(sender_phone, chat_user):
+                        logger.info("WA skip: DM from %s not in identity map (guest)", sender_phone)
+                        return
                 logger.info("WA routing: DM from %s", sender_phone)
 
             # Defensive unwrap: the Go library should unwrap these, but

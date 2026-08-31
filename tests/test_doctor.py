@@ -414,6 +414,7 @@ def test_whatsapp_access_control_warning_self_chat_only_no_identity_map(tmp_path
     cfg = MagicMock()
     cfg.whatsapp_enabled = True
     cfg.whatsapp_self_chat_only = True
+    cfg.whatsapp_guests_allowed = False
     cfg.identity_map = ""
     result = doc._check_whatsapp_access_control(cfg)
     assert result.status == CheckStatus.WARNING
@@ -444,15 +445,32 @@ def test_whatsapp_access_control_pass_with_identity_map(tmp_path):
 
 
 def test_whatsapp_access_control_critical_open_to_anyone(tmp_path):
+    """guests_allowed=true overrides the fail-closed-without-map DM default."""
     from unittest.mock import MagicMock
 
     doc = SecurityDoctor(config_dir=tmp_path)
     cfg = MagicMock()
     cfg.whatsapp_enabled = True
     cfg.whatsapp_self_chat_only = False
+    cfg.whatsapp_guests_allowed = True
     cfg.identity_map = ""
     result = doc._check_whatsapp_access_control(cfg)
     assert result.status == CheckStatus.CRITICAL
+
+
+def test_whatsapp_access_control_warning_no_map_dm_fail_closed(tmp_path):
+    """No map, self_chat_only=False, guests not allowed → DMs fail closed by
+    default now, so this is a WARNING (ungated group mentions remain), not CRITICAL."""
+    from unittest.mock import MagicMock
+
+    doc = SecurityDoctor(config_dir=tmp_path)
+    cfg = MagicMock()
+    cfg.whatsapp_enabled = True
+    cfg.whatsapp_self_chat_only = False
+    cfg.whatsapp_guests_allowed = False
+    cfg.identity_map = ""
+    result = doc._check_whatsapp_access_control(cfg)
+    assert result.status == CheckStatus.WARNING
 
 
 def test_whatsapp_access_control_skipped_not_configured(tmp_path):

@@ -35,7 +35,12 @@ class ChannelSettings(BaseModel):
         default=False,
         description=(
             "When PINCER_IDENTITY_MAP is configured, allow senders not in the map through as "
-            "disposable guests instead of rejecting them. No-op if no identity map is configured."
+            "disposable guests instead of rejecting them. For group mentions this is a no-op "
+            "if no identity map is configured, same as Telegram/Signal. For DMs it is NOT a "
+            "no-op: unlike Telegram/Signal, WhatsApp DMs are rejected by default with no "
+            "identity map configured (matching the pre-PR default of the removed "
+            "PINCER_WHATSAPP_DM_ALLOWLIST, which rejected all DMs when empty); set this to "
+            "True to accept DMs from anyone regardless of whether a map is configured."
         ),
     )
     whatsapp_group_trigger: str = Field(

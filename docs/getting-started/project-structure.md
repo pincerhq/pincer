@@ -508,7 +508,7 @@ enables random failover.
 | Variable | Purpose |
 |----------|---------|
 | `PINCER_WHATSAPP_ENABLED` | Enable WhatsApp channel (`true`/`false`) |
-| `PINCER_WHATSAPP_GUESTS_ALLOWED` | Once `PINCER_IDENTITY_MAP` is configured, allow unmapped senders through as disposable guests (default `false`; no-op if no identity map is configured) |
+| `PINCER_WHATSAPP_GUESTS_ALLOWED` | Once `PINCER_IDENTITY_MAP` is configured, allow unmapped senders through as disposable guests (default `false`). No-op if no identity map is configured for group mentions; for DMs, unlike Telegram/Signal, this is NOT a no-op — DMs are rejected by default with no identity map configured, and this flag overrides that |
 | `PINCER_WHATSAPP_GROUP_TRIGGER` | Trigger word for group messages (default: `pincer`) |
 
 ### Optional — Email & Calendar

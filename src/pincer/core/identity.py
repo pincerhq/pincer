@@ -95,7 +95,13 @@ class IdentityResolver:
         self._db_path = str(db_path)
         self._identity_map_config = identity_map_config
         self._profiles = profiles or {}
-        self._seeding_complete = False
+        self._seeded = asyncio.Event()
+
+    # Bounded wait for mark_seeding_complete() in is_guest(), so a future
+    # caller of rebuild_identity_map() that doesn't guarantee it eventually
+    # runs (e.g. skips the try/finally) hangs a channel handler for at most
+    # this long instead of forever. Generous vs. the observed ~1-3s startup gap.
+    _SEEDING_WAIT_TIMEOUT = 30.0
 
     @property
     def has_config(self) -> bool:
@@ -104,11 +110,12 @@ class IdentityResolver:
     def mark_seeding_complete(self) -> None:
         """Signal that startup identity-map seeding (see seed_from_config) has finished.
 
-        Until this is called, is_guest() fails open so channels don't reject senders
-        during the brief startup window before channel-specific IDs (e.g. WhatsApp LIDs)
-        have been resolved against the configured identity map.
+        Until this is called, is_guest() blocks (rather than failing open) so
+        channels don't treat an unresolved sender as trusted during the brief
+        startup window before channel-specific IDs (e.g. WhatsApp LIDs) have
+        been resolved against the configured identity map.
         """
-        self._seeding_complete = True
+        self._seeded.set()
 
     def _get_db(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self._db_path)
@@ -144,10 +151,22 @@ class IdentityResolver:
     async def is_guest(self, channel: ChannelType, channel_user_id: str | int) -> bool:
         """True if an identity map is configured and this sender is not in it.
 
-        No-op (always False) when no identity map is configured for the deployment,
-        or while startup seeding is still in progress (see mark_seeding_complete).
+        No-op (always False) when no identity map is configured for the deployment.
+        Blocks until startup seeding completes (see mark_seeding_complete) before
+        evaluating, so a message arriving before seeding finishes is held rather
+        than treated as trusted. Falls open after _SEEDING_WAIT_TIMEOUT if seeding
+        never completes, so a stuck caller doesn't hang a channel handler forever.
         """
-        if not self.has_config or not self._seeding_complete:
+        if not self.has_config:
+            return False
+        try:
+            await asyncio.wait_for(self._seeded.wait(), timeout=self._SEEDING_WAIT_TIMEOUT)
+        except TimeoutError:
+            logger.error(
+                "IdentityResolver: seeding still not complete after %.0fs — "
+                "failing open for this check to avoid hanging the channel handler",
+                self._SEEDING_WAIT_TIMEOUT,
+            )
             return False
         return await self.find(channel, channel_user_id) is None
 

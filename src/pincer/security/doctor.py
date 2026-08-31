@@ -412,13 +412,28 @@ class SecurityDoctor:
                 ),
                 category="access",
             )
+        if cfg.whatsapp_guests_allowed:
+            return CheckResult(
+                "whatsapp_access_control",
+                CheckStatus.CRITICAL,
+                "WhatsApp accepts DMs from anyone — PINCER_WHATSAPP_GUESTS_ALLOWED=true "
+                "overrides the fail-closed default that applies with no PINCER_IDENTITY_MAP configured",
+                fix_hint=(
+                    "Set PINCER_WHATSAPP_SELF_CHAT_ONLY=true, or set PINCER_IDENTITY_MAP "
+                    "(or configure the [identity] TOML section) and PINCER_WHATSAPP_GUESTS_ALLOWED=false"
+                ),
+                category="access",
+            )
         return CheckResult(
             "whatsapp_access_control",
-            CheckStatus.CRITICAL,
-            "WhatsApp accepts DMs from anyone — no self-chat-only mode and no identity map configured",
+            CheckStatus.WARNING,
+            "WhatsApp DMs are blocked by default with no PINCER_IDENTITY_MAP configured "
+            "(fail-closed), but group mentions/trigger-word messages are still answered "
+            "for any group member",
             fix_hint=(
-                "Set PINCER_WHATSAPP_SELF_CHAT_ONLY=true, or set PINCER_IDENTITY_MAP "
-                "(or configure the [identity] TOML section) and PINCER_WHATSAPP_GUESTS_ALLOWED=false"
+                "Set PINCER_IDENTITY_MAP (or configure the [identity] TOML section) and "
+                "PINCER_WHATSAPP_GUESTS_ALLOWED=false to restrict who can trigger Pincer "
+                "from a group"
             ),
             category="access",
         )
