@@ -814,9 +814,7 @@ class WhatsAppChannel(BaseChannel):
                     # mapped, and a mapped member posting once back-links the group
                     # JID onto their identity (see alt_user_ids below), which would
                     # then let every other unmapped member through.
-                    if not self._settings.whatsapp_guests_allowed and await self._sender_is_guest(
-                        sender_phone, ""
-                    ):
+                    if not self._settings.whatsapp_guests_allowed and await self._sender_is_guest(sender_phone, ""):
                         logger.info(
                             "WA skip: group message from %s not in identity map (guest)",
                             sender_phone,
