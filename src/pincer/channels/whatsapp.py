@@ -809,8 +809,13 @@ class WhatsAppChannel(BaseChannel):
                     # No fail-closed-without-map here: pre-PR groups had no allowlist
                     # at all (just the @mention requirement), so a no-op when no
                     # identity map is configured is not a regression for groups.
+                    # chat_user is the group JID here, not a peer identity form —
+                    # passing it as a candidate would ask whether the GROUP is
+                    # mapped, and a mapped member posting once back-links the group
+                    # JID onto their identity (see alt_user_ids below), which would
+                    # then let every other unmapped member through.
                     if not self._settings.whatsapp_guests_allowed and await self._sender_is_guest(
-                        sender_phone, chat_user
+                        sender_phone, ""
                     ):
                         logger.info(
                             "WA skip: group message from %s not in identity map (guest)",
@@ -886,7 +891,11 @@ class WhatsAppChannel(BaseChannel):
             # Expose both sender JID user and chat JID user as candidates.
             # On LID-based accounts sender_phone is a LID; chat_user may be
             # the phone-number JID. IdentityMiddleware tries both in order.
-            if chat_user and chat_user != sender_phone:
+            # Groups excluded: chat_user is the group JID there, not an alias
+            # of the sender, and IdentityMiddleware back-links unresolved
+            # candidates onto whoever matched — feeding it the group JID would
+            # persist the group as one of the sender's WhatsApp identities.
+            if chat_user and chat_user != sender_phone and not is_group:
                 incoming.alt_user_ids = [chat_user]
 
             logger.info(

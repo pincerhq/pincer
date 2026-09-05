@@ -524,10 +524,72 @@ class TestWhatsAppRouting:
         await ch._on_message(MagicMock(), event)
         ch._handler.assert_not_called()
         ch._extract_message.assert_not_called()
+        # Only the sender is a candidate — the group JID (chat_user) must never
+        # be checked, since it isn't an identity alias of the sender the way it
+        # is for DMs (see test_group_mention_guest_rejected_after_member_backlinked).
         assert ch._identity.is_guest.await_args_list == [
             call(ChannelType.WHATSAPP, OTHER_PHONE),
-            call(ChannelType.WHATSAPP, "group123"),
         ]
+
+    async def test_group_mention_guest_rejected_after_member_backlinked(self):
+        """Regression for PR #182 review r3893141982: a mapped member posting in
+        a group previously caused IdentityMiddleware to back-link the group JID
+        onto their identity. Because the guest gate ORs across candidates, that
+        made the group JID itself read as "mapped", letting every other unmapped
+        sender in the group bypass the gate. Simulate that persisted back-link
+        (is_guest(group JID) → False) and confirm an unmapped sender is still
+        rejected, i.e. the group JID must never be consulted at all."""
+        settings = _make_settings(whatsapp_self_chat_only=False)
+        settings.whatsapp_guests_allowed = False
+        ch = WhatsAppChannel(settings, identity=AsyncMock())
+
+        async def fake_is_guest(channel, candidate):
+            if candidate == "group123":
+                return False  # simulates a prior back-link from a mapped member
+            return candidate != OWNER_PHONE  # only the owner is actually mapped
+
+        ch._identity.is_guest = AsyncMock(side_effect=fake_is_guest)
+        ch._own_jid = OWNER_PHONE
+        ch._handler = AsyncMock(return_value="ok")
+        ch._extract_message = AsyncMock(
+            return_value=IncomingMessage(
+                user_id=OTHER_PHONE,
+                channel="whatsapp",
+                text="hi",
+                channel_type=ChannelType.WHATSAPP,
+                reply_to_message_id="x",
+            )
+        )
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user="group123",
+            sender_user=OTHER_PHONE,
+            is_group=True,
+            message_text=f"hey {OWNER_PHONE} what's up?",
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_not_called()
+        ch._extract_message.assert_not_called()
+        assert ch._identity.is_guest.await_args_list == [
+            call(ChannelType.WHATSAPP, OTHER_PHONE),
+        ]
+
+    async def test_group_message_does_not_set_alt_user_ids(self, routing_channel):
+        """The group JID must never be exposed as an alt_user_ids candidate —
+        IdentityMiddleware back-links unresolved candidates onto whoever matched,
+        so leaking the group JID here is what causes the bypass above."""
+        ch = routing_channel
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user="group123",
+            sender_user=OTHER_PHONE,
+            is_group=True,
+            message_text=f"hey {OWNER_PHONE} what's up?",
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_called_once()
+        incoming = ch._extract_message.return_value
+        assert incoming.alt_user_ids == []
 
     async def test_group_mention_guest_allowed_when_flag_true(self):
         """Group mention from a sender not in the identity map, guests allowed → responds."""
