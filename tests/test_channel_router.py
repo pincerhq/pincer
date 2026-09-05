@@ -43,3 +43,39 @@ class TestSendToUser:
 
         sent = await router.send_to_user("usr_abc", "hello")
         assert sent is False
+
+
+@pytest.mark.asyncio
+class TestRebuildIdentityMap:
+    async def test_mark_seeding_complete_called_on_success(self) -> None:
+        router, _channel = _router_with_channel(ChannelType.TELEGRAM)
+        router._identity.seed_from_config = AsyncMock()
+        router._identity.cleanup = AsyncMock()
+        router._identity.mark_seeding_complete = MagicMock()
+
+        await router.rebuild_identity_map()
+
+        router._identity.mark_seeding_complete.assert_called_once()
+
+    async def test_mark_seeding_complete_called_even_on_seed_failure(self) -> None:
+        router, _channel = _router_with_channel(ChannelType.TELEGRAM)
+        router._identity.seed_from_config = AsyncMock(side_effect=RuntimeError("boom"))
+        router._identity.cleanup = AsyncMock()
+        router._identity.mark_seeding_complete = MagicMock()
+
+        # Seeding failures are logged and swallowed, not propagated — startup
+        # should continue rather than crash on a transient seeding error.
+        await router.rebuild_identity_map()
+
+        router._identity.mark_seeding_complete.assert_called_once()
+        router._identity.cleanup.assert_not_called()
+
+    async def test_mark_seeding_complete_called_even_on_cleanup_failure(self) -> None:
+        router, _channel = _router_with_channel(ChannelType.TELEGRAM)
+        router._identity.seed_from_config = AsyncMock()
+        router._identity.cleanup = AsyncMock(side_effect=RuntimeError("boom"))
+        router._identity.mark_seeding_complete = MagicMock()
+
+        await router.rebuild_identity_map()
+
+        router._identity.mark_seeding_complete.assert_called_once()

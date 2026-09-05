@@ -21,12 +21,10 @@ from pincer.channels.slack import SlackChannel, split_message
 def make_settings(
     bot_token: str = "xoxb-test",
     app_token: str = "xapp-test",
-    allowlist: list[str] | None = None,
 ) -> Any:
     s = MagicMock()
     s.slack_bot_token.get_secret_value.return_value = bot_token
     s.slack_app_token.get_secret_value.return_value = app_token
-    s.slack_user_allowlist = allowlist or []
     return s
 
 
@@ -519,65 +517,6 @@ async def test_skip_message_subtypes() -> None:
         await registered["message"](event=event, client=AsyncMock())
 
     assert received == []
-
-
-# ── Allowlist ─────────────────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_allowlist_blocks_unknown_user() -> None:
-    received: list[IncomingMessage] = []
-
-    async def handler(msg: IncomingMessage) -> str:
-        received.append(msg)
-        return ""
-
-    ch = SlackChannel(make_settings(allowlist=["U_ALLOWED"]))
-    ch._app = MagicMock()
-    ch._app.client = AsyncMock()
-    ch._bot_user_id = "U_BOT"
-    ch._handler = handler
-
-    mock_client = AsyncMock()
-    event = {
-        "user": "U_STRANGER",
-        "channel": "D_DM",
-        "channel_type": "im",
-        "text": "hello",
-        "ts": "1.0",
-    }
-    await ch._process_message(event, mock_client)
-    assert received == []
-
-
-@pytest.mark.asyncio
-async def test_allowlist_permits_known_user() -> None:
-    received: list[IncomingMessage] = []
-
-    async def handler(msg: IncomingMessage) -> str:
-        received.append(msg)
-        return "hi"
-
-    ch = SlackChannel(make_settings(allowlist=["U_ALLOWED"]))
-    ch._app = MagicMock()
-    ch._app.client = AsyncMock()
-    ch._bot_user_id = "U_BOT"
-    ch._handler = handler
-    ch._identity = make_identity()
-
-    mock_client = AsyncMock()
-    mock_client.users_info = AsyncMock(
-        return_value={"user": {"profile": {"display_name": "Alice", "real_name": "Alice"}}}
-    )
-    event = {
-        "user": "U_ALLOWED",
-        "channel": "D_DM",
-        "channel_type": "im",
-        "text": "hello",
-        "ts": "1.0",
-    }
-    await ch._process_message(event, mock_client)
-    assert len(received) == 1
 
 
 # ── Identity resolution ───────────────────────────────────────────────────────

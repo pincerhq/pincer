@@ -37,7 +37,6 @@ def test_split_preserves_content() -> None:
 
 def _make_channel() -> TelegramChannel:
     settings = MagicMock()
-    settings.telegram_allowed_users = []
     channel = TelegramChannel(settings)
     channel._bot = AsyncMock()
     return channel
@@ -328,6 +327,177 @@ async def test_handle_text_sends_response_via_send() -> None:
     await handle_text(_mock_message(text="hello bot"))
 
     channel.send.assert_awaited_once_with("123456789", "hi there")
+
+
+async def test_is_guest_blocked_false_when_no_identity_configured() -> None:
+    channel = _make_channel()
+    assert channel._identity is None
+    assert await channel._is_guest_blocked(123456789) is False
+
+
+async def test_is_guest_blocked_true_when_guest_and_not_allowed() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_guests_allowed = False
+    channel._identity = AsyncMock()
+    channel._identity.is_guest = AsyncMock(return_value=True)
+
+    assert await channel._is_guest_blocked(123456789) is True
+
+
+async def test_is_guest_blocked_false_when_guests_allowed() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_guests_allowed = True
+    channel._identity = AsyncMock()
+    channel._identity.is_guest = AsyncMock(return_value=True)
+
+    assert await channel._is_guest_blocked(123456789) is False
+    channel._identity.is_guest.assert_not_called()
+
+
+async def test_handle_text_blocked_for_unmapped_sender() -> None:
+    channel, router = _registered_handlers()
+    channel._handler = AsyncMock(return_value="hi there")
+    channel.send = AsyncMock()
+    channel._settings.telegram_guests_allowed = False
+    channel._identity = AsyncMock()
+    channel._identity.is_guest = AsyncMock(return_value=True)
+
+    handle_text = router.message.handlers[7].callback
+    await handle_text(_mock_message(text="hello bot"))
+
+    channel._handler.assert_not_called()
+    channel.send.assert_not_called()
+
+
+def _mock_group_message(
+    text: str | None = None,
+    user_id: int = 987654321,
+    entities: list | None = None,
+    reply_to_bot_id: int | None = None,
+) -> MagicMock:
+    message = MagicMock()
+    message.from_user.id = user_id
+    message.text = text
+    message.caption = None
+    message.caption_entities = None
+    message.entities = entities
+    message.answer = AsyncMock()
+    message.chat.id = -100123456789
+    message.chat.type = "group"
+    if reply_to_bot_id is not None:
+        message.reply_to_message = MagicMock()
+        message.reply_to_message.from_user.id = reply_to_bot_id
+    else:
+        message.reply_to_message = None
+    return message
+
+
+def test_is_triggered_in_group_by_trigger_word() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = "pincer"
+    message = _mock_group_message(text="hey pincer, what's up?")
+    assert channel._is_triggered_in_group(message) is True
+
+
+def test_is_triggered_in_group_by_mention_entity() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = ""
+    channel._own_username = "PincerBot"
+    text = "hey @PincerBot help me"
+    entity = MagicMock()
+    entity.type = "mention"
+    entity.offset = text.index("@PincerBot")
+    entity.length = len("@PincerBot")
+    message = _mock_group_message(text=text, entities=[entity])
+    assert channel._is_triggered_in_group(message) is True
+
+
+def test_is_triggered_in_group_by_reply_to_bot() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = ""
+    channel._bot.id = 111
+    message = _mock_group_message(text="what do you think?", reply_to_bot_id=111)
+    assert channel._is_triggered_in_group(message) is True
+
+
+def test_is_triggered_in_group_false_when_no_match() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = "pincer"
+    message = _mock_group_message(text="just chatting here")
+    assert channel._is_triggered_in_group(message) is False
+
+
+async def test_handle_text_group_without_trigger_ignored() -> None:
+    """Group chatter that doesn't mention/trigger Pincer is dropped before the guest check."""
+    channel, router = _registered_handlers()
+    channel._handler = AsyncMock(return_value="hi there")
+    channel.send = AsyncMock()
+    channel._settings.telegram_group_trigger = "pincer"
+
+    handle_text = router.message.handlers[7].callback
+    await handle_text(_mock_group_message(text="just chatting here"))
+
+    channel._handler.assert_not_called()
+    channel.send.assert_not_called()
+
+
+async def test_handle_text_group_with_trigger_responds() -> None:
+    channel, router = _registered_handlers()
+    channel._handler = AsyncMock(return_value="hi there")
+    channel.send = AsyncMock()
+    channel._settings.telegram_group_trigger = "pincer"
+    channel._settings.telegram_guests_allowed = True
+
+    handle_text = router.message.handlers[7].callback
+    await handle_text(_mock_group_message(text="hey pincer, help me"))
+
+    channel._handler.assert_called_once()
+    channel.send.assert_awaited_once()
+
+
+async def test_handle_photo_group_without_trigger_ignored() -> None:
+    """The group-trigger gate applies uniformly across message types, not just text."""
+    channel, router = _registered_handlers()
+    channel._handler = AsyncMock(return_value="nice photo")
+    channel.send = AsyncMock()
+    channel._settings.telegram_group_trigger = "pincer"
+
+    message = _mock_group_message(text=None)
+    photo = MagicMock()
+    photo.file_id = "photo1"
+    message.photo = [photo]
+
+    handle_photo = router.message.handlers[5].callback
+    await handle_photo(message)
+
+    channel._handler.assert_not_called()
+    channel.send.assert_not_called()
+    channel._bot.get_file.assert_not_called()
+
+
+async def test_cmd_help_blocked_for_unmapped_sender() -> None:
+    """cmd_help must respect the guest gate like every other command/handler."""
+    channel, router = _registered_handlers()
+    channel._settings.telegram_guests_allowed = False
+    channel._identity = AsyncMock()
+    channel._identity.is_guest = AsyncMock(return_value=True)
+
+    cmd_help = router.message.handlers[3].callback
+    message = _mock_message()
+    await cmd_help(message)
+
+    message.answer.assert_not_called()
+
+
+async def test_cmd_help_responds_when_allowed() -> None:
+    channel, router = _registered_handlers()
+    assert channel._identity is None
+
+    cmd_help = router.message.handlers[3].callback
+    message = _mock_message()
+    await cmd_help(message)
+
+    message.answer.assert_called_once()
 
 
 async def test_tool_approval_callback_edits_message_with_escaped_label() -> None:

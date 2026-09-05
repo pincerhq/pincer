@@ -80,7 +80,6 @@ from pincer.channels.whatsapp import WhatsAppChannel  # noqa: E402
 @pytest.fixture
 def wa_channel():
     settings = MagicMock()
-    settings.whatsapp_dm_allowlist = "+491234567890,+491111111111"
     settings.whatsapp_self_chat_only = False
     settings.whatsapp_group_trigger = "pincer"
     settings.data_dir = "/tmp/test"
@@ -94,20 +93,6 @@ class TestWhatsAppChannel:
 
     def test_name(self, wa_channel):
         assert wa_channel.name == "whatsapp"
-
-    def test_allowlist_parsing(self, wa_channel):
-        assert "491234567890" in wa_channel._dm_allowlist
-        assert "491111111111" in wa_channel._dm_allowlist
-        assert len(wa_channel._dm_allowlist) == 2
-
-    def test_empty_allowlist(self):
-        settings = MagicMock()
-        settings.whatsapp_dm_allowlist = ""
-        settings.whatsapp_self_chat_only = True
-        settings.whatsapp_group_trigger = "pincer"
-        settings.data_dir = "/tmp/test"
-        ch = WhatsAppChannel(settings)
-        assert len(ch._dm_allowlist) == 0
 
     def test_mention_by_trigger_word(self, wa_channel):
         wa_channel._own_jid = "491234567890"

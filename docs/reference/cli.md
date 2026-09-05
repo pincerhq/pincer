@@ -284,6 +284,20 @@ Unlike `PINCER_IDENTITY_MAP`, a person may have just one `[[...channels]]` entry
 
 **`PINCER_IDENTITY_MAP`, when set (non-empty), always fully overrides the TOML `[identity]` section** — the two are not merged; the TOML section is simply ignored while the env var is set.
 
+#### Guest access control
+
+Once an identity map (`PINCER_IDENTITY_MAP` or TOML `[identity]`) is configured, senders on Telegram, WhatsApp, and Signal whose `channel:user_id` is *not* in the map are treated as guests:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PINCER_TELEGRAM_GUESTS_ALLOWED` | `false` | Let unmapped Telegram senders through with a disposable identity instead of rejecting them |
+| `PINCER_WHATSAPP_GUESTS_ALLOWED` | `false` | Same, for WhatsApp DMs |
+| `PINCER_SIGNAL_GUESTS_ALLOWED` | `false` | Same, for Signal DMs |
+
+For Telegram and Signal, these flags are a no-op — everyone is allowed, matching today's default — if no identity map is configured at all for the deployment. WhatsApp group mentions behave the same way. WhatsApp DMs are the one exception: with no identity map configured, DMs are rejected by default regardless of `PINCER_WHATSAPP_GUESTS_ALLOWED` (matching the pre-#182 default of the removed `PINCER_WHATSAPP_DM_ALLOWLIST`, which rejected all DMs when empty) — set `PINCER_WHATSAPP_GUESTS_ALLOWED=true` to accept WhatsApp DMs from anyone even without a map. `pincer doctor` warns if a channel is configured (bot token set, or WhatsApp enabled without self-chat-only mode) but no identity map exists at all, since that means the channel has no access control whatsoever.
+
+`PINCER_IDENTITY_MAP` + these flags are now the *only* access-control mechanism for Telegram, WhatsApp, and Signal — the older `PINCER_TELEGRAM_ALLOWED_USERS`, `PINCER_WHATSAPP_DM_ALLOWLIST`, and `PINCER_SIGNAL_ALLOWLIST` settings have been removed. Slack's equivalent (`PINCER_SLACK_USER_ALLOWLIST`) has also been removed — Slack access relies entirely on native workspace/app-install membership. Microsoft Teams keeps its own `PINCER_TEAMS_USER_ALLOWLIST`, unaffected by this change.
+
 ## API Endpoints
 
 The API server starts automatically with `pincer run` on the configured

@@ -14,7 +14,6 @@ def _make_settings(**kwargs) -> MagicMock:
     s = MagicMock()
     s.signal_api_url = "http://localhost:8080"
     s.signal_phone_number = "+491234567890"
-    s.signal_allowlist = ""
     s.signal_group_reply = "all"
     s.signal_receive_mode = "poll"
     s.signal_poll_interval = 2
@@ -59,24 +58,6 @@ async def test_receive_to_reply_flow() -> None:
     assert len(replies) == 1
     assert replies[0][0] == "+491111111111"
     assert "Echo: Hello Pincer" in replies[0][1]
-
-
-@pytest.mark.asyncio
-async def test_allowlist_blocks_dm() -> None:
-    settings = _make_settings(signal_allowlist="+491111111111")
-    ch = SignalChannel(settings)
-    handler = AsyncMock(return_value="reply")
-    ch._handler = handler
-    ch._client = AsyncMock()
-
-    msg = SignalMessage(
-        source="+499876543210",  # not in allowlist
-        timestamp=200,
-        text="intrusion attempt",
-        is_group=False,
-    )
-    await ch._process_signal_message(msg)
-    handler.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,7 @@ Alternatively, open the printed URL in your browser directly.
 PINCER_SIGNAL_ENABLED=true
 PINCER_SIGNAL_PHONE_NUMBER=+491234567890
 PINCER_SIGNAL_API_URL=http://signal-api:8080   # Docker internal URL
-PINCER_SIGNAL_ALLOWLIST=                       # Empty = allow all DMs
+PINCER_SIGNAL_GUESTS_ALLOWED=false             # No-op unless PINCER_IDENTITY_MAP is set
 ```
 
 ### 4. Verify
@@ -67,7 +67,7 @@ pincer run
 | `PINCER_SIGNAL_API_URL` | `http://signal-api:8080` | signal-cli-rest-api base URL (inter-container) |
 | `PINCER_SIGNAL_PAIR_URL` | `http://127.0.0.1:8081` | URL for `pincer signal pair` browser (host-facing) |
 | `PINCER_SIGNAL_PHONE_NUMBER` | *(required)* | Your Signal E.164 phone number |
-| `PINCER_SIGNAL_ALLOWLIST` | `""` | Comma-separated allowed DM numbers; empty = allow all |
+| `PINCER_SIGNAL_GUESTS_ALLOWED` | `false` | Once `PINCER_IDENTITY_MAP` is configured, let senders not in the map through as disposable guests instead of rejecting them. No-op if no identity map is configured |
 | `PINCER_SIGNAL_GROUP_REPLY` | `mention_only` | Group reply mode: `mention_only` \| `all` \| `disabled` |
 | `PINCER_SIGNAL_RECEIVE_MODE` | `websocket` | `websocket` (recommended) or `poll` |
 | `PINCER_SIGNAL_POLL_INTERVAL` | `2` | Poll interval in seconds (poll mode only) |
@@ -91,7 +91,7 @@ If you use a different port mapping for signal-api, set `PINCER_SIGNAL_PAIR_URL`
 - The security doctor (`pincer doctor`) checks:
   - `signal_phone_set` — critical if Signal is enabled but phone is not configured
   - `signal_api_local` — critical if the API URL is not a local/internal address
-  - `signal_allowlist` — warning if no DM allowlist is configured
+  - `signal_access_control` — warning if no `PINCER_IDENTITY_MAP` is configured (any phone number can DM the bot)
 
 ---
 
@@ -142,6 +142,8 @@ Link a Signal number to a Telegram user:
 ```env
 PINCER_IDENTITY_MAP=telegram:12345=signal:+491234567890
 ```
+
+Once `PINCER_IDENTITY_MAP` (or the TOML `[identity]` section) is configured, Signal senders not listed in it are guests and are rejected by default. Set `PINCER_SIGNAL_GUESTS_ALLOWED=true` to let them through with a disposable identity instead — see [Guest access control](../reference/cli.md#guest-access-control) for details.
 
 ---
 

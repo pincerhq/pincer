@@ -188,6 +188,10 @@ If you consistently see this (e.g. a user messages the bot the instant it restar
 
 This is a known limitation; a readiness gate that queues messages until the identity map is seeded is tracked as a future improvement.
 
+**Interaction with `PINCER_WHATSAPP_GUESTS_ALLOWED`**
+
+`PINCER_WHATSAPP_GUESTS_ALLOWED=false` (the default) rejects unmapped senders once an identity map is configured — see [Guest access control](../reference/cli.md#guest-access-control). The guest check blocks (rather than failing open) until the same startup seeding step described above (`seed_from_config`) has completed: a message arriving during the startup gap holds until seeding finishes (typically 1–3 seconds) before the sender is evaluated against the map, rather than being waved through unchecked. If seeding somehow never completes, the check gives up and fails open after 30 seconds so a stuck seed doesn't hang the channel forever — this is logged as an error and should not happen in normal operation. Note this only affects whether a message is *accepted or rejected*; it does not change the fallback-identity behavior described above — a message that arrives before seeding finishes can still be stored under the wrong (channel-scoped) identity even once it's accepted.
+
 ## Keeping an eye on this
 
 `pincer doctor` includes a `whatsapp_neonize_version` check. It reports PASS

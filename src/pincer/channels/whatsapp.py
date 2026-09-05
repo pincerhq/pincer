@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     )
 
     from pincer.config import Settings
+    from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -140,12 +141,13 @@ class WhatsAppChannel(BaseChannel):
 
     channel_type = ChannelType.WHATSAPP
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, identity: IdentityResolver | None = None) -> None:
         if not HAS_NEONIZE:
             raise ImportError(
                 "neonize is required for WhatsApp support. Install it with: pip install neonize (requires libmagic)"
             )
         self._settings = settings
+        self._identity = identity
         self._client: NewAClient | None = None
         self._handler: MessageHandler | None = None
         self._own_jid: str | None = None
@@ -166,13 +168,6 @@ class WhatsAppChannel(BaseChannel):
         # the "@lid" server — `build_jid(lid_user)` defaults to "@s.whatsapp.net"
         # and the WA server rejects it with "no LID found".
         self._reply_targets: dict[str, tuple[str, str]] = {}
-
-        self._dm_allowlist: set[str] = set()
-        if settings.whatsapp_dm_allowlist:
-            self._dm_allowlist = {
-                phone.strip().lstrip("+") for phone in settings.whatsapp_dm_allowlist.split(",") if phone.strip()
-            }
-            logger.info("WhatsApp allowlist: %d numbers", len(self._dm_allowlist))
 
         # Echo prevention: skip processing messages Pincer just sent.
         self._recent_sent_ids: set[str] = set()
@@ -705,6 +700,23 @@ class WhatsAppChannel(BaseChannel):
             return True
         return bool(self._own_lid and chat_user == self._own_lid)
 
+    async def _sender_is_guest(self, sender_phone: str, chat_user: str) -> bool:
+        """True only if every LID/phone candidate for this sender is unmapped.
+
+        On LID-based WhatsApp accounts sender_phone may be a LID while chat_user
+        carries the phone-number form of the same peer (or vice versa) — mirrors
+        IdentityMiddleware's OR-across-candidates resolution (middleware.py) so a
+        contact mapped under either form is never rejected here before reaching
+        the middleware that would otherwise back-link their LID.
+        """
+        if self._identity is None:
+            return False
+        candidates = list(dict.fromkeys(c for c in (sender_phone, chat_user) if c))
+        for candidate in candidates:
+            if not await self._identity.is_guest(ChannelType.WHATSAPP, candidate):
+                return False
+        return True
+
     async def _on_message(self, client: NewAClient, event: MessageEv) -> None:
         """Route incoming WhatsApp messages to the handler callback."""
         try:
@@ -773,26 +785,63 @@ class WhatsAppChannel(BaseChannel):
             is_self_chat = not is_group and is_from_me and self._is_self_chat(chat_user)
             if is_self_chat:
                 logger.info("WA routing: self-chat (chat_user=%s own_jid=%s)", chat_user, self._own_jid)
-            else:
-                # Rule 3: Outgoing to others → always ignore.
-                if is_from_me:
-                    logger.debug("WA skip: outgoing message to %s → ignoring", chat_jid)
+            elif is_from_me and not is_group:
+                # Rule 3: Outgoing DM to someone else → always ignore.
+                logger.debug("WA skip: outgoing message to %s → ignoring", chat_jid)
+                return
+            elif is_group:
+                # Rule 4: Group — only process if @mentioned or trigger word used.
+                # This also covers the owner's own messages when Pincer is linked
+                # to the owner's own WhatsApp number (is_from_me=True): previously
+                # Rule 3 dropped these unconditionally, so the owner could never
+                # summon Pincer in a group the way any other member could.
+                if not self._is_mentioned_in_group(msg, client):
+                    logger.debug("WA skip: group message without mention")
                     return
-                # Rule 4: Group — only process if @mentioned or trigger.
-                if is_group:
-                    if not self._is_mentioned_in_group(msg, client):
-                        logger.debug("WA skip: group message without mention")
+                if is_from_me:
+                    # Unambiguously the owner — bypass the guest gate, which
+                    # exists to vet other senders, not the owner.
+                    logger.info("WA routing: group mention (from owner's own number)")
+                else:
+                    # Rule 4a: Guest gate, keyed on the sender (not the chat/group).
+                    # whatsapp_self_chat_only is deliberately not consulted here —
+                    # its docstring says group mentions work regardless of that flag.
+                    # No fail-closed-without-map here: pre-PR groups had no allowlist
+                    # at all (just the @mention requirement), so a no-op when no
+                    # identity map is configured is not a regression for groups.
+                    # chat_user is the group JID here, not a peer identity form —
+                    # passing it as a candidate would ask whether the GROUP is
+                    # mapped, and a mapped member posting once back-links the group
+                    # JID onto their identity (see alt_user_ids below), which would
+                    # then let every other unmapped member through.
+                    if not self._settings.whatsapp_guests_allowed and await self._sender_is_guest(sender_phone, ""):
+                        logger.info(
+                            "WA skip: group message from %s not in identity map (guest)",
+                            sender_phone,
+                        )
                         return
                     logger.info("WA routing: group mention")
-                else:
-                    # Rule 5: Incoming DM — only process if allowlisted (and not self-chat-only).
-                    if self._settings.whatsapp_self_chat_only:
-                        logger.info("WA skip: incoming DM from %s (self-chat-only mode)", sender_phone)
+            else:
+                # Rule 5: Incoming DM — only process if not self-chat-only and not a guest.
+                if self._settings.whatsapp_self_chat_only:
+                    logger.info("WA skip: incoming DM from %s (self-chat-only mode)", sender_phone)
+                    return
+                if not self._settings.whatsapp_guests_allowed:
+                    if self._identity is None or not self._identity.has_config:
+                        # Unlike Telegram/Signal, WhatsApp DMs fail CLOSED without a
+                        # map: pre-PR the removed PINCER_WHATSAPP_DM_ALLOWLIST rejected
+                        # all DMs by default when empty, so a no-op-without-config guest
+                        # gate here would silently flip that default open on upgrade.
+                        # See whatsapp_guests_allowed docstring (config/channels.py).
+                        logger.info(
+                            "WA skip: DM from %s rejected (no identity map configured, guests not allowed)",
+                            sender_phone,
+                        )
                         return
-                    if sender_phone not in self._dm_allowlist:
-                        logger.info("WA skip: DM from %s not in allowlist", sender_phone)
+                    if await self._sender_is_guest(sender_phone, chat_user):
+                        logger.info("WA skip: DM from %s not in identity map (guest)", sender_phone)
                         return
-                    logger.info("WA routing: DM from %s", sender_phone)
+                logger.info("WA routing: DM from %s", sender_phone)
 
             # Defensive unwrap: the Go library should unwrap these, but
             # if for any reason the raw wrapper arrives, extract the inner
@@ -840,7 +889,11 @@ class WhatsAppChannel(BaseChannel):
             # Expose both sender JID user and chat JID user as candidates.
             # On LID-based accounts sender_phone is a LID; chat_user may be
             # the phone-number JID. IdentityMiddleware tries both in order.
-            if chat_user and chat_user != sender_phone:
+            # Groups excluded: chat_user is the group JID there, not an alias
+            # of the sender, and IdentityMiddleware back-links unresolved
+            # candidates onto whoever matched — feeding it the group JID would
+            # persist the group as one of the sender's WhatsApp identities.
+            if chat_user and chat_user != sender_phone and not is_group:
                 incoming.alt_user_ids = [chat_user]
 
             logger.info(

@@ -877,7 +877,7 @@ async def _run_agent(settings: Settings) -> None:
     if settings.telegram_bot_token.get_secret_value():
         from pincer.channels.telegram import TelegramChannel
 
-        tg = TelegramChannel(settings)
+        tg = TelegramChannel(settings, identity=identity)
         tg.set_stream_agent(agent)
         await tg.start(on_message)
         channel_map[tg.name] = tg
@@ -889,7 +889,7 @@ async def _run_agent(settings: Settings) -> None:
         try:
             from pincer.channels.whatsapp import WhatsAppChannel
 
-            wa = WhatsAppChannel(settings)
+            wa = WhatsAppChannel(settings, identity=identity)
             await wa.start(on_message)
             channel_map[wa.name] = wa
             router.register(ChannelType.WHATSAPP, wa)
@@ -1093,7 +1093,7 @@ async def _run_agent(settings: Settings) -> None:
             try:
                 from pincer.channels.signal import SignalChannel
 
-                sig = SignalChannel(settings)
+                sig = SignalChannel(settings, identity=identity)
                 await sig.start(on_message)
                 channel_map[sig.name] = sig
                 router.register(ChannelType.SIGNAL, sig)
@@ -1699,9 +1699,10 @@ def init() -> None:
     if Confirm.ask("Enable Telegram?", default=False):
         token = Prompt.ask("Telegram bot token", password=True)
         env_lines.append(f"PINCER_TELEGRAM_BOT_TOKEN={token}")
-        allowed = Prompt.ask("Allowed user IDs (comma-separated, empty = all)", default="")
-        if allowed:
-            env_lines.append(f"PINCER_TELEGRAM_ALLOWED_USERS={allowed}")
+        console.print(
+            "  Access is controlled by PINCER_IDENTITY_MAP — set it after setup to restrict "
+            "who can message the bot (unset = anyone can message it)."
+        )
 
     if Confirm.ask("Enable Discord?", default=False):
         token = Prompt.ask("Discord bot token", password=True)
@@ -1715,9 +1716,10 @@ def init() -> None:
         env_lines.append("PINCER_SIGNAL_ENABLED=true")
         phone = Prompt.ask("Signal phone number (E.164, e.g. +491234567890)")
         env_lines.append(f"PINCER_SIGNAL_PHONE_NUMBER={phone}")
-        allowlist = Prompt.ask("Allowed DM numbers (comma-separated, empty = allow all)", default="")
-        if allowlist:
-            env_lines.append(f"PINCER_SIGNAL_ALLOWLIST={allowlist}")
+        console.print(
+            "  Access is controlled by PINCER_IDENTITY_MAP — set it after setup to restrict "
+            "who can DM the bot (unset = anyone can DM it)."
+        )
         api_url = Prompt.ask(
             "signal-cli-rest-api URL (for Docker: http://signal-api:8080)",
             default="http://signal-api:8080",
