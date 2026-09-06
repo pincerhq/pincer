@@ -27,7 +27,7 @@ This starts only the Signal API (pre-built image, no build required). For the fu
 ### 2. Pair your device (QR code)
 
 ```bash
-pincer signal pair
+pincer signal setup
 ```
 
 Scan the QR code with the Signal app:
@@ -65,7 +65,7 @@ pincer run
 |---|---|---|
 | `PINCER_SIGNAL_ENABLED` | `false` | Enable Signal channel |
 | `PINCER_SIGNAL_API_URL` | `http://signal-api:8080` | signal-cli-rest-api base URL (inter-container) |
-| `PINCER_SIGNAL_PAIR_URL` | `http://127.0.0.1:8081` | URL for `pincer signal pair` browser (host-facing) |
+| `PINCER_SIGNAL_PAIR_URL` | `http://127.0.0.1:8081` | URL for `pincer signal setup` browser (host-facing) |
 | `PINCER_SIGNAL_PHONE_NUMBER` | *(required)* | Your Signal E.164 phone number |
 | `PINCER_SIGNAL_GUESTS_ALLOWED` | `false` | Once `PINCER_IDENTITY_MAP` is configured, let senders not in the map through as disposable guests instead of rejecting them. No-op if no identity map is configured |
 | `PINCER_SIGNAL_GROUP_REPLY` | `mention_only` | Group reply mode: `mention_only` \| `all` \| `disabled` |
@@ -79,7 +79,7 @@ pincer run
 When signal-api runs in Docker, two different URLs apply:
 
 - **`PINCER_SIGNAL_API_URL`** — Used by the Pincer agent (inside Docker) to talk to signal-api. Use the Docker service name: `http://signal-api:8080`.
-- **`PINCER_SIGNAL_PAIR_URL`** — Used by `pincer signal pair` to open the QR link in your browser. The browser runs on your host, so it must use 127.0.0.1: `http://127.0.0.1:8081` (default, matches docker-compose port mapping). Using 127.0.0.1 instead of localhost avoids Safari IPv6 resolution issues on macOS.
+- **`PINCER_SIGNAL_PAIR_URL`** — Used by `pincer signal setup` to open the QR link in your browser. The browser runs on your host, so it must use 127.0.0.1: `http://127.0.0.1:8081` (default, matches docker-compose port mapping). Using 127.0.0.1 instead of localhost avoids Safari IPv6 resolution issues on macOS.
 
 If you use a different port mapping for signal-api, set `PINCER_SIGNAL_PAIR_URL` accordingly (e.g. `http://127.0.0.1:8082`).
 
@@ -149,7 +149,7 @@ Once `PINCER_IDENTITY_MAP` (or the TOML `[identity]` section) is configured, Sig
 
 ## Troubleshooting
 
-**"Cannot reach signal-api" when running `pincer signal pair`**
+**"Cannot reach signal-api" when running `pincer signal setup`**
 - The pair command checks that signal-api is reachable before opening the browser. If you see this error, start signal-api first:
   ```bash
   docker compose -f docker-compose.yml -f docker-compose.signal.yml up -d signal-api
@@ -164,7 +164,7 @@ Once `PINCER_IDENTITY_MAP` (or the TOML `[identity]` section) is configured, Sig
 
 **"Unacceptable response from the service" / "Failed to link device" / silent failure when scanning QR code**
 - We use `MODE=normal` and `latest-dev` for better linking. If linking still fails (silent or rejected):
-  1. **Clear volume and start fresh:** `docker compose -f docker-compose.yml -f docker-compose.signal.yml down` then `docker volume rm pincer-signal-data`, then `up -d signal-api` again. Get a new QR code with `pincer signal pair`.
+  1. **Clear volume and start fresh:** `docker compose -f docker-compose.yml -f docker-compose.signal.yml down` then `docker volume rm pincer-signal-data`, then `up -d signal-api` again. Get a new QR code with `pincer signal setup`.
   2. **Apple Silicon (M1/M2/M4):** JVM in the image can crash on ARM64. Add under the signal-api service in docker-compose.signal.yml:
      ```yaml
      platform: linux/amd64
@@ -173,7 +173,7 @@ Once `PINCER_IDENTITY_MAP` (or the TOML `[identity]` section) is configured, Sig
   4. Ensure your Signal app is updated; some versions have known compatibility issues.
 
 **"QR code not found" / pairing fails**
-- The QR link expires quickly. Re-run `pincer signal pair` for a fresh code.
+- The QR link expires quickly. Re-run `pincer signal setup` for a fresh code.
 
 **Messages not arriving**
 - Run `pincer signal status` to confirm health and account registration

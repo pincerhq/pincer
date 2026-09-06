@@ -17,7 +17,7 @@ Quick start::
 
 Setup::
 
-    pincer setup-slack   # interactive token setup
+    pincer slack setup   # interactive token setup
 """
 
 from __future__ import annotations

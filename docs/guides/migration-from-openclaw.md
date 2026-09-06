@@ -128,7 +128,7 @@ Stop OpenClaw first, then start Pincer. Only one service can poll the same bot t
 WhatsApp sessions can't be transferred — you'll need to scan a new QR code:
 
 ```bash
-pincer channels add whatsapp
+pincer whatsapp setup
 # Scan the QR code with your phone
 ```
 

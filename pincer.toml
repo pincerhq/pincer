@@ -1,5 +1,5 @@
 # ── Google Workspace Integration ──────────────────────────────────────────────
-# Run 'pincer setup-google' for one-time OAuth consent.
+# Run 'pincer google setup' for one-time OAuth consent.
 # Credentials: ~/.pincer/google_credentials.json (OAuth client JSON from Google Cloud Console)
 # Token cache: ~/.pincer/google_workspace_token.json (auto-created after setup)
 #

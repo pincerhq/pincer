@@ -134,7 +134,7 @@ pincer run tasks
 `pincer run tasks` requires `task_broker=redis` — the in-memory broker can't
 be shared across processes, and the command refuses to start otherwise. The
 standalone worker builds the same LLM/tools/agent core as the main process
-(`_build_core` in `cli.py`) but **does not** start channels, the MCP server
+(`_build_core` in `cli/run.py`) but **does not** start channels, the MCP server
 export, or live email/calendar polling loops (`EventTriggerManager.start()`
 is never called there — only `ensure_table()`, since those loops must run in
 exactly one process). It consumes the shared repid queue and publishes

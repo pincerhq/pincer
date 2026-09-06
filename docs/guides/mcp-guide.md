@@ -295,10 +295,14 @@ pincer mcp uninstall github
 ### MCP server (expose Pincer to external clients)
 
 ```bash
-pincer mcp server start    # Start Pincer's outbound MCP endpoint
-pincer mcp server stop     # Stop it
-pincer mcp server status   # Show status and connected clients
+pincer mcp serve            # Start a standalone Pincer MCP server (no agent/channels)
+pincer mcp server status    # Show whether the export server is enabled + its config
+pincer mcp server config    # Print MCP client config JSON (Claude Desktop / Cursor)
 ```
+
+There is no `mcp server start`/`stop` — `pincer mcp serve` runs the standalone
+server in the foreground (Ctrl+C to stop); when running the full agent, the
+export server starts and stops with `pincer run`.
 
 See [MCP Server guide](../core-components/pincer-mcp-server.md) for the full server export guide.
 
@@ -410,13 +414,10 @@ access_token_ttl_seconds = 3600
 refresh_token_ttl_seconds = 2592000                  # 30 days
 ```
 
-First-run provisioning:
+First-run provisioning is automatic — there is no CLI setup step:
 
-```bash
-pincer mcp oauth init        # Generate Ed25519 key pair + seed clients table
-pincer mcp oauth client add  # Register a new MCP client (PKCE public or confidential)
-pincer mcp oauth client list # List registered clients
-```
+- The Ed25519 signing key is generated on first use and persisted to `signing_key_path` (mode `0o600`).
+- MCP clients self-register via Dynamic Client Registration (`POST /register`, RFC 7591); there is no manual client add/list command.
 
 ---
 

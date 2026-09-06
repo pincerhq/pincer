@@ -46,12 +46,12 @@ def test_run_calls_setup_logging(monkeypatch: pytest.MonkeyPatch) -> None:
     """run() calls _setup_logging with the configured log level."""
 
     logged: list[str] = []
-    monkeypatch.setattr("pincer.cli._setup_logging", lambda level: logged.append(level))
+    monkeypatch.setattr("pincer.cli.run._setup_logging", lambda level: logged.append(level))
 
     async def _noop(settings):  # type: ignore[no-untyped-def]
         pass
 
-    monkeypatch.setattr("pincer.cli._run_agent", _noop)
+    monkeypatch.setattr("pincer.cli.run._run_agent", _noop)
 
     runner.invoke(app, ["run"])
 
@@ -87,7 +87,7 @@ def test_run_tasks_dispatches_to_run_tasks_worker(monkeypatch: pytest.MonkeyPatc
     async def _noop(settings):  # type: ignore[no-untyped-def]
         called.append(settings)
 
-    monkeypatch.setattr("pincer.cli._run_tasks_worker", _noop)
+    monkeypatch.setattr("pincer.cli.run._run_tasks_worker", _noop)
 
     result = runner.invoke(app, ["run", "tasks"])
 
@@ -133,7 +133,7 @@ async def test_chat_loop_degrades_mcp_memory_backend(
     mock_agent = MagicMock()
 
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
-    monkeypatch.setattr("pincer.cli._create_memory_backend", lambda _s: fake_memory)
+    monkeypatch.setattr("pincer.cli.chat._create_memory_backend", lambda _s: fake_memory)
     mock_router = MagicMock()
     mock_router.get_llm.return_value = mock_llm
     mock_router.get_summarizer.return_value = mock_llm
@@ -144,11 +144,11 @@ async def test_chat_loop_degrades_mcp_memory_backend(
     monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=mock_agent))
 
     # Exit the input loop immediately on first prompt
-    import pincer.cli as _cli_mod
+    import pincer.cli.chat as _cli_mod
 
     monkeypatch.setattr(_cli_mod.console, "input", lambda _p: (_ for _ in ()).throw(EOFError()))
 
-    from pincer.cli import _chat_loop
+    from pincer.cli.chat import _chat_loop
 
     await _chat_loop()
 
@@ -192,7 +192,7 @@ async def test_chat_loop_creates_summarizer_for_non_mcp_memory(
         return MagicMock()
 
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
-    monkeypatch.setattr("pincer.cli._create_memory_backend", lambda _s: fake_memory)
+    monkeypatch.setattr("pincer.cli.chat._create_memory_backend", lambda _s: fake_memory)
     mock_router = MagicMock()
     mock_router.get_llm.return_value = mock_llm
     mock_router.get_summarizer.return_value = mock_llm
@@ -203,11 +203,11 @@ async def test_chat_loop_creates_summarizer_for_non_mcp_memory(
     monkeypatch.setattr("pincer.memory.summarizer.Summarizer", _mock_summarizer)
     monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock()))
 
-    import pincer.cli as _cli_mod
+    import pincer.cli.chat as _cli_mod
 
     monkeypatch.setattr(_cli_mod.console, "input", lambda _p: (_ for _ in ()).throw(EOFError()))
 
-    from pincer.cli import _chat_loop
+    from pincer.cli.chat import _chat_loop
 
     await _chat_loop()
 
@@ -241,7 +241,7 @@ async def test_build_core_returns_core_components(monkeypatch: pytest.MonkeyPatc
     """_build_core wires up the shared core and returns a CoreComponents with every field set."""
     from unittest.mock import AsyncMock, MagicMock
 
-    from pincer.cli import CoreComponents, _build_core
+    from pincer.cli.run import CoreComponents, _build_core
 
     settings = _mock_settings_for_build_core(tmp_path)
 
@@ -271,7 +271,7 @@ async def test_build_core_returns_core_components(monkeypatch: pytest.MonkeyPatc
 async def test_build_core_enables_audit_logging(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from unittest.mock import AsyncMock, MagicMock
 
-    from pincer.cli import _build_core
+    from pincer.cli.run import _build_core
 
     settings = _mock_settings_for_build_core(tmp_path)
     settings.audit_disabled = False
@@ -298,7 +298,7 @@ def test_register_channel_bound_tools_send_file_and_send_image() -> None:
     """send_file/send_image close over channel_map and route through the right channel by name."""
     from unittest.mock import AsyncMock
 
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -311,7 +311,7 @@ def test_register_channel_bound_tools_send_file_and_send_image() -> None:
 
 @pytest.mark.asyncio
 async def test_send_file_handler_errors_without_channel(tmp_path: Path) -> None:
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -323,7 +323,7 @@ async def test_send_file_handler_errors_without_channel(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_send_file_handler_errors_when_file_exists_but_no_active_channel(tmp_path: Path) -> None:
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -340,7 +340,7 @@ async def test_send_file_handler_errors_when_file_exists_but_no_active_channel(t
 async def test_send_file_handler_sends_existing_file(tmp_path: Path) -> None:
     from unittest.mock import AsyncMock
 
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -363,7 +363,7 @@ async def test_send_file_handler_sends_existing_file(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_send_image_handler_errors_without_channel() -> None:
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -377,7 +377,7 @@ async def test_send_image_handler_errors_without_channel() -> None:
 async def test_send_image_handler_sends_photo() -> None:
     from unittest.mock import AsyncMock
 
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -399,7 +399,7 @@ async def test_send_image_handler_sends_photo() -> None:
 async def test_send_image_handler_sends_gif_via_send_animation() -> None:
     from unittest.mock import AsyncMock
 
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -421,7 +421,7 @@ async def test_send_image_handler_sends_gif_via_send_animation() -> None:
 async def test_send_image_handler_reports_error_on_send_failure() -> None:
     from unittest.mock import AsyncMock
 
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -454,7 +454,7 @@ async def test_run_agent_wires_core_and_channel_bound_tools_before_channel_start
     """
     from unittest.mock import AsyncMock, MagicMock
 
-    from pincer.cli import CoreComponents, _run_agent
+    from pincer.cli.run import CoreComponents, _run_agent
 
     mock_tools = MagicMock()
     core = CoreComponents(
@@ -478,8 +478,8 @@ async def test_run_agent_wires_core_and_channel_bound_tools_before_channel_start
         registered_with.append((tools, channel_map))
         raise RuntimeError("stop here — rest of _run_agent is out of scope for this test")
 
-    monkeypatch.setattr("pincer.cli._build_core", AsyncMock(return_value=core))
-    monkeypatch.setattr("pincer.cli._register_channel_bound_tools", _fake_register)
+    monkeypatch.setattr("pincer.cli.run._build_core", AsyncMock(return_value=core))
+    monkeypatch.setattr("pincer.cli.run._register_channel_bound_tools", _fake_register)
 
     with pytest.raises(RuntimeError, match="stop here"):
         await _run_agent(MagicMock())

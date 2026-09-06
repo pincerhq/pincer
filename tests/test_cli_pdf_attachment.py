@@ -3,7 +3,7 @@ heuristic in cli.py's automatic PDF-attachment text extraction."""
 
 from __future__ import annotations
 
-from pincer.cli import _format_pdf_attachment
+from pincer.cli._attachments import _format_pdf_attachment
 
 
 def test_normal_text_pdf_returns_code_fence() -> None:

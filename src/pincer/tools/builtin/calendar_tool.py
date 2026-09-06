@@ -32,7 +32,7 @@ def _get_credentials():  # type: ignore[no-untyped-def]
     """Get or refresh Google OAuth2 credentials.
 
     Never attempts the interactive browser consent flow — that belongs
-    in the ``pincer auth-google`` CLI command.  This function only loads
+    in the ``pincer google auth`` CLI command.  This function only loads
     an existing token and refreshes it if possible.
     """
     from google.auth.transport.requests import Request
@@ -53,7 +53,7 @@ def _get_credentials():  # type: ignore[no-untyped-def]
 
     if not token_path.exists():
         raise FileNotFoundError(
-            "SETUP REQUIRED: No Google token found. Run the one-time OAuth consent flow first:  pincer auth-google"
+            "SETUP REQUIRED: No Google token found. Run the one-time OAuth consent flow first:  pincer google auth"
         )
 
     creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
@@ -70,12 +70,12 @@ def _get_credentials():  # type: ignore[no-untyped-def]
             return creds
         except Exception as e:
             raise FileNotFoundError(
-                f"Google token refresh failed: {e}. Delete {token_path} and re-authorize with: pincer auth-google"
+                f"Google token refresh failed: {e}. Delete {token_path} and re-authorize with: pincer google auth"
             ) from e
 
     raise FileNotFoundError(
         "Google token exists but is invalid (no refresh token). "
-        f"Delete {token_path} and re-authorize with: pincer auth-google"
+        f"Delete {token_path} and re-authorize with: pincer google auth"
     )
 
 
