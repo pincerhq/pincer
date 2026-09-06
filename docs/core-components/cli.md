@@ -30,7 +30,18 @@ pincer
 ├── config                  # Show configuration
 ├── cost                    # Spending summary
 ├── doctor                  # Security health check
-├── audit                   # View audit logs
+├── google
+│   ├── setup               # Google Workspace OAuth (113 tools)
+│   └── auth                # Google Calendar OAuth (legacy, 3 tools)
+├── signal
+│   ├── setup               # Pair Signal via QR code
+│   ├── status              # Signal API health + registered accounts
+│   └── test <recipient>    # Send a test message
+├── slack
+│   └── setup               # Interactive Slack bot token setup (71 tools)
+├── whatsapp
+│   └── setup               # Pair WhatsApp via QR code
+├── audit                   # View audit logs (options, not subcommands)
 ├── mcp
 │   ├── list                # MCP servers + connection status
 │   ├── test <server>       # Test connection to a server
@@ -41,17 +52,22 @@ pincer
 │   ├── install <pkg>       # Install MCP server from registry
 │   ├── scan <pkg>          # Security scan without installing
 │   ├── uninstall <name>    # Remove server from config
-│   └── server              # Manage Pincer's outbound MCP endpoint
-│       ├── start           # Start MCP server export
-│       ├── stop            # Stop MCP server export
-│       └── status          # Show status + connected clients
+│   ├── serve               # Start a standalone Pincer MCP server
+│   └── server              # Manage Pincer's outbound MCP export endpoint
+│       ├── status          # Show whether export is enabled + config
+│       └── config          # Print MCP client config JSON (Claude Desktop / Cursor)
 ├── memory
 │   ├── search <query>      # Search memories
 │   ├── stats               # Memory usage
 │   ├── clear               # Clear user memory
+│   ├── list                # List memory records (paginated)
 │   └── export              # Export to JSON
-└── schedule
-    └── list                # Scheduled tasks (read-only — create/remove/toggle happen via chat)
+├── schedule
+│   └── list                # Scheduled tasks (read-only — create/remove/toggle happen via chat)
+└── db
+    ├── upgrade              # Apply pending Alembic migrations
+    ├── current              # Show current schema revision
+    └── history              # Show migration history
 ```
 
 ---
@@ -107,27 +123,25 @@ $ pincer init
 Start the Pincer agent with all configured channels.
 
 ```bash
-pincer run [OPTIONS]
+pincer run [COMPONENT]
 ```
 
-**Options:**
-| Flag | Description | Default |
+**Arguments:**
+| Argument | Description | Default |
 |------|-------------|---------|
-| `--channel TEXT` | Start only this channel (telegram/whatsapp/discord) | All |
-| `--reload` | Enable hot-reload for development | Off |
-| `--port INT` | API server port | 8080 |
-| `--host TEXT` | API server bind address | 127.0.0.1 |
+| `component` | Run a single component standalone instead of the full agent. Only `tasks` is supported. | None (full agent) |
+
+There are no `--channel`, `--reload`, `--port`, or `--host` flags — which channels
+start is driven entirely by config (`PINCER_*_ENABLED`/tokens in `.env`), and the
+API server's bind address/port are set via `PINCER_DASHBOARD_HOST`/`PINCER_DASHBOARD_PORT`.
 
 **Examples:**
 ```bash
 # Start everything
 pincer run
 
-# Telegram only
-pincer run --channel telegram
-
-# Dev mode with API on custom port
-pincer run --reload --port 9090
+# Standalone background-task worker (requires PINCER_TASK_BROKER=redis)
+pincer run tasks
 ```
 
 **Output:**
@@ -310,6 +324,56 @@ Running 25+ security checks...
 Score: 88/100  🟢 20 passed  🟡 3 warnings  🔴 1 critical
 
 ⚠️  Fix critical issues before deploying!
+```
+
+---
+
+### `pincer google setup` / `pincer google auth`
+
+Google integration setup, split into two commands:
+
+- **`pincer google setup`** — one-time Google Workspace OAuth (opens browser for consent). Registers 113 tools across Gmail, Calendar, Drive, Docs, Sheets, Slides, Meet, Tasks, and Contacts. Saves the token to `~/.pincer/google_workspace_token.json`.
+- **`pincer google auth`** — legacy Google Calendar-only OAuth consent flow (3 tools). Saves the token to `~/.pincer/google_token.json`.
+
+```bash
+pincer google setup
+pincer google auth
+```
+
+See [CLI Reference](../reference/cli.md#google-workspace) for the full walkthrough.
+
+---
+
+### `pincer signal setup` / `pincer signal status` / `pincer signal test`
+
+Manage the Signal integration (via a `signal-cli-rest-api` sidecar).
+
+| Command | Description |
+|---------|-------------|
+| `pincer signal setup` | Open the Signal QR-code link in your browser to register/link a device |
+| `pincer signal status` | Check Signal API health and registered accounts |
+| `pincer signal test <recipient>` | Send a test message via Signal (E.164 phone number) |
+
+See the [Signal Setup Guide](../guides/signal-setup.md).
+
+---
+
+### `pincer slack setup`
+
+Interactive Slack bot token setup (71 tools: channels, messages, threads, files, reactions, pins, bookmarks, reminders, search, and user management). Also offers to configure the Slack channel (Socket Mode) for DMs/mentions.
+
+```bash
+pincer slack setup
+```
+
+---
+
+### `pincer whatsapp setup`
+
+Pair WhatsApp via QR code (run once to link your device).
+
+```bash
+pincer whatsapp setup
 ```
 
 ---
@@ -567,6 +631,19 @@ tools the agent calls on your behalf: `schedule_create`, `schedule_list`,
 Full details — guardrails, `cron_expr` vs `run_in_minutes`, per-schedule
 tool allow-lists, and the standalone `pincer run tasks` worker for scaling
 execution — are in [Background Tasks](background-tasks.md).
+
+---
+
+### `pincer db upgrade` / `pincer db current` / `pincer db history`
+
+Manage the Pincer database schema. Migrations are Alembic-managed and applied
+automatically on startup — these commands are for manual/ops use.
+
+| Command | Description |
+|---------|-------------|
+| `pincer db upgrade` | Apply pending migrations |
+| `pincer db current` | Show current schema revision |
+| `pincer db history` | Show migration history |
 
 ---
 

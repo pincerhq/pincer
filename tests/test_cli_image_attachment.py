@@ -5,7 +5,7 @@ its own vision."""
 
 from __future__ import annotations
 
-from pincer.cli import _IMAGE_EXTENSIONS, _format_image_attachment
+from pincer.cli._attachments import _IMAGE_EXTENSIONS, _format_image_attachment
 
 
 def test_hint_includes_saved_path_and_size() -> None:

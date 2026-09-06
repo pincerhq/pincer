@@ -26,6 +26,7 @@ dependencies = [
     "pydantic-settings>=2.7.0",
     "python-dotenv>=1.0.0",
     "typer>=0.12.0",
+    "async-typer>=0.27.2",
     "rich>=13.9.0",
     "structlog>=24.4.0",
     "pyyaml>=6.0.0",
@@ -112,7 +113,7 @@ dev = [
 ]
 
 [project.scripts]
-pincer = "pincer.cli:app"
+pincer = "pincer.cli.main:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -187,6 +188,7 @@ module = [
     "pincer.memory.store",
     "pincer.api.skills",
     "pincer.cli",
+    "pincer.cli.*",
 ]
 disable_error_code = [
     "type-arg",

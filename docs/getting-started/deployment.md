@@ -93,7 +93,7 @@ WhatsApp requires a one-time QR pairing before it can receive messages. Unlike T
 
 3. Pair WhatsApp (one-time, run interactively):
    ```bash
-   docker compose run --rm -it pincer pincer pair-whatsapp
+   docker compose run --rm -it pincer pincer whatsapp setup
    ```
    A QR code appears in the terminal. Scan it with WhatsApp on your phone (Settings → Linked Devices → Link a Device).
 
@@ -106,7 +106,7 @@ WhatsApp requires a one-time QR pairing before it can receive messages. Unlike T
 
 **Troubleshooting:** If you see `WhatsApp failed: neonize is required for WhatsApp support. Install it with: pip install neonize (requires libmagic)`, the Docker image needs `libmagic1`. Rebuild with `docker compose build --no-cache` — the project Dockerfile already includes it.
 
-The container uses `working_dir: /app/data` so the WhatsApp session is stored in the persistent volume and survives restarts. If WhatsApp stops working after a restart, re-run `pair-whatsapp` to re-pair.
+The container uses `working_dir: /app/data` so the WhatsApp session is stored in the persistent volume and survives restarts. If WhatsApp stops working after a restart, re-run `whatsapp setup` to re-pair.
 
 ---
 

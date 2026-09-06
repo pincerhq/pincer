@@ -313,6 +313,18 @@ wheels = [
 ]
 
 [[package]]
+name = "async-typer"
+version = "0.27.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "typer" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a0/b4/376bca99068ec7a8186c02cf6800c19c5c5487010632924dac583533ddcc/async_typer-0.27.2.tar.gz", hash = "sha256:18425d2e7e5ad626013afd414c0f37081c0ff493eb3685567d8ed94764aa3b1b", size = 15746, upload-time = "2026-09-04T11:13:46.862Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/36/11/fcbff0a648e022fbc5046ee408b72e0a4fc251dd11cc832102e6f27f2a21/async_typer-0.27.2-py3-none-any.whl", hash = "sha256:2546ce0a10729fb1ece099cbd81551baa6822495f3dad3900737a77d76ebe41b", size = 8271, upload-time = "2026-09-04T11:13:45.838Z" },
+]
+
+[[package]]
 name = "attrs"
 version = "26.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3459,6 +3471,7 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
     { name = "anthropic" },
+    { name = "async-typer" },
     { name = "croniter" },
     { name = "discord-py", extra = ["voice"] },
     { name = "fastapi" },
@@ -3584,6 +3597,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.22.0" },
     { name = "alembic", specifier = ">=1.13.0" },
     { name = "anthropic", specifier = ">=0.49.0" },
+    { name = "async-typer", specifier = ">=0.27.2" },
     { name = "bandit", marker = "extra == 'dev'", specifier = ">=1.7.0" },
     { name = "croniter", specifier = ">=5.0" },
     { name = "deepgram-sdk", marker = "extra == 'voice'", specifier = ">=3.0" },
@@ -5425,17 +5439,17 @@ wheels = [
 
 [[package]]
 name = "typer"
-version = "0.24.2"
+version = "0.27.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "annotated-doc" },
-    { name = "click" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "rich" },
     { name = "shellingham" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/83/b8/9ebb531b6c2d377af08ac6746a5df3425b21853a5d2260876919b58a2a4a/typer-0.24.2.tar.gz", hash = "sha256:ec070dcfca1408e85ee203c6365001e818c3b7fffe686fd07ff2d68095ca0480", size = 119849, upload-time = "2026-04-22T17:45:34.413Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/16/f7/57713ba479fd405eb76de31404b2c744c289e336b2d999511ebf51e496f7/typer-0.27.2.tar.gz", hash = "sha256:269b7eb9d3c202ca84b4bc9618cb04ebb43d3d4d1e567e4c768607232c05f945", size = 204045, upload-time = "2026-08-28T10:26:55.046Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/39/d1/9484b497e0a0410b901c12b8251c3e746e1e863f7d28419ffe06f7892fda/typer-0.24.2-py3-none-any.whl", hash = "sha256:b618bc3d721f9a8d30f3e05565be26416d06e9bcc29d49bc491dc26aba674fa8", size = 55977, upload-time = "2026-04-22T17:45:33.055Z" },
+    { url = "https://files.pythonhosted.org/packages/dc/bf/205d0004930ede8f542fb58f601526fccf4ae7626075ca1e6c4de5d3d652/typer-0.27.2-py3-none-any.whl", hash = "sha256:b3a5fc4342d5fc8fda8fc3010b1cf117e9249aab7fae800c2eff62fd3842d97d", size = 123130, upload-time = "2026-08-28T10:26:53.752Z" },
 ]
 
 [[package]]

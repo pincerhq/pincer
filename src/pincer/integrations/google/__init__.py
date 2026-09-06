@@ -16,7 +16,7 @@ Quick start::
 
 Setup::
 
-    pincer setup-google   # one-time OAuth consent flow
+    pincer google setup   # one-time OAuth consent flow
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def get_google_factory() -> GoogleServiceFactory | None:
             "Google Workspace token is missing %d required scope(s) — "
             "Google tools will be disabled until you re-authenticate.\n"
             "  Missing: %s\n"
-            "  Fix: delete %s  then run  pincer setup-google",
+            "  Fix: delete %s  then run  pincer google setup",
             len(missing),
             missing,
             token_path,
