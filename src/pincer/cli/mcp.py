@@ -408,11 +408,11 @@ def _append_server_to_toml(toml_path: object, config: object) -> None:
     if config.args:
         args_toml = "[" + ", ".join(f'"{a}"' for a in config.args) + "]"
         lines.append(f"args = {args_toml}")
+    lines.append('approval_required = ["*"]')
     if config.env:
         lines.append("[mcp.servers.env]")
         for k, v in config.env.items():
             lines.append(f'{k} = "{v}"')
-    lines.append('approval_required = ["*"]')
 
     toml_path.write_text(existing + "\n".join(lines) + "\n")
 

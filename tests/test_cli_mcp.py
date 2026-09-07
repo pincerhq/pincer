@@ -377,6 +377,35 @@ def test_mcp_install_success_high_score(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert 'name = "github"' in toml_path.read_text()
 
 
+def test_mcp_install_with_env_vars_produces_valid_toml(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import tomllib
+
+    monkeypatch.chdir(tmp_path)
+
+    config = MagicMock()
+    config.name = "github"
+    config.command = "npx"
+    config.args = ["-y", "@modelcontextprotocol/server-github"]
+    config.env = {"GITHUB_TOKEN": "REPLACE_ME"}
+    config.transport.value = "stdio"
+
+    scan_info = {"skipped": False, "score": 95, "summary": "Score 95/100"}
+
+    mock_client = MagicMock()
+    mock_client.install = AsyncMock(return_value=(config, scan_info))
+    monkeypatch.setattr("pincer.mcp.registry_client.MCPRegistryClient", lambda: mock_client)
+
+    result = runner.invoke(app, ["mcp", "install", "github-mcp"])
+
+    assert result.exit_code == 0
+    toml_path = tmp_path / "pincer.toml"
+    parsed = tomllib.loads(toml_path.read_text())
+
+    server = parsed["mcp"]["servers"][0]
+    assert server["approval_required"] == ["*"]
+    assert server["env"] == {"GITHUB_TOKEN": "REPLACE_ME"}
+
+
 def test_mcp_install_low_score_declined(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.chdir(tmp_path)
 

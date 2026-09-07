@@ -13,7 +13,12 @@ from typing import TYPE_CHECKING
 
 import typer
 
-from pincer.cli._attachments import _IMAGE_EXTENSIONS, _format_image_attachment, _format_pdf_attachment
+from pincer.cli._attachments import (
+    _IMAGE_EXTENSIONS,
+    _format_image_attachment,
+    _format_pdf_attachment,
+    _safe_upload_path,
+)
 from pincer.cli._shared import _create_memory_backend, _port_in_use, _print_voice_webhook_urls, _setup_logging, console
 
 if TYPE_CHECKING:
@@ -567,7 +572,12 @@ async def _run_agent(settings: Settings) -> None:
 
             file_parts: list[str] = []
             for raw_bytes, mime, filename in incoming.files:
-                save_path = uploads_dir / filename
+                try:
+                    save_path = _safe_upload_path(uploads_dir, filename)
+                except ValueError:
+                    logger.warning("Rejected unsafe attachment filename: %r", filename)
+                    file_parts.append(f"[File: {filename}] rejected — unsafe filename")
+                    continue
                 save_path.write_bytes(raw_bytes)
                 abs_path = str(save_path)
 
@@ -629,7 +639,7 @@ async def _run_agent(settings: Settings) -> None:
             for raw_bytes, media_type in incoming.images:
                 ext = _IMAGE_EXTENSIONS.get(media_type, ".bin")
                 filename = f"image_{uuid.uuid4().hex[:8]}{ext}"
-                save_path = uploads_dir / filename
+                save_path = _safe_upload_path(uploads_dir, filename)
                 save_path.write_bytes(raw_bytes)
                 image_parts.append(_format_image_attachment(filename, str(save_path), len(raw_bytes), media_type))
 

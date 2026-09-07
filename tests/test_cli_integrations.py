@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -29,6 +30,26 @@ def test_whatsapp_setup_pairs_successfully(monkeypatch: pytest.MonkeyPatch) -> N
     assert "paired successfully" in result.output
     mock_wa.start.assert_awaited_once()
     mock_wa.stop.assert_awaited_once()
+
+
+def test_whatsapp_setup_noop_handler_returns_pairing_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The placeholder message handler passed to wa.start() during pairing mode."""
+    monkeypatch.setattr("pincer.config.get_settings", lambda: MagicMock())
+
+    captured: dict[str, str] = {}
+
+    async def _start(handler):  # type: ignore[no-untyped-def]
+        captured["reply"] = await handler("hello")
+
+    mock_wa = MagicMock()
+    mock_wa.start = AsyncMock(side_effect=_start)
+    mock_wa.stop = AsyncMock()
+    monkeypatch.setattr("pincer.channels.whatsapp.WhatsAppChannel", lambda settings: mock_wa)
+
+    result = runner.invoke(app, ["whatsapp", "setup"])
+
+    assert result.exit_code == 0
+    assert captured["reply"] == "Pairing mode — send messages after running `pincer run`."
 
 
 def test_whatsapp_setup_reports_pairing_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -264,6 +285,40 @@ def test_slack_setup_success_with_channel_config(monkeypatch: pytest.MonkeyPatch
     assert "PINCER_SLACK_APP_TOKEN=xapp-token" in saved
 
 
+def test_slack_setup_warns_on_malformed_user_token(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "pincer.integrations.slack.auth.validate_bot_token",
+        AsyncMock(return_value={"workspace": "Acme", "bot_user": "pincer"}),
+    )
+    monkeypatch.setattr(
+        "pincer.integrations.slack.auth.save_tokens",
+        lambda bot, user: tmp_path / "slack_tokens.json",
+    )
+
+    result = runner.invoke(app, ["slack", "setup"], input="xoxb-abc123\ny\nbad-user-token\nn\n")
+
+    assert result.exit_code == 0
+    assert "user token should start with 'xoxp-'" in result.output
+
+
+def test_slack_setup_warns_on_malformed_app_token(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "pincer.integrations.slack.auth.validate_bot_token",
+        AsyncMock(return_value={"workspace": "Acme", "bot_user": "pincer"}),
+    )
+    monkeypatch.setattr(
+        "pincer.integrations.slack.auth.save_tokens",
+        lambda bot, user: tmp_path / "slack_tokens.json",
+    )
+    env_path = tmp_path / ".env"
+    monkeypatch.setattr("pincer.cli.slack._find_env_file", lambda: str(env_path))
+
+    result = runner.invoke(app, ["slack", "setup"], input="xoxb-abc123\nn\ny\nbad-app-token\n")
+
+    assert result.exit_code == 0
+    assert "app token should start with 'xapp-'" in result.output
+
+
 # ── google ────────────────────────────────────────────────────────────────
 
 
@@ -315,6 +370,20 @@ def test_google_setup_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None
     mock_auth_instance.run_auth_flow.assert_called_once_with(open_browser=True)
 
 
+def test_google_setup_reports_missing_oauthlib(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / "google_credentials.json").write_text("{}")
+
+    mock_settings = MagicMock()
+    mock_settings.google_oauth_dir.return_value = tmp_path
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
+    monkeypatch.setitem(sys.modules, "google_auth_oauthlib.flow", None)
+
+    result = runner.invoke(app, ["google", "setup"])
+
+    assert result.exit_code == 1
+    assert "google-auth-oauthlib not installed" in result.output
+
+
 def test_google_setup_reports_auth_failure(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     (tmp_path / "google_credentials.json").write_text("{}")
 
@@ -358,6 +427,20 @@ def test_google_auth_declines_overwrite(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
     assert result.exit_code == 0
     assert "Token already exists" in result.output
+
+
+def test_google_auth_reports_missing_oauthlib(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / "google_credentials.json").write_text("{}")
+
+    mock_settings = MagicMock()
+    mock_settings.google_oauth_dir.return_value = tmp_path
+    monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
+    monkeypatch.setitem(sys.modules, "google_auth_oauthlib.flow", None)
+
+    result = runner.invoke(app, ["google", "auth"])
+
+    assert result.exit_code == 1
+    assert "google-auth-oauthlib is not installed" in result.output
 
 
 def test_google_auth_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]

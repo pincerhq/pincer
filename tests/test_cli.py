@@ -25,6 +25,35 @@ def test_config_no_crash() -> None:
     assert "Configuration" in result.output or "Error" in result.output or "Provider" in result.output
 
 
+def test_config_shows_error_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """config command prints [red]Error[/red] and doesn't crash when settings fail to load."""
+
+    def _raise() -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("pincer.config.get_settings", _raise)
+
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 0
+    assert "Error: boom" in result.output
+
+
+def test_doctor_json_output() -> None:
+    """doctor --json prints machine-readable JSON instead of the table.
+
+    Not parsed strictly as JSON: rich's Console wraps long lines at the
+    terminal width, which can break mid-string and produce invalid JSON in
+    the captured output even though the underlying dump is well-formed.
+    """
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 0
+    assert '"score"' in result.output
+    assert '"checks"' in result.output
+    assert "Check" not in result.output  # table view's column header shouldn't appear
+
+
 def test_cost_shows_table() -> None:
     """cost command runs (may error but doesn't crash)."""
     result = runner.invoke(app, ["cost"])
@@ -56,6 +85,73 @@ def test_run_calls_setup_logging(monkeypatch: pytest.MonkeyPatch) -> None:
     runner.invoke(app, ["run"])
 
     assert logged, "_setup_logging was not called by run()"
+
+
+def test_run_exits_on_settings_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run() prints a clear error and exits 1 when settings fail to load."""
+
+    def _raise() -> None:
+        raise RuntimeError("bad config")
+
+    monkeypatch.setattr("pincer.config.get_settings", _raise)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 1
+    assert "Configuration error" in result.output
+    assert "bad config" in result.output
+
+
+def _mock_settings_with_telemetry(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    from unittest.mock import AsyncMock, MagicMock
+
+    mock_settings = MagicMock()
+    mock_settings.log_level.value = "WARNING"
+    mock_settings.telemetry_dsn = "https://example.com/dsn"
+    mock_settings.daily_budget_usd = 5.0
+    monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
+    monkeypatch.setattr("pincer.cli.run._run_agent", AsyncMock())
+    return mock_settings
+
+
+def test_run_telemetry_import_error_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run() warns (but doesn't crash) when telemetry_dsn is set but opentelemetry isn't installed."""
+    import sys
+
+    _mock_settings_with_telemetry(monkeypatch)
+    monkeypatch.setitem(sys.modules, "pincer_telemetry", None)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 0
+    assert "opentelemetry packages are not installed" in result.output
+
+
+def test_run_telemetry_enabled_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run() prints 'Telemetry enabled' once pincer_telemetry.init succeeds."""
+    _mock_settings_with_telemetry(monkeypatch)
+    monkeypatch.setattr("pincer_telemetry.init", lambda **kwargs: None)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 0
+    assert "Telemetry enabled" in result.output
+
+
+def test_run_telemetry_init_failure_is_nonfatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run() keeps going (and reports the error) if pincer_telemetry.init raises."""
+
+    def _raise(**kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("telemetry boom")
+
+    _mock_settings_with_telemetry(monkeypatch)
+    monkeypatch.setattr("pincer_telemetry.init", _raise)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 0
+    assert "Telemetry init failed" in result.output
+    assert "telemetry boom" in result.output
 
 
 def _mock_settings_for_run(monkeypatch: pytest.MonkeyPatch, *, task_broker: str) -> None:

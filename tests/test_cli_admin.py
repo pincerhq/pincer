@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -162,6 +163,24 @@ def test_mcp_server_status_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "ENABLED" in result.output
     assert "127.0.0.1:8090/mcp" in result.output
     assert "shell_exec" in result.output
+
+
+def test_mcp_server_status_reports_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "pincer.mcp.config", None)
+
+    result = runner.invoke(app, ["mcp", "server", "status"])
+
+    assert result.exit_code == 0
+    assert "MCP not installed" in result.output
+
+
+def test_mcp_server_config_reports_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "pincer.mcp.config", None)
+
+    result = runner.invoke(app, ["mcp", "server", "config"])
+
+    assert result.exit_code == 0
+    assert "MCP not installed" in result.output
 
 
 def test_mcp_server_config_prints_client_json(monkeypatch: pytest.MonkeyPatch) -> None:

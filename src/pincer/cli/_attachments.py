@@ -2,6 +2,23 @@
 
 from __future__ import annotations
 
+import uuid
+from pathlib import Path
+
+
+def _safe_upload_path(uploads_dir: Path, filename: str) -> Path:
+    """Resolve `filename` under `uploads_dir`, rejecting traversal/absolute paths.
+
+    `filename` comes straight off attacker-controlled incoming-message metadata
+    (e.g. Telegram's doc.file_name, WhatsApp's fileName) — joining it onto
+    uploads_dir unchecked lets a sender write outside the uploads directory.
+    """
+    safe_name = Path(filename).name or f"file_{uuid.uuid4().hex[:8]}"
+    save_path = uploads_dir / safe_name
+    if uploads_dir.resolve() not in save_path.resolve().parents:
+        raise ValueError(f"unsafe attachment filename: {filename!r}")
+    return save_path
+
 
 def _format_pdf_attachment(pages: list[str], filename: str, abs_path: str, max_chars: int = 30_000) -> str:
     """Format a PDF attachment's extracted text for the LLM prompt.
