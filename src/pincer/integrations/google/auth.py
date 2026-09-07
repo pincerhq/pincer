@@ -139,7 +139,7 @@ class GoogleAuth:
             if missing:
                 raise RuntimeError(
                     f"Google token is missing required scopes: {missing}. "
-                    f"Delete {self._token_path} and run 'pincer setup-google' "
+                    f"Delete {self._token_path} and run 'pincer google setup' "
                     "to re-authorise with the full scope set."
                 )
 
@@ -154,11 +154,11 @@ class GoogleAuth:
                 return self._credentials
             except Exception as exc:
                 raise RuntimeError(
-                    f"Token refresh failed: {exc}. Delete {self._token_path} and run 'pincer setup-google'."
+                    f"Token refresh failed: {exc}. Delete {self._token_path} and run 'pincer google setup'."
                 ) from exc
 
         raise RuntimeError(
-            f"Google token is invalid (no refresh token). Delete {self._token_path} and run 'pincer setup-google'."
+            f"Google token is invalid (no refresh token). Delete {self._token_path} and run 'pincer google setup'."
         )
 
     def run_auth_flow(self, open_browser: bool = True) -> Any:

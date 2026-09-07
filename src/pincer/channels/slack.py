@@ -140,7 +140,7 @@ class SlackChannel(BaseChannel):
         if not bot_token or not app_token:
             logger.warning(
                 "Slack channel disabled: PINCER_SLACK_BOT_TOKEN and PINCER_SLACK_APP_TOKEN required. "
-                "Run 'pincer setup-slack' to configure."
+                "Run 'pincer slack setup' to configure."
             )
             return
 

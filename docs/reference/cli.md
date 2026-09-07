@@ -15,17 +15,17 @@ Complete command reference across all sprints (1–13). For the full list of too
 |---------|-------------|--------|
 | `pincer init` | Interactive setup wizard (provider, keys, channels, .env) | 4 |
 | `pincer run` | Start agent (all configured channels + API server) | 1 |
-| `pincer run --channel telegram` | Start only Telegram channel | 1 |
-| `pincer run --channel whatsapp` | Start only WhatsApp channel | 3 |
-| `pincer run --channel discord` | Start only Discord channel | 4 |
 | `pincer run tasks` | Standalone background-task worker only — no channels/API/MCP export (requires `PINCER_TASK_BROKER=redis`) | 14 |
 | `pincer chat` | CLI chat interface (no messaging app needed) | 4 |
 | `pincer config` | Show current configuration (masked secrets) | 1 |
-| `pincer pair-whatsapp` | Pair WhatsApp via QR code | 3 |
-| `pincer auth-google` | Google Calendar OAuth consent flow (legacy, 3 tools) | 3 |
-| `pincer setup-google` | Google Workspace OAuth consent flow (113 tools incl. Meet v2) | 9 |
+| `pincer whatsapp setup` | Pair WhatsApp via QR code | 3 |
+| `pincer google auth` | Google Calendar OAuth consent flow (legacy, 3 tools) | 3 |
+| `pincer google setup` | Google Workspace OAuth consent flow (113 tools incl. Meet v2) | 9 |
 | `ms365-mcp-setup` | Microsoft 365 device code auth flow, default identity (62 tools) | 10 |
-| `pincer signal start/stop/status/link` | Manage Signal integration (signal-cli sidecar) | 7.5 |
+| `pincer signal setup` | Open the Signal QR-code link to register/link a device (signal-cli sidecar) | 7.5 |
+| `pincer signal status` | Check Signal API health and registered accounts | 7.5 |
+| `pincer signal test <recipient>` | Send a test message via Signal | 7.5 |
+| `pincer slack setup` | Interactive Slack bot token setup (71 tools) | 11 |
 
 ## Cost & Budget
 
@@ -125,9 +125,9 @@ Redis-backed split worker), and config reference.
 
 | Command | Description | Sprint |
 |---------|-------------|--------|
-| `pincer setup-google` | One-time OAuth consent — opens browser, saves token to `~/.pincer/google_workspace_token.json` | 9 |
+| `pincer google setup` | One-time OAuth consent — opens browser, saves token to `~/.pincer/google_workspace_token.json` | 9 |
 
-### What `pincer setup-google` does
+### What `pincer google setup` does
 
 1. Verifies `~/.pincer/google_credentials.json` (or `data/google_credentials.json`) — shows instructions if missing
 2. Launches `InstalledAppFlow` — opens browser at Google consent page
@@ -184,11 +184,16 @@ Full catalog: see `docs/TOOLS_CATALOG.md` in the repository.
 | `pincer mcp tools` | List every MCP tool currently registered |
 | `pincer mcp test <server>` | Smoke-test a specific MCP server connection |
 | `pincer mcp call <server> <tool> --arg v` | Invoke a tool directly |
-| `pincer mcp server start|stop|status` | Manage Pincer's outbound MCP server endpoint |
-| `pincer mcp oauth init` | Generate Ed25519 signing key + seed OAuth tables |
-| `pincer mcp oauth client add|list` | Register / list OAuth 2.0 clients |
+| `pincer mcp status` | Show live connectivity status for all configured MCP servers |
+| `pincer mcp search <query>` | Search MCP Registry and ClawHub for available MCP servers |
+| `pincer mcp install <name>` | Install an MCP server: download, scan, and add to `pincer.toml` |
+| `pincer mcp scan <path>` | Run an AST security scan on a local directory or installed package |
+| `pincer mcp uninstall <name>` | Remove an MCP server from `pincer.toml` and clean up staging files |
+| `pincer mcp serve` | Start a standalone Pincer MCP server (no full agent required) |
+| `pincer mcp server status` | Show whether Pincer's outbound MCP export server is enabled and its config |
+| `pincer mcp server config` | Print MCP client config JSON for Claude Desktop / Cursor |
 
-See [MCP Guide](../guides/mcp-guide.md) for the full MCP client + OAuth 2.0 server documentation.
+See [MCP Guide](../guides/mcp-guide.md) for the full MCP client documentation.
 
 ### Getting an Azure App client ID
 

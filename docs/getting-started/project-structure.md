@@ -20,7 +20,7 @@
 | 7.5 | — | Signal Channel | Signal via signal-cli-rest-api sidecar, WebSocket receive mode |
 | 8 | — | Image Generation + Grok | fal.ai + Gemini image generation, Grok/xAI LLM provider |
 | A0 | Mar 21, 2026 | MCP Architecture | MCPServiceCore, layered shells (embedded + standalone), resources, prompts, sampling, `pincer mcp serve` |
-| 9 | Mar 26, 2026 | Google Workspace | 85-tool native integration (Gmail 19, Calendar 12, Drive 15, Docs 8, Sheets 10, Slides 6, Tasks 8, Contacts 7), `pincer setup-google` |
+| 9 | Mar 26, 2026 | Google Workspace | 85-tool native integration (Gmail 19, Calendar 12, Drive 15, Docs 8, Sheets 10, Slides 6, Tasks 8, Contacts 7), `pincer google setup` |
 | 9.5 | — | Google Meet | Extended Google Workspace integration to 113 tools — full Meet v2 REST surface (27 tools: spaces, conference records, participants, recordings, transcripts, smart notes, event subscriptions) |
 | 10 | Apr 6, 2026 | Microsoft 365 | 69-tool standalone MCP server (Outlook 17, Calendar 12, OneDrive 14, To Do 8, Teams 7, Contacts 6, OneNote 5), `ms365-mcp-setup` |
 | 11 | Apr 2026 | Slack Native | 71-tool native integration (messages 18, channels 16, users 10, files 10, misc 12, reactions 5) on top of the existing Slack channel; supports bot + user tokens for full-text search |
@@ -70,7 +70,7 @@
 - `calendar_week` — List this week's events
 - `calendar_create` — Create new calendar events
 - OAuth2 flow with automatic token refresh
-- Dedicated `pincer auth-google` CLI command for one-time consent
+- Dedicated `pincer google auth` CLI command for one-time consent
 - Actionable error messages for missing credentials
 - **Strict response validation:** Success only when API returns both `id` and `htmlLink`; otherwise returns error (no silent failure)
 - **IANA timezone handling:** Naive datetimes use `settings.timezone`; fixed offsets fall back to IANA; ZoneInfo preserved
@@ -252,7 +252,8 @@ pincer/
 ├── src/pincer/                     # Main Python package (~10,600 lines)
 │   ├── __init__.py
 │   ├── __main__.py                 # `python -m pincer` entry
-│   ├── cli.py                      # Typer CLI (run, config, cost, auth-google, pair-whatsapp)
+│   ├── cli/                        # Typer CLI package (main.py registers run, config, cost,
+│   │                                #   google, signal, slack, whatsapp, audit, memory, schedule, db, mcp)
 │   ├── config.py                   # Pydantic Settings (env-based config)
 │   ├── exceptions.py               # Custom exception classes
 │   │
@@ -376,7 +377,7 @@ pincer/
 | `core/session.py` | SQLite-backed session persistence with trim-safe message history |
 | `core/identity.py` | Cross-channel identity resolver with config-driven seeding |
 | `config.py` | Pydantic Settings with env vars, validation, API key auto-detection |
-| `cli.py` | Typer CLI (`run`, `config`, `cost`, `auth-google`, `pair-whatsapp`) |
+| `cli/main.py` | Typer CLI entry point — registers `run`, `config`, `cost`, `google`, `signal`, `slack`, `whatsapp`, `audit`, `memory`, `schedule`, `db`, `mcp` |
 | `channels/base.py` | Abstract channel interface (`BaseChannel`, `IncomingMessage`, `ChannelType`) |
 | `channels/telegram.py` | Full Telegram bot — text, voice, photos, documents, streaming, message splitting |
 | `channels/whatsapp.py` | WhatsApp via neonize — QR pairing, self-chat (LID-aware), identity-map guest gating, groups, voice/image/docs |
@@ -469,9 +470,9 @@ pincer/
 | `pincer run` | Start the agent (all channels + scheduler) |
 | `pincer config` | Show current configuration |
 | `pincer cost` | Show today's spend |
-| `pincer auth-google` | Run Google Calendar OAuth consent flow (legacy, 3 tools) |
-| `pincer setup-google` | Run Google Workspace OAuth consent flow (113 tools) |
-| `pincer pair-whatsapp` | Pair WhatsApp via QR code |
+| `pincer google auth` | Run Google Calendar OAuth consent flow (legacy, 3 tools) |
+| `pincer google setup` | Run Google Workspace OAuth consent flow (113 tools) |
+| `pincer whatsapp setup` | Pair WhatsApp via QR code |
 | `python main.py` | Start the agent (alternative) |
 | `python -m pincer` | Module entry |
 | `docker compose up` | Run via Docker |
@@ -526,9 +527,9 @@ enables random failover.
 ### First-Time Setup
 
 1. `cp .env.example .env` — fill in API keys
-2. `pincer auth-google` — one-time Google Calendar consent (legacy, 3 tools)
+2. `pincer google auth` — one-time Google Calendar consent (legacy, 3 tools)
    — **or** —
-   `pincer setup-google` — one-time Google Workspace consent (full 113-tool suite incl. Meet v2)
+   `pincer google setup` — one-time Google Workspace consent (full 113-tool suite incl. Meet v2)
 3. `pincer run` — scan WhatsApp QR on first launch
 4. Message yourself on WhatsApp or talk to the bot on Telegram
 
@@ -537,7 +538,7 @@ enables random failover.
 | Variable / File | Purpose |
 |----------------|---------|
 | `~/.pincer/google_credentials.json` | OAuth 2.0 client ID (from Google Cloud Console, Desktop App type) |
-| `~/.pincer/google_workspace_token.json` | OAuth token (created by `pincer setup-google`, `chmod 0o600`) |
+| `~/.pincer/google_workspace_token.json` | OAuth token (created by `pincer google setup`, `chmod 0o600`) |
 
 When both files exist, all 85 `google__*` tools auto-register on `pincer run`. No env vars required.
 

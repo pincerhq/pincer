@@ -194,7 +194,7 @@ class _FakeConsole:
 def test_print_voice_webhook_urls_conversation_relay():
     from unittest.mock import MagicMock
 
-    from pincer.cli import _print_voice_webhook_urls
+    from pincer.cli._shared import _print_voice_webhook_urls
 
     settings = MagicMock()
     settings.voice_webhook_base_url = "https://abc.ngrok.io"
@@ -210,7 +210,7 @@ def test_print_voice_webhook_urls_conversation_relay():
 def test_print_voice_webhook_urls_media_streams():
     from unittest.mock import MagicMock
 
-    from pincer.cli import _print_voice_webhook_urls
+    from pincer.cli._shared import _print_voice_webhook_urls
 
     settings = MagicMock()
     settings.voice_webhook_base_url = "https://abc.ngrok.io"
@@ -225,7 +225,7 @@ def test_print_voice_webhook_urls_media_streams():
 def test_print_voice_webhook_urls_skips_when_empty():
     from unittest.mock import MagicMock
 
-    from pincer.cli import _print_voice_webhook_urls
+    from pincer.cli._shared import _print_voice_webhook_urls
 
     settings = MagicMock()
     settings.voice_webhook_base_url = ""

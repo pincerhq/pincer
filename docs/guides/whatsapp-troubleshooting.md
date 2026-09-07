@@ -43,7 +43,7 @@ Re-pair is usually required:
 # pincer-wa.sqlite3 and neonize.db — remove whichever you find.
 find . -maxdepth 3 -name "pincer-wa.sqlite3" -o -name "neonize.db"
 rm -f ./pincer-wa.sqlite3   # or the path printed above
-pincer run --channel whatsapp
+pincer whatsapp setup
 ```
 
 NOTE: neonize strictly require libmagick library. You should install it system wide if you run app without docker.
@@ -109,11 +109,13 @@ hardcoded number within weeks.
 
 ### 4. Fall back to Telegram while you fix it
 
-Pincer supports seven channels. Start the agent on Telegram alone and keep
-working until the `neonize` upgrade lands:
+Pincer supports seven channels, but `pincer run` has no per-channel flag — it
+starts every channel enabled in config. To keep working on Telegram alone
+until the `neonize` upgrade lands, temporarily set `PINCER_WHATSAPP_ENABLED=false`
+in `.env`, then start the agent as usual:
 
 ```bash
-pincer run --channel telegram
+pincer run
 ```
 
 Don't leave an agent running while its primary channel silently fails —

@@ -3,7 +3,7 @@
 Token resolution order (highest priority first):
   1. Environment variables  SLACK_BOT_TOKEN / SLACK_USER_TOKEN
   2. pincer.toml  [integrations.slack]
-  3. ~/.pincer/slack_tokens.json  (written by ``pincer setup-slack``)
+  3. ~/.pincer/slack_tokens.json  (written by ``pincer slack setup``)
 """
 
 from __future__ import annotations

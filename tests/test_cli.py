@@ -25,6 +25,35 @@ def test_config_no_crash() -> None:
     assert "Configuration" in result.output or "Error" in result.output or "Provider" in result.output
 
 
+def test_config_shows_error_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """config command prints [red]Error[/red] and doesn't crash when settings fail to load."""
+
+    def _raise() -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("pincer.config.get_settings", _raise)
+
+    result = runner.invoke(app, ["config"])
+
+    assert result.exit_code == 0
+    assert "Error: boom" in result.output
+
+
+def test_doctor_json_output() -> None:
+    """doctor --json prints machine-readable JSON instead of the table.
+
+    Not parsed strictly as JSON: rich's Console wraps long lines at the
+    terminal width, which can break mid-string and produce invalid JSON in
+    the captured output even though the underlying dump is well-formed.
+    """
+    result = runner.invoke(app, ["doctor", "--json"])
+
+    assert result.exit_code == 0
+    assert '"score"' in result.output
+    assert '"checks"' in result.output
+    assert "Check" not in result.output  # table view's column header shouldn't appear
+
+
 def test_cost_shows_table() -> None:
     """cost command runs (may error but doesn't crash)."""
     result = runner.invoke(app, ["cost"])
@@ -46,16 +75,83 @@ def test_run_calls_setup_logging(monkeypatch: pytest.MonkeyPatch) -> None:
     """run() calls _setup_logging with the configured log level."""
 
     logged: list[str] = []
-    monkeypatch.setattr("pincer.cli._setup_logging", lambda level: logged.append(level))
+    monkeypatch.setattr("pincer.cli.run._setup_logging", lambda level: logged.append(level))
 
     async def _noop(settings):  # type: ignore[no-untyped-def]
         pass
 
-    monkeypatch.setattr("pincer.cli._run_agent", _noop)
+    monkeypatch.setattr("pincer.cli.run._run_agent", _noop)
 
     runner.invoke(app, ["run"])
 
     assert logged, "_setup_logging was not called by run()"
+
+
+def test_run_exits_on_settings_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run() prints a clear error and exits 1 when settings fail to load."""
+
+    def _raise() -> None:
+        raise RuntimeError("bad config")
+
+    monkeypatch.setattr("pincer.config.get_settings", _raise)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 1
+    assert "Configuration error" in result.output
+    assert "bad config" in result.output
+
+
+def _mock_settings_with_telemetry(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    from unittest.mock import AsyncMock, MagicMock
+
+    mock_settings = MagicMock()
+    mock_settings.log_level.value = "WARNING"
+    mock_settings.telemetry_dsn = "https://example.com/dsn"
+    mock_settings.daily_budget_usd = 5.0
+    monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
+    monkeypatch.setattr("pincer.cli.run._run_agent", AsyncMock())
+    return mock_settings
+
+
+def test_run_telemetry_import_error_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run() warns (but doesn't crash) when telemetry_dsn is set but opentelemetry isn't installed."""
+    import sys
+
+    _mock_settings_with_telemetry(monkeypatch)
+    monkeypatch.setitem(sys.modules, "pincer_telemetry", None)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 0
+    assert "opentelemetry packages are not installed" in result.output
+
+
+def test_run_telemetry_enabled_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run() prints 'Telemetry enabled' once pincer_telemetry.init succeeds."""
+    _mock_settings_with_telemetry(monkeypatch)
+    monkeypatch.setattr("pincer_telemetry.init", lambda **kwargs: None)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 0
+    assert "Telemetry enabled" in result.output
+
+
+def test_run_telemetry_init_failure_is_nonfatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """run() keeps going (and reports the error) if pincer_telemetry.init raises."""
+
+    def _raise(**kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("telemetry boom")
+
+    _mock_settings_with_telemetry(monkeypatch)
+    monkeypatch.setattr("pincer_telemetry.init", _raise)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 0
+    assert "Telemetry init failed" in result.output
+    assert "telemetry boom" in result.output
 
 
 def _mock_settings_for_run(monkeypatch: pytest.MonkeyPatch, *, task_broker: str) -> None:
@@ -87,7 +183,7 @@ def test_run_tasks_dispatches_to_run_tasks_worker(monkeypatch: pytest.MonkeyPatc
     async def _noop(settings):  # type: ignore[no-untyped-def]
         called.append(settings)
 
-    monkeypatch.setattr("pincer.cli._run_tasks_worker", _noop)
+    monkeypatch.setattr("pincer.cli.run._run_tasks_worker", _noop)
 
     result = runner.invoke(app, ["run", "tasks"])
 
@@ -133,7 +229,7 @@ async def test_chat_loop_degrades_mcp_memory_backend(
     mock_agent = MagicMock()
 
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
-    monkeypatch.setattr("pincer.cli._create_memory_backend", lambda _s: fake_memory)
+    monkeypatch.setattr("pincer.cli.chat._create_memory_backend", lambda _s: fake_memory)
     mock_router = MagicMock()
     mock_router.get_llm.return_value = mock_llm
     mock_router.get_summarizer.return_value = mock_llm
@@ -144,11 +240,11 @@ async def test_chat_loop_degrades_mcp_memory_backend(
     monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=mock_agent))
 
     # Exit the input loop immediately on first prompt
-    import pincer.cli as _cli_mod
+    import pincer.cli.chat as _cli_mod
 
     monkeypatch.setattr(_cli_mod.console, "input", lambda _p: (_ for _ in ()).throw(EOFError()))
 
-    from pincer.cli import _chat_loop
+    from pincer.cli.chat import _chat_loop
 
     await _chat_loop()
 
@@ -192,7 +288,7 @@ async def test_chat_loop_creates_summarizer_for_non_mcp_memory(
         return MagicMock()
 
     monkeypatch.setattr("pincer.config.get_settings", lambda: mock_settings)
-    monkeypatch.setattr("pincer.cli._create_memory_backend", lambda _s: fake_memory)
+    monkeypatch.setattr("pincer.cli.chat._create_memory_backend", lambda _s: fake_memory)
     mock_router = MagicMock()
     mock_router.get_llm.return_value = mock_llm
     mock_router.get_summarizer.return_value = mock_llm
@@ -203,11 +299,11 @@ async def test_chat_loop_creates_summarizer_for_non_mcp_memory(
     monkeypatch.setattr("pincer.memory.summarizer.Summarizer", _mock_summarizer)
     monkeypatch.setattr("pincer.core.agent.Agent", MagicMock(return_value=MagicMock()))
 
-    import pincer.cli as _cli_mod
+    import pincer.cli.chat as _cli_mod
 
     monkeypatch.setattr(_cli_mod.console, "input", lambda _p: (_ for _ in ()).throw(EOFError()))
 
-    from pincer.cli import _chat_loop
+    from pincer.cli.chat import _chat_loop
 
     await _chat_loop()
 
@@ -241,7 +337,7 @@ async def test_build_core_returns_core_components(monkeypatch: pytest.MonkeyPatc
     """_build_core wires up the shared core and returns a CoreComponents with every field set."""
     from unittest.mock import AsyncMock, MagicMock
 
-    from pincer.cli import CoreComponents, _build_core
+    from pincer.cli.run import CoreComponents, _build_core
 
     settings = _mock_settings_for_build_core(tmp_path)
 
@@ -271,7 +367,7 @@ async def test_build_core_returns_core_components(monkeypatch: pytest.MonkeyPatc
 async def test_build_core_enables_audit_logging(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from unittest.mock import AsyncMock, MagicMock
 
-    from pincer.cli import _build_core
+    from pincer.cli.run import _build_core
 
     settings = _mock_settings_for_build_core(tmp_path)
     settings.audit_disabled = False
@@ -298,7 +394,7 @@ def test_register_channel_bound_tools_send_file_and_send_image() -> None:
     """send_file/send_image close over channel_map and route through the right channel by name."""
     from unittest.mock import AsyncMock
 
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -311,7 +407,7 @@ def test_register_channel_bound_tools_send_file_and_send_image() -> None:
 
 @pytest.mark.asyncio
 async def test_send_file_handler_errors_without_channel(tmp_path: Path) -> None:
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -323,7 +419,7 @@ async def test_send_file_handler_errors_without_channel(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_send_file_handler_errors_when_file_exists_but_no_active_channel(tmp_path: Path) -> None:
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -340,7 +436,7 @@ async def test_send_file_handler_errors_when_file_exists_but_no_active_channel(t
 async def test_send_file_handler_sends_existing_file(tmp_path: Path) -> None:
     from unittest.mock import AsyncMock
 
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -363,7 +459,7 @@ async def test_send_file_handler_sends_existing_file(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_send_image_handler_errors_without_channel() -> None:
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -377,7 +473,7 @@ async def test_send_image_handler_errors_without_channel() -> None:
 async def test_send_image_handler_sends_photo() -> None:
     from unittest.mock import AsyncMock
 
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -399,7 +495,7 @@ async def test_send_image_handler_sends_photo() -> None:
 async def test_send_image_handler_sends_gif_via_send_animation() -> None:
     from unittest.mock import AsyncMock
 
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -421,7 +517,7 @@ async def test_send_image_handler_sends_gif_via_send_animation() -> None:
 async def test_send_image_handler_reports_error_on_send_failure() -> None:
     from unittest.mock import AsyncMock
 
-    from pincer.cli import _register_channel_bound_tools
+    from pincer.cli.run import _register_channel_bound_tools
     from pincer.tools.registry import ToolRegistry
 
     tools = ToolRegistry()
@@ -454,7 +550,7 @@ async def test_run_agent_wires_core_and_channel_bound_tools_before_channel_start
     """
     from unittest.mock import AsyncMock, MagicMock
 
-    from pincer.cli import CoreComponents, _run_agent
+    from pincer.cli.run import CoreComponents, _run_agent
 
     mock_tools = MagicMock()
     core = CoreComponents(
@@ -478,8 +574,8 @@ async def test_run_agent_wires_core_and_channel_bound_tools_before_channel_start
         registered_with.append((tools, channel_map))
         raise RuntimeError("stop here — rest of _run_agent is out of scope for this test")
 
-    monkeypatch.setattr("pincer.cli._build_core", AsyncMock(return_value=core))
-    monkeypatch.setattr("pincer.cli._register_channel_bound_tools", _fake_register)
+    monkeypatch.setattr("pincer.cli.run._build_core", AsyncMock(return_value=core))
+    monkeypatch.setattr("pincer.cli.run._register_channel_bound_tools", _fake_register)
 
     with pytest.raises(RuntimeError, match="stop here"):
         await _run_agent(MagicMock())

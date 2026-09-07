@@ -187,7 +187,7 @@ Pincer ships **303 first-party tools** and plugs into **any MCP server** to reac
 |---|---:|---|
 | Core built-ins (`shell_exec`, `python_exec`, file ops, browser, email, calendar, image, voice) | 23 | Always on |
 | Bundled skills (SKILL.md, progressive disclosure: `load_skill`/`load_skill_reference`/`run_skill_script`) | 5 | Always on |
-| **Google Workspace** — Gmail · Calendar · Drive · Docs · Sheets · Slides · Meet · Tasks · Contacts | **113** | `pincer setup-google` |
+| **Google Workspace** — Gmail · Calendar · Drive · Docs · Sheets · Slides · Meet · Tasks · Contacts | **113** | `pincer google setup` |
 | **Microsoft 365** — Outlook · Calendar · OneDrive · OneNote · To Do · Contacts · Directory (multi-user) | **62** | `ms365-mcp-setup` |
 | **Slack (native)** — messages · channels · users · files · reactions · pins · reminders · search | **71** | `PINCER_SLACK_BOT_TOKEN` |
 | **MCP tools** (GitHub, Postgres, Notion, Linear, Stripe, filesystem, …) | unlimited | `pincer.toml` + `[mcp]` |
@@ -526,8 +526,8 @@ Pincer doesn't just respond — it reaches out.
 
 ```bash
 pincer init                        # interactive setup wizard
-pincer run                         # start agent (all channels)
-pincer run --channel telegram      # single channel
+pincer run                         # start agent (all configured channels)
+pincer run tasks                   # standalone background-task worker (requires PINCER_TASK_BROKER=redis)
 pincer chat                        # CLI chat for testing
 pincer doctor                      # security + config audit (40+ checks)
 pincer cost                        # spending summary
@@ -536,10 +536,14 @@ pincer mcp list                    # MCP servers + status
 pincer mcp test <server>           # test MCP connection
 pincer mcp tools                   # list registered MCP tools
 pincer mcp call <server> <tool>    # call a specific MCP tool
-pincer pair approve <ch> <code>    # approve a DM sender
-pincer setup-google                # Google Workspace OAuth (113 tools)
+pincer whatsapp setup              # pair WhatsApp via QR code
+pincer signal setup                # pair Signal via QR code
+pincer slack setup                 # interactive Slack bot token setup (71 tools)
+pincer google setup                # Google Workspace OAuth (113 tools)
 ms365-mcp-setup                    # Microsoft 365 device-code auth, default identity (62 tools)
 ```
+
+See [CLI Reference](docs/reference/cli.md) for the full command list.
 
 **Chat commands** (any channel): `/status`, `/budget`, `/new`, `/compact`, `/model <name>`, `/tools`
 
@@ -633,7 +637,7 @@ pip install "pincer-agent[image]"  # Image generation (fal.ai + Gemini)
 - [x] Skill system with sandboxing, AST scanning, signing
 - [x] Docker + one-click deploys (Railway, Render, DigitalOcean)
 - [x] Voice calling (Twilio + STT/TTS + compliance)
-- [x] Google Workspace integration (113 tools via `pincer setup-google`)
+- [x] Google Workspace integration (113 tools via `pincer google setup`)
 - [x] Microsoft 365 integration (62 tools, multi-user, lazy per-identity auth)
 - [x] Slack native integration (71 tools)
 - [x] MCP client + OAuth 2.0 authorization server

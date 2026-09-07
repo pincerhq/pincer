@@ -94,26 +94,22 @@ Send these to your bot via Telegram to see what it can do:
 ### WhatsApp
 
 ```bash
-pincer channels add whatsapp
+pincer whatsapp setup
 ```
 
 This opens a QR code in your terminal. Scan it with WhatsApp on your phone (Settings → Linked Devices → Link a Device). No API key needed — Pincer uses the multi-device protocol directly.
 
 ### Discord
 
-```bash
-pincer channels add discord
-```
-
-You'll need a Discord bot token from the [Discord Developer Portal](https://discord.com/developers/applications). The wizard walks you through it.
+Set `PINCER_DISCORD_BOT_TOKEN` in your `.env` (get one from the [Discord Developer Portal](https://discord.com/developers/applications)) and enable Discord during `pincer init`, or add it manually — there is no dedicated `pincer discord` setup command.
 
 ### Email
 
 ```bash
-pincer channels add email
+pincer google setup
 ```
 
-Connects to your Gmail via OAuth. Pincer can then read, search, draft, and send emails on your behalf.
+Connects to your Gmail (and the rest of Google Workspace) via OAuth. Pincer can then read, search, draft, and send emails on your behalf.
 
 ---
 
@@ -122,7 +118,7 @@ Connects to your Gmail via OAuth. Pincer can then read, search, draft, and send 
 To unlock Gmail, Google Calendar, Drive, Docs, Sheets, Slides, Meet, Tasks, and Contacts — 113 tools total:
 
 ```bash
-pincer setup-google
+pincer google setup
 ```
 
 This opens a browser window for Google OAuth consent. Grant the requested permissions. Pincer stores the token locally at `~/.pincer/google_workspace_token.json` (readable only by you).

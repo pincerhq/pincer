@@ -32,7 +32,7 @@ def _build_fastmcp() -> object:
 
     client = get_slack_client()
     if client is None:
-        raise RuntimeError("Slack tokens not configured. Run: pincer setup-slack")
+        raise RuntimeError("Slack tokens not configured. Run: pincer slack setup")
 
     registry = ToolRegistry()
     count = register_all_tools(registry, client)

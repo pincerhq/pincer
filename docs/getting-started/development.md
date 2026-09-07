@@ -195,7 +195,7 @@ PINCER_LOG_LEVEL=DEBUG pincer run
 
 ### Debugging Tips
 
-- **Breakpoints:** Use `breakpoint()` or your IDE debugger; run with `python -m pincer.cli run`
+- **Breakpoints:** Use `breakpoint()` or your IDE debugger; run with `pincer run` (or `uv run pincer run`)
 - **Tool calls:** Set `PINCER_LOG_LEVEL=DEBUG` to see tool invocations and results
 - **LLM traffic:** Mock `BaseLLMProvider` in tests to inspect prompts
 - **Session state:** Session DB path is under `PINCER_DATA_DIR`; inspect with SQLite tools
@@ -259,7 +259,7 @@ Channels live in `src/pincer/channels/`. Each channel implements the router inte
 ### Test a Channel
 
 - Unit tests: mock the external API (e.g. `tests/test_telegram.py`, `tests/test_discord.py`)
-- Integration: run `pincer run --channel my_channel` with real credentials
+- Integration: run `pincer run` with the new channel's credentials configured (there is no per-channel `--channel` flag — `pincer run` starts every channel enabled in config)
 
 **Important:** Open a [GitHub Discussion](https://github.com/pincerhq/pincer/discussions) before implementing a new channel so we can align on design.
 
