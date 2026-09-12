@@ -508,4 +508,3 @@ class ChannelSettings(BaseModel):
                 "'verbal' is rejected — the caller's yes is the verbal step)"
             )
         return mode
-

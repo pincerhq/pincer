@@ -272,9 +272,7 @@ class TestTranscriptTool:
         )
         from pincer.tools.builtin.call_transcript import get_call_transcript
 
-        assert "No transcript found" in await get_call_transcript(
-            "CA_nope", context={"pincer_user_id": "tester"}
-        )
+        assert "No transcript found" in await get_call_transcript("CA_nope", context={"pincer_user_id": "tester"})
 
     async def test_no_db_yet(self, tmp_path, monkeypatch):
         monkeypatch.setattr(

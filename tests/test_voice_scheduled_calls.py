@@ -232,7 +232,5 @@ async def test_the_actor_knows_the_action_type():
     """A schedule with no handler is a call that silently never happens."""
     from pincer.voice.scheduled_calls import ACTION_TYPE
 
-    source = (
-        __import__("pathlib").Path(__file__).resolve().parents[1] / "src/pincer/tasks/actors.py"
-    ).read_text()
+    source = (__import__("pathlib").Path(__file__).resolve().parents[1] / "src/pincer/tasks/actors.py").read_text()
     assert f'"{ACTION_TYPE}": make_scheduled_call_handler' in source

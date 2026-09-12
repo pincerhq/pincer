@@ -46,10 +46,7 @@ CREATE TABLE IF NOT EXISTS inbound_messages (
 
 
 def _sql(template: str, dialect: str) -> str:
-    return (
-        template.replace("{AUTOPK}", _AUTOPK[dialect])
-        .replace("{NOW_COL}", _NOW_COL[dialect])
-    )
+    return template.replace("{AUTOPK}", _AUTOPK[dialect]).replace("{NOW_COL}", _NOW_COL[dialect])
 
 
 def _columns(bind: Connection, table: str) -> set[str]:
@@ -67,16 +64,9 @@ def _add_column_if_missing(
         return
 
     if dialect == "postgresql":
-        bind.execute(
-            text(
-                f"ALTER TABLE {table} "
-                f"ADD COLUMN IF NOT EXISTS {column} {coldef}"
-            )
-        )
+        bind.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coldef}"))
     else:
-        bind.execute(
-            text(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
-        )
+        bind.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}"))
 
 
 def upgrade() -> None:
@@ -84,9 +74,7 @@ def upgrade() -> None:
     dialect = bind.dialect.name
 
     if dialect not in _AUTOPK:
-        raise RuntimeError(
-            f"Unsupported database dialect for voice migrations: {dialect}"
-        )
+        raise RuntimeError(f"Unsupported database dialect for voice migrations: {dialect}")
 
     op.execute(_sql(_INBOUND_MESSAGES, dialect))
 
@@ -98,10 +86,7 @@ def upgrade() -> None:
         "TEXT DEFAULT ''",
     )
 
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS "
-        "idx_inbound_messages_call ON inbound_messages(call_sid)"
-    )
+    op.execute("CREATE INDEX IF NOT EXISTS idx_inbound_messages_call ON inbound_messages(call_sid)")
 
 
 def downgrade() -> None:
@@ -112,7 +97,4 @@ def downgrade() -> None:
     # ultimately drops voice_calls.
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
-        op.execute(
-            "ALTER TABLE voice_calls "
-            "DROP COLUMN IF EXISTS inbound_intent"
-        )
+        op.execute("ALTER TABLE voice_calls DROP COLUMN IF EXISTS inbound_intent")

@@ -835,9 +835,7 @@ class VoiceChannel(BaseChannel):
             if sentence:
                 spoken_any = True
                 spoken_text = f"{spoken_text} {sentence}".strip()
-                transcript.log_utterance(
-                    Speaker.AGENT, sentence, state=str(sm.phase) if delivered else "undelivered"
-                )
+                transcript.log_utterance(Speaker.AGENT, sentence, state=str(sm.phase) if delivered else "undelivered")
 
         async def gate_first_sentence(sentence: str) -> str:
             """Token + drift gate for the first sentence (local, ~0ms)."""
@@ -1029,9 +1027,7 @@ class VoiceChannel(BaseChannel):
         if response and self._engine:
             metrics.mark_agent_speech_start()
             delivered = await self._engine.send_speech(call_sid, response)
-            transcript.log_utterance(
-                Speaker.AGENT, response, state=str(sm.phase) if delivered else "undelivered"
-            )
+            transcript.log_utterance(Speaker.AGENT, response, state=str(sm.phase) if delivered else "undelivered")
         self._after_agent_turn(call_sid, sm, response or "", end_requested)
 
     def _log_turn_latency(

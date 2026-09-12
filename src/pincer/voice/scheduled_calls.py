@@ -77,8 +77,7 @@ def resolve_when(
     if run_in_minutes is not None:
         if run_in_minutes < MIN_LEAD_MINUTES:
             raise ScheduledCallError(
-                f"Schedule the call at least {MIN_LEAD_MINUTES} minute ahead, "
-                "or place it now instead."
+                f"Schedule the call at least {MIN_LEAD_MINUTES} minute ahead, or place it now instead."
             )
         target = current + timedelta(minutes=run_in_minutes)
     else:

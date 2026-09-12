@@ -42,9 +42,7 @@ def upgrade() -> None:
     dialect = op.get_bind().dialect.name
 
     if dialect not in _NOW_COL:
-        raise RuntimeError(
-            f"Unsupported database dialect for voice migrations: {dialect}"
-        )
+        raise RuntimeError(f"Unsupported database dialect for voice migrations: {dialect}")
 
     op.execute(
         _CALL_ANALYTICS.replace(
@@ -52,11 +50,7 @@ def upgrade() -> None:
             _NOW_COL[dialect],
         )
     )
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS "
-        "idx_call_analytics_sentiment "
-        "ON call_analytics(sentiment)"
-    )
+    op.execute("CREATE INDEX IF NOT EXISTS idx_call_analytics_sentiment ON call_analytics(sentiment)")
 
 
 def downgrade() -> None:

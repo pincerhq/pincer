@@ -76,16 +76,9 @@ def _add_column_if_missing(
         return
 
     if dialect == "postgresql":
-        bind.execute(
-            text(
-                f"ALTER TABLE {table} "
-                f"ADD COLUMN IF NOT EXISTS {column} {coldef}"
-            )
-        )
+        bind.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coldef}"))
     else:
-        bind.execute(
-            text(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
-        )
+        bind.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}"))
 
 
 def upgrade() -> None:
@@ -93,9 +86,7 @@ def upgrade() -> None:
     dialect = bind.dialect.name
 
     if dialect not in _NOW_COL:
-        raise RuntimeError(
-            f"Unsupported database dialect for voice migrations: {dialect}"
-        )
+        raise RuntimeError(f"Unsupported database dialect for voice migrations: {dialect}")
 
     op.execute(_sql(_CALL_THREADS, dialect))
     op.execute(_sql(_CALL_THREAD_MEMBERS, dialect))
@@ -115,20 +106,9 @@ def upgrade() -> None:
         "TEXT DEFAULT ''",
     )
 
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS "
-        "idx_calls_thread ON voice_calls(thread_id)"
-    )
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS "
-        "idx_threads_number_status "
-        "ON call_threads(primary_number, status)"
-    )
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS "
-        "idx_thread_members_thread "
-        "ON call_thread_members(thread_id)"
-    )
+    op.execute("CREATE INDEX IF NOT EXISTS idx_calls_thread ON voice_calls(thread_id)")
+    op.execute("CREATE INDEX IF NOT EXISTS idx_threads_number_status ON call_threads(primary_number, status)")
+    op.execute("CREATE INDEX IF NOT EXISTS idx_thread_members_thread ON call_thread_members(thread_id)")
 
 
 def downgrade() -> None:
@@ -137,11 +117,5 @@ def downgrade() -> None:
 
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
-        op.execute(
-            "ALTER TABLE voice_calls "
-            "DROP COLUMN IF EXISTS thread_attach_kind"
-        )
-        op.execute(
-            "ALTER TABLE voice_calls "
-            "DROP COLUMN IF EXISTS thread_id"
-        )
+        op.execute("ALTER TABLE voice_calls DROP COLUMN IF EXISTS thread_attach_kind")
+        op.execute("ALTER TABLE voice_calls DROP COLUMN IF EXISTS thread_id")

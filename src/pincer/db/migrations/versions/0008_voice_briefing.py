@@ -30,37 +30,22 @@ def upgrade() -> None:
     dialect = bind.dialect.name
 
     if dialect not in {"sqlite", "postgresql"}:
-        raise RuntimeError(
-            f"Unsupported database dialect for voice migrations: {dialect}"
-        )
+        raise RuntimeError(f"Unsupported database dialect for voice migrations: {dialect}")
 
     if "briefing_json" in _columns(bind, "voice_calls"):
         return
 
     if dialect == "postgresql":
-        bind.execute(
-            text(
-                "ALTER TABLE voice_calls "
-                "ADD COLUMN IF NOT EXISTS briefing_json TEXT DEFAULT ''"
-            )
-        )
+        bind.execute(text("ALTER TABLE voice_calls ADD COLUMN IF NOT EXISTS briefing_json TEXT DEFAULT ''"))
     else:
-        bind.execute(
-            text(
-                "ALTER TABLE voice_calls "
-                "ADD COLUMN briefing_json TEXT DEFAULT ''"
-            )
-        )
+        bind.execute(text("ALTER TABLE voice_calls ADD COLUMN briefing_json TEXT DEFAULT ''"))
 
 
 def downgrade() -> None:
     bind = op.get_bind()
 
     if bind.dialect.name == "postgresql":
-        op.execute(
-            "ALTER TABLE voice_calls "
-            "DROP COLUMN IF EXISTS briefing_json"
-        )
+        op.execute("ALTER TABLE voice_calls DROP COLUMN IF EXISTS briefing_json")
 
     # SQLite: keep the additive column. `downgrade base` ultimately drops
     # voice_calls in 0001, so rebuilding the whole table is unnecessary.

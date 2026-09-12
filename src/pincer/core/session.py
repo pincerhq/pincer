@@ -102,7 +102,6 @@ class SessionManager:
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA busy_timeout=5000")
 
-
     async def close(self) -> None:
         for session in self._cache.values():
             await self._persist(session)
