@@ -22,9 +22,11 @@ from pincer.cli import (
     init,
     mcp,
     memory,
+    pilot,
     schedule,
     signal,
     slack,
+    voice,
     whatsapp,
 )
 from pincer.cli import run as run_cmd
@@ -51,3 +53,5 @@ app.add_typer(memory.memory_app, name="memory")
 app.add_typer(schedule.schedule_app, name="schedule")
 app.add_typer(db.db_app, name="db")
 app.add_typer(mcp.mcp_app, name="mcp")
+app.add_typer(voice.voice_app, name="voice")
+app.add_typer(pilot.pilot_app, name="pilot")

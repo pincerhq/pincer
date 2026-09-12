@@ -217,7 +217,7 @@ def test_port_in_use_detection():
     """Single-instance guard: detects a listener on the dashboard port."""
     import socket as socket_mod
 
-    from pincer.cli import _port_in_use
+    from pincer.cli._shared import _port_in_use
 
     server = socket_mod.socket(socket_mod.AF_INET, socket_mod.SOCK_STREAM)
     try:
