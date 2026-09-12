@@ -547,3 +547,46 @@ def test_voice_briefing_schema_is_alembic_managed(tmp_path: Path) -> None:
         assert value == ('{"task":"book appointment"}',)
     finally:
         con.close()
+
+
+def test_voice_analytics_schema_is_alembic_managed(tmp_path: Path) -> None:
+    db_path = tmp_path / "pincer.db"
+    cfg = build_config(db_path)
+
+    command.upgrade(cfg, "0009")
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        assert "call_analytics" in _tables(db_path)
+
+        cols = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(call_analytics)"
+            ).fetchall()
+        }
+        assert {
+            "call_sid",
+            "agent_speech_ms",
+            "caller_speech_ms",
+            "silence_ms",
+            "overlap_ms",
+            "interruptions",
+            "talk_ratio",
+            "method",
+            "sentiment",
+            "sentiment_trajectory",
+            "sentiment_rationale",
+            "sentiment_reason",
+            "created_at",
+        } <= cols
+
+        indexes = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA index_list(call_analytics)"
+            ).fetchall()
+        }
+        assert "idx_call_analytics_sentiment" in indexes
+    finally:
+        con.close()
