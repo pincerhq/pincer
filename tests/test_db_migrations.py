@@ -194,3 +194,183 @@ def test_legacy_audit_db_is_imported_into_unified_db(tmp_path: Path) -> None:
     assert rows == [("usr_abc", "tool_call")]
     # Legacy file is left untouched on disk, not deleted.
     assert legacy_audit_path.is_file()
+
+
+def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> None:
+    """0005 must upgrade the dormant 0001 voice schema without losing data."""
+    db_path = tmp_path / "pincer.db"
+    cfg = build_config(db_path)
+
+    # Reproduce the exact schema state described in the PR review:
+    # Alembic baseline is present, but the active voice schema is not.
+    command.upgrade(cfg, "0004")
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.execute(
+            """
+            INSERT INTO voice_calls (
+                id,
+                user_id,
+                direction,
+                caller_number,
+                target_number,
+                status,
+                engine,
+                started_at,
+                ended_at,
+                recording_consent
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "CA_legacy",
+                "usr_legacy",
+                "outbound",
+                "+491111111111",
+                "+492222222222",
+                "completed",
+                "twilio",
+                "2026-09-01T10:00:00+00:00",
+                "2026-09-01T10:02:00+00:00",
+                1,
+            ),
+        )
+        con.execute(
+            """
+            INSERT INTO call_transcripts (
+                call_id,
+                speaker,
+                text,
+                confidence,
+                is_final,
+                state,
+                timestamp
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "CA_legacy",
+                "caller",
+                "legacy transcript",
+                0.95,
+                1,
+                "final",
+                "2026-09-01T10:01:00+00:00",
+            ),
+        )
+        con.execute(
+            """
+            INSERT INTO call_actions (
+                call_id,
+                action_type,
+                tool_name,
+                input_summary,
+                output_summary,
+                user_confirmed,
+                timestamp
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "CA_legacy",
+                "tool_call",
+                "calendar_today",
+                "",
+                "ok",
+                1,
+                "2026-09-01T10:01:30+00:00",
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    command.upgrade(cfg, "head")
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        voice_cols = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(voice_calls)"
+            ).fetchall()
+        }
+        assert {
+            "call_sid",
+            "direction",
+            "from_number",
+            "to_number",
+            "pincer_user_id",
+            "started_at",
+            "ended_at",
+            "failure_code",
+            "engine",
+            "language",
+            "report_delivered_at",
+        } <= voice_cols
+
+        row = con.execute(
+            """
+            SELECT
+                call_sid,
+                direction,
+                from_number,
+                to_number,
+                pincer_user_id,
+                engine
+            FROM voice_calls
+            WHERE call_sid = 'CA_legacy'
+            """
+        ).fetchone()
+        assert row == (
+            "CA_legacy",
+            "outbound",
+            "+491111111111",
+            "+492222222222",
+            "usr_legacy",
+            "twilio",
+        )
+
+        transcript = con.execute(
+            """
+            SELECT call_id, speaker, text
+            FROM call_transcripts
+            WHERE call_id = 'CA_legacy'
+            """
+        ).fetchone()
+        assert transcript == (
+            "CA_legacy",
+            "caller",
+            "legacy transcript",
+        )
+
+        action = con.execute(
+            """
+            SELECT
+                call_id,
+                action_type,
+                tool_name,
+                tier,
+                approval_mode,
+                deny_reason
+            FROM call_actions
+            WHERE call_id = 'CA_legacy'
+            """
+        ).fetchone()
+        assert action == (
+            "CA_legacy",
+            "tool_call",
+            "calendar_today",
+            "",
+            "",
+            "",
+        )
+
+        tables = _tables(db_path)
+        assert {
+            "do_not_call",
+            "outbound_call_log",
+        } <= tables
+    finally:
+        con.close()
