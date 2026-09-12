@@ -374,3 +374,51 @@ def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> Non
         } <= tables
     finally:
         con.close()
+
+
+def test_voice_receptionist_schema_is_alembic_managed(tmp_path: Path) -> None:
+    db_path = tmp_path / "pincer.db"
+    cfg = build_config(db_path)
+
+    command.upgrade(cfg, "0006")
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        tables = _tables(db_path)
+        assert "inbound_messages" in tables
+
+        message_cols = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(inbound_messages)"
+            ).fetchall()
+        }
+        assert {
+            "call_sid",
+            "caller_name",
+            "caller_name_unverified",
+            "callback_number",
+            "callback_unverified",
+            "matter",
+            "urgent",
+            "created_at",
+            "delivered_to_owner_at",
+        } <= message_cols
+
+        voice_cols = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(voice_calls)"
+            ).fetchall()
+        }
+        assert "inbound_intent" in voice_cols
+
+        indexes = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA index_list(inbound_messages)"
+            ).fetchall()
+        }
+        assert "idx_inbound_messages_call" in indexes
+    finally:
+        con.close()
