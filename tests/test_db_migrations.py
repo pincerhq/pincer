@@ -290,12 +290,7 @@ def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> Non
 
     con = sqlite3.connect(str(db_path))
     try:
-        voice_cols = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA table_info(voice_calls)"
-            ).fetchall()
-        }
+        voice_cols = {row[1] for row in con.execute("PRAGMA table_info(voice_calls)").fetchall()}
         assert {
             "call_sid",
             "direction",
@@ -318,7 +313,10 @@ def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> Non
                 from_number,
                 to_number,
                 pincer_user_id,
-                engine
+                engine,
+                consent_given,
+                started_at,
+                ended_at
             FROM voice_calls
             WHERE call_sid = 'CA_legacy'
             """
@@ -330,6 +328,9 @@ def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> Non
             "+492222222222",
             "usr_legacy",
             "twilio",
+            1,
+            "2026-09-01T10:00:00+00:00",
+            "2026-09-01T10:02:00+00:00",
         )
 
         transcript = con.execute(
@@ -387,12 +388,7 @@ def test_voice_receptionist_schema_is_alembic_managed(tmp_path: Path) -> None:
         tables = _tables(db_path)
         assert "inbound_messages" in tables
 
-        message_cols = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA table_info(inbound_messages)"
-            ).fetchall()
-        }
+        message_cols = {row[1] for row in con.execute("PRAGMA table_info(inbound_messages)").fetchall()}
         assert {
             "call_sid",
             "caller_name",
@@ -405,20 +401,10 @@ def test_voice_receptionist_schema_is_alembic_managed(tmp_path: Path) -> None:
             "delivered_to_owner_at",
         } <= message_cols
 
-        voice_cols = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA table_info(voice_calls)"
-            ).fetchall()
-        }
+        voice_cols = {row[1] for row in con.execute("PRAGMA table_info(voice_calls)").fetchall()}
         assert "inbound_intent" in voice_cols
 
-        indexes = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA index_list(inbound_messages)"
-            ).fetchall()
-        }
+        indexes = {row[1] for row in con.execute("PRAGMA index_list(inbound_messages)").fetchall()}
         assert "idx_inbound_messages_call" in indexes
     finally:
         con.close()
@@ -437,12 +423,7 @@ def test_voice_threads_schema_is_alembic_managed(tmp_path: Path) -> None:
             "call_thread_members",
         } <= _tables(db_path)
 
-        thread_cols = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA table_info(call_threads)"
-            ).fetchall()
-        }
+        thread_cols = {row[1] for row in con.execute("PRAGMA table_info(call_threads)").fetchall()}
         assert {
             "thread_id",
             "subject",
@@ -457,12 +438,7 @@ def test_voice_threads_schema_is_alembic_managed(tmp_path: Path) -> None:
             "closed_at",
         } <= thread_cols
 
-        member_cols = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA table_info(call_thread_members)"
-            ).fetchall()
-        }
+        member_cols = {row[1] for row in con.execute("PRAGMA table_info(call_thread_members)").fetchall()}
         assert {
             "call_sid",
             "thread_id",
@@ -474,31 +450,16 @@ def test_voice_threads_schema_is_alembic_managed(tmp_path: Path) -> None:
             "task_result",
         } <= member_cols
 
-        voice_cols = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA table_info(voice_calls)"
-            ).fetchall()
-        }
+        voice_cols = {row[1] for row in con.execute("PRAGMA table_info(voice_calls)").fetchall()}
         assert {
             "thread_id",
             "thread_attach_kind",
         } <= voice_cols
 
-        indexes = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA index_list(call_threads)"
-            ).fetchall()
-        }
+        indexes = {row[1] for row in con.execute("PRAGMA index_list(call_threads)").fetchall()}
         assert "idx_threads_number_status" in indexes
 
-        member_indexes = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA index_list(call_thread_members)"
-            ).fetchall()
-        }
+        member_indexes = {row[1] for row in con.execute("PRAGMA index_list(call_thread_members)").fetchall()}
         assert "idx_thread_members_thread" in member_indexes
     finally:
         con.close()
@@ -512,12 +473,7 @@ def test_voice_briefing_schema_is_alembic_managed(tmp_path: Path) -> None:
 
     con = sqlite3.connect(str(db_path))
     try:
-        voice_cols = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA table_info(voice_calls)"
-            ).fetchall()
-        }
+        voice_cols = {row[1] for row in con.execute("PRAGMA table_info(voice_calls)").fetchall()}
         assert "briefing_json" in voice_cols
 
         con.execute(
@@ -559,12 +515,7 @@ def test_voice_analytics_schema_is_alembic_managed(tmp_path: Path) -> None:
     try:
         assert "call_analytics" in _tables(db_path)
 
-        cols = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA table_info(call_analytics)"
-            ).fetchall()
-        }
+        cols = {row[1] for row in con.execute("PRAGMA table_info(call_analytics)").fetchall()}
         assert {
             "call_sid",
             "agent_speech_ms",
@@ -581,12 +532,413 @@ def test_voice_analytics_schema_is_alembic_managed(tmp_path: Path) -> None:
             "created_at",
         } <= cols
 
-        indexes = {
-            row[1]
-            for row in con.execute(
-                "PRAGMA index_list(call_analytics)"
-            ).fetchall()
-        }
+        indexes = {row[1] for row in con.execute("PRAGMA index_list(call_analytics)").fetchall()}
         assert "idx_call_analytics_sentiment" in indexes
+    finally:
+        con.close()
+
+
+def test_unversioned_modern_voice_schema_upgrades_to_head(
+    tmp_path: Path,
+) -> None:
+    """A pre-Alembic call_sid voice DB must upgrade without legacy collisions."""
+    db_path = tmp_path / "pincer.db"
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.execute(
+            """
+            CREATE TABLE voice_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_sid TEXT NOT NULL UNIQUE,
+                direction TEXT NOT NULL DEFAULT 'inbound',
+                from_number TEXT DEFAULT '',
+                to_number TEXT DEFAULT '',
+                pincer_user_id TEXT DEFAULT '',
+                recording_enabled INTEGER DEFAULT 0,
+                consent_given INTEGER DEFAULT 0,
+                started_at TEXT NOT NULL,
+                ended_at TEXT
+            )
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO voice_calls (
+                call_sid,
+                direction,
+                started_at,
+                ended_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "CA_pre_alembic",
+                "outbound",
+                "2026-08-20T16:43:37+00:00",
+                "2026-08-20T16:44:00+00:00",
+            ),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    cfg = build_config(db_path)
+    command.upgrade(cfg, "head")
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        row = con.execute(
+            """
+            SELECT call_sid, direction
+            FROM voice_calls
+            WHERE call_sid = 'CA_pre_alembic'
+            """
+        ).fetchone()
+        assert row == ("CA_pre_alembic", "outbound")
+
+        voice_cols = {row[1] for row in con.execute("PRAGMA table_info(voice_calls)").fetchall()}
+        assert {
+            "call_sid",
+            "pincer_user_id",
+            "failure_code",
+            "inbound_intent",
+            "thread_id",
+            "briefing_json",
+        } <= voice_cols
+
+        assert {
+            "call_transcripts",
+            "call_actions",
+            "phone_contacts",
+            "inbound_messages",
+            "call_threads",
+            "call_thread_members",
+            "call_analytics",
+        } <= _tables(db_path)
+
+        transcript_cols = {row[1] for row in con.execute("PRAGMA table_info(call_transcripts)").fetchall()}
+        assert {
+            "call_id",
+            "speaker",
+            "text",
+            "confidence",
+            "is_final",
+            "state",
+            "timestamp",
+        } <= transcript_cols
+
+        action_cols = {row[1] for row in con.execute("PRAGMA table_info(call_actions)").fetchall()}
+        assert {
+            "call_id",
+            "action_type",
+            "tool_name",
+            "tier",
+            "approval_mode",
+            "deny_reason",
+        } <= action_cols
+    finally:
+        con.close()
+
+
+def test_unversioned_modern_voice_schema_backfills_missing_columns(
+    tmp_path: Path,
+) -> None:
+    """An older pre-Alembic modern schema must gain the columns runtime DDL used to add.
+
+    Before this branch, `voice_calls`/`call_actions` columns were reconciled by
+    a runtime `ALTER TABLE ... ADD COLUMN` that swallowed SQLite's "duplicate
+    column" error. Revision 0005 has to do the same job for a database created
+    by one of those older runtime versions, without touching existing rows.
+    """
+    db_path = tmp_path / "pincer.db"
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        # The modern shape as it stood before Sprint 9/11 added their columns.
+        con.execute(
+            """
+            CREATE TABLE voice_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_sid TEXT NOT NULL UNIQUE,
+                direction TEXT NOT NULL DEFAULT 'inbound',
+                from_number TEXT DEFAULT '',
+                to_number TEXT DEFAULT '',
+                pincer_user_id TEXT DEFAULT '',
+                recording_enabled INTEGER DEFAULT 0,
+                consent_given INTEGER DEFAULT 0,
+                started_at TEXT NOT NULL,
+                ended_at TEXT
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE call_transcripts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id TEXT NOT NULL,
+                speaker TEXT NOT NULL,
+                text TEXT NOT NULL,
+                confidence REAL DEFAULT 1.0,
+                is_final INTEGER DEFAULT 1,
+                state TEXT DEFAULT '',
+                timestamp TEXT NOT NULL
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE call_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                tool_name TEXT DEFAULT '',
+                input_summary TEXT DEFAULT '',
+                output_summary TEXT DEFAULT '',
+                user_confirmed INTEGER,
+                timestamp TEXT NOT NULL
+            )
+            """
+        )
+        con.execute(
+            "INSERT INTO voice_calls (call_sid, direction, started_at) VALUES (?, ?, ?)",
+            ("CA_old_runtime", "inbound", "2026-08-21T09:00:00+00:00"),
+        )
+        con.execute(
+            """
+            INSERT INTO call_transcripts (call_id, speaker, text, timestamp)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("CA_old_runtime", "caller", "kept across the upgrade", "2026-08-21T09:00:05+00:00"),
+        )
+        con.execute(
+            """
+            INSERT INTO call_actions (call_id, action_type, tool_name, timestamp)
+            VALUES (?, ?, ?, ?)
+            """,
+            ("CA_old_runtime", "tool_call", "calendar_today", "2026-08-21T09:00:10+00:00"),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    command.upgrade(build_config(db_path), "head")
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        # Rows survive: 0005 must backfill columns, not rebuild these tables.
+        assert con.execute(
+            """
+            SELECT call_sid, failure_code, engine, language, report_delivered_at
+            FROM voice_calls
+            """
+        ).fetchall() == [("CA_old_runtime", "", "", "", None)]
+
+        assert con.execute("SELECT text FROM call_transcripts").fetchall() == [("kept across the upgrade",)]
+
+        assert con.execute("SELECT call_id, tier, approval_mode, deny_reason FROM call_actions").fetchall() == [
+            ("CA_old_runtime", "", "", "")
+        ]
+
+        indexes = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()}
+        assert {
+            "idx_voice_calls_started",
+            "idx_voice_calls_failure",
+            "idx_call_actions_call",
+            "idx_call_transcripts_call",
+            "idx_outbound_log_day",
+        } <= indexes
+    finally:
+        con.close()
+
+
+# The exact schema `pincer.voice.retention.ensure_voice_tables` used to create
+# at runtime, before revisions 0005-0009 took ownership of it. Kept verbatim
+# here as the fixture for the real-world upgrade path: a database built by that
+# code has every modern voice table but no `alembic_version` row.
+_PRE_ALEMBIC_RUNTIME_VOICE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS voice_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        call_sid TEXT NOT NULL UNIQUE,
+        direction TEXT NOT NULL DEFAULT 'inbound',
+        from_number TEXT DEFAULT '',
+        to_number TEXT DEFAULT '',
+        pincer_user_id TEXT DEFAULT '',
+        recording_enabled INTEGER DEFAULT 0,
+        consent_given INTEGER DEFAULT 0,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        failure_code TEXT DEFAULT '',
+        engine TEXT DEFAULT '',
+        language TEXT DEFAULT '',
+        report_delivered_at TEXT,
+        inbound_intent TEXT DEFAULT '',
+        thread_id TEXT DEFAULT '',
+        thread_attach_kind TEXT DEFAULT '',
+        briefing_json TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS call_transcripts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        call_id TEXT NOT NULL,
+        speaker TEXT NOT NULL,
+        text TEXT NOT NULL,
+        confidence REAL DEFAULT 1.0,
+        is_final INTEGER DEFAULT 1,
+        state TEXT DEFAULT '',
+        timestamp TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS call_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        call_id TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        tool_name TEXT DEFAULT '',
+        input_summary TEXT DEFAULT '',
+        output_summary TEXT DEFAULT '',
+        user_confirmed INTEGER,
+        timestamp TEXT NOT NULL,
+        tier TEXT DEFAULT '',
+        approval_mode TEXT DEFAULT '',
+        deny_reason TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS inbound_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        call_sid TEXT NOT NULL,
+        caller_name TEXT DEFAULT '',
+        caller_name_unverified INTEGER DEFAULT 0,
+        callback_number TEXT DEFAULT '',
+        callback_unverified INTEGER DEFAULT 0,
+        matter TEXT DEFAULT '',
+        urgent INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        delivered_to_owner_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS call_threads (
+        thread_id TEXT PRIMARY KEY,
+        subject TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        origin TEXT NOT NULL,
+        primary_number TEXT DEFAULT '',
+        contact_name TEXT DEFAULT '',
+        language TEXT DEFAULT '',
+        rolling_summary TEXT DEFAULT '',
+        open_commitments TEXT DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        resolved_at TEXT,
+        closed_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS call_thread_members (
+        call_sid TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        attach_kind TEXT NOT NULL DEFAULT '',
+        attached_at TEXT NOT NULL,
+        call_started_at TEXT DEFAULT '',
+        direction TEXT DEFAULT '',
+        outcome_code TEXT DEFAULT '',
+        task_result TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS call_analytics (
+        call_sid TEXT PRIMARY KEY,
+        agent_speech_ms INTEGER,
+        caller_speech_ms INTEGER,
+        silence_ms INTEGER,
+        overlap_ms INTEGER,
+        interruptions INTEGER DEFAULT 0,
+        talk_ratio REAL,
+        method TEXT NOT NULL,
+        sentiment TEXT,
+        sentiment_trajectory TEXT,
+        sentiment_rationale TEXT,
+        sentiment_reason TEXT DEFAULT '',
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_call_analytics_sentiment ON call_analytics(sentiment);
+    CREATE INDEX IF NOT EXISTS idx_inbound_messages_call ON inbound_messages(call_sid);
+    CREATE INDEX IF NOT EXISTS idx_threads_number_status ON call_threads(primary_number, status);
+    CREATE INDEX IF NOT EXISTS idx_thread_members_thread ON call_thread_members(thread_id);
+    CREATE INDEX IF NOT EXISTS idx_call_transcripts_call ON call_transcripts(call_id);
+    CREATE INDEX IF NOT EXISTS idx_call_transcripts_ts ON call_transcripts(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_call_actions_call ON call_actions(call_id);
+    CREATE INDEX IF NOT EXISTS idx_call_actions_ts ON call_actions(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_voice_calls_started ON voice_calls(started_at);
+"""
+
+
+def test_full_pre_alembic_runtime_voice_db_upgrades_to_head(tmp_path: Path) -> None:
+    """The production upgrade path: a DB built by the old runtime DDL, with rows.
+
+    Revision 0001 must skip its incompatible legacy voice block, 0005 must
+    leave the existing tables in place, and 0006-0009 must be no-ops on the
+    columns and tables that are already there — with every row intact.
+    """
+    db_path = tmp_path / "pincer.db"
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.executescript(_PRE_ALEMBIC_RUNTIME_VOICE_SCHEMA)
+        con.execute(
+            """
+            INSERT INTO voice_calls (call_sid, direction, from_number, to_number, started_at, inbound_intent)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("CA_runtime", "inbound", "+493333333333", "+494444444444", "2026-09-02T08:00:00+00:00", "question"),
+        )
+        con.execute(
+            "INSERT INTO call_transcripts (call_id, speaker, text, timestamp) VALUES (?, ?, ?, ?)",
+            ("CA_runtime", "agent", "Guten Tag", "2026-09-02T08:00:03+00:00"),
+        )
+        con.execute(
+            """
+            INSERT INTO call_actions (call_id, action_type, tool_name, timestamp, tier, deny_reason)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("CA_runtime", "tool_denied", "email_send", "2026-09-02T08:00:20+00:00", "X", "tier_x"),
+        )
+        con.execute(
+            "INSERT INTO inbound_messages (call_sid, caller_name, matter, created_at) VALUES (?, ?, ?, ?)",
+            ("CA_runtime", "Anna", "Rueckruf", "2026-09-02T08:01:00+00:00"),
+        )
+        con.execute(
+            """
+            INSERT INTO call_threads (thread_id, subject, origin, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ("th_1", "Angebot", "inbound", "2026-09-02T08:00:00+00:00", "2026-09-02T08:02:00+00:00"),
+        )
+        con.execute(
+            "INSERT INTO call_thread_members (call_sid, thread_id, attached_at) VALUES (?, ?, ?)",
+            ("CA_runtime", "th_1", "2026-09-02T08:00:05+00:00"),
+        )
+        con.execute(
+            "INSERT INTO call_analytics (call_sid, method, created_at) VALUES (?, ?, ?)",
+            ("CA_runtime", "exact", "2026-09-02T08:02:10+00:00"),
+        )
+        con.commit()
+    finally:
+        con.close()
+
+    command.upgrade(build_config(db_path), "head")
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        assert con.execute(
+            "SELECT call_sid, direction, from_number, inbound_intent, thread_id FROM voice_calls"
+        ).fetchall() == [("CA_runtime", "inbound", "+493333333333", "question", "")]
+
+        assert con.execute("SELECT speaker, text FROM call_transcripts").fetchall() == [("agent", "Guten Tag")]
+        assert con.execute("SELECT tier, deny_reason FROM call_actions").fetchall() == [("X", "tier_x")]
+        assert con.execute("SELECT caller_name, matter FROM inbound_messages").fetchall() == [("Anna", "Rueckruf")]
+        assert con.execute("SELECT thread_id, subject FROM call_threads").fetchall() == [("th_1", "Angebot")]
+        assert con.execute("SELECT call_sid, thread_id FROM call_thread_members").fetchall() == [("CA_runtime", "th_1")]
+        assert con.execute("SELECT call_sid, method FROM call_analytics").fetchall() == [("CA_runtime", "exact")]
+
+        # 0001 must still have created the non-voice schema it owns.
+        assert {"memories", "identity_meta", "audit_log", "phone_contacts"} <= _tables(db_path)
+
+        # 0005's own tables are additive here.
+        assert {"do_not_call", "outbound_call_log"} <= _tables(db_path)
+
+        # The database is genuinely at head, not merely stamped.
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone() == ("0009",)
     finally:
         con.close()

@@ -112,14 +112,15 @@ _INDEXES = (
 
 
 def _sql(template: str, dialect: str) -> str:
-    return (
-        template.replace("{AUTOPK}", _AUTOPK[dialect])
-        .replace("{NOW_COL}", _NOW_COL[dialect])
-    )
+    return template.replace("{AUTOPK}", _AUTOPK[dialect]).replace("{NOW_COL}", _NOW_COL[dialect])
 
 
 def _columns(bind: Connection, table: str) -> set[str]:
     return {str(col["name"]) for col in inspect(bind).get_columns(table)}
+
+
+def _tables(bind: Connection) -> set[str]:
+    return set(inspect(bind).get_table_names())
 
 
 def _add_column_if_missing(
@@ -133,16 +134,9 @@ def _add_column_if_missing(
         return
 
     if dialect == "postgresql":
-        bind.execute(
-            text(
-                f"ALTER TABLE {table} "
-                f"ADD COLUMN IF NOT EXISTS {column} {coldef}"
-            )
-        )
+        bind.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coldef}"))
     else:
-        bind.execute(
-            text(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}")
-        )
+        bind.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}"))
 
 
 def _create_modern_voice_tables(dialect: str) -> None:
@@ -159,50 +153,17 @@ def _rebuild_legacy_voice_schema(
     voice_cols = _columns(bind, "voice_calls")
     action_cols = _columns(bind, "call_actions")
 
-    failure_expr = (
-        "COALESCE(failure_code, '')"
-        if "failure_code" in voice_cols
-        else "''"
-    )
-    language_expr = (
-        "COALESCE(language, '')"
-        if "language" in voice_cols
-        else "''"
-    )
-    report_expr = (
-        "report_delivered_at"
-        if "report_delivered_at" in voice_cols
-        else "NULL"
-    )
+    failure_expr = "COALESCE(failure_code, '')" if "failure_code" in voice_cols else "''"
+    language_expr = "COALESCE(language, '')" if "language" in voice_cols else "''"
+    report_expr = "report_delivered_at" if "report_delivered_at" in voice_cols else "NULL"
 
-    tier_expr = (
-        "COALESCE(tier, '')"
-        if "tier" in action_cols
-        else "''"
-    )
-    approval_expr = (
-        "COALESCE(approval_mode, '')"
-        if "approval_mode" in action_cols
-        else "''"
-    )
-    deny_expr = (
-        "COALESCE(deny_reason, '')"
-        if "deny_reason" in action_cols
-        else "''"
-    )
+    tier_expr = "COALESCE(tier, '')" if "tier" in action_cols else "''"
+    approval_expr = "COALESCE(approval_mode, '')" if "approval_mode" in action_cols else "''"
+    deny_expr = "COALESCE(deny_reason, '')" if "deny_reason" in action_cols else "''"
 
-    op.execute(
-        "ALTER TABLE voice_calls "
-        "RENAME TO voice_calls_legacy_0005"
-    )
-    op.execute(
-        "ALTER TABLE call_transcripts "
-        "RENAME TO call_transcripts_legacy_0005"
-    )
-    op.execute(
-        "ALTER TABLE call_actions "
-        "RENAME TO call_actions_legacy_0005"
-    )
+    op.execute("ALTER TABLE voice_calls RENAME TO voice_calls_legacy_0005")
+    op.execute("ALTER TABLE call_transcripts RENAME TO call_transcripts_legacy_0005")
+    op.execute("ALTER TABLE call_actions RENAME TO call_actions_legacy_0005")
 
     _create_modern_voice_tables(dialect)
 
@@ -309,6 +270,15 @@ def _ensure_already_modern_schema(
     dialect: str,
 ) -> None:
     """Bring pre-Alembic installs that already have call_sid up to 0005."""
+    # An unversioned deployment may already have the modern voice_calls table
+    # while call_transcripts/call_actions are absent, because revision 0001
+    # deliberately skips its incompatible legacy versions in that case.
+    existing = _tables(bind)
+    if "call_transcripts" not in existing:
+        op.execute(_sql(_CALL_TRANSCRIPTS, dialect))
+    if "call_actions" not in existing:
+        op.execute(_sql(_CALL_ACTIONS, dialect))
+
     now_col = _NOW_COL[dialect]
 
     for column, coldef in (
@@ -344,9 +314,7 @@ def upgrade() -> None:
     dialect = bind.dialect.name
 
     if dialect not in _AUTOPK:
-        raise RuntimeError(
-            f"Unsupported database dialect for voice migrations: {dialect}"
-        )
+        raise RuntimeError(f"Unsupported database dialect for voice migrations: {dialect}")
 
     if "call_sid" not in _columns(bind, "voice_calls"):
         _rebuild_legacy_voice_schema(bind, dialect)
