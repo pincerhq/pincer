@@ -40,6 +40,8 @@ coverage.xml
 .ruff_cache/
 
 # Google OAuth secrets
+data
+data/*
 data/google_credentials.json
 data/google_token.json
 
