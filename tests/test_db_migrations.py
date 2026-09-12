@@ -422,3 +422,128 @@ def test_voice_receptionist_schema_is_alembic_managed(tmp_path: Path) -> None:
         assert "idx_inbound_messages_call" in indexes
     finally:
         con.close()
+
+
+def test_voice_threads_schema_is_alembic_managed(tmp_path: Path) -> None:
+    db_path = tmp_path / "pincer.db"
+    cfg = build_config(db_path)
+
+    command.upgrade(cfg, "0007")
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        assert {
+            "call_threads",
+            "call_thread_members",
+        } <= _tables(db_path)
+
+        thread_cols = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(call_threads)"
+            ).fetchall()
+        }
+        assert {
+            "thread_id",
+            "subject",
+            "status",
+            "origin",
+            "primary_number",
+            "rolling_summary",
+            "open_commitments",
+            "created_at",
+            "updated_at",
+            "resolved_at",
+            "closed_at",
+        } <= thread_cols
+
+        member_cols = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(call_thread_members)"
+            ).fetchall()
+        }
+        assert {
+            "call_sid",
+            "thread_id",
+            "attach_kind",
+            "attached_at",
+            "call_started_at",
+            "direction",
+            "outcome_code",
+            "task_result",
+        } <= member_cols
+
+        voice_cols = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(voice_calls)"
+            ).fetchall()
+        }
+        assert {
+            "thread_id",
+            "thread_attach_kind",
+        } <= voice_cols
+
+        indexes = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA index_list(call_threads)"
+            ).fetchall()
+        }
+        assert "idx_threads_number_status" in indexes
+
+        member_indexes = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA index_list(call_thread_members)"
+            ).fetchall()
+        }
+        assert "idx_thread_members_thread" in member_indexes
+    finally:
+        con.close()
+
+
+def test_voice_briefing_schema_is_alembic_managed(tmp_path: Path) -> None:
+    db_path = tmp_path / "pincer.db"
+    cfg = build_config(db_path)
+
+    command.upgrade(cfg, "0008")
+
+    con = sqlite3.connect(str(db_path))
+    try:
+        voice_cols = {
+            row[1]
+            for row in con.execute(
+                "PRAGMA table_info(voice_calls)"
+            ).fetchall()
+        }
+        assert "briefing_json" in voice_cols
+
+        con.execute(
+            """
+            INSERT INTO voice_calls (
+                call_sid,
+                started_at,
+                briefing_json
+            )
+            VALUES (?, ?, ?)
+            """,
+            (
+                "CA_brief",
+                "2026-09-12T10:00:00+00:00",
+                '{"task":"book appointment"}',
+            ),
+        )
+        con.commit()
+
+        value = con.execute(
+            """
+            SELECT briefing_json
+            FROM voice_calls
+            WHERE call_sid = 'CA_brief'
+            """
+        ).fetchone()
+        assert value == ('{"task":"book appointment"}',)
+    finally:
+        con.close()
