@@ -177,12 +177,12 @@ async def test_do_not_call_survives_the_purge(tmp_path):
     assert await is_do_not_call(settings, "+4915112345678")
 
 
-# ── Sprint 11 migration (docs/migrations/011_in_call_tools.sql) ──────
+# ── Sprint 11 migration (Alembic revision 0005) ─────────────────────
 
 
 async def test_call_actions_migration_adds_policy_columns(tmp_path):
     """A pre-Sprint-11 call_actions table gains tier/approval_mode/deny_reason
-    (try/except duplicate-column pattern), and the transcript save writes them."""
+    (via revision 0005, not runtime DDL), and the transcript save writes them."""
     import aiosqlite
 
     from pincer.voice.retention import ensure_voice_tables

@@ -8,15 +8,15 @@ that deletes data is written to the audit log.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from pincer.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -48,169 +48,35 @@ RETENTION_TABLES: dict[str, str] = {
     # auto-close job, not by the transcript purge.
 }
 
-VOICE_TABLES_SQL = """
-CREATE TABLE IF NOT EXISTS voice_calls (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    call_sid TEXT NOT NULL UNIQUE,
-    direction TEXT NOT NULL DEFAULT 'inbound',
-    from_number TEXT DEFAULT '',
-    to_number TEXT DEFAULT '',
-    pincer_user_id TEXT DEFAULT '',
-    recording_enabled INTEGER DEFAULT 0,
-    consent_given INTEGER DEFAULT 0,
-    started_at TEXT NOT NULL,
-    ended_at TEXT,
-    -- Sprint 9 (T9.3): stable failure taxonomy, one code per terminated call.
-    -- '' until the call ends; 'none' means it completed successfully.
-    failure_code TEXT DEFAULT '',
-    engine TEXT DEFAULT '',
-    language TEXT DEFAULT '',
-    report_delivered_at TEXT,
-    -- Sprint 12: receptionist intent
-    inbound_intent TEXT DEFAULT '',
-    -- Sprint 13 (call threads): the matter this call belongs to ('' = threadless)
-    thread_id TEXT DEFAULT '',
-    thread_attach_kind TEXT DEFAULT '',
-    -- Call briefing: what the agent was told to do, verbatim ('' = inbound/legacy)
-    briefing_json TEXT DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS call_transcripts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    call_id TEXT NOT NULL,
-    speaker TEXT NOT NULL,
-    text TEXT NOT NULL,
-    confidence REAL DEFAULT 1.0,
-    is_final INTEGER DEFAULT 1,
-    state TEXT DEFAULT '',
-    timestamp TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS call_actions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    call_id TEXT NOT NULL,
-    action_type TEXT NOT NULL,
-    tool_name TEXT DEFAULT '',
-    input_summary TEXT DEFAULT '',
-    output_summary TEXT DEFAULT '',
-    user_confirmed INTEGER,
-    timestamp TEXT NOT NULL,
-    -- Sprint 11 (in-call tools): policy tier, approval mode, deny reason
-    tier TEXT DEFAULT '',
-    approval_mode TEXT DEFAULT '',
-    deny_reason TEXT DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS inbound_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    call_sid TEXT NOT NULL,
-    caller_name TEXT DEFAULT '',
-    caller_name_unverified INTEGER DEFAULT 0,
-    callback_number TEXT DEFAULT '',
-    callback_unverified INTEGER DEFAULT 0,
-    matter TEXT DEFAULT '',
-    urgent INTEGER DEFAULT 0,
-    created_at TEXT NOT NULL,
-    delivered_to_owner_at TEXT
-);
-CREATE TABLE IF NOT EXISTS call_threads (
-    thread_id TEXT PRIMARY KEY,
-    subject TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open',
-    origin TEXT NOT NULL,
-    primary_number TEXT DEFAULT '',
-    contact_name TEXT DEFAULT '',
-    language TEXT DEFAULT '',
-    rolling_summary TEXT DEFAULT '',
-    open_commitments TEXT DEFAULT '[]',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    resolved_at TEXT,
-    closed_at TEXT
-);
-CREATE TABLE IF NOT EXISTS call_thread_members (
-    call_sid TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL,
-    attach_kind TEXT NOT NULL DEFAULT '',
-    attached_at TEXT NOT NULL,
-    call_started_at TEXT DEFAULT '',
-    direction TEXT DEFAULT '',
-    outcome_code TEXT DEFAULT '',
-    task_result TEXT DEFAULT ''
-);
-CREATE TABLE IF NOT EXISTS call_analytics (
-    call_sid TEXT PRIMARY KEY,
-    agent_speech_ms INTEGER,
-    caller_speech_ms INTEGER,
-    silence_ms INTEGER,
-    overlap_ms INTEGER,
-    interruptions INTEGER DEFAULT 0,
-    talk_ratio REAL,
-    method TEXT NOT NULL,
-    sentiment TEXT,
-    sentiment_trajectory TEXT,
-    sentiment_rationale TEXT,
-    sentiment_reason TEXT DEFAULT '',
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_call_analytics_sentiment ON call_analytics(sentiment);
-CREATE INDEX IF NOT EXISTS idx_inbound_messages_call ON inbound_messages(call_sid);
-CREATE INDEX IF NOT EXISTS idx_threads_number_status ON call_threads(primary_number, status);
-CREATE INDEX IF NOT EXISTS idx_thread_members_thread ON call_thread_members(thread_id);
-CREATE INDEX IF NOT EXISTS idx_call_transcripts_call ON call_transcripts(call_id);
-CREATE INDEX IF NOT EXISTS idx_call_transcripts_ts ON call_transcripts(timestamp);
-CREATE INDEX IF NOT EXISTS idx_call_actions_call ON call_actions(call_id);
-CREATE INDEX IF NOT EXISTS idx_call_actions_ts ON call_actions(timestamp);
-CREATE INDEX IF NOT EXISTS idx_voice_calls_started ON voice_calls(started_at);
-"""
 
+async def ensure_schema_for_connection(db: aiosqlite.Connection) -> None:
+    """Bring the database behind an open connection to the latest revision.
 
-# Sprint 9 columns added to a table that already exists in every deployment.
-# SQLite has no `ADD COLUMN IF NOT EXISTS`, so the project-wide pattern is to
-# try and swallow the "duplicate column" error.
-_VOICE_CALLS_MIGRATIONS: tuple[tuple[str, str], ...] = (
-    ("failure_code", "TEXT DEFAULT ''"),
-    ("engine", "TEXT DEFAULT ''"),
-    ("language", "TEXT DEFAULT ''"),
-    # T9.5: when the post-call report actually reached the initiating user.
-    # The gap from ended_at is the report-delivery SLI.
-    ("report_delivered_at", "TEXT"),
-    # Sprint 12: question|message|appointment|human|unknown|after_hours ('' = not a receptionist call)
-    ("inbound_intent", "TEXT DEFAULT ''"),
-    # Sprint 13 (call threads): '' = threadless (pre-Sprint-13 calls stay that
-    # way — §2 forbids retroactive heuristic grouping).
-    ("thread_id", "TEXT DEFAULT ''"),
-    ("thread_attach_kind", "TEXT DEFAULT ''"),
-    # Call briefing: the task the agent was given, stored verbatim so the
-    # dashboard can show exactly what it was told.
-    ("briefing_json", "TEXT DEFAULT ''"),
-)
+    Schema DDL for the voice tables is owned entirely by the Alembic
+    revisions under `pincer.db.migrations.versions` (0005-0009). This helper
+    only resolves which file the caller's connection is attached to and hands
+    it to the migration runner, which is synchronous and therefore has to run
+    off the event loop.
 
+    `PRAGMA database_list` reports the resolved filename of the `main`
+    schema; it is empty for an in-memory database, which Alembic cannot
+    migrate through a separate connection, so that is rejected explicitly
+    rather than silently skipped.
+    """
+    from pincer.db import ensure_schema_current
 
-# Sprint 11 (in-call tools): mirrors docs/migrations/011_in_call_tools.sql.
-_CALL_ACTIONS_MIGRATIONS: tuple[tuple[str, str], ...] = (
-    ("tier", "TEXT DEFAULT ''"),
-    ("approval_mode", "TEXT DEFAULT ''"),
-    ("deny_reason", "TEXT DEFAULT ''"),
-)
+    rows = await db.execute_fetchall("PRAGMA database_list")
+    for _seq, name, filename in rows:
+        if name == "main" and filename:
+            await asyncio.to_thread(ensure_schema_current, Path(filename))
+            return
 
-
-async def _add_columns(db: aiosqlite.Connection, table: str, migrations: tuple[tuple[str, str], ...]) -> None:
-    for column, ddl in migrations:
-        try:
-            await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")  # noqa: S608 - module constants
-        except aiosqlite.OperationalError as e:
-            if "duplicate column" not in str(e).lower():
-                raise
+    raise RuntimeError("Alembic schema management requires a file-backed SQLite database")
 
 
 async def ensure_voice_tables(db: aiosqlite.Connection) -> None:
-    """Create the voice call tables if they don't exist, and migrate old ones."""
-    await db.executescript(VOICE_TABLES_SQL)
-    await _add_columns(db, "voice_calls", _VOICE_CALLS_MIGRATIONS)
-    await _add_columns(db, "call_actions", _CALL_ACTIONS_MIGRATIONS)
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_voice_calls_failure ON voice_calls(failure_code)")
-    # Sprint 13: indexes the thread columns the migration above just added —
-    # they cannot live in VOICE_TABLES_SQL, which runs before _add_columns.
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_calls_thread ON voice_calls(thread_id)")
-    await db.commit()
+    """Compatibility entry point for voice callers — see `ensure_schema_for_connection`."""
+    await ensure_schema_for_connection(db)
 
 
 async def _null_expired_rationales(db: aiosqlite.Connection, cutoff: str) -> int:

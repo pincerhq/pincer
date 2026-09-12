@@ -31,7 +31,7 @@ from pincer.observability.golden_signals import (
     stuck_calls,
     turn_latency,
 )
-from pincer.voice.retention import VOICE_TABLES_SQL, ensure_voice_tables
+from pincer.voice.retention import ensure_voice_tables
 
 
 @pytest.fixture
@@ -353,6 +353,14 @@ async def test_collect_on_an_empty_system_is_all_insufficient(settings):
     assert evaluate(signals, settings) == []
 
 
-def test_voice_tables_sql_has_the_sprint9_columns():
-    for column in ("failure_code", "engine", "language", "report_delivered_at"):
-        assert column in VOICE_TABLES_SQL
+async def test_voice_schema_has_the_sprint9_columns(settings):
+    async with aiosqlite.connect(settings.db_path) as db:
+        await ensure_voice_tables(db)
+        columns = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(voice_calls)")}
+
+    assert {
+        "failure_code",
+        "engine",
+        "language",
+        "report_delivered_at",
+    } <= columns

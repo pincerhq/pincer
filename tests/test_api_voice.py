@@ -1,7 +1,9 @@
 """Tests for the Voice REST API (/api/voice/*)."""
 
+import asyncio
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import aiosqlite
@@ -12,8 +14,8 @@ os.environ.setdefault("PINCER_ANTHROPIC_API_KEY", "sk-ant-test-key")
 from fastapi.testclient import TestClient
 
 from pincer.api.server import create_app
+from pincer.db import ensure_schema_current
 from pincer.voice.engine import CallDirection, CallState
-from pincer.voice.retention import VOICE_TABLES_SQL
 
 
 @pytest.fixture
@@ -31,8 +33,11 @@ def client(monkeypatch, tmp_path):
 
 
 async def _seed_db(db_path):
+    await asyncio.to_thread(
+        ensure_schema_current,
+        Path(db_path),
+    )
     async with aiosqlite.connect(db_path) as db:
-        await db.executescript(VOICE_TABLES_SQL)
         # Relative to now so the calls stay inside the stats endpoints' 7-day window.
         started = datetime.now(UTC) - timedelta(days=1)
         for sid, direction, offset_min, ended in [
@@ -205,11 +210,6 @@ async def test_contacts(client, tmp_path):
     assert r.json() == []
 
     async with aiosqlite.connect(tmp_path / "pincer.db") as db:
-        await db.execute(
-            "CREATE TABLE phone_contacts (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT DEFAULT '', "
-            "name TEXT NOT NULL, phone_number TEXT NOT NULL, category TEXT DEFAULT '', "
-            "ivr_tree_json TEXT, notes TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
-        )
         await db.execute(
             "INSERT INTO phone_contacts (name, phone_number, category, notes) "
             "VALUES ('Zoe', '+15550009999', 'personal', ''), ('Dr. Ada', '+15550008888', 'doctor', 'dentist')"

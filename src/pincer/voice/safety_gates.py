@@ -187,27 +187,6 @@ def requires_confirmation(tool_name: str) -> bool:
 # Outbound call gate (Sprint 8, T8.3)
 # ══════════════════════════════════════════════════════════════════════
 
-OUTBOUND_GUARD_SQL = """
-CREATE TABLE IF NOT EXISTS do_not_call (
-    phone_number TEXT PRIMARY KEY,
-    reason TEXT DEFAULT '',
-    source TEXT DEFAULT '',
-    call_sid TEXT DEFAULT '',
-    added_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS outbound_call_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    phone_number TEXT NOT NULL,
-    user_id TEXT NOT NULL DEFAULT '',
-    channel TEXT DEFAULT '',
-    call_sid TEXT DEFAULT '',
-    placed_at TEXT NOT NULL,
-    local_day TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_outbound_log_day ON outbound_call_log(local_day);
-CREATE INDEX IF NOT EXISTS idx_outbound_log_number ON outbound_call_log(phone_number, placed_at);
-"""
-
 
 class BlockReason(StrEnum):
     """Why a dial attempt was refused. Stable identifiers — the API maps these
@@ -272,8 +251,11 @@ def _messages(language: str) -> dict[BlockReason, str]:
 
 
 async def ensure_outbound_tables(conn: aiosqlite.Connection) -> None:
-    await conn.executescript(OUTBOUND_GUARD_SQL)
-    await conn.commit()
+    """Compatibility entry point — `do_not_call`/`outbound_call_log` are
+    created by Alembic revision 0005, not by this module."""
+    from pincer.voice.retention import ensure_schema_for_connection
+
+    await ensure_schema_for_connection(conn)
 
 
 @asynccontextmanager
