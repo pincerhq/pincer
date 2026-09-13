@@ -100,20 +100,6 @@ def create_app() -> FastAPI:
 
     app.openapi = _custom_openapi  # type: ignore[method-assign]
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://localhost:5173",
-            "http://localhost:8080",  # 3Days.ai dev
-            settings.dashboard_url,
-            settings.web_chat_url,
-        ],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
         _dashboard_token = settings.dashboard_token.get_secret_value()
@@ -132,6 +118,26 @@ def create_app() -> FastAPI:
         if auth in allowed:
             return await call_next(request)
         return JSONResponse(status_code=401, content={"error": "Invalid token"})
+
+    # Registered last so it is the OUTERMOST middleware: add_middleware() inserts at
+    # position 0, so the final registration wraps every earlier one. CORS must wrap
+    # auth_middleware because browser preflight (OPTIONS) requests carry no
+    # Authorization header — auth would 401 them before any Access-Control-Allow-Origin
+    # header exists, which the browser surfaces as a CORS failure. Wrapping also means
+    # genuine 401s keep their CORS headers, so clients see the real status.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:3000",
+            "http://localhost:5173",
+            "http://localhost:8080",  # 3Days.ai dev
+            settings.dashboard_url,
+            settings.web_chat_url,
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     app.include_router(costs_router)
     app.include_router(audit_router)
