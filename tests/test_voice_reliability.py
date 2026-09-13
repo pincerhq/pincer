@@ -417,6 +417,34 @@ class TestAnsweringMachineDetection:
         assert response.status_code == 200
         assert any("no answer" in msg for msg in sent)
 
+    def test_async_amd_endpoint_hangs_up_on_machine(self, webhook_client):
+        """The async AMD verdict arrives on its own endpoint and still acts."""
+        client, engine = webhook_client
+        sent = self._setup_notify()
+
+        response = client.post(
+            "/api/apps/twilio/amd",
+            data={"CallSid": "CA_amd", "AnsweredBy": "machine_start"},
+        )
+        assert response.status_code == 200
+        engine.end_call.assert_called_once_with("CA_amd")
+        assert any("voicemail" in msg for msg in sent)
+
+    def test_async_amd_endpoint_leaves_human_calls_alone(self, webhook_client):
+        client, engine = webhook_client
+        sent = self._setup_notify()
+
+        response = client.post(
+            "/api/apps/twilio/amd",
+            data={"CallSid": "CA_amd", "AnsweredBy": "human"},
+        )
+        assert response.status_code == 200
+        engine.end_call.assert_not_called()
+        # The AMD callback reports nothing on its own — /status owns the
+        # "Connected" notification, and duplicating it here would burn one of
+        # the three status updates a call is allowed.
+        assert sent == []
+
 
 class TestConversationRelayProtocol:
     """CR protocol hygiene (hotfix): no Media-Streams messages on the CR socket."""
@@ -592,3 +620,10 @@ class TestOutboundMachineDetection:
         result = await outbound.make_phone_call("+14155551234", "test purpose", context={"user_id": "u1"})
         assert "Call initiated" in result
         assert captured.get("machine_detection") == "Enable"
+        # Synchronous AMD (Twilio's default) blocks the call until detection
+        # finishes, so the callee answers and hears silence — no greeting, no
+        # relay — for up to machine_detection_timeout. The dial must always
+        # ask for async AMD and take the verdict on the callback instead.
+        assert captured.get("async_amd") == "true"
+        assert captured.get("async_amd_status_callback") == "https://example.com/api/apps/twilio/amd"
+        assert captured.get("async_amd_status_callback_method") == "POST"

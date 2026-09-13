@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from pincer.core.clock import current_time_block
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
     ONBOARDING_FOLLOWUP_INSTRUCTION,
@@ -302,6 +303,9 @@ class Agent:
         self.mcp_manager: MCPClientManager | None = None  # set by cli after startup
         self.mcp_server: PincerMCPServer | None = None  # set by cli after startup
         self.skill_index: SkillIndex | None = None  # set by cli after startup
+        # set by cli after startup; supplies each user's own timezone so the
+        # clock in the system prompt reads in *their* zone, not the server's
+        self.identity_resolver: Any = None
         self.mcp_shell: Any = None  # set by EmbeddedMCPShell.start()
         # (user_id, channel_name) of the most recent message — used by ask_user
         self._last_active: tuple[str, str] | None = None
@@ -1048,6 +1052,21 @@ class Agent:
             await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=full_text))
         yield StreamChunk(StreamEventType.DONE, full_text)
 
+    async def _user_timezone(self, user_id: str) -> str:
+        """This user's configured timezone, or "" to fall back to settings.
+
+        Never raises and never blocks the turn: an identity DB that is missing,
+        locked or simply has no timezone for this user just means the
+        deployment-wide `PINCER_TIMEZONE` is used instead.
+        """
+        if not self.identity_resolver or not user_id:
+            return ""
+        try:
+            return str(await self.identity_resolver.get_timezone(user_id) or "")
+        except Exception:
+            logger.debug("Timezone lookup failed for %s", user_id, exc_info=True)
+            return ""
+
     async def _build_system_prompt(
         self,
         user_id: str,
@@ -1101,8 +1120,17 @@ class Agent:
             except Exception:
                 logger.debug("Failed to fetch MCP server list for prompt", exc_info=True)
 
+        # The model has no clock and will invent today's date if nothing states
+        # it (see core/clock.py). Appended on every return path below, and last
+        # so it is the most recent thing the model reads before the messages.
+        time_block = current_time_block(self._settings, await self._user_timezone(user_id))
+
         def _with_extra(prompt: str) -> str:
-            return f"{prompt}\n\n{extra_system}" if extra_system else prompt
+            parts = [prompt]
+            if extra_system:
+                parts.append(extra_system)
+            parts.append(time_block)
+            return "\n\n".join(parts)
 
         if not self._memory or skip_memory:
             return _with_extra(base_prompt)

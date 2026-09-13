@@ -1026,6 +1026,9 @@ async def _run_agent(settings: Settings) -> None:
     identity_map_config, identity_profiles = resolve_identity_map_config(settings.identity_map)
     identity = IdentityResolver(settings.db_path, identity_map_config, identity_profiles)
     await identity.ensure_table()
+    # Lets the per-turn clock in the system prompt read in each user's own
+    # timezone instead of the deployment-wide one (see core/clock.py).
+    agent.identity_resolver = identity
 
     _identity_pipeline = build_pipeline(IdentityMiddleware(identity))
 
@@ -1218,6 +1221,23 @@ async def _run_agent(settings: Settings) -> None:
                 console.print(
                     "[yellow]ConversationRelay will fall back to the Google voice for affected calls.[/yellow]"
                 )
+
+            # A voice can be perfectly valid on our account and still never be
+            # heard: ConversationRelay picks its voice by the CALL language and
+            # Twilio silently swaps in its own default when the pairing is
+            # wrong. No Twilio alert, no error in our logs — the only symptom
+            # is a stranger's voice on the phone. Say so at startup.
+            if settings.voice_engine.lower().strip() == "conversation_relay":
+                from pincer.voice.voices import voice_language_mismatches
+
+                mismatched = await asyncio.to_thread(voice_language_mismatches, settings)
+                for problem in mismatched.values():
+                    console.print(f"[yellow]Voice/language mismatch: {problem}[/yellow]")
+                if mismatched:
+                    console.print(
+                        "[yellow]Set PINCER_ELEVENLABS_VOICE_ID_EN / _DE / _UK to a voice "
+                        "in each language (`pincer voice list`).[/yellow]"
+                    )
         try:
             from pincer.channels.phone_calls import VoiceChannel
             from pincer.voice.engine import get_voice_engine

@@ -148,6 +148,7 @@ class SecurityDoctor:
         report.checks.append(self._check_voice_provider_regions(settings))
         # Voice ElevenLabs (1 check, Sprint 4)
         report.checks.append(self._check_voice_elevenlabs_voices(settings))
+        report.checks.append(self._check_voice_language_pairing(settings))
         # Observability (2 checks, Sprint 9)
         report.checks.append(self._check_ops_alert_routing(settings))
         report.checks.append(self._check_voice_canary(settings))
@@ -1771,6 +1772,57 @@ class SecurityDoctor:
             "voice_elevenlabs_voices",
             CheckStatus.PASS,
             f"{len(voice_ids)} ElevenLabs voice ID(s) verified, model {model}",
+            category="voice",
+        )
+
+    def _check_voice_language_pairing(self, cfg: Settings | None = None) -> CheckResult:
+        """Each call language's voice is a voice *for* that language.
+
+        ConversationRelay selects TTS by the call's language and accepts only a
+        matching voice; given a mismatch it substitutes its own default voice
+        and reports nothing — no Twilio alert, no error here. A German voice
+        configured for English calls therefore passes every other check and
+        still never reaches the caller's ear.
+        """
+        cfg = self._cfg(cfg)
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled):
+            return CheckResult(
+                "voice_language_pairing",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        if str(getattr(cfg, "voice_engine", "")).lower().strip() != "conversation_relay":
+            return CheckResult(
+                "voice_language_pairing",
+                CheckStatus.SKIPPED,
+                "Only ConversationRelay picks the voice by call language",
+                category="voice",
+            )
+        if not cfg.elevenlabs_api_key.get_secret_value():
+            return CheckResult(
+                "voice_language_pairing",
+                CheckStatus.SKIPPED,
+                "No ElevenLabs key configured",
+                category="voice",
+            )
+
+        from pincer.voice.voices import voice_language_mismatches
+
+        mismatches = voice_language_mismatches(cfg)
+        if mismatches:
+            return CheckResult(
+                "voice_language_pairing",
+                CheckStatus.WARNING,
+                "; ".join(mismatches.values()),
+                fix_hint="Set PINCER_ELEVENLABS_VOICE_ID_EN / _DE / _UK to a voice in each language "
+                "(`pincer voice list`)",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_language_pairing",
+            CheckStatus.PASS,
+            "Every call language uses a voice in that language",
             category="voice",
         )
 

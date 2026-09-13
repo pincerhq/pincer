@@ -19,6 +19,59 @@ logger = logging.getLogger(__name__)
 
 E164_PATTERN = re.compile(r"^\+[1-9]\d{6,14}$")
 
+#: SGR/CSI sequences. `TwilioRestException.__str__` colours its output whenever
+#: stderr is a tty, and its own source notes the hazard: "someone might catch
+#: this error and try to display the message from it to an end user". We do
+#: exactly that — the dashboard shows `detail` verbatim — so the codes are
+#: stripped here rather than left to paint `[31m[49m` across the caller's UI.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+#: Twilio codes that all mean "the number you dialled *from* is not usable on
+#: this account". Twilio names the number but not the knob that sets it, and the
+#: owner reading the dashboard has no way to know it is an env var — so we say.
+_FROM_NUMBER_CODES = frozenset({21210, 21212, 21606, 21659})
+
+#: The rejecting account is in the request URI Twilio echoes back
+#: (`/Accounts/AC…/Calls.json`). Naming it turns the most common cause of this
+#: failure — credentials pointing at a different Twilio project than the one
+#: that owns the number — from a guess into something you can read off.
+_ACCOUNT_SID_RE = re.compile(r"/Accounts/(AC[0-9a-fA-F]{32})/")
+
+
+def _from_number_hint(exc: Exception) -> str:
+    match = _ACCOUNT_SID_RE.search(str(getattr(exc, "uri", "") or ""))
+    account = f" account {match.group(1)}" if match else " the account in PINCER_TWILIO_ACCOUNT_SID"
+    return (
+        f"Set PINCER_TWILIO_PHONE_NUMBER to a number{account} has purchased or "
+        "verified, or point PINCER_TWILIO_ACCOUNT_SID/AUTH_TOKEN at the project "
+        "that owns the number you want to call from."
+    )
+
+
+def twilio_error_text(exc: Exception) -> str:
+    """A one-line, human-readable rendering of a failed Twilio request.
+
+    `str(TwilioRestException)` is a multi-line, ANSI-coloured block built for a
+    terminal. Every field it prints is available as an attribute, so we format
+    the useful ones ourselves and get a message that is safe to log, to return
+    over HTTP and to show to an owner.
+    """
+    msg = getattr(exc, "msg", None)
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status", None)
+    if msg:
+        parts = [str(msg).strip()]
+        if code in _FROM_NUMBER_CODES:
+            parts.append(_from_number_hint(exc))
+        if code:
+            parts.append(f"(Twilio error {code}: https://www.twilio.com/docs/errors/{code})")
+        elif status:
+            parts.append(f"(HTTP {status})")
+        return " ".join(parts)
+    return _ANSI_RE.sub("", str(exc)).strip()
+
+
 _daily_outbound_counts: dict[str, dict[str, int]] = {}
 
 
@@ -282,9 +335,20 @@ async def make_phone_call(
             "time_limit": min(max_duration, settings.voice_max_call_duration),
         }
         # T1.3: Answering Machine Detection — voicemail is detected and
-        # reported to the user, never conversed with (see twiml_server /status).
+        # reported to the user, never conversed with (see twiml_server /amd).
+        #
+        # AsyncAmd is required, not a tuning knob. Twilio's default is
+        # synchronous AMD, which *blocks the call* until detection finishes:
+        # the callee picks up and hears pure silence — no welcomeGreeting, no
+        # ConversationRelay — for as long as detection takes, up to
+        # machine_detection_timeout (30s default). Async AMD connects the
+        # callee immediately and posts the verdict to the callback below,
+        # which is the only thing we ever used it for.
         if getattr(settings, "voice_machine_detection", True):
             call_kwargs["machine_detection"] = "Enable"
+            call_kwargs["async_amd"] = "true"
+            call_kwargs["async_amd_status_callback"] = f"{base_url}/api/apps/twilio/amd"
+            call_kwargs["async_amd_status_callback_method"] = "POST"
 
         # §2 Fix A: the briefed state exists BEFORE the dial, so a relay
         # `setup` that beats the REST response finds a briefed call instead of
@@ -364,7 +428,7 @@ async def make_phone_call(
         logger.info("make_phone_call aborted: Twilio SDK not installed")
         return "Error: Twilio SDK not installed. Install with: uv pip install 'pincer-agent[voice]'"
     except Exception as e:
-        err_msg = f"Error placing call: {e}"
+        err_msg = f"Error placing call: {twilio_error_text(e)}"
         logger.warning("make_phone_call failed: %s", err_msg)
         logger.exception("Twilio exception details")
         return err_msg

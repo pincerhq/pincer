@@ -29,6 +29,12 @@ class VoiceInfo:
     name: str
     category: str  # premade | cloned | professional | generated
     languages: list[str] = field(default_factory=list)
+    #: The voice's own primary language ("de", "en", ...). ConversationRelay
+    #: picks its voice by CALL language, and Twilio only accepts a voice whose
+    #: language matches — so this is what a configured voice must be checked
+    #: against, not the long `languages` list (which every multilingual voice
+    #: fills with dozens of sample languages).
+    primary_language: str = ""
 
 
 def _headers(api_key: str) -> dict[str, str]:
@@ -39,11 +45,13 @@ def _parse_voice(data: dict[str, Any]) -> VoiceInfo:
     languages = [
         str(entry.get("language", "")) for entry in data.get("verified_languages") or [] if entry.get("language")
     ]
+    labels = data.get("labels") or {}
     return VoiceInfo(
         voice_id=str(data.get("voice_id", "")),
         name=str(data.get("name", "")),
         category=str(data.get("category", "")),
         languages=languages,
+        primary_language=str(labels.get("language", "") or "").strip().lower()[:2],
     )
 
 
@@ -240,3 +248,46 @@ def validate_configured_voices(settings: Any) -> dict[str, str]:
             continue
     problems.update({vid: "not usable by this ElevenLabs account" for vid in _invalid_voice_ids & ids})
     return problems
+
+
+def voice_language_mismatches(settings: Any) -> dict[str, str]:
+    """Languages whose configured voice is for a *different* language.
+
+    ConversationRelay chooses its TTS voice by the call's language, and Twilio
+    accepts only a voice that matches it. Hand it a mismatched pairing — a
+    German voice on an `en-US` call — and Twilio does not raise an error or a
+    debugger alert: it silently substitutes its own per-language default and
+    the call goes out in a stock voice. Nothing else in the stack notices,
+    because the voice is perfectly valid on our ElevenLabs account; only the
+    pairing is wrong. Hence this check.
+
+    Returns {language: description} for each mismatch, empty when fine.
+    """
+    from pincer.voice.language import supported_languages, voice_for
+
+    try:
+        api_key = settings.elevenlabs_api_key.get_secret_value()
+    except AttributeError:  # pragma: no cover — non-SecretStr test doubles
+        api_key = str(getattr(settings, "elevenlabs_api_key", "") or "")
+    if not api_key:
+        return {}
+
+    mismatches: dict[str, str] = {}
+    for lang in supported_languages(settings):
+        voice_id = voice_for(settings, lang)
+        if not voice_id:
+            continue
+        try:
+            info = get_voice(api_key, voice_id)
+        except VoiceLookupError as e:
+            logger.warning("Could not check voice/language pairing for %s: %s", lang, e)
+            continue
+        if info is None or not info.primary_language:
+            continue
+        if info.primary_language != lang:
+            mismatches[lang] = (
+                f"{lang} calls use voice {voice_id} ({info.name}), which is a "
+                f"{info.primary_language} voice — Twilio will silently replace it "
+                f"with its default {lang} voice"
+            )
+    return mismatches

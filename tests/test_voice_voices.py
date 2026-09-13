@@ -193,3 +193,59 @@ class TestUlawWav:
         assert riff_size == len(wav) - 8
         fmt_tag = struct.unpack("<H", wav[20:22])[0]
         assert fmt_tag == 7  # WAVE_FORMAT_MULAW
+
+
+class TestVoiceLanguagePairing:
+    """ConversationRelay picks its voice by the CALL language and silently
+    substitutes Twilio's own default when the pairing is wrong — no alert, no
+    error, just a stranger's voice on the phone. These cover the only check
+    that can catch it."""
+
+    @staticmethod
+    def _pairing_settings(**voices_by_lang):
+        ns = _settings(
+            elevenlabs_voice_id=voices_by_lang.pop("fallback", ""),
+            elevenlabs_voice_id_en=voices_by_lang.pop("en", ""),
+            elevenlabs_voice_id_de=voices_by_lang.pop("de", ""),
+        )
+        ns.elevenlabs_voice_id_uk = voices_by_lang.pop("uk", "")
+        ns.voice_supported_languages = "en,de,uk"
+        return ns
+
+    def test_mismatched_voice_is_reported_per_language(self):
+        """One German voice used for every language: en and uk are wrong."""
+        s = self._pairing_settings(fallback="de-voice")
+        info = voices.VoiceInfo(voice_id="de-voice", name="Marc", category="professional", primary_language="de")
+        with patch("pincer.voice.voices.get_voice", return_value=info):
+            problems = voices.voice_language_mismatches(s)
+        assert set(problems) == {"en", "uk"}
+        assert "de voice" in problems["en"]
+
+    def test_matching_voices_report_nothing(self):
+        s = self._pairing_settings(en="en-v", de="de-v", uk="uk-v")
+        by_id = {
+            "en-v": voices.VoiceInfo("en-v", "Alexandra", "professional", primary_language="en"),
+            "de-v": voices.VoiceInfo("de-v", "Marc", "professional", primary_language="de"),
+            "uk-v": voices.VoiceInfo("uk-v", "Nastasia", "professional", primary_language="uk"),
+        }
+        with patch("pincer.voice.voices.get_voice", side_effect=lambda _k, vid: by_id[vid]):
+            assert voices.voice_language_mismatches(s) == {}
+
+    def test_unknown_primary_language_is_not_condemned(self):
+        """A voice whose metadata carries no language label must not be
+        flagged — an unknown pairing is not a proven bad one."""
+        s = self._pairing_settings(fallback="mystery")
+        info = voices.VoiceInfo("mystery", "?", "cloned", primary_language="")
+        with patch("pincer.voice.voices.get_voice", return_value=info):
+            assert voices.voice_language_mismatches(s) == {}
+
+    def test_network_failure_does_not_report_a_mismatch(self):
+        s = self._pairing_settings(fallback="v")
+        with patch("pincer.voice.voices.get_voice", side_effect=VoiceLookupError("down")):
+            assert voices.voice_language_mismatches(s) == {}
+
+    def test_primary_language_parsed_from_labels(self):
+        info = voices._parse_voice(
+            {"voice_id": "v", "name": "n", "category": "professional", "labels": {"language": "DE"}}
+        )
+        assert info.primary_language == "de"

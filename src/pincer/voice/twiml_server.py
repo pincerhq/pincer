@@ -294,6 +294,92 @@ def _transfer_session_lookup(call_sid: str) -> Any:
         return None
 
 
+def _report_language(call_sid: str) -> str:
+    """The language the initiating user gets their call reports in (Sprint 3)."""
+    from pincer.voice.status_notify import get_call_language
+
+    call_lang = get_call_language(call_sid).strip().lower()[:2]
+    return call_lang if call_lang in ("de", "uk") else "en"
+
+
+async def _handle_amd_verdict(call_sid: str, answered_by: str, user_lang: str) -> bool:
+    """Act on an Answering Machine Detection verdict.
+
+    Returns True when the verdict was acted on (the call was hung up), False
+    when the caller is a human, the verdict is empty, or it was overruled —
+    in which case the caller must fall through to its normal handling.
+
+    The verdict reaches us on /amd for outbound calls (async AMD) and on
+    /status for anything still running AMD synchronously.
+    """
+    if not (answered_by.startswith("machine") or answered_by == "fax"):
+        return False
+
+    from pincer.voice.status_notify import notify_ended
+
+    amd_state = _engine.get_call_state(call_sid) if _engine else None
+    if amd_state is not None and amd_state.metadata.get("caller_spoke"):
+        # AMD false positive: a human is already mid-conversation. Acting
+        # on the verdict here killed live calls 20s in — ignore it and let
+        # the caller fall through to normal handling.
+        logger.info(
+            "AMD verdict '%s' ignored [%s] — caller already conversing",
+            answered_by,
+            call_sid,
+        )
+        return False
+
+    logger.info("Voicemail/machine detected [%s] (%s) — hanging up", call_sid, answered_by)
+    voicemail_reasons = {
+        "en": "voicemail detected, no message left",
+        "de": "Anrufbeantworter erkannt, keine Nachricht hinterlassen",
+        "uk": "виявлено автовідповідач, повідомлення не залишено",
+    }
+    voicemail_reason = voicemail_reasons[user_lang]
+    # Appointment calls (Sprint 6): voicemail triggers the retry
+    # policy. Consumes the scheduling context BEFORE end_call so the
+    # post-call pipeline doesn't double-handle it.
+    if _settings is not None:
+        from pincer.voice.scheduling import handle_call_not_connected
+
+        await handle_call_not_connected(call_sid, "voicemail", _settings)
+    vm_state = _engine.get_call_state(call_sid) if _engine else None
+    if vm_state is not None:
+        # The post-call pipeline owns the final message: sending the
+        # ENDED stage here would pop the call from tracking and the
+        # structured report would be built but never delivered.
+        vm_state.metadata["end_reason"] = voicemail_reason
+    else:
+        # No conversation state -> end_call fires no post-call pipeline
+        await notify_ended(call_sid, voicemail_reason)
+    if _engine:
+        # The call is live (greeting a voicemail box) — always hang up
+        await _engine.end_call(call_sid)
+    return True
+
+
+@twilio_router.post("/amd")
+async def voice_amd(request: Request) -> PlainTextResponse:
+    """Asynchronous Answering Machine Detection result.
+
+    Outbound calls are dialled with AsyncAmd=true. With Twilio's default
+    (synchronous) AMD the call is *blocked* until detection finishes, so the
+    callee picks up and hears nothing at all — no welcomeGreeting, no relay —
+    for up to `machine_detection_timeout` seconds. Async AMD connects the
+    callee immediately and delivers the verdict here instead, which is the
+    only thing /status ever used it for.
+    """
+    if await _authenticate(request) is None:
+        return PlainTextResponse("Forbidden", status_code=403)
+
+    form = await request.form()
+    call_sid = str(form.get("CallSid", ""))
+    answered_by = str(form.get("AnsweredBy", ""))
+    logger.info("AMD result [%s]: %s", call_sid, answered_by or "(none)")
+    await _handle_amd_verdict(call_sid, answered_by, _report_language(call_sid))
+    return PlainTextResponse("OK")
+
+
 @twilio_router.post("/status")
 async def voice_status(request: Request) -> PlainTextResponse:
     """Call status callbacks (ringing, answered, completed) + AMD results."""
@@ -316,52 +402,12 @@ async def voice_status(request: Request) -> PlainTextResponse:
         f", answered_by={answered_by}" if answered_by else "",
     )
 
-    from pincer.voice.status_notify import get_call_language
-
     # Reports reach the user in the language of their initiating command (Sprint 3)
-    call_lang = get_call_language(call_sid).strip().lower()[:2]
-    user_lang = call_lang if call_lang in ("de", "uk") else "en"
+    user_lang = _report_language(call_sid)
 
     # T1.3: Answering Machine Detection — voicemail is reported, not conversed with.
-    if answered_by.startswith("machine") or answered_by == "fax":
-        amd_state = _engine.get_call_state(call_sid) if _engine else None
-        if amd_state is not None and amd_state.metadata.get("caller_spoke"):
-            # AMD false positive: a human is already mid-conversation. Acting
-            # on the verdict here killed live calls 20s in — ignore it and let
-            # the status fall through to normal handling.
-            logger.info(
-                "AMD verdict '%s' ignored [%s] — caller already conversing",
-                answered_by,
-                call_sid,
-            )
-        else:
-            logger.info("Voicemail/machine detected [%s] (%s) — hanging up", call_sid, answered_by)
-            voicemail_reasons = {
-                "en": "voicemail detected, no message left",
-                "de": "Anrufbeantworter erkannt, keine Nachricht hinterlassen",
-                "uk": "виявлено автовідповідач, повідомлення не залишено",
-            }
-            voicemail_reason = voicemail_reasons[user_lang]
-            # Appointment calls (Sprint 6): voicemail triggers the retry
-            # policy. Consumes the scheduling context BEFORE end_call so the
-            # post-call pipeline doesn't double-handle it.
-            if _settings is not None:
-                from pincer.voice.scheduling import handle_call_not_connected
-
-                await handle_call_not_connected(call_sid, "voicemail", _settings)
-            vm_state = _engine.get_call_state(call_sid) if _engine else None
-            if vm_state is not None:
-                # The post-call pipeline owns the final message: sending the
-                # ENDED stage here would pop the call from tracking and the
-                # structured report would be built but never delivered.
-                vm_state.metadata["end_reason"] = voicemail_reason
-            else:
-                # No conversation state -> end_call fires no post-call pipeline
-                await notify_ended(call_sid, voicemail_reason)
-            if _engine:
-                # The call is live (greeting a voicemail box) — always hang up
-                await _engine.end_call(call_sid)
-            return PlainTextResponse("OK")
+    if await _handle_amd_verdict(call_sid, answered_by, user_lang):
+        return PlainTextResponse("OK")
 
     if status == "in-progress":
         # Callee (a human) picked up

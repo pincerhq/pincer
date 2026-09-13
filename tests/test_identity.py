@@ -906,3 +906,28 @@ class TestLegacyMigration:
         channels = await r.get_all_channels("usr_legacy01")
         assert ChannelType.TELEGRAM in channels
         assert ChannelType.WHATSAPP in channels
+
+
+@pytest.mark.asyncio
+class TestIdentityTimezone:
+    """The per-user timezone that decides what "today" means for that person."""
+
+    async def test_unset_timezone_is_empty_not_a_guess(self, resolver):
+        """ "" means "no opinion", so the deployment-wide setting still wins —
+        returning a default here would silently override PINCER_TIMEZONE."""
+        uid = await resolver.resolve(ChannelType.TELEGRAM, 31415)
+        assert await resolver.get_timezone(uid) == ""
+
+    async def test_configured_timezone_is_returned(self, tmp_path):
+        db_path = tmp_path / "tz.db"
+        r = IdentityResolver(
+            db_path,
+            identity_map_config="kyivuser@telegram:222333",
+            profiles={"kyivuser": IdentityProfile(timezone="Europe/Kyiv")},
+        )
+        await r.ensure_table()
+        await r.seed_from_config()
+        assert await r.get_timezone("kyivuser") == "Europe/Kyiv"
+
+    async def test_unknown_user_has_no_timezone(self, resolver):
+        assert await resolver.get_timezone("nobody") == ""

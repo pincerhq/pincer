@@ -575,6 +575,24 @@ class IdentityResolver:
             )
             await db.commit()
 
+    async def get_timezone(self, pincer_user_id: str) -> str:
+        """This identity's IANA timezone, or "" when none is configured.
+
+        Set from a `[identity.<key>] timezone` entry (see config/identity.py).
+        The caller decides the fallback — an empty string here means "no
+        opinion", not UTC, so a deployment-wide `settings.timezone` still wins
+        over a hardcoded default.
+        """
+        async with (
+            self._get_db() as db,
+            db.execute(
+                "SELECT timezone FROM identity_meta WHERE pincer_user_id = ?",
+                (pincer_user_id,),
+            ) as cursor,
+        ):
+            row = await cursor.fetchone()
+        return str(row[0]).strip() if row and row[0] else ""
+
     async def get_preferred_channel(
         self,
         pincer_user_id: str,
