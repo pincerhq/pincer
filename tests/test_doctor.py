@@ -1,5 +1,7 @@
 """Tests for the security doctor."""
 
+from types import SimpleNamespace
+
 import pytest
 
 from pincer.security.doctor import CheckStatus, DoctorReport, SecurityDoctor
@@ -796,34 +798,35 @@ def test_skill_sandbox_enabled_critical():
     assert result.status == CheckStatus.CRITICAL
 
 
-def test_tool_approval_mode_pass_manual():
-    from unittest.mock import MagicMock
+def _approval_cfg(policy="critical", never=""):
+    """Plain namespace, not MagicMock: a MagicMock attribute is not a real name list."""
+    return SimpleNamespace(approval_policy=policy, approval_never=never)
 
+
+def test_tool_approval_mode_pass_critical():
     doc = SecurityDoctor()
-    cfg = MagicMock()
-    cfg.tool_approval = "manual"
-    result = doc._check_tool_approval_mode(cfg)
+    result = doc._check_tool_approval_mode(_approval_cfg("critical"))
     assert result.status == CheckStatus.PASS
 
 
-def test_tool_approval_mode_pass_allowlist():
-    from unittest.mock import MagicMock
-
+def test_tool_approval_mode_pass_all():
     doc = SecurityDoctor()
-    cfg = MagicMock()
-    cfg.tool_approval = "allowlist"
-    result = doc._check_tool_approval_mode(cfg)
+    result = doc._check_tool_approval_mode(_approval_cfg("all"))
     assert result.status == CheckStatus.PASS
 
 
-def test_tool_approval_mode_warning_auto():
-    from unittest.mock import MagicMock
-
+def test_tool_approval_mode_warning_none():
     doc = SecurityDoctor()
-    cfg = MagicMock()
-    cfg.tool_approval = "auto"
-    result = doc._check_tool_approval_mode(cfg)
+    result = doc._check_tool_approval_mode(_approval_cfg("none"))
     assert result.status == CheckStatus.WARNING
+    assert "none" in result.message
+
+
+def test_tool_approval_mode_warning_on_never_overrides():
+    doc = SecurityDoctor()
+    result = doc._check_tool_approval_mode(_approval_cfg("critical", "email_send"))
+    assert result.status == CheckStatus.WARNING
+    assert "email_send" in result.message
 
 
 # ── Voice checks ──────────────────────────────────────────────────────────────

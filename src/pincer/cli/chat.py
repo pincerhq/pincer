@@ -79,7 +79,9 @@ async def _chat_loop() -> None:
                 threshold=settings.summary_threshold,
             )
 
-    tools = ToolRegistry()
+    from pincer.tools.approval import ApprovalPolicy
+
+    tools = ToolRegistry(ApprovalPolicy.from_settings(settings))
     tools.register(name="file_read", description="Read a file", handler=file_read)
     tools.register(name="file_write", description="Write a file", handler=file_write)
     tools.register(name="file_list", description="List files", handler=file_list)

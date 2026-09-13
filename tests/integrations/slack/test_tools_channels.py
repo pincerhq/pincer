@@ -257,7 +257,7 @@ async def test_channel_write_tools_require_approval():
         "slack__kick_from_channel",
     ]
     for name in write_tools:
-        assert registry.requires_approval(name), f"{name} should require approval"
+        assert registry.declares_approval(name), f"{name} should require approval"
 
 
 @pytest.mark.asyncio
@@ -280,4 +280,4 @@ async def test_channel_read_tools_no_approval():
         "slack__list_dm_conversations",
     ]
     for name in read_tools:
-        assert not registry.requires_approval(name), f"{name} should NOT require approval"
+        assert not registry.declares_approval(name), f"{name} should NOT require approval"

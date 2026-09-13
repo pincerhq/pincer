@@ -2116,20 +2116,37 @@ class SecurityDoctor:
             )
 
     def _check_tool_approval_mode(self, cfg: Settings | None = None) -> CheckResult:
+        """Report the live approval policy (``PINCER_APPROVAL_POLICY``).
+
+        Note ``PINCER_TOOL_APPROVAL`` is legacy and unenforced — nothing reads
+        it but this check used to.
+        """
         cfg = self._cfg(cfg)
-        mode = cfg.tool_approval
-        if mode in ("manual", "allowlist"):
+        mode = getattr(cfg, "approval_policy", "critical")
+        from pincer.tools.approval import parse_tool_names
+
+        never = sorted(parse_tool_names(getattr(cfg, "approval_never", None)))
+
+        if mode == "none":
             return CheckResult(
                 "tool_approval_mode",
-                CheckStatus.PASS,
-                f"Tool approval: {mode}",
+                CheckStatus.WARNING,
+                "Tool approval: none — no tool ever prompts, including sends, deletes and shell",
+                fix_hint="Set PINCER_APPROVAL_POLICY=critical unless this is a trusted non-interactive deployment",
+                category="runtime",
+            )
+        if mode == "critical" and never:
+            return CheckResult(
+                "tool_approval_mode",
+                CheckStatus.WARNING,
+                f"Tool approval: critical, with {len(never)} tool(s) force-ungated: {', '.join(sorted(never)[:5])}",
+                fix_hint="Review PINCER_APPROVAL_NEVER — entries there bypass the critical classification",
                 category="runtime",
             )
         return CheckResult(
             "tool_approval_mode",
-            CheckStatus.WARNING,
+            CheckStatus.PASS,
             f"Tool approval: {mode}",
-            fix_hint="Set PINCER_TOOL_APPROVAL=allowlist",
             category="runtime",
         )
 

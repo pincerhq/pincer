@@ -239,7 +239,7 @@ def test_all_write_tools_require_approval():
     }
 
     for name in approval_required:
-        assert registry.requires_approval(name), f"{name} should require approval"
+        assert registry.declares_approval(name), f"{name} should require approval"
 
 
 def test_read_tools_no_approval():
@@ -290,7 +290,7 @@ def test_read_tools_no_approval():
     }
 
     for name in read_only:
-        assert not registry.requires_approval(name), f"{name} should NOT require approval"
+        assert not registry.declares_approval(name), f"{name} should NOT require approval"
 
 
 def test_bot_token_not_exposed_in_tool_descriptions():

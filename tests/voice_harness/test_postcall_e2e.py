@@ -108,7 +108,7 @@ async def test_call_report_memory_followup_approval(tmp_path, memory):
     )
 
     draft_args = {"title": "Zahnarzt", "start_time": "2026-08-18T15:00:00"}
-    assert registry.requires_approval("calendar_create")
+    assert registry.declares_approval("calendar_create")
 
     async def approve(tool_name, args, user_id, channel):
         return True

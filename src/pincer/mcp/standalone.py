@@ -209,7 +209,7 @@ class StandaloneMCPShell:
                 name=mcp_name,
                 handler=tool_def.handler,
                 schema=tool_def.parameters,
-                approval_required=temp_registry.requires_approval(tool_name),
+                approval_required=temp_registry.declares_approval(tool_name),
                 description=tool_def.description,
             )
             logger.debug("Standalone: registered tool '%s'", mcp_name)

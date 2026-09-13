@@ -83,7 +83,9 @@ class PincerToolExporter:
             needs_approval = (
                 pincer_name in _APPROVAL_REQUIRED
                 or mcp_name in _APPROVAL_REQUIRED
-                or self._registry.requires_approval(pincer_name)
+                # Declared intent, not the local prompting policy: an external
+                # MCP client crosses a trust boundary and must not inherit it.
+                or self._registry.declares_approval(pincer_name)
             )
             self._wrap_tool(fmcp, pincer_name, mcp_name, needs_approval)
             self._registered.append(mcp_name)

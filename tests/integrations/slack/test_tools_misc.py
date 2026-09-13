@@ -224,7 +224,7 @@ async def test_misc_write_tools_require_approval():
         "slack__delete_reminder",
     ]
     for name in write_tools:
-        assert registry.requires_approval(name), f"{name} should require approval"
+        assert registry.declares_approval(name), f"{name} should require approval"
 
 
 @pytest.mark.asyncio
@@ -246,4 +246,4 @@ async def test_misc_read_tools_no_approval():
         "slack__search_messages",
         "slack__search_files",
     ]:
-        assert not registry.requires_approval(name), f"{name} should NOT require approval"
+        assert not registry.declares_approval(name), f"{name} should NOT require approval"
