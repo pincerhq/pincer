@@ -19,7 +19,6 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
-    "geist": "^1.7.0",
     "ky": "^1.14.3",
     "lucide-react": "^0.575.0",
     "radix-ui": "^1.4.3",
