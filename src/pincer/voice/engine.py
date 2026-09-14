@@ -12,6 +12,7 @@ import base64
 import contextlib
 import json
 import logging
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -52,6 +53,12 @@ class CallDirection(StrEnum):
 # only speech after this window counts as a demonstrably conversing human.
 AMD_GRACE_SECONDS = 10.0
 
+# How long a torn-down call stays recognisable to late status webhooks. Twilio
+# retries a status callback for minutes, so this outlives the post-call
+# pipeline rather than just the create_task hand-off.
+_ENDED_CALL_TTL_S = 900.0
+_MAX_ENDED_CALLS = 500
+
 
 @dataclass
 class CallState:
@@ -88,6 +95,21 @@ class CallState:
             self.metadata["caller_spoke"] = True
 
 
+@dataclass
+class _SpeechProgress:
+    """How much of one utterance has reached Twilio.
+
+    Shared across the synthesis attempt and its retry so the retry resumes
+    instead of repeating. Segment-level rather than byte-level: neural TTS is
+    not byte-reproducible, so re-synthesizing and skipping N bytes would cut
+    mid-phoneme rather than resume cleanly.
+    """
+
+    segments_done: int = 0
+    wrote_audio: bool = False
+    first_chunk_ms: float | None = None
+
+
 class VoiceEngine(ABC):
     """Abstract interface for voice call handling.
 
@@ -108,6 +130,8 @@ class VoiceEngine(ABC):
         # keyed by a temporary id until the real CallSid comes back. See
         # register_pending_outbound().
         self._pending_outbound: dict[str, CallState] = {}
+        # call_sid -> monotonic time of teardown. See was_recently_ended().
+        self._ended_calls: dict[str, float] = {}
         # Optional VoiceMetricsRegistry, injected by VoiceChannel.set_engine
         self.metrics_registry: Any = None
 
@@ -320,7 +344,18 @@ class VoiceEngine(ABC):
         if state is None or state.metadata.get("answered_at") is not None:
             return state
 
-        state.metadata["answered_at"] = datetime.now(UTC)
+        answered = datetime.now(UTC)
+        state.metadata["answered_at"] = answered
+        # An outbound state exists from before client.calls.create(), so
+        # started_at has been running through the whole ring. Re-anchor it to
+        # the pickup, keeping the dial time for diagnostics. Both things that
+        # read started_at break otherwise: duration_seconds bills and reports
+        # the ring as conversation, and the AMD grace window in
+        # mark_caller_spoke() is already spent at pickup on any call that rang
+        # longer than AMD_GRACE_SECONDS — so a voicemail greeting sets
+        # caller_spoke and disarms the AMD shield in _handle_amd_verdict.
+        state.metadata.setdefault("dialed_at", state.started_at)
+        state.started_at = answered
         # Ringing is not silence: the talk-time clock is re-anchored here so
         # the wait for an answer does not land in the call's silence figure.
         from pincer.voice.analytics import TalkTimeAccumulator
@@ -407,12 +442,39 @@ class VoiceEngine(ABC):
         state = self._active_calls.pop(call_sid, None)
         if state:
             state.ended_at = datetime.now(UTC)
+            self._remember_ended(call_sid)
             logger.info(
                 "Call ended: %s duration=%ds",
                 call_sid,
                 state.duration_seconds,
             )
         return state
+
+    def _remember_ended(self, call_sid: str) -> None:
+        """Record that this call HAD state and has been torn down.
+
+        Teardown schedules the post-call pipeline as a background task, so for
+        a moment afterwards `get_call_state()` returns None for a call that is
+        very much accounted for. A status webhook arriving in that window must
+        not read the miss as "this call never connected".
+        """
+        self._ended_calls[call_sid] = time.monotonic()
+        cutoff = time.monotonic() - _ENDED_CALL_TTL_S
+        for sid in [s for s, at in self._ended_calls.items() if at < cutoff]:
+            self._ended_calls.pop(sid, None)
+        while len(self._ended_calls) > _MAX_ENDED_CALLS:
+            self._ended_calls.pop(next(iter(self._ended_calls)), None)
+
+    def was_recently_ended(self, call_sid: str) -> bool:
+        """Whether `end_call` already tore this call down.
+
+        `end_call` always owns the final user message from that point on —
+        either through the post-call pipeline it schedules or through the
+        fallback status it sends directly — so a caller that finds no live
+        state should stay quiet rather than send its own generic ending.
+        """
+        started = self._ended_calls.get(call_sid)
+        return started is not None and (time.monotonic() - started) < _ENDED_CALL_TTL_S
 
     @property
     @abstractmethod
@@ -819,6 +881,18 @@ class MediaStreamEngine(VoiceEngine):
         if stt_stream:
             await stt_stream.send_audio(pcm_16k)
 
+    async def _clear_twilio_buffer(self, state: CallState) -> None:
+        """Drop whatever Twilio still has buffered for playout.
+
+        Note this flushes the WHOLE outbound buffer, not just the tail — so it
+        is only safe when nothing the caller still needs to hear is in it.
+        """
+        ws = state.metadata.get("websocket")
+        if not ws:
+            return
+        msg = json.dumps({"event": "clear", "streamSid": state.metadata.get("stream_sid", "")})
+        await ws.send_text(msg)
+
     async def send_speech(self, call_sid: str, text_or_audio: Any, *, last: bool = True) -> bool:
         """Synthesize text to speech and send audio to Twilio.
 
@@ -827,6 +901,12 @@ class MediaStreamEngine(VoiceEngine):
         never dead air. Returns True only when audio was streamed.
         ``last`` is accepted for interface parity (Sprint 5 streaming) — each
         utterance is synthesized independently here, so it is a no-op.
+
+        The retry RESUMES: delivery is tracked per sentence-segment, so a
+        synthesis that dies mid-utterance restarts at the first segment the
+        caller has not been sent, never from the top. Re-speaking the whole
+        utterance made the caller hear the opening sentences twice while the
+        transcript recorded them once.
         """
         state = self._active_calls.get(call_sid)
         if not state:
@@ -839,12 +919,33 @@ class MediaStreamEngine(VoiceEngine):
             logger.warning("send_speech with no TTS provider [%s] — agent output DROPPED", call_sid)
             return False
 
+        from pincer.voice.sentence_stream import split_into_segments
+
+        segments = split_into_segments(text)
+        if not segments:
+            return False
+        progress = _SpeechProgress()
+
         try:
-            delivered = await self._stream_tts(call_sid, state, text)
+            delivered = await self._stream_tts(call_sid, state, segments, progress)
         except Exception:
-            logger.warning("TTS synthesis failed [%s] — retrying utterance once", call_sid)
+            if progress.segments_done == 0 and progress.wrote_audio:
+                # Only a fragment of the first segment is buffered, so dropping
+                # the buffer costs the caller nothing and spares them hearing
+                # that fragment before the retry repeats it. Once a segment has
+                # completed we must NOT clear: `clear` flushes everything still
+                # queued, which would silently swallow sentences the caller has
+                # not heard yet. Losing content is worse than one stutter.
+                with contextlib.suppress(Exception):
+                    await self._clear_twilio_buffer(state)
+            logger.warning(
+                "TTS synthesis failed [%s] after %d/%d segment(s) — resuming utterance",
+                call_sid,
+                progress.segments_done,
+                len(segments),
+            )
             try:
-                delivered = await self._stream_tts(call_sid, state, text)
+                delivered = await self._stream_tts(call_sid, state, segments, progress)
             except Exception:
                 logger.exception("TTS retry failed [%s] — spoken fallback + hangup", call_sid)
                 await self.fallback_and_end(call_sid)
@@ -855,16 +956,26 @@ class MediaStreamEngine(VoiceEngine):
         logger.info("MS speech output [%s] delivered=True: %s", call_sid, text[:80])
         return True
 
-    async def _stream_tts(self, call_sid: str, state: CallState, text: str) -> bool:
-        """One synthesis attempt: stream audio chunks to the Twilio WebSocket.
+    async def _stream_tts(
+        self,
+        call_sid: str,
+        state: CallState,
+        segments: list[str],
+        progress: _SpeechProgress,
+    ) -> bool:
+        """Stream an utterance's segments to the Twilio WebSocket.
 
-        Returns True only when at least one audio chunk was written to the
-        socket — no socket means no synthesis (and no ElevenLabs spend).
-        With ulaw_8000 output the ElevenLabs bytes go to Twilio as-is; the
-        Python resample only runs on the legacy pcm_16000 fallback path.
+        Picks up at ``progress.segments_done``, so a retry after a mid-stream
+        failure delivers only what the caller has not been sent. A segment is
+        marked done only once its whole stream has been written, so the segment
+        that failed is re-synthesized from its own start — the finest boundary
+        neural TTS can restart on without cutting mid-phoneme.
+
+        Returns True when any audio has been written for this utterance — no
+        socket means no synthesis (and no ElevenLabs spend). With ulaw_8000
+        output the ElevenLabs bytes go to Twilio as-is; the Python resample
+        only runs on the legacy pcm_16000 fallback path.
         """
-        import time
-
         from pincer.voice.language import elevenlabs_model_for, voice_for
         from pincer.voice.tts import OUTPUT_PCM_16000
 
@@ -880,45 +991,50 @@ class MediaStreamEngine(VoiceEngine):
         from pincer.voice.analytics import get_accumulator
 
         accumulator = get_accumulator(state)
+        metrics = self.metrics_registry.get(call_sid) if self.metrics_registry else None
 
         started = time.monotonic()
-        first_chunk_ms: float | None = None
-        wrote_audio = False
-        async for audio_chunk in self._tts_provider.synthesize_stream(text, voice=voice_id, model=tts_model):
-            if first_chunk_ms is None:
-                first_chunk_ms = (time.monotonic() - started) * 1000.0
-                if accumulator is not None:
-                    # Playout begins when Twilio receives the first chunk.
-                    accumulator.agent_audio_begin()
-            mulaw_data = audio_chunk
-            if needs_resample:
-                from pincer.voice.audio import pcm16k_to_mulaw8k
+        for index in range(progress.segments_done, len(segments)):
+            segment = segments[index]
+            async for audio_chunk in self._tts_provider.synthesize_stream(segment, voice=voice_id, model=tts_model):
+                if progress.first_chunk_ms is None:
+                    # Measured once for the utterance: playout begins when
+                    # Twilio receives the first chunk, whichever attempt sent it.
+                    progress.first_chunk_ms = (time.monotonic() - started) * 1000.0
+                    if accumulator is not None:
+                        accumulator.agent_audio_begin()
+                    if metrics:
+                        metrics.record_tts_first_chunk(progress.first_chunk_ms)
+                mulaw_data = audio_chunk
+                if needs_resample:
+                    from pincer.voice.audio import pcm16k_to_mulaw8k
 
-                mulaw_data = pcm16k_to_mulaw8k(audio_chunk)
-            if mulaw_data:
-                payload = base64.b64encode(mulaw_data).decode("ascii")
-                msg = json.dumps(
-                    {
-                        "event": "media",
-                        "streamSid": stream_sid,
-                        "media": {"payload": payload},
-                    }
-                )
-                await ws.send_text(msg)
-                wrote_audio = True
-            if accumulator is not None and mulaw_data:
-                # μ-law at 8 kHz: one byte is 0.125 ms of audio. This is the
-                # measurement the `exact` method is named for.
-                accumulator.agent_audio_bytes(len(mulaw_data))
+                    mulaw_data = pcm16k_to_mulaw8k(audio_chunk)
+                if mulaw_data:
+                    payload = base64.b64encode(mulaw_data).decode("ascii")
+                    msg = json.dumps(
+                        {
+                            "event": "media",
+                            "streamSid": stream_sid,
+                            "media": {"payload": payload},
+                        }
+                    )
+                    await ws.send_text(msg)
+                    progress.wrote_audio = True
+                if accumulator is not None and mulaw_data:
+                    # μ-law at 8 kHz: one byte is 0.125 ms of audio. This is the
+                    # measurement the `exact` method is named for.
+                    accumulator.agent_audio_bytes(len(mulaw_data))
 
-        # Latency guard + per-call character count for cost tracking (T4.2/T4.5)
-        state.metadata["tts_characters"] = int(state.metadata.get("tts_characters", 0)) + len(text)
-        metrics = self.metrics_registry.get(call_sid) if self.metrics_registry else None
-        if metrics:
-            metrics.record_tts_characters(len(text))
-            if first_chunk_ms is not None:
-                metrics.record_tts_first_chunk(first_chunk_ms)
-        return wrote_audio
+            # Charged per segment actually synthesized, so a resumed retry does
+            # not bill the segments it skipped (the old whole-utterance retry
+            # counted every character twice).
+            state.metadata["tts_characters"] = int(state.metadata.get("tts_characters", 0)) + len(segment)
+            if metrics:
+                metrics.record_tts_characters(len(segment))
+            progress.segments_done = index + 1
+
+        return progress.wrote_audio
 
     async def interrupt_speech(self, call_sid: str) -> None:
         state = self._active_calls.get(call_sid)
@@ -937,11 +1053,7 @@ class MediaStreamEngine(VoiceEngine):
         if self._tts_provider:
             await self._tts_provider.cancel()
 
-        ws = state.metadata.get("websocket")
-        stream_sid = state.metadata.get("stream_sid", "")
-        if ws:
-            msg = json.dumps({"event": "clear", "streamSid": stream_sid})
-            await ws.send_text(msg)
+        await self._clear_twilio_buffer(state)
 
         logger.debug("MS interrupt [%s]", call_sid)
 

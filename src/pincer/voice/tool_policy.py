@@ -133,6 +133,36 @@ META_PENDING_ARGS = "pending_args"
 META_MODE_OVERRIDES = "mode_overrides"
 
 
+# Modes the inbound receptionist may pin onto google__create_event. "verbal"
+# is deliberately absent: the receptionist's own deterministic yes/no step IS
+# the verbal confirmation, and it never calls set_verbal_confirmation(), so a
+# "verbal" override would make decide() answer need_verbal forever and every
+# booking would fail with booking_failed. The config layer rejects the value at
+# startup; this keeps the invariant next to the code that depends on it.
+RECEPTIONIST_BOOKING_MODES: tuple[str, ...] = ("off", "user")
+
+
+def receptionist_booking_mode(settings: Any) -> str:
+    """Resolve the receptionist's booking-approval mode, fail-safe.
+
+    "verbal" collapses to "off" — the caller already said yes out loud, which
+    is exactly what the mode would be asking for. Anything unrecognised also
+    yields "off" rather than a mode nobody can satisfy: a receptionist that
+    silently declines every booking is worse than one that books after the
+    caller's spoken confirmation.
+    """
+    mode = str(getattr(settings, "receptionist_booking_approval", "off") or "off").strip().lower()
+    if mode in RECEPTIONIST_BOOKING_MODES:
+        return mode
+    logger.warning(
+        "receptionist_booking_approval=%r cannot be honoured on an inbound call "
+        "(allowed: %s) — booking after the caller's spoken yes instead",
+        mode,
+        ", ".join(RECEPTIONIST_BOOKING_MODES),
+    )
+    return "off"
+
+
 def tier_of(tool_name: str) -> str:
     """Tier for a tool name; unknown names are X."""
     return TIERS.get(tool_name, DEFAULT_TIER)
@@ -430,6 +460,7 @@ __all__ = [
     "GENERIC_CALL_WRITE_TOOLS",
     "INBOUND_EXCLUDED_TOOLS",
     "INBOUND_RECEPTIONIST_TOOLS",
+    "RECEPTIONIST_BOOKING_MODES",
     "META_ALLOWED_TOOLS",
     "META_MODE_OVERRIDES",
     "META_PENDING_ARGS",
@@ -455,6 +486,7 @@ __all__ = [
     "ignored_extra_tools",
     "max_writes_per_call",
     "parse_overrides",
+    "receptionist_booking_mode",
     "resolve_mode",
     "set_verbal_confirmation",
     "tier_of",

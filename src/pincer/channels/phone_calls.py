@@ -234,7 +234,14 @@ class VoiceChannel(BaseChannel):
                 await asyncio.wait_for(self._engine.send_speech(call_sid, goodbye), timeout=SHUTDOWN_SPEECH_TIMEOUT_S)
         sm = self._state_machines.get(call_sid)
         if sm and not sm.is_terminal:
-            sm.force_terminal(CallPhase.FAILED, reason="shutdown")
+            # Same rule as a phase timeout: a call already wrapping up in a
+            # benign phase heard a clean, complete goodbye, so the deploy that
+            # cut it is not a failed call. Marking every drained call FAILED
+            # skewed the failure-rate dashboards and alerts on every restart
+            # that landed with active traffic.
+            phase = sm.phase
+            terminal = CallPhase.COMPLETED if phase in _BENIGN_TIMEOUT_PHASES else CallPhase.FAILED
+            sm.force_terminal(terminal, reason=f"shutdown_{phase.value}")
 
     async def send(self, user_id: str, text: str, **kwargs: Any) -> None:
         """Send a text response to the active voice call for this user.
@@ -583,6 +590,27 @@ class VoiceChannel(BaseChannel):
         with call_context(call_sid):
             await self._handle_speech_turn(call_sid, text)
 
+    async def _cancel_prior_turn(self, call_sid: str) -> None:
+        """Stop the previous turn and silence what it already queued.
+
+        Cancelling the task alone is not enough: sentences it handed to the
+        engine are still buffered at Twilio, so `interrupt_speech` has to drop
+        them too or the caller hears the old turn playing under the new one.
+
+        No-op when no turn is in flight, so it is safe to call unconditionally
+        at the top of every caller utterance.
+        """
+        prior_turn = self._active_turns.pop(call_sid, None)
+        if prior_turn is None or prior_turn.done():
+            return
+        prior_turn.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await prior_turn
+        if self._engine:
+            with contextlib.suppress(Exception):
+                await self._engine.interrupt_speech(call_sid)
+        logger.info("Streamed turn cancelled by barge-in [%s]", call_sid)
+
     async def _handle_speech_turn(self, call_sid: str, text: str) -> None:
         if not self._handler:
             return
@@ -607,6 +635,14 @@ class VoiceChannel(BaseChannel):
         # The greeting phases end the moment the callee speaks
         if sm.phase in (CallPhase.GREETING, CallPhase.OUTBOUND_GREETING):
             sm.transition(CallPhase.INTENT_CAPTURE, "caller_spoke")
+
+        # Barge-in (Sprint 5): the caller talking over us makes the previous
+        # turn obsolete, so it is cancelled here — before ANY path below can
+        # speak or return. The deterministic handlers (the confirmation gate's
+        # re-ask, a fully-handled receptionist turn, a mutual-goodbye hangup)
+        # all speak and return early, so cancelling after them left the old
+        # turn streaming underneath the new audio.
+        await self._cancel_prior_turn(call_sid)
 
         # Goodbyes (the receptionist line has its own endings). After the agent
         # already said goodbye a farewell just ends the call; said first, the
@@ -649,19 +685,6 @@ class VoiceChannel(BaseChannel):
                 verdict_note = f"{verdict_note}\n\n{plan.system_note}" if verdict_note else plan.system_note
             if plan.override_text:
                 text = plan.override_text
-
-        # Barge-in at the turn level (Sprint 5): a new caller utterance while
-        # the previous streamed turn is still generating/speaking cancels that
-        # turn — no queued sentences may play after the interrupt.
-        prior_turn = self._active_turns.pop(call_sid, None)
-        if prior_turn is not None and not prior_turn.done():
-            prior_turn.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await prior_turn
-            if self._engine:
-                with contextlib.suppress(Exception):
-                    await self._engine.interrupt_speech(call_sid)
-            logger.info("Streamed turn cancelled by barge-in [%s]", call_sid)
 
         extra_system = self._build_voice_system(state, sm)
         if verdict_note:

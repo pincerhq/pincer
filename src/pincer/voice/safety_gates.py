@@ -76,8 +76,11 @@ CONFIRMATION_PATTERNS: dict[ActionCategory, str] = {
     ActionCategory.OTHER: "I'm going to {details}. Is that correct?",
 }
 
-# English + German (Sprint 2). German affirmatives use lookarounds so that
-# negated forms ("passt nicht", "nicht richtig") don't double-match as both.
+# English + German (Sprint 2). The inline lookarounds below only catch a
+# negation directly against the affirmative word; `_is_negated` is what
+# actually scopes negation ("not quite right", "nicht ganz richtig", "I'm not
+# sure"). The forward lookaheads are still load-bearing for German postposed
+# negation ("stimmt nicht", "passt mir nicht"), which no look-back can see.
 AFFIRMATIVE_PATTERNS = re.compile(
     r"\b(yes|yeah|yep|yup|sure|go ahead|do it|correct|confirmed|absolutely|"
     r"that's right|proceed|affirmative|ok|okay|sounds good|perfect|"
@@ -100,6 +103,62 @@ NEGATIVE_PATTERNS = re.compile(
     r"das ist falsch|doch nicht|so nicht)\b",
     re.IGNORECASE,
 )
+
+
+# Negation is scoped by clause, not by adjacency: a caller who says "that's
+# not quite right" has an affirmative word in the sentence but is rejecting.
+_NEGATOR_WORDS = frozenset(
+    {
+        "not",
+        "no",
+        "never",
+        "none",
+        "nor",
+        "cannot",
+        "nicht",
+        "nie",
+        "niemals",
+        "nichts",
+        "kein",
+        "keine",
+        "keinen",
+        "keinem",
+        "keiner",
+        "keines",
+        "ohne",
+        "weder",
+    }
+)
+
+# A negation binds only inside its own clause, so "No problem, yes" keeps its
+# "yes" and a trailing "but yes" is not dragged under an earlier "not".
+_CLAUSE_BREAK = re.compile(r"[,;:.!?—–-]|\b(?:but|however|though|aber|jedoch|sondern|allerdings)\b", re.IGNORECASE)
+
+_TOKEN = re.compile(r"[\w']+", re.UNICODE)
+
+# How far back a negation reaches. Covers "not quite/really/at all",
+# "nicht (so) ganz", "nicht wirklich" without crossing a clause.
+_NEGATION_WINDOW = 4
+
+
+def _is_negator(token: str) -> bool:
+    lowered = token.lower()
+    return lowered in _NEGATOR_WORDS or lowered.endswith("n't")
+
+
+def _is_negated(text: str, match_start: int) -> bool:
+    """Whether an affirmative word at ``match_start`` sits under a negation.
+
+    Only the preceding words of the same clause are considered, and only the
+    last `_NEGATION_WINDOW` of them, so an unrelated earlier "no" cannot
+    silently flip a later genuine "yes".
+    """
+    prefix = text[:match_start]
+    breaks = list(_CLAUSE_BREAK.finditer(prefix))
+    if breaks:
+        prefix = prefix[breaks[-1].end() :]
+    tokens = _TOKEN.findall(prefix)
+    return any(_is_negator(tok) for tok in tokens[-_NEGATION_WINDOW:])
 
 
 def classify_action(tool_name: str, arguments: dict) -> ActionCategory:
@@ -138,8 +197,13 @@ def parse_confirmation(utterance: str) -> ConfirmationStatus:
     if not text:
         return ConfirmationStatus.UNCLEAR
 
-    has_affirmative = bool(AFFIRMATIVE_PATTERNS.search(text))
-    has_negative = bool(NEGATIVE_PATTERNS.search(text))
+    affirmatives = list(AFFIRMATIVE_PATTERNS.finditer(text))
+    negated = [m for m in affirmatives if _is_negated(text, m.start())]
+
+    # An affirmative word under a negation is not a confirmation — it is a
+    # rejection ("that's not quite right"), so it counts on the negative side.
+    has_affirmative = len(affirmatives) > len(negated)
+    has_negative = bool(NEGATIVE_PATTERNS.search(text)) or bool(negated)
 
     if has_affirmative and not has_negative:
         return ConfirmationStatus.CONFIRMED

@@ -120,12 +120,15 @@ class PostCallProcessor:
             # Audit trail: the structured outcome joins the call's action log
             transcript.log_action("outcome", output_summary=outcome.to_json())
 
-        await self._persist(call_sid, state, transcript)
+        persisted = await self._persist(call_sid, state, transcript)
 
-        # T8.3: a callee who asked never to be called again is added to the
-        # shared do-not-call list here, so the block applies to every user and
-        # every channel from the next dial attempt onward.
-        opt_out_note = await self._honor_opt_out(call_sid, state, transcript, outcome, language)
+        # T8.3 + Sprint 13 §6 + analytics: the steps every call type shares.
+        # A callee who asked never to be called again is added to the shared
+        # do-not-call list here, so the block applies to every user and every
+        # channel from the next dial attempt onward.
+        opt_out_note, thread_update = await self._run_shared_pipeline(
+            call_sid, state, transcript, outcome, call_analytics, language
+        )
 
         if outcome is not None:
             await self._write_memory_notes(call_sid, user_id, target_label, outcome)
@@ -140,11 +143,6 @@ class PostCallProcessor:
                 transcript,
                 task_result=outcome.task_result if outcome is not None else "",
             )
-
-        # Sprint 13 §6: fold this call into its thread (rolling summary,
-        # commitments, derived lifecycle step). Runs AFTER outcome extraction
-        # because the outcome IS its input, and never blocks the report.
-        thread_update = await self._update_thread(call_sid, outcome, language)
 
         if outcome is not None:
             report = render_report(outcome, target_label, state.duration_seconds, call_sid, language)
@@ -192,6 +190,9 @@ class PostCallProcessor:
             report = f"{report}\n{self._render_deferred(deferred, language)}"
             await self._write_deferred_followups(call_sid, user_id, target_label, deferred)
 
+        if not persisted:
+            report = f"{report}\n{self._persist_failure_note(language)}"
+
         if unverified_claims:
             caveat = (
                 "⚠️ Hinweis: Eine Erfolgsaussage im Gespräch konnte nicht durch ein Tool-Ergebnis belegt werden."
@@ -209,15 +210,6 @@ class PostCallProcessor:
             # supports it. This build always proposes and waits for the user.
             logger.info("voice_auto_followup=true is reserved; proposing follow-ups instead of executing")
 
-        # Sentiment rides on the extraction that just ran — no second LLM call.
-        an.apply_sentiment(call_analytics, outcome)
-        await an.save_analytics(self._db_path, call_sid, call_analytics)
-        an.record_metrics(
-            call_analytics,
-            engine=state.engine_type,
-            direction=state.direction.value,
-            language=language,
-        )
         # §5: only a negative reading earns a line. A note on every call is
         # noise the owner learns to skip, and then misses the one that mattered.
         negative_line = an.render_report_line(call_analytics, language)
@@ -306,9 +298,14 @@ class PostCallProcessor:
     ) -> str:
         """Add the callee to the do-not-call list when they asked to be left alone.
 
-        Reads the callee's own turns (never the agent's, which quotes the
-        request back when apologising) plus the extractor's key facts, so both
+        Reads the callee's own turns plus the extractor's key facts, so both
         the deterministic transcript signal and the LLM's reading count.
+
+        CALLER turns only — not merely "not the agent". The agent's lines quote
+        the request back when apologising, and the SYSTEM lines carry the
+        outbound `[BRIEFING]` text: a user briefing the agent to "tell them to
+        stop calling me" would otherwise blacklist the number they asked us to
+        call, on the strength of their own instruction.
         """
         number = state.target_number or state.caller_number
         if not number:
@@ -316,7 +313,7 @@ class PostCallProcessor:
 
         sources: list[str] = []
         if transcript is not None:
-            sources.extend(entry.text for entry in transcript.entries if entry.speaker != Speaker.AGENT)
+            sources.extend(entry.text for entry in transcript.entries if entry.speaker == Speaker.CALLER)
         if outcome is not None:
             sources.extend(outcome.key_facts)
             sources.append(outcome.task_result)
@@ -344,6 +341,38 @@ class PostCallProcessor:
 
     # ── Receptionist (Sprint 12 §11/§12) ──────────────────
 
+    async def _run_shared_pipeline(
+        self,
+        call_sid: str,
+        state: CallState,
+        transcript: TranscriptLogger | None,
+        outcome: CallOutcome | None,
+        call_analytics: Any,
+        language: str,
+    ) -> tuple[str, Any]:
+        """The post-call steps EVERY call type owes, whatever its report looks like.
+
+        One place on purpose. These used to live only in the outbound body, so
+        a receptionist call produced no `call_analytics` row and an inbound
+        caller asking never to be called again was never added to the shared
+        do-not-call list that an outbound callee would land on. Each new call
+        type otherwise has to rediscover the whole list.
+
+        Returns (opt_out_note, thread_update) for the caller's report.
+        """
+        opt_out_note = await self._honor_opt_out(call_sid, state, transcript, outcome, language)
+        thread_update = await self._update_thread(call_sid, outcome, language)
+        # Sentiment rides on the extraction that already ran — no second LLM call.
+        an.apply_sentiment(call_analytics, outcome)
+        await an.save_analytics(self._db_path, call_sid, call_analytics)
+        an.record_metrics(
+            call_analytics,
+            engine=state.engine_type,
+            direction=state.direction.value,
+            language=language,
+        )
+        return opt_out_note, thread_update
+
     async def _process_receptionist(
         self,
         call_sid: str,
@@ -360,18 +389,34 @@ class PostCallProcessor:
             profile.default_language if profile else "en"
         )
 
+        # Talk time is closed before extraction, same as the outbound path, so
+        # the sentiment pass sees the ratio rather than guessing at it.
+        call_analytics = self._finalize_analytics(state, completed)
+
         # Abuse flag from the extractor (best effort; a failed extraction is simply "not abusive")
+        outcome: CallOutcome | None = None
         abusive = False
         if transcript is not None and self._llm is not None and transcript.entries:
             try:
                 outcome = await extract_outcome(
-                    self._llm, transcript.get_full_transcript(), "", language=owner_language, purpose="inbound"
+                    self._llm,
+                    transcript.get_full_transcript(),
+                    "",
+                    language=owner_language,
+                    purpose="inbound",
+                    talk_time=_talk_time_context(call_analytics),
                 )
                 abusive = bool(outcome.abusive) if outcome is not None else False
             except Exception:
                 logger.debug("receptionist outcome extraction failed [%s]", call_sid, exc_info=True)
 
-        await self._persist(call_sid, state, transcript)
+        persisted = await self._persist(call_sid, state, transcript)
+
+        # An inbound caller is owed the same handling as an outbound callee:
+        # the do-not-call list is shared, and a receptionist call is a call.
+        opt_out_note, _thread_update = await self._run_shared_pipeline(
+            call_sid, state, transcript, outcome, call_analytics, owner_language
+        )
         delivered = False
         report = ""
         if rp.should_report(reception) or abusive:
@@ -385,6 +430,10 @@ class PostCallProcessor:
                 abusive=abusive,
                 caller_number=state.caller_number,
             )
+            if opt_out_note:
+                report = f"{report}\n{opt_out_note}"
+            if not persisted:
+                report = f"{report}\n{self._persist_failure_note(owner_language)}"
             delivered = await rp.deliver_owner_report(self._settings, call_sid, report)
             if delivered:
                 await rp.stamp_delivered(self._db_path, call_sid)
@@ -464,11 +513,21 @@ class PostCallProcessor:
 
     # ── Persistence ───────────────────────────────────────
 
-    async def _persist(self, call_sid: str, state: CallState, transcript: TranscriptLogger | None) -> None:
+    async def _persist(self, call_sid: str, state: CallState, transcript: TranscriptLogger | None) -> bool:
         """Save the call row + transcript + actions for /transcript and audit.
-        Rows age out via the Sprint 0 retention purge."""
+        Rows age out via the Sprint 0 retention purge.
+
+        Returns False when the write did not fully land. The exception is still
+        swallowed — losing the record must not also cost the user their report —
+        but the caller has to SAY so: a locked database or a full disk otherwise
+        produced a normal-looking report for a call that `/transcript` will
+        never find.
+        """
         if not self._db_path:
-            return
+            # No store configured: nothing was meant to be written, so this is
+            # not a failure to report. Warning on every call here would train
+            # the user to ignore the line that matters.
+            return True
         try:
             from pincer.voice.retention import ensure_voice_tables
 
@@ -527,6 +586,23 @@ class PostCallProcessor:
                     await transcript.save_to_db(db)
         except Exception:
             logger.exception("Failed to persist call %s", call_sid)
+            return False
+        return True
+
+    @staticmethod
+    def _persist_failure_note(language: str) -> str:
+        """Told to the user, not just the log: the record of this call is gone."""
+        if language.startswith("de"):
+            return (
+                "⚠️ Hinweis: Dieser Anruf konnte nicht vollständig gespeichert werden — "
+                "Transkript und Gesprächsdaten sind nicht abrufbar."
+            )
+        if language.startswith("uk"):
+            return "⚠️ Увага: цей дзвінок не вдалося повністю зберегти — стенограма та дані дзвінка недоступні."
+        return (
+            "⚠️ Note: this call could not be fully saved — its transcript and record are unavailable "
+            "(/transcript will not find it)."
+        )
 
     # ── Memory notes (T3.3) ───────────────────────────────
 

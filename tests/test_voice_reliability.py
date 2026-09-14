@@ -317,6 +317,9 @@ def webhook_client():
     engine = AsyncMock()
     engine.get_active_calls = MagicMock(return_value={})
     engine.get_call_state = MagicMock(return_value=None)
+    # Sync on the real engine: left as an AsyncMock it returns an un-awaited
+    # coroutine, and these tests exercise calls that never had state.
+    engine.was_recently_ended = MagicMock(return_value=False)
     settings = MagicMock()
     settings.voice_engine = "conversation_relay"
     settings.twilio_auth_token.get_secret_value.return_value = ""
@@ -349,6 +352,60 @@ class TestAnsweringMachineDetection:
         assert response.status_code == 200
         engine.end_call.assert_called_once_with("CA_amd")
         assert any("voicemail" in msg for msg in sent)
+
+    def test_completed_webhook_leaves_the_report_to_the_pipeline(self, webhook_client):
+        """The teardown race: `end_call` pops the CallState and hands the final
+        message to a background post-call task. Twilio's own `completed`
+        webhook can land in that window, find no state, and send the generic
+        "call ended" — which consumes the ENDED stage, so the voicemail report
+        the pipeline then tries to deliver is silently dropped.
+        """
+        client, engine = webhook_client
+        sent = self._setup_notify()
+        # The AMD hangup already tore the call down moments ago.
+        engine.was_recently_ended = MagicMock(return_value=True)
+
+        response = client.post(
+            "/api/apps/twilio/status",
+            data={"CallSid": "CA_amd", "CallStatus": "completed"},
+        )
+
+        assert response.status_code == 200
+        assert sent == [], "the generic ending must not pre-empt the pipeline's report"
+        # The ENDED stage is still free, so the real report still gets through.
+        import asyncio
+
+        assert asyncio.run(status_notify.notify_ended("CA_amd", "voicemail detected")) is True
+        assert any("voicemail" in msg for msg in sent)
+
+    def test_completed_webhook_still_reports_a_call_that_never_connected(self, webhook_client):
+        """The guard must not silence the case it was protecting: a call that
+        genuinely never had state still gets its final status."""
+        client, engine = webhook_client
+        sent = self._setup_notify()
+        engine.was_recently_ended = MagicMock(return_value=False)
+
+        response = client.post(
+            "/api/apps/twilio/status",
+            data={"CallSid": "CA_amd", "CallStatus": "completed"},
+        )
+
+        assert response.status_code == 200
+        assert any("call ended" in msg for msg in sent)
+
+    def test_not_connected_webhook_leaves_the_report_to_the_pipeline(self, webhook_client):
+        """Same race on the busy/no-answer/failed branch."""
+        client, engine = webhook_client
+        sent = self._setup_notify()
+        engine.was_recently_ended = MagicMock(return_value=True)
+
+        response = client.post(
+            "/api/apps/twilio/status",
+            data={"CallSid": "CA_amd", "CallStatus": "no-answer"},
+        )
+
+        assert response.status_code == 200
+        assert sent == []
 
     def test_machine_verdict_ignored_when_caller_already_spoke(self, webhook_client):
         """AMD false positive: a late 'machine_start' must not kill a live

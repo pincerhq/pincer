@@ -4,7 +4,7 @@ tool set, free/busy windows-only rendering, report template, config parsing."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -331,6 +331,264 @@ def test_owner_report_template_de():
     assert "Sperrliste" in render_owner_report(reception, call_sid="CA3", profile=profile, language="de", abusive=True)
 
 
+class TestWithinHours:
+    """A slot is bookable only if it fits ENTIRELY inside one opening range.
+
+    The midnight case was the hole: a slot ending at 00:00 skipped the
+    date-mismatch guard, and the loop then compared that 00:00 against the
+    closing time. 00:00 is the smallest time there is, so every such slot
+    passed whatever the business's actual closing hour was.
+    """
+
+    TZ = ZoneInfo("Europe/Berlin")
+    HALF_HOUR = timedelta(minutes=30)
+
+    @staticmethod
+    def _profile(**hours):
+        from pincer.voice.receptionist.profile import parse_business_profile
+
+        days = {d: [] for d in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")}
+        days.update(hours)
+        return parse_business_profile(
+            {
+                "version": 1,
+                "business": {"name": "T", "languages": ["de"], "timezone": "Europe/Berlin"},
+                "hours": days,
+                "booking": {"enabled": True, "event_duration_min": 30},
+            }
+        )
+
+    def _at(self, hh, mm, day=17):  # 2026-08-17 is a Monday
+        return datetime(2026, 8, day, hh, mm, tzinfo=self.TZ)
+
+    def test_slot_ending_at_midnight_is_rejected_past_closing(self):
+        from pincer.voice.receptionist.booking import within_hours
+
+        profile = self._profile(mon=["08:00-23:45"])
+        # 23:30 + 30min = 00:00 next day — 15 minutes past the 23:45 close.
+        assert not within_hours(self._at(23, 30), self.HALF_HOUR, profile)
+
+    def test_a_slot_ending_exactly_at_closing_is_accepted(self):
+        from pincer.voice.receptionist.booking import within_hours
+
+        profile = self._profile(mon=["08:00-23:45"])
+        assert within_hours(self._at(23, 15), self.HALF_HOUR, profile)
+
+    def test_a_slot_overrunning_closing_is_rejected(self):
+        from pincer.voice.receptionist.booking import within_hours
+
+        profile = self._profile(mon=["08:00-23:45"])
+        assert not within_hours(self._at(23, 20), self.HALF_HOUR, profile)
+
+    def test_a_slot_starting_before_opening_is_rejected(self):
+        from pincer.voice.receptionist.booking import within_hours
+
+        profile = self._profile(mon=["08:00-17:00"])
+        assert not within_hours(self._at(7, 45), self.HALF_HOUR, profile)
+
+    def test_a_slot_spanning_a_lunch_gap_is_rejected(self):
+        """Both ends inside opening hours is not enough — one RANGE must hold
+        the whole slot."""
+        from pincer.voice.receptionist.booking import within_hours
+
+        profile = self._profile(mon=["08:00-12:00", "14:00-17:00"])
+        assert not within_hours(self._at(11, 50), timedelta(minutes=150), profile)
+        assert within_hours(self._at(11, 30), self.HALF_HOUR, profile)
+        assert within_hours(self._at(14, 0), self.HALF_HOUR, profile)
+
+    def test_a_closed_day_accepts_nothing(self):
+        from pincer.voice.receptionist.booking import within_hours
+
+        profile = self._profile(mon=["08:00-17:00"])
+        assert not within_hours(self._at(10, 0, day=22), self.HALF_HOUR, profile)  # Saturday
+
+    def test_hours_are_wall_clock_across_dst(self):
+        """Ranges are local wall-clock, so 09:00 is inside 08:00-17:00 in both
+        CET and CEST."""
+        from pincer.voice.receptionist.booking import within_hours
+
+        profile = self._profile(mon=["08:00-17:00"])
+        winter = datetime(2026, 1, 12, 9, 0, tzinfo=self.TZ)  # Monday, CET
+        summer = datetime(2026, 7, 13, 9, 0, tzinfo=self.TZ)  # Monday, CEST
+        assert within_hours(winter, self.HALF_HOUR, profile)
+        assert within_hours(summer, self.HALF_HOUR, profile)
+
+    def test_a_utc_instant_is_judged_in_business_local_time(self):
+        from pincer.voice.receptionist.booking import within_hours
+
+        profile = self._profile(mon=["08:00-17:00"])
+        # 06:30Z on a summer Monday is 08:30 Berlin → inside hours.
+        assert within_hours(datetime(2026, 7, 13, 6, 30, tzinfo=ZoneInfo("UTC")), self.HALF_HOUR, profile)
+        # 05:00Z is 07:00 Berlin → before opening.
+        assert not within_hours(datetime(2026, 7, 13, 5, 0, tzinfo=ZoneInfo("UTC")), self.HALF_HOUR, profile)
+
+    def test_no_opening_range_can_end_at_midnight(self):
+        """Why the midnight exemption protected nothing: the schema forbids it,
+        so a slot ending at 00:00 could never be inside hours anyway."""
+        from pincer.voice.receptionist.profile import parse_range
+
+        with pytest.raises(ValueError, match="start must be before end"):
+            parse_range("08:00-00:00")
+
+
+class TestParseSlotChoice:
+    """Picking an offered slot. The hazard is that `_ORDINAL_WORDS` aliases the
+    literal digits "1"/"2"/"3" to first/second/third, and the ordinal check runs
+    before hour matching — so a caller asking about a clock time silently got
+    a numbered slot they never named, and the receptionist booked it."""
+
+    TZ = ZoneInfo("Europe/Berlin")
+    # Mon 09:00, Tue 10:00, Wed 11:00
+    CANDIDATES = [
+        datetime(2026, 8, 17, 9, 0, tzinfo=TZ),
+        datetime(2026, 8, 18, 10, 0, tzinfo=TZ),
+        datetime(2026, 8, 19, 11, 0, tzinfo=TZ),
+    ]
+
+    def _pick(self, text, language="de"):
+        from pincer.voice.receptionist.booking import parse_slot_choice
+
+        return parse_slot_choice(text, self.CANDIDATES, language)
+
+    @pytest.mark.parametrize("text", ["geht 3 Uhr?", "geht 2 Uhr?", "1 Uhr passt", "geht es um 3 Uhr?", "3:30?"])
+    def test_clock_times_do_not_pick_a_numbered_slot(self, text):
+        """None of these name an offered slot, so none may select one."""
+        assert self._pick(text) is None
+
+    @pytest.mark.parametrize(
+        ("text", "index"),
+        [
+            ("Den ersten bitte.", 0),
+            ("Den zweiten bitte.", 1),
+            ("Den dritten bitte.", 2),
+            ("the second one", 1),
+            ("Nummer 2", 1),
+            ("den 3.", 2),
+            ("3", 2),
+        ],
+    )
+    def test_real_ordinals_still_select(self, text, index):
+        assert self._pick(text) == self.CANDIDATES[index]
+
+    @pytest.mark.parametrize(
+        ("text", "index"),
+        [("geht 9 Uhr?", 0), ("geht 10 Uhr?", 1), ("geht 11 Uhr?", 2), ("11:00 bitte", 2)],
+    )
+    def test_clock_times_still_match_by_hour(self, text, index):
+        """Excluding clock digits from the ORDINAL path must not break the
+        hour path — that is the one that should have handled them all along."""
+        assert self._pick(text) == self.CANDIDATES[index]
+
+    def test_an_ordinal_and_a_clock_time_in_one_sentence(self):
+        """The ordinal is real here; only the clock digits are excluded."""
+        assert self._pick("Den zweiten, also 10 Uhr.") == self.CANDIDATES[1]
+
+    def test_weekday_still_selects(self):
+        assert self._pick("Dienstag bitte.") == self.CANDIDATES[1]
+
+    def test_last_still_selects(self):
+        assert self._pick("Den letzten bitte.") == self.CANDIDATES[-1]
+
+    def test_ambiguous_or_unrelated_text_selects_nothing(self):
+        assert self._pick("weiß nicht") is None
+        assert self._pick("") is None
+
+    def test_no_candidates_is_safe(self):
+        from pincer.voice.receptionist.booking import parse_slot_choice
+
+        assert parse_slot_choice("den ersten", [], "de") is None
+
+    def test_two_digit_hours_never_read_as_ordinals(self):
+        """Guards the \\b anchoring: the "3" inside "13" is not an ordinal."""
+        assert self._pick("geht 13 Uhr?") is None
+
+
+class TestBookingPhaseCycle:
+    """The receptionist's booking loop has to be a cycle, not a one-way trip.
+
+    Every way a booking can fall through at the read-back — the caller
+    declines, the slot was taken between offer and write, the calendar write
+    failed — is still in VERIFY when it tries to go back to INBOUND_BOOKING
+    (the in-call gate only advances VERIFY -> EXECUTE -> CONFIRM on a
+    SUCCESSFUL write). `_to_phase` only warns on a rejected transition, so a
+    missing edge parks the call in VERIFY instead of failing loudly.
+    """
+
+    def test_verify_can_return_to_inbound_booking(self):
+        from pincer.voice.state_machine import VALID_TRANSITIONS, CallPhase
+
+        assert CallPhase.INBOUND_BOOKING in VALID_TRANSITIONS[CallPhase.VERIFY]
+
+    def test_the_booking_read_back_cycle_is_closed(self):
+        from pincer.voice.state_machine import VALID_TRANSITIONS, CallPhase
+
+        assert CallPhase.VERIFY in VALID_TRANSITIONS[CallPhase.INBOUND_BOOKING]
+        assert CallPhase.INBOUND_BOOKING in VALID_TRANSITIONS[CallPhase.VERIFY]
+
+    def test_a_declined_read_back_actually_moves_the_machine(self):
+        from pincer.voice.state_machine import CallPhase, CallStateMachine
+
+        sm = CallStateMachine("CA1")
+        sm._state.phase = CallPhase.VERIFY
+        assert sm.transition(CallPhase.INBOUND_BOOKING, "booking_not_confirmed") is True
+        assert sm.phase == CallPhase.INBOUND_BOOKING
+        # ...and the caller can be read back to again after picking another slot.
+        assert sm.transition(CallPhase.VERIFY, "booking_verify") is True
+
+    def test_the_return_restores_the_longer_booking_timeout(self):
+        """Being parked in VERIFY also shortened the caller's thinking time."""
+        from pincer.voice.state_machine import PHASE_TIMEOUTS, CallPhase
+
+        assert PHASE_TIMEOUTS[CallPhase.INBOUND_BOOKING] > PHASE_TIMEOUTS[CallPhase.VERIFY]
+
+
+class TestLeadTime:
+    """One definition of "soon enough to book", used by both paths that decide
+    it: the candidates we offer, and a time the caller proposes."""
+
+    TZ = ZoneInfo("Europe/Berlin")
+    NOW = datetime(2025, 8, 19, 10, 0, tzinfo=TZ)  # Tuesday 10:00
+
+    def test_earliest_bookable_is_now_plus_the_lead_time(self):
+        from pincer.voice.receptionist import booking as bk
+        from pincer.voice.scheduling import MIN_LEAD_MINUTES
+
+        assert bk.earliest_bookable(self.NOW) == self.NOW + timedelta(minutes=MIN_LEAD_MINUTES)
+
+    @pytest.mark.parametrize("minutes_ahead", [-30, 0, 1, 5, 30, 59])
+    def test_slots_inside_the_window_are_refused(self, minutes_ahead):
+        from pincer.voice.receptionist import booking as bk
+
+        slot = self.NOW + timedelta(minutes=minutes_ahead)
+        assert not bk.meets_lead_time(slot, self.NOW)
+
+    @pytest.mark.parametrize("minutes_ahead", [60, 61, 120, 1440])
+    def test_slots_past_the_window_are_allowed(self, minutes_ahead):
+        from pincer.voice.receptionist import booking as bk
+
+        slot = self.NOW + timedelta(minutes=minutes_ahead)
+        assert bk.meets_lead_time(slot, self.NOW)
+
+    def test_offered_candidates_obey_the_same_rule(self):
+        """The invariant the counter-proposal path was missing: whatever
+        compute_profile_candidates offers must itself clear the bar."""
+        from pincer.voice.receptionist import booking as bk
+
+        profile = parse_business_profile(VALID)
+        candidates = bk.compute_profile_candidates(
+            busy=[],
+            window_start=self.NOW.replace(hour=0, minute=0),
+            window_end=self.NOW.replace(hour=23, minute=59),
+            profile=profile,
+            duration_minutes=30,
+            buffer_minutes=0,
+            now=self.NOW,
+        )
+        assert candidates, "the fixture should produce slots"
+        for slot in candidates:
+            assert bk.meets_lead_time(slot, self.NOW), f"{slot} was offered inside the lead-time window"
+
+
 # ── §3 config ────────────────────────────────────────────────────────
 
 
@@ -344,6 +602,81 @@ def test_receptionist_booking_approval_rejects_verbal():
         == "user"
     )
     assert Settings(anthropic_api_key="sk-ant-test").receptionist_booking_approval == "off"
+
+
+class TestReceptionistBookingMode:
+    """`verbal` is meaningless on an inbound line and actively harmful.
+
+    ReceptionSession confirms the booking itself, deterministically, and never
+    calls tool_policy.set_verbal_confirmation(). A "verbal" override therefore
+    makes decide() answer need_verbal forever: _write_booking's tool call never
+    executes and every caller hears booking_failed.
+
+    The config layer rejects the value at startup (see the test above), so this
+    is unreachable through configuration — these pin the invariant next to the
+    code that relies on it, since nothing else between the two layers defends
+    it and a breach is silent and total.
+    """
+
+    @staticmethod
+    def _cfg(value):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(receptionist_booking_approval=value)
+
+    def test_valid_modes_pass_through(self):
+        from pincer.voice import tool_policy
+
+        assert tool_policy.receptionist_booking_mode(self._cfg("off")) == "off"
+        assert tool_policy.receptionist_booking_mode(self._cfg("user")) == "user"
+        assert tool_policy.receptionist_booking_mode(self._cfg(" USER ")) == "user"
+
+    def test_verbal_collapses_to_off(self):
+        """The caller's spoken yes already IS the verbal step."""
+        from pincer.voice import tool_policy
+
+        assert tool_policy.receptionist_booking_mode(self._cfg("verbal")) == "off"
+        assert tool_policy.receptionist_booking_mode(self._cfg("VERBAL")) == "off"
+
+    def test_unusable_values_fall_back_to_off_not_to_a_dead_mode(self):
+        from types import SimpleNamespace
+
+        from pincer.voice import tool_policy
+
+        for value in ("", None, "garbage"):
+            assert tool_policy.receptionist_booking_mode(self._cfg(value)) == "off"
+        assert tool_policy.receptionist_booking_mode(SimpleNamespace()) == "off"
+
+    def test_verbal_never_reaches_the_call_override(self):
+        """End to end: even handed a rejected value, the session pins a mode
+        the receptionist can actually satisfy."""
+        from pincer.voice import tool_policy
+
+        mode = tool_policy.receptionist_booking_mode(self._cfg("verbal"))
+        assert mode in tool_policy.RECEPTIONIST_BOOKING_MODES
+
+    def test_a_verbal_override_would_deadlock_the_booking(self):
+        """Guards the reason the invariant exists: this is what would happen."""
+        from types import SimpleNamespace
+
+        from pincer.voice import tool_policy
+        from pincer.voice.engine import CallDirection, CallState
+
+        state = CallState(call_sid="CA1", direction=CallDirection.INBOUND, caller_number="+49")
+        state.metadata[tool_policy.META_ALLOWED_TOOLS] = frozenset({"google__create_event"})
+        settings = SimpleNamespace(
+            voice_max_writes_per_call=5, voice_tool_approval="off", voice_tool_approval_overrides=""
+        )
+        args = {"summary": "x"}
+
+        state.metadata[tool_policy.META_MODE_OVERRIDES] = {"google__create_event": "verbal"}
+        assert tool_policy.decide("google__create_event", state, settings, args).action == "need_verbal"
+
+        # ...and with the resolver in front of it, the booking goes through.
+        state.metadata[tool_policy.META_MODE_OVERRIDES] = {
+            "google__create_event": tool_policy.receptionist_booking_mode(self._cfg("verbal"))
+        }
+        assert tool_policy.decide("google__create_event", state, settings, args).action == "execute"
 
 
 def test_doctor_checks(tmp_path):

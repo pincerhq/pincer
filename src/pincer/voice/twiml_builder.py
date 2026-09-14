@@ -106,7 +106,7 @@ def build_connect_twiml(
         relay_url = f"wss://{_extract_host(base_url)}/api/apps/twilio/relay{relay_auth}"
         provider = cr_tts_provider(settings, lang)
         voice_attr = f' voice="{relay_voice_attr(settings, lang, provider)}"'
-        if provider == "elevenlabs" and is_voice_invalid(voice_for(settings, lang)):
+        if provider == "elevenlabs" and is_voice_invalid(voice_for(settings, lang), settings):
             # Voice failed startup validation or live synthesis (Twilio 64111).
             # Omitting the attribute makes Twilio apply its documented
             # per-language default ElevenLabs voice — a guaranteed-valid
@@ -142,7 +142,7 @@ def build_connect_twiml(
                 continue
             other_provider = cr_tts_provider(settings, other)
             other_voice = relay_voice_attr(settings, other, other_provider)
-            if other_provider == "elevenlabs" and is_voice_invalid(voice_for(settings, other)):
+            if other_provider == "elevenlabs" and is_voice_invalid(voice_for(settings, other), settings):
                 continue  # Twilio's per-language default voice is the safe fallback
             language_elements += (
                 f'<Language code="{relay_language(other)}" '

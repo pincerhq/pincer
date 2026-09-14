@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 DEFAULT_TZ = ZoneInfo("Europe/Berlin")
@@ -80,6 +81,36 @@ def _num(token: str) -> int:
     return _NUMBER_WORDS.get(token, -1)
 
 
+@lru_cache(maxsize=1)
+def _minute_words() -> dict[str, int]:
+    """Spoken minute forms, derived from `number_words_de` so the parser can
+    always read back a time this module itself spoke.
+
+    `render_time_de` says "vierzehn Uhr dreißig"; without the inverse mapping
+    the minute is dropped and the caller hears a confident ":00" back in
+    VERIFY. Deriving it keeps the two halves from drifting apart.
+    """
+    words = {number_words_de(n): n for n in range(60)}
+    words["ein"] = 1  # spoken unit form; number_words_de(1) renders "eins"
+    return words
+
+
+@lru_cache(maxsize=1)
+def _minute_word_or_digit() -> str:
+    """Regex alternation for a minute: digits, or any spoken form.
+
+    Longest-first so "fünfzehn"/"fünfundvierzig" win over the "fünf" prefix.
+    """
+    return r"(?:\d{1,2}|" + "|".join(sorted(_minute_words(), key=len, reverse=True)) + r")"
+
+
+def _minute_num(token: str) -> int:
+    token = token.strip().lower()
+    if token.isdigit():
+        return int(token)
+    return _minute_words().get(token, -1)
+
+
 @dataclass
 class ParsedDateTimeDe:
     """Result of deterministic German date/time parsing."""
@@ -90,12 +121,40 @@ class ParsedDateTimeDe:
     has_time: bool
 
 
-def _apply_daytime_heuristic(hour: int, text: str) -> int:
+# "nachts" spans the turn of the night, so it is the one daytime marker that
+# does not simply mean PM. Spoken as 12-hour clock: "neun/zehn/elf Uhr nachts"
+# is 21:00–23:00, "zwölf Uhr nachts" is midnight, and "ein bis acht Uhr nachts"
+# is the small hours and must stay AM.
+_NIGHT_PM_FROM = 9
+
+
+def _apply_daytime_heuristic(hour: int, text: str, *, twelve_hour_wrap: bool = False) -> int:
     """Phone calls are business-hours by default: bare small hours ("um drei",
-    "halb drei") mean the afternoon unless the caller says morning/night."""
+    "halb drei") mean the afternoon unless the caller says morning/night.
+
+    ``twelve_hour_wrap`` marks an hour produced by "half to"/"quarter to"
+    arithmetic ("halb eins" → 1 - 1 = 0). There 0 is the 12-hour clock's twelve
+    o'clock, not midnight — unlike an explicit "um 0 Uhr 30", which really is
+    00:30 and must pass through untouched.
+    """
+    if twelve_hour_wrap and hour == 0:
+        # "halb eins" is 12:30 (lunchtime); only a night or early-morning
+        # marker makes it 00:30.
+        if re.search(r"\b(nachts|nacht|morgens|früh)\b", text):
+            return 0
+        return 12
     if re.search(r"\b(morgens|früh|vormittag|vormittags)\b", text):
         return hour
-    if re.search(r"\b(abends|abend|nachts)\b", text) and hour < 12:
+    # Check "nachts" before the evening markers: "ein Uhr nachts" is 01:00, not
+    # 13:00, and booking the opposite half of the day would survive VERIFY
+    # because we would read the wrong time back as if it were what was said.
+    if re.search(r"\b(nachts|nacht)\b", text):
+        if hour == 12:
+            return 0  # "zwölf Uhr nachts" = midnight
+        if _NIGHT_PM_FROM <= hour <= 11:
+            return hour + 12  # late evening end of the night
+        return hour  # small hours stay AM
+    if re.search(r"\b(abends|abend)\b", text) and hour < 12:
         return hour + 12
     if re.search(r"\b(nachmittags|nachmittag|mittags)\b", text) and hour < 12:
         return hour + 12
@@ -111,13 +170,18 @@ def _parse_time(text: str) -> tuple[int, int, str] | None:
     if m:
         return int(m.group(1)), int(m.group(2)), m.group(0)
 
-    # "um 14 Uhr 30" / "um 14 Uhr"
-    m = re.search(rf"\bum\s+({_WORD_OR_DIGIT})\s+uhr(?:\s+(\d{{1,2}}))?\b", text)
+    # "um 14 Uhr 30" / "um vierzehn Uhr dreißig" / "um 14 Uhr"
+    m = re.search(rf"\bum\s+({_WORD_OR_DIGIT})\s+uhr(?:\s+({_minute_word_or_digit()}))?\b", text)
     if m:
         hour = _num(m.group(1))
-        minute = int(m.group(2)) if m.group(2) else 0
-        if hour >= 0:
-            if hour <= 12 and not m.group(2):
+        minute = _minute_num(m.group(2)) if m.group(2) else 0
+        if hour >= 0 and 0 <= minute <= 59:
+            # Naming a minute says nothing about which half of the day was
+            # meant: "um drei Uhr 15" is as much the afternoon as "um drei
+            # Uhr" is. Every other pattern here applies the heuristic, so
+            # gating it on the minute left this branch alone reading 1–12 as
+            # literal AM.
+            if hour <= 12:
                 hour = _apply_daytime_heuristic(hour, text)
             return hour, minute, m.group(0)
 
@@ -126,7 +190,7 @@ def _parse_time(text: str) -> tuple[int, int, str] | None:
     if m:
         target = _num(m.group(1))
         if target > 0:
-            hour = _apply_daytime_heuristic(target - 1, text)
+            hour = _apply_daytime_heuristic(target - 1, text, twelve_hour_wrap=True)
             return hour, 30, m.group(0)
 
     # "dreiviertel vier" = 15:45 (southern German)
@@ -134,7 +198,7 @@ def _parse_time(text: str) -> tuple[int, int, str] | None:
     if m:
         target = _num(m.group(1))
         if target > 0:
-            hour = _apply_daytime_heuristic(target - 1, text)
+            hour = _apply_daytime_heuristic(target - 1, text, twelve_hour_wrap=True)
             return hour, 45, m.group(0)
 
     # "Viertel nach vier" = 16:15 / "Viertel vor fünf" = 16:45
@@ -146,7 +210,7 @@ def _parse_time(text: str) -> tuple[int, int, str] | None:
                 hour, minute = base, 15
             else:
                 hour, minute = base - 1, 45
-            hour = _apply_daytime_heuristic(hour, text)
+            hour = _apply_daytime_heuristic(hour, text, twelve_hour_wrap=True)
             return hour, minute, m.group(0)
 
     # bare "um drei"

@@ -158,6 +158,69 @@ class TestPromptI18n:
         assert "Перепрошую" in get_prompt("LOW_CONFIDENCE_REPLY", "uk")
         assert any("перевірю" in p.lower() for p in get_filler_phrases("uk"))
 
+    def test_every_language_defines_every_prompt_key(self):
+        """Module-level parity, not just the phase dicts.
+
+        `get_prompt` falls back to English for a missing key, so a gap is
+        invisible until a call is already running in that language: the LLM
+        gets an English rules block while the LANGUAGE_POLICY tells it to
+        answer only in the call language, and a deterministic line is spoken
+        to the caller in English. The phase-dict tests below did not cover
+        module-level constants, which is how three appointment keys and the
+        IVR prompt went missing from Ukrainian.
+        """
+        import pincer.voice.prompts.de as de_mod
+        import pincer.voice.prompts.en as en_mod
+        import pincer.voice.prompts.uk as uk_mod
+
+        expected = {k for k in dir(en_mod) if k.isupper() and not k.startswith("_")}
+        for name, module in (("de", de_mod), ("uk", uk_mod)):
+            missing = sorted(k for k in expected if getattr(module, k, None) is None)
+            assert missing == [], f"{name}.py silently falls back to English for: {missing}"
+
+    def test_translations_keep_every_format_placeholder(self):
+        """A dropped {placeholder} is a KeyError mid-call; an added one is an
+        unformatted brace spoken aloud."""
+        import re
+
+        import pincer.voice.prompts.de as de_mod
+        import pincer.voice.prompts.en as en_mod
+        import pincer.voice.prompts.uk as uk_mod
+
+        field = re.compile(r"{(\w+)}")
+        problems = []
+        for key in (k for k in dir(en_mod) if k.isupper() and not k.startswith("_")):
+            english = getattr(en_mod, key)
+            if not isinstance(english, str):
+                continue
+            expected = set(field.findall(english))
+            for name, module in (("de", de_mod), ("uk", uk_mod)):
+                found = set(field.findall(getattr(module, key)))
+                if found != expected:
+                    problems.append(f"{key}[{name}]: missing={expected - found} extra={found - expected}")
+        assert problems == [], f"placeholder drift: {problems}"
+
+    def test_appointment_prompts_are_localized(self):
+        """The three keys scheduling.py reads on every appointment call."""
+        for key in ("APPOINTMENT_NEGOTIATION_RULES", "APPOINTMENT_CONFIRM_ACK", "APPOINTMENT_DEFER_LINE"):
+            english = get_prompt(key, "en")
+            for language in ("de", "uk"):
+                assert get_prompt(key, language) != english, f"{key} is still English for {language}"
+
+    def test_the_confirmation_token_stays_machine_readable(self):
+        """Rule 4 names a token that voice/scheduling.py parses with a regex —
+        translating it would break confirmation in that language."""
+        from pincer.voice.scheduling import APPOINTMENT_TOKEN_RE
+
+        for language in ("en", "de", "uk"):
+            assert "[APPOINTMENT_CONFIRMED:" in get_prompt("APPOINTMENT_NEGOTIATION_RULES", language)
+        assert APPOINTMENT_TOKEN_RE.search("[APPOINTMENT_CONFIRMED:2026-08-25T14:00:00+02:00] Чудово!")
+
+    def test_missing_key_is_logged_not_silent(self, caplog):
+        with caplog.at_level("WARNING"):
+            get_prompt("A_KEY_THAT_DOES_NOT_EXIST", "uk")
+        assert "falling back to English" in caplog.text
+
     def test_ukrainian_phase_dicts_complete(self):
         assert set(get_prompt("PHASE_TIMEOUT_MESSAGES", "uk")) == set(get_prompt("PHASE_TIMEOUT_MESSAGES", "en"))
         assert set(get_prompt("PHASE_INSTRUCTIONS", "uk")) == set(get_prompt("PHASE_INSTRUCTIONS", "en"))

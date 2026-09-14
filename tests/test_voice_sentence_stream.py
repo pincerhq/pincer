@@ -109,3 +109,46 @@ class TestStripTtsMarkup:
 
         text = "Gerne, das mache ich sofort. Passt Dienstag um 14 Uhr?"
         assert strip_tts_markup(text) == text
+
+
+class TestSplitIntoSegments:
+    """Resume granularity for TTS delivery: a synthesis that dies mid-utterance
+    restarts at a segment boundary instead of repeating the whole thing."""
+
+    def test_splits_a_multi_sentence_utterance(self):
+        from pincer.voice.sentence_stream import split_into_segments
+
+        assert split_into_segments("I will book you for Tuesday at three. See you then.") == [
+            "I will book you for Tuesday at three.",
+            "See you then.",
+        ]
+
+    def test_reassembles_to_the_original_words(self):
+        from pincer.voice.sentence_stream import split_into_segments
+
+        text = "Das passt sehr gut. Ich trage es direkt ein. Vielen Dank dafür."
+        assert " ".join(split_into_segments(text)) == text
+
+    def test_single_sentence_is_one_segment(self):
+        from pincer.voice.sentence_stream import split_into_segments
+
+        assert split_into_segments("Hello there caller.") == ["Hello there caller."]
+
+    def test_text_without_any_terminator_is_still_speakable(self):
+        from pincer.voice.sentence_stream import split_into_segments
+
+        assert split_into_segments("no terminator here") == ["no terminator here"]
+
+    def test_abbreviations_do_not_create_a_segment(self):
+        """A cut inside "Dr." would resume mid-name on a retry."""
+        from pincer.voice.sentence_stream import split_into_segments
+
+        assert split_into_segments("Der Termin ist bei Dr. Meier um 14.30 Uhr.") == [
+            "Der Termin ist bei Dr. Meier um 14.30 Uhr."
+        ]
+
+    def test_empty_input_yields_nothing_to_speak(self):
+        from pincer.voice.sentence_stream import split_into_segments
+
+        assert split_into_segments("") == []
+        assert split_into_segments("   ") == []

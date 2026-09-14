@@ -175,3 +175,23 @@ class SentenceAssembler:
         remainder = self._buffer.strip()
         self._buffer = ""
         return remainder
+
+
+def split_into_segments(text: str) -> list[str]:
+    """Split a complete utterance into independently speakable segments.
+
+    Used as the resume granularity for TTS delivery: a synthesis that dies
+    mid-utterance can restart at a segment boundary instead of repeating the
+    whole thing. Sentence boundaries are the right unit because neural TTS is
+    not byte-reproducible — re-synthesising and skipping N bytes would cut
+    mid-phoneme, so there is no finer position to resume from.
+
+    Never returns an empty list for non-empty input: an utterance with no
+    boundary at all is one segment.
+    """
+    assembler = SentenceAssembler()
+    segments = assembler.feed(text)
+    remainder = assembler.flush()
+    if remainder:
+        segments.append(remainder)
+    return segments or ([text] if text.strip() else [])

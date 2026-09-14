@@ -517,6 +517,104 @@ async def test_talk_time_excludes_the_ringing(voice):
     assert accumulator._now_ms() < 400, "the talk-time clock starts at answer, not at dial"
 
 
+async def test_started_at_is_re_anchored_on_answer(voice):
+    """`started_at` is stamped before the dial, so it runs through the ring.
+
+    Everything that reads it has to measure from pickup instead: the reported
+    and billed duration, and the AMD grace window.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    briefing = CallBriefing.create(TASK, source="chat")
+    pre = await voice.engine.register_pending_outbound(briefing, TARGET, language="en")
+    await voice.engine.promote_pending(pre, "CA_anchor")
+
+    state = voice.engine.get_call_state("CA_anchor")
+    dialed = datetime.now(UTC) - timedelta(seconds=18)  # a long but ordinary ring
+    state.started_at = dialed
+
+    await voice.engine.mark_call_answered("CA_anchor")
+
+    assert state.duration_seconds < 2, "the ring must not be reported or billed as conversation"
+    assert state.metadata["dialed_at"] == dialed, "the dial time stays available for diagnostics"
+
+
+async def test_re_anchoring_is_idempotent(voice):
+    """A second `setup` must not restart the duration clock either."""
+    briefing = CallBriefing.create(TASK, source="chat")
+    pre = await voice.engine.register_pending_outbound(briefing, TARGET, language="en")
+    await voice.engine.promote_pending(pre, "CA_anchor2")
+
+    await voice.engine.mark_call_answered("CA_anchor2")
+    state = voice.engine.get_call_state("CA_anchor2")
+    first = state.started_at
+
+    await asyncio.sleep(0.05)
+    await voice.engine.mark_call_answered("CA_anchor2")
+
+    assert state.started_at == first
+
+
+async def test_amd_grace_survives_a_long_ring(voice):
+    """A voicemail greeting at pickup must not count as the caller speaking.
+
+    With `started_at` left at the dial, any call ringing longer than
+    AMD_GRACE_SECONDS had its grace already spent by the time the callee
+    picked up — so the machine's own greeting set `caller_spoke`, which is
+    exactly what `_handle_amd_verdict` treats as "a human is already
+    conversing" before it declines to hang up.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from pincer.voice.engine import AMD_GRACE_SECONDS
+
+    briefing = CallBriefing.create(TASK, source="chat")
+    pre = await voice.engine.register_pending_outbound(briefing, TARGET, language="en")
+    await voice.engine.promote_pending(pre, "CA_amd")
+
+    state = voice.engine.get_call_state("CA_amd")
+    state.started_at = datetime.now(UTC) - timedelta(seconds=AMD_GRACE_SECONDS + 8)
+
+    await voice.engine.mark_call_answered("CA_amd")
+    state.mark_caller_spoke()  # the answering machine's greeting, transcribed at pickup
+
+    assert state.metadata.get("caller_spoke") is None, "the AMD shield must stay armed"
+
+
+async def test_amd_grace_still_expires_after_answer(voice):
+    """The shield must still arm once a real conversation is under way."""
+    from datetime import UTC, datetime, timedelta
+
+    from pincer.voice.engine import AMD_GRACE_SECONDS
+
+    briefing = CallBriefing.create(TASK, source="chat")
+    pre = await voice.engine.register_pending_outbound(briefing, TARGET, language="en")
+    await voice.engine.promote_pending(pre, "CA_amd2")
+    await voice.engine.mark_call_answered("CA_amd2")
+
+    state = voice.engine.get_call_state("CA_amd2")
+    # Speech this far past the answer is a person, not a greeting.
+    state.started_at = datetime.now(UTC) - timedelta(seconds=AMD_GRACE_SECONDS + 1)
+    state.mark_caller_spoke()
+
+    assert state.metadata.get("caller_spoke") is True
+
+
+async def test_unanswered_call_still_measures_the_ring(voice):
+    """No answer means no re-anchor: the ring is all that happened."""
+    from datetime import UTC, datetime, timedelta
+
+    briefing = CallBriefing.create(TASK, source="chat")
+    pre = await voice.engine.register_pending_outbound(briefing, TARGET, language="en")
+    await voice.engine.promote_pending(pre, "CA_noans")
+
+    state = voice.engine.get_call_state("CA_noans")
+    state.started_at = datetime.now(UTC) - timedelta(seconds=18)
+
+    assert state.duration_seconds >= 18
+    assert "dialed_at" not in state.metadata
+
+
 async def test_inbound_calls_are_answered_on_registration(voice):
     """An inbound call is already live when we first see it, so nothing defers."""
     state = await voice.engine.on_call_start("CA_in2", "+4917612345", CallDirection.INBOUND, language="en")

@@ -278,7 +278,7 @@ class ReceptionSession:
 
         state.metadata["receptionist"] = True
         state.metadata[tool_policy.META_MODE_OVERRIDES] = {
-            "google__create_event": str(getattr(settings, "receptionist_booking_approval", "off") or "off"),
+            "google__create_event": tool_policy.receptionist_booking_mode(settings),
         }
         self._sync()
 
@@ -377,6 +377,13 @@ class ReceptionSession:
             return
         if not self.sm.transition(phase, reason):
             logger.warning("Receptionist: %s -> %s not allowed [%s]", self.sm.phase, phase, self.call_sid)
+
+    @property
+    def slot_buffer(self) -> timedelta:
+        """Gap kept around a booking. Every free/busy judgement must apply it:
+        offering a slot with a buffer and then writing it without one gives the
+        caller a back-to-back appointment the profile said it would not."""
+        return timedelta(minutes=int(getattr(self.settings, "slot_buffer_min", 15) or 0))
 
     @property
     def caller_id(self) -> str:
@@ -786,7 +793,7 @@ class ReceptionSession:
                 window[1],
                 self.profile,
                 duration_minutes=self.profile.booking.event_duration_min,
-                buffer_minutes=int(getattr(self.settings, "slot_buffer_min", 15) or 0),
+                buffer_minutes=int(self.slot_buffer.total_seconds() // 60),
                 now=now,
             )
             if not self.booking.candidates:
@@ -802,10 +809,13 @@ class ReceptionSession:
             if chosen is None:
                 counter = bk.parse_counter_proposal(text, now, self.language)
                 duration = timedelta(minutes=self.profile.booking.event_duration_min)
-                buffer = timedelta(minutes=int(getattr(self.settings, "slot_buffer_min", 15) or 0))
+                buffer = self.slot_buffer
                 if (
                     counter is not None
-                    and counter > now
+                    # A caller-proposed time is still a booking: it clears the
+                    # same lead-time bar as the slots we offer, not merely
+                    # "later than now".
+                    and bk.meets_lead_time(counter, now)
                     and bk.within_hours(counter, duration, self.profile)
                     and bk.is_slot_free(counter, duration, self.booking.busy, buffer)
                 ):
@@ -915,11 +925,20 @@ class ReceptionSession:
         chosen = self.booking.chosen
         assert chosen is not None
         duration = timedelta(minutes=self.profile.booking.event_duration_min)
-        # §8.3.6 fresh free/busy re-check at write time
-        busy_now = await self._freebusy(chosen - timedelta(minutes=1), chosen + duration + timedelta(minutes=1))
-        if busy_now is not None and not bk.is_slot_free(chosen, duration, busy_now):
+        buffer = self.slot_buffer
+        # §8.3.6 fresh free/busy re-check at write time. The window has to reach
+        # a buffer beyond the slot on both sides: an event that close makes the
+        # slot unbookable, so a window that cannot even see it turns the recheck
+        # into a rubber stamp for exactly the conflicts it exists to catch.
+        busy_now = await self._freebusy(
+            chosen - buffer - timedelta(minutes=1),
+            chosen + duration + buffer + timedelta(minutes=1),
+        )
+        if busy_now is not None and not bk.is_slot_free(chosen, duration, busy_now, buffer):
             self.booking.busy = busy_now
-            remaining = [c for c in self.booking.candidates if c != chosen and bk.is_slot_free(c, duration, busy_now)]
+            remaining = [
+                c for c in self.booking.candidates if c != chosen and bk.is_slot_free(c, duration, busy_now, buffer)
+            ]
             self.booking.candidates = remaining
             self.booking.chosen = None
             self._to_phase(CallPhase.INBOUND_BOOKING, "slot_taken")

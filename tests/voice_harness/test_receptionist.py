@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
@@ -121,12 +121,14 @@ class FakeCalendar:
         self.fail_create = False
         self.freebusy_calls = 0
         self.take_slot_on_recheck: str | None = None  # ISO start → becomes busy at write-time re-check
+        self.windows: list[tuple[str, str]] = []  # every (time_min, time_max) asked for
 
     def registry(self) -> ToolRegistry:
         registry = ToolRegistry()
 
         async def check_freebusy(emails: str, time_min: str = "", time_max: str = "") -> str:
             self.freebusy_calls += 1
+            self.windows.append((time_min, time_max))
             busy = list(self.busy)
             if self.take_slot_on_recheck and self.freebusy_calls > 1:
                 start = datetime.fromisoformat(self.take_slot_on_recheck)
@@ -136,6 +138,14 @@ class FakeCalendar:
                     else start.replace(hour=start.hour + 1, minute=0)
                 )
                 busy.append((start.isoformat(), end.isoformat()))
+            # A real free/busy query only reports events overlapping the window.
+            # Returning everything regardless is what let a too-narrow recheck
+            # window look correct here.
+            if time_min and time_max:
+                lo, hi = datetime.fromisoformat(time_min), datetime.fromisoformat(time_max)
+                busy = [
+                    (bs, be) for bs, be in busy if datetime.fromisoformat(bs) < hi and datetime.fromisoformat(be) > lo
+                ]
             if not busy:
                 return f"{emails}: FREE"
             lines = [f"{emails}: BUSY at:"] + [f"    {s} → {e}" for s, e in busy]
@@ -180,6 +190,36 @@ def _settings(**overrides):
     for k, v in overrides.items():
         setattr(settings, k, v)
     return settings
+
+
+@pytest.fixture(autouse=True)
+def _no_silent_phase_rejections():
+    """Fail the test if the receptionist attempts a transition the state
+    machine does not allow.
+
+    `_to_phase` only logs a warning on rejection, so a missing edge in
+    VALID_TRANSITIONS leaves the call parked in the wrong phase and every
+    downstream consumer — phase timeouts, transcript phase labels, the
+    benign-phase classification at hangup — quietly reads the stale value.
+    Nothing fails, so nothing notices.
+    """
+    from pincer.voice.receptionist.session import ReceptionSession
+
+    original = ReceptionSession._to_phase
+    rejected: list[tuple[str, str, str]] = []
+
+    def recording(self, phase, reason):
+        before = self.sm.phase
+        original(self, phase, reason)
+        if before != phase and self.sm.phase != phase:
+            rejected.append((before.value, phase.value, reason))
+
+    ReceptionSession._to_phase = recording
+    try:
+        yield
+    finally:
+        ReceptionSession._to_phase = original
+    assert rejected == [], f"receptionist attempted transition(s) VALID_TRANSITIONS rejects: {rejected}"
 
 
 @pytest.fixture(autouse=True)
@@ -491,6 +531,120 @@ async def test_booking_counter_proposal_out_of_slots():
     _assert_no_leak(h)
 
 
+async def test_counter_proposal_must_clear_the_lead_time():
+    """A caller-proposed time is still a booking.
+
+    `compute_profile_candidates` never offers a slot inside MIN_LEAD_MINUTES,
+    but the counter-proposal branch only checked `counter > now` — so
+    "kann ich in einer halben Stunde vorbeikommen?" booked a slot with almost
+    no lead time whenever it happened to be free and inside opening hours.
+    """
+    from pincer.voice.scheduling import MIN_LEAD_MINUTES
+
+    assert MIN_LEAD_MINUTES == 60, "this test reasons in terms of the configured lead time"
+
+    h = await _start()
+    await h.say("Termin bitte.")
+    await h.say("Diese Woche.")
+    assert h.last().startswith("Ich kann Ihnen anbieten:")
+
+    # OPEN_NOW is 09:00; 09:30 is inside opening hours and free, but only
+    # 30 minutes ahead — inside the lead-time window.
+    await h.say("Geht auch heute um halb zehn?")
+    assert h.session.booking.chosen is None, "a slot inside the lead-time window must not be bookable"
+    assert h.last().startswith("Da kann ich leider nichts anbieten")
+
+    # Past the lead time on the same day, the same phrasing is accepted.
+    await h.say("Dann heute um elf Uhr.")
+    assert h.session.booking.chosen is not None
+    assert h.session.booking.chosen.hour == 11
+    _assert_no_leak(h)
+
+
+async def test_near_term_counter_proposal_never_reaches_the_calendar():
+    """A quarter-hour out: parses cleanly, is free, is inside opening hours —
+    the exact shape that used to slip past `counter > now` and get written.
+
+    (The literal "in fünf Minuten" phrasing does not parse as a time at all,
+    so it was already declined as unintelligible; a clock time is what
+    actually reached the booking path.)
+    """
+    h = await _start()
+    await h.say("Termin bitte.")
+    await h.say("Diese Woche.")
+
+    await h.say("Geht heute um viertel nach neun?")  # OPEN_NOW is 09:00
+
+    assert h.session.booking.chosen is None
+    assert not h.calendar.created, "no calendar write may happen inside the lead-time window"
+    assert h.last().startswith("Da kann ich leider nichts anbieten")
+    _assert_no_leak(h)
+
+
+async def test_declining_the_read_back_returns_to_booking():
+    """Saying no at the confirmation read-back must re-offer slots.
+
+    VERIFY -> INBOUND_BOOKING was missing from VALID_TRANSITIONS, so the
+    rejection logged a warning and left the call parked in VERIFY — on the
+    60s VERIFY timeout instead of INBOUND_BOOKING's 180s, and with every
+    transcript line from then on labelled with the wrong phase.
+    """
+    h = await _start()
+    await h.say("Ich hätte gern einen Termin.")
+    await h.say("Eher nächste Woche.")
+    await h.say("Den ersten bitte.")
+    await h.say("Schmidt")
+    await h.say("Ja.")  # caller-id ok
+    assert h.sm.phase == CallPhase.VERIFY
+
+    await h.say("Nein, doch nicht.")
+
+    assert h.sm.phase == CallPhase.INBOUND_BOOKING, "a declined read-back re-offers slots"
+    assert not h.calendar.created
+    assert h.session.booking.declines == 1
+    assert h.last().startswith("Ich kann Ihnen anbieten:")
+    _assert_no_leak(h)
+
+
+async def test_asking_about_a_clock_time_does_not_book_a_numbered_slot():
+    """ "geht 3 Uhr?" is a question about three o'clock, not a pick.
+
+    The literal "3" aliased to "third" in _ORDINAL_WORDS and the ordinal check
+    ran before hour matching, so the caller was moved straight to confirming
+    the third offered slot — a time they never mentioned.
+    """
+    h = await _start()
+    await h.say("Termin bitte.")
+    await h.say("Nächste Woche.")
+    offered = list(h.session.booking.candidates)
+    assert len(offered) == 3
+
+    await h.say("Geht 3 Uhr?")
+
+    assert h.session.booking.chosen is None, "no offered slot may be selected by a clock time"
+    assert not h.calendar.created
+    assert h.session.step == "b_choose", "the caller is still choosing"
+    _assert_no_leak(h)
+
+
+async def test_counter_proposal_running_past_closing_is_refused():
+    """The reported path: a late counter-proposal whose slot ends at midnight.
+
+    `within_hours` suppressed its date-mismatch guard for an end of exactly
+    00:00 and then compared that 00:00 against the closing time — which every
+    closing time beats. A 23:30 slot booked 15 minutes past a 23:45 close.
+    """
+    h = await _start(profile_changes={"hours.mon": ["08:00-23:45"]})
+    await h.say("Termin bitte.")
+    await h.say("Diese Woche.")
+
+    await h.say("Geht es heute um halb zwölf nachts?")  # 23:30 + 30min = 00:00
+
+    assert h.session.booking.chosen is None, "a slot running past closing must not be selected"
+    assert not h.calendar.created
+    _assert_no_leak(h)
+
+
 async def test_booking_three_declines_degrade_to_message():
     h = await _start()
     await h.say("Termin bitte.")
@@ -519,6 +673,90 @@ async def test_booking_race_slot_taken_at_write():
     assert h.last().startswith("Zur Bestätigung:")  # identity already known → straight to VERIFY
     await h.say("Ja.")
     assert h.calendar.created and h.state.metadata["reception"]["booking"]["booked"] is True
+
+
+async def test_write_recheck_applies_the_slot_buffer():
+    """A competing event created inside the buffer must block the write.
+
+    Candidates are offered with `slot_buffer_min` applied, but the write-time
+    recheck asked `is_slot_free` without a buffer AND over a +-1 minute window
+    — too narrow to even see the conflict. The slot was booked back-to-back,
+    breaking the guarantee that was enforced when it was offered.
+    """
+    h = await _start(settings=_settings(slot_buffer_min=15))
+    await h.say("Termin bitte.")
+    await h.say("Nächste Woche.")
+    first = h.session.booking.candidates[0]
+    await h.say("Den ersten.")
+    await h.say("Schmidt")
+    await h.say("Ja.")
+
+    # Someone books 5 minutes after our slot ends — inside the 15 min buffer.
+    gap_start = first + timedelta(minutes=30 + 5)
+    h.calendar.busy.append((gap_start.isoformat(), (gap_start + timedelta(minutes=30)).isoformat()))
+
+    await h.say("Ja.")  # verify → write → recheck
+
+    assert not h.calendar.created, "a slot without its buffer must not be written"
+    assert h.session.booking.chosen is None
+    assert first not in h.session.booking.candidates
+    # The alternatives are filtered with the buffer too, so here none survive
+    # and the call degrades to taking a message rather than offering a slot
+    # that would have the same problem.
+    assert h.sm.phase != CallPhase.VERIFY
+
+
+async def test_write_recheck_window_spans_the_buffer():
+    """The recheck cannot judge what it never fetched."""
+    h = await _start(settings=_settings(slot_buffer_min=15))
+    await h.say("Termin bitte.")
+    await h.say("Nächste Woche.")
+    first = h.session.booking.candidates[0]
+    await h.say("Den ersten.")
+    await h.say("Schmidt")
+    await h.say("Ja.")
+    await h.say("Ja.")
+
+    time_min, time_max = h.calendar.windows[-1]
+    lo, hi = datetime.fromisoformat(time_min), datetime.fromisoformat(time_max)
+    assert lo <= first - timedelta(minutes=15), "window must reach a buffer before the slot"
+    assert hi >= first + timedelta(minutes=30 + 15), "window must reach a buffer after the slot"
+
+
+async def test_event_exactly_at_the_buffer_distance_still_books():
+    """The boundary is exclusive: a buffer-sized gap IS the required gap."""
+    h = await _start(settings=_settings(slot_buffer_min=15))
+    await h.say("Termin bitte.")
+    await h.say("Nächste Woche.")
+    first = h.session.booking.candidates[0]
+    await h.say("Den ersten.")
+    await h.say("Schmidt")
+    await h.say("Ja.")
+
+    gap_start = first + timedelta(minutes=30 + 15)  # exactly one buffer after the end
+    h.calendar.busy.append((gap_start.isoformat(), (gap_start + timedelta(minutes=30)).isoformat()))
+
+    await h.say("Ja.")
+
+    assert h.calendar.created, "a full buffer of clearance is bookable"
+
+
+async def test_zero_buffer_configuration_still_books_back_to_back():
+    """slot_buffer_min=0 is a valid choice and must not be broken by the fix."""
+    h = await _start(settings=_settings(slot_buffer_min=0))
+    await h.say("Termin bitte.")
+    await h.say("Nächste Woche.")
+    first = h.session.booking.candidates[0]
+    await h.say("Den ersten.")
+    await h.say("Schmidt")
+    await h.say("Ja.")
+
+    back_to_back = first + timedelta(minutes=30)
+    h.calendar.busy.append((back_to_back.isoformat(), (back_to_back + timedelta(minutes=30)).isoformat()))
+
+    await h.say("Ja.")
+
+    assert h.calendar.created
 
 
 async def test_booking_email_declined():

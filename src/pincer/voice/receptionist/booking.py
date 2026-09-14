@@ -36,6 +36,22 @@ _NEXT_WEEK = ("nächste woche", "naechste woche", "next week", "наступно
 _TOMORROW = ("morgen", "tomorrow", "завтра")
 
 
+def earliest_bookable(now: datetime) -> datetime:
+    """The soonest a slot may start.
+
+    One definition for both paths that decide bookability: the candidates we
+    offer, and a time the CALLER proposes. A caller-proposed slot is still a
+    booking, so "kann ich in fünf Minuten vorbeikommen?" has to clear the same
+    bar as anything we would have offered — otherwise the lead-time guarantee
+    holds everywhere except where a caller asks for it to not.
+    """
+    return now + timedelta(minutes=MIN_LEAD_MINUTES)
+
+
+def meets_lead_time(slot: datetime, now: datetime) -> bool:
+    return slot >= earliest_bookable(now)
+
+
 def compute_profile_candidates(
     busy: list[tuple[datetime, datetime]],
     window_start: datetime,
@@ -51,7 +67,7 @@ def compute_profile_candidates(
     tz = profile.tz
     duration = timedelta(minutes=duration_minutes)
     buffer = timedelta(minutes=buffer_minutes)
-    earliest = max(window_start, now + timedelta(minutes=MIN_LEAD_MINUTES))
+    earliest = max(window_start, earliest_bookable(now))
     candidates: list[datetime] = []
     day = window_start.astimezone(tz).date()
     last_day = window_end.astimezone(tz).date()
@@ -77,15 +93,32 @@ def is_slot_free(
     return not any(b_start < padded_end and b_end > padded_start for b_start, b_end in busy)
 
 
+_MINUTES_PER_DAY = 24 * 60
+
+
+def _minutes(value: time) -> int:
+    return value.hour * 60 + value.minute
+
+
 def within_hours(slot: datetime, duration: timedelta, profile: BusinessProfile) -> bool:
+    """Does the whole slot, start to end, fall inside one opening range?"""
     local = slot.astimezone(profile.tz)
     end_local = (slot + duration).astimezone(profile.tz)
-    if local.date() != end_local.date() and end_local.time() != time(0, 0):
-        return False
-    for start_t, end_t in profile.hours_for(local.weekday()):
-        if start_t <= local.time() and end_local.time() <= end_t:
-            return True
-    return False
+    start_min, end_min = _minutes(local.time()), _minutes(end_local.time())
+
+    if end_local.date() != local.date():
+        # A slot ending exactly at midnight still belongs to the start day —
+        # but its end is 24:00, not 00:00. Comparing the raw 00:00 against a
+        # closing time let EVERY such slot through, because 00:00 is the
+        # smallest time there is: 23:30 + 30min passed a 23:45 close.
+        if end_min != 0 or end_local.date() != local.date() + timedelta(days=1):
+            return False
+        end_min = _MINUTES_PER_DAY
+
+    return any(
+        _minutes(start_t) <= start_min and end_min <= _minutes(end_t)
+        for start_t, end_t in profile.hours_for(local.weekday())
+    )
 
 
 def resolve_booking_window(text: str, now: datetime) -> tuple[datetime, datetime]:
@@ -103,14 +136,34 @@ def resolve_booking_window(text: str, now: datetime) -> tuple[datetime, datetime
     return now, day_start + timedelta(days=8)
 
 
+# A digit is only an ordinal ("the 2nd one") when it is not part of a clock
+# time. "geht 3 Uhr?" is a question about three o'clock, not a pick of the
+# third offered slot — and silently treating it as a pick books a slot the
+# caller never named.
+_EXPLICIT_CLOCK_RE = re.compile(r"\b\d{1,2}(?::\d{2}|\s*(?:uhr|o'?clock|am|pm|год))")
+
+
+def _clock_spans(text: str) -> list[tuple[int, int]]:
+    return [m.span() for m in _EXPLICIT_CLOCK_RE.finditer(text)]
+
+
+def _mentions_ordinal(text: str, word: str, clock_spans: list[tuple[int, int]]) -> bool:
+    """Whether `word` appears as an ordinal, ignoring clock-time occurrences."""
+    for m in re.finditer(rf"\b{re.escape(word)}\b", text):
+        if not any(lo <= m.start() < hi for lo, hi in clock_spans):
+            return True
+    return False
+
+
 def parse_slot_choice(text: str, candidates: list[datetime], language: str = "de") -> datetime | None:
     """Which offered candidate did the caller pick? Ordinals ("the second"),
     weekday names, or a clock time that matches exactly one candidate."""
     lowered = str(text or "").lower()
     if not candidates:
         return None
+    clock_spans = _clock_spans(lowered)
     for idx, words in _ORDINAL_WORDS.items():
-        if idx < len(candidates) and any(re.search(rf"\b{re.escape(w)}\b", lowered) for w in words):
+        if idx < len(candidates) and any(_mentions_ordinal(lowered, w, clock_spans) for w in words):
             return candidates[idx]
     if any(w in lowered for w in _LAST_WORDS):
         return candidates[-1]
@@ -173,7 +226,9 @@ def parse_counter_proposal(text: str, now: datetime, language: str = "de") -> da
 __all__ = [
     "MAX_INBOUND_CANDIDATES",
     "compute_profile_candidates",
+    "earliest_bookable",
     "is_slot_free",
+    "meets_lead_time",
     "parse_counter_proposal",
     "parse_slot_choice",
     "resolve_booking_window",

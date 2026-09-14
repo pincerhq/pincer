@@ -109,6 +109,11 @@ VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
         CallPhase.INTENT_CAPTURE,
         CallPhase.ERROR_RECOVERY,
         CallPhase.ENDING,
+        # Sprint 12: a receptionist read-back the caller declines — or a slot
+        # that got taken, or a calendar write that failed — goes back to
+        # re-offer. The gate only advances VERIFY -> EXECUTE -> CONFIRM on a
+        # SUCCESSFUL write, so every one of those paths is still in VERIFY.
+        CallPhase.INBOUND_BOOKING,
     },
     CallPhase.EXECUTE: {
         CallPhase.CONFIRM,

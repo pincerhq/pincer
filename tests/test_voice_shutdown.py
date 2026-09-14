@@ -55,8 +55,11 @@ class TestGracefulShutdown:
         goodbye = de_pack.PHASE_TIMEOUT_MESSAGES["error_recovery"]
         assert engine.spoken["CA_shutdown"][-1] == goodbye  # spoken, in German
         assert "CA_shutdown" in engine.ended  # then hung up
+        # INTENT_CAPTURE is not a benign wrap-up phase: this caller really was
+        # cut off mid-conversation, so it stays FAILED.
         assert sm.is_terminal and sm.phase == CallPhase.FAILED
-        assert sm.state.transitions[-1].reason == "shutdown"
+        # The reason carries the interrupted phase, like `timeout_{phase}` does.
+        assert sm.state.transitions[-1].reason == "shutdown_intent_capture"
         agent_lines = [e for e in transcript.entries if e.speaker == Speaker.AGENT and e.state == "shutdown"]
         assert len(agent_lines) == 1 and agent_lines[0].text == goodbye
 
@@ -167,3 +170,96 @@ class TestHangupSemantics:
         for task in list(channel._postcall_tasks.values()):
             await task
         assert outcomes == [False]
+
+
+class TestShutdownRespectsBenignPhases:
+    """A deploy landing on a call that is already wrapping up cleanly must not
+    be recorded as a failed call. The drain used to force every active call to
+    FAILED regardless of phase, so every restart with live traffic put a step
+    in the failure-rate dashboards and fired the alerts that watch them."""
+
+    @staticmethod
+    def _park_in(sm, phase: CallPhase) -> None:
+        """Put the machine in `phase` directly.
+
+        Not every wrap-up phase is reachable by a legal transition from where
+        `_live_call` leaves the call, and the rules themselves are not what is
+        under test here — the drain's terminal-phase choice is.
+        """
+        sm.state.phase = phase
+
+    async def test_every_benign_phase_drains_as_completed(self):
+        from pincer.channels.phone_calls import _BENIGN_TIMEOUT_PHASES
+
+        for phase in sorted(_BENIGN_TIMEOUT_PHASES, key=lambda p: p.value):
+            call_sid = f"CA_benign_{phase.value}"
+            channel, _engine = await _live_call("de", call_sid=call_sid)
+            sm = channel.get_state_machine(call_sid)
+            self._park_in(sm, phase)
+
+            await channel.stop()
+
+            assert sm.phase == CallPhase.COMPLETED, f"{phase.value} heard a complete goodbye"
+            assert sm.state.transitions[-1].reason == f"shutdown_{phase.value}"
+
+    async def test_non_benign_phase_still_fails(self):
+        """A call cut mid-action is a real failure and must stay visible."""
+        channel, _engine = await _live_call("de", call_sid="CA_mid")
+        sm = channel.get_state_machine("CA_mid")
+        sm.transition(CallPhase.VERIFY, "test")
+        sm.transition(CallPhase.EXECUTE, "test")
+
+        await channel.stop()
+
+        assert sm.phase == CallPhase.FAILED
+        assert sm.state.transitions[-1].reason == "shutdown_execute"
+
+    async def test_benign_drain_carries_no_failure_code(self):
+        """The terminal phase decides `completed`, which zeroes the failure
+        code — that code is what reaches the dashboards and the alerts."""
+        from pincer.observability.failure_codes import FailureCode
+
+        channel, _engine = await _live_call("de", call_sid="CA_conf")
+        self._park_in(channel.get_state_machine("CA_conf"), CallPhase.CONFIRM)
+        outcomes = []
+
+        class _Processor:
+            async def process(self, call_sid, state, transcript, completed, unverified):
+                outcomes.append((completed, state.metadata.get("failure_code")))
+
+        channel.set_post_call_processor(_Processor())
+        await channel.stop()
+        for task in list(channel._postcall_tasks.values()):
+            await task
+
+        assert outcomes == [(True, str(FailureCode.NONE))]
+
+    async def test_non_benign_drain_keeps_the_shutdown_code(self):
+        from pincer.observability.failure_codes import FailureCode
+
+        channel, _engine = await _live_call("de", call_sid="CA_exec")
+        sm = channel.get_state_machine("CA_exec")
+        sm.transition(CallPhase.VERIFY, "test")
+        sm.transition(CallPhase.EXECUTE, "test")
+        outcomes = []
+
+        class _Processor:
+            async def process(self, call_sid, state, transcript, completed, unverified):
+                outcomes.append((completed, state.metadata.get("failure_code")))
+
+        channel.set_post_call_processor(_Processor())
+        await channel.stop()
+        for task in list(channel._postcall_tasks.values()):
+            await task
+
+        assert outcomes == [(False, str(FailureCode.SHUTDOWN))]
+
+    async def test_benign_call_still_hears_the_goodbye(self):
+        """The terminal-phase decision must not change spoken behaviour."""
+        channel, engine = await _live_call("de", call_sid="CA_spoken")
+        self._park_in(channel.get_state_machine("CA_spoken"), CallPhase.CONFIRM)
+
+        await channel.stop()
+
+        assert engine.spoken["CA_spoken"][-1] == de_pack.PHASE_TIMEOUT_MESSAGES["error_recovery"]
+        assert "CA_spoken" in engine.ended

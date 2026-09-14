@@ -220,7 +220,7 @@ class TestRelayWebSocket:
                 ws.send_text(json.dumps({"type": "prompt", "voicePrompt": "flush"}))
 
             assert engine.fallbacks == ["CA_tts_err"]
-            assert voices.is_voice_invalid("cr-bad-voice")
+            assert voices.is_voice_invalid("cr-bad-voice", settings)
         finally:
             voices._reset_validation_cache_for_tests()
 

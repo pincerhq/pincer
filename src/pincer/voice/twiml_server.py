@@ -302,6 +302,21 @@ def _report_language(call_sid: str) -> str:
     return call_lang if call_lang in ("de", "uk") else "en"
 
 
+def _already_torn_down(call_sid: str) -> bool:
+    """Whether `end_call` already ran for this call.
+
+    From that point the post-call pipeline — a background task — owns the final
+    user message, so a status webhook that finds no live state must not send
+    its own generic ending: that consumes the ENDED stage and the real report
+    is dropped.
+
+    `is True` on purpose: MagicMock engines in tests answer every attribute.
+    """
+    if _engine is None:
+        return False
+    return getattr(_engine, "was_recently_ended", lambda _sid: False)(call_sid) is True
+
+
 async def _handle_amd_verdict(call_sid: str, answered_by: str, user_lang: str) -> bool:
     """Act on an Answering Machine Detection verdict.
 
@@ -349,6 +364,10 @@ async def _handle_amd_verdict(call_sid: str, answered_by: str, user_lang: str) -
         # ENDED stage here would pop the call from tracking and the
         # structured report would be built but never delivered.
         vm_state.metadata["end_reason"] = voicemail_reason
+    elif _already_torn_down(call_sid):
+        # The state was torn down moments ago, not absent all along: end_call
+        # already ran and its post-call pipeline owns the final message.
+        logger.info("AMD verdict [%s] — call already torn down, leaving the report to the pipeline", call_sid)
     else:
         # No conversation state -> end_call fires no post-call pipeline
         await notify_ended(call_sid, voicemail_reason)
@@ -448,6 +467,8 @@ async def voice_status(request: Request) -> PlainTextResponse:
             # consume the ENDED stage and drop that report.
             nc_state.metadata["end_reason"] = not_connected_reason
             await _engine.end_call(call_sid)
+        elif _already_torn_down(call_sid):
+            logger.info("Status '%s' [%s] — call already torn down, pipeline owns the report", status, call_sid)
         else:
             # Usual shape: the call never connected, no pipeline will run
             await notify_ended(call_sid, not_connected_reason)
@@ -456,6 +477,13 @@ async def voice_status(request: Request) -> PlainTextResponse:
         state = _engine.get_call_state(call_sid)
         if state:
             await _engine.end_call(call_sid)
+        elif _already_torn_down(call_sid):
+            # Race: end_call (AMD hangup, caller hangup, shutdown) popped the
+            # state and handed the final message to its post-call pipeline,
+            # which runs as a background task. Sending the generic ending here
+            # consumes the ENDED stage first, and the real report — the
+            # voicemail outcome, the summary — is then silently dropped.
+            logger.info("Status 'completed' [%s] — call already torn down, pipeline owns the report", call_sid)
         else:
             # Ended before any conversation state existed (e.g. hangup during AMD)
             ended_texts = {"en": "call ended", "de": "Anruf beendet", "uk": "дзвінок завершено"}
@@ -762,7 +790,7 @@ async def _handle_relay_error(call_sid: str, msg: dict[str, Any]) -> None:
 
     bad_voice = voice_for(_settings, state.language) if _settings else ""
     if bad_voice:
-        mark_voice_invalid(bad_voice)
+        mark_voice_invalid(bad_voice, _settings)
         logger.error(
             "ConversationRelay TTS failing repeatedly [%s] — voice %s marked unusable; "
             "next calls use Twilio's default ElevenLabs voice for the language",

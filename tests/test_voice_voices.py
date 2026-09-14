@@ -137,7 +137,7 @@ class TestValidation:
         ):
             problems = validate_configured_voices(s)
         assert "dead" in problems
-        assert voices.is_voice_invalid("dead")
+        assert voices.is_voice_invalid("dead", s)
 
     def test_library_voice_passes_via_synthesis_probe(self):
         # Public-library/default voices 404 on /v1/voices/{id} but synthesize fine
@@ -148,7 +148,7 @@ class TestValidation:
         ):
             assert validate_configured_voices(s) == {}
         probe.assert_called_once()
-        assert not voices.is_voice_invalid("lib-voice")
+        assert not voices.is_voice_invalid("lib-voice", s)
 
     def test_probe_network_failure_does_not_condemn(self):
         s = _settings(elevenlabs_voice_id="maybe-lib")
@@ -157,7 +157,7 @@ class TestValidation:
             patch("pincer.voice.voices.probe_voice", side_effect=VoiceLookupError("down")),
         ):
             assert validate_configured_voices(s) == {}
-        assert not voices.is_voice_invalid("maybe-lib")
+        assert not voices.is_voice_invalid("maybe-lib", s)
 
     def test_good_id_cached_and_not_rechecked(self):
         s = _settings(elevenlabs_voice_id="live")
@@ -165,14 +165,14 @@ class TestValidation:
             assert validate_configured_voices(s) == {}
             assert validate_configured_voices(s) == {}  # second call hits the cache
         assert gv.call_count == 1
-        assert not voices.is_voice_invalid("live")
+        assert not voices.is_voice_invalid("live", s)
 
     def test_network_failure_does_not_condemn_voice(self):
         s = _settings(elevenlabs_voice_id="maybe")
         with patch("pincer.voice.voices.get_voice", side_effect=VoiceLookupError("down")):
             problems = validate_configured_voices(s)
         assert problems == {}
-        assert not voices.is_voice_invalid("maybe")
+        assert not voices.is_voice_invalid("maybe", s)
 
     def test_no_key_or_no_ids_is_noop(self):
         assert validate_configured_voices(_settings(api_key="")) == {}
@@ -249,3 +249,88 @@ class TestVoiceLanguagePairing:
             {"voice_id": "v", "name": "n", "category": "professional", "labels": {"language": "DE"}}
         )
         assert info.primary_language == "de"
+
+
+class TestCredentialRotation:
+    """Voice verdicts are facts about an ACCOUNT, not about an ID.
+
+    The cache used to be keyed by voice_id alone, so rotating
+    PINCER_ELEVENLABS_API_KEY to a different account without restarting left
+    every verdict standing: a voice verified under the old account kept being
+    handed to the TwiML builder until it failed mid-call.
+    """
+
+    def test_verified_voice_is_rechecked_after_key_rotation(self):
+        old_account = _settings(elevenlabs_voice_id="v1", api_key="key-A")
+        with patch("pincer.voice.voices.get_voice", return_value=voices.VoiceInfo("v1", "V", "premade")) as gv:
+            assert validate_configured_voices(old_account) == {}
+            assert validate_configured_voices(old_account) == {}  # cached
+            assert gv.call_count == 1
+
+            # Same voice ID, different account — the verdict must not carry over.
+            new_account = _settings(elevenlabs_voice_id="v1", api_key="key-B")
+            assert validate_configured_voices(new_account) == {}
+            assert gv.call_count == 2, "a rotated credential must force a re-check"
+
+    def test_voice_good_on_the_old_account_can_be_bad_on_the_new_one(self):
+        old_account = _settings(elevenlabs_voice_id="v1", api_key="key-A")
+        with patch("pincer.voice.voices.get_voice", return_value=voices.VoiceInfo("v1", "V", "premade")):
+            assert validate_configured_voices(old_account) == {}
+
+        new_account = _settings(elevenlabs_voice_id="v1", api_key="key-B")
+        with (
+            patch("pincer.voice.voices.get_voice", return_value=None),
+            patch("pincer.voice.voices.probe_voice", return_value=False),
+        ):
+            assert "v1" in validate_configured_voices(new_account)
+        assert voices.is_voice_invalid("v1", new_account)
+
+    def test_invalid_verdict_does_not_follow_the_key_to_a_new_account(self):
+        """The converse: a voice condemned under one account must get a fresh
+        chance under another, not stay blacklisted forever."""
+        old_account = _settings(elevenlabs_voice_id="v1", api_key="key-A")
+        with (
+            patch("pincer.voice.voices.get_voice", return_value=None),
+            patch("pincer.voice.voices.probe_voice", return_value=False),
+        ):
+            assert "v1" in validate_configured_voices(old_account)
+        assert voices.is_voice_invalid("v1", old_account)
+
+        new_account = _settings(elevenlabs_voice_id="v1", api_key="key-B")
+        assert not voices.is_voice_invalid("v1", new_account)
+
+    def test_runtime_marker_is_scoped_to_the_current_account(self):
+        """The live Twilio-64111 path must condemn the voice for the account
+        it actually failed on — and only that one."""
+        account_a = _settings(elevenlabs_voice_id="v1", api_key="key-A")
+        account_b = _settings(elevenlabs_voice_id="v1", api_key="key-B")
+
+        voices.mark_voice_invalid("v1", account_a)
+        assert voices.is_voice_invalid("v1", account_a)
+        assert not voices.is_voice_invalid("v1", account_b)
+
+        # Marking under B re-keys the cache; A's verdict is gone, not shadowed.
+        voices.mark_voice_invalid("v1", account_b)
+        assert voices.is_voice_invalid("v1", account_b)
+        assert not voices.is_voice_invalid("v1", account_a)
+
+    def test_same_key_keeps_using_the_cache(self):
+        """Re-validation must stay a no-op when nothing rotated."""
+        s = _settings(elevenlabs_voice_id="v1", api_key="key-A")
+        with patch("pincer.voice.voices.get_voice", return_value=voices.VoiceInfo("v1", "V", "premade")) as gv:
+            for _ in range(3):
+                assert validate_configured_voices(s) == {}
+        assert gv.call_count == 1
+
+    def test_fingerprint_never_exposes_the_key(self):
+        s = _settings(api_key="super-secret-key")
+        fingerprint = voices._account_fingerprint(s)
+        assert fingerprint and "super-secret-key" not in fingerprint
+        assert fingerprint == voices._account_fingerprint(_settings(api_key="super-secret-key"))
+        assert fingerprint != voices._account_fingerprint(_settings(api_key="other-key"))
+
+    def test_missing_or_empty_key_is_a_stable_empty_fingerprint(self):
+        from types import SimpleNamespace
+
+        assert voices._account_fingerprint(_settings(api_key="")) == ""
+        assert voices._account_fingerprint(SimpleNamespace()) == ""  # no attribute at all

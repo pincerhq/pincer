@@ -9,6 +9,7 @@ CLI, doctor, startup wiring) is sync or can afford the one-off blocking call.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -181,23 +182,74 @@ def ulaw_to_wav(ulaw_bytes: bytes, sample_rate: int = 8000) -> bytes:
 
 _invalid_voice_ids: set[str] = set()
 _verified_voice_ids: set[str] = set()
+# Fingerprint of the credential the cached verdicts were established under. A
+# voice ID means nothing on its own: "usable" is a fact about an ACCOUNT, so a
+# verdict reached under one key must never be applied under another.
+_cache_account: str = ""
 
 
-def is_voice_invalid(voice_id: str) -> bool:
+def _account_fingerprint(settings: Any) -> str:
+    """Stable, non-secret identifier for the ElevenLabs credential in use.
+
+    A digest rather than the key itself: this lives in a process-global and
+    must not turn a stack dump or a repr into a credential leak. Two keys on
+    the same account fingerprint differently, which only costs a re-validation
+    — the error that matters is reusing a verdict across accounts, never
+    re-checking one unnecessarily.
+    """
+    try:
+        secret = settings.elevenlabs_api_key.get_secret_value()
+    except Exception:
+        return ""
+    secret = str(secret or "").strip()
+    if not secret:
+        return ""
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()[:16]
+
+
+def _adopt_account(account: str) -> None:
+    """Point the cache at `account`, discarding verdicts from another one."""
+    global _cache_account  # noqa: PLW0603
+    if account == _cache_account:
+        return
+    if _cache_account and (_invalid_voice_ids or _verified_voice_ids):
+        logger.info(
+            "ElevenLabs credential changed — discarding %d cached voice verdict(s)",
+            len(_invalid_voice_ids) + len(_verified_voice_ids),
+        )
+    _invalid_voice_ids.clear()
+    _verified_voice_ids.clear()
+    _cache_account = account
+
+
+def is_voice_invalid(voice_id: str, settings: Any) -> bool:
+    """Whether this voice is known-bad *for the credential now configured*.
+
+    Deliberately pure: a verdict from another account is reported as "not
+    known bad" rather than silently re-keying the cache on a read. The voice
+    then gets used, and if it is bad on this account too the live 64111 path
+    (`mark_voice_invalid`) re-establishes the verdict against the new
+    credential on the first call.
+    """
+    if _account_fingerprint(settings) != _cache_account:
+        return False
     return voice_id in _invalid_voice_ids
 
 
-def mark_voice_invalid(voice_id: str) -> None:
+def mark_voice_invalid(voice_id: str, settings: Any) -> None:
     """Runtime discovery that a voice is unusable (e.g. Twilio 64111 while
     synthesizing on ConversationRelay) — subsequent TwiML falls back to the
     Google voice until the configuration changes."""
+    _adopt_account(_account_fingerprint(settings))
     _invalid_voice_ids.add(voice_id)
     _verified_voice_ids.discard(voice_id)
 
 
 def _reset_validation_cache_for_tests() -> None:
+    global _cache_account  # noqa: PLW0603
     _invalid_voice_ids.clear()
     _verified_voice_ids.clear()
+    _cache_account = ""
 
 
 def configured_voice_ids(settings: Any) -> set[str]:
@@ -226,6 +278,9 @@ def validate_configured_voices(settings: Any) -> dict[str, str]:
     ids = configured_voice_ids(settings)
     if not api_key or not ids:
         return {}
+
+    # Verdicts are per-account: a rotated key invalidates every one of them.
+    _adopt_account(_account_fingerprint(settings))
 
     problems: dict[str, str] = {}
     for voice_id in sorted(ids - _verified_voice_ids - _invalid_voice_ids):

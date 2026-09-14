@@ -168,6 +168,93 @@ class TestBargeIn:
         assert engine.interrupts.get("CA_stream", 0) >= 1
         await channel.stop()
 
+    async def _stall_a_turn(self, channel, engine, agent):
+        """Leave a streamed turn mid-generation, one sentence already spoken."""
+        agent.pause_after = 1
+        old_turn = asyncio.create_task(engine.on_speech_input("CA_stream", "Erste Frage?"))
+        await asyncio.wait_for(agent.paused.wait(), timeout=2)
+        assert engine.spoken["CA_stream"] == ["Der erste Satz der alten Antwort."]
+        return old_turn
+
+    async def test_gate_reask_interrupts_the_prior_turn(self):
+        """The confirmation gate speaks its re-ask and returns `handled`, which
+        used to skip the barge-in block entirely — the old turn kept streaming
+        underneath the re-ask."""
+        from pincer.voice.in_call_tools import CallerVerdict
+
+        slow_script = text_chunks("Der erste Satz der alten Antwort. ", "Dieser Satz darf niemals gesprochen werden.")
+        channel, engine, agent, _state = await _start([slow_script])
+        old_turn = await self._stall_a_turn(channel, engine, agent)
+
+        class ReaskingGate:
+            def begin_turn(self): ...
+
+            async def handle_caller_utterance(self, text):
+                await engine.send_speech("CA_stream", "Soll ich das wirklich buchen?")
+                return CallerVerdict(status="unclear", handled=True)
+
+        channel._tool_gates["CA_stream"] = ReaskingGate()
+
+        await asyncio.wait_for(engine.on_speech_input("CA_stream", "Moment!"), timeout=2)
+        await asyncio.wait_for(old_turn, timeout=2)
+
+        assert engine.interrupts.get("CA_stream", 0) >= 1, "the re-ask must silence the prior turn first"
+        spoken = engine.spoken["CA_stream"]
+        assert "Dieser Satz darf niemals gesprochen werden." not in spoken
+        assert spoken[-1] == "Soll ich das wirklich buchen?"
+        await channel.stop()
+
+    async def test_handled_receptionist_turn_interrupts_the_prior_turn(self):
+        from pincer.voice.receptionist.session import TurnPlan
+
+        slow_script = text_chunks("Der erste Satz der alten Antwort. ", "Dieser Satz darf niemals gesprochen werden.")
+        channel, engine, agent, _state = await _start([slow_script])
+        old_turn = await self._stall_a_turn(channel, engine, agent)
+
+        class HandlingSession:
+            async def on_caller_utterance(self, text):
+                await engine.send_speech("CA_stream", "Ich notiere das für Sie.")
+                return TurnPlan(handled=True)
+
+        channel._reception_sessions["CA_stream"] = HandlingSession()
+
+        await asyncio.wait_for(engine.on_speech_input("CA_stream", "Moment!"), timeout=2)
+        await asyncio.wait_for(old_turn, timeout=2)
+
+        assert engine.interrupts.get("CA_stream", 0) >= 1
+        spoken = engine.spoken["CA_stream"]
+        assert "Dieser Satz darf niemals gesprochen werden." not in spoken
+        assert spoken[-1] == "Ich notiere das für Sie."
+        await channel.stop()
+
+    async def test_mutual_goodbye_interrupts_the_prior_turn(self):
+        """A farewell hangs up and returns before the old block was reached."""
+        slow_script = text_chunks("Der erste Satz der alten Antwort. ", "Dieser Satz darf niemals gesprochen werden.")
+        channel, engine, agent, _state = await _start([slow_script])
+        old_turn = await self._stall_a_turn(channel, engine, agent)
+
+        # The agent is treated as having already said goodbye, so the caller's
+        # farewell is the mutual one that ends the call immediately.
+        channel._transcripts["CA_stream"].log_utterance(Speaker.AGENT, "Auf Wiederhören.", state="wrapup")
+
+        await asyncio.wait_for(engine.on_speech_input("CA_stream", "Tschüss!"), timeout=2)
+        await asyncio.wait_for(old_turn, timeout=2)
+
+        assert engine.interrupts.get("CA_stream", 0) >= 1
+        assert "Dieser Satz darf niemals gesprochen werden." not in engine.spoken["CA_stream"]
+        await channel.stop()
+
+    async def test_no_interrupt_when_no_turn_is_in_flight(self):
+        """Cancelling unconditionally must not fabricate an interruption —
+        the analytics count barge-ins from these calls."""
+        script = text_chunks("Gerne, das mache ich sofort. ", "Welche Uhrzeit passt Ihnen?")
+        channel, engine, agent, _state = await _start([script])
+
+        await asyncio.wait_for(engine.on_speech_input("CA_stream", "Bitte einen Termin."), timeout=2)
+
+        assert engine.interrupts.get("CA_stream", 0) == 0
+        await channel.stop()
+
 
 class TestGuardsUnderStreaming:
     async def test_drift_first_sentence_buffers_and_regenerates(self):
