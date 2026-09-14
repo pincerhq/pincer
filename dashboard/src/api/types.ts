@@ -433,3 +433,281 @@ export interface VoiceCallSummary {
   failure_description: string
   cost_usd: number | null
 }
+
+// ── Telephony telemetry ──────────────────────────────────────────────
+//
+// Mirrors `pincer/voice/telemetry`. Nullable numbers are everywhere on purpose:
+// a stage that did not happen, or that the engine cannot observe, is `null` —
+// never 0. The UI must render `null` as "not measured" / "Unavailable".
+
+export interface TelephonyMetricDefinition {
+  key: string
+  label: string
+  start_event: string
+  end_event: string
+  source: "server_measured" | "provider_reported" | "estimated" | "unavailable"
+  unit: string
+  available_on: string[]
+  limitations: string
+  unavailable_reason: string
+}
+
+export interface TelephonyExportStats {
+  queued: number
+  exported: number
+  dropped_queue_full: number
+  dropped_not_started: number
+  export_failures: number
+  last_error: string
+  last_export_utc: string
+  queue_depth: number
+  queue_capacity: number
+  running: boolean
+}
+
+export interface TelephonyHealth {
+  enabled: boolean
+  sample_rate: number
+  active_calls_traced: number
+  coverage: number
+  healthy: boolean
+  export: TelephonyExportStats
+}
+
+export interface LatencySummary {
+  count: number
+  p50: number | null
+  p95: number | null
+  p99: number | null
+  min: number | null
+  max: number | null
+  mean: number | null
+  sufficient_samples: boolean
+  min_samples: number
+}
+
+export interface HistogramBucket {
+  lower_ms: number
+  upper_ms: number | null
+  count: number
+}
+
+export interface RateValue {
+  /** null when the denominator is 0 — "no calls" is not "0%". */
+  value: number | null
+  numerator: number
+  denominator: number
+}
+
+export interface TelephonyCall {
+  call_id: string
+  provider_call_id: string
+  trace_id: string
+  direction: string
+  provider: string
+  engine: string
+  transport: string
+  codec: string
+  sample_rate: number
+  model: string
+  language: string
+  tenant_id: string
+  environment: string
+  app_version: string
+  from_number_masked: string
+  to_number_masked: string
+  registered_at: string | null
+  dialed_at: string | null
+  answered_at: string | null
+  media_open_at: string | null
+  ended_at: string | null
+  status: string
+  outcome: string
+  failure_category: string
+  termination_reason: string
+  failure_code: string
+  duration_ms: number | null
+  setup_ms: number | null
+  media_establish_ms: number | null
+  turn_count: number
+  tool_count: number
+  error_count: number
+  timeout_count: number
+  retry_count: number
+  interruption_count: number
+  reconnect_count: number
+  sampled: boolean
+  sample_rate_used: number
+  coverage: string
+  config: Record<string, unknown>
+}
+
+export interface CriticalPathSegment {
+  stage: string
+  start_offset_ms: number
+  duration_ms: number
+  span_id: string
+  label: string
+  status: string
+}
+
+export interface CriticalPath {
+  total_ms: number
+  segments: CriticalPathSegment[]
+  bottleneck_stage: string
+  bottleneck_ms: number
+  unattributed_ms: number
+}
+
+export interface TelephonyTurn {
+  turn_id: string
+  call_id: string
+  turn_no: number
+  trigger: string
+  started_at: string | null
+  first_audio_at: string | null
+  engine: string
+  model: string
+  language: string
+  streamed: number
+  response_latency_ms: number | null
+  response_latency_source: string
+  endpointing_ms: number | null
+  stt_first_partial_ms: number | null
+  stt_final_ms: number | null
+  agent_queue_ms: number | null
+  agent_prep_ms: number | null
+  llm_ttft_ms: number | null
+  llm_total_ms: number | null
+  tool_total_ms: number | null
+  tts_first_audio_ms: number | null
+  tts_total_ms: number | null
+  audio_queue_ms: number | null
+  total_ms: number | null
+  tool_calls: number
+  tool_retries: number
+  tool_timeouts: number
+  interrupted: boolean
+  cancelled: boolean
+  error: string
+  bottleneck_stage: string
+  bottleneck_ms: number | null
+  critical_path: CriticalPath | Record<string, never>
+  complete: boolean
+  created_at: string
+  provider_call_id?: string
+}
+
+export interface TelephonyEvent {
+  event_id: string
+  call_id: string
+  provider_call_id: string
+  trace_id: string
+  span_id: string
+  turn_id: string
+  name: string
+  ts_utc: string
+  seq: number
+  attributes: Record<string, unknown>
+}
+
+export interface TelephonySpan {
+  span_id: string
+  parent_span_id: string
+  call_id: string
+  trace_id: string
+  turn_id: string
+  name: string
+  start_utc: string
+  end_utc: string | null
+  duration_ms: number | null
+  status: string
+  attempt: number
+  attributes: Record<string, unknown>
+  start_offset_ms: number
+  end_offset_ms: number | null
+  open: boolean
+}
+
+export interface TelephonyOverview {
+  calls: {
+    total: number
+    attempted: number
+    declined_by_policy: number
+    connected: number
+    completed: number
+    technical_failures: number
+    active: number
+    duration_distribution: HistogramBucket[]
+    duration_summary: LatencySummary
+    turn_count_distribution: HistogramBucket[]
+    turn_count_summary: LatencySummary
+  }
+  rates: Record<string, RateValue>
+  stages: Record<string, LatencySummary>
+  distributions: Record<string, HistogramBucket[]>
+  comparisons: Record<string, Array<{ key: string } & LatencySummary>>
+  reliability: Record<string, number>
+  coverage: {
+    calls: number
+    calls_with_telemetry: number
+    calls_partial: number
+    turns: number
+    turns_incomplete: number
+    turns_without_response_latency: number
+    sample_rates_seen: number[]
+    note: string
+    telemetry_tables?: boolean
+  }
+  trend: Array<{ bucket_start: string; turns: number } & LatencySummary>
+  unavailable: Array<TelephonyMetricDefinition & { engines: string[] }>
+  denominators: Record<string, string>
+  window_hours: number
+  telemetry: TelephonyHealth
+}
+
+export interface TelephonyCallList {
+  total: number
+  limit: number
+  offset: number
+  calls: TelephonyCall[]
+}
+
+export interface TelephonyCallDetail {
+  call: TelephonyCall
+  turns: TelephonyTurn[]
+  metrics: TelephonyMetricDefinition[]
+  unavailable: TelephonyMetricDefinition[]
+  telemetry_gaps: string[]
+}
+
+export interface TelephonyAlert {
+  rule: string
+  title: string
+  severity: "page" | "notify" | "info"
+  firing: boolean
+  value: number | null
+  threshold: number
+  window_min: number
+  samples: number
+  min_samples: number
+  insufficient_data: boolean
+  reason: string
+  dashboard_filter: string
+  evidence: string[]
+  detail: string
+}
+
+export interface TelephonyFilters {
+  hours: number
+  environment?: string
+  app_version?: string
+  direction?: string
+  provider?: string
+  engine?: string
+  model?: string
+  language?: string
+  status?: string
+  failure_category?: string
+  search?: string
+}

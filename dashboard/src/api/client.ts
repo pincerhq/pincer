@@ -27,6 +27,15 @@ import type {
   CanaryTriggerResult,
   VoiceCallSummary,
   VoiceActiveCall,
+  TelephonyOverview,
+  TelephonyCallList,
+  TelephonyCallDetail,
+  TelephonyEvent,
+  TelephonySpan,
+  TelephonyTurn,
+  TelephonyAlert,
+  TelephonyHealth,
+  TelephonyMetricDefinition,
 } from "./types"
 
 function getStoredAuth(): { token?: string; apiUrl?: string } | null {
@@ -166,4 +175,22 @@ export const pincer = {
   voiceActive: () => api().get("api/voice/active").json<VoiceActiveCall[]>(),
   /** Places a REAL phone call to PINCER_VOICE_CANARY_NUMBER. */
   triggerCanary: () => api().post("api/ops/canary").json<CanaryTriggerResult>(),
+
+  // ── Telephony telemetry ──
+  telephonyOverview: (params: Record<string, string>) =>
+    api().get(`api/telephony/overview?${new URLSearchParams(params)}`).json<TelephonyOverview>(),
+  telephonyCalls: (params: Record<string, string>) =>
+    api().get(`api/telephony/calls?${new URLSearchParams(params)}`).json<TelephonyCallList>(),
+  telephonyCall: (ref: string) =>
+    api().get(`api/telephony/calls/${encodeURIComponent(ref)}`).json<TelephonyCallDetail>(),
+  telephonyCallEvents: (ref: string) =>
+    api().get(`api/telephony/calls/${encodeURIComponent(ref)}/events`).json<TelephonyEvent[]>(),
+  telephonyCallSpans: (ref: string) =>
+    api().get(`api/telephony/calls/${encodeURIComponent(ref)}/spans`).json<TelephonySpan[]>(),
+  telephonySlowestTurns: (params: Record<string, string>) =>
+    api().get(`api/telephony/turns/slowest?${new URLSearchParams(params)}`).json<TelephonyTurn[]>(),
+  telephonyAlerts: () => api().get("api/telephony/alerts").json<TelephonyAlert[]>(),
+  telephonyHealth: () => api().get("api/telephony/health").json<TelephonyHealth>(),
+  telephonyMetricDefinitions: () =>
+    api().get("api/telephony/metrics").json<TelephonyMetricDefinition[]>(),
 }

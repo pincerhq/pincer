@@ -148,10 +148,63 @@ async def purge_expired_voice_data(
     return deleted
 
 
+#: Telephony telemetry is TECHNICAL data — stage timings, span names, failure
+#: codes, masked numbers. It carries no transcript and no audio, so it keeps its
+#: own window (`PINCER_TELEPHONY_TELEMETRY_RETENTION_DAYS`) rather than the
+#: transcript's. Diagnosing a latency regression needs weeks of history;
+#: keeping what was *said* that long would not be justifiable.
+TELEMETRY_TABLES: dict[str, str] = {
+    "telephony_events": "ts_utc",
+    "telephony_spans": "start_utc",
+    "telephony_turns": "created_at",
+    "telephony_calls": "registered_at",
+}
+
+
+async def purge_expired_telemetry(
+    db_path: str | Path,
+    retention_days: int,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """Delete telephony telemetry older than its own window.
+
+    Child rows go before the call row, so an interrupted purge leaves orphaned
+    events rather than a call whose detail pages are empty.
+    """
+    if retention_days <= 0:
+        return {}
+    cutoff = ((now or datetime.now(UTC)) - timedelta(days=retention_days)).isoformat()
+    deleted: dict[str, int] = {}
+    async with aiosqlite.connect(str(db_path)) as db:
+        for table, ts_column in TELEMETRY_TABLES.items():
+            exists = await db.execute_fetchall(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            )
+            if not exists:
+                continue
+            cursor = await db.execute(
+                f"DELETE FROM {table} WHERE {ts_column} < ?",  # noqa: S608 - identifiers from module constant
+                (cutoff,),
+            )
+            if cursor.rowcount > 0:
+                deleted[table] = cursor.rowcount
+        await db.commit()
+    if deleted:
+        logger.info("Telephony telemetry purge (cutoff=%s): %s", cutoff, deleted)
+    return deleted
+
+
 async def run_retention_purge(settings: Settings) -> dict[str, int]:
     """Run the purge against the configured DB and audit any deletions."""
     retention_days = settings.voice_transcript_retention_days
     deleted = await purge_expired_voice_data(settings.db_path, retention_days)
+    deleted.update(
+        await purge_expired_telemetry(
+            settings.db_path,
+            int(getattr(settings, "telephony_telemetry_retention_days", 30) or 0),
+        )
+    )
 
     if deleted:
         from pincer.security.audit import AuditAction, AuditEntry, get_audit_logger

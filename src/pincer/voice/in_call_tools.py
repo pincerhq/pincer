@@ -52,6 +52,45 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _open_approval_span(tool_name: str) -> Any:
+    """Span for a dashboard approval hold, or None outside a traced turn."""
+    from pincer.voice.telemetry.schema import SpanName
+    from pincer.voice.telemetry.tracer import current_turn_tracer
+
+    trace = current_turn_tracer()
+    if trace is None:
+        return None
+    try:
+        return trace.open_span(SpanName.APPROVAL, tool=tool_name)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("approval span failed", exc_info=True)
+        return None
+
+
+def _trace_tool_timeout(tool_name: str, limit_s: float) -> None:
+    """A tool that ran out of time is an OUTCOME, not an error — it is counted
+    separately so "the calendar is slow" never reads as "the calendar broke"."""
+    from pincer.voice.telemetry.schema import EventName
+    from pincer.voice.telemetry.tracer import current_turn_tracer
+
+    trace = current_turn_tracer()
+    if trace is None:
+        return
+    try:
+        trace.bump("tool_timeouts")
+        trace.call.timeout("tool", limit_s=limit_s, tool=tool_name)
+        trace.call.event(
+            EventName.TOOL_END,
+            turn_id=trace.turn.turn_id,
+            span_id=trace.span_id,
+            tool=tool_name,
+            outcome="timeout",
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("tool timeout trace failed", exc_info=True)
+
+
 # §6.3: while the initiating user is deciding, the callee hears this every N s.
 HOLD_REASSURE_INTERVAL_S = 8.0
 
@@ -333,6 +372,7 @@ class InCallToolGate:
             content, is_error = await asyncio.wait_for(execute(), timeout=timeout)
         except TimeoutError:
             logger.warning("In-call tool %s timed out after %.0fs [%s]", tool_name, timeout, self.call_sid)
+            _trace_tool_timeout(tool_name, timeout)
             return await self._defer(tool_name, args, decision, tool_policy.REASON_TOOL_TIMEOUT, approval_mode)
         except asyncio.CancelledError:
             raise
@@ -560,6 +600,11 @@ class InCallToolGate:
         await self.speak(self.prompt("TOOL_HOLD"))
         self.suppress_llm_speech = True
 
+        # The hold is wall-clock inside the turn, but it is a human waiting on a
+        # dashboard card — not latency anything can optimise. Its own span keeps
+        # it out of the LLM and tool numbers while still explaining a 20 s turn.
+        approval_span = _open_approval_span(tool_name)
+
         req = await approvals.request(
             call_sid=self.call_sid,
             tool_name=tool_name,
@@ -593,6 +638,8 @@ class InCallToolGate:
                 outcome = approvals.APPROVED if approved else (req.final_state or approvals.DENIED)
                 break
         self._approval_request = None
+        if approval_span is not None:
+            approval_span.close(outcome=str(outcome))
 
         if outcome == approvals.APPROVED:
             await approvals.finalize(req, approvals.APPROVED)

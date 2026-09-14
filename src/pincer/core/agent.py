@@ -958,6 +958,18 @@ class Agent:
             # memory search, prompt assembly) vs. actual provider TTFT.
             timings["prep_ms"] = (time.monotonic() - turn_started) * 1000.0
 
+        # Telephony telemetry. The turn tracer travels on a contextvar (bound by
+        # the voice channel), so this stays a no-op for every non-voice caller
+        # and the agent keeps no dependency on the voice subsystem's objects.
+        from pincer.voice.telemetry.schema import EventName as _TelemetryEvent
+        from pincer.voice.telemetry.schema import SpanName as _TelemetrySpan
+        from pincer.voice.telemetry.schema import SpanStatus as _SpanStatus
+        from pincer.voice.telemetry.tracer import current_turn_tracer
+
+        turn_trace = current_turn_tracer()
+        if turn_trace is not None:
+            turn_trace.stamp(_TelemetryEvent.AGENT_PREP_DONE)
+
         full_text = ""
         consecutive_errors = 0
         sanitize_attempts = 0
@@ -969,6 +981,18 @@ class Agent:
                 await self._sessions._persist(session)  # noqa: SLF001
 
             response: LLMResponse | None = None
+            llm_span = (
+                turn_trace.open_span(
+                    _TelemetrySpan.LLM,
+                    attempt=_iteration + 1,
+                    model=voice_model or "",
+                    provider=getattr(voice_llm, "name", ""),
+                )
+                if turn_trace is not None
+                else None
+            )
+            if turn_trace is not None:
+                turn_trace.stamp(_TelemetryEvent.LLM_REQUEST, model=voice_model or "", iteration=_iteration + 1)
             try:
                 async for event in voice_llm.stream_turn(
                     messages=session.messages,
@@ -980,19 +1004,30 @@ class Agent:
                     if event.response is not None:
                         response = event.response
                     elif event.text:
+                        if turn_trace is not None:
+                            turn_trace.stamp(_TelemetryEvent.LLM_FIRST_TOKEN)
                         full_text += event.text
                         yield StreamChunk(StreamEventType.TEXT, event.text)
             except BudgetExceededError:
+                if llm_span is not None:
+                    llm_span.close(_SpanStatus.DENIED, reason="budget")
                 budget_note = f"Warning: Daily budget limit reached. Limit: ${self._settings.daily_budget_usd:.2f}."
                 yield StreamChunk(StreamEventType.DONE, full_text or budget_note)
                 return
             except LLMError as e:
+                if llm_span is not None:
+                    llm_span.close(_SpanStatus.ERROR, error=type(e).__name__)
                 if "tool_use" in str(e) and "tool_result" in str(e) and sanitize_attempts < _MAX_SANITIZE_ATTEMPTS:
                     sanitize_attempts += 1
                     session.messages = _sanitize_tool_pairs(session.messages)
                     await self._sessions._persist(session)  # noqa: SLF001
                     continue
                 raise
+            if llm_span is not None:
+                llm_span.close(
+                    output_tokens=getattr(response, "output_tokens", 0) if response else 0,
+                    model=getattr(response, "model", "") if response else "",
+                )
             if response is None:  # provider stream ended without a final event
                 raise LLMError("stream_turn ended without a final response")
 
@@ -1031,7 +1066,39 @@ class Agent:
             iteration_had_error = False
             for tool_call in response.tool_calls:
                 yield StreamChunk(StreamEventType.TOOL_START, tool_call.name)
+                tool_span = (
+                    turn_trace.open_span(
+                        _TelemetrySpan.TOOL,
+                        tool=tool_call.name,
+                        iteration=_iteration + 1,
+                        provider_request_id=getattr(tool_call, "id", "") or "",
+                    )
+                    if turn_trace is not None
+                    else None
+                )
+                if turn_trace is not None:
+                    # An EVENT per tool, not a turn stamp: a stamp records only
+                    # the first occurrence, which would hide every tool after
+                    # the first in a turn that called several.
+                    turn_trace.call.event(
+                        _TelemetryEvent.TOOL_START,
+                        turn_id=turn_trace.turn.turn_id,
+                        span_id=turn_trace.span_id,
+                        tool=tool_call.name,
+                        iteration=_iteration + 1,
+                    )
+                    turn_trace.bump("tool_calls")
                 result = await self._execute_call_tool(tool_call, user_id, channel, channel_user_id, call_gate)
+                if tool_span is not None:
+                    tool_span.close(_SpanStatus.ERROR if result.is_error else _SpanStatus.OK)
+                if turn_trace is not None:
+                    turn_trace.call.event(
+                        _TelemetryEvent.TOOL_END,
+                        turn_id=turn_trace.turn.turn_id,
+                        span_id=turn_trace.span_id,
+                        tool=tool_call.name,
+                        error=bool(result.is_error),
+                    )
                 await self._sessions.add_message(
                     session,
                     LLMMessage(role=MessageRole.TOOL_RESULT, content=result.content, tool_call_id=result.tool_call_id),
@@ -1048,6 +1115,8 @@ class Agent:
             else:
                 consecutive_errors = 0
 
+        if turn_trace is not None:
+            turn_trace.stamp(_TelemetryEvent.LLM_DONE, characters=len(full_text))
         if full_text:
             await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=full_text))
         yield StreamChunk(StreamEventType.DONE, full_text)

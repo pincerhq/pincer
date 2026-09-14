@@ -30,6 +30,12 @@ const SchedulesPage = lazy(() =>
 const VoiceOpsPage = lazy(() =>
   import("@/pages/VoiceOps").then((m) => ({ default: m.VoiceOpsPage })),
 )
+const TelephonyPage = lazy(() =>
+  import("@/pages/Telephony").then((m) => ({ default: m.TelephonyPage })),
+)
+const TelephonyCallPage = lazy(() =>
+  import("@/pages/TelephonyCall").then((m) => ({ default: m.TelephonyCallPage })),
+)
 const SkillsPage = lazy(() =>
   import("@/pages/Skills").then((m) => ({ default: m.SkillsPage })),
 )
@@ -120,6 +126,14 @@ export default function App() {
               <Route
                 path={ROUTES.VOICE_OPS}
                 element={<VoiceOpsPage />}
+              />
+              <Route
+                path={ROUTES.TELEPHONY}
+                element={<PageWrapper><TelephonyPage /></PageWrapper>}
+              />
+              <Route
+                path={ROUTES.TELEPHONY_CALL}
+                element={<PageWrapper><TelephonyCallPage /></PageWrapper>}
               />
               <Route
                 path={ROUTES.SKILLS}

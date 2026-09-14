@@ -939,6 +939,6 @@ def test_full_pre_alembic_runtime_voice_db_upgrades_to_head(tmp_path: Path) -> N
         assert {"do_not_call", "outbound_call_log"} <= _tables(db_path)
 
         # The database is genuinely at head, not merely stamped.
-        assert con.execute("SELECT version_num FROM alembic_version").fetchone() == ("0009",)
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone() == ("0010",)
     finally:
         con.close()

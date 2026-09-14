@@ -47,6 +47,8 @@ nav:
     - Pilot onboarding: operations/pilot-onboarding.md
     - Pilot expectations: operations/pilot-expectations.md
     - Pilot feedback template: operations/pilot-feedback.md
+    - Telephony pipeline analysis: operations/telephony-pipeline.md
+    - Telephony telemetry & diagnosis: operations/telephony-telemetry.md
     - GA gate: operations/ga-gate.md
     - Post-GA backlog: operations/post-ga-backlog.md
   - Contribute:
