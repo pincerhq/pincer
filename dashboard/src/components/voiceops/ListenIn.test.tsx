@@ -26,7 +26,10 @@ class FakeWS {
   onclose: ((ev: { code?: number }) => void) | null = null
   onerror: ((ev: unknown) => void) | null = null
   closed = false
-  constructor(readonly url: string) {
+  readonly url: string
+
+  constructor(url: string) {
+    this.url = url
     FakeWS.instances.push(this)
   }
   close() {

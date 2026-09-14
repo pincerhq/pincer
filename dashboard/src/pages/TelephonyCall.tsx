@@ -5,9 +5,10 @@ import { PageContainer } from "@/components/layout/PageContainer"
 import { Skeleton } from "@/components/ui/skeleton"
 import { CallHeader } from "@/components/telephony/CallHeader"
 import { EventTimeline } from "@/components/telephony/EventTimeline"
-import { Panel, Ms, stageLabel } from "@/components/telephony/shared"
+import { ExportMenu } from "@/components/telephony/ExportMenu"
+import { InfoHint } from "@/components/telephony/InfoHint"
+import { Block, Ms, stageLabel } from "@/components/telephony/shared"
 import { TurnBreakdown } from "@/components/telephony/TurnBreakdown"
-import { UnavailablePanel } from "@/components/telephony/UnavailablePanel"
 import { Waterfall } from "@/components/telephony/Waterfall"
 import {
   useTelephonyCall,
@@ -15,14 +16,16 @@ import {
   useTelephonyCallSpans,
   useTelephonyMetricDefinitions,
 } from "@/api/hooks/useTelephony"
+import { downloadJson } from "@/lib/download"
 import { ROUTES } from "@/lib/constants"
 import type { TelephonySpan } from "@/api/types"
 
 /**
  * One call, in full.
  *
- * The order is the order an engineer works in: what the call was → what went
- * wrong → which turn was slow → which spans explain that turn → the raw events.
+ * Ordered the way an engineer works: what the call was → which turn was slow →
+ * which spans explain that turn → the raw events. Explanations are folded behind
+ * "i" icons so the page reads as data rather than as documentation.
  */
 export function TelephonyCallPage() {
   const { callRef } = useParams<{ callRef: string }>()
@@ -55,36 +58,69 @@ export function TelephonyCallPage() {
     .sort((a, b) => (b.response_latency_ms ?? 0) - (a.response_latency_ms ?? 0))
     .slice(0, 3)
 
+  const bundle = {
+    call,
+    turns,
+    events: events.data ?? [],
+    spans: spans.data ?? [],
+  }
+
   return (
     <PageContainer title={call.provider_call_id || call.call_id}>
-      <div className="space-y-5">
-        <Link
-          to={ROUTES.TELEPHONY}
-          className="inline-flex items-center gap-1.5 text-xs text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" /> All calls
-        </Link>
+      <div className="space-y-4">
+        <div className="flex items-center gap-3">
+          <Link
+            to={ROUTES.TELEPHONY}
+            className="inline-flex items-center gap-1.5 text-xs text-[var(--color-muted)] hover:text-[var(--color-foreground)]"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" /> All calls
+          </Link>
+          <div className="ml-auto flex items-center gap-1">
+            <InfoHint title="Exporting this call">
+              <p>
+                Downloads this call's metadata, turns, events and spans as one JSON bundle — the
+                shape to attach to a bug report.
+              </p>
+              <p>
+                It contains technical telemetry only: masked numbers, stage timings and span names.
+                Transcripts and recordings live behind their own permissions and are not part of it.
+              </p>
+            </InfoHint>
+            <button
+              onClick={() => downloadJson(`telephony-call-${call.provider_call_id || call.call_id}.json`, bundle)}
+              className="rounded-md px-2 py-1 text-[11px] text-[var(--color-muted)] hover:bg-white/[0.06] hover:text-[var(--color-foreground)]"
+            >
+              Export call bundle
+            </button>
+          </div>
+        </div>
 
         <CallHeader call={call} gaps={gaps} />
 
         {slowest.length > 0 && (
-          <Panel
+          <Block
             title="Slowest turns on this call"
-            subtitle="Bottleneck is the measured owner of the largest share of the response window."
+            info={
+              <p>
+                The bottleneck named here is the stage that <strong>measurably</strong> owned the
+                largest share of the response window — not the longest span, which in a streaming
+                turn is usually the LLM running underneath everything else.
+              </p>
+            }
           >
             <div className="flex flex-wrap gap-2">
               {slowest.map((turn) => (
                 <button
                   key={turn.turn_id}
                   onClick={() => setSelectedTurn(turn.turn_id)}
-                  className={`rounded-lg border px-3 py-2 text-left text-xs hover:bg-white/[0.04] ${
+                  className={`rounded-lg border px-3 py-2 text-left text-xs transition-colors hover:bg-white/[0.04] ${
                     selectedTurn === turn.turn_id
                       ? "border-[var(--color-accent)]/50 bg-white/[0.04]"
                       : "border-[var(--color-border)]"
                   }`}
                 >
                   <div className="font-medium">Turn {turn.turn_no}</div>
-                  <div className="tabular-nums">
+                  <div className="text-lg font-semibold tabular-nums">
                     <Ms value={turn.response_latency_ms} />
                   </div>
                   <div className="text-[10px] text-[var(--color-muted)]">
@@ -93,12 +129,43 @@ export function TelephonyCallPage() {
                 </button>
               ))}
             </div>
-          </Panel>
+          </Block>
         )}
 
-        <Panel
+        <Block
           title="Turn-by-turn latency"
-          subtitle="Open a turn for its stage durations and its critical path to the first response audio."
+          info={
+            <>
+              <p>Open a turn for its stage durations and its measured critical path.</p>
+              <p>
+                Stage durations overlap; only the critical path is a partition, and only it may be
+                read as "where the time went". Its segments sum to the response latency exactly.
+              </p>
+            </>
+          }
+          actions={
+            <ExportMenu
+              local={{
+                label: "This call's turns",
+                filename: `telephony-turns-${call.provider_call_id || call.call_id}`,
+                columns: [
+                  "turn_no",
+                  "response_latency_ms",
+                  "response_latency_source",
+                  "llm_ttft_ms",
+                  "llm_total_ms",
+                  "tool_total_ms",
+                  "tts_first_audio_ms",
+                  "bottleneck_stage",
+                  "bottleneck_ms",
+                  "tool_calls",
+                  "cancelled",
+                  "error",
+                ],
+                rows: turns as unknown as Array<Record<string, unknown>>,
+              }}
+            />
+          }
         >
           <TurnBreakdown
             turns={turns}
@@ -107,20 +174,47 @@ export function TelephonyCallPage() {
             onSelect={setSelectedTurn}
             engine={call.engine}
           />
-        </Panel>
+        </Block>
 
-        <Panel
-          title={selectedTurn ? "Waterfall — selected turn" : "Waterfall — whole call"}
-          subtitle="Concurrent and sequential spans as they actually ran."
-          action={
-            selectedTurn ? (
-              <button
-                onClick={() => setSelectedTurn("")}
-                className="rounded px-2 py-1 text-[11px] text-[var(--color-muted)] hover:bg-white/[0.06]"
-              >
-                Show whole call
-              </button>
-            ) : undefined
+        <Block
+          title={selectedTurn ? "Waterfall · selected turn" : "Waterfall · whole call"}
+          info={
+            <>
+              <p>
+                Spans as they actually ran. They overlap because the pipeline streams — an LLM span
+                running underneath a TTS span is the shape of a fast turn, not a bug.
+              </p>
+              <p>Durations here are not additive. Click a bar for its attributes.</p>
+            </>
+          }
+          actions={
+            <>
+              {selectedTurn && (
+                <button
+                  onClick={() => setSelectedTurn("")}
+                  className="rounded px-2 py-1 text-[11px] text-[var(--color-muted)] hover:bg-white/[0.06]"
+                >
+                  Whole call
+                </button>
+              )}
+              <ExportMenu
+                local={{
+                  label: "Spans",
+                  filename: `telephony-spans-${call.provider_call_id || call.call_id}`,
+                  columns: [
+                    "span_id",
+                    "turn_id",
+                    "name",
+                    "start_offset_ms",
+                    "end_offset_ms",
+                    "duration_ms",
+                    "status",
+                    "attempt",
+                  ],
+                  rows: (spans.data ?? []) as unknown as Array<Record<string, unknown>>,
+                }}
+              />
+            </>
           }
         >
           {spans.isLoading ? (
@@ -132,9 +226,7 @@ export function TelephonyCallPage() {
             <div className="mt-3 rounded-lg border border-[var(--color-border)] bg-white/[0.02] p-3 text-xs">
               <div className="flex items-center gap-2">
                 <span className="font-medium">{stageLabel(selectedSpan.name)}</span>
-                <span className="font-mono text-[10px] text-[var(--color-muted)]">
-                  {selectedSpan.span_id}
-                </span>
+                <span className="font-mono text-[10px] text-[var(--color-muted)]">{selectedSpan.span_id}</span>
                 <span className="ml-auto tabular-nums">
                   <Ms value={selectedSpan.duration_ms} />
                 </span>
@@ -154,25 +246,59 @@ export function TelephonyCallPage() {
               )}
             </div>
           )}
-        </Panel>
+        </Block>
 
-        <Panel
+        <Block
           title="Event timeline"
-          subtitle="Ordered by (UTC timestamp, per-call sequence) at read time, so late provider callbacks land in place."
+          info={
+            <>
+              <p>
+                Ordered by (UTC timestamp, per-call sequence) at read time, so a provider callback
+                that lands minutes after teardown still appears where it happened.
+              </p>
+              <p>
+                Duplicate provider callbacks collapse to one row — Twilio retries status callbacks
+                for minutes, and a retry is not a second event.
+              </p>
+            </>
+          }
+          actions={
+            <ExportMenu
+              local={{
+                label: "Events",
+                filename: `telephony-events-${call.provider_call_id || call.call_id}`,
+                columns: ["ts_utc", "seq", "name", "turn_id", "span_id"],
+                rows: (events.data ?? []) as unknown as Array<Record<string, unknown>>,
+              }}
+            />
+          }
         >
           {events.isLoading ? (
             <Skeleton className="h-64 rounded-lg" />
           ) : (
             <EventTimeline events={events.data ?? []} turnId={selectedTurn || undefined} />
           )}
-        </Panel>
+        </Block>
 
-        <Panel
-          title="Not measurable on this engine"
-          subtitle={`Engine: ${call.engine || "unknown"}`}
-        >
-          <UnavailablePanel metrics={unavailable} />
-        </Panel>
+        {unavailable.length > 0 && (
+          <div className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] px-3 py-2 text-[11px] text-[var(--color-muted)]">
+            <span>
+              {unavailable.length} metric{unavailable.length === 1 ? "" : "s"} cannot be measured on{" "}
+              <span className="font-mono">{call.engine || "this engine"}</span>
+            </span>
+            <InfoHint title="Not measurable on this engine" className="ml-auto">
+              <p>These are structural limits of the pipeline, not gaps in the data:</p>
+              <ul className="space-y-1">
+                {unavailable.map((metric) => (
+                  <li key={metric.key}>
+                    <span className="text-[var(--color-foreground)]">{metric.label}</span> —{" "}
+                    {metric.unavailable_reason}
+                  </li>
+                ))}
+              </ul>
+            </InfoHint>
+          </div>
+        )}
       </div>
     </PageContainer>
   )

@@ -1,5 +1,6 @@
 import type { LatencySummary } from "@/api/types"
 import { cn } from "@/lib/utils"
+import { InfoHint } from "./InfoHint"
 
 /**
  * A measured number and a missing one must never look alike.
@@ -125,27 +126,41 @@ export function SampleNote({ summary }: { summary: LatencySummary }) {
   return <span className="text-[11px] text-[var(--color-muted)]">n={summary.count}</span>
 }
 
-export function Panel({
+export function Block({
   title,
-  subtitle,
+  info,
+  actions,
   children,
-  action,
+  className,
+  dense = false,
 }: {
   title: string
-  subtitle?: string
+  /** The explanation, folded behind an "i". Never omitted, never shouted. */
+  info?: React.ReactNode
+  actions?: React.ReactNode
   children: React.ReactNode
-  action?: React.ReactNode
+  className?: string
+  dense?: boolean
 }) {
   return (
-    <section className="rounded-xl border border-[var(--color-border)] bg-white/[0.02] p-4">
-      <div className="mb-3 flex items-start gap-3">
-        <div>
-          <h2 className="text-sm font-medium">{title}</h2>
-          {subtitle && <p className="mt-0.5 text-[11px] text-[var(--color-muted)]">{subtitle}</p>}
-        </div>
-        {action && <div className="ml-auto">{action}</div>}
+    <section
+      className={cn(
+        "rounded-xl border border-[var(--color-border)] bg-white/[0.02]",
+        dense ? "p-3" : "p-4",
+        className,
+      )}
+    >
+      <div className="mb-3 flex items-center gap-1.5">
+        <h2 className="text-[13px] font-medium">{title}</h2>
+        {info && <InfoHint title={title}>{info}</InfoHint>}
+        {actions && <div className="ml-auto flex items-center gap-1">{actions}</div>}
       </div>
       {children}
     </section>
   )
+}
+
+/** A clickable series/segment legend entry. */
+export function LegendDot({ color }: { color: string }) {
+  return <span className="inline-block h-2 w-2 shrink-0 rounded-sm" style={{ backgroundColor: color }} />
 }

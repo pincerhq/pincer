@@ -343,6 +343,42 @@ async def slowest_turns(
     return out
 
 
+async def export_turns(
+    db_path: str | Path,
+    filters: CallFilters,
+    *,
+    scope: TenantScope | None = None,
+    limit: int = 50_000,
+) -> list[dict[str, Any]]:
+    """Every turn in the window, joined to its call's provider id.
+
+    For the download path: flat rows, no nested critical path (a JSON blob in a
+    CSV cell helps nobody — the per-call API serves the path when it is wanted).
+    """
+    where, params = filters.where()
+    if scope is not None:
+        where, params = scope.apply(where, params)
+    async with store.connect(db_path) as db:
+        if not await store.tables_present(db):
+            return []
+        rows = await _fetch(
+            db,
+            "SELECT t.*, c.provider_call_id AS provider_call_id FROM telephony_turns t "
+            f"JOIN telephony_calls c ON c.call_id = t.call_id WHERE {where} "  # noqa: S608
+            "ORDER BY t.created_at DESC LIMIT ?",
+            [*params, int(limit)],
+        )
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        data = {key: row[key] for key in row.keys()}  # noqa: SIM118 - aiosqlite.Row iterates values, not keys
+        data.pop("critical_path", None)
+        data["interrupted"] = bool(data.get("interrupted", 0))
+        data["cancelled"] = bool(data.get("cancelled", 0))
+        data["complete"] = bool(data.get("complete", 0))
+        out.append(data)
+    return out
+
+
 async def overview(
     db_path: str | Path,
     filters: CallFilters,

@@ -296,3 +296,70 @@ def test_numbers_are_masked_on_the_call_row(seeded):
     call = _client(seeded).get("/api/telephony/calls/CA_alpha").json()["call"]
     assert call["from_number_masked"].startswith("+49")
     assert call["from_number_masked"] != "+4915112345678"
+
+
+# ── export ───────────────────────────────────────────────────────────
+
+
+def test_csv_export_covers_the_whole_filter_not_just_the_page(seeded):
+    client = _client(seeded)
+    response = client.get("/api/telephony/export?dataset=calls&format=csv&hours=24&limit=1")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert "attachment" in response.headers["content-disposition"]
+    assert response.headers["X-Export-Truncated"] == "false"
+    assert int(response.headers["X-Export-Rows"]) == 2
+
+    lines = response.text.strip().splitlines()
+    assert lines[0].startswith("call_id,provider_call_id,trace_id")
+    assert len(lines) == 3  # header + both calls, despite the page-size hint
+    assert "CA_alpha" in response.text and "CA_beta" in response.text
+
+
+def test_export_respects_the_active_filters(seeded):
+    response = _client(seeded).get("/api/telephony/export?dataset=calls&format=csv&hours=24&engine=media_streams")
+    assert "CA_alpha" in response.text
+    assert "CA_beta" not in response.text
+
+
+def test_export_is_tenant_scoped_like_every_other_read(seeded):
+    response = _client(seeded, tenants=["tenant-a"]).get("/api/telephony/export?dataset=calls&format=csv&hours=24")
+    assert "CA_alpha" in response.text
+    assert "CA_beta" not in response.text
+
+
+def test_turn_export_is_flat_and_drops_the_nested_path(seeded):
+    """A JSON blob in a CSV cell helps nobody."""
+    response = _client(seeded).get("/api/telephony/export?dataset=turns&format=csv&hours=24")
+    header = response.text.splitlines()[0]
+    assert "response_latency_ms" in header
+    assert "bottleneck_stage" in header
+    assert "critical_path" not in header
+
+
+def test_json_export_declares_whether_it_was_capped(seeded):
+    payload = _client(seeded).get("/api/telephony/export?dataset=stages&format=json&hours=24").json()
+    assert payload["dataset"] == "stages"
+    assert payload["truncated"] is False
+    stages = {row["stage"] for row in payload["rows"]}
+    assert "response_latency_ms" in stages
+    assert all("samples" in row for row in payload["rows"])
+
+
+def test_export_never_carries_conversation_content(seeded):
+    """The column list is the review point for what leaves the system."""
+    from pincer.api.telephony import EXPORT_COLUMNS
+
+    forbidden = {"text", "transcript", "utterance", "prompt", "content", "audio", "args", "result", "recording_url"}
+    for dataset, columns in EXPORT_COLUMNS.items():
+        assert not (set(columns) & forbidden), dataset
+        if dataset == "calls":
+            assert "from_number_masked" in columns
+            assert "from_number" not in columns
+
+    body = _client(seeded).get("/api/telephony/export?dataset=calls&format=csv&hours=24").text
+    assert "+4915112345678" not in body
+
+
+def test_an_unknown_dataset_is_rejected(seeded):
+    assert _client(seeded).get("/api/telephony/export?dataset=secrets&format=csv").status_code == 422

@@ -127,6 +127,15 @@ def start_call(
     if existing is not None:
         return existing
     try:
+        if engine and not transport:
+            # Derived here rather than only in `hooks`, so a call registered
+            # through any path still reports its transport, codec and rate.
+            from pincer.voice.telemetry.hooks import transport_facts
+
+            facts = transport_facts(engine)
+            transport = str(facts["transport"])
+            codec = codec or str(facts["codec"])
+            sample_rate_hz = sample_rate_hz or int(facts["sample_rate_hz"])
         ctx = ctxmod.register_call(
             provider_call_id=provider_call_id,
             direction=direction,

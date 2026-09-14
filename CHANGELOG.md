@@ -88,6 +88,18 @@ in [`docs/operations/telephony-telemetry.md`](docs/operations/telephony-telemetr
   alert links to the filtered dashboard and the calls that caused it.
 - **`pincer telephony`** — `baseline` (observed percentiles plus the alert
   thresholds they suggest), `call <sid>` (turn breakdown), `alerts`, `health`.
+- **Interactive BI layout** — the Telephony page is drill-in blocks rather than a
+  report: KPI tiles, the outcome donut and the comparison bars are all filters,
+  applied filters appear as removable chips, percentile series toggle on the
+  latency chart, and clicking a stage drives its distribution. Every definition,
+  denominator, limitation and caveat is folded behind an "i" popover so the
+  numbers stay readable — nothing was deleted, only unstacked.
+- **Data export** — `GET /api/telephony/export` serves calls, turns or stage
+  percentiles as CSV or JSON for the *whole* current filter (not the page on
+  screen), with the row cap declared in the filename and response headers.
+  Chart series export locally; a call detail page exports its whole bundle
+  (metadata + turns + events + spans) as one JSON attachment. Export columns are
+  an explicit allowlist, which is the review point for what leaves the system.
 - **Sampling and retention** — `PINCER_TELEPHONY_TELEMETRY_SAMPLE_RATE` is
   head-based and per call, so a sampled call is complete; lifecycle events are
   recorded for *every* call regardless, which keeps a failed call diagnosable
@@ -104,6 +116,12 @@ in [`docs/operations/telephony-telemetry.md`](docs/operations/telephony-telemetr
 - **An unclosed `aiosqlite` connection could stop the process from exiting.**
   Connection worker threads are marked daemon, so a leaked connection costs a
   thread rather than a hung shutdown.
+- **The dashboard's `type-check` script checked nothing.** The root `tsconfig.json`
+  is solution-style (`files: []` plus references), so `tsc --noEmit` against it
+  type-checked zero files and CI passed vacuously. It now targets
+  `tsconfig.app.json`, and the four pre-existing TypeScript parameter properties
+  this exposed (in `lib/listenIn*`, rejected by `erasableSyntaxOnly`) are
+  rewritten as explicit fields — `pnpm build` succeeds again.
 
 ### Added
 

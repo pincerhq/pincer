@@ -17,9 +17,11 @@ own (shorter) retention.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from pincer.config import get_settings_relaxed
@@ -292,6 +294,209 @@ async def alert_state(request: Request) -> list[dict[str, Any]]:
     settings = get_settings_relaxed()
     evaluated = await telephony_alerts.evaluate(_db_path(), settings)
     return [a.to_dict() for a in evaluated]
+
+
+# ── export ───────────────────────────────────────────────────────────
+
+#: Datasets that can be downloaded, and the columns each one exports. Explicit
+#: rather than "whatever the row has": an export is an interface, and a column
+#: appearing or vanishing because a query changed shape breaks whatever consumes
+#: it. Columns are also the review point for what leaves the system — note that
+#: only masked numbers are here, and no content column exists to add.
+EXPORT_COLUMNS: dict[str, tuple[str, ...]] = {
+    "calls": (
+        "call_id",
+        "provider_call_id",
+        "trace_id",
+        "direction",
+        "provider",
+        "engine",
+        "transport",
+        "codec",
+        "sample_rate",
+        "model",
+        "language",
+        "tenant_id",
+        "environment",
+        "app_version",
+        "from_number_masked",
+        "to_number_masked",
+        "registered_at",
+        "answered_at",
+        "ended_at",
+        "status",
+        "outcome",
+        "failure_category",
+        "failure_code",
+        "termination_reason",
+        "duration_ms",
+        "setup_ms",
+        "media_establish_ms",
+        "turn_count",
+        "tool_count",
+        "error_count",
+        "timeout_count",
+        "retry_count",
+        "interruption_count",
+        "reconnect_count",
+        "sampled",
+        "coverage",
+    ),
+    "turns": (
+        "turn_id",
+        "call_id",
+        "provider_call_id",
+        "turn_no",
+        "created_at",
+        "engine",
+        "model",
+        "language",
+        "response_latency_ms",
+        "response_latency_source",
+        "endpointing_ms",
+        "stt_first_partial_ms",
+        "stt_final_ms",
+        "agent_queue_ms",
+        "agent_prep_ms",
+        "llm_ttft_ms",
+        "llm_total_ms",
+        "tool_total_ms",
+        "tts_first_audio_ms",
+        "tts_total_ms",
+        "audio_queue_ms",
+        "total_ms",
+        "tool_calls",
+        "tool_retries",
+        "tool_timeouts",
+        "interrupted",
+        "cancelled",
+        "error",
+        "bottleneck_stage",
+        "bottleneck_ms",
+        "complete",
+    ),
+    "stages": ("stage", "p50_ms", "p95_ms", "p99_ms", "min_ms", "max_ms", "mean_ms", "samples", "sufficient_samples"),
+}
+
+#: A row cap, so a download cannot become a denial of service against the box
+#: serving live calls. Exceeding it is reported in the filename, not silently.
+EXPORT_ROW_LIMIT = 50_000
+
+
+def _csv(columns: tuple[str, ...], rows: list[dict[str, Any]]) -> str:
+    import csv
+    import io
+
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=list(columns), extrasaction="ignore", lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({column: _csv_value(row.get(column)) for column in columns})
+    return buffer.getvalue()
+
+
+def _csv_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return "" if value is None else value
+
+
+async def _export_rows(request: Request, dataset: str, filters: queries.CallFilters) -> list[dict[str, Any]]:
+    scope = _scope(request)
+    db = _db_path()
+    if dataset == "calls":
+        result = await queries.search_calls(db, filters, scope=scope, limit=EXPORT_ROW_LIMIT, offset=0)
+        return list(result["calls"])
+    if dataset == "turns":
+        return await queries.export_turns(db, filters, scope=scope, limit=EXPORT_ROW_LIMIT)
+    if dataset == "stages":
+        settings = get_settings_relaxed()
+        aggregate = await queries.overview(
+            db, filters, scope=scope, min_samples=int(getattr(settings, "telephony_min_samples", 20) or 20)
+        )
+        return [
+            {
+                "stage": stage,
+                "p50_ms": summary["p50"],
+                "p95_ms": summary["p95"],
+                "p99_ms": summary["p99"],
+                "min_ms": summary["min"],
+                "max_ms": summary["max"],
+                "mean_ms": summary["mean"],
+                "samples": summary["count"],
+                "sufficient_samples": summary["sufficient_samples"],
+            }
+            for stage, summary in aggregate.stages.items()
+        ]
+    raise HTTPException(status_code=400, detail=f"Unknown dataset {dataset!r}")
+
+
+@router.get("/export")
+async def export_dataset(
+    request: Request,
+    dataset: str = Query(default="calls", pattern="^(calls|turns|stages)$"),
+    fmt: str = Query(default="csv", alias="format", pattern="^(csv|json)$"),
+    hours: float = Query(default=24.0, ge=0.1, le=8760.0),
+    environment: str = "",
+    app_version: str = "",
+    direction: str = "",
+    provider: str = "",
+    engine: str = "",
+    model: str = "",
+    language: str = "",
+    status: str = "",
+    failure_category: str = "",
+    failure_code: str = "",
+    search: str = "",
+) -> StreamingResponse:
+    """Download the CURRENT FILTER's data as CSV or JSON.
+
+    The whole filtered set, not the page on screen — an export that silently
+    stops at the pagination boundary is worse than no export, because the
+    spreadsheet it lands in looks complete.
+
+    Tenant scoping and the content policy apply exactly as they do to the
+    interactive endpoints: masked numbers only, and no transcript, audio, prompt
+    or tool payload exists in these tables to export.
+    """
+    import json as json_lib
+
+    filters = _filters(
+        request,
+        hours,
+        environment,
+        app_version,
+        direction,
+        provider,
+        engine,
+        model,
+        language,
+        status,
+        failure_category,
+        failure_code,
+        search,
+    )
+    rows = await _export_rows(request, dataset, filters)
+    truncated = len(rows) >= EXPORT_ROW_LIMIT
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    name = f"telephony-{dataset}-{stamp}{'-truncated' if truncated else ''}.{fmt}"
+
+    if fmt == "json":
+        body = json_lib.dumps({"dataset": dataset, "rows": rows, "truncated": truncated}, default=str, indent=2)
+        media_type = "application/json"
+    else:
+        body = _csv(EXPORT_COLUMNS[dataset], rows)
+        media_type = "text/csv"
+
+    return StreamingResponse(
+        iter([body]),
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}"',
+            "X-Export-Rows": str(len(rows)),
+            "X-Export-Truncated": "true" if truncated else "false",
+        },
+    )
 
 
 # ── per call ─────────────────────────────────────────────────────────

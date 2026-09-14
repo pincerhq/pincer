@@ -31,16 +31,22 @@ export function DistributionChart({
   const data = buckets
     .filter((b) => b.count > 0)
     .map((b) => ({
-      label: b.upper_ms === null ? `>${formatMs(b.lower_ms)}` : `≤${formatMs(b.upper_ms)}`,
+      label: b.upper_ms === null ? `>${formatMs(b.lower_ms)}` : formatMs(b.upper_ms),
+      range: b.upper_ms === null ? `above ${formatMs(b.lower_ms)}` : `${formatMs(b.lower_ms)} – ${formatMs(b.upper_ms)}`,
       count: b.count,
     }))
   return (
-    <ResponsiveContainer width="100%" height={200}>
-      <BarChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: 0 }}>
+    <ResponsiveContainer width="100%" height={216}>
+      <BarChart data={data} margin={{ top: 4, right: 8, bottom: 4, left: -8 }}>
         <CartesianGrid {...CHART_THEME.grid} vertical={false} />
-        <XAxis dataKey="label" {...CHART_THEME.axis} interval={0} angle={-35} textAnchor="end" height={54} />
-        <YAxis {...CHART_THEME.axis} allowDecimals={false} />
-        <Tooltip contentStyle={CHART_THEME.tooltip} cursor={{ fill: "rgba(255,255,255,0.04)" }} />
+        <XAxis dataKey="label" {...CHART_THEME.axis} minTickGap={8} tickMargin={6} />
+        <YAxis {...CHART_THEME.axis} allowDecimals={false} width={40} />
+        <Tooltip
+          contentStyle={CHART_THEME.tooltip}
+          cursor={{ fill: "rgba(255,255,255,0.04)" }}
+          labelFormatter={(_label, payload) => payload?.[0]?.payload?.range ?? ""}
+          formatter={(value) => [String(value), "turns"]}
+        />
         <Bar dataKey="count" fill={CHART_COLORS.secondary} radius={[3, 3, 0, 0]} />
       </BarChart>
     </ResponsiveContainer>
