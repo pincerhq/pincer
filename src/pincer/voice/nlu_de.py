@@ -168,7 +168,13 @@ def _parse_time(text: str) -> tuple[int, int, str] | None:
     # "um 14:30 (Uhr)" / "um 14.30"
     m = re.search(r"\bum\s+(\d{1,2})[:.](\d{2})(?:\s*uhr)?\b", text)
     if m:
-        return int(m.group(1)), int(m.group(2)), m.group(0)
+        hour, minute = int(m.group(1)), int(m.group(2))
+        # STT can transcribe a spoken "drei Uhr dreißig" as digits "3:30" just
+        # as easily as the word form below — the same 1-12 ambiguity applies,
+        # so the same heuristic has to run here too.
+        if hour <= 12:
+            hour = _apply_daytime_heuristic(hour, text)
+        return hour, minute, m.group(0)
 
     # "um 14 Uhr 30" / "um vierzehn Uhr dreißig" / "um 14 Uhr"
     m = re.search(rf"\bum\s+({_WORD_OR_DIGIT})\s+uhr(?:\s+({_minute_word_or_digit()}))?\b", text)
