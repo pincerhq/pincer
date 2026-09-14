@@ -20,6 +20,35 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _trace_phase(call_sid: str, from_phase: Any, to_phase: Any, reason: str, *, forced: bool = False) -> None:
+    """Put a phase transition on the call's telemetry timeline.
+
+    The call's LIFECYCLE is a state machine; the conversation pipeline is not.
+    Recording transitions as events keeps the two representations separate —
+    the timeline shows the states, the waterfall shows the overlapping work —
+    instead of flattening streaming stages into phases they do not correspond to.
+
+    Never raises: a telemetry failure must not break a state transition.
+    """
+    try:
+        from pincer.voice.telemetry import runtime as telemetry_runtime
+
+        tracer = telemetry_runtime.tracer_for(call_sid)
+        if tracer is None:
+            return
+        from pincer.voice.telemetry.schema import EventName
+
+        tracer.event(
+            EventName.CALL_PHASE,
+            from_phase=str(from_phase),
+            to_phase=str(to_phase),
+            reason=reason,
+            forced=forced,
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("phase transition trace failed", exc_info=True)
+
+
 class CallPhase(StrEnum):
     RINGING = "ringing"
     GREETING = "greeting"
@@ -300,6 +329,7 @@ class CallStateMachine:
         self._state.transitions.append(transition)
         self._state.phase = to_phase
         self._state.phase_entered_at = time.monotonic()
+        _trace_phase(self._state.call_sid, current, to_phase, reason)
 
         if to_phase != CallPhase.EXECUTE:
             self._state.pending_action = None
@@ -391,6 +421,7 @@ class CallStateMachine:
         self._state.phase = phase
         self._state.phase_entered_at = time.monotonic()
         self._state.pending_action = None
+        _trace_phase(self._state.call_sid, current, phase, reason, forced=True)
         logger.info("State forced terminal [%s]: %s -> %s (%s)", self._state.call_sid, current, phase, reason)
 
 

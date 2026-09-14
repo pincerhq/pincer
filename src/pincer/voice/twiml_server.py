@@ -39,6 +39,11 @@ logger = logging.getLogger(__name__)
 # milliseconds apart; this is the margin, not a retry budget.
 SETUP_STATE_WAIT_S = 3.0
 
+# Twilio sends a media frame every 20 ms. Anything beyond this is a real gap in
+# the inbound audio — network, provider buffering, or our own event loop being
+# blocked. It does NOT attribute blame; it only says the audio stopped arriving.
+MEDIA_GAP_THRESHOLD_MS = 120.0
+
 twilio_router = APIRouter(prefix="/api/apps/twilio", tags=["apps", "twilio"])
 voice_router = APIRouter(prefix="/voice", tags=["voice"])
 
@@ -147,6 +152,15 @@ async def voice_webhook(request: Request) -> Response:
         if declined is not None:
             return declined
 
+    from pincer.voice.telemetry import hooks as telemetry
+
+    telemetry.inbound_webhook(
+        call_sid,
+        from_number=caller,
+        to_number=called,
+        engine=str(getattr(_settings, "voice_engine", "") or ""),
+        language=call_language,
+    )
     await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=call_language)
 
     twiml = build_connect_twiml(
@@ -202,7 +216,11 @@ async def _record_declined_call(call_sid: str, caller: str, failure_code: str, l
     """Declined calls never reach the engine, so the row + metric are written here."""
     try:
         from pincer.observability.metrics import record_call_ended, record_inbound_event
+        from pincer.voice.telemetry import hooks as telemetry
 
+        await telemetry.call_declined(
+            call_sid, failure_code=failure_code, reason="receptionist_policy", language=language
+        )
         record_inbound_event(failure_code, language=language)
         record_call_ended(direction="inbound", outcome="failed", failure_code=failure_code, language=language)
     except Exception:
@@ -395,6 +413,9 @@ async def voice_amd(request: Request) -> PlainTextResponse:
     call_sid = str(form.get("CallSid", ""))
     answered_by = str(form.get("AnsweredBy", ""))
     logger.info("AMD result [%s]: %s", call_sid, answered_by or "(none)")
+    from pincer.voice.telemetry import hooks as telemetry
+
+    telemetry.amd_verdict(call_sid, answered_by)
     await _handle_amd_verdict(call_sid, answered_by, _report_language(call_sid))
     return PlainTextResponse("OK")
 
@@ -419,6 +440,19 @@ async def voice_status(request: Request) -> PlainTextResponse:
         status,
         duration,
         f", answered_by={answered_by}" if answered_by else "",
+    )
+
+    from pincer.voice.telemetry import hooks as telemetry
+
+    # `SequenceNumber` is Twilio's own per-call ordinal for status callbacks, so a
+    # retried callback dedupes to the row it already wrote rather than appearing
+    # twice on the timeline.
+    telemetry.provider_status(
+        call_sid,
+        status,
+        sequence=str(form.get("SequenceNumber", "") or status),
+        duration_s=duration,
+        answered_by=answered_by or None,
     )
 
     # Reports reach the user in the language of their initiating command (Sprint 3)
@@ -509,6 +543,9 @@ async def voice_fallback(request: Request) -> Response:
         error_code,
         error_msg,
     )
+    from pincer.voice.telemetry import hooks as telemetry
+
+    telemetry.error(call_sid, "twiml_error", stage="provider", provider_error_code=error_code)
 
     from pincer.voice.status_notify import get_call_language
 
@@ -592,6 +629,9 @@ async def relay_ws(websocket: WebSocket) -> None:
                     await websocket.close(code=1008, reason="Already connected")
                     return
                 state.metadata["websocket"] = websocket
+                from pincer.voice.telemetry import hooks as telemetry
+
+                telemetry.media_open(call_sid, engine="conversation_relay")
                 # `setup` is Twilio's "the callee picked up". Every clock in
                 # the call starts from here — an outbound state exists from
                 # before the dial, so registration is NOT an answer.
@@ -608,6 +648,9 @@ async def relay_ws(websocket: WebSocket) -> None:
 
             elif msg_type == "error":
                 logger.error("ConversationRelay error [%s]: %s", call_sid, msg)
+                from pincer.voice.telemetry import hooks as telemetry
+
+                telemetry.error(call_sid, "relay_error", stage="provider", detail=str(msg.get("description", ""))[:120])
                 await _handle_relay_error(call_sid, msg)
 
     except WebSocketDisconnect:
@@ -617,6 +660,9 @@ async def relay_ws(websocket: WebSocket) -> None:
     finally:
         if state is not None and state.metadata.get("websocket") is websocket:
             state.metadata.pop("websocket", None)
+            from pincer.voice.telemetry import hooks as telemetry
+
+            telemetry.media_closed(call_sid, reason="relay_socket_closed")
             # socket gone = call over (inbound calls have no other end signal)
             await _media_closed(call_sid)
 
@@ -879,7 +925,15 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
         await websocket.close(code=1008, reason="Already connected")
         return
     state.metadata["websocket"] = websocket
+    from pincer.voice.telemetry import hooks as telemetry
+
+    telemetry.media_open(call_sid, engine="media_streams")
     await _engine.mark_call_answered(call_sid)
+
+    # Inbound frame arrival gaps are the only audio-quality signal this
+    # transport exposes: Twilio terminates the RTP leg, so there is no jitter
+    # or loss statistic to read — only whether frames kept arriving.
+    last_frame_ns = 0
 
     try:
         while True:
@@ -906,6 +960,14 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
             elif event == "media":
                 payload = msg.get("media", {}).get("payload", "")
                 if payload:
+                    now_ns = telemetry.now_ns()
+                    if last_frame_ns == 0:
+                        telemetry.first_inbound_audio(call_sid)
+                    else:
+                        gap_ms = (now_ns - last_frame_ns) / 1_000_000.0
+                        if gap_ms > MEDIA_GAP_THRESHOLD_MS:
+                            telemetry.audio_gap(call_sid, gap_ms)
+                    last_frame_ns = now_ns
                     await _engine.on_speech_input(call_sid, payload)
 
             elif event == "stop":
@@ -922,6 +984,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
         if state:
             state.metadata.pop("websocket", None)
             state.metadata.pop("stream_sid", None)
+            telemetry.media_closed(call_sid, reason="media_socket_closed")
             await _media_closed(call_sid)
 
 

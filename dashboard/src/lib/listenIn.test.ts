@@ -10,7 +10,10 @@ class FakeSocket implements WebSocketLike {
   onerror: ((ev: unknown) => void) | null = null
   closedWith: { code?: number; reason?: string } | null = null
 
-  constructor(readonly url: string) {
+  readonly url: string
+
+  constructor(url: string) {
+    this.url = url
     FakeSocket.instances.push(this)
   }
   open() {

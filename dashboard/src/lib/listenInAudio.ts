@@ -117,11 +117,14 @@ export class ListenInPlayer {
   private levelsCb: ((levels: TrackLevels) => void) | null = null
   private closed = false
 
-  private constructor(
-    private readonly ctx: AudioContext,
-    private readonly node: AudioWorkletNode,
-    readonly analyser: AnalyserNode,
-  ) {
+  private readonly ctx: AudioContext
+  private readonly node: AudioWorkletNode
+  readonly analyser: AnalyserNode
+
+  private constructor(ctx: AudioContext, node: AudioWorkletNode, analyser: AnalyserNode) {
+    this.ctx = ctx
+    this.node = node
+    this.analyser = analyser
     node.port.onmessage = (ev: MessageEvent) => {
       const m = ev.data as { type?: string; inbound?: number; outbound?: number }
       if (m?.type === "levels" && this.levelsCb) {

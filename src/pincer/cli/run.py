@@ -1248,6 +1248,16 @@ async def _run_agent(settings: Settings) -> None:
 
             apply_overrides(settings)
 
+            # Telephony telemetry: start the bounded exporter before the first
+            # call can arrive. Failing to start it must never stop voice from
+            # coming up — the call matters more than the trace of it.
+            from pincer.voice.telemetry import runtime as telephony_telemetry
+
+            try:
+                await telephony_telemetry.configure(settings)
+            except Exception:
+                logging.getLogger("pincer.voice").warning("Telephony telemetry failed to start", exc_info=True)
+
             voice_engine = get_voice_engine(settings)
             vc = VoiceChannel(settings)
             vc.set_engine(voice_engine)
@@ -1680,6 +1690,10 @@ async def _run_agent(settings: Settings) -> None:
             await task_worker
         await task_connection.__aexit__(None, None, None)
         await proactive.close()
+        with contextlib.suppress(Exception):
+            from pincer.voice.telemetry import runtime as telephony_telemetry
+
+            await telephony_telemetry.shutdown()
         for ch in router.channels.values():
             await ch.stop()
         try:
