@@ -9,6 +9,7 @@ const LABELS: Partial<Record<keyof TelephonyFilters, string>> = {
   language: "language",
   status: "status",
   failure_category: "failure",
+  failure_code: "code",
   environment: "env",
   app_version: "version",
   search: "search",

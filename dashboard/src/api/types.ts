@@ -709,5 +709,6 @@ export interface TelephonyFilters {
   language?: string
   status?: string
   failure_category?: string
+  failure_code?: string
   search?: string
 }

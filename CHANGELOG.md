@@ -88,6 +88,11 @@ in [`docs/operations/telephony-telemetry.md`](docs/operations/telephony-telemetr
   alert links to the filtered dashboard and the calls that caused it.
 - **`pincer telephony`** — `baseline` (observed percentiles plus the alert
   thresholds they suggest), `call <sid>` (turn breakdown), `alerts`, `health`.
+- **Sectioned into tabs** — Telephony is five routed sections behind a horizontal
+  nav (Overview · Latency · Reliability · Alerts · Calls) instead of one long
+  scroll. Filters live in the URL, so they survive a section switch and a reload
+  and "the latency view, German outbound, last 6h" is a link that can be pasted
+  into an incident channel. Tabs carry live badges (firing alerts, call count).
 - **Interactive BI layout** — the Telephony page is drill-in blocks rather than a
   report: KPI tiles, the outcome donut and the comparison bars are all filters,
   applied filters appear as removable chips, percentile series toggle on the

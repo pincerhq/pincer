@@ -30,8 +30,23 @@ const SchedulesPage = lazy(() =>
 const VoiceOpsPage = lazy(() =>
   import("@/pages/VoiceOps").then((m) => ({ default: m.VoiceOpsPage })),
 )
-const TelephonyPage = lazy(() =>
-  import("@/pages/Telephony").then((m) => ({ default: m.TelephonyPage })),
+const TelephonyLayout = lazy(() =>
+  import("@/pages/telephony/Layout").then((m) => ({ default: m.TelephonyLayout })),
+)
+const TelephonyOverview = lazy(() =>
+  import("@/pages/telephony/Overview").then((m) => ({ default: m.TelephonyOverview })),
+)
+const TelephonyLatency = lazy(() =>
+  import("@/pages/telephony/Latency").then((m) => ({ default: m.TelephonyLatency })),
+)
+const TelephonyReliability = lazy(() =>
+  import("@/pages/telephony/Reliability").then((m) => ({ default: m.TelephonyReliability })),
+)
+const TelephonyAlertsPage = lazy(() =>
+  import("@/pages/telephony/Alerts").then((m) => ({ default: m.TelephonyAlertsPage })),
+)
+const TelephonyCalls = lazy(() =>
+  import("@/pages/telephony/Calls").then((m) => ({ default: m.TelephonyCalls })),
 )
 const TelephonyCallPage = lazy(() =>
   import("@/pages/TelephonyCall").then((m) => ({ default: m.TelephonyCallPage })),
@@ -127,14 +142,22 @@ export default function App() {
                 path={ROUTES.VOICE_OPS}
                 element={<VoiceOpsPage />}
               />
-              <Route
-                path={ROUTES.TELEPHONY}
-                element={<PageWrapper><TelephonyPage /></PageWrapper>}
-              />
+              {/* Declared before the tabbed section so the more specific
+                  /telephony/calls/:callRef wins over the /telephony/calls tab. */}
               <Route
                 path={ROUTES.TELEPHONY_CALL}
                 element={<PageWrapper><TelephonyCallPage /></PageWrapper>}
               />
+              <Route
+                path={ROUTES.TELEPHONY}
+                element={<PageWrapper><TelephonyLayout /></PageWrapper>}
+              >
+                <Route index element={<TelephonyOverview />} />
+                <Route path="latency" element={<TelephonyLatency />} />
+                <Route path="reliability" element={<TelephonyReliability />} />
+                <Route path="alerts" element={<TelephonyAlertsPage />} />
+                <Route path="calls" element={<TelephonyCalls />} />
+              </Route>
               <Route
                 path={ROUTES.SKILLS}
                 element={<PageWrapper><SkillsPage /></PageWrapper>}
