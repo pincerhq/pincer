@@ -16,7 +16,7 @@ RUN pnpm build
 # ============================================
 # Stage 1: Build
 # ============================================
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /app
 
@@ -40,7 +40,7 @@ RUN uv sync --frozen --no-cache --no-dev --all-extras
 # ============================================
 # Stage 2: Runtime
 # ============================================
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 WORKDIR /app
 
