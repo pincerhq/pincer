@@ -53,6 +53,32 @@ class STTConfig:
     vad_events: bool = True
 
 
+# Sprint 5 (T5.5): endpointing tuned per language for voice-to-voice latency.
+# German speech rhythm (compound words, verb-final clauses) needs more
+# generous values than English; both are tighter than the pre-Sprint-5
+# defaults (en 300/1000, de 400/1200). Do not tune below a ~5% false-cut
+# rate in the harness — a caller interrupted mid-sentence is worse than
+# 200ms of extra silence.
+_ENDPOINTING_DEFAULTS = {
+    "en": (300, 800),
+    "de": (400, 1000),
+    "uk": (350, 900),
+}
+
+
+def stt_config_for_language(language: str, settings: Any = None) -> STTConfig:
+    """Per-call STT config (Sprint 2; latency-tuned in Sprint 5).
+
+    PINCER_VOICE_STT_ENDPOINTING_MS / _UTTERANCE_END_MS (when > 0) override
+    the per-language defaults for A/B latency measurement."""
+    lang = str(language or "en").strip().lower()[:2] or "en"
+    endpointing, utterance_end = _ENDPOINTING_DEFAULTS.get(lang, _ENDPOINTING_DEFAULTS["en"])
+    if settings is not None:
+        endpointing = int(getattr(settings, "voice_stt_endpointing_ms", 0) or 0) or endpointing
+        utterance_end = int(getattr(settings, "voice_stt_utterance_end_ms", 0) or 0) or utterance_end
+    return STTConfig(language=lang, endpointing=endpointing, utterance_end_ms=utterance_end)
+
+
 class STTStream(ABC):
     """Active streaming transcription session."""
 

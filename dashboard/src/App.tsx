@@ -27,6 +27,9 @@ const AuditPage = lazy(() =>
 const SchedulesPage = lazy(() =>
   import("@/pages/Schedules").then((m) => ({ default: m.SchedulesPage })),
 )
+const VoiceOpsPage = lazy(() =>
+  import("@/pages/VoiceOps").then((m) => ({ default: m.VoiceOpsPage })),
+)
 const SkillsPage = lazy(() =>
   import("@/pages/Skills").then((m) => ({ default: m.SkillsPage })),
 )
@@ -113,6 +116,10 @@ export default function App() {
               <Route
                 path={ROUTES.SCHEDULES}
                 element={<PageWrapper><SchedulesPage /></PageWrapper>}
+              />
+              <Route
+                path={ROUTES.VOICE_OPS}
+                element={<VoiceOpsPage />}
               />
               <Route
                 path={ROUTES.SKILLS}

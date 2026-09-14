@@ -315,3 +315,121 @@ export interface ScheduledTasksResponse {
   future_count: number
   past_count: number
 }
+
+// ── Voice Ops (Sprint 9) ────────────────────────────────────────────
+
+export interface GoldenSignal {
+  name: string
+  value: number | null
+  unit: string
+  sample_size: number
+  min_sample: number
+  target: number | null
+  window: string
+  sufficient_data: boolean
+  detail: Record<string, unknown>
+}
+
+export interface GoldenSignals {
+  generated_at: string
+  signals: Record<string, GoldenSignal>
+}
+
+export interface OpsAlert {
+  rule: string
+  severity: "page" | "notify"
+  title: string
+  detail: string
+  value: number | null
+  threshold: number | null
+  runbook: string
+}
+
+export interface SLOStatus {
+  name: string
+  target: number
+  actual: number | null
+  unit: string
+  window: string
+  sample_size: number
+  budget_total: number | null
+  budget_spent: number | null
+  burn_pct: number | null
+  met: boolean | null
+  confidence: "measured" | "inferred"
+  detail: Record<string, unknown>
+}
+
+export interface SLOReport {
+  generated_at: string
+  freeze_threshold_pct: number
+  freeze_min_sample: number
+  feature_freeze: boolean
+  freeze_reason: string
+  slos: SLOStatus[]
+}
+
+export interface FailureCodeEntry {
+  code: string
+  count: number
+  description: string
+}
+
+export interface FailureBreakdown {
+  window_hours: number
+  total: number
+  codes: FailureCodeEntry[]
+}
+
+export interface CanaryRun {
+  ran_at: string
+  ok: boolean
+  skipped: boolean
+  reason: string
+  call_sid: string
+  turns: number
+  duration_s: number
+}
+
+export interface CanaryTriggerResult {
+  ok: boolean
+  skipped: boolean
+  reason: string
+  call_sid: string
+  turns: number
+  duration_s: number
+}
+
+/** GET /api/voice/active — one live call (Sprint 15 adds the listen fields). */
+export interface VoiceActiveCall {
+  call_sid: string
+  direction: string
+  caller_number: string
+  target_number: string
+  target_name: string
+  purpose: string
+  briefing_task_preview: string
+  language: string
+  engine: string
+  started_at: string
+  duration_seconds: number
+  /** listen-in enabled AND the Twilio monitor fork for this call is attached */
+  listen_available: boolean
+  listener_count: number
+  /** PINCER_LISTEN_IN_MAX_LISTENERS (0 when the feature is off) */
+  listener_capacity: number
+}
+
+export interface VoiceCallSummary {
+  call_sid: string
+  direction: string
+  status: string
+  from_number: string
+  to_number: string
+  started_at: string
+  ended_at: string | null
+  duration_seconds: number
+  failure_code: string
+  failure_description: string
+  cost_usd: number | null
+}

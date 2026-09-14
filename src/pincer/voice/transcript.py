@@ -6,6 +6,7 @@ report generation, and integration with the audit system.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -14,6 +15,26 @@ if TYPE_CHECKING:
     import aiosqlite
 
 logger = logging.getLogger(__name__)
+
+# T1.4: agent utterances that claim a task was completed. If no successful
+# CallAction backs such a claim, the call is flagged (feeds the reliability
+# metric — the agent must never claim success the tools didn't confirm).
+COMPLETION_CLAIM_PATTERNS = re.compile(
+    r"\b("
+    r"i(?:'ve| have) (?:booked|scheduled|sent|cancelled|canceled|ordered|created|updated|confirmed|rescheduled)"
+    r"|(?:it's|it is|that's|that is) (?:booked|scheduled|sent|cancelled|canceled|done|confirmed|all set)"
+    r"|(?:your|the) \w+ (?:is|has been) (?:booked|scheduled|sent|cancelled|canceled|created|updated|confirmed)"
+    r"|all (?:set|done|taken care of)"
+    r"|successfully (?:booked|scheduled|sent|cancelled|canceled|ordered|created|updated)"
+    # German (Sprint 2)
+    r"|ist (?:bestätigt|gebucht|erledigt|storniert|abgesagt|eingetragen|verschickt|gesendet)"
+    r"|habe ich (?:gebucht|bestätigt|storniert|abgesagt|eingetragen|verschickt|gesendet|erledigt)"
+    r"|ich habe (?:den|die|das|ihren|ihre|ihr)? ?\w* "
+    r"?(?:gebucht|bestätigt|storniert|abgesagt|eingetragen|verschickt|gesendet)"
+    r"|(?:alles|das wäre) erledigt"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 class Speaker:
@@ -35,12 +56,22 @@ class TranscriptEntry:
 
 @dataclass
 class CallAction:
-    action_type: str  # tool_call, dtmf, transfer, confirm
+    action_type: str  # tool_call, tool_execute, tool_denied, dtmf, transfer, confirm, outcome
     tool_name: str = ""
     input_summary: str = ""
     output_summary: str = ""
     user_confirmed: bool | None = None
     timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+    # Sprint 11 (in-call tools): policy tier (R/W/X), the approval mode the
+    # action ran under (auto/verbal/user/off), and the stable deny reason
+    # code (§5.2) for tool_denied rows.
+    tier: str = ""
+    approval_mode: str = ""
+    deny_reason: str = ""
+
+
+# Action types whose non-error output backs a completion claim (T1.4 / §7).
+SUCCESSFUL_ACTION_TYPES = frozenset({"tool_call", "tool_execute"})
 
 
 class TranscriptLogger:
@@ -88,15 +119,23 @@ class TranscriptLogger:
         input_summary: str = "",
         output_summary: str = "",
         user_confirmed: bool | None = None,
-    ) -> None:
+        *,
+        tier: str = "",
+        approval_mode: str = "",
+        deny_reason: str = "",
+    ) -> CallAction:
         action = CallAction(
             action_type=action_type,
             tool_name=tool_name,
             input_summary=input_summary,
             output_summary=output_summary,
             user_confirmed=user_confirmed,
+            tier=tier,
+            approval_mode=approval_mode,
+            deny_reason=deny_reason,
         )
         self._actions.append(action)
+        return action
 
     def get_full_transcript(self) -> str:
         """Return the full conversation transcript as readable text."""
@@ -139,6 +178,42 @@ class TranscriptLogger:
 
         return "\n".join(parts)
 
+    def _has_successful_action(self) -> bool:
+        """True if at least one tool action ran with a non-error result."""
+        for action in self._actions:
+            if action.action_type not in SUCCESSFUL_ACTION_TYPES:
+                continue
+            if action.user_confirmed is False:
+                continue
+            output = action.output_summary.strip()
+            if output and not output.lower().startswith("error"):
+                return True
+        return False
+
+    def verify_completion_claims(self) -> list[str]:
+        """Post-call truthfulness assertion (Sprint 1, T1.4).
+
+        Returns agent utterances that claim task completion without a matching
+        successful CallAction, and logs a WARNING for each. An empty list means
+        the transcript is honest (or made no completion claims).
+        """
+        claims = [
+            entry.text
+            for entry in self._entries
+            if entry.is_final and entry.speaker == Speaker.AGENT and COMPLETION_CLAIM_PATTERNS.search(entry.text)
+        ]
+        if not claims:
+            return []
+        if self._has_successful_action():
+            return []
+        for claim in claims:
+            logger.warning(
+                "Unverified completion claim [%s]: agent said %r but no successful tool action exists",
+                self._call_sid,
+                claim[:200],
+            )
+        return claims
+
     async def save_to_db(self, db: aiosqlite.Connection) -> None:
         """Persist transcript and actions to the database."""
         for entry in self._entries:
@@ -163,8 +238,8 @@ class TranscriptLogger:
             await db.execute(
                 "INSERT INTO call_actions "
                 "(call_id, action_type, tool_name, input_summary, "
-                "output_summary, user_confirmed, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "output_summary, user_confirmed, timestamp, tier, approval_mode, deny_reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     self._call_sid,
                     action.action_type,
@@ -173,6 +248,9 @@ class TranscriptLogger:
                     action.output_summary,
                     action.user_confirmed,
                     action.timestamp,
+                    action.tier,
+                    action.approval_mode,
+                    action.deny_reason,
                 ),
             )
 

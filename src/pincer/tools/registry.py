@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, get_type_hints
 
 from pincer.exceptions import ToolNotFoundError
+from pincer.tools.approval import ApprovalPolicy
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -39,13 +40,15 @@ class ToolDef:
     parameters: dict[str, Any]  # JSON Schema
     handler: Callable[..., Awaitable[str]]
     require_approval: bool = False
+    """Declared intent: this tool changes something. See `tools.approval`."""
 
 
 class ToolRegistry:
     """Manages available tools for the agent."""
 
-    def __init__(self) -> None:
+    def __init__(self, approval_policy: ApprovalPolicy | None = None) -> None:
         self._tools: dict[str, ToolDef] = {}
+        self._approval_policy = approval_policy or ApprovalPolicy()
 
     @property
     def has_tools(self) -> bool:
@@ -95,9 +98,28 @@ class ToolRegistry:
         return schemas
 
     def requires_approval(self, name: str) -> bool:
-        """Check whether a tool requires user approval before execution."""
+        """Whether a tool needs user approval, after applying the approval policy.
+
+        The declared flag on `ToolDef` says "this tool writes"; the policy
+        decides whether that write is critical enough to interrupt the user.
+        """
+        tool = self._tools.get(name)
+        if tool is None:
+            return False
+        return self._approval_policy.requires_approval(name, declared=tool.require_approval)
+
+    def declares_approval(self, name: str) -> bool:
+        """The tool's registration-time flag, before policy. For audit/introspection."""
         tool = self._tools.get(name)
         return tool.require_approval if tool else False
+
+    @property
+    def approval_policy(self) -> ApprovalPolicy:
+        return self._approval_policy
+
+    def set_approval_policy(self, policy: ApprovalPolicy) -> None:
+        """Swap the policy on an existing registry (wiring order convenience)."""
+        self._approval_policy = policy
 
     async def execute(
         self,

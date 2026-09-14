@@ -28,7 +28,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from alembic import op
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
@@ -369,10 +369,13 @@ _HABIT_CHECKINS_DAILY_UNIQUE = {
 }
 
 # ── folded from data/migrations/005_sprint7_voice.sql ────────────
-# Also dormant: voice_calls/phone_contacts have no readers or writers today;
-# call_transcripts/call_actions have exactly one dormant writer
-# (voice/transcript.py TranscriptLogger.save_to_db, itself never called).
-_VOICE_TABLES = [
+# The `voice_calls`/`call_transcripts`/`call_actions` shape below is the
+# *legacy* one this migration file froze; revision 0005 reconciles it with
+# the call_sid-based schema the voice subsystem actually uses. It is kept
+# separate from `_PHONE_CONTACT_TABLES` because `upgrade()` has to be able
+# to skip it — see `_has_preexisting_modern_voice_schema`. `phone_contacts`
+# is dialect-identical in both shapes and is always created.
+_LEGACY_VOICE_TABLES = [
     """
     CREATE TABLE IF NOT EXISTS voice_calls (
         id TEXT PRIMARY KEY,
@@ -421,6 +424,9 @@ _VOICE_TABLES = [
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_call_actions_call ON call_actions(call_id)",
+]
+
+_PHONE_CONTACT_TABLES = [
     """
     CREATE TABLE IF NOT EXISTS phone_contacts (
         id {AUTOPK},
@@ -444,7 +450,10 @@ _PHONE_CONTACTS_NAME_INDEX = {
     "postgresql": "CREATE INDEX IF NOT EXISTS idx_phone_contacts_name ON phone_contacts(lower(name))",
 }
 
-_ALL_TEMPLATES = (
+# Everything that is created unconditionally. The legacy voice block is
+# applied separately in `upgrade()` because it is the one group a pre-Alembic
+# install can already have in an incompatible newer shape.
+_NON_VOICE_TEMPLATES = (
     _MEMORY_TABLES
     + _SESSION_TABLES
     + _IDENTITY_TABLES
@@ -452,7 +461,7 @@ _ALL_TEMPLATES = (
     + _SCHEDULER_TABLES
     + _COST_TABLES
     + _SKILLS_TABLES
-    + _VOICE_TABLES
+    + _PHONE_CONTACT_TABLES
 )
 
 # Reverse-dependency order for downgrade() (children before the tables they
@@ -505,11 +514,31 @@ def _add_column_if_missing(bind: Connection, dialect: str, table: str, column: s
         bind.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coldef}"))
 
 
+def _has_preexisting_modern_voice_schema(bind: Connection) -> bool:
+    """Detect the call_sid-based `voice_calls` that predates Alembic adoption.
+
+    Installs that ran the voice subsystem before this baseline existed
+    already carry the modern schema with no `alembic_version` row, so the
+    stamp-free upgrade path starts here at 0001. `CREATE TABLE IF NOT EXISTS`
+    is harmlessly a no-op against it, but the legacy indexes below are not:
+    `idx_voice_calls_user` references a `user_id` column the modern table
+    does not have, and creating the legacy `call_transcripts`/`call_actions`
+    shapes would shadow the modern ones revision 0005 owns. So when this
+    returns True, `upgrade()` leaves the whole legacy voice block to 0005.
+    """
+    inspector = inspect(bind)
+    if "voice_calls" not in inspector.get_table_names():
+        return False
+    return "call_sid" in {str(column["name"]) for column in inspector.get_columns("voice_calls")}
+
+
 def upgrade() -> None:
     bind = op.get_bind()
     dialect = bind.dialect.name
 
-    for template in _ALL_TEMPLATES:
+    legacy_voice = [] if _has_preexisting_modern_voice_schema(bind) else _LEGACY_VOICE_TABLES
+
+    for template in _NON_VOICE_TEMPLATES + legacy_voice:
         op.execute(_sql(template, dialect))
 
     if dialect == "sqlite":

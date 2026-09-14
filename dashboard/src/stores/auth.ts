@@ -17,7 +17,7 @@ export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({
       token: null,
-      apiUrl: import.meta.env.VITE_API_URL || "http://localhost:8080",
+      apiUrl: import.meta.env.VITE_API_URL || window.location.origin,
       isConnected: false,
       version: null,
       setToken: (token) => {

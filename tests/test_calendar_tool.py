@@ -100,6 +100,29 @@ class TestCalendarWeek:
             result = await calendar_week()
             assert "Monday Meeting" in result
 
+    async def test_day_heading_agrees_with_converted_times(self):
+        """A 00:30 Europe/Berlin event returned as 23:30Z the previous UTC day
+        must be filed under Tuesday, matching the 00:30 it displays."""
+        events = [
+            {
+                "summary": "Night Shift",
+                "start": {"dateTime": "2026-08-17T22:30:00Z"},
+                "end": {"dateTime": "2026-08-17T23:30:00Z"},
+            },
+        ]
+        mock_service = _mock_events_list(events)
+        with (
+            patch("pincer.tools.builtin.calendar_tool._get_service", return_value=mock_service),
+            patch("pincer.tools.builtin.calendar_tool.get_settings") as mock_s,
+        ):
+            mock_s.return_value.timezone = "Europe/Berlin"
+            from pincer.tools.builtin.calendar_tool import calendar_week
+
+            result = await calendar_week()
+            assert "00:30 - 01:30" in result  # CEST is UTC+2
+            assert "Tuesday, August 18" in result
+            assert "Monday, August 17" not in result
+
 
 @pytest.mark.asyncio
 class TestCalendarCreate:

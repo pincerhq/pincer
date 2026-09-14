@@ -137,7 +137,7 @@ class EmbeddedMCPShell:
                 continue
 
             mcp_name = tool_name if tool_name.startswith("pincer_") else f"pincer_{tool_name}"
-            approval = agent.tool_registry.requires_approval(tool_name)
+            approval = agent.tool_registry.declares_approval(tool_name)
 
             self._core.register_tool(
                 name=mcp_name,

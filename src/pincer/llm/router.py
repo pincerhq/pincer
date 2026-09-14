@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 from pincer.config import get_settings
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.anthropic_common import AnthropicCompatibleProvider
-from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse
+from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, StreamTurnEvent
 from pincer.llm.openai_common import OpenAICompatibleProvider
 
 if TYPE_CHECKING:
@@ -102,6 +102,31 @@ class LLMRouter(BaseLLMProvider):
             return pool[name]
         return pool[self._settings.default_provider]
 
+    def get_provider(self, name: str, model_hint: str = "") -> BaseLLMProvider | None:
+        """Provider by name — from the active pool, or built on demand when
+        its credentials exist. Used by the voice turn-model override
+        (Sprint 5: e.g. voice_turn_model="openai:gpt-5-mini" while the default
+        provider stays anthropic). Returns None when unavailable.
+
+        ``model_hint``: the model the caller will request. Lets an on-demand
+        OpenAI-wire leaf construct even when its default model would resolve
+        to a claude-* id (its fail-fast guard), since every voice call passes
+        the model explicitly anyway.
+        """
+        pool = self._build_pool()
+        if name in pool:
+            return pool[name]
+        settings = self._settings
+        if model_hint and name == "openai" and not settings.openai_model:
+            settings = settings.model_copy(update={"openai_model": model_hint})
+        try:
+            provider = _build_leaf(settings, name)
+        except Exception as e:
+            logger.warning("Provider %r unavailable for per-call override: %s", name, e)
+            return None
+        pool[name] = provider  # memoise alongside the configured pool
+        return provider
+
     def is_free(self, provider: str) -> bool:
         """A provider is free when it has no API key (e.g. a local Ollama endpoint)."""
         s = self._settings
@@ -172,6 +197,39 @@ class LLMRouter(BaseLLMProvider):
                 if started:
                     raise  # mid-stream failure propagates — no mid-stream failover
                 logger.warning("Stream provider %d failed before first token: %s — trying next", index, err)
+                continue
+        if primary_err is not None:
+            raise primary_err
+
+    async def stream_turn(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        system: str | None = None,
+    ) -> AsyncIterator[StreamTurnEvent]:
+        """Same failover discipline as stream(): providers are tried in order
+        until one produces its first event; a mid-stream failure propagates."""
+        primary, failovers = self._primary_and_failovers()
+        ordered = [primary, *random.sample(failovers, len(failovers))]
+        primary_err: Exception | None = None
+        for index, provider in enumerate(ordered):
+            started = False
+            try:
+                async for event in provider.stream_turn(
+                    messages, tools=tools, model=model, max_tokens=max_tokens, temperature=temperature, system=system
+                ):
+                    started = True
+                    yield event
+                return
+            except (LLMError, LLMRateLimitError) as err:
+                if index == 0:
+                    primary_err = err
+                if started:
+                    raise  # mid-stream failure propagates — no mid-stream failover
+                logger.warning("stream_turn provider %d failed before first event: %s — trying next", index, err)
                 continue
         if primary_err is not None:
             raise primary_err

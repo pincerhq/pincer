@@ -139,7 +139,41 @@ CONSENT_ANNOUNCEMENT_TWO_PARTY_EN = "This call may be recorded. By continuing th
 
 CONSENT_ANNOUNCEMENT_DE = "Dieser Anruf kann zu Qualitätszwecken aufgezeichnet werden."
 
+CONSENT_ANNOUNCEMENT_TWO_PARTY_DE = (
+    "Dieser Anruf wird möglicherweise aufgezeichnet. Wenn Sie das Gespräch fortsetzen, stimmen Sie der Aufzeichnung zu."
+)
+
+CONSENT_ANNOUNCEMENT_UK = "Цей дзвінок може записуватися для контролю якості."
+
+CONSENT_ANNOUNCEMENT_TWO_PARTY_UK = "Цей дзвінок може записуватися. Продовжуючи розмову, ви даєте згоду на запис."
+
+# Non-recording case: disclosing that an AI assistant is on the line is best
+# practice (and increasingly required, e.g. EU AI Act Art. 50) even when no
+# recording takes place.
+AI_DISCLOSURE_EN = "Please note: you are speaking with an automated AI assistant."
+
+AI_DISCLOSURE_DE = "Bitte beachten Sie: Sie sprechen mit einem automatischen KI-Assistenten."
+
+AI_DISCLOSURE_UK = "Зверніть увагу: ви розмовляєте з автоматичним ШІ-асистентом."
+
 OUTBOUND_RECORDING_DISCLOSURE = "I should let you know that this call may be recorded."
+
+# Sprint 15: live listen-in. Monitoring is legally distinct from recording
+# (no audio is stored) but equally sensitive in DACH, so the call opening
+# must say so whenever the media fork is on (PINCER_LISTEN_IN_ANNOUNCE).
+MONITOR_ANNOUNCEMENT_EN = "This call may be monitored for quality assurance."
+
+MONITOR_ANNOUNCEMENT_DE = "Dieses Gespräch kann zur Qualitätssicherung mitgehört werden."
+
+MONITOR_ANNOUNCEMENT_UK = "Ця розмова може прослуховуватися для контролю якості."
+
+# Jurisdictions where German-language announcements are appropriate by default
+GERMAN_SPEAKING_JURISDICTIONS = {"DE", "AT", "CH"}
+
+# Substrings (lowercase) whose presence in an introduction means it already
+# discloses the AI assistant, making the separate AI-disclosure line redundant.
+# Covers every phrasing build_intro_text generates plus common override wording.
+AI_INTRO_MARKERS = ("ai assistant", "ki-assistent", "ki assistent", "ші-асистент")
 
 
 @dataclass
@@ -163,6 +197,12 @@ def detect_jurisdiction(phone_number: str) -> str:
     if cleaned.startswith("49"):
         return "DE"
 
+    if cleaned.startswith("43"):
+        return "AT"
+
+    if cleaned.startswith("41"):
+        return "CH"
+
     if cleaned.startswith("44"):
         return "UK"
 
@@ -184,28 +224,231 @@ def get_consent_mode(settings: Settings, caller_number: str) -> ConsentMode:
     if jurisdiction == "US-two-party":
         return ConsentMode.TWO_PARTY
     if jurisdiction == "DE":
+        # §201 StGB: recording the non-public spoken word requires all-party consent
+        return ConsentMode.TWO_PARTY
+    if jurisdiction == "CH":
+        # Art. 179ter StGB: all-party consent required
         return ConsentMode.TWO_PARTY
 
     return ConsentMode(configured) if configured in ConsentMode.__members__.values() else ConsentMode.ONE_PARTY
 
 
+def resolve_consent_language(settings: Settings, caller_number: str = "") -> str:
+    """Resolve the language for consent/disclosure announcements.
+
+    Priority: explicit PINCER_VOICE_CONSENT_LANGUAGE > call language
+    (PINCER_VOICE_LANGUAGE) > caller jurisdiction > 'en'.
+    """
+    configured = getattr(settings, "voice_consent_language", "") or ""
+    if configured.strip():
+        return configured.strip().lower()[:2]
+
+    call_language = (getattr(settings, "voice_language", "") or "").strip().lower()
+    if call_language and not call_language.startswith("en"):
+        return call_language[:2]
+
+    if detect_jurisdiction(caller_number) in GERMAN_SPEAKING_JURISDICTIONS:
+        return "de"
+
+    return "en"
+
+
+def get_ai_disclosure(language: str = "en") -> str:
+    """AI-assistant disclosure for calls without recording."""
+    if language.lower().startswith("de"):
+        return AI_DISCLOSURE_DE
+    if language.lower().startswith("uk"):
+        return AI_DISCLOSURE_UK
+    return AI_DISCLOSURE_EN
+
+
+def get_monitoring_announcement(settings: Settings | None, language: str = "en") -> str:
+    """Sprint 15 §2.1: the listen-in notice, or '' when no notice is due.
+
+    Due exactly when the media fork is on (``listen_in_enabled``) and
+    ``listen_in_announce`` has not been switched off. Switching the notice off
+    while the fork is on is a ``pincer doctor`` FAIL unless two-party recording
+    is already announced — the gate lives in the doctor, not here.
+    """
+    if settings is None:
+        return ""
+    # `is True` on purpose: MagicMock settings in tests have every attribute.
+    if getattr(settings, "listen_in_enabled", False) is not True:
+        return ""
+    if getattr(settings, "listen_in_announce", True) is False:
+        return ""
+    lang = (language or "en").lower()
+    if lang.startswith("de"):
+        return MONITOR_ANNOUNCEMENT_DE
+    if lang.startswith("uk"):
+        return MONITOR_ANNOUNCEMENT_UK
+    return MONITOR_ANNOUNCEMENT_EN
+
+
 def get_consent_announcement(
     mode: ConsentMode,
     caller_number: str = "",
+    language: str = "",
+    recording: bool = True,
 ) -> str | None:
-    """Get the appropriate consent announcement text."""
+    """Get the appropriate consent announcement text.
+
+    When ``recording`` is False there is nothing to consent to, but the AI
+    disclosure is still announced (unless mode is NONE). ``language`` overrides
+    the jurisdiction-based language choice (use ``resolve_consent_language``).
+    """
     if mode == ConsentMode.NONE:
         return None
 
-    jurisdiction = detect_jurisdiction(caller_number)
+    lang = language.lower()[:2] if language else ("de" if detect_jurisdiction(caller_number) == "DE" else "en")
 
-    if jurisdiction == "DE":
+    if not recording:
+        return get_ai_disclosure(lang)
+
+    if lang == "de":
+        if mode == ConsentMode.TWO_PARTY:
+            return CONSENT_ANNOUNCEMENT_TWO_PARTY_DE
         return CONSENT_ANNOUNCEMENT_DE
+
+    if lang == "uk":
+        if mode == ConsentMode.TWO_PARTY:
+            return CONSENT_ANNOUNCEMENT_TWO_PARTY_UK
+        return CONSENT_ANNOUNCEMENT_UK
 
     if mode == ConsentMode.TWO_PARTY:
         return CONSENT_ANNOUNCEMENT_TWO_PARTY_EN
 
     return CONSENT_ANNOUNCEMENT_EN
+
+
+def build_intro_text(settings: Settings, language: str = "en") -> str:
+    """Self-introduction spoken at call start, e.g.
+    'This is Pincer, the AI assistant from 3days.ai and personal AI assistant of Jane Doe.'
+
+    Configured via voice_assistant_name / voice_assistant_org / voice_assistant_owner;
+    voice_intro_text overrides the whole sentence verbatim. Empty name = no introduction.
+    """
+    override = str(getattr(settings, "voice_intro_text", "") or "").strip()
+    if override:
+        return override
+
+    name = str(getattr(settings, "voice_assistant_name", "") or "").strip()
+    if not name:
+        return ""
+    org = str(getattr(settings, "voice_assistant_org", "") or "").strip()
+    owner = str(getattr(settings, "voice_assistant_owner", "") or "").strip()
+
+    if language.lower().startswith("de"):
+        clauses = []
+        if org:
+            clauses.append(f"der KI-Assistent von {org}")
+        if owner:
+            clauses.append(
+                f"persönlicher KI-Assistent von {owner}" if org else f"der persönliche KI-Assistent von {owner}"
+            )
+        text = f"Hier spricht {name}"
+        if clauses:
+            text += ", " + " und ".join(clauses)
+        return text + "."
+
+    if language.lower().startswith("uk"):
+        clauses = []
+        if org:
+            clauses.append(f"ШІ-асистент від {org}")
+        if owner:
+            clauses.append(f"особистий ШІ-асистент {owner}")
+        text = f"Це {name}"
+        if clauses:
+            text += ", " + " і ".join(clauses)
+        return text + "."
+
+    clauses = []
+    if org:
+        clauses.append(f"the AI assistant from {org}")
+    if owner:
+        clauses.append(f"personal AI assistant of {owner}" if org else f"the personal AI assistant of {owner}")
+    text = f"This is {name}"
+    if clauses:
+        text += ", " + " and ".join(clauses)
+    return text + "."
+
+
+def build_receptionist_opening(settings: Settings, language: str = "") -> str:
+    """Sprint 12 §7.1: the receptionist greeting (AI disclosure + business name,
+    after-hours note + first question when closed). With
+    PINCER_INBOUND_RECORDING=true the two-party recording announcement is
+    spoken BEFORE the greeting. '' when the receptionist is not active."""
+    from pincer.voice.receptionist.profile import get_profile, receptionist_active
+    from pincer.voice.receptionist.session import opening_text
+
+    profile = get_profile()
+    if profile is None or not receptionist_active(settings):
+        return ""
+    lang = language.strip().lower()[:2] if language else profile.default_language
+    greeting, _is_open = opening_text(profile, lang)
+    notices: list[str] = []
+    if bool(getattr(settings, "inbound_recording", False)):
+        announcement = get_consent_announcement(ConsentMode.TWO_PARTY, "", language=lang, recording=True)
+        if announcement:
+            notices.append(announcement)
+    # Sprint 15: the monitoring notice precedes the greeting like the
+    # recording announcement does.
+    monitoring = get_monitoring_announcement(settings, lang)
+    if monitoring:
+        notices.append(monitoring)
+    return " ".join([*notices, greeting]).strip()
+
+
+def build_call_opening(settings: Settings, remote_number: str, language: str = "", direction: str = "") -> str:
+    """Full spoken call opening: introduction, then consent/AI-disclosure.
+
+    The introduction plays regardless of consent mode; the consent announcement
+    follows when one applies. When recording is off, the separate AI-disclosure
+    line is skipped only if the introduction itself already discloses the AI
+    assistant (a bare "This is Pincer." or a verbatim voice_intro_text override
+    may not — EU AI Act Art. 50 requires the callee be told either way).
+    ``language`` (per-call, Sprint 2) overrides the settings/jurisdiction-based
+    language when given.
+
+    Sprint 12: for inbound calls with the receptionist active, the opening IS
+    the receptionist greeting (§7.1) — never the outbound-style introduction.
+    """
+    language = language.strip().lower()[:2] if language else resolve_consent_language(settings, remote_number)
+    if direction and direction != "outbound":
+        receptionist = build_receptionist_opening(settings, language)
+        if receptionist:
+            return receptionist
+    intro = build_intro_text(settings, language)
+
+    mode = get_consent_mode(settings, remote_number)
+    recording = bool(settings.voice_recording_enabled)
+    announcement = get_consent_announcement(mode, remote_number, language=language, recording=recording)
+    intro_discloses_ai = any(marker in intro.lower() for marker in AI_INTRO_MARKERS)
+    if announcement and not recording and intro_discloses_ai:
+        announcement = None
+
+    # Sprint 15: live listen-in notice, after the recording/AI line.
+    monitoring = get_monitoring_announcement(settings, language)
+
+    return " ".join(part for part in (intro, announcement, monitoring) if part)
+
+
+def build_consent_say_twiml(settings: Settings, remote_number: str, language: str = "", direction: str = "") -> str:
+    """TwiML ``<Say>`` for the call opening (introduction + consent/disclosure).
+
+    Played before ``<Connect>`` so it precedes the conversation. Returns ''
+    when nothing applies (no introduction configured and consent mode ``none``).
+    ``language`` (the per-call language, Sprint 2) overrides the
+    settings/jurisdiction-based announcement language when given.
+    """
+    from xml.sax.saxutils import escape
+
+    text = build_call_opening(settings, remote_number, language=language, direction=direction)
+    if not text:
+        return ""
+    resolved = language.strip().lower()[:2] if language else resolve_consent_language(settings, remote_number)
+    say_language = {"de": "de-DE", "uk": "uk-UA"}.get(resolved, "en-US")
+    return f'<Say language="{say_language}">{escape(text)}</Say>'
 
 
 def should_record(settings: Settings, consent_given: bool) -> bool:
@@ -225,7 +468,12 @@ class ComplianceChecker:
 
     def check_inbound_call(self, caller_number: str) -> ConsentResult:
         mode = get_consent_mode(self._settings, caller_number)
-        announcement = get_consent_announcement(mode, caller_number)
+        announcement = get_consent_announcement(
+            mode,
+            caller_number,
+            language=resolve_consent_language(self._settings, caller_number),
+            recording=bool(self._settings.voice_recording_enabled),
+        )
         jurisdiction = detect_jurisdiction(caller_number)
 
         return ConsentResult(

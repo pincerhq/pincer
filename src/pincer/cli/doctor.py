@@ -9,6 +9,11 @@ from pincer.cli._shared import console
 
 def doctor(
     output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+    production: bool = typer.Option(
+        False,
+        "--production",
+        help="Deploy gate (Sprint 7): adds production checks and exits non-zero on any CRITICAL",
+    ),
 ) -> None:
     """Run 25+ security checks with traffic-light report."""
     import json as _json
@@ -19,11 +24,14 @@ def doctor(
     doc = SecurityDoctor(
         data_dir=_P("data"),
         config_dir=_P("."),
+        production=production,
     )
     report = doc.run_all()
 
     if output_json:
         console.print(_json.dumps(report.to_dict(), indent=2))
+        if production and report.critical > 0:
+            raise typer.Exit(1)
         return
 
     from rich.table import Table
@@ -65,3 +73,6 @@ def doctor(
         f"[yellow]{report.warnings} warnings[/yellow]  "
         f"[red]{report.critical} critical[/red]\n"
     )
+    if production and report.critical > 0:
+        console.print("[bold red]Production gate: RED — refusing (deploy scripts must not start).[/bold red]")
+        raise typer.Exit(1)

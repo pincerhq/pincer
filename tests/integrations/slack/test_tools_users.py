@@ -203,4 +203,4 @@ async def test_user_write_tools_require_approval():
         "slack__disable_user_group",
     ]
     for name in write_tools:
-        assert registry.requires_approval(name), f"{name} should require approval"
+        assert registry.declares_approval(name), f"{name} should require approval"

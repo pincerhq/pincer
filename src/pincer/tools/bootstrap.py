@@ -32,6 +32,11 @@ def register_default_tools(tools: ToolRegistry, settings: Settings) -> dict[str,
     Returns a small report dict so the caller can log what came on/off
     (e.g. ``{"google": 112, "slack": 71, "builtins": 12}``).
     """
+    from pincer.tools.approval import ApprovalPolicy
+
+    # One policy for every tool the agent can reach, whatever registers it.
+    tools.set_approval_policy(ApprovalPolicy.from_settings(settings))
+
     report: dict[str, int] = {"builtins": 0}
 
     _register_builtins(tools, settings, report)

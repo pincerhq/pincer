@@ -22,6 +22,13 @@ def _setup_logging(level: str) -> None:
     )
     # format="%(message)s",
 
+    # T8.5: no raw E.164 number reaches any log sink. Installed on the root
+    # handlers right after basicConfig so it covers every module's logger,
+    # including third-party ones (twilio, httpx) that echo call metadata.
+    from pincer.voice.pii_guard import install_log_pii_filter
+
+    install_log_pii_filter()
+
 
 def _find_env_file() -> str:
     """Return the path to the .env file (project root preferred, else home dir)."""
@@ -56,10 +63,18 @@ def _upsert_env(env_path: str, key: str, value: str) -> None:
 
 
 def _port_in_use(host: str, port: int) -> bool:
-    """Return True if something is already listening on the given host:port."""
-    check_host = "127.0.0.1" if host == "0.0.0.0" else host
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex((check_host, port)) == 0
+    """Return True if something is already listening on the given host:port.
+
+    Defensive: unresolvable inputs (e.g. mocked settings in tests) count as
+    "not in use" rather than crashing startup.
+    """
+    try:
+        check_host = "127.0.0.1" if host == "0.0.0.0" else host
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.5)
+            return s.connect_ex((check_host, int(port))) == 0
+    except (TypeError, ValueError, OSError):
+        return False
 
 
 def _print_voice_webhook_urls(settings: Any, console: Any) -> None:  # type: ignore[no-untyped-def]
@@ -73,15 +88,16 @@ def _print_voice_webhook_urls(settings: Any, console: Any) -> None:  # type: ign
         f"  Fallback:          {base}/api/apps/twilio/fallback",
     ]
     engine = getattr(settings, "voice_engine", "conversation_relay").lower().strip()
+    host = base
+    for prefix in ("https://", "http://"):
+        if host.startswith(prefix):
+            host = host[len(prefix) :]
+            break
     if engine == "media_streams":
-        host = base
-        for prefix in ("https://", "http://"):
-            if host.startswith(prefix):
-                host = host[len(prefix) :]
-                break
         lines.append(f"  Media stream WS:   wss://{host}/api/apps/twilio/stream/{{CallSid}}")
     else:
-        lines.append(f"  ConversationRelay: {base}/api/apps/twilio/relay-webhook")
+        # ConversationRelay is WS-only (the relay-webhook HTTP path caused Twilio 64101).
+        lines.append(f"  ConversationRelay: wss://{host}/api/apps/twilio/relay")
     for line in lines:
         console.print(line)
 

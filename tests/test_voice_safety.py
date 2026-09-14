@@ -76,6 +76,88 @@ class TestParseConfirmation:
         assert parse_confirmation("yes but wait no") == ConfirmationStatus.UNCLEAR
 
 
+class TestNegatedAffirmatives:
+    """A qualified rejection must never read as a confirmation.
+
+    The inline lookarounds only excluded a negation directly against the
+    affirmative word, and most affirmatives ("sure", "correct", "genau",
+    "korrekt") carried no guard at all — so "that's not quite right" and even
+    "I'm not sure" returned CONFIRMED and the gated action went ahead.
+    """
+
+    @pytest.mark.parametrize(
+        "utterance",
+        [
+            "That's not quite right",
+            "not quite right",
+            "that is not correct",
+            "not really correct",
+            "I'm not sure",
+            "I am not at all sure",
+            "I don't think that's right",
+            "that doesn't sound right",
+        ],
+    )
+    def test_english_qualified_rejection(self, utterance):
+        assert parse_confirmation(utterance) == ConfirmationStatus.REJECTED
+
+    @pytest.mark.parametrize(
+        "utterance",
+        [
+            "nicht ganz richtig",
+            "Das ist nicht ganz richtig",
+            "nicht so ganz richtig",
+            "nicht wirklich korrekt",
+            "nicht ganz genau",
+            "das ist nicht in ordnung",
+        ],
+    )
+    def test_german_qualified_rejection(self, utterance):
+        assert parse_confirmation(utterance) == ConfirmationStatus.REJECTED
+
+    @pytest.mark.parametrize(
+        "utterance",
+        [
+            "yes",
+            "ja",
+            "sure",
+            "correct",
+            "korrekt",
+            "genau",
+            "that is right",
+            "yes, that's right",
+            "ja, das ist richtig",
+            "go ahead",
+            "in ordnung",
+            "einverstanden",
+        ],
+    )
+    def test_plain_affirmatives_still_confirm(self, utterance):
+        """The negation scope must not swallow genuine confirmations."""
+        assert parse_confirmation(utterance) == ConfirmationStatus.CONFIRMED
+
+    def test_negation_does_not_cross_a_clause_boundary(self):
+        # The "no" belongs to its own clause; the later "yes" is untouched by
+        # it, so this stays the mixed signal it has always been.
+        assert parse_confirmation("No problem, yes go ahead") == ConfirmationStatus.UNCLEAR
+
+    def test_negated_and_genuine_affirmative_is_unclear(self):
+        assert parse_confirmation("not quite right, but yes go ahead") == ConfirmationStatus.UNCLEAR
+
+    def test_german_postposed_negation_still_works(self):
+        # No look-back can see these; the forward lookaheads still carry them.
+        assert parse_confirmation("stimmt nicht") == ConfirmationStatus.REJECTED
+        assert parse_confirmation("das passt mir nicht") == ConfirmationStatus.REJECTED
+        assert parse_confirmation("das passt nicht ganz") == ConfirmationStatus.REJECTED
+
+    def test_distant_negation_does_not_reach(self):
+        """Negation is windowed, so an early 'no' cannot flip a far-off yes."""
+        assert parse_confirmation("no") == ConfirmationStatus.REJECTED
+        # Same clause but well beyond the window: the affirmative survives and
+        # the explicit negative still forces a re-ask rather than an execution.
+        assert parse_confirmation("no I said I would be happy to proceed") == ConfirmationStatus.UNCLEAR
+
+
 class TestClassifyAction:
     def test_calling(self):
         assert classify_action("make_phone_call", {}) == ActionCategory.CALLING

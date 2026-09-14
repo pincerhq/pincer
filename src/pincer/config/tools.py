@@ -12,6 +12,25 @@ class ToolSettings(BaseModel):
         description="Require user approval before running shell commands",
     )
 
+    # ── Approval policy ───────────────────────────────────
+    approval_policy: str = Field(
+        default="critical",
+        description=(
+            "Which write-capable tools prompt for in-chat approval: "
+            "'critical' (only irreversible/outward-facing/executing tools), "
+            "'all' (every tool that declares require_approval), "
+            "'none' (never prompt — trusted non-interactive deployments only)"
+        ),
+    )
+    approval_always: str = Field(
+        default="",
+        description="Comma-separated tool names that always require approval, whatever the policy says",
+    )
+    approval_never: str = Field(
+        default="",
+        description="Comma-separated tool names that never require approval, whatever the policy says",
+    )
+
     # ── Memory ────────────────────────────────────────────
     memory_enabled: bool = Field(default=True, description="Enable memory system")
     memory_backend: str = Field(
@@ -61,4 +80,13 @@ class ToolSettings(BaseModel):
     def check_value_allowed(cls, v: str) -> str:
         if v not in ["sqlite", "mcp"]:
             raise ValidationError("Provided value not in allowed list: sqlite, mcp")
+        return v
+
+    @field_validator("approval_policy", mode="before")
+    @classmethod
+    def check_approval_policy(cls, v: str) -> str:
+        from pincer.tools.approval import APPROVAL_MODES
+
+        if v not in APPROVAL_MODES:
+            raise ValueError(f"approval_policy must be one of: {', '.join(sorted(APPROVAL_MODES))}")
         return v

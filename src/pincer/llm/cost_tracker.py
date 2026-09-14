@@ -105,6 +105,17 @@ class CostTracker:
         )
         await self._db.commit()
 
+        # Sprint 9 (T9.1): attribute this spend to the voice call currently
+        # bound to the context, if any. `cost_log.session_id` is per-user, not
+        # per-call, so summing by session would bill a user's chat traffic to
+        # whichever call happened to be running.
+        try:
+            from pincer.observability.call_costs import attribute_llm_cost
+
+            attribute_llm_cost(input_tokens, output_tokens, cost)
+        except Exception:  # pragma: no cover — accounting must never break a turn
+            logger.debug("Per-call LLM cost attribution failed", exc_info=True)
+
         logger.debug(
             "Cost: $%.6f (%din/%dout) model=%s session=%s",
             cost,
