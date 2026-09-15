@@ -363,3 +363,188 @@ def test_export_never_carries_conversation_content(seeded):
 
 def test_an_unknown_dataset_is_rejected(seeded):
     assert _client(seeded).get("/api/telephony/export?dataset=secrets&format=csv").status_code == 422
+
+
+# ── overall statistics ───────────────────────────────────────────────
+
+
+def test_overview_exports_every_leaf_of_the_aggregate(seeded):
+    """The flattened table must not quietly drop a section the JSON has."""
+    response = _client(seeded).get("/api/telephony/export?dataset=overview&format=csv&hours=24")
+    assert response.status_code == 200
+    assert response.text.splitlines()[0] == "section,key,metric,value"
+
+    rows = [line.split(",") for line in response.text.strip().splitlines()[1:]]
+    sections = {row[0] for row in rows}
+    assert {"calls", "rates", "stages", "reliability", "coverage", "denominators"} <= sections
+
+    # A rate keeps the numbers that make it interpretable, not just its value.
+    flat = {(row[0], row[1], row[2]) for row in rows}
+    assert ("rates", "connection_rate", "value") in flat
+    assert ("rates", "connection_rate", "denominator") in flat
+
+
+def test_overview_json_keeps_the_nesting_the_csv_has_to_flatten(seeded):
+    payload = _client(seeded).get("/api/telephony/export?dataset=overview&format=json&hours=24").json()
+    assert payload["dataset"] == "overview"
+    assert payload["window_hours"] == 24
+    assert payload["calls"]["total"] == 2
+    assert "connection_rate" in payload["rates"]
+
+
+def test_the_archive_carries_the_window_and_the_means_to_read_it(seeded):
+    import io
+    import json
+    import zipfile
+
+    response = _client(seeded).get("/api/telephony/export/archive?hours=24")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    assert "attachment" in response.headers["content-disposition"]
+    assert response.headers["X-Export-Truncated"] == "false"
+
+    archive = zipfile.ZipFile(io.BytesIO(response.content))
+    assert set(archive.namelist()) == {
+        "README.txt",
+        "filters.json",
+        "overview.json",
+        "overview.csv",
+        "stages.csv",
+        "calls.csv",
+        "turns.csv",
+        "metrics.json",
+    }
+
+    calls = archive.read("calls.csv").decode()
+    assert "CA_alpha" in calls and "CA_beta" in calls
+
+    # The definitions travel with the numbers: an archive read months later must
+    # still say what a metric was measured between.
+    metrics = json.loads(archive.read("metrics.json"))
+    response_latency = next(m for m in metrics if m["key"] == "response_latency_ms")
+    assert response_latency["start_event"] and response_latency["end_event"]
+    assert response_latency["limitations"]
+
+    readme = archive.read("README.txt").decode()
+    assert "Never sum span durations" in readme
+    assert "complete set" in readme
+
+
+def test_the_archive_is_filtered_and_tenant_scoped_like_every_other_read(seeded):
+    import io
+    import zipfile
+
+    response = _client(seeded, tenants=["tenant-a"]).get("/api/telephony/export/archive?hours=24")
+    archive = zipfile.ZipFile(io.BytesIO(response.content))
+    calls = archive.read("calls.csv").decode()
+    assert "CA_alpha" in calls
+    assert "CA_beta" not in calls
+
+    filtered = _client(seeded).get("/api/telephony/export/archive?hours=24&engine=media_streams")
+    calls = zipfile.ZipFile(io.BytesIO(filtered.content)).read("calls.csv").decode()
+    assert "CA_alpha" in calls
+    assert "CA_beta" not in calls
+
+
+# ── one call ─────────────────────────────────────────────────────────
+
+
+def test_a_call_exports_complete_from_the_database(seeded):
+    """Not from whatever the open page had fetched."""
+    import json
+
+    payload = _client(seeded).get("/api/telephony/calls/CA_alpha/export?format=json").json()
+    assert payload["call"]["provider_call_id"] == "CA_alpha"
+    assert payload["turns"] and payload["events"] and payload["spans"]
+    assert payload["truncated"] is False
+    # The engine's own limits ride along, so a missing metric reads as a known
+    # limitation rather than as a gap in the export.
+    assert {m["key"] for m in payload["unavailable"]}
+    assert json.dumps(payload, default=str)
+
+
+def test_a_call_archive_holds_the_timeline_as_csv(seeded):
+    import io
+    import zipfile
+
+    response = _client(seeded).get("/api/telephony/calls/CA_alpha/export")
+    assert response.headers["content-type"] == "application/zip"
+    assert "telephony-call-CA_alpha.zip" in response.headers["content-disposition"]
+
+    archive = zipfile.ZipFile(io.BytesIO(response.content))
+    assert set(archive.namelist()) == {
+        "README.txt",
+        "call.json",
+        "turns.csv",
+        "events.csv",
+        "spans.csv",
+        "metrics.json",
+    }
+    events = archive.read("events.csv").decode()
+    assert events.splitlines()[0] == "ts_utc,seq,name,event_id,turn_id,span_id"
+    assert "call.answered" in events
+    assert "CA_alpha" in archive.read("README.txt").decode()
+
+
+def test_a_download_name_survives_a_call_that_twilio_never_named(seeded):
+    """Outbound calls carry `pending:<uuid>`; a colon is not a filename."""
+    from pincer.api.telephony import _safe_filename
+
+    assert _safe_filename("pending:f373eac4-99") == "pending-f373eac4-99"
+    assert _safe_filename("CA_alpha") == "CA_alpha"
+    assert _safe_filename("///") == "call"
+
+
+def test_a_call_export_is_tenant_scoped(seeded):
+    """Downloading a call is a read, and reads fail closed."""
+    assert _client(seeded, tenants=["tenant-a"]).get("/api/telephony/calls/CA_beta/export").status_code == 404
+
+
+def test_a_call_export_refuses_a_caller_scoped_to_nothing(seeded):
+    """Scoped to nothing means nothing — never everything."""
+    assert _client(seeded, tenants=[]).get("/api/telephony/calls/CA_alpha/export").status_code == 404
+
+
+def test_no_export_surface_carries_conversation_content(seeded):
+    """Every new download goes through the same review as the old ones.
+
+    The unmasked number is the probe: it is the one piece of real caller data
+    the seeded calls were given, and it exists nowhere in these tables.
+    """
+    import io
+    import json
+    import zipfile
+
+    client = _client(seeded)
+    bodies = {
+        "call-json": client.get("/api/telephony/calls/CA_alpha/export?format=json").text,
+        "overview-csv": client.get("/api/telephony/export?dataset=overview&format=csv&hours=24").text,
+    }
+    for label, url in (
+        ("window", "/api/telephony/export/archive?hours=24"),
+        ("call", "/api/telephony/calls/CA_alpha/export"),
+    ):
+        archive = zipfile.ZipFile(io.BytesIO(client.get(url).content))
+        for name in archive.namelist():
+            bodies[f"{label}:{name}"] = archive.read(name).decode()
+
+    for label, body in bodies.items():
+        assert "+4915112345678" not in body, label
+
+    # Payload-bearing fields are checked structurally rather than by substring:
+    # the metric definitions travel inside these files and their prose *mentions*
+    # transcripts and utterances precisely to say they are not measured here.
+    forbidden = {"text", "transcript", "utterance", "prompt", "content", "audio", "args", "result", "recording_url"}
+    bundle = json.loads(bodies["call-json"])
+    fields = set(bundle["call"])
+    for section in ("turns", "events", "spans"):
+        for row in bundle[section]:
+            fields |= set(row)
+            fields |= set(row.get("attributes", {}))
+    assert not (fields & forbidden), sorted(fields & forbidden)
+
+    for label, body in bodies.items():
+        if not label.endswith(".csv") and label != "overview-csv":
+            continue
+        header = set(body.splitlines()[0].split(","))
+        assert not (header & forbidden), f"{label}: {sorted(header & forbidden)}"

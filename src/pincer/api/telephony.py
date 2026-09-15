@@ -376,6 +376,27 @@ EXPORT_COLUMNS: dict[str, tuple[str, ...]] = {
         "complete",
     ),
     "stages": ("stage", "p50_ms", "p95_ms", "p99_ms", "min_ms", "max_ms", "mean_ms", "samples", "sufficient_samples"),
+    # The whole aggregate as one long table, so a spreadsheet can pivot it.
+    # Nested sections keep their path in `key` rather than being dropped.
+    "overview": ("section", "key", "metric", "value"),
+    # Per-call datasets. `attributes` is deliberately absent from both: a JSON
+    # blob in a CSV cell helps nobody, and the JSON members of the same archive
+    # carry it in full.
+    "events": ("ts_utc", "seq", "name", "event_id", "turn_id", "span_id"),
+    "spans": (
+        "span_id",
+        "parent_span_id",
+        "turn_id",
+        "name",
+        "start_utc",
+        "end_utc",
+        "start_offset_ms",
+        "end_offset_ms",
+        "duration_ms",
+        "status",
+        "attempt",
+        "open",
+    ),
 }
 
 #: A row cap, so a download cannot become a denial of service against the box
@@ -401,7 +422,54 @@ def _csv_value(value: Any) -> Any:
     return "" if value is None else value
 
 
-async def _export_rows(request: Request, dataset: str, filters: queries.CallFilters) -> list[dict[str, Any]]:
+async def _aggregate(request: Request, filters: queries.CallFilters) -> queries.Aggregate:
+    settings = get_settings_relaxed()
+    return await queries.overview(
+        _db_path(),
+        filters,
+        scope=_scope(request),
+        min_samples=int(getattr(settings, "telephony_min_samples", 20) or 20),
+    )
+
+
+def _flatten(node: Any, path: tuple[str, ...], rows: list[dict[str, Any]]) -> None:
+    """Depth-first walk of the aggregate into `section, key, metric, value` rows.
+
+    Every leaf keeps its full path, so nothing is lost the way a hand-picked
+    column list loses it: `rates.connection_rate.denominator` survives as
+    section `rates`, key `connection_rate`, metric `denominator`. A list of
+    objects is addressed by its own `key` field when it has one — comparison
+    rows and unavailable metrics both do — and by index otherwise, so the rows
+    stay stable across exports instead of shifting when a group appears.
+    """
+    if isinstance(node, dict):
+        for name, value in node.items():
+            _flatten(value, (*path, str(name)), rows)
+        return
+    if isinstance(node, list):
+        for index, value in enumerate(node):
+            label = str(value["key"]) if isinstance(value, dict) and value.get("key") else str(index)
+            _flatten(value, (*path, label), rows)
+        return
+    rows.append(
+        {
+            "section": path[0] if len(path) > 1 else "",
+            "key": ".".join(path[1:-1]),
+            "metric": path[-1],
+            "value": node,
+        }
+    )
+
+
+def _overview_rows(aggregate: queries.Aggregate, *, window_hours: float) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    _flatten({"window_hours": window_hours, **aggregate.to_dict()}, (), rows)
+    return rows
+
+
+async def _export_rows(
+    request: Request, dataset: str, filters: queries.CallFilters, *, hours: float = 0.0
+) -> list[dict[str, Any]]:
     scope = _scope(request)
     db = _db_path()
     if dataset == "calls":
@@ -410,31 +478,35 @@ async def _export_rows(request: Request, dataset: str, filters: queries.CallFilt
     if dataset == "turns":
         return await queries.export_turns(db, filters, scope=scope, limit=EXPORT_ROW_LIMIT)
     if dataset == "stages":
-        settings = get_settings_relaxed()
-        aggregate = await queries.overview(
-            db, filters, scope=scope, min_samples=int(getattr(settings, "telephony_min_samples", 20) or 20)
-        )
-        return [
-            {
-                "stage": stage,
-                "p50_ms": summary["p50"],
-                "p95_ms": summary["p95"],
-                "p99_ms": summary["p99"],
-                "min_ms": summary["min"],
-                "max_ms": summary["max"],
-                "mean_ms": summary["mean"],
-                "samples": summary["count"],
-                "sufficient_samples": summary["sufficient_samples"],
-            }
-            for stage, summary in aggregate.stages.items()
-        ]
+        aggregate = await _aggregate(request, filters)
+        return _stage_rows(aggregate)
+    if dataset == "overview":
+        aggregate = await _aggregate(request, filters)
+        return _overview_rows(aggregate, window_hours=hours)
     raise HTTPException(status_code=400, detail=f"Unknown dataset {dataset!r}")
+
+
+def _stage_rows(aggregate: queries.Aggregate) -> list[dict[str, Any]]:
+    return [
+        {
+            "stage": stage,
+            "p50_ms": summary["p50"],
+            "p95_ms": summary["p95"],
+            "p99_ms": summary["p99"],
+            "min_ms": summary["min"],
+            "max_ms": summary["max"],
+            "mean_ms": summary["mean"],
+            "samples": summary["count"],
+            "sufficient_samples": summary["sufficient_samples"],
+        }
+        for stage, summary in aggregate.stages.items()
+    ]
 
 
 @router.get("/export")
 async def export_dataset(
     request: Request,
-    dataset: str = Query(default="calls", pattern="^(calls|turns|stages)$"),
+    dataset: str = Query(default="calls", pattern="^(calls|turns|stages|overview)$"),
     fmt: str = Query(default="csv", alias="format", pattern="^(csv|json)$"),
     hours: float = Query(default=24.0, ge=0.1, le=8760.0),
     environment: str = "",
@@ -476,13 +548,23 @@ async def export_dataset(
         failure_code,
         search,
     )
-    rows = await _export_rows(request, dataset, filters)
+    if dataset == "overview" and fmt == "json":
+        # The aggregate's own shape, not the flattened table: the nesting is what
+        # says which denominator a rate belongs to, and JSON can keep it.
+        aggregate = await _aggregate(request, filters)
+        rows = _overview_rows(aggregate, window_hours=hours)
+        payload: dict[str, Any] = {"dataset": dataset, **aggregate.to_dict(), "window_hours": hours}
+    else:
+        rows = await _export_rows(request, dataset, filters, hours=hours)
+        payload = {"dataset": dataset, "rows": rows}
+
     truncated = len(rows) >= EXPORT_ROW_LIMIT
+    payload["truncated"] = truncated
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     name = f"telephony-{dataset}-{stamp}{'-truncated' if truncated else ''}.{fmt}"
 
     if fmt == "json":
-        body = json_lib.dumps({"dataset": dataset, "rows": rows, "truncated": truncated}, default=str, indent=2)
+        body = json_lib.dumps(payload, default=str, indent=2)
         media_type = "application/json"
     else:
         body = _csv(EXPORT_COLUMNS[dataset], rows)
@@ -496,6 +578,192 @@ async def export_dataset(
             "X-Export-Rows": str(len(rows)),
             "X-Export-Truncated": "true" if truncated else "false",
         },
+    )
+
+
+# ── archives ─────────────────────────────────────────────────────────
+
+#: What every archive says about itself. Written into the ZIP so the file is
+#: still interpretable months later, detached from the dashboard that made it.
+_ARCHIVE_NOTICE = """\
+Pincer telephony telemetry export
+=================================
+
+Generated   {generated}
+{scope}
+
+Contents
+--------
+{contents}
+
+What this data is
+-----------------
+Technical telemetry only. Phone numbers are masked at write time, and
+transcripts, recordings, prompts, tool arguments and tool results never enter
+these tables — they are not omitted from this archive, they do not exist in it.
+
+How to read the numbers
+-----------------------
+metrics.json carries every metric's definition: the two events it is measured
+between, whether it is server-measured or provider-reported, which engines can
+produce it at all, and its known limitations. Read it before comparing figures
+across engines.
+
+Three rules the data obeys, and your analysis should too:
+
+  * Durations come only from paired monotonic readings. A duration is never
+    derived by subtracting two wall-clock timestamps.
+  * Percentiles come only from histograms. A p95 of a p95 is not a p95.
+  * Spans overlap, on purpose — a streaming turn runs its LLM underneath its
+    TTS. Never sum span durations. Only the critical path is a partition, and
+    only it sums to the response latency.
+
+Counts marked with a denominator are rates: a rate with a denominator of zero
+is reported as null, never as 0%.
+
+{caps}
+"""
+
+
+def _archive_notice(*, scope: str, contents: list[tuple[str, str]], caps: list[str]) -> str:
+    width = max((len(name) for name, _ in contents), default=0)
+    return _ARCHIVE_NOTICE.format(
+        generated=datetime.now(UTC).isoformat(timespec="seconds"),
+        scope=scope,
+        contents="\n".join(f"  {name:<{width}}  {description}" for name, description in contents),
+        caps="\n".join(caps) if caps else "No cap was reached: this archive is the complete set.",
+    )
+
+
+def _zip_response(members: dict[str, str], *, filename: str, rows: int, truncated: bool) -> StreamingResponse:
+    """Pack text members into a ZIP in memory.
+
+    In memory on purpose: EXPORT_ROW_LIMIT already bounds this to a size a
+    dashboard request can hold, and a temporary file would outlive a cancelled
+    download.
+    """
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, body in members.items():
+            archive.writestr(name, body)
+    payload = buffer.getvalue()
+
+    return StreamingResponse(
+        iter([payload]),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Length": str(len(payload)),
+            "X-Export-Rows": str(rows),
+            "X-Export-Truncated": "true" if truncated else "false",
+        },
+    )
+
+
+def _safe_filename(reference: str) -> str:
+    """A call reference is not a filename.
+
+    An outbound call carries `pending:<uuid>` until Twilio names it, and a colon
+    is illegal in a Windows filename and awkward everywhere else — the download
+    must not arrive as a file the browser refuses to save.
+    """
+    cleaned = "".join(character if character.isalnum() or character in "-_." else "-" for character in reference)
+    return cleaned.strip("-") or "call"
+
+
+def _metrics_json() -> str:
+    import json as json_lib
+
+    return json_lib.dumps([m.to_dict() for m in METRICS.values()], default=str, indent=2)
+
+
+@router.get("/export/archive")
+async def export_archive(
+    request: Request,
+    hours: float = Query(default=24.0, ge=0.1, le=8760.0),
+    environment: str = "",
+    app_version: str = "",
+    direction: str = "",
+    provider: str = "",
+    engine: str = "",
+    model: str = "",
+    language: str = "",
+    status: str = "",
+    failure_category: str = "",
+    failure_code: str = "",
+    search: str = "",
+) -> StreamingResponse:
+    """Everything the current filter covers, as one ZIP.
+
+    The dataset downloads answer "give me the call table". This answers "give me
+    the window" — the aggregate, the calls, their turns, the per-stage
+    percentiles and the metric definitions needed to interpret any of it, in one
+    file that can be attached to a ticket or opened in a notebook.
+    """
+    import dataclasses
+    import json as json_lib
+
+    filters = _filters(
+        request,
+        hours,
+        environment,
+        app_version,
+        direction,
+        provider,
+        engine,
+        model,
+        language,
+        status,
+        failure_category,
+        failure_code,
+        search,
+    )
+
+    aggregate = await _aggregate(request, filters)
+    calls = await _export_rows(request, "calls", filters)
+    turns = await _export_rows(request, "turns", filters)
+    overview_rows = _overview_rows(aggregate, window_hours=hours)
+
+    caps = [
+        f"{label} hit the {EXPORT_ROW_LIMIT:,}-row cap — narrow the filter for the rest."
+        for label, dataset in (("calls.csv", calls), ("turns.csv", turns))
+        if len(dataset) >= EXPORT_ROW_LIMIT
+    ]
+    contents = [
+        ("README.txt", "this file"),
+        ("filters.json", "the exact slice these files describe"),
+        ("overview.json", "the aggregate: counts, rates, percentiles, trend, coverage"),
+        ("overview.csv", "the same aggregate flattened for a spreadsheet"),
+        ("stages.csv", "per-stage percentiles, one row per stage"),
+        ("calls.csv", f"one row per call ({len(calls):,})"),
+        ("turns.csv", f"one row per conversational turn ({len(turns):,})"),
+        ("metrics.json", "what each metric means and what it cannot tell you"),
+    ]
+
+    members = {
+        "README.txt": _archive_notice(
+            scope=f"Window      last {hours} h  (see filters.json for the exact slice)",
+            contents=contents,
+            caps=caps,
+        ),
+        "filters.json": json_lib.dumps({"window_hours": hours, **dataclasses.asdict(filters)}, default=str, indent=2),
+        "overview.json": json_lib.dumps({**aggregate.to_dict(), "window_hours": hours}, default=str, indent=2),
+        "overview.csv": _csv(EXPORT_COLUMNS["overview"], overview_rows),
+        "stages.csv": _csv(EXPORT_COLUMNS["stages"], _stage_rows(aggregate)),
+        "calls.csv": _csv(EXPORT_COLUMNS["calls"], calls),
+        "turns.csv": _csv(EXPORT_COLUMNS["turns"], turns),
+        "metrics.json": _metrics_json(),
+    }
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return _zip_response(
+        members,
+        filename=f"telephony-{stamp}{'-truncated' if caps else ''}.zip",
+        rows=len(calls) + len(turns),
+        truncated=bool(caps),
     )
 
 
@@ -540,6 +808,94 @@ async def call_detail(request: Request, call_ref: str) -> CallDetailOut:
         metrics=[MetricDefinitionOut(**m.to_dict()) for m in available],  # type: ignore[arg-type]
         unavailable=[MetricDefinitionOut(**m.to_dict()) for m in unavailable],  # type: ignore[arg-type]
         telemetry_gaps=gaps,
+    )
+
+
+#: Per-call reads are bounded like every other read. A call that produced more
+#: events than this is pathological, and the archive says so rather than
+#: quietly handing over a prefix.
+CALL_EXPORT_LIMIT = 20_000
+
+
+@router.get("/calls/{call_ref}/export")
+async def export_call(
+    request: Request,
+    call_ref: str,
+    fmt: str = Query(default="zip", alias="format", pattern="^(zip|json)$"),
+) -> StreamingResponse:
+    """One call, complete: metadata, turns, events and spans.
+
+    Assembled from the database rather than from whatever the open page happened
+    to have fetched, so the download is the same whether it is taken from a
+    freshly loaded call or a half-rendered one.
+    """
+    import json as json_lib
+
+    call = await _resolve_call(request, call_ref)
+    call_id = str(call["call_id"])
+    db = _db_path()
+    turns = await queries.get_turns(db, call_id)
+    events = await queries.get_events(db, call_id, limit=CALL_EXPORT_LIMIT)
+    spans = await queries.get_spans(db, call_id, limit=CALL_EXPORT_LIMIT)
+    engine = str(call.get("engine") or "")
+
+    reference = str(call.get("provider_call_id") or call_id)
+    stem = _safe_filename(reference)
+    truncated = len(events) >= CALL_EXPORT_LIMIT or len(spans) >= CALL_EXPORT_LIMIT
+    bundle = {
+        "call": call,
+        "turns": turns,
+        "events": events,
+        "spans": spans,
+        "metrics": [m.to_dict() for m in METRICS.values() if m.available(engine)],
+        "unavailable": [m.to_dict() for m in METRICS.values() if not m.available(engine)],
+        "truncated": truncated,
+    }
+
+    if fmt == "json":
+        body = json_lib.dumps(bundle, default=str, indent=2)
+        return StreamingResponse(
+            iter([body]),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="telephony-call-{stem}.json"',
+                "X-Export-Rows": str(len(turns) + len(events) + len(spans)),
+                "X-Export-Truncated": "true" if truncated else "false",
+            },
+        )
+
+    caps = (
+        [f"This call hit the {CALL_EXPORT_LIMIT:,}-row cap: events or spans are a prefix, not the whole call."]
+        if truncated
+        else []
+    )
+    contents = [
+        ("README.txt", "this file"),
+        ("call.json", "the call row, its turns, events and spans with their attributes"),
+        ("turns.csv", f"one row per turn ({len(turns):,})"),
+        ("events.csv", f"the timeline, ordered by (ts_utc, seq) ({len(events):,})"),
+        ("spans.csv", f"waterfall spans, offsets relative to the call ({len(spans):,})"),
+        ("metrics.json", "what each metric means and which ones this engine cannot produce"),
+    ]
+
+    members = {
+        "README.txt": _archive_notice(
+            scope=f"Call        {reference}  (engine {engine or 'unknown'})",
+            contents=contents,
+            caps=caps,
+        ),
+        "call.json": json_lib.dumps(bundle, default=str, indent=2),
+        "turns.csv": _csv(EXPORT_COLUMNS["turns"], turns),
+        "events.csv": _csv(EXPORT_COLUMNS["events"], events),
+        "spans.csv": _csv(EXPORT_COLUMNS["spans"], spans),
+        "metrics.json": _metrics_json(),
+    }
+
+    return _zip_response(
+        members,
+        filename=f"telephony-call-{stem}.zip",
+        rows=len(turns) + len(events) + len(spans),
+        truncated=truncated,
     )
 
 

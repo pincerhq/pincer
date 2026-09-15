@@ -176,6 +176,11 @@ class CallTracer:
         self._answered_ns: int | None = None
         self._dialed_ns: int | None = None
         self._media_open_ns: int | None = None
+        #: The socket opened before anything marked the call answered. On both
+        #: engines the WS frame that opens the media IS the pickup signal, and
+        #: the handler marks the answer immediately after opening — so the two
+        #: are one event and `answered()` closes the gap.
+        self._media_open_before_answer = False
         #: First inbound media frame seen. Guards a per-frame hook that is
         #: called on the audio path — it must stay a single attribute read.
         self.first_inbound_audio_seen = False
@@ -371,31 +376,51 @@ class CallTracer:
         self._answered_ns = mono_ns()
         self.event(EventName.CALL_ANSWERED, at_ns=self._answered_ns, **attributes)
         setup = duration_ms(self._dialed_ns, self._answered_ns) if self._dialed_ns else None
-        self._enqueue(
-            store.upsert_call(
-                self._db_path,
-                self.ctx.call_id,
-                answered_at=project_utc(self._answered_ns).isoformat(),
-                setup_ms=setup,
-                status="connected",
-                updated_at=utc_iso(),
-            )
-        )
+        fields: dict[str, Any] = {
+            "answered_at": project_utc(self._answered_ns).isoformat(),
+            "setup_ms": setup,
+            "status": "connected",
+            "updated_at": utc_iso(),
+        }
+        if self._media_open_before_answer:
+            # Same wire frame opened the socket and told us the callee picked
+            # up, microseconds apart in our own bookkeeping. One event, so the
+            # establishment interval is zero — not the negative delta between
+            # the two readings, and not "not measured".
+            self._media_open_before_answer = False
+            fields["media_establish_ms"] = 0.0
+        self._enqueue(store.upsert_call(self._db_path, self.ctx.call_id, **fields))
 
     def media_open(self, **attributes: Any) -> None:
-        if self._media_open_ns is None:
-            self._media_open_ns = mono_ns()
-        self.event(EventName.MEDIA_STREAM_OPEN, at_ns=self._media_open_ns, **attributes)
-        establish = duration_ms(self._answered_ns, self._media_open_ns) if self._answered_ns else None
-        self._enqueue(
-            store.upsert_call(
-                self._db_path,
-                self.ctx.call_id,
-                media_open_at=project_utc(self._media_open_ns).isoformat(),
-                media_establish_ms=establish,
-                updated_at=utc_iso(),
-            )
-        )
+        """A media socket is open. Called once per connection, not once per call.
+
+        Timestamped per connection: a socket re-established mid-call (coming
+        back from a `<Dial>` transfer) opens at its own instant, and stamping
+        it with the first connection's reading put the event at the wrong
+        place on the timeline.
+        """
+        open_ns = mono_ns()
+        reopened = self._media_open_ns is not None
+        self._media_open_ns = open_ns
+        self.event(EventName.MEDIA_STREAM_OPEN, at_ns=open_ns, **attributes)
+        if reopened:
+            # A socket re-established mid-call is its own point on the timeline
+            # and stops here. The call row keeps the first establishment: that
+            # column means "how long this call's media took to come up", and
+            # answered → reopen is the elapsed call, not an establishment.
+            return
+        # Nothing has marked the answer yet: this open IS the pickup signal and
+        # the handler marks it on the next line, so there is no interval to
+        # measure here. Recording a duration against an answer that has not
+        # happened would be a fabrication; `answered()` writes the value.
+        self._media_open_before_answer = self._answered_ns is None
+        fields: dict[str, Any] = {
+            "media_open_at": project_utc(open_ns).isoformat(),
+            "updated_at": utc_iso(),
+        }
+        if self._answered_ns is not None:
+            fields["media_establish_ms"] = duration_ms(self._answered_ns, open_ns)
+        self._enqueue(store.upsert_call(self._db_path, self.ctx.call_id, **fields))
 
     def provider_status(self, status: str, *, sequence: str = "", **attributes: Any) -> None:
         """A provider status callback.

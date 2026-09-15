@@ -240,6 +240,50 @@ belongs.
 
 ---
 
+## 6a. Downloading the data
+
+Everything the dashboard shows can be taken out of it. Two shapes, both behind
+the same bearer token and the same fail-closed tenant scope as every other read.
+
+**One window** — `GET /api/telephony/export/archive?<filters>` returns a ZIP:
+
+| Member | What it is |
+| --- | --- |
+| `README.txt` | what the archive is, and the three rules below |
+| `filters.json` | the exact slice these files describe |
+| `overview.json` | the aggregate, nested: counts, rates, percentiles, trend, coverage |
+| `overview.csv` | the same aggregate flattened to `section,key,metric,value` |
+| `stages.csv` | per-stage percentiles, one row per stage |
+| `calls.csv` | one row per call |
+| `turns.csv` | one row per conversational turn |
+| `metrics.json` | every metric's definition and its limitations |
+
+**One call** — `GET /api/telephony/calls/{ref}/export?format=zip|json` returns
+that call's row, turns, events and spans. It is assembled from the database, not
+from what the open page happened to have fetched, so a download taken from a
+half-rendered page is still the complete call.
+
+Single datasets stay available at `GET /api/telephony/export?dataset=…` —
+`calls`, `turns`, `stages` or `overview`, as `csv` or `json`. Every dataset
+download covers the whole filter, never the page on screen.
+
+`metrics.json` travels with the numbers on purpose: an archive opened months
+later must still say what each figure was measured between, and the analysis has
+to obey the same three rules the pipeline does — durations only from monotonic
+pairs, percentiles only from histograms, and never sum overlapping spans (only
+the critical path is a partition).
+
+Caps: `EXPORT_ROW_LIMIT` (50 000) rows per dataset and `CALL_EXPORT_LIMIT`
+(20 000) events or spans per call. Hitting one is reported in the filename, in
+`X-Export-Truncated` and in the archive's README — never silently.
+
+Nothing new leaves the system through these routes. The column lists in
+`EXPORT_COLUMNS` are the review point, and §6 still holds: masked numbers only,
+and no transcript, recording, prompt or tool payload exists in these tables to
+export.
+
+---
+
 ## 7. Alerts
 
 `voice/telemetry/alerts.py`, evaluated over a configurable window. Every rule

@@ -169,8 +169,10 @@ METRICS: dict[str, MetricDefinition] = {
             end_event=EventName.MEDIA_STREAM_OPEN,
             source=MeasurementSource.SERVER_MEASURED,
             limitations=(
-                "On both engines the WebSocket open IS the answer signal, so this is usually "
-                "near zero; it is non-zero only when the socket is re-established mid-call."
+                "The call's first media socket only; a mid-call reconnect is a timeline event, "
+                "not a second establishment. On both engines the WebSocket open IS the answer "
+                "signal, so this is zero on almost every call — it is non-zero only when the "
+                "answer reached us over a separate webhook before the socket connected."
             ),
         ),
         MetricDefinition(

@@ -16,7 +16,6 @@ import {
   useTelephonyCallSpans,
   useTelephonyMetricDefinitions,
 } from "@/api/hooks/useTelephony"
-import { downloadJson } from "@/lib/download"
 import { ROUTES } from "@/lib/constants"
 import type { TelephonySpan } from "@/api/types"
 
@@ -53,20 +52,14 @@ export function TelephonyCallPage() {
   }
 
   const { call, turns, unavailable, telemetry_gaps: gaps } = detail.data
+  const reference = call.provider_call_id || call.call_id
   const slowest = [...turns]
     .filter((t) => t.response_latency_ms !== null)
     .sort((a, b) => (b.response_latency_ms ?? 0) - (a.response_latency_ms ?? 0))
     .slice(0, 3)
 
-  const bundle = {
-    call,
-    turns,
-    events: events.data ?? [],
-    spans: spans.data ?? [],
-  }
-
   return (
-    <PageContainer title={call.provider_call_id || call.call_id}>
+    <PageContainer title={reference}>
       <div className="space-y-4">
         <div className="flex items-center gap-3">
           <Link
@@ -78,20 +71,37 @@ export function TelephonyCallPage() {
           <div className="ml-auto flex items-center gap-1">
             <InfoHint title="Exporting this call">
               <p>
-                Downloads this call's metadata, turns, events and spans as one JSON bundle — the
-                shape to attach to a bug report.
+                This call's metadata, turns, events and spans — the shape to attach to a bug report.
+                The archive adds the timeline as CSVs and the metric definitions needed to read the
+                timings; the JSON document is the same data as one file.
               </p>
               <p>
-                It contains technical telemetry only: masked numbers, stage timings and span names.
-                Transcripts and recordings live behind their own permissions and are not part of it.
+                Both are assembled by the server from the database, so the download is complete even
+                if this page is still loading its timeline.
+              </p>
+              <p>
+                Technical telemetry only: masked numbers, stage timings and span names. Transcripts
+                and recordings live behind their own permissions and are not part of it.
               </p>
             </InfoHint>
-            <button
-              onClick={() => downloadJson(`telephony-call-${call.provider_call_id || call.call_id}.json`, bundle)}
-              className="rounded-md px-2 py-1 text-[11px] text-[var(--color-muted)] hover:bg-white/[0.06] hover:text-[var(--color-foreground)]"
-            >
-              Export call bundle
-            </button>
+            <ExportMenu
+              label="Download call"
+              archive={{
+                label: "This call · complete",
+                items: [
+                  {
+                    label: "Archive · ZIP",
+                    path: `api/telephony/calls/${encodeURIComponent(callRef ?? call.call_id)}/export?format=zip`,
+                    filename: `telephony-call-${reference}.zip`,
+                  },
+                  {
+                    label: "Bundle · JSON",
+                    path: `api/telephony/calls/${encodeURIComponent(callRef ?? call.call_id)}/export?format=json`,
+                    filename: `telephony-call-${reference}.json`,
+                  },
+                ],
+              }}
+            />
           </div>
         </div>
 
@@ -147,7 +157,7 @@ export function TelephonyCallPage() {
             <ExportMenu
               local={{
                 label: "This call's turns",
-                filename: `telephony-turns-${call.provider_call_id || call.call_id}`,
+                filename: `telephony-turns-${reference}`,
                 columns: [
                   "turn_no",
                   "response_latency_ms",
@@ -200,7 +210,7 @@ export function TelephonyCallPage() {
               <ExportMenu
                 local={{
                   label: "Spans",
-                  filename: `telephony-spans-${call.provider_call_id || call.call_id}`,
+                  filename: `telephony-spans-${reference}`,
                   columns: [
                     "span_id",
                     "turn_id",
@@ -266,7 +276,7 @@ export function TelephonyCallPage() {
             <ExportMenu
               local={{
                 label: "Events",
-                filename: `telephony-events-${call.provider_call_id || call.call_id}`,
+                filename: `telephony-events-${reference}`,
                 columns: ["ts_utc", "seq", "name", "turn_id", "span_id"],
                 rows: (events.data ?? []) as unknown as Array<Record<string, unknown>>,
               }}

@@ -20,34 +20,54 @@ export interface LocalExport {
 }
 
 /**
+ * Whole bundles the server assembles, listed explicitly rather than derived
+ * from a format flag — an archive and a JSON document are different endpoints
+ * with different query strings, not one endpoint with a switch.
+ */
+export interface ArchiveExport {
+  /** Heading above the entries. */
+  label: string
+  items: Array<{
+    label: string
+    /** API path, query string included. */
+    path: string
+    /** Used only if the server sends no Content-Disposition. */
+    filename: string
+  }>
+}
+
+/**
  * Download control.
  *
  * Server-backed datasets export the WHOLE current filter, not the page on
  * screen — an export that stops at the pagination boundary lands in a
- * spreadsheet looking complete. Chart series that already live in the browser
- * are written locally, because a round trip for forty points is silly.
+ * spreadsheet looking complete. Archives go further and are assembled from the
+ * database rather than from what this page has fetched, so a download taken
+ * from a half-rendered page is still the complete call. Chart series that
+ * already live in the browser are written locally, because a round trip for
+ * forty points is silly.
  */
 export function ExportMenu({
   dataset,
   query,
+  archive,
   local,
   label = "Export",
   compact = false,
 }: {
-  dataset?: "calls" | "turns" | "stages"
+  dataset?: "calls" | "turns" | "stages" | "overview"
   query?: Record<string, string>
+  archive?: ArchiveExport
   local?: LocalExport
   label?: string
   compact?: boolean
 }) {
   const [busy, setBusy] = useState(false)
 
-  const serverDownload = async (format: "csv" | "json") => {
-    if (!dataset) return
+  const fetchDownload = async (path: string, fallbackName: string) => {
     setBusy(true)
     try {
-      const params = new URLSearchParams({ ...(query ?? {}), dataset, format })
-      const result = await downloadFromApi(`api/telephony/export?${params}`, `telephony-${dataset}.${format}`)
+      const result = await downloadFromApi(path, fallbackName)
       toast.success(
         result.truncated
           ? `Exported ${result.rows.toLocaleString()} rows — capped, narrow the filter for the rest`
@@ -59,6 +79,13 @@ export function ExportMenu({
       setBusy(false)
     }
   }
+
+  const serverDownload = (format: "csv" | "json") => {
+    if (!dataset) return Promise.resolve()
+    const params = new URLSearchParams({ ...(query ?? {}), dataset, format })
+    return fetchDownload(`api/telephony/export?${params}`, `telephony-${dataset}.${format}`)
+  }
+
 
   return (
     <DropdownMenu>
@@ -75,10 +102,23 @@ export function ExportMenu({
         {!compact && <span>{label}</span>}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-[13rem]">
+        {archive && (
+          <>
+            <DropdownMenuLabel className="text-[10px] uppercase tracking-wide opacity-60">
+              {archive.label}
+            </DropdownMenuLabel>
+            {archive.items.map((item) => (
+              <DropdownMenuItem key={item.path} onSelect={() => void fetchDownload(item.path, item.filename)}>
+                {item.label}
+              </DropdownMenuItem>
+            ))}
+          </>
+        )}
+        {archive && (dataset || local) && <DropdownMenuSeparator />}
         {dataset && (
           <>
             <DropdownMenuLabel className="text-[10px] uppercase tracking-wide opacity-60">
-              Current filter · all rows
+              {dataset === "overview" ? "Current filter · aggregate" : "Current filter · all rows"}
             </DropdownMenuLabel>
             <DropdownMenuItem onSelect={() => void serverDownload("csv")}>{dataset} · CSV</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => void serverDownload("json")}>{dataset} · JSON</DropdownMenuItem>

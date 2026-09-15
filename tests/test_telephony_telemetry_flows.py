@@ -462,6 +462,66 @@ async def test_missing_telemetry_is_reported_as_coverage_not_hidden(telemetry):
     assert aggregate.stages["response_latency_ms"]["p50"] is None
 
 
+# ── media establishment ──────────────────────────────────────────────
+
+# Both TwiML handlers open the socket and only then mark the answer: the same
+# wire frame carries both, and the answer costs an await. Tests that call
+# `answered()` first exercise the order production never uses.
+
+
+async def test_the_socket_opening_before_the_answer_measures_zero_not_null(telemetry):
+    """The production order. The open IS the pickup, so there is no interval."""
+    tracer = _inbound()
+    tracer.media_open(transport="ws")
+    tracer.answered()
+    await tracer.finish(status="completed", failure_code="none")
+    await _settle()
+
+    call = await queries.get_call(telemetry, "CA_in")
+    assert call is not None
+    assert call["media_open_at"] is not None
+    assert call["media_establish_ms"] == 0.0
+
+
+async def test_an_answer_that_precedes_the_socket_measures_the_real_gap(telemetry):
+    """ConversationRelay's HTTP `setup` webhook can beat its own socket."""
+    tracer = _inbound(engine="conversation_relay")
+    tracer.answered()
+    tracer.media_open(transport="ws")
+    await tracer.finish(status="completed", failure_code="none")
+    await _settle()
+
+    call = await queries.get_call(telemetry, "CA_in")
+    assert call is not None
+    assert call["media_establish_ms"] is not None
+    assert call["media_establish_ms"] >= 0.0
+
+
+async def test_a_mid_call_reconnect_never_rewrites_the_establishment(telemetry):
+    """Back from a <Dial> transfer: a second open is a timeline event only.
+
+    Measuring it against the answer would subtract the whole conversation —
+    and measuring the answer against the *first* open went negative.
+    """
+    tracer = _inbound()
+    tracer.media_open(transport="ws")
+    tracer.answered()
+    turn = tracer.start_turn(speech_end_ns=tracer.watch.started_ns)
+    turn.first_audio(kind="audio", at_ns=tracer.watch.started_ns + 400 * MS)
+    turn.finish()
+    tracer.media_open(transport="ws")  # the socket came back
+    await tracer.finish(status="completed", failure_code="none", duration_s=42.0)
+    await _settle()
+
+    call = await queries.get_call(telemetry, "CA_in")
+    assert call is not None
+    assert call["media_establish_ms"] == 0.0
+
+    opens = [e for e in await queries.get_events(telemetry, call["call_id"]) if e["name"] == "call.media_stream_open"]
+    assert len(opens) == 2
+    assert opens[1]["ts_utc"] >= opens[0]["ts_utc"]
+
+
 # ── aggregation ──────────────────────────────────────────────────────
 
 

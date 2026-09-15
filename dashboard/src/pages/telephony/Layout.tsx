@@ -2,7 +2,9 @@ import { useCallback, useMemo } from "react"
 import { Outlet, useSearchParams } from "react-router-dom"
 import { PageContainer } from "@/components/layout/PageContainer"
 import { ActiveFilters } from "@/components/telephony/ActiveFilters"
+import { ExportMenu } from "@/components/telephony/ExportMenu"
 import { Filters } from "@/components/telephony/Filters"
+import { InfoHint } from "@/components/telephony/InfoHint"
 import { TelephonyTabs } from "@/components/telephony/TelephonyTabs"
 import { filterParams, useTelephonyAlerts, useTelephonyCalls } from "@/api/hooks/useTelephony"
 import type { TelephonyFilters } from "@/api/types"
@@ -69,7 +71,41 @@ export function TelephonyLayout() {
       <div className="space-y-4">
         <div className="space-y-2">
           <FiltersRow filters={filters} setFilters={setFilters} />
-          <ActiveFilters filters={filters} onChange={setFilters} />
+          <div className="flex items-center gap-1">
+            <ActiveFilters filters={filters} onChange={setFilters} />
+            <div className="ml-auto flex items-center gap-1">
+              <InfoHint title="Downloading this window">
+                <p>
+                  Every download covers the <strong>whole filtered window</strong>, not the page on
+                  screen or the section you are looking at.
+                </p>
+                <p>
+                  The archive is the one to take for analysis: the aggregate, one row per call, one
+                  row per turn, the per-stage percentiles, and the metric definitions needed to read
+                  any of it — with the filter that produced it recorded alongside.
+                </p>
+                <p>
+                  Technical telemetry only. Numbers are masked and no transcript, recording, prompt
+                  or tool payload exists in these tables to export.
+                </p>
+              </InfoHint>
+              <ExportMenu
+                label="Download"
+                dataset="overview"
+                query={query}
+                archive={{
+                  label: "This window · everything",
+                  items: [
+                    {
+                      label: "Full archive · ZIP",
+                      path: `api/telephony/export/archive?${new URLSearchParams(query)}`,
+                      filename: "telephony-export.zip",
+                    },
+                  ],
+                }}
+              />
+            </div>
+          </div>
         </div>
 
         <TelephonyTabs
