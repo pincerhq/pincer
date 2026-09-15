@@ -26,7 +26,7 @@ import type { TelephonySpan } from "@/api/types"
  * which spans explain that turn → the raw events. Explanations are folded behind
  * "i" icons so the page reads as data rather than as documentation.
  */
-export function TelephonyCallPage() {
+function CallDetail() {
   const { callRef } = useParams<{ callRef: string }>()
   const [searchParams] = useSearchParams()
   const detail = useTelephonyCall(callRef)
@@ -312,4 +312,32 @@ export function TelephonyCallPage() {
       </div>
     </PageContainer>
   )
+}
+
+
+/**
+ * Remounts the detail on a different call — which is what makes the selection
+ * state correct.
+ *
+ * `selectedTurn` is seeded from `?turn=` by a `useState` initializer and
+ * `selectedSpan` is picked by clicking the waterfall; both belong to the call
+ * they were chosen in. The route (`App.tsx`, `ROUTES.TELEPHONY_CALL`) renders
+ * one element for every `:callRef`, so React reconciles the same component
+ * across a call change and neither piece of state resets: the waterfall and
+ * the turn breakdown end up filtered against a turn id from the call you just
+ * left, and the span panel shows a span that is not in this call at all.
+ *
+ * `AlertStrip` links here without a `turn` param, which is the nastier case —
+ * the URL then gives no hint why the waterfall looks empty.
+ *
+ * Keyed rather than synced with an effect: a key resets ALL per-call state at
+ * once, including any added later, whereas an effect only resyncs the fields
+ * someone remembered to list (`selectedSpan` has no URL param to sync from).
+ * The requested turn is in the key too, so a link to a *different* turn on the
+ * call already open re-seeds the selection instead of being ignored.
+ */
+export function TelephonyCallPage() {
+  const { callRef } = useParams<{ callRef: string }>()
+  const [searchParams] = useSearchParams()
+  return <CallDetail key={`${callRef ?? ""}|${searchParams.get("turn") ?? ""}`} />
 }
