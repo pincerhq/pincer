@@ -140,6 +140,38 @@ _ACCUMULATING = frozenset(
     }
 )
 
+#: The only statuses a call row may be moved OUT of. Everything else — the
+#: statuses `CallTracer.finish` writes: "completed", "failed", "ended" — is
+#: terminal and ABSORBING.
+#:
+#: Stated as the live set rather than the terminal set on purpose: a terminal
+#: status added later is then absorbing by default, whereas a forgotten entry
+#: in a terminal list would silently re-open the hole. The live set is written
+#: in exactly two places (`CallTracer.registered` and `.answered`).
+#:
+#: Why this lives in the UPDATE and not in a Python guard: Twilio retries
+#: status callbacks for minutes, and by the time a late one lands the original
+#: `CallTracer` may have been evicted (`runtime._MAX_TRACERS`, a 900 s context
+#: TTL) or the process restarted. A caller then builds a FRESH tracer whose
+#: `_finished` is False — see `hooks.call_declined` — and an in-memory flag
+#: cannot see the terminal write the previous instance made. The row can.
+LIVE_STATUSES = ("active", "connected")
+
+_STATUS_ASSIGNMENT = "status=CASE WHEN COALESCE(telephony_calls.status,'') IN ('', {live}) THEN excluded.status ELSE telephony_calls.status END".format(  # noqa: E501
+    live=", ".join(f"'{s}'" for s in LIVE_STATUSES)
+)
+
+
+def _assignment(column: str) -> str:
+    """The `DO UPDATE SET` clause for one column."""
+    if column in _ACCUMULATING:
+        return f"{column}=telephony_calls.{column}+excluded.{column}"
+    if column == "status":
+        # COALESCE covers the row `dial_requested()` can create before anything
+        # has set a status at all: NULL is not terminal, it is "not yet known".
+        return _STATUS_ASSIGNMENT
+    return f"{column}=excluded.{column}"
+
 
 async def open_connection(db_path: str | Path) -> aiosqlite.Connection:
     """An open connection with row access by name. Caller closes it.
@@ -268,9 +300,7 @@ async def upsert_call(db_path: str | Path, call_id: str, **fields: Any) -> None:
 async def _upsert_call(db: aiosqlite.Connection, call_id: str, known: dict[str, Any]) -> None:
     columns = ", ".join(known)
     placeholders = ", ".join("?" for _ in known)
-    assignments = ", ".join(
-        f"{k}=telephony_calls.{k}+excluded.{k}" if k in _ACCUMULATING else f"{k}=excluded.{k}" for k in known
-    )
+    assignments = ", ".join(_assignment(k) for k in known)
     await db.execute(
         f"INSERT INTO telephony_calls (call_id, {columns}) VALUES (?, {placeholders}) "  # noqa: S608
         f"ON CONFLICT(call_id) DO UPDATE SET {assignments}",

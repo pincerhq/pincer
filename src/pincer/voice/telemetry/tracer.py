@@ -336,6 +336,8 @@ class CallTracer:
     # ── lifecycle ────────────────────────────────────────────────────
 
     def registered(self, **attributes: Any) -> None:
+        if self._finished:
+            return
         self.event(EventName.CALL_REGISTERED, **attributes)
         self._enqueue(
             store.upsert_call(
@@ -364,6 +366,8 @@ class CallTracer:
         )
 
     def dial_requested(self, **attributes: Any) -> None:
+        if self._finished:
+            return
         self._dialed_ns = mono_ns()
         self.event(EventName.DIAL_REQUESTED, at_ns=self._dialed_ns, **attributes)
         self._enqueue(store.upsert_call(self._db_path, self.ctx.call_id, dialed_at=utc_iso(), updated_at=utc_iso()))
@@ -371,7 +375,13 @@ class CallTracer:
     def answered(self, **attributes: Any) -> None:
         """The callee picked up. Registration is NOT an answer — see
         `VoiceEngine.mark_call_answered`; the setup latency depends on it."""
-        if self._answered_ns is not None:
+        # Two different guards. `_answered_ns` is idempotence — a RETRIED
+        # answer must not restamp the call. `_finished` is ordering — a FIRST
+        # answer arriving after the row was closed (call ended before pickup,
+        # then a late Twilio callback) would otherwise sail past the
+        # idempotence check, since `_answered_ns` is still None, and put an
+        # ended call back to "connected".
+        if self._answered_ns is not None or self._finished:
             return
         self._answered_ns = mono_ns()
         self.event(EventName.CALL_ANSWERED, at_ns=self._answered_ns, **attributes)
@@ -399,6 +409,8 @@ class CallTracer:
         it with the first connection's reading put the event at the wrong
         place on the timeline.
         """
+        if self._finished:
+            return
         open_ns = mono_ns()
         reopened = self._media_open_ns is not None
         self._media_open_ns = open_ns

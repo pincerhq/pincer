@@ -606,3 +606,66 @@ async def test_a_policy_declined_call_is_terminal_immediately(telemetry):
     aggregate = await queries.overview(telemetry, queries.CallFilters.for_hours(1))
     assert aggregate.calls["declined_by_policy"] == 1
     assert aggregate.rates["technical_failure_rate"]["numerator"] == 0
+
+
+# ── a closed row stays closed ────────────────────────────────────────
+#
+# Twilio retries status callbacks for minutes, and they can arrive out of
+# order. Every one of these drives a write that used to reopen an ended call.
+
+
+async def test_a_late_first_answer_cannot_reopen_an_ended_call(telemetry):
+    """The call ended before pickup; the answer callback lands afterwards.
+
+    `answered()`'s own `_answered_ns` guard does NOT cover this: the call was
+    never answered, so that field is still None and the guard passes.
+    """
+    tracer = _inbound()
+    await tracer.finish(status="failed", failure_code="no_answer", duration_s=8.0)
+    tracer.answered()
+    await _settle()
+
+    call = await queries.get_call(telemetry, "CA_in")
+    assert call["status"] == "failed"
+    assert call["failure_code"] == "no_answer"
+
+
+async def test_a_late_registration_from_a_fresh_tracer_cannot_reopen(telemetry):
+    """The case an in-memory `_finished` flag cannot catch.
+
+    Tracers are evicted (LRU at `_MAX_TRACERS`, a 900 s context TTL) and the
+    process can restart, after which a late webhook builds a NEW tracer whose
+    `_finished` is False — `hooks.call_declined` does exactly this. Ordering
+    therefore has to be a property of the row, not of the Python object.
+    """
+    tracer = _inbound()
+    tracer.answered()
+    await tracer.finish(status="completed", duration_s=30.0)
+    await _settle()
+
+    runtime.forget("CA_in")
+    revenant = _inbound()
+    assert revenant is not tracer
+    assert revenant._finished is False  # the flag genuinely does not help here
+    revenant.registered()
+    revenant.answered()
+    await _settle()
+
+    call = await queries.get_call(telemetry, "CA_in")
+    assert call["status"] == "completed"
+
+
+async def test_a_live_status_can_still_advance(telemetry):
+    """The absorbing rule must not freeze a call that is merely in progress."""
+    tracer = _inbound()
+    tracer.registered()
+    await _settle()
+    assert (await queries.get_call(telemetry, "CA_in"))["status"] == "active"
+
+    tracer.answered()
+    await _settle()
+    assert (await queries.get_call(telemetry, "CA_in"))["status"] == "connected"
+
+    await tracer.finish(status="completed", duration_s=12.0)
+    await _settle()
+    assert (await queries.get_call(telemetry, "CA_in"))["status"] == "completed"
