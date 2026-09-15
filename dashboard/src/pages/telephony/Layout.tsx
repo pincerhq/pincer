@@ -119,8 +119,37 @@ export function TelephonyLayout() {
   )
 }
 
+type Facet = "environment" | "app_version" | "model" | "language"
+
+const FACET_PAGE = { limit: 200, offset: 0, sort: "registered_at", order: "desc" }
+
+/** Every current filter except one facet — that facet's own selection must not
+ *  narrow its own option list. */
+function without(filters: TelephonyFilters, facet: Facet): TelephonyFilters {
+  const rest = { ...filters }
+  delete rest[facet]
+  return rest
+}
+
 /** Facet values come from the calls currently in scope, so the dropdowns only
- *  ever offer values that exist. */
+ *  ever offer values that exist.
+ *
+ *  Each list is derived from the calls matching every filter EXCEPT its own
+ *  facet. Deriving all four from the fully-filtered rows made each dropdown a
+ *  one-way door: pick `environment=prod` and the fetch returns only prod rows,
+ *  so the environment list collapses to `["prod"]` and staging and dev are
+ *  unreachable until every filter is cleared — the opposite of the goal.
+ *
+ *  The extra queries are nearly free: the params are the query key, so while a
+ *  facet is unset its query is identical to the others and react-query serves
+ *  all of them from one cache entry. Only a facet that is actually set costs a
+ *  request.
+ *
+ *  Cross-facet narrowing still applies — with `model=X` set, the environment
+ *  list covers only environments that have an X call — which is what keeps the
+ *  offer honest. The current selection is always included so the control can
+ *  still show and clear itself; a native <select> whose value is missing from
+ *  its options renders blank. */
 function FiltersRow({
   filters,
   setFilters,
@@ -128,19 +157,26 @@ function FiltersRow({
   filters: TelephonyFilters
   setFilters: (next: TelephonyFilters) => void
 }) {
-  const calls = useTelephonyCalls(filters, { limit: 200, offset: 0, sort: "registered_at", order: "desc" })
-  const rows = calls.data?.calls ?? []
-  const unique = (key: "environment" | "app_version" | "model" | "language") =>
-    [...new Set(rows.map((row) => String(row[key] ?? "")).filter(Boolean))].sort()
+  const byEnvironment = useTelephonyCalls(without(filters, "environment"), FACET_PAGE)
+  const byVersion = useTelephonyCalls(without(filters, "app_version"), FACET_PAGE)
+  const byModel = useTelephonyCalls(without(filters, "model"), FACET_PAGE)
+  const byLanguage = useTelephonyCalls(without(filters, "language"), FACET_PAGE)
+
+  const unique = (query: ReturnType<typeof useTelephonyCalls>, key: Facet) => {
+    const values = (query.data?.calls ?? []).map((row) => String(row[key] ?? ""))
+    const selected = filters[key]
+    if (selected) values.push(String(selected))
+    return [...new Set(values.filter(Boolean))].sort()
+  }
 
   return (
     <Filters
       filters={filters}
       onChange={setFilters}
-      environments={unique("environment")}
-      versions={unique("app_version")}
-      models={unique("model")}
-      languages={unique("language")}
+      environments={unique(byEnvironment, "environment")}
+      versions={unique(byVersion, "app_version")}
+      models={unique(byModel, "model")}
+      languages={unique(byLanguage, "language")}
     />
   )
 }
