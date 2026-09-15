@@ -253,7 +253,13 @@ METRICS: dict[str, MetricDefinition] = {
             ),
         ),
         MetricDefinition(
-            key="tool_ms",
+            # Must match the stage COLUMN, not the span name: METRICS is keyed
+            # by `key` and every consumer looks a stage up by its column —
+            # `queries.STAGE_COLUMNS`, `store.TURN_FIELDS`, the dashboard's
+            # `byKey.get(row.key)`. Registered as "tool_ms" this silently
+            # resolved to None and dropped the limitations note below, which is
+            # the one stage where it changes how the number should be read.
+            key="tool_total_ms",
             label="Tool execution",
             start_event=EventName.TOOL_START,
             end_event=EventName.TOOL_END,

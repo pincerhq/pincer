@@ -248,6 +248,32 @@ def test_every_metric_documents_its_boundaries():
         assert metric.label, metric.key
 
 
+def test_every_stage_column_has_a_metric_definition():
+    """The key IS the join between the metric catalogue and the data.
+
+    `METRICS` is keyed by `MetricDefinition.key`, and every consumer looks a
+    stage up by its column name — the CLI's stage table, and the dashboard's
+    `byKey.get(row.key)` in StageBars. A definition registered under any other
+    spelling does not raise: the lookup returns None and the boundaries and
+    limitations note are silently dropped from the UI. `tool_ms` vs
+    `tool_total_ms` shipped exactly that way.
+    """
+    from pincer.voice.telemetry.queries import STAGE_COLUMNS
+
+    # `total_ms` is the roll-up of the stages, not a stage — the dashboard
+    # filters it out of the breakdown for that reason.
+    stages = {c for c in STAGE_COLUMNS if c != "total_ms"}
+    assert stages <= set(METRICS), f"stage columns with no MetricDefinition: {sorted(stages - set(METRICS))}"
+
+
+def test_tool_execution_keeps_its_limitations_note_reachable():
+    """The stage whose note most changes how the number should be read."""
+    tool = METRICS["tool_total_ms"]
+    assert tool.label == "Tool execution"
+    assert "parallel" in tool.limitations
+    assert "approval" in tool.limitations
+
+
 def test_unavailable_metrics_explain_themselves():
     for metric in METRICS.values():
         if not metric.available_on:
