@@ -11,6 +11,10 @@ import { useTelephonyContext } from "./context"
 export function TelephonyReliability() {
   const { filters, setFilters, query } = useTelephonyContext()
   const overview = useTelephonyOverview(filters)
+  // 500 is the API's ceiling (`limit` is `le=500`), not a display choice, so a
+  // busier window cannot be covered by asking for more. The two components
+  // counted from this list therefore receive `total` as well and say when what
+  // they drew is a sample rather than the window.
   const calls = useTelephonyCalls(filters, { limit: 500, offset: 0, sort: "registered_at", order: "desc" })
 
   if (overview.isLoading || !overview.data) {
@@ -24,6 +28,7 @@ export function TelephonyReliability() {
       <div className="grid gap-4 xl:grid-cols-2">
         <OutcomeMix
           calls={calls.data?.calls ?? []}
+          total={calls.data?.total ?? 0}
           filters={filters}
           onChange={setFilters}
           query={query}
@@ -65,6 +70,7 @@ export function TelephonyReliability() {
 
       <FailureCodes
         calls={calls.data?.calls ?? []}
+        total={calls.data?.total ?? 0}
         filters={filters}
         onChange={setFilters}
         query={query}

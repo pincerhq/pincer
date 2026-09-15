@@ -20,6 +20,35 @@ export function Ms({ value, className }: { value: number | null | undefined; cla
   return <span className={className}>{formatMs(value)}</span>
 }
 
+/**
+ * "Based on the N most recent of M calls."
+ *
+ * Anything counted in the browser from the call list is counted from at most
+ * 500 rows — the API caps `limit` at 500 (`le=500`) — so the moment a filter
+ * matches more than that, a chart drawn from it describes a sample of the
+ * window rather than the window. The percentages stay real; what changes is
+ * what they are percentages OF, and that has to be on screen or the reader has
+ * no way to know. Amber because it is the same "treat this with caution"
+ * signal the under-sampled percentile labels already use.
+ *
+ * Renders nothing when the list is complete, so it costs nothing on the small
+ * tenants where it does not apply.
+ *
+ * Distinct from `SampleNote` below, which asks whether a percentile has enough
+ * observations to mean anything. This one asks whether we loaded all the rows
+ * at all — a count can be perfectly well-sampled and still be of the wrong
+ * population.
+ */
+export function TruncationNote({ loaded, total }: { loaded: number; total: number }) {
+  if (!total || total <= loaded) return null
+  return (
+    <p className="mt-2 text-[11px] text-amber-400">
+      Based on the {loaded.toLocaleString()} most recent of {total.toLocaleString()} matching calls —
+      the call list is capped, so this is a sample of the window, not all of it.
+    </p>
+  )
+}
+
 export function formatMs(value: number): string {
   if (value >= 10_000) return `${(value / 1000).toFixed(1)}s`
   if (value >= 1000) return `${(value / 1000).toFixed(2)}s`

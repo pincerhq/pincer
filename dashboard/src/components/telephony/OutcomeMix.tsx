@@ -1,7 +1,7 @@
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from "recharts"
 import type { TelephonyCall, TelephonyFilters } from "@/api/types"
 import { ExportMenu } from "./ExportMenu"
-import { Block } from "./shared"
+import { Block, TruncationNote } from "./shared"
 
 const CATEGORY_META: Record<string, { label: string; color: string; explain: string }> = {
   none: { label: "Succeeded", color: "#10b981", explain: "The call did what it was supposed to." },
@@ -37,11 +37,14 @@ const CATEGORY_META: Record<string, { label: string; color: string; explain: str
  */
 export function OutcomeMix({
   calls,
+  total: matching,
   filters,
   onChange,
   query,
 }: {
   calls: TelephonyCall[]
+  /** Calls matching the filters, which is more than `calls` once past the cap. */
+  total: number
   filters: TelephonyFilters
   onChange: (next: TelephonyFilters) => void
   query: Record<string, string>
@@ -67,7 +70,7 @@ export function OutcomeMix({
       title="How calls ended"
       info={
         <>
-          <p>Terminal category of every call in this window. Click a segment to filter the page.</p>
+          <p>Terminal category of each call counted here. Click a segment to filter the page.</p>
           <ul className="space-y-1">
             {Object.entries(CATEGORY_META).map(([key, meta]) => (
               <li key={key}>
@@ -76,7 +79,9 @@ export function OutcomeMix({
             ))}
           </ul>
           <p className="opacity-70">
-            Counted over the calls loaded for the table, so it follows the same filters.
+            Counted over the calls loaded for the table, so it follows the same filters. That
+            list is capped at 500 rows, so on a busy window this is the most recent 500 rather
+            than all of them — the note under the chart says so when it applies.
           </p>
         </>
       }
@@ -155,6 +160,7 @@ export function OutcomeMix({
       ) : (
         <p className="py-12 text-center text-xs text-[var(--color-muted)]">No calls in this window.</p>
       )}
+      <TruncationNote loaded={calls.length} total={matching} />
     </Block>
   )
 }

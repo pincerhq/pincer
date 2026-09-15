@@ -1,7 +1,7 @@
 import type { TelephonyCall, TelephonyFilters } from "@/api/types"
 import { cn } from "@/lib/utils"
 import { ExportMenu } from "./ExportMenu"
-import { Block } from "./shared"
+import { Block, TruncationNote } from "./shared"
 
 const CATEGORY_TONE: Record<string, string> = {
   technical: "text-red-400",
@@ -21,11 +21,14 @@ const CATEGORY_TONE: Record<string, string> = {
  */
 export function FailureCodes({
   calls,
+  total: matching,
   filters,
   onChange,
   query,
 }: {
   calls: TelephonyCall[]
+  /** Calls matching the filters, which is more than `calls` once past the cap. */
+  total: number
   filters: TelephonyFilters
   onChange: (next: TelephonyFilters) => void
   query: Record<string, string>
@@ -57,7 +60,9 @@ export function FailureCodes({
           </p>
           <p>
             Successful calls (<span className="font-mono">none</span>) are excluded. Click a row to
-            filter the page to that code.
+            filter the page to that code. Counts come from the capped call list, so on a busy
+            window they are the most recent 500 rather than every call — the note below says so
+            when it applies.
           </p>
         </>
       }
@@ -105,6 +110,7 @@ export function FailureCodes({
           No terminated call in this window carried a failure code.
         </p>
       )}
+      <TruncationNote loaded={calls.length} total={matching} />
     </Block>
   )
 }
