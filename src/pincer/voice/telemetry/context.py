@@ -195,6 +195,15 @@ def attach_provider_call_id(call_id: str, provider_call_id: str) -> CallContext 
     tracked = _by_call_id.get(call_id)
     if tracked is None or not provider_call_id:
         return None
+    # Drop the superseded key BEFORE the overwrite loses it. `_prune()` can only
+    # ever evict a tracked call's CURRENT provider id, so a key left behind here
+    # is unreachable forever — and it is not merely a leak: the pre-dial key is
+    # derived per attempt, and `register_call` is idempotent on this dict, so a
+    # stale entry would hand a later call the previous call's CallContext, i.e.
+    # its call_id. Two calls, one row.
+    previous = tracked.context.provider_call_id
+    if previous and previous != provider_call_id:
+        _by_provider_id.pop(previous, None)
     tracked.context = replace(tracked.context, provider_call_id=provider_call_id)
     _by_provider_id[provider_call_id] = tracked
     return tracked.context

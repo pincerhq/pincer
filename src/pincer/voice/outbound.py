@@ -11,6 +11,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from pincer.voice.briefing import BriefingError, CallBriefing, log_briefing_bound
 from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, truncate
@@ -366,7 +367,12 @@ async def make_phone_call(
         # never happened. The temporary key is re-bound to the real SID below.
         from pincer.voice.telemetry import hooks as telemetry
 
-        trace_key = pre_state.call_sid if pre_state is not None else f"pending-{validated}"
+        # Unique per ATTEMPT, not per destination. Keyed on the number, two
+        # calls to the same callee collided: the second `start_call` found the
+        # first's still-live pending entry and returned its tracer, so the
+        # second call's pre-dial events landed on the first call's row and its
+        # own `dial_accepted` re-key then found nothing to re-key.
+        trace_key = pre_state.call_sid if pre_state is not None else f"pending-{uuid4().hex}"
         telemetry.dial_requested(
             trace_key,
             to_number=validated,

@@ -286,6 +286,45 @@ def test_outbound_call_id_survives_learning_the_provider_id_later():
     assert ctxmod.context_for_provider_call("CA_real").call_id == ctx.call_id
 
 
+def test_rekeying_releases_the_superseded_provider_id():
+    """The pre-dial key must not outlive the re-key.
+
+    `_prune()` can only ever evict a tracked call's CURRENT provider id, so a
+    key left behind here is unreachable for the life of the process.
+    """
+    ctx = ctxmod.register_call(provider_call_id="pending-1", direction="outbound")
+    ctxmod.attach_provider_call_id(ctx.call_id, "CA_real")
+
+    assert ctxmod.context_for_provider_call("pending-1") is None
+    assert "pending-1" not in ctxmod._by_provider_id
+
+
+def test_a_stale_pending_key_cannot_hand_a_later_call_the_earlier_call_id():
+    """Why the orphan was a correctness bug and not only a leak.
+
+    `register_call` is idempotent on `_by_provider_id`, so a surviving pending
+    entry would return the previous call's context — two calls, one call_id.
+    """
+    first = ctxmod.register_call(provider_call_id="pending-same", direction="outbound")
+    ctxmod.attach_provider_call_id(first.call_id, "CA_first")
+
+    second = ctxmod.register_call(provider_call_id="pending-same", direction="outbound")
+    assert second.call_id != first.call_id
+
+
+def test_rebinding_the_same_provider_id_keeps_it_resolvable():
+    """Guards the pop against being written as pop-then-overwrite.
+
+    The outbound path passes the real CallSid as the trace key when the engine
+    pre-registered the call, so the re-key is a same-key rebind.
+    """
+    ctx = ctxmod.register_call(provider_call_id="CA_known", direction="outbound")
+    bound = ctxmod.attach_provider_call_id(ctx.call_id, "CA_known")
+
+    assert bound is not None
+    assert ctxmod.context_for_provider_call("CA_known").call_id == ctx.call_id
+
+
 def test_sequence_numbers_order_events_inside_one_millisecond():
     ctx = ctxmod.register_call(provider_call_id="CA1", direction="inbound")
     assert [ctxmod.next_seq(ctx.call_id) for _ in range(3)] == [1, 2, 3]
