@@ -58,6 +58,11 @@ class LatencyHistogram:
     total: float = 0.0
     minimum: float | None = None
     maximum: float | None = None
+    #: Observations refused as impossible — today, negative durations. Kept as a
+    #: count rather than discarded silently: a clock that went backwards is a
+    #: defect upstream, and the only way anyone finds out is if the number is
+    #: somewhere they can see it.
+    invalid: int = 0
 
     def __post_init__(self) -> None:
         if not self.counts:
@@ -72,7 +77,18 @@ class LatencyHistogram:
             return
         if v != v:  # NaN
             return
-        v = max(0.0, v)
+        if v < 0.0:
+            # Dropped, not clamped. A negative duration means the two readings
+            # it came from were reordered — `clock.duration_ms` subtracts
+            # without a floor, so a momentary reversal reaches us intact.
+            # Clamping filed that as a real 0 ms observation: it inflates the
+            # fastest bucket, drags p50, mean and minimum down, and leaves the
+            # defect that produced it invisible. The subsystem's rule elsewhere
+            # is that a number it cannot stand behind is never rendered as a
+            # zero (`clock.duration_ms`, `Ms` in the dashboard); this is that
+            # rule applied to the aggregate.
+            self.invalid += 1
+            return
         self.count += 1
         self.total += v
         self.minimum = v if self.minimum is None else min(self.minimum, v)
@@ -90,6 +106,7 @@ class LatencyHistogram:
         self.overflow += other.overflow
         self.count += other.count
         self.total += other.total
+        self.invalid += other.invalid
         if other.minimum is not None:
             self.minimum = other.minimum if self.minimum is None else min(self.minimum, other.minimum)
         if other.maximum is not None:
@@ -138,6 +155,10 @@ class LatencyHistogram:
             "mean": _round(self.mean),
             "sufficient_samples": self.count >= min_samples,
             "min_samples": min_samples,
+            # Non-zero means observations were refused as impossible. It travels
+            # with the percentiles so the defect is visible next to the numbers
+            # it would otherwise have quietly skewed.
+            "invalid": self.invalid,
         }
 
     def distribution(self) -> list[dict[str, object]]:

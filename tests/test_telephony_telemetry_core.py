@@ -94,6 +94,50 @@ def test_under_sampled_percentiles_are_flagged():
     assert summary["sufficient_samples"] is False
 
 
+def test_negative_durations_are_dropped_not_clamped():
+    """A reordered clock must not read as the fastest turn on record.
+
+    `clock.duration_ms` subtracts without a floor, so a momentary reversal
+    arrives here intact. Clamping it to 0 filed it as a real zero-latency
+    observation: the fastest bucket gains a count, p50, mean and minimum all
+    drag downwards, and the defect that produced it disappears.
+    """
+    clean = build([100.0, 200.0, 300.0])
+    with_reversal = build([100.0, 200.0, 300.0, -50.0])
+
+    # The aggregate is untouched by the bad observation.
+    assert with_reversal.count == clean.count
+    assert with_reversal.minimum == clean.minimum
+    assert with_reversal.percentile(0.50) == clean.percentile(0.50)
+    assert with_reversal.total == clean.total
+
+    # And it is not silently gone — it is counted where someone can see it.
+    assert with_reversal.invalid == 1
+    assert clean.invalid == 0
+    assert with_reversal.summary()["invalid"] == 1
+
+
+def test_a_genuine_zero_is_still_an_observation():
+    """Only impossible values are refused.
+
+    `media_open()` records a real 0.0 when the socket and the pickup are one
+    wire frame, so a guard that keyed on falsiness rather than on sign would
+    throw away a measurement the tracer went out of its way to make.
+    """
+    hist = build([0.0, 10.0])
+    assert hist.count == 2
+    assert hist.invalid == 0
+    assert hist.minimum == 0.0
+
+
+def test_invalid_counts_survive_a_merge():
+    left = build([100.0, -1.0])
+    right = build([200.0, -2.0, -3.0])
+    left.merge(right)
+    assert left.count == 2
+    assert left.invalid == 3
+
+
 def test_none_and_nan_observations_are_ignored():
     hist = build([100.0, None, float("nan")])
     assert hist.count == 1

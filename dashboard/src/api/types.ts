@@ -484,6 +484,10 @@ export interface LatencySummary {
   mean: number | null
   sufficient_samples: boolean
   min_samples: number
+  /** Observations the aggregator refused as impossible (negative durations).
+   *  Non-zero means a clock-ordering defect upstream skewed nothing, because
+   *  these were dropped rather than clamped to a fake 0 ms. */
+  invalid?: number
 }
 
 export interface HistogramBucket {
