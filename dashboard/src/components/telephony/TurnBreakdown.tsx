@@ -40,6 +40,7 @@ export function TurnBreakdown({
   engine: string
 }) {
   const defsByKey = new Map(definitions.map((d) => [d.key, d]))
+  const responseDef = defsByKey.get("response_latency_ms")
   if (!turns.length) {
     return (
       <p className="text-xs text-[var(--color-muted)]">
@@ -110,13 +111,25 @@ export function TurnBreakdown({
                     Critical path to first response audio
                   </h4>
                   <CriticalPathBar path={turn.critical_path} />
+                  {/* Where the clock STOPS is the metric's own statement: the
+                      `response_latency_ms` definition in schema.py already says
+                      it ends at the first response audio on Media Streams or the
+                      first text token on ConversationRelay, and says it is SENT
+                      rather than heard. This used to paraphrase that from a
+                      hardcoded engine name, which meant one sentence maintained
+                      in two repos and a new engine needing a code change here.
+                      The stage block below was already read off `definitions`;
+                      this now matches it.
+
+                      Where the clock STARTS stays local — which boundary actually
+                      applied is per-turn data (`response_latency_source`) that a
+                      metric definition cannot know. */}
                   <p className="mt-1.5 text-[10px] text-[var(--color-muted)]">
                     Clock starts at{" "}
                     {turn.response_latency_source === "speech_end"
                       ? "the caller's measured speech end (Deepgram word timings)"
                       : "transcript arrival — this engine does not expose speech end, so the endpointing wait is NOT included and the real figure is larger"}
-                    . Clock stops when the first response {turn.engine === "conversation_relay" ? "text token" : "audio"}{" "}
-                    was written to the provider. That is SENT, not heard.
+                    .{responseDef ? ` ${responseDef.limitations}` : ""}
                   </p>
                 </div>
 
