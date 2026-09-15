@@ -23,8 +23,12 @@ def mock_engine():
 
 
 @pytest.fixture
-def mock_settings():
+def mock_settings(tmp_path):
     settings = MagicMock()
+    # A real path, because a declined call writes a voice_calls row: with the
+    # MagicMock default, `str(db_path)` becomes the mock's repr and aiosqlite
+    # creates a database file of that name in the repo root.
+    settings.db_path = tmp_path / "voice.db"
     settings.voice_engine = "conversation_relay"
     settings.voice_webhook_base_url = "https://example.com"
     settings.voice_language = "en-US"
@@ -86,6 +90,53 @@ class TestWebhookEndpoint:
         assert response.status_code == 200
         assert "not authorized" in response.text
         mock_engine.on_call_start.assert_not_called()
+
+    def test_rejected_caller_is_still_recorded(self, client, mock_settings, mock_engine, monkeypatch):
+        """A blocked caller must not vanish from the dashboard.
+
+        The allowlist returns TwiML before `telemetry.inbound_webhook()`, so
+        without an explicit record here the call exists in no dashboard, no
+        metric and no voice_calls row, and an operator asking "why is call X
+        missing" finds nothing at all. The receptionist declines a few lines
+        below already record themselves; this path was the exception.
+        """
+        from pincer.voice import twiml_server
+
+        recorded: list[dict] = []
+
+        async def _capture(call_sid, caller, failure_code, language, reason="receptionist_policy"):
+            recorded.append(
+                {
+                    "call_sid": call_sid,
+                    "caller": caller,
+                    "failure_code": failure_code,
+                    "reason": reason,
+                }
+            )
+
+        monkeypatch.setattr(twiml_server, "_record_declined_call", _capture)
+        mock_settings.voice_allowed_callers = "+10000000000"
+
+        response = client.post(
+            "/api/apps/twilio/webhook",
+            data={"CallSid": "CA_blocked", "From": "+14155551234", "To": "+14155559876"},
+        )
+
+        assert response.status_code == 200
+        assert "not authorized" in response.text
+        assert len(recorded) == 1, "the allowlist reject left no telemetry behind"
+        assert recorded[0]["call_sid"] == "CA_blocked"
+        assert recorded[0]["caller"] == "+14155551234"
+        # Distinguishable from a blocklist hit: the operator's remedy differs.
+        assert recorded[0]["reason"] == "not_allowlisted"
+
+    def test_an_allowlist_reject_is_a_policy_decline_not_a_technical_failure(self):
+        """It must not burn the error budget — the guardrail working is not an outage."""
+        from pincer.observability.failure_codes import EXCLUDED_FROM_SLO, FailureCode
+        from pincer.voice.telemetry.outcomes import FailureCategory, categorise
+
+        assert categorise(FailureCode.BLOCKED) is FailureCategory.POLICY_DECLINED
+        assert FailureCode.BLOCKED in EXCLUDED_FROM_SLO
 
 
 class TestStatusEndpoint:

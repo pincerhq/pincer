@@ -133,6 +133,27 @@ async def voice_webhook(request: Request) -> Response:
         allowed_set = {n.strip() for n in allowed.split(",")}
         if caller not in allowed_set:
             logger.warning("Rejected call from %s (not in allowlist)", caller)
+            # This returns before `telemetry.inbound_webhook()` below, so without
+            # recording it here the call exists in no dashboard, no metric and no
+            # voice_calls row — an operator asking "why is call X missing" finds
+            # nothing at all. The receptionist declines already do this via
+            # `_receptionist_decline`; the allowlist was the one path that did not.
+            #
+            # `BLOCKED` rather than a new failure code: both mean "this caller is
+            # not permitted", it is already in POLICY_BLOCKED (so it categorises
+            # as policy_declined and stays out of the SLO, which is right — the
+            # guardrail worked), and `reason` carries the distinction the operator
+            # actually needs, since the remedy differs (allowlist vs blocklist).
+            from pincer.observability.failure_codes import FailureCode
+            from pincer.voice.language import resolve_call_language as _resolve_language
+
+            await _record_declined_call(
+                call_sid,
+                caller,
+                str(FailureCode.BLOCKED),
+                _resolve_language(_settings),
+                reason="not_allowlisted",
+            )
             return _twiml_response("<Response><Say>This number is not authorized.</Say><Hangup/></Response>")
 
     from pincer.voice.engine import CallDirection
@@ -212,15 +233,15 @@ async def _receptionist_decline(call_sid: str, caller: str, language: str) -> Re
     return _twiml_response(f"<Response>{say}<Hangup/></Response>")
 
 
-async def _record_declined_call(call_sid: str, caller: str, failure_code: str, language: str) -> None:
+async def _record_declined_call(
+    call_sid: str, caller: str, failure_code: str, language: str, reason: str = "receptionist_policy"
+) -> None:
     """Declined calls never reach the engine, so the row + metric are written here."""
     try:
         from pincer.observability.metrics import record_call_ended, record_inbound_event
         from pincer.voice.telemetry import hooks as telemetry
 
-        await telemetry.call_declined(
-            call_sid, failure_code=failure_code, reason="receptionist_policy", language=language
-        )
+        await telemetry.call_declined(call_sid, failure_code=failure_code, reason=reason, language=language)
         record_inbound_event(failure_code, language=language)
         record_call_ended(direction="inbound", outcome="failed", failure_code=failure_code, language=language)
     except Exception:
