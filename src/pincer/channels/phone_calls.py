@@ -621,9 +621,20 @@ class VoiceChannel(BaseChannel):
         trace.stamp(EventName.STT_FINAL, at_ns=arrival, engine=state.engine_type)
         return trace
 
-    def _close_turn_trace(self, call_sid: str, reason: str = "") -> None:
-        """Finish the open trace for this call, if any. Idempotent."""
-        trace = self._turn_traces.pop(call_sid, None)
+    def _close_turn_trace(self, call_sid: str, reason: str = "", *, own: Any = None) -> None:
+        """Finish the open trace for this call, if any. Idempotent.
+
+        `own` names the caller's own trace. Given one, the dict entry is only
+        removed when it is still that trace — the identity check the streaming
+        cleanup already makes — so a turn that has been superseded closes ITS
+        OWN trace rather than its successor's. Without it the behaviour is
+        unchanged: take whatever is open, which is what teardown wants.
+        """
+        trace = own
+        if trace is None:
+            trace = self._turn_traces.pop(call_sid, None)
+        elif self._turn_traces.get(call_sid) is trace:
+            self._turn_traces.pop(call_sid, None)
         if trace is None:
             return
         from pincer.voice.telemetry.schema import EventName
@@ -668,10 +679,16 @@ class VoiceChannel(BaseChannel):
         No-op when no turn is in flight, so it is safe to call unconditionally
         at the top of every caller utterance.
         """
-        prior_trace = self._turn_traces.pop(call_sid, None)
         prior_turn = self._active_turns.pop(call_sid, None)
         if prior_turn is None or prior_turn.done():
+            # Nothing cancellable, so the open trace is NOT ours to take. Only
+            # the streaming path fills `_active_turns`; on the buffered path the
+            # in-flight turn closes its own trace when it finishes, and popping
+            # it here would either orphan it unpersisted or — once a later turn
+            # had replaced the entry — hand us the successor's trace to close
+            # early. Leave the dict alone and let the owner finish.
             return
+        prior_trace = self._turn_traces.pop(call_sid, None)
         if prior_trace is not None:
             # The interrupting utterance owns the call now; the old turn's trace
             # is closed as cancelled so it is never counted as a slow response.
@@ -870,12 +887,13 @@ class VoiceChannel(BaseChannel):
                     state=str(sm.phase) if delivered else "undelivered",
                 )
             self._after_agent_turn(call_sid, sm, response or "", end_requested)
-            self._close_turn_trace(call_sid)
+            self._close_turn_trace(call_sid, own=trace)
         except Exception:
             logger.exception("Error handling voice input for call %s", call_sid)
             if trace is not None:
                 trace.fail("brain_error")
-            self._turn_traces.pop(call_sid, None)
+            if self._turn_traces.get(call_sid) is trace:
+                self._turn_traces.pop(call_sid, None)
             await self._handle_brain_error(call_sid, sm)
 
     # ── Streaming turn (Sprint 5, T5.1/T5.2/T5.7) ─────────
