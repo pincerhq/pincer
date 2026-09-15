@@ -321,7 +321,14 @@ async def slowest_turns(
     scope: TenantScope | None = None,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Slowest turns in the window, with their bottleneck stage already attributed."""
+    """Slowest turns in the window, with their bottleneck stage already attributed.
+
+    Booleans are coerced here for the same reason ``get_turns`` and
+    ``export_turns`` coerce them: SQLite stores them as 0/1, the dashboard
+    declares them ``boolean`` (``TelephonyTurn`` in ``api/types.ts``, which is
+    what ``client.ts`` types this endpoint's response as), and 0/1 satisfies
+    that type at run time right up until the first ``=== true``.
+    """
     where, params = filters.where()
     if scope is not None:
         where, params = scope.apply(where, params)
@@ -339,6 +346,9 @@ async def slowest_turns(
     for row in rows:
         data = {key: row[key] for key in row.keys()}  # noqa: SIM118 - aiosqlite.Row iterates values, not keys
         data["critical_path"] = store.loads(data.pop("critical_path", None), [])
+        data["complete"] = bool(data.get("complete", 1))
+        data["interrupted"] = bool(data.get("interrupted", 0))
+        data["cancelled"] = bool(data.get("cancelled", 0))
         out.append(data)
     return out
 

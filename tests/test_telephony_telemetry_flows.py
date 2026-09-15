@@ -669,3 +669,36 @@ async def test_a_live_status_can_still_advance(telemetry):
     await tracer.finish(status="completed", duration_s=12.0)
     await _settle()
     assert (await queries.get_call(telemetry, "CA_in"))["status"] == "completed"
+
+
+async def test_every_turn_query_returns_real_booleans(telemetry):
+    """One shape for `complete`/`interrupted`/`cancelled`, whichever query served it.
+
+    SQLite stores these as 0/1. The dashboard declares them `boolean`
+    (`TelephonyTurn` in api/types.ts) and types three different endpoints with
+    that one interface, so a query that forwards the raw integer satisfies the
+    type at run time right up until the first `=== true`.
+
+    Asserted across all three rather than only the one that had drifted, so a
+    fourth turn-returning query cannot quietly reintroduce it.
+    """
+    tracer = _inbound()
+    tracer.answered()
+    turn = tracer.start_turn(speech_end_ns=tracer.watch.started_ns)
+    turn.first_audio(kind="audio", at_ns=tracer.watch.started_ns + 400 * MS)
+    turn.finish()
+    await tracer.finish(status="completed", duration_s=20.0)
+    await _settle()
+
+    window = queries.CallFilters.for_hours(1)
+    sources = {
+        "get_turns": await queries.get_turns(telemetry, tracer.ctx.call_id),
+        "slowest_turns": await queries.slowest_turns(telemetry, window),
+        "export_turns": await queries.export_turns(telemetry, window),
+    }
+
+    for name, turns in sources.items():
+        assert turns, f"{name} returned no turns"
+        for row in turns:
+            for field in ("complete", "interrupted", "cancelled"):
+                assert isinstance(row[field], bool), f"{name}.{field} is {type(row[field]).__name__}, not bool"
