@@ -28,16 +28,41 @@ export function StageBars({
 }) {
   const byKey = new Map(definitions.map((d) => [d.key, d]))
 
-  const rows = Object.entries(data.stages)
-    .filter(([key, summary]) => summary.count > 0 && key !== "total_ms")
-    .map(([key, summary]) => ({
-      key,
-      label: METRIC_LABELS[key] ?? key,
-      p50: summary.p50 ?? 0,
-      p95: summary.p95 ?? 0,
-      count: summary.count,
-      enough: summary.sufficient_samples,
-    }))
+  const inScope = Object.entries(data.stages).filter(
+    ([key, summary]) => summary.count > 0 && key !== "total_ms",
+  )
+
+  // A null percentile is "not measured" and must never be drawn as a 0 ms bar:
+  // `Ms` in ./shared states the rule — rendering a missing number as zero makes
+  // the least observable stage look like the fastest. `?? 0` did exactly that,
+  // and no amount of dimming fixes it, because the bar's LENGTH is the lie.
+  //
+  // Reachability, so the next reader does not go looking for a broken screen:
+  // `LatencyHistogram.percentile` only returns None when `count == 0`, which
+  // the filter above already drops, so this is currently unreachable from the
+  // backend. It is held here because `LatencySummary.p50` is `number | null` on
+  // this side of the wire — the guarantee lives in Python and nothing carries
+  // it across, so a change to `min_samples` or a new summary source would
+  // reintroduce the silent 0 ms bar rather than a visible gap.
+  const unmeasured = inScope
+    .filter(([, summary]) => summary.p50 === null || summary.p95 === null)
+    .map(([key]) => METRIC_LABELS[key] ?? key)
+
+  const rows = inScope
+    .flatMap(([key, summary]) => {
+      const { p50, p95 } = summary
+      if (p50 === null || p95 === null) return []
+      return [
+        {
+          key,
+          label: METRIC_LABELS[key] ?? key,
+          p50,
+          p95,
+          count: summary.count,
+          enough: summary.sufficient_samples,
+        },
+      ]
+    })
     .sort((a, b) => b.p95 - a.p95)
 
   const unavailable = data.unavailable.filter((metric) => metric.available_on.length > 0)
@@ -157,6 +182,13 @@ export function StageBars({
               )
             })}
           </div>
+
+          {unmeasured.length > 0 && (
+            <p className="mt-1.5 text-[10px] text-[var(--color-muted)]">
+              Not measured: {unmeasured.join(", ")} — these stages ran but report no percentile, so
+              they get no bar rather than a 0ms one.
+            </p>
+          )}
         </>
       ) : (
         <p className="py-10 text-center text-xs text-[var(--color-muted)]">
