@@ -21,23 +21,46 @@ function tone(name: string): string {
 /**
  * The chronological event log for a call.
  *
- * Ordered by (UTC timestamp, per-call sequence) at read time, so a Twilio status
- * callback that arrives minutes after teardown still appears where it happened
- * rather than at the bottom.
+ * Ordered by (UTC timestamp, per-call sequence), so a Twilio status callback
+ * that arrives minutes after teardown appears where it happened rather than at
+ * the bottom.
+ *
+ * That ordering is the backend's — `queries.get_events` selects
+ * `ORDER BY ts_utc ASC, seq ASC` — and this component used to simply trust it
+ * while reading `events[0]` as the time origin and rendering in array order.
+ * The trust was invisible: nothing here said the order was load-bearing, so
+ * relaxing that ORDER BY would have silently produced negative offsets
+ * rendered as "+-1.23s" and a timeline out of sequence, in the exact
+ * late-callback case the ordering exists for.
+ *
+ * So it sorts by the same key rather than assuming. The sort is over an
+ * already-ordered list in every normal case, and `seq` is carried on the wire,
+ * so it reproduces the backend's tiebreak exactly instead of degrading it.
  */
 export function EventTimeline({ events, turnId }: { events: TelephonyEvent[]; turnId?: string }) {
   const [filter, setFilter] = useState("")
+
+  const ordered = useMemo(
+    () =>
+      [...events].sort(
+        (a, b) => Date.parse(a.ts_utc) - Date.parse(b.ts_utc) || (a.seq ?? 0) - (b.seq ?? 0),
+      ),
+    [events],
+  )
+
   const visible = useMemo(() => {
-    let rows = events
+    let rows = ordered
     if (turnId) rows = rows.filter((e) => e.turn_id === turnId || !e.turn_id)
     if (filter.trim()) {
       const needle = filter.trim().toLowerCase()
       rows = rows.filter((e) => e.name.toLowerCase().includes(needle))
     }
     return rows
-  }, [events, filter, turnId])
+  }, [ordered, filter, turnId])
 
-  const first = events.length ? new Date(events[0].ts_utc).getTime() : 0
+  // The origin is the call's first event, not the filtered view's, so offsets
+  // stay comparable when a turn filter is on.
+  const first = ordered.length ? Date.parse(ordered[0].ts_utc) : 0
 
   return (
     <div className="space-y-2">
@@ -51,7 +74,7 @@ export function EventTimeline({ events, turnId }: { events: TelephonyEvent[]; tu
         <table className="w-full text-xs">
           <tbody>
             {visible.map((event) => {
-              const offset = new Date(event.ts_utc).getTime() - first
+              const offset = Date.parse(event.ts_utc) - first
               const attrs = Object.entries(event.attributes).filter(([, v]) => v !== null && v !== "")
               return (
                 <tr key={event.event_id} className="border-b border-[var(--color-border)]/50 align-top">
