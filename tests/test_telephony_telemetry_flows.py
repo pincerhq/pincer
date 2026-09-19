@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from pincer.db import ensure_schema_current
-from pincer.voice.telemetry import queries, runtime
+from pincer.voice.telemetry import hooks, queries, runtime
 from pincer.voice.telemetry.recorder import get_recorder
 from pincer.voice.telemetry.schema import EventName, SpanName, SpanStatus
 from pincer.voice.telemetry.tracer import drain_pending
@@ -606,6 +606,18 @@ async def test_a_policy_declined_call_is_terminal_immediately(telemetry):
     aggregate = await queries.overview(telemetry, queries.CallFilters.for_hours(1))
     assert aggregate.calls["declined_by_policy"] == 1
     assert aggregate.rates["technical_failure_rate"]["numerator"] == 0
+
+
+async def test_a_rejected_dial_is_terminal(telemetry):
+    """Twilio refusing the dial is a technical failure, not a call still in progress."""
+    for key in ("pending-aaa", "pending-bbb"):  # what uuid4() yields per ATTEMPT
+        hooks.dial_requested(key, to_number="+4930111", engine="media_streams", language="de")
+        hooks.dial_rejected(key, error="TwilioRestException: 21211")
+    await _settle()
+
+    aggregate = await queries.overview(telemetry, queries.CallFilters.for_hours(1))
+    assert aggregate.calls["active"] == 0
+    assert aggregate.rates["technical_failure_rate"]["denominator"] == 2
 
 
 # ── a closed row stays closed ────────────────────────────────────────

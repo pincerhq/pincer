@@ -149,6 +149,21 @@ def dial_rejected(temp_id: str, *, error: str) -> None:
     if tracer is None:
         return
     _safe(tracer.event, EventName.DIAL_REJECTED, error=error)
+    # No CallSid means no status callback and no teardown: nothing else would
+    # ever close this row, and it would count as "active" forever. The error
+    # text stays on the event; the row gets only the code.
+    from pincer.observability.failure_codes import FailureCode
+    from pincer.voice.telemetry.tracer import _spawn
+
+    runtime.forget(temp_id)
+    _spawn(
+        tracer.finish(
+            status="failed",
+            failure_code=FailureCode.TWILIO_API.value,
+            termination_reason="dial_rejected",
+            duration_s=0.0,
+        )
+    )
 
 
 def media_open(call_sid: str, *, engine: str = "", stream_sid: str = "") -> None:
