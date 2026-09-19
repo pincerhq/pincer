@@ -106,6 +106,57 @@ async def test_a_superseded_turn_closes_its_own_trace_not_the_successors():
     assert channel._turn_traces.get("CA1") is successor, "the successor was closed early"
 
 
+async def test_a_deterministic_handler_closes_its_own_trace_not_the_successors():
+    """The early returns (mutual goodbye, approval gate, receptionist) pass `own=`."""
+    channel = _channel()
+    mine = FakeTrace("mine")
+    successor = FakeTrace("successor")
+    channel._turn_traces["CA1"] = successor
+
+    channel._close_turn_trace("CA1", "approval_gate", own=mine)
+
+    assert mine.finished is True
+    assert successor.finished is False, "the successor was closed by the wrong turn"
+    assert channel._turn_traces.get("CA1") is successor
+
+
+async def test_the_gates_early_return_leaves_a_later_turns_trace_open():
+    """The real path: a later turn registers while the gate is still deciding."""
+    from pincer.voice.engine import CallDirection
+    from pincer.voice.in_call_tools import CallerVerdict
+
+    channel = _channel()
+
+    async def _handler(_incoming):
+        return ""
+
+    await channel.start(_handler)
+    await channel._engine.on_call_start("CA1", "+4930123456", CallDirection.INBOUND)
+    mine, successor = FakeTrace("mine"), FakeTrace("successor")
+
+    def _open(call_sid, _state, _arrival_ns):
+        channel._turn_traces[call_sid] = mine
+        return mine
+
+    channel._open_turn_trace = _open
+
+    class SlowGate:
+        def begin_turn(self) -> None: ...
+
+        async def handle_caller_utterance(self, _text):
+            channel._turn_traces["CA1"] = successor  # the next utterance got in first
+            return CallerVerdict(status="unclear", handled=True)
+
+    channel._tool_gates["CA1"] = SlowGate()
+
+    await channel._handle_speech_turn("CA1", "Moment")
+
+    assert mine.finished is True
+    assert successor.finished is False, "the gate's turn closed its successor's trace"
+    assert channel._turn_traces.get("CA1") is successor
+    await channel.stop()
+
+
 async def test_closing_without_an_owner_still_takes_whatever_is_open():
     """Teardown has no turn of its own and must keep the old behaviour."""
     channel = _channel()

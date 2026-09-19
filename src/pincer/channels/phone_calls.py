@@ -751,7 +751,7 @@ class VoiceChannel(BaseChannel):
                 if self._hangup_pending(call_sid) or call_end.last_agent_said_farewell(transcript, call_lang):
                     logger.info("Mutual goodbye [%s] — hanging up", call_sid)
                     self._schedule_hangup(call_sid, sm, "", "mutual_goodbye")
-                    self._close_turn_trace(call_sid, "mutual_goodbye")
+                    self._close_turn_trace(call_sid, "mutual_goodbye", own=trace)
                     return
                 self._farewell_turns.add(call_sid)
             elif self._hangup_pending(call_sid):
@@ -768,7 +768,7 @@ class VoiceChannel(BaseChannel):
             gate.begin_turn()
             verdict = await gate.handle_caller_utterance(text)
             if verdict.handled:
-                self._close_turn_trace(call_sid, "approval_gate")
+                self._close_turn_trace(call_sid, "approval_gate", own=trace)
                 return  # the gate re-asked; no LLM turn
             verdict_note = verdict.system_note
 
@@ -779,7 +779,7 @@ class VoiceChannel(BaseChannel):
         if session is not None:
             plan = await session.on_caller_utterance(text)
             if plan.handled:
-                self._close_turn_trace(call_sid, "receptionist")
+                self._close_turn_trace(call_sid, "receptionist", own=trace)
                 return
             if plan.system_note:
                 verdict_note = f"{verdict_note}\n\n{plan.system_note}" if verdict_note else plan.system_note
