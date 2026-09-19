@@ -612,13 +612,29 @@ async def test_a_rejected_dial_is_terminal(telemetry):
     """Twilio refusing the dial is a technical failure, not a call still in progress."""
     for key in ("pending-aaa", "pending-bbb"):  # what uuid4() yields per ATTEMPT
         hooks.dial_requested(key, to_number="+4930111", engine="media_streams", language="de")
-        hooks.dial_rejected(key, error="TwilioRestException: 21211")
+        await hooks.dial_rejected(key, error="TwilioRestException: 21211")
     await _settle()
 
     aggregate = await queries.overview(telemetry, queries.CallFilters.for_hours(1))
     assert aggregate.calls["active"] == 0
     assert aggregate.rates["technical_failure_rate"]["denominator"] == 2
     assert aggregate.rates["technical_failure_rate"]["numerator"] == 2
+
+
+async def test_a_rejected_dial_closes_even_when_the_write_backlog_is_full(telemetry, monkeypatch):
+    """The terminal write is awaited, not spawned: a full backlog drops spawned
+    writes, and no status callback would ever arrive to close this row later."""
+    from pincer.voice.telemetry import tracer as tracer_mod
+
+    hooks.dial_requested("pending-ccc", to_number="+4930111", engine="media_streams", language="de")
+    await _settle()
+    monkeypatch.setattr(tracer_mod, "_MAX_PENDING", 0)  # every spawned write is now dropped
+    await hooks.dial_rejected("pending-ccc", error="TwilioRestException: 21211")
+    await _settle()
+
+    aggregate = await queries.overview(telemetry, queries.CallFilters.for_hours(1))
+    assert aggregate.calls["active"] == 0
+    assert aggregate.rates["technical_failure_rate"]["numerator"] == 1
 
 
 # ── a closed row stays closed ────────────────────────────────────────

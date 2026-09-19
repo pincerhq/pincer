@@ -7,9 +7,9 @@ point. Instrumentation that a caller has to guard with `if enabled and tracer
 and ...` gets skipped on the error paths, which are exactly the paths that need
 it most.
 
-Nothing in here awaits. The two functions that must finish before the process
-forgets a call (`call_ended`) are async and are awaited from teardown, which is
-not the audio path.
+Nothing in here awaits. The functions that must finish before the process
+forgets a call (`call_ended`, `call_declined`, `dial_rejected`) are async and
+are awaited from teardown or a refusal path, neither of which is the audio path.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pincer.observability.failure_codes import FailureCode
 from pincer.voice.telemetry import runtime
 from pincer.voice.telemetry.clock import mono_ns
 from pincer.voice.telemetry.schema import CONVERSATION_RELAY, MEDIA_STREAMS, EventName
@@ -144,26 +145,29 @@ def dial_accepted(temp_id: str, call_sid: str) -> Any:
     return tracer
 
 
-def dial_rejected(temp_id: str, *, error: str) -> None:
+async def dial_rejected(temp_id: str, *, error: str) -> None:
+    """Twilio refused the dial.
+
+    Terminal immediately, and awaited rather than spawned: no CallSid means no
+    status callback and no teardown, so nothing else would ever close this row,
+    and a background write dropped under backlog would leave it "active"
+    forever. The error text stays on the event; the row gets only the code.
+    """
     tracer = runtime.tracer_for(temp_id)
     if tracer is None:
         return
     _safe(tracer.event, EventName.DIAL_REJECTED, error=error)
-    # No CallSid means no status callback and no teardown: nothing else would
-    # ever close this row, and it would count as "active" forever. The error
-    # text stays on the event; the row gets only the code.
-    from pincer.observability.failure_codes import FailureCode
-    from pincer.voice.telemetry.tracer import _spawn
-
-    runtime.forget(temp_id)
-    _spawn(
-        tracer.finish(
+    try:
+        await tracer.finish(
             status="failed",
             failure_code=FailureCode.TWILIO_API.value,
             termination_reason="dial_rejected",
             duration_s=0.0,
         )
-    )
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("rejected-dial finalisation failed", exc_info=True)
+    finally:
+        runtime.forget(temp_id)
 
 
 def media_open(call_sid: str, *, engine: str = "", stream_sid: str = "") -> None:

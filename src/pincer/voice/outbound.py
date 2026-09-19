@@ -383,7 +383,7 @@ async def make_phone_call(
         try:
             call = client.calls.create(**call_kwargs)
         except Exception as e:
-            telemetry.dial_rejected(trace_key, error=f"{type(e).__name__}: {e}"[:160])
+            await telemetry.dial_rejected(trace_key, error=f"{type(e).__name__}: {e}"[:160])
             if engine is not None and pre_state is not None:
                 engine.discard_pending(pre_state)
             raise
