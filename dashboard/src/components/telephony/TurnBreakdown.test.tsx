@@ -46,23 +46,21 @@ function expand(engine: string, limitations: string, source = "speech_end") {
 }
 
 describe("turn breakdown boundary wording", () => {
-  it("takes the stop boundary from the metric definition, not from the engine name", () => {
-    // The whole point: change schema.py's wording and the UI follows, with no
-    // engine string to hunt for here.
-    expand("conversation_relay", "SENTINEL-ends-at-the-first-text-token.")
-    expect(screen.getByText(/SENTINEL-ends-at-the-first-text-token/)).toBeInTheDocument()
+  it("names the engine's own stop boundary and not the definition's start fallback", () => {
+    // `limitations` also describes the ConversationRelay START fallback, which
+    // contradicts a speech_end turn, so it is not rendered here.
+    expand("conversation_relay", "SENTINEL-start-falls-back.")
+    const paragraph = screen.getByText(/Clock starts at/).textContent ?? ""
+    expect(paragraph).toContain("first response text token was")
+    expect(paragraph).not.toContain("SENTINEL")
   })
 
-  it("uses that same definition for an engine it has never heard of", () => {
-    // Adding an engine must not require a code change here. Previously anything
-    // that was not "conversation_relay" silently rendered "audio".
-    expand("some_future_engine", "SENTINEL-ends-when-written-to-the-provider.")
-
-    // Scoped to the boundary paragraph: the panel has an unrelated
-    // "Critical path to first response audio" heading.
+  it("does not guess a stop boundary for an engine it has never heard of", () => {
+    // Previously anything that was not "conversation_relay" rendered "audio".
+    expand("some_future_engine", "SENTINEL.")
     const paragraph = screen.getByText(/Clock starts at/).textContent ?? ""
-    expect(paragraph).toContain("SENTINEL-ends-when-written-to-the-provider")
-    expect(paragraph).not.toContain("text token")
+    expect(paragraph).toContain("first response was written to the provider")
+    expect(paragraph).not.toMatch(/text token|response audio/)
   })
 
   it("still says which start boundary this particular turn used", () => {
@@ -71,7 +69,7 @@ describe("turn breakdown boundary wording", () => {
     expect(screen.getByText(/transcript arrival/)).toBeInTheDocument()
   })
 
-  it("degrades to the per-turn sentence when definitions have not loaded", () => {
+  it("keeps both boundaries and the caveat when definitions have not loaded", () => {
     render(
       <TurnBreakdown
         turns={[turn("media_streams", "speech_end")]}
@@ -82,5 +80,7 @@ describe("turn breakdown boundary wording", () => {
       />,
     )
     expect(screen.getByText(/measured speech end/)).toBeInTheDocument()
+    // The caveat must not wait on a second query.
+    expect(screen.getByText(/SENT, not heard/)).toBeInTheDocument()
   })
 })
