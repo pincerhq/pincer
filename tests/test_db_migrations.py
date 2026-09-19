@@ -2,14 +2,12 @@
 
 import contextlib
 import importlib.util
-import os
 import sqlite3
-import uuid
 from pathlib import Path
 
-import pytest
 import sqlalchemy as sa
 from alembic import command
+from alembic.script import ScriptDirectory
 
 from pincer.db import build_config, engine, ensure_schema_current
 
@@ -945,7 +943,8 @@ def test_full_pre_alembic_runtime_voice_db_upgrades_to_head(tmp_path: Path) -> N
         assert {"do_not_call_numbers", "outbound_call_logs"} <= _tables(db_path)
 
         # The database is genuinely at head, not merely stamped.
-        assert con.execute("SELECT version_num FROM alembic_version").fetchone() == ("0011",)
+        head = ScriptDirectory.from_config(build_config(db_path)).get_current_head()
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone() == (head,)
     finally:
         con.close()
 
@@ -976,30 +975,6 @@ _SEED_0010 = {
     "skill_registry": "INSERT INTO skill_registry (skill_id, name, version, install_path) VALUES ('s', 'n', '1', '/p')",
 }
 _LINK = "INSERT INTO channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '1', 'usr_a')"
-
-
-@pytest.fixture(params=["sqlite", "postgres"])
-def migration_url(request, tmp_path):
-    """A sync URL for an empty database, once per dialect. Postgres gets a
-    throwaway database (the migrations create dozens of tables in `public`) and
-    is skipped unless `PINCER_TEST_PG_URL` is set."""
-    if request.param == "sqlite":
-        yield f"sqlite:///{tmp_path / 'pincer.db'}"
-        return
-    base = os.environ.get("PINCER_TEST_PG_URL")
-    if not base:
-        pytest.skip("PINCER_TEST_PG_URL not set")
-    server = sa.engine.make_url(base).set(drivername="postgresql+psycopg")
-    name = f"pincer_mig_{uuid.uuid4().hex[:12]}"
-    admin = sa.create_engine(server, isolation_level="AUTOCOMMIT")
-    with admin.connect() as conn:
-        conn.execute(sa.text(f'CREATE DATABASE "{name}"'))
-    try:
-        yield server.set(database=name).render_as_string(hide_password=False)
-    finally:
-        with admin.connect() as conn:
-            conn.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
-        admin.dispose()
 
 
 @contextlib.contextmanager

@@ -28,6 +28,34 @@ newer one.
 
 ## Adding a revision
 
-Date/time columns follow the project dialect convention — `TEXT` on SQLite,
-`TIMESTAMP` on PostgreSQL — so templates substitute the type per dialect
-rather than hard-coding one. See `_NOW_COL` in any voice revision.
+The SQLModel tables in [`src/pincer/models/`](../../src/pincer/models/) are
+the source of truth for the schema, and Alembic's `target_metadata` points at
+them. `0001`–`0012` predate the models and stay hand-written SQL.
+`tests/test_schema_drift.py` checks that the models and those revisions
+describe the same schema, on SQLite and (in CI) on Postgres.
+
+To change the schema:
+
+1. Change the model. Keep storage types as they are (`IsoText` for timestamps,
+   which is `TEXT` on SQLite and `TIMESTAMP` on Postgres; `REAL` for floats;
+   JSON stays in `TEXT`).
+2. Autogenerate the revision against a database at head:
+   `uv run alembic -c src/pincer/db/alembic.ini revision --autogenerate --rev-id 0013 -m "..."`
+   (revisions are numbered, not hashed; `PINCER_DATABASE_URL` picks the database).
+3. Review it. SQLite runs in batch mode (the table is rebuilt), and Alembic
+   cannot see everything: data moves, renames (which it writes as a drop plus
+   an add) and anything in the list below are yours to write.
+4. Run `uv run pytest tests/test_schema_drift.py tests/test_db_migrations.py`,
+   with `PINCER_TEST_PG_URL` set if you can, to cover Postgres as well.
+
+Autogenerate leaves these alone (`pincer.db.metadata.include_object`), because
+they have no model and are written by hand:
+
+- the FTS5 table `memories_fts`, its shadow tables and its triggers (SQLite only)
+- `idx_phone_contacts_name` (`COLLATE NOCASE` on SQLite, `lower(name)` on Postgres)
+- the dormant tables from `0001` (`registry_skills`, `expenses`, `habits`,
+  `habit_checkins`, `pomodoro_sessions`, `discord_threads`)
+
+It also ignores two differences that SQLite reports on its own and that are
+not worth rebuilding a table for: primary keys that reflect as nullable, and
+`phone_contacts.created_at`, which is declared `TIMESTAMP`.

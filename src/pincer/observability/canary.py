@@ -53,19 +53,13 @@ _POLL_INTERVAL_S = 2.0
 # Canary history is what the availability SLO is inferred from (T9.5), so runs
 # are persisted rather than only counted in a metric — the SLO must be
 # reconstructable after a restart or a metrics-backend outage.
-CANARY_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS canary_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ran_at TEXT NOT NULL,
-    ok INTEGER NOT NULL,
-    skipped INTEGER NOT NULL DEFAULT 0,
-    reason TEXT DEFAULT '',
-    call_sid TEXT DEFAULT '',
-    turns INTEGER DEFAULT 0,
-    duration_s REAL DEFAULT 0.0
-);
-CREATE INDEX IF NOT EXISTS idx_canary_runs_ran_at ON canary_runs(ran_at);
-"""
+# The table itself is Alembic-managed (0012).
+
+
+async def _ensure_schema(conn: Any) -> None:
+    from pincer.voice.retention import ensure_schema_for_connection
+
+    await ensure_schema_for_connection(conn)
 
 
 async def _persist_run(settings: Settings | Any, result: CanaryResult) -> None:
@@ -75,7 +69,7 @@ async def _persist_run(settings: Settings | Any, result: CanaryResult) -> None:
 
     try:
         async with aiosqlite.connect(str(settings.db_path)) as conn:
-            await conn.executescript(CANARY_TABLE_SQL)
+            await _ensure_schema(conn)
             await conn.execute(
                 "INSERT INTO canary_runs (ran_at, ok, skipped, reason, call_sid, turns, duration_s) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -101,7 +95,7 @@ async def recent_runs(settings: Settings | Any, limit: int = 20) -> list[dict[st
     try:
         async with aiosqlite.connect(str(settings.db_path)) as conn:
             conn.row_factory = aiosqlite.Row
-            await conn.executescript(CANARY_TABLE_SQL)
+            await _ensure_schema(conn)
             rows = await conn.execute_fetchall(
                 "SELECT ran_at, ok, skipped, reason, call_sid, turns, duration_s "
                 "FROM canary_runs ORDER BY ran_at DESC LIMIT ?",

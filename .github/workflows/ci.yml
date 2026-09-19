@@ -75,7 +75,7 @@ jobs:
       - run: uv sync --all-extras
 
       - name: Database layer tests (SQLite + Postgres)
-        run: uv run pytest tests/db -v --no-cov
+        run: uv run pytest tests/db tests/test_db_migrations.py tests/test_schema_drift.py -v --no-cov
 
   # Sprint 8, T8.6: known-vulnerable dependencies fail the build. Untriaged
   # advisories block; triaged ones live in .security/pip-audit-ignore.txt with

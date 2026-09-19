@@ -40,21 +40,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-BOOKING_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS appointment_outcomes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id TEXT NOT NULL,
-    call_sid TEXT DEFAULT '',
-    result TEXT NOT NULL,
-    language TEXT DEFAULT '',
-    attempts INTEGER DEFAULT 1,
-    detail TEXT DEFAULT '',
-    recorded_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_appointment_outcomes_recorded ON appointment_outcomes(recorded_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_appointment_outcomes_task ON appointment_outcomes(task_id);
-"""
-
 
 class BookingResult(StrEnum):
     CONFIRMED = "confirmed"
@@ -68,9 +53,15 @@ class BookingResult(StrEnum):
 async def _db(settings: Settings | Any) -> AsyncIterator[aiosqlite.Connection]:
     async with aiosqlite.connect(str(settings.db_path)) as conn:
         conn.row_factory = aiosqlite.Row
-        await conn.executescript(BOOKING_TABLE_SQL)
-        await conn.commit()
+        await _ensure_schema(conn)
         yield conn
+
+
+async def _ensure_schema(conn: aiosqlite.Connection) -> None:
+    """`appointment_outcomes` is Alembic-managed (0012); bring the file to head."""
+    from pincer.voice.retention import ensure_schema_for_connection
+
+    await ensure_schema_for_connection(conn)
 
 
 async def record_booking_outcome(

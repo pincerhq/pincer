@@ -41,27 +41,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-CALL_COSTS_SQL = """
-CREATE TABLE IF NOT EXISTS call_costs (
-    call_sid TEXT PRIMARY KEY,
-    direction TEXT DEFAULT '',
-    engine TEXT DEFAULT '',
-    language TEXT DEFAULT '',
-    duration_seconds INTEGER DEFAULT 0,
-    twilio_usd REAL DEFAULT 0.0,
-    stt_seconds REAL DEFAULT 0.0,
-    stt_usd REAL DEFAULT 0.0,
-    tts_characters INTEGER DEFAULT 0,
-    tts_usd REAL DEFAULT 0.0,
-    llm_input_tokens INTEGER DEFAULT 0,
-    llm_output_tokens INTEGER DEFAULT 0,
-    llm_usd REAL DEFAULT 0.0,
-    total_usd REAL DEFAULT 0.0,
-    recorded_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_call_costs_recorded ON call_costs(recorded_at);
-"""
-
 
 @dataclass
 class CallCost:
@@ -251,8 +230,10 @@ def price_call(
 
 
 async def ensure_call_costs_table(db: aiosqlite.Connection) -> None:
-    await db.executescript(CALL_COSTS_SQL)
-    await db.commit()
+    """`call_costs` is Alembic-managed (0012); bring the file behind `db` to head."""
+    from pincer.voice.retention import ensure_schema_for_connection
+
+    await ensure_schema_for_connection(db)
 
 
 @asynccontextmanager

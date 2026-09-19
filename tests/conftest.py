@@ -293,3 +293,31 @@ async def migrated_db(tmp_path: Path):
     await asyncio.to_thread(ensure_schema_current, path)
     yield to_async_url(f"sqlite:///{path}")
     await dispose_engines()
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def migration_url(request: pytest.FixtureRequest, tmp_path: Path):
+    """A sync URL for an empty database, once per dialect. Postgres gets a
+    throwaway database (the migrations create dozens of tables in `public`) and
+    is skipped unless `PINCER_TEST_PG_URL` is set."""
+    import uuid
+
+    import sqlalchemy as sa
+
+    if request.param == "sqlite":
+        yield f"sqlite:///{tmp_path / 'pincer.db'}"
+        return
+    base = _postgres_test_url()
+    if base is None:
+        pytest.skip("PINCER_TEST_PG_URL not set")
+    server = sa.engine.make_url(base).set(drivername="postgresql+psycopg")
+    name = f"pincer_mig_{uuid.uuid4().hex[:12]}"
+    admin = sa.create_engine(server, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(sa.text(f'CREATE DATABASE "{name}"'))
+    try:
+        yield server.set(database=name).render_as_string(hide_password=False)
+    finally:
+        with admin.connect() as conn:
+            conn.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()

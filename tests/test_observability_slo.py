@@ -64,10 +64,10 @@ def _write_turns(settings, totals_ms: list[float]) -> None:
 
 
 async def _seed_canary(settings, results: list[bool]) -> None:
-    from pincer.observability.canary import CANARY_TABLE_SQL
+    from pincer.voice.retention import ensure_schema_for_connection
 
     async with aiosqlite.connect(settings.db_path) as db:
-        await db.executescript(CANARY_TABLE_SQL)
+        await ensure_schema_for_connection(db)
         for i, ok in enumerate(results):
             await db.execute(
                 "INSERT INTO canary_runs (ran_at, ok, skipped) VALUES (?, ?, 0)",

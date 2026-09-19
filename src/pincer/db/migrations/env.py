@@ -5,14 +5,18 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from pincer.db.metadata import compare_type, drop_sqlite_noise, include_object, metadata
+
 config = context.config
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Migrations are raw SQL (op.execute()), not ORM-model-driven, so there is no
-# SQLAlchemy metadata for Alembic to diff against.
-target_metadata = None
+# The SQLModel tables are the schema's source of truth: `alembic revision
+# --autogenerate` diffs them against the database. Revisions 0001-0012 predate
+# the models and stay raw SQL; `tests/test_schema_drift.py` keeps the models
+# and those revisions in step.
+target_metadata = metadata
 
 
 def _get_url() -> str:
@@ -37,6 +41,7 @@ def run_migrations_offline() -> None:
     context.configure(
         url=_get_url(),
         target_metadata=target_metadata,
+        include_object=include_object,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
@@ -51,7 +56,19 @@ def run_migrations_online() -> None:
 
     try:
         with connectable.connect() as connection:
-            context.configure(connection=connection, target_metadata=target_metadata)
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                include_object=include_object,
+                compare_type=compare_type,
+                process_revision_directives=drop_sqlite_noise,
+                # SQLite reflects defaults as raw text ('0' vs 0, quoting),
+                # so comparing them would only report noise.
+                compare_server_default=False,
+                # SQLite cannot ALTER most things in place; batch mode
+                # rebuilds the table instead.
+                render_as_batch=connection.dialect.name == "sqlite",
+            )
             with context.begin_transaction():
                 context.run_migrations()
     finally:
