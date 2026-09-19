@@ -307,9 +307,9 @@ async def get_turns(db_path: str | Path, call_id: str) -> list[dict[str, Any]]:
     for row in rows:
         data = {key: row[key] for key in row.keys()}  # noqa: SIM118 - aiosqlite.Row iterates values, not keys
         data["critical_path"] = store.loads(data.pop("critical_path", None), [])
-        data["complete"] = bool(data.get("complete", 1))
-        data["interrupted"] = bool(data.get("interrupted", 0))
-        data["cancelled"] = bool(data.get("cancelled", 0))
+        data["complete"] = bool(data["complete"])
+        data["interrupted"] = bool(data["interrupted"])
+        data["cancelled"] = bool(data["cancelled"])
         out.append(data)
     return out
 
@@ -346,9 +346,9 @@ async def slowest_turns(
     for row in rows:
         data = {key: row[key] for key in row.keys()}  # noqa: SIM118 - aiosqlite.Row iterates values, not keys
         data["critical_path"] = store.loads(data.pop("critical_path", None), [])
-        data["complete"] = bool(data.get("complete", 1))
-        data["interrupted"] = bool(data.get("interrupted", 0))
-        data["cancelled"] = bool(data.get("cancelled", 0))
+        data["complete"] = bool(data["complete"])
+        data["interrupted"] = bool(data["interrupted"])
+        data["cancelled"] = bool(data["cancelled"])
         out.append(data)
     return out
 
@@ -382,9 +382,9 @@ async def export_turns(
     for row in rows:
         data = {key: row[key] for key in row.keys()}  # noqa: SIM118 - aiosqlite.Row iterates values, not keys
         data.pop("critical_path", None)
-        data["interrupted"] = bool(data.get("interrupted", 0))
-        data["cancelled"] = bool(data.get("cancelled", 0))
-        data["complete"] = bool(data.get("complete", 0))
+        data["interrupted"] = bool(data["interrupted"])
+        data["cancelled"] = bool(data["cancelled"])
+        data["complete"] = bool(data["complete"])
         out.append(data)
     return out
 
