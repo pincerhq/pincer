@@ -7,7 +7,7 @@ all channels.
 
 Schema
 ------
-identity_meta     — one row per pincer user (preferred channel, display name)
+identity_profiles     — one row per pincer user (preferred channel, display name)
 channel_identities — many-to-many: (channel, channel_user_id) → pincer_user_id
 
 Config mapping (.env)
@@ -234,7 +234,8 @@ class IdentityResolver:
         display_name: str | None = None,
     ) -> None:
         await db.execute(
-            "INSERT OR IGNORE INTO identity_meta (pincer_user_id, preferred_channel, display_name) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO identity_profiles (pincer_user_id, preferred_channel, display_name) "
+            "VALUES (?, ?, ?)",
             (pincer_user_id, channel.value, display_name),
         )
         await db.execute(
@@ -264,15 +265,15 @@ class IdentityResolver:
         old_id: str,
         new_id: str,
     ) -> None:
-        """Rename a pincer_user_id across identity_meta, channel_identities, and sessions.
+        """Rename a pincer_user_id across identity_profiles, channel_identities, and sessions.
 
         Only called for auto-generated hash IDs (usr_...) to avoid overwriting
         intentionally-named identities.
         """
         await db.execute(
-            "INSERT OR IGNORE INTO identity_meta "
+            "INSERT OR IGNORE INTO identity_profiles "
             "(pincer_user_id, preferred_channel, display_name) "
-            "SELECT ?, preferred_channel, display_name FROM identity_meta "
+            "SELECT ?, preferred_channel, display_name FROM identity_profiles "
             "WHERE pincer_user_id = ?",
             (new_id, old_id),
         )
@@ -280,7 +281,7 @@ class IdentityResolver:
             "UPDATE channel_identities SET pincer_user_id = ? WHERE pincer_user_id = ?",
             (new_id, old_id),
         )
-        await db.execute("DELETE FROM identity_meta WHERE pincer_user_id = ?", (old_id,))
+        await db.execute("DELETE FROM identity_profiles WHERE pincer_user_id = ?", (old_id,))
         try:
             await db.execute(
                 "UPDATE sessions SET user_id = ? WHERE user_id = ?",
@@ -375,7 +376,7 @@ class IdentityResolver:
         If PINCER_IDENTITY_MAP is configured, the resolved internal IDs for
         every channel pair are the authoritative whitelist. Any
         channel_identities row whose (channel, channel_user_id) is NOT in the
-        whitelist is deleted, and any identity_meta row left with no channels is
+        whitelist is deleted, and any identity_profiles row left with no channels is
         deleted with it. Passing ``channels`` allows config IDs to be translated
         to real internal IDs before the whitelist is built.
 
@@ -407,7 +408,7 @@ class IdentityResolver:
             return
 
         async with self._get_db() as db:
-            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='identity_meta'")
+            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='identity_profiles'")
             if not await cursor.fetchone():
                 return
 
@@ -423,7 +424,7 @@ class IdentityResolver:
 
             cursor = await db.execute(
                 """
-                DELETE FROM identity_meta
+                DELETE FROM identity_profiles
                 WHERE pincer_user_id NOT IN (SELECT pincer_user_id FROM channel_identities)
                 """
             )
@@ -525,7 +526,7 @@ class IdentityResolver:
                 profile = self._profiles.get(pincer_uid, IdentityProfile())
                 preferred_channel = profile.preferred_channel or first_channel
                 await db.execute(
-                    "INSERT OR IGNORE INTO identity_meta "
+                    "INSERT OR IGNORE INTO identity_profiles "
                     "(pincer_user_id, preferred_channel, display_name, email, timezone) VALUES (?, ?, ?, ?, ?)",
                     (pincer_uid, preferred_channel, profile.display_name, profile.email, profile.timezone),
                 )
@@ -537,7 +538,7 @@ class IdentityResolver:
                     # is otherwise write-once (see touch_active_channel's docstring for
                     # why active_channel, not this, tracks day-to-day channel use).
                     await db.execute(
-                        "UPDATE identity_meta SET "
+                        "UPDATE identity_profiles SET "
                         "display_name = COALESCE(?, display_name), "
                         "preferred_channel = COALESCE(?, preferred_channel), "
                         "email = COALESCE(?, email), "
@@ -569,7 +570,7 @@ class IdentityResolver:
         """
         async with self._get_db() as db:
             await db.execute(
-                "UPDATE identity_meta SET active_channel = ?, active_channel_updated_at = datetime('now') "
+                "UPDATE identity_profiles SET active_channel = ?, active_channel_updated_at = datetime('now') "
                 "WHERE pincer_user_id = ?",
                 (channel.value, pincer_user_id),
             )
@@ -586,7 +587,7 @@ class IdentityResolver:
         async with (
             self._get_db() as db,
             db.execute(
-                "SELECT timezone FROM identity_meta WHERE pincer_user_id = ?",
+                "SELECT timezone FROM identity_profiles WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             ) as cursor,
         ):
@@ -619,7 +620,7 @@ class IdentityResolver:
             db.row_factory = aiosqlite.Row
             cursor = await db.execute(
                 "SELECT preferred_channel, active_channel, active_channel_updated_at "
-                "FROM identity_meta WHERE pincer_user_id = ?",
+                "FROM identity_profiles WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             )
             meta = await cursor.fetchone()

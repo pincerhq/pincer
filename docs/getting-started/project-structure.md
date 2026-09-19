@@ -45,7 +45,7 @@
 
 ### Cross-Channel Identity (`core/identity.py`)
 - Unified `pincer_user_id` across all channels — tell the agent something on WhatsApp, ask about it on Telegram, it remembers
-- Two-table normalized schema: `identity_meta` (one row per user) + `channel_identities` (many-to-many channel links)
+- Two-table normalized schema: `identity_profiles` (one row per user) + `channel_identities` (many-to-many channel links)
 - Config-driven identity seeding at startup via `PINCER_IDENTITY_MAP`; supports N channels per identity: `name@ch1:id1=ch2:id2=ch3:id3`
 - Named canonical IDs (`john@telegram:...`) make memory tags human-readable and portable across DB rebuilds
 - Hash-based fallback ID (`usr_abc123...`) auto-generated when no name is configured — backward-compatible
@@ -86,7 +86,7 @@
 
 ### Proactive Agent (`scheduler/proactive.py`)
 - Morning briefing: weather (OpenWeatherMap) + calendar + email + news (NewsAPI)
-- Customizable via `briefing_config` table
+- Customizable via `briefing_configs` table
 - Delivered to user's preferred channel via router
 
 ### Event Triggers (`scheduler/triggers.py`)

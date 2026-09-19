@@ -161,7 +161,7 @@ class AuditLogger:
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = f"""
-            SELECT * FROM audit_log {where}
+            SELECT * FROM audit_logs {where}
             ORDER BY timestamp DESC
             LIMIT ? OFFSET ?
         """
@@ -203,7 +203,7 @@ class AuditLogger:
             params.append(until)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        sql = f"SELECT COUNT(*) FROM audit_log {where}"  # noqa: S608
+        sql = f"SELECT COUNT(*) FROM audit_logs {where}"  # noqa: S608
 
         async with self._db.execute(sql, params) as cursor:
             row = await cursor.fetchone()
@@ -233,7 +233,7 @@ class AuditLogger:
             params.append(until)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        sql = f"SELECT * FROM audit_log {where} ORDER BY timestamp ASC"
+        sql = f"SELECT * FROM audit_logs {where} ORDER BY timestamp ASC"
 
         output_path = Path(output_path)
         count = 0
@@ -271,26 +271,26 @@ class AuditLogger:
 
         stats: dict[str, Any] = {}
 
-        async with self._db.execute(f"SELECT COUNT(*) FROM audit_log {where()}", params) as cursor:
+        async with self._db.execute(f"SELECT COUNT(*) FROM audit_logs {where()}", params) as cursor:
             row = await cursor.fetchone()
             stats["total_entries"] = row[0] if row else 0
 
         async with self._db.execute(
-            f"SELECT action, COUNT(*) FROM audit_log {where()} GROUP BY action ORDER BY COUNT(*) DESC", params
+            f"SELECT action, COUNT(*) FROM audit_logs {where()} GROUP BY action ORDER BY COUNT(*) DESC", params
         ) as cursor:
             stats["by_action"] = {row[0]: row[1] async for row in cursor}
 
         async with self._db.execute(
-            f"SELECT tool, COUNT(*) FROM audit_log {where('tool IS NOT NULL')} GROUP BY tool ORDER BY COUNT(*) DESC",
+            f"SELECT tool, COUNT(*) FROM audit_logs {where('tool IS NOT NULL')} GROUP BY tool ORDER BY COUNT(*) DESC",
             params,
         ) as cursor:
             stats["by_tool"] = {row[0]: row[1] async for row in cursor}
 
-        async with self._db.execute(f"SELECT SUM(cost_usd) FROM audit_log {where()}", params) as cursor:
+        async with self._db.execute(f"SELECT SUM(cost_usd) FROM audit_logs {where()}", params) as cursor:
             row = await cursor.fetchone()
             stats["total_cost_usd"] = round(row[0] or 0.0, 6)
 
-        async with self._db.execute(f"SELECT COUNT(*) FROM audit_log {where('approved = 0')}", params) as cursor:
+        async with self._db.execute(f"SELECT COUNT(*) FROM audit_logs {where('approved = 0')}", params) as cursor:
             row = await cursor.fetchone()
             stats["failed_actions"] = row[0] if row else 0
 
@@ -318,7 +318,7 @@ class AuditLogger:
             return
 
         sql = """
-            INSERT INTO audit_log
+            INSERT INTO audit_logs
             (timestamp, user_id, session_id, action, tool, input_summary,
              output_summary, approved, cost_usd, duration_ms, ip_address,
              channel, metadata_json)

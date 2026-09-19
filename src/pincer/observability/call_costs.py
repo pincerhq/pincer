@@ -10,7 +10,7 @@ Four components, three of which nobody was adding up before:
   this is where that counter finally becomes money).
 * **LLM** — tokens spent on the call's own turns.
 
-LLM attribution is the subtle one. `cost_log.session_id` is a *per-user* session,
+LLM attribution is the subtle one. `cost_logs.session_id` is a *per-user* session,
 not per-call, so summing by session would bill a user's chat traffic to whichever
 call happened to be running. Instead a `ContextVar` binds the current call SID
 for the duration of a turn; `CostTracker.record` reports into it. Since each turn

@@ -94,7 +94,7 @@ async def test_run_retention_purge_writes_audit_entry(voice_db, tmp_path, monkey
 
         async with aiosqlite.connect(str(tmp_path / "audit.db")) as db:
             rows = await db.execute_fetchall(
-                "SELECT user_id, output_summary FROM audit_log WHERE action = 'retention_purge'"
+                "SELECT user_id, output_summary FROM audit_logs WHERE action = 'retention_purge'"
             )
         assert len(rows) == 1
         assert rows[0][0] == "system"
@@ -120,7 +120,7 @@ async def test_run_retention_purge_no_deletions_no_audit(voice_db, tmp_path, mon
         assert deleted == {}
         await audit._flush_pending()
         async with aiosqlite.connect(str(tmp_path / "audit.db")) as db:
-            rows = await db.execute_fetchall("SELECT COUNT(*) FROM audit_log")
+            rows = await db.execute_fetchall("SELECT COUNT(*) FROM audit_logs")
         assert rows[0][0] == 0
     finally:
         await audit.shutdown()
@@ -148,16 +148,16 @@ async def test_outbound_call_log_is_purged(tmp_path):
     async with aiosqlite.connect(db_path) as db:
         await ensure_outbound_tables(db)
         await db.executemany(
-            "INSERT INTO outbound_call_log (phone_number, user_id, placed_at, local_day) VALUES (?, ?, ?, ?)",
+            "INSERT INTO outbound_call_logs (phone_number, user_id, placed_at, local_day) VALUES (?, ?, ?, ?)",
             [("+4915112345678", "u1", old, "2026-01-01"), ("+4915112345678", "u1", recent, "2026-08-20")],
         )
         await db.commit()
 
     deleted = await purge_expired_voice_data(db_path, retention_days=90)
-    assert deleted.get("outbound_call_log") == 1
+    assert deleted.get("outbound_call_logs") == 1
 
     async with aiosqlite.connect(db_path) as db:
-        rows = await db.execute_fetchall("SELECT placed_at FROM outbound_call_log")
+        rows = await db.execute_fetchall("SELECT placed_at FROM outbound_call_logs")
     assert [r[0] for r in rows] == [recent]
 
 

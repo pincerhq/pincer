@@ -1,6 +1,6 @@
 """Per-call cost record and LLM attribution (Sprint 9, T9.1).
 
-The attribution tests matter most: `cost_log.session_id` is per-user, not
+The attribution tests matter most: `cost_logs.session_id` is per-user, not
 per-call, so the only thing standing between "cost per call" and "cost per user's
 whole afternoon" is the ContextVar binding.
 """

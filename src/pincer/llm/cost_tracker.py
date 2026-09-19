@@ -98,7 +98,7 @@ class CostTracker:
                 raise BudgetExceededError(spent=today_spent + cost, limit=self._daily_budget)
 
         await self._db.execute(
-            """INSERT INTO cost_log
+            """INSERT INTO cost_logs
                (timestamp, provider, model, input_tokens, output_tokens, cost_usd, session_id)
                VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (time.time(), provider, model, input_tokens, output_tokens, cost, session_id),
@@ -106,7 +106,7 @@ class CostTracker:
         await self._db.commit()
 
         # Sprint 9 (T9.1): attribute this spend to the voice call currently
-        # bound to the context, if any. `cost_log.session_id` is per-user, not
+        # bound to the context, if any. `cost_logs.session_id` is per-user, not
         # per-call, so summing by session would bill a user's chat traffic to
         # whichever call happened to be running.
         try:
@@ -130,7 +130,7 @@ class CostTracker:
         """Record an image generation cost entry."""
         assert self._db is not None
         await self._db.execute(
-            "INSERT INTO image_cost_log (timestamp, provider, model, cost_usd) VALUES (?, ?, ?, ?)",
+            "INSERT INTO image_cost_logs (timestamp, provider, model, cost_usd) VALUES (?, ?, ?, ?)",
             (time.time(), provider, model, cost_usd),
         )
         await self._db.commit()
@@ -140,7 +140,7 @@ class CostTracker:
         assert self._db is not None
         today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         async with self._db.execute(
-            "SELECT COUNT(*) FROM image_cost_log WHERE timestamp >= ?",
+            "SELECT COUNT(*) FROM image_cost_logs WHERE timestamp >= ?",
             (today_start,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -152,14 +152,14 @@ class CostTracker:
         today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
         async with self._db.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM cost_log WHERE timestamp >= ?",
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM cost_logs WHERE timestamp >= ?",
             (today_start,),
         ) as cursor:
             row = await cursor.fetchone()
             llm_spend = float(row[0]) if row else 0.0
 
         async with self._db.execute(
-            "SELECT COALESCE(SUM(cost_usd), 0) FROM image_cost_log WHERE timestamp >= ?",
+            "SELECT COALESCE(SUM(cost_usd), 0) FROM image_cost_logs WHERE timestamp >= ?",
             (today_start,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -173,7 +173,7 @@ class CostTracker:
         query = (
             "SELECT COALESCE(SUM(cost_usd),0), COUNT(*), "
             "COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0) "
-            "FROM cost_log"
+            "FROM cost_logs"
         )
         params: tuple[float, ...] = ()
         if since_timestamp:
@@ -200,7 +200,7 @@ class CostTracker:
         day_end = day_start + 86400
 
         async with self._db.execute(
-            "SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM cost_log WHERE timestamp >= ? AND timestamp < ?",
+            "SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM cost_logs WHERE timestamp >= ? AND timestamp < ?",
             (day_start, day_end),
         ) as cursor:
             row = await cursor.fetchone()
@@ -209,7 +209,7 @@ class CostTracker:
 
         by_model: dict[str, float] = {}
         async with self._db.execute(
-            "SELECT model, COALESCE(SUM(cost_usd),0) FROM cost_log "
+            "SELECT model, COALESCE(SUM(cost_usd),0) FROM cost_logs "
             "WHERE timestamp >= ? AND timestamp < ? GROUP BY model",
             (day_start, day_end),
         ) as cursor:
@@ -232,7 +232,7 @@ class CostTracker:
 
         async with self._db.execute(
             "SELECT date(timestamp, 'unixepoch') as day, "
-            "COALESCE(SUM(cost_usd),0), COUNT(*) FROM cost_log "
+            "COALESCE(SUM(cost_usd),0), COUNT(*) FROM cost_logs "
             "WHERE timestamp >= ? AND timestamp < ? GROUP BY day ORDER BY day",
             (start_ts, end_ts),
         ) as cursor:
@@ -246,7 +246,7 @@ class CostTracker:
 
         async with self._db.execute(
             "SELECT model, COALESCE(SUM(cost_usd),0), COUNT(*), "
-            "COALESCE(SUM(input_tokens+output_tokens),0) FROM cost_log "
+            "COALESCE(SUM(input_tokens+output_tokens),0) FROM cost_logs "
             "WHERE timestamp >= ? AND timestamp < ? "
             "GROUP BY model ORDER BY SUM(cost_usd) DESC",
             (start_ts, end_ts),

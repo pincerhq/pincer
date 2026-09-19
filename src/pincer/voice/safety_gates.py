@@ -315,7 +315,7 @@ def _messages(language: str) -> dict[BlockReason, str]:
 
 
 async def ensure_outbound_tables(conn: aiosqlite.Connection) -> None:
-    """Compatibility entry point — `do_not_call`/`outbound_call_log` are
+    """Compatibility entry point — `do_not_call_numbers`/`outbound_call_logs` are
     created by Alembic revision 0005, not by this module."""
     from pincer.voice.retention import ensure_schema_for_connection
 
@@ -360,10 +360,10 @@ async def add_do_not_call(
     if not key:
         return False
     async with _db(settings) as conn:
-        cursor = await conn.execute("SELECT 1 FROM do_not_call WHERE phone_number = ?", (key,))
+        cursor = await conn.execute("SELECT 1 FROM do_not_call_numbers WHERE phone_number = ?", (key,))
         already = await cursor.fetchone() is not None
         await conn.execute(
-            "INSERT INTO do_not_call (phone_number, reason, source, call_sid, added_at) VALUES (?, ?, ?, ?, ?) "
+            "INSERT INTO do_not_call_numbers (phone_number, reason, source, call_sid, added_at) VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(phone_number) DO UPDATE SET reason=excluded.reason, source=excluded.source",
             (key, reason, source, call_sid, datetime.now(UTC).isoformat()),
         )
@@ -381,7 +381,7 @@ async def remove_do_not_call(settings: Settings | Any, number: str) -> bool:
     """Remove a number from the do-not-call list (explicit user override)."""
     key = normalize_number(number)
     async with _db(settings) as conn:
-        cursor = await conn.execute("DELETE FROM do_not_call WHERE phone_number = ?", (key,))
+        cursor = await conn.execute("DELETE FROM do_not_call_numbers WHERE phone_number = ?", (key,))
         await conn.commit()
         return bool(cursor.rowcount)
 
@@ -391,14 +391,14 @@ async def is_do_not_call(settings: Settings | Any, number: str) -> bool:
     if not key:
         return False
     async with _db(settings) as conn:
-        cursor = await conn.execute("SELECT 1 FROM do_not_call WHERE phone_number = ?", (key,))
+        cursor = await conn.execute("SELECT 1 FROM do_not_call_numbers WHERE phone_number = ?", (key,))
         return await cursor.fetchone() is not None
 
 
 async def list_do_not_call(settings: Settings | Any) -> list[dict[str, str]]:
     async with _db(settings) as conn:
         rows = await conn.execute_fetchall(
-            "SELECT phone_number, reason, source, call_sid, added_at FROM do_not_call ORDER BY added_at DESC"
+            "SELECT phone_number, reason, source, call_sid, added_at FROM do_not_call_numbers ORDER BY added_at DESC"
         )
     return [dict(row) for row in rows]
 
@@ -461,7 +461,7 @@ async def record_outbound_call(
 
     async with _db(settings) as conn:
         await conn.execute(
-            "INSERT INTO outbound_call_log (phone_number, user_id, channel, call_sid, placed_at, local_day) "
+            "INSERT INTO outbound_call_logs (phone_number, user_id, channel, call_sid, placed_at, local_day) "
             "VALUES (?, ?, ?, ?, ?, ?)",
             (
                 normalize_number(number),
@@ -481,7 +481,7 @@ async def calls_today(settings: Settings | Any) -> int:
 
     async with _db(settings) as conn:
         cursor = await conn.execute(
-            "SELECT COUNT(*) FROM outbound_call_log WHERE local_day = ?", (voice_today_str(settings),)
+            "SELECT COUNT(*) FROM outbound_call_logs WHERE local_day = ?", (voice_today_str(settings),)
         )
         row = await cursor.fetchone()
     return int(row[0]) if row else 0
@@ -491,7 +491,7 @@ async def _recent_target_calls(settings: Settings | Any, number: str, window_min
     cutoff = datetime.now(UTC) - timedelta(minutes=window_min)
     async with _db(settings) as conn:
         rows = await conn.execute_fetchall(
-            "SELECT placed_at FROM outbound_call_log WHERE phone_number = ? AND placed_at >= ? ORDER BY placed_at ASC",
+            "SELECT placed_at FROM outbound_call_logs WHERE phone_number = ? AND placed_at >= ? ORDER BY placed_at ASC",
             (normalize_number(number), cutoff.isoformat()),
         )
     stamps: list[datetime] = []

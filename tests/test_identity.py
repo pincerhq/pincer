@@ -46,7 +46,7 @@ class TestIdentityResolver:
         )
         async with resolver._get_db() as db:
             cursor = await db.execute(
-                "SELECT display_name FROM identity_meta WHERE pincer_user_id = ?",
+                "SELECT display_name FROM identity_profiles WHERE pincer_user_id = ?",
                 (uid,),
             )
             row = await cursor.fetchone()
@@ -203,7 +203,7 @@ class TestActiveChannel:
 
         async with resolver._get_db() as db:
             cursor = await db.execute(
-                "SELECT active_channel, active_channel_updated_at FROM identity_meta WHERE pincer_user_id = ?",
+                "SELECT active_channel, active_channel_updated_at FROM identity_profiles WHERE pincer_user_id = ?",
                 (uid,),
             )
             row = await cursor.fetchone()
@@ -233,7 +233,7 @@ class TestActiveChannel:
 
         async with resolver._get_db() as db:
             await db.execute(
-                "UPDATE identity_meta SET active_channel = 'whatsapp' WHERE pincer_user_id = ?",
+                "UPDATE identity_profiles SET active_channel = 'whatsapp' WHERE pincer_user_id = ?",
                 (uid,),
             )
             await db.commit()
@@ -260,7 +260,7 @@ class TestActiveChannel:
         # too coarse to observe a difference from two touches back-to-back).
         async with resolver._get_db() as db:
             await db.execute(
-                "UPDATE identity_meta SET active_channel_updated_at = datetime('now', '-1 hour') "
+                "UPDATE identity_profiles SET active_channel_updated_at = datetime('now', '-1 hour') "
                 "WHERE pincer_user_id = ?",
                 (uid,),
             )
@@ -281,7 +281,7 @@ class TestActiveChannel:
         await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
 
         async with resolver._get_db() as db:
-            cursor = await db.execute("SELECT active_channel FROM identity_meta WHERE pincer_user_id = ?", (uid,))
+            cursor = await db.execute("SELECT active_channel FROM identity_profiles WHERE pincer_user_id = ?", (uid,))
             row = await cursor.fetchone()
         assert row[0] == "whatsapp"
 
@@ -294,7 +294,7 @@ class TestActiveChannel:
         # Backdate active_channel_updated_at by 31 minutes (past the 30-minute window).
         async with resolver._get_db() as db:
             await db.execute(
-                "UPDATE identity_meta SET active_channel_updated_at = "
+                "UPDATE identity_profiles SET active_channel_updated_at = "
                 "datetime('now', '-31 minutes') WHERE pincer_user_id = ?",
                 (uid,),
             )
@@ -319,7 +319,7 @@ class TestActiveChannel:
 
         async with resolver._get_db() as db:
             await db.execute(
-                "UPDATE identity_meta SET active_channel_updated_at = "
+                "UPDATE identity_profiles SET active_channel_updated_at = "
                 "datetime('now', '-1 day') WHERE pincer_user_id = ?",
                 (uid,),
             )
@@ -336,7 +336,7 @@ class TestActiveChannel:
 
         async with resolver._get_db() as db:
             await db.execute(
-                "UPDATE identity_meta SET active_channel = 'whatsapp', active_channel_updated_at = NULL "
+                "UPDATE identity_profiles SET active_channel = 'whatsapp', active_channel_updated_at = NULL "
                 "WHERE pincer_user_id = ?",
                 (uid,),
             )
@@ -373,7 +373,7 @@ class TestActiveChannel:
         await r.touch_active_channel("usr_old", ChannelType.WHATSAPP)
 
         async with r._get_db() as db:
-            cursor = await db.execute("PRAGMA table_info(identity_meta)")
+            cursor = await db.execute("PRAGMA table_info(identity_profiles)")
             col_names = {row[1] for row in await cursor.fetchall()}
         assert "active_channel" in col_names
         assert "active_channel_updated_at" in col_names
@@ -595,7 +595,7 @@ class TestNamedCanonicalId:
         # Old hash-based identity should no longer exist
         async with r_with_name._get_db() as db:
             cursor = await db.execute(
-                "SELECT pincer_user_id FROM identity_meta WHERE pincer_user_id = ?",
+                "SELECT pincer_user_id FROM identity_profiles WHERE pincer_user_id = ?",
                 (original_uid,),
             )
             assert await cursor.fetchone() is None
@@ -650,7 +650,7 @@ class TestNamedCanonicalId:
         async with aiosqlite.connect(str(db_path)) as db:
             cursor = await db.execute(
                 "SELECT display_name, preferred_channel, email, timezone "
-                "FROM identity_meta WHERE pincer_user_id = 'johndoe'",
+                "FROM identity_profiles WHERE pincer_user_id = 'johndoe'",
             )
             row = await cursor.fetchone()
         assert row == ("John Doe", "whatsapp", "johndoe@example.com", "Europe/Berlin")
@@ -670,7 +670,7 @@ class TestNamedCanonicalId:
 
         async with aiosqlite.connect(str(db_path)) as db:
             cursor = await db.execute(
-                "SELECT preferred_channel FROM identity_meta WHERE pincer_user_id = 'johndoe'",
+                "SELECT preferred_channel FROM identity_profiles WHERE pincer_user_id = 'johndoe'",
             )
             row = await cursor.fetchone()
         assert row == ("telegram",)
@@ -693,7 +693,7 @@ class TestNamedCanonicalId:
 
         async with aiosqlite.connect(str(db_path)) as db:
             cursor = await db.execute(
-                "SELECT email, timezone FROM identity_meta WHERE pincer_user_id = 'johndoe'",
+                "SELECT email, timezone FROM identity_profiles WHERE pincer_user_id = 'johndoe'",
             )
             row = await cursor.fetchone()
         assert row == ("johndoe@example.com", None)
@@ -805,7 +805,7 @@ class TestCleanup:
                 assert (await cur.fetchone())[0] == 1
 
     async def test_cleanup_removes_channelless_identity_after_purge(self, tmp_path):
-        """identity_meta rows left with no channels after cleanup are also deleted."""
+        """identity_profiles rows left with no channels after cleanup are also deleted."""
         import aiosqlite
 
         db_path = tmp_path / "channelless.db"
@@ -816,7 +816,7 @@ class TestCleanup:
         # Create an identity linked only to an unlisted channel
         async with aiosqlite.connect(str(db_path)) as db:
             await db.execute(
-                "INSERT INTO identity_meta (pincer_user_id, preferred_channel) VALUES ('ghost', 'whatsapp')"
+                "INSERT INTO identity_profiles (pincer_user_id, preferred_channel) VALUES ('ghost', 'whatsapp')"
             )
             await db.execute(
                 "INSERT INTO channel_identities (channel, channel_user_id, pincer_user_id) "
@@ -828,7 +828,7 @@ class TestCleanup:
 
         async with (
             aiosqlite.connect(str(db_path)) as db,
-            db.execute("SELECT COUNT(*) FROM identity_meta WHERE pincer_user_id = 'ghost'") as cur,
+            db.execute("SELECT COUNT(*) FROM identity_profiles WHERE pincer_user_id = 'ghost'") as cur,
         ):
             assert (await cur.fetchone())[0] == 0
 

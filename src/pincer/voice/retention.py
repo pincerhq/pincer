@@ -31,9 +31,9 @@ RETENTION_TABLES: dict[str, str] = {
     "inbound_messages": "created_at",
     # Sprint 8 (T8.3/T8.5): the abuse gate's dial log is personal data too and
     # only needs to outlive the longest limit window (a day / the cooldown).
-    # `do_not_call` is deliberately NOT here: it records an Art. 21 objection,
+    # `do_not_call_numbers` is deliberately NOT here: it records an Art. 21 objection,
     # and purging it would silently re-enable calls the callee refused.
-    "outbound_call_log": "placed_at",
+    "outbound_call_logs": "placed_at",
     # `call_analytics` is deliberately NOT here either: talk ratio, silence and
     # sentiment are derived numbers about a call, not a recording of it, so
     # they outlive the transcript like the Sprint 13 thread summaries do. Its

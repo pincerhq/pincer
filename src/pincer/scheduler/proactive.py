@@ -7,7 +7,7 @@ Generates a daily briefing with:
 3. Email (reuses tools/builtin/email_tool.py)
 4. News (NewsAPI)
 
-Users customize via briefing_config table.
+Users customize via briefing_configs table.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class ProactiveAgent:
         await self._http.aclose()
 
     async def ensure_table(self) -> None:
-        """Ensure the briefing_config table is at head (see pincer.db.migrations)."""
+        """Ensure the briefing_configs table is at head (see pincer.db.migrations)."""
         await asyncio.to_thread(ensure_schema_current, Path(self._db_path))
 
     # ── Main briefing generator ──────────────────
@@ -162,13 +162,13 @@ class ProactiveAgent:
         async with aiosqlite.connect(self._db_path) as db:
             db.row_factory = aiosqlite.Row
             rows = await db.execute_fetchall(
-                "SELECT * FROM briefing_config WHERE pincer_user_id = ?",
+                "SELECT * FROM briefing_configs WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             )
             if rows:
                 return dict(rows[0])
             await db.execute(
-                "INSERT INTO briefing_config (pincer_user_id) VALUES (?)",
+                "INSERT INTO briefing_configs (pincer_user_id) VALUES (?)",
                 (pincer_user_id,),
             )
             await db.commit()
@@ -192,7 +192,7 @@ class ProactiveAgent:
         values = list(updates.values()) + [pincer_user_id]
         async with aiosqlite.connect(self._db_path) as db:
             await db.execute(
-                f"UPDATE briefing_config SET {set_clause}, "  # noqa: S608
+                f"UPDATE briefing_configs SET {set_clause}, "  # noqa: S608
                 "updated_at = datetime('now') WHERE pincer_user_id = ?",
                 values,
             )

@@ -29,7 +29,9 @@ async def list_identities(
             db.row_factory = aiosqlite.Row
 
             # Check that the new schema exists
-            async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='identity_meta'") as cur:
+            async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='identity_profiles'"
+            ) as cur:
                 if not await cur.fetchone():
                     return {"identities": [], "total": 0}
 
@@ -39,7 +41,7 @@ async def list_identities(
                     """
                     SELECT DISTINCT m.pincer_user_id, m.preferred_channel, m.display_name, m.created_at,
                         m.active_channel, m.active_channel_updated_at, m.timezone, m.email
-                    FROM identity_meta m
+                    FROM identity_profiles m
                     LEFT JOIN channel_identities ci ON ci.pincer_user_id = m.pincer_user_id
                     WHERE m.pincer_user_id LIKE ? OR ci.channel_user_id LIKE ?
                     ORDER BY m.created_at
@@ -53,7 +55,7 @@ async def list_identities(
                     """
                     SELECT pincer_user_id, preferred_channel, display_name, created_at,
                         active_channel, active_channel_updated_at, timezone, email
-                    FROM identity_meta
+                    FROM identity_profiles
                     ORDER BY created_at
                     LIMIT ?
                     """,
@@ -118,7 +120,7 @@ async def get_identity(pincer_user_id: str) -> dict[str, Any]:
             async with db.execute(
                 "SELECT pincer_user_id, preferred_channel, display_name, created_at, "
                 "active_channel, active_channel_updated_at, timezone, email "
-                "FROM identity_meta WHERE pincer_user_id = ?",
+                "FROM identity_profiles WHERE pincer_user_id = ?",
                 (pincer_user_id,),
             ) as cur:
                 meta = await cur.fetchone()

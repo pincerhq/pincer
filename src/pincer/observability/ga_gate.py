@@ -511,8 +511,8 @@ async def compliance_incidents(settings: Settings | Any, days: int) -> Criterion
     # them, so a violation means something reached Twilio around the gate.
     violations = await _rows(
         settings,
-        "SELECT o.phone_number, o.placed_at FROM outbound_call_log o "
-        "JOIN do_not_call d ON d.phone_number = o.phone_number "
+        "SELECT o.phone_number, o.placed_at FROM outbound_call_logs o "
+        "JOIN do_not_call_numbers d ON d.phone_number = o.phone_number "
         "WHERE o.placed_at >= ? AND o.placed_at > d.added_at",
         (_cutoff(days),),
     )

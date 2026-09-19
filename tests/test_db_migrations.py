@@ -1,8 +1,14 @@
 """Tests for the Alembic-managed schema in pincer.db."""
 
+import contextlib
+import importlib.util
+import os
 import sqlite3
+import uuid
 from pathlib import Path
 
+import pytest
+import sqlalchemy as sa
 from alembic import command
 
 from pincer.db import build_config, engine, ensure_schema_current
@@ -13,15 +19,15 @@ EXPECTED_TABLES = {
     "memories_fts",
     "entities",
     "sessions",
-    "identity_meta",
+    "identity_profiles",
     "channel_identities",
-    "audit_log",
+    "audit_logs",
     "schedules",
     "event_triggers",
-    "briefing_config",
-    "cost_log",
-    "image_cost_log",
-    "skill_registry",
+    "briefing_configs",
+    "cost_logs",
+    "image_cost_logs",
+    "registry_skills",
     "expenses",
     "habits",
     "habit_checkins",
@@ -126,7 +132,7 @@ def test_legacy_identity_map_is_migrated_and_dropped(tmp_path: Path) -> None:
     con = sqlite3.connect(str(db_path))
     try:
         assert con.execute("SELECT name FROM sqlite_master WHERE name='identity_map'").fetchone() is None
-        meta = con.execute("SELECT pincer_user_id, preferred_channel, display_name FROM identity_meta").fetchall()
+        meta = con.execute("SELECT pincer_user_id, preferred_channel, display_name FROM identity_profiles").fetchall()
         assert meta == [("usr_abc", "telegram", "Alice")]
         links = {
             (channel, channel_user_id)
@@ -139,13 +145,13 @@ def test_legacy_identity_map_is_migrated_and_dropped(tmp_path: Path) -> None:
         con.close()
 
 
-def test_identity_meta_has_email_timezone_columns(tmp_path: Path) -> None:
+def test_identity_profiles_has_email_timezone_columns(tmp_path: Path) -> None:
     db_path = tmp_path / "pincer.db"
     ensure_schema_current(db_path)
 
     con = sqlite3.connect(str(db_path))
     try:
-        cols = {row[1] for row in con.execute("PRAGMA table_info(identity_meta)").fetchall()}
+        cols = {row[1] for row in con.execute("PRAGMA table_info(identity_profiles)").fetchall()}
     finally:
         con.close()
     assert {"email", "timezone"} <= cols
@@ -188,7 +194,7 @@ def test_legacy_audit_db_is_imported_into_unified_db(tmp_path: Path) -> None:
 
     con = sqlite3.connect(str(db_path))
     try:
-        rows = con.execute("SELECT user_id, action FROM audit_log").fetchall()
+        rows = con.execute("SELECT user_id, action FROM audit_logs").fetchall()
     finally:
         con.close()
     assert rows == [("usr_abc", "tool_call")]
@@ -370,8 +376,8 @@ def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> Non
 
         tables = _tables(db_path)
         assert {
-            "do_not_call",
-            "outbound_call_log",
+            "do_not_call_numbers",
+            "outbound_call_logs",
         } <= tables
     finally:
         con.close()
@@ -933,12 +939,139 @@ def test_full_pre_alembic_runtime_voice_db_upgrades_to_head(tmp_path: Path) -> N
         assert con.execute("SELECT call_sid, method FROM call_analytics").fetchall() == [("CA_runtime", "exact")]
 
         # 0001 must still have created the non-voice schema it owns.
-        assert {"memories", "identity_meta", "audit_log", "phone_contacts"} <= _tables(db_path)
+        assert {"memories", "identity_profiles", "audit_logs", "phone_contacts"} <= _tables(db_path)
 
         # 0005's own tables are additive here.
-        assert {"do_not_call", "outbound_call_log"} <= _tables(db_path)
+        assert {"do_not_call_numbers", "outbound_call_logs"} <= _tables(db_path)
 
         # The database is genuinely at head, not merely stamped.
-        assert con.execute("SELECT version_num FROM alembic_version").fetchone() == ("0010",)
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone() == ("0011",)
     finally:
         con.close()
+
+
+# ── 0011: plural table names ─────────────────────────────────────────
+
+
+def _renames() -> tuple[tuple[str, str], ...]:
+    """0011's own list, so the test cannot drift from the migration."""
+    path = Path(engine.__file__).parent / "migrations" / "versions" / "0011_plural_table_names.py"
+    spec = importlib.util.spec_from_file_location("migration_0011", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.RENAMES
+
+
+#: One row per renamed table, written at 0010 under the old name.
+_SEED_0010 = {
+    "audit_log": "INSERT INTO audit_log (timestamp, user_id, action) VALUES ('2026-01-01T00:00:00', 'usr_a', 'x')",
+    "cost_log": "INSERT INTO cost_log (timestamp, provider, model, input_tokens, output_tokens, cost_usd) "
+    "VALUES (1.0, 'anthropic', 'm', 1, 2, 0.5)",
+    "image_cost_log": "INSERT INTO image_cost_log (timestamp, provider, model, cost_usd) VALUES (1.0, 'p', 'm', 0.1)",
+    "outbound_call_log": "INSERT INTO outbound_call_log (phone_number, placed_at, local_day) "
+    "VALUES ('+4930111', '2026-01-01T00:00:00', '2026-01-01')",
+    "briefing_config": "INSERT INTO briefing_config (pincer_user_id) VALUES ('usr_a')",
+    "identity_meta": "INSERT INTO identity_meta (pincer_user_id, display_name) VALUES ('usr_a', 'Alice')",
+    "do_not_call": "INSERT INTO do_not_call (phone_number, added_at) VALUES ('+4930111', '2026-01-01T00:00:00')",
+    "skill_registry": "INSERT INTO skill_registry (skill_id, name, version, install_path) VALUES ('s', 'n', '1', '/p')",
+}
+_LINK = "INSERT INTO channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '1', 'usr_a')"
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def migration_url(request, tmp_path):
+    """A sync URL for an empty database, once per dialect. Postgres gets a
+    throwaway database (the migrations create dozens of tables in `public`) and
+    is skipped unless `PINCER_TEST_PG_URL` is set."""
+    if request.param == "sqlite":
+        yield f"sqlite:///{tmp_path / 'pincer.db'}"
+        return
+    base = os.environ.get("PINCER_TEST_PG_URL")
+    if not base:
+        pytest.skip("PINCER_TEST_PG_URL not set")
+    server = sa.engine.make_url(base).set(drivername="postgresql+psycopg")
+    name = f"pincer_mig_{uuid.uuid4().hex[:12]}"
+    admin = sa.create_engine(server, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(sa.text(f'CREATE DATABASE "{name}"'))
+    try:
+        yield server.set(database=name).render_as_string(hide_password=False)
+    finally:
+        with admin.connect() as conn:
+            conn.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+@contextlib.contextmanager
+def _connect(url: str):
+    engine = sa.create_engine(url)
+    try:
+        with engine.begin() as conn:
+            yield conn
+    finally:
+        engine.dispose()
+
+
+def _config(url: str, tmp_path: Path):
+    cfg = build_config(tmp_path / "unused.db")
+    cfg.set_main_option("sqlalchemy.url", url)
+    return cfg
+
+
+def test_0011_renames_every_singular_table_and_keeps_its_rows(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0010")
+    with _connect(migration_url) as conn:
+        for insert in _SEED_0010.values():
+            conn.execute(sa.text(insert))
+        conn.execute(sa.text(_LINK))
+
+    command.upgrade(cfg, "0011")
+
+    with _connect(migration_url) as conn:
+        inspector = sa.inspect(conn)
+        tables = set(inspector.get_table_names())
+        for old, new in _renames():
+            assert old not in tables, old
+            assert new in tables, new
+            assert conn.execute(sa.text(f"SELECT COUNT(*) FROM {new}")).scalar_one() == 1, new  # noqa: S608
+        # The foreign key followed the table instead of dangling.
+        (fk,) = inspector.get_foreign_keys("channel_identities")
+        assert fk["referred_table"] == "identity_profiles"
+        joined = conn.execute(
+            sa.text(
+                "SELECT p.display_name FROM channel_identities c "
+                "JOIN identity_profiles p ON p.pincer_user_id = c.pincer_user_id"
+            )
+        ).scalar_one()
+        assert joined == "Alice"
+
+
+def test_0011_downgrades_back_to_the_old_names(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0011")
+    command.downgrade(cfg, "0010")
+    with _connect(migration_url) as conn:
+        tables = set(sa.inspect(conn).get_table_names())
+    for old, new in _renames():
+        assert old in tables and new not in tables, (old, new)
+    command.upgrade(cfg, "0011")  # and forward again
+
+
+def test_0011_skips_tables_that_are_already_renamed(tmp_path):
+    """A database that is partway there (or never had a table) still upgrades."""
+    db_path = tmp_path / "pincer.db"
+    cfg = build_config(db_path)
+    command.upgrade(cfg, "0010")
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.execute("ALTER TABLE cost_log RENAME TO cost_logs")
+        con.execute("DROP TABLE skill_registry")
+        con.commit()
+    finally:
+        con.close()
+    command.upgrade(cfg, "0011")
+    tables = _tables(db_path)
+    assert "cost_logs" in tables and "cost_log" not in tables
+    assert "registry_skills" not in tables and "skill_registry" not in tables
+    assert "audit_logs" in tables
