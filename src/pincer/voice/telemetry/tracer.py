@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -73,6 +74,26 @@ _ALWAYS_RECORD: frozenset[str] = frozenset(
 _pending: set[asyncio.Task[Any]] = set()
 _MAX_PENDING = 512
 
+#: How many background row writes may hold a database connection at once.
+#: Each write opens its own aiosqlite connection — a new OS thread. Unbounded,
+#: a burst of finished turns (25 calls × 8 turns in the overhead test) starts
+#: hundreds of threads that fight the event loop for the GIL, and on a 2-core
+#: box the audio loop stalled for 70 ms. Queued writes wait their turn instead;
+#: they were never on the audio path, so waiting costs nothing a caller hears.
+_MAX_CONCURRENT_WRITES = 4
+
+#: One semaphore per event loop: an asyncio primitive binds to the loop that
+#: first contends on it, and tests (and `asyncio.run` callers) use many loops.
+_write_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+
+
+def _write_slot() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    slot = _write_slots.get(loop)
+    if slot is None:
+        slot = _write_slots[loop] = asyncio.Semaphore(_MAX_CONCURRENT_WRITES)
+    return slot
+
 
 def _spawn(coro: Any) -> None:
     """Run a persistence coroutine off the caller's path, or drop it."""
@@ -92,7 +113,8 @@ def _spawn(coro: Any) -> None:
 
 async def _guard(coro: Any) -> None:
     try:
-        await coro
+        async with _write_slot():
+            await coro
     except asyncio.CancelledError:
         raise
     except Exception:
