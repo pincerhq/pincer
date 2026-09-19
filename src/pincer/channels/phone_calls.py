@@ -95,6 +95,10 @@ class VoiceChannel(BaseChannel):
         # Sprint 12: inbound receptionist controller per call
         self._reception_sessions: dict[str, ReceptionSession] = {}
         self._tools: Any = None  # ToolRegistry, for the receptionist's reads/writes
+        # Telephony telemetry: the turn currently being traced per call. Kept
+        # here (not on the task) so a barge-in can close the PREVIOUS turn's
+        # trace as cancelled rather than leaving it open forever.
+        self._turn_traces: dict[str, Any] = {}
         self.metrics = VoiceMetricsRegistry()
 
     def set_stream_agent(self, agent: Any) -> None:
@@ -576,6 +580,73 @@ class VoiceChannel(BaseChannel):
 
         return build_time_context(self._settings, language, formality)
 
+    # ── turn tracing (telephony telemetry) ───────────────────
+
+    def _open_turn_trace(self, call_sid: str, state: CallState, arrival_ns: int | None) -> Any:
+        """Start the trace for this caller utterance and date its STT stages.
+
+        The response clock starts at the caller's MEASURED speech end when the
+        engine observed one (Media Streams, via Deepgram word times). On
+        ConversationRelay there is no such observation — Twilio endpoints
+        internally — so it starts when the transcript reached us, which is
+        later than reality by the endpointing wait. The difference is recorded
+        as `response_latency_source` rather than papered over.
+        """
+        from pincer.voice.telemetry import hooks as telemetry
+        from pincer.voice.telemetry.schema import EventName
+
+        speech_end_ns = state.metadata.get("speech_end_ns")
+        trace = telemetry.start_turn(call_sid, speech_end_ns=speech_end_ns)
+        if trace is None:
+            return None
+        self._turn_traces[call_sid] = trace
+        arrival = arrival_ns if arrival_ns is not None else telemetry.now_ns()
+        speech_start_ns = state.metadata.get("speech_start_ns")
+        partial_ns = state.metadata.get("first_partial_ns")
+        if speech_start_ns:
+            trace.stamp(EventName.STT_SPEECH_START, at_ns=int(speech_start_ns))
+        if partial_ns:
+            trace.stamp(EventName.STT_PARTIAL, at_ns=int(partial_ns))
+        if speech_end_ns:
+            trace.stamp(EventName.STT_SPEECH_END, at_ns=int(speech_end_ns))
+            # The transcript arriving IS the endpointing decision on this
+            # pipeline: Deepgram emits the final only once it has decided the
+            # utterance ended.
+            trace.stamp(
+                EventName.ENDPOINT_DECISION,
+                at_ns=arrival,
+                configured_endpointing_ms=state.metadata.get("stt_endpointing_ms"),
+                configured_utterance_end_ms=state.metadata.get("stt_utterance_end_ms"),
+            )
+        trace.stamp(EventName.STT_FINAL, at_ns=arrival, engine=state.engine_type)
+        return trace
+
+    def _close_turn_trace(self, call_sid: str, reason: str = "", *, own: Any = None) -> None:
+        """Finish the open trace for this call, if any. Idempotent.
+
+        `own` names the caller's own trace. Given one, the dict entry is only
+        removed when it is still that trace — the identity check the streaming
+        cleanup already makes — so a turn that has been superseded closes ITS
+        OWN trace rather than its successor's. Without it the behaviour is
+        unchanged: take whatever is open, which is what teardown wants.
+        """
+        trace = own
+        if trace is None:
+            trace = self._turn_traces.pop(call_sid, None)
+        elif self._turn_traces.get(call_sid) is trace:
+            self._turn_traces.pop(call_sid, None)
+        if trace is None:
+            return
+        from pincer.voice.telemetry.schema import EventName
+
+        with contextlib.suppress(Exception):
+            if reason:
+                # A turn the deterministic handlers answered never reaches the
+                # LLM. Marked, so a turn with no llm span reads as "handled
+                # locally" rather than as missing telemetry.
+                trace.stamp(EventName.TURN_HANDLED_LOCALLY, handler=reason)
+            trace.finish()
+
     async def _handle_speech(self, call_sid: str, text: str) -> None:
         """Called when the caller speaks (STT output or ConversationRelay text).
 
@@ -586,9 +657,17 @@ class VoiceChannel(BaseChannel):
         out of the call's cost record.
         """
         from pincer.observability.call_costs import call_context
+        from pincer.voice.telemetry import hooks as telemetry
+        from pincer.voice.telemetry import runtime as telemetry_runtime
+        from pincer.voice.telemetry.context import bind_call
 
-        with call_context(call_sid):
-            await self._handle_speech_turn(call_sid, text)
+        # Stamped before anything else runs: this is when the transcript reached
+        # us, and on ConversationRelay it is the earliest point the response
+        # clock can start from.
+        arrival_ns = telemetry.now_ns()
+        tracer = telemetry_runtime.tracer_for(call_sid)
+        with call_context(call_sid), bind_call(tracer.ctx if tracer else None):
+            await self._handle_speech_turn(call_sid, text, arrival_ns=arrival_ns)
 
     async def _cancel_prior_turn(self, call_sid: str) -> None:
         """Stop the previous turn and silence what it already queued.
@@ -602,7 +681,18 @@ class VoiceChannel(BaseChannel):
         """
         prior_turn = self._active_turns.pop(call_sid, None)
         if prior_turn is None or prior_turn.done():
+            # Nothing cancellable, so the open trace is NOT ours to take. Only
+            # the streaming path fills `_active_turns`; on the buffered path the
+            # in-flight turn closes its own trace when it finishes, and popping
+            # it here would either orphan it unpersisted or — once a later turn
+            # had replaced the entry — hand us the successor's trace to close
+            # early. Leave the dict alone and let the owner finish.
             return
+        prior_trace = self._turn_traces.pop(call_sid, None)
+        if prior_trace is not None:
+            # The interrupting utterance owns the call now; the old turn's trace
+            # is closed as cancelled so it is never counted as a slow response.
+            prior_trace.cancel("barge_in")
         prior_turn.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await prior_turn
@@ -611,7 +701,7 @@ class VoiceChannel(BaseChannel):
                 await self._engine.interrupt_speech(call_sid)
         logger.info("Streamed turn cancelled by barge-in [%s]", call_sid)
 
-    async def _handle_speech_turn(self, call_sid: str, text: str) -> None:
+    async def _handle_speech_turn(self, call_sid: str, text: str, *, arrival_ns: int | None = None) -> None:
         if not self._handler:
             return
 
@@ -644,6 +734,13 @@ class VoiceChannel(BaseChannel):
         # turn streaming underneath the new audio.
         await self._cancel_prior_turn(call_sid)
 
+        # Opened AFTER the cancellation on purpose: `_cancel_prior_turn` closes
+        # whatever trace is registered for this call, so registering the new one
+        # first made every turn cancel itself. It also means the wait for the
+        # previous turn to stop lands in this turn's `agent_queue_ms`, which is
+        # exactly what that metric is for.
+        trace = self._open_turn_trace(call_sid, state, arrival_ns)
+
         # Goodbyes (the receptionist line has its own endings). After the agent
         # already said goodbye a farewell just ends the call; said first, the
         # next turn is the agent's goodbye. Anything else cancels a pending hangup.
@@ -654,6 +751,7 @@ class VoiceChannel(BaseChannel):
                 if self._hangup_pending(call_sid) or call_end.last_agent_said_farewell(transcript, call_lang):
                     logger.info("Mutual goodbye [%s] — hanging up", call_sid)
                     self._schedule_hangup(call_sid, sm, "", "mutual_goodbye")
+                    self._close_turn_trace(call_sid, "mutual_goodbye", own=trace)
                     return
                 self._farewell_turns.add(call_sid)
             elif self._hangup_pending(call_sid):
@@ -670,6 +768,7 @@ class VoiceChannel(BaseChannel):
             gate.begin_turn()
             verdict = await gate.handle_caller_utterance(text)
             if verdict.handled:
+                self._close_turn_trace(call_sid, "approval_gate", own=trace)
                 return  # the gate re-asked; no LLM turn
             verdict_note = verdict.system_note
 
@@ -680,6 +779,7 @@ class VoiceChannel(BaseChannel):
         if session is not None:
             plan = await session.on_caller_utterance(text)
             if plan.handled:
+                self._close_turn_trace(call_sid, "receptionist", own=trace)
                 return
             if plan.system_note:
                 verdict_note = f"{verdict_note}\n\n{plan.system_note}" if verdict_note else plan.system_note
@@ -699,9 +799,14 @@ class VoiceChannel(BaseChannel):
 
         # Sprint 5 streaming path: sentence-by-sentence LLM→TTS pipeline
         if self._stream_agent is not None and self._engine is not None:
-            with bind_gate(gate):
+            from pincer.voice.telemetry.tracer import bind_turn_tracer
+
+            # The task copies the context at creation, so binding here is what
+            # carries the trace into the agent, its tool calls and TTS — none of
+            # which take a tracer parameter.
+            with bind_gate(gate), bind_turn_tracer(trace):
                 turn = asyncio.create_task(
-                    self._run_streaming_turn(call_sid, state, sm, transcript, metrics, text, extra_system),
+                    self._run_streaming_turn(call_sid, state, sm, transcript, metrics, text, extra_system, trace),
                     name=f"voice-turn-{call_sid}",
                 )
             self._active_turns[call_sid] = turn
@@ -712,6 +817,8 @@ class VoiceChannel(BaseChannel):
             finally:
                 if self._active_turns.get(call_sid) is turn:
                     self._active_turns.pop(call_sid, None)
+                if self._turn_traces.get(call_sid) is trace:
+                    self._turn_traces.pop(call_sid, None)
             return
 
         incoming = IncomingMessage(
@@ -736,8 +843,10 @@ class VoiceChannel(BaseChannel):
             )
             return await self._handler(retry)
 
+        from pincer.voice.telemetry.tracer import bind_turn_tracer
+
         try:
-            with bind_gate(gate):
+            with bind_gate(gate), bind_turn_tracer(trace):
                 response = await self._handler(incoming)
             self._error_counts.pop(call_sid, None)
             if gate is not None and gate.suppress_llm_speech:
@@ -778,8 +887,13 @@ class VoiceChannel(BaseChannel):
                     state=str(sm.phase) if delivered else "undelivered",
                 )
             self._after_agent_turn(call_sid, sm, response or "", end_requested)
+            self._close_turn_trace(call_sid, own=trace)
         except Exception:
             logger.exception("Error handling voice input for call %s", call_sid)
+            if trace is not None:
+                trace.fail("brain_error")
+            if self._turn_traces.get(call_sid) is trace:
+                self._turn_traces.pop(call_sid, None)
             await self._handle_brain_error(call_sid, sm)
 
     # ── Streaming turn (Sprint 5, T5.1/T5.2/T5.7) ─────────
@@ -793,6 +907,7 @@ class VoiceChannel(BaseChannel):
         metrics: Any,
         text: str,
         extra_system: str,
+        trace: Any = None,
     ) -> None:
         """One caller turn on the streaming pipeline: LLM tokens → sentence
         boundaries → TTS immediately, so the first sentence plays while the
@@ -969,6 +1084,8 @@ class VoiceChannel(BaseChannel):
             if open_stream:
                 with contextlib.suppress(Exception):
                     await engine.send_speech(call_sid, "", last=True)
+            if trace is not None:
+                trace.cancel("barge_in")
             raise
         except Exception:
             logger.exception("Streaming turn failed [%s]", call_sid)
@@ -976,6 +1093,8 @@ class VoiceChannel(BaseChannel):
                 with contextlib.suppress(Exception):
                     await engine.send_speech(call_sid, "", last=True)
             await self._handle_brain_error(call_sid, sm)
+            if trace is not None:
+                trace.fail("streaming_turn_failed")
             self._log_turn_latency(call_sid, state, turn_no, t0, {**agent_timings, **stamps}, streamed=True, error=True)
             return
         finally:
@@ -1002,6 +1121,8 @@ class VoiceChannel(BaseChannel):
 
         if not buffered_mode:  # the guarded block handles its own turn
             self._after_agent_turn(call_sid, sm, spoken_text, end_requested)
+        if trace is not None:
+            trace.finish()
         self._log_turn_latency(call_sid, state, turn_no, t0, {**agent_timings, **stamps}, streamed=True)
 
     async def _speak_guarded_block(
@@ -1206,6 +1327,7 @@ class VoiceChannel(BaseChannel):
         )
 
         await self._record_call_telemetry(call_sid, state, failure_code, completed, summary)
+        await self._close_call_trace(call_sid, state, sm, failure_code, completed)
 
         # Sprint 3: full post-call pipeline (report in the user's language,
         # memory notes, follow-up proposals). Runs as a background task so
@@ -1230,6 +1352,37 @@ class VoiceChannel(BaseChannel):
             outcome += " — note: the agent made a completion claim I could not verify against tool results"
         with contextlib.suppress(Exception):
             await notify_ended(call_sid, outcome)
+
+    async def _close_call_trace(
+        self,
+        call_sid: str,
+        state: CallState,
+        sm: CallStateMachine | None,
+        failure_code: Any,
+        completed: bool,
+    ) -> None:
+        """Finalise the telephony trace for a terminated call.
+
+        Runs for every call, including one that died before a single turn — a
+        failed call with partial telemetry is the case the dashboard exists for,
+        so the row is always closed with whatever is known.
+        """
+        from pincer.voice.telemetry import hooks as telemetry
+
+        self._close_turn_trace(call_sid)
+        reason = str(state.metadata.get("end_reason") or "")
+        if not reason and sm is not None and sm.state.transitions:
+            reason = str(sm.state.transitions[-1].reason or "")
+        with contextlib.suppress(Exception):
+            await telemetry.call_ended(
+                call_sid,
+                status="completed" if completed else "failed",
+                failure_code=str(failure_code),
+                termination_reason=reason,
+                duration_s=float(state.duration_seconds),
+                engine=state.engine_type,
+                language=str(state.language or ""),
+            )
 
     def _classify_call_failure(
         self,

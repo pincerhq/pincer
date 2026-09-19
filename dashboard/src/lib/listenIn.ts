@@ -95,7 +95,11 @@ export class ListenSession {
   private wasListening = false
   private timer: ReturnType<typeof setTimeout> | null = null
 
-  constructor(private readonly opts: ListenSessionOptions) {}
+  private readonly opts: ListenSessionOptions
+
+  constructor(opts: ListenSessionOptions) {
+    this.opts = opts
+  }
 
   start(): void {
     if (this.state !== "idle") return

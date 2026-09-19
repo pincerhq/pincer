@@ -5,6 +5,12 @@ export const ROUTES = {
   AUDIT: "/audit",
   SCHEDULES: "/schedules",
   VOICE_OPS: "/voice-ops",
+  TELEPHONY: "/telephony",
+  TELEPHONY_LATENCY: "/telephony/latency",
+  TELEPHONY_RELIABILITY: "/telephony/reliability",
+  TELEPHONY_ALERTS: "/telephony/alerts",
+  TELEPHONY_CALLS: "/telephony/calls",
+  TELEPHONY_CALL: "/telephony/calls/:callRef",
   SKILLS: "/skills",
   SKILL: "/skills/:name",
   INTEGRATIONS: "/integrations",
@@ -49,6 +55,8 @@ export const REFETCH_INTERVALS = {
   SCHEDULES: 15_000,
   // Voice Ops: golden signals drive an on-call decision, so they refresh fast.
   VOICE_OPS: 15_000,
+  // Telephony: a latency regression is watched live during a deploy.
+  TELEPHONY: 15_000,
 } as const
 
 export const CHANNEL_COLORS: Record<string, string> = {

@@ -177,3 +177,92 @@ class ObservabilitySettings(BaseModel):
         description="Turns the canary must complete for the run to count as healthy "
         "(0 = connecting is enough; 1+ proves STT and the LLM answered)",
     )
+
+    # ── Telephony telemetry (call/turn traces and latency metrics) ──
+    #
+    # Separate from the golden signals above on purpose: those answer "is voice
+    # healthy", these answer "why was THIS turn slow". The first is a handful of
+    # numbers per hour, the second is tens of rows per turn, so it gets its own
+    # sampling, its own retention, and its own bounded exporter.
+    telephony_telemetry_enabled: bool = Field(
+        default=True,
+        description="Record correlated call/turn telemetry (events, spans, latency metrics) to the database",
+    )
+    telephony_telemetry_sample_rate: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of calls whose turn-level detail is recorded. Head-based and per call, so a "
+        "sampled call is complete; lifecycle events are recorded for every call regardless",
+    )
+    telephony_telemetry_queue_size: int = Field(
+        default=4096,
+        ge=64,
+        description="Bounded export queue. When it is full, records are DROPPED and counted rather than "
+        "blocking the audio pipeline — the drop count is reported by /api/telephony/health",
+    )
+    telephony_telemetry_batch_size: int = Field(
+        default=256, ge=1, description="Maximum records written per export batch"
+    )
+    telephony_telemetry_flush_interval_s: float = Field(
+        default=0.5, gt=0.0, le=30.0, description="Maximum seconds a record waits in the queue before export"
+    )
+    telephony_telemetry_retention_days: int = Field(
+        default=30,
+        ge=0,
+        description="Days of telephony events/spans/turn metrics to keep (0 = keep forever). Technical "
+        "telemetry only; transcripts and recordings keep their own, stricter retention",
+    )
+    telephony_min_samples: int = Field(
+        default=20,
+        ge=1,
+        description="Percentiles computed over fewer samples than this are flagged as under-sampled in the "
+        "dashboard and cannot fire an alert",
+    )
+
+    # ── Telephony alert thresholds ────────────────────────────────
+    #
+    # Thresholds start from the SLO targets above and from the baselines
+    # measured on the pilot; `pincer telephony baseline` prints the observed
+    # percentiles these should be set from.
+    alert_response_latency_p95_ms: float = Field(
+        default=2000.0,
+        gt=0,
+        description="Fire when p95 response latency (caller speech end -> first response audio SENT) "
+        "exceeds this over its window",
+    )
+    alert_response_latency_window_min: int = Field(
+        default=30, ge=1, le=1440, description="Response-latency alert window (minutes)"
+    )
+    alert_connection_rate_min: float = Field(
+        default=0.90, ge=0.0, le=1.0, description="Fire when the connection rate falls below this"
+    )
+    alert_technical_failure_rate_max: float = Field(
+        default=0.05, ge=0.0, le=1.0, description="Fire when the technical failure rate exceeds this"
+    )
+    alert_unexpected_disconnect_rate_max: float = Field(
+        default=0.02, ge=0.0, le=1.0, description="Fire when the unexpected-disconnect rate exceeds this"
+    )
+    alert_stage_timeout_max: int = Field(
+        default=3,
+        ge=1,
+        description="Fire when STT/LLM/TTS/tool timeouts in the window exceed this count",
+    )
+    alert_audio_queue_p95_ms: float = Field(
+        default=250.0,
+        gt=0,
+        description="Fire when p95 outbound audio queue residence exceeds this — a growing queue means "
+        "we are producing audio faster than we can ship it",
+    )
+    alert_telemetry_coverage_min: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="Fire when the share of emitted telemetry records that reached storage falls below this",
+    )
+    alert_telephony_window_min: int = Field(
+        default=60, ge=1, le=1440, description="Default evaluation window for telephony rate alerts (minutes)"
+    )
+    alert_telephony_min_calls: int = Field(
+        default=10, ge=1, description="Minimum calls in the window before a telephony rate alert can fire"
+    )

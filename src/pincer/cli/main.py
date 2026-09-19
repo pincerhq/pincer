@@ -26,6 +26,7 @@ from pincer.cli import (
     schedule,
     signal,
     slack,
+    telephony,
     voice,
     whatsapp,
 )
@@ -54,4 +55,5 @@ app.add_typer(schedule.schedule_app, name="schedule")
 app.add_typer(db.db_app, name="db")
 app.add_typer(mcp.mcp_app, name="mcp")
 app.add_typer(voice.voice_app, name="voice")
+app.add_typer(telephony.telephony_app, name="telephony")
 app.add_typer(pilot.pilot_app, name="pilot")

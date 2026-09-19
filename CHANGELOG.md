@@ -9,6 +9,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Telephony telemetry and the internal Telephony dashboard
+
+Correlated events, spans and latency metrics across the whole call lifecycle,
+plus a Telephony page for overall pipeline health and per-call diagnosis.
+Analysis of the pipeline this instruments is in
+[`docs/operations/telephony-pipeline.md`](docs/operations/telephony-pipeline.md);
+the schema, metric definitions and the "how to diagnose a slow call" guide are
+in [`docs/operations/telephony-telemetry.md`](docs/operations/telephony-telemetry.md).
+
+- **New package `voice/telemetry/`** — correlation context (internal call id,
+  provider CallSid, OTel-compatible trace/span ids, turn id, conversation id,
+  tenant, direction/provider/engine/model/environment/version) propagated
+  through `contextvars`, so it survives `asyncio.create_task`, the turn task,
+  WebSockets and tool calls. Durations come only from monotonic readings taken
+  in one process; UTC timestamps order events across services; subtracting
+  unsynchronised clocks is refused by construction (`clock.cross_process_gap`).
+- **Instrumented stages** — inbound webhook, dial/accept/reject, provider status
+  callbacks, AMD, media-stream open, answer, first inbound audio, media close
+  and termination; then per turn: speech start/end, first partial, final
+  transcript, endpointing decision, agent queueing and prep, LLM request/first
+  token/done, each tool call *per attempt* (including parallel calls, timeouts,
+  deferrals and approval holds), TTS request/first audio/done, outbound audio
+  queueing and dispatch, barge-in, cancellation and buffer clear, plus errors,
+  timeouts and reconnects. Call lifecycle states are recorded separately from
+  the overlapping pipeline spans.
+- **Documented metric definitions** — every metric declares its start event, end
+  event, measurement source and limitations, served at
+  `GET /api/telephony/metrics` and rendered next to the number. Server-measured,
+  provider-reported, estimated and caller-perceived latency are kept distinct:
+  audio **sent** is never labelled as audio **played**, and caller-perceived
+  latency is reported as `Unavailable` with the reason (it needs an audio probe
+  on the PSTN leg). ConversationRelay's structural blind spots (no endpointing,
+  no STT partials, no TTS timing, no barge-in timing) are surfaced the same way
+  rather than shown as zeros.
+- **Measured critical path per turn** — the window from the caller's speech end
+  to the first response audio is *partitioned* across the stages that were
+  actually being waited on, so overlapping streaming stages are never
+  double-counted and the reported bottleneck is measured rather than suspected.
+  Post-response work is excluded from first-response latency.
+- **Storage** (Alembic `0010`): `telephony_calls`, `telephony_events`,
+  `telephony_spans`, `telephony_turns`. Provider-sourced events carry a
+  deterministic id so Twilio's callback retries collapse to one row; ordering is
+  applied at read time so late callbacks land where they belong; a failed or
+  abruptly disconnected call keeps whatever telemetry closed.
+- **Bounded, non-blocking export** — `emit` is synchronous and `put_nowait`s onto
+  a bounded queue; a full queue drops and *counts* rather than applying
+  backpressure, and export failures are surfaced at
+  `GET /api/telephony/health`. Measured overhead: ≈200 µs of CPU per
+  instrumented turn, worst audio-loop delay 6 ms at 25 concurrent calls (frame
+  budget 20 ms), and a wedged sink costs records rather than latency
+  (`tests/test_telephony_overhead.py`).
+- **APIs** under `/api/telephony/` — aggregate overview, paginated call search,
+  call metadata, events, spans, turn-level performance, slowest turns, metric
+  definitions, alert state and exporter health. Percentiles come off histograms
+  built from raw observations (percentiles are never averaged), every aggregate
+  ships its sample count and an under-sampled flag, and every rate ships its
+  numerator, denominator and the denominator's definition. Technical failures
+  are separated from busy / no-answer / policy-declined / party-ended calls.
+- **Access and privacy** — tenant scoping fails closed (an empty permission set
+  reads nothing; the `X-Pincer-Tenant` header can only narrow). Phone numbers
+  are masked at write time; raw audio, transcripts, prompts, credentials and
+  tool payloads are rejected before anything is queued; recordings and
+  transcripts stay behind their existing permissions and shorter retention.
+  High-cardinality ids stay in traces and logs, never on metric labels.
+- **Dashboard** — `Telephony` (counts, rates with denominators, per-stage
+  percentiles and distributions, latency trend, provider/model comparison,
+  reliability counters, slowest turns, coverage banner, searchable/sortable call
+  table) and a call detail page (identifiers and configuration, chronological
+  event timeline, span waterfall showing real concurrency, turn-by-turn
+  breakdown with the critical path, and explicit "not measurable here" and
+  "telemetry incomplete" panels).
+- **Configurable alerts** — response latency p95, connection rate, technical
+  failure rate, unexpected disconnects, STT/LLM/TTS/tool timeouts, media
+  connection failures, audio queue growth and telemetry coverage loss. Every
+  rule has a threshold, evaluation window and minimum sample size; a rule below
+  its minimum reports `insufficient_data` and cannot fire, and every firing
+  alert links to the filtered dashboard and the calls that caused it.
+- **`pincer telephony`** — `baseline` (observed percentiles plus the alert
+  thresholds they suggest), `call <sid>` (turn breakdown), `alerts`, `health`.
+- **Sectioned into tabs** — Telephony is five routed sections behind a horizontal
+  nav (Overview · Latency · Reliability · Alerts · Calls) instead of one long
+  scroll. Filters live in the URL, so they survive a section switch and a reload
+  and "the latency view, German outbound, last 6h" is a link that can be pasted
+  into an incident channel. Tabs carry live badges (firing alerts, call count).
+- **Interactive BI layout** — the Telephony page is drill-in blocks rather than a
+  report: KPI tiles, the outcome donut and the comparison bars are all filters,
+  applied filters appear as removable chips, percentile series toggle on the
+  latency chart, and clicking a stage drives its distribution. Every definition,
+  denominator, limitation and caveat is folded behind an "i" popover so the
+  numbers stay readable — nothing was deleted, only unstacked.
+- **Data export** — `GET /api/telephony/export` serves calls, turns or stage
+  percentiles as CSV or JSON for the *whole* current filter (not the page on
+  screen), with the row cap declared in the filename and response headers.
+  Chart series export locally; a call detail page exports its whole bundle
+  (metadata + turns + events + spans) as one JSON attachment. Export columns are
+  an explicit allowlist, which is the review point for what leaves the system.
+- **Sampling and retention** — `PINCER_TELEPHONY_TELEMETRY_SAMPLE_RATE` is
+  head-based and per call, so a sampled call is complete; lifecycle events are
+  recorded for *every* call regardless, which keeps a failed call diagnosable
+  and the call table complete. Technical telemetry has its own retention window
+  (`PINCER_TELEPHONY_TELEMETRY_RETENTION_DAYS`, default 30) because it carries
+  no transcript or audio.
+
+### Fixed
+
+- **Turn telemetry and per-call rows could be written out of order.** Background
+  call-row writes are now chained per call, so a late "answered" write can no
+  longer resurrect a stale status on a call that has already ended, and a turn's
+  row is derived when the turn closes rather than when its write runs.
+- **An unclosed `aiosqlite` connection could stop the process from exiting.**
+  Connection worker threads are marked daemon, so a leaked connection costs a
+  thread rather than a hung shutdown.
+- **The dashboard's `type-check` script checked nothing.** The root `tsconfig.json`
+  is solution-style (`files: []` plus references), so `tsc --noEmit` against it
+  type-checked zero files and CI passed vacuously. It now targets
+  `tsconfig.app.json`, and the four pre-existing TypeScript parameter properties
+  this exposed (in `lib/listenIn*`, rejected by `erasableSyntaxOnly`) are
+  rewritten as explicit fields — `pnpm build` succeeds again.
+
+### Added
+
 - **Call briefing for outbound calls** — the dashboard "Purpose" (plus optional `instructions` and `target_name`, also accepted by `POST /api/voice/calls` and the `make_phone_call` tool) now reaches the live call as a localized *CALL BRIEFING* prompt block: the agent opens by introducing itself and explaining, in its own words, why it is calling, then works towards the briefing's goal. Previously the purpose was stored but never shown to the model and `instructions` were dropped.
 - **Hanging up on goodbyes** — the model ends a finished conversation with a short farewell + `[END_CALL]`; farewells from the other party are detected per language (mutual goodbye → hang up after `PINCER_VOICE_HANGUP_GRACE_S`, default 2 s, without another LLM turn; caller-first → one-sentence goodbye then hang up). A meaningful utterance during the grace window cancels the hangup. New module `voice/call_end.py`.
 - **Local clock in the call prompt** — current local date/time + IANA zone (`TIME_CONTEXT`), so "tomorrow at 12:00" resolves in the configured timezone.

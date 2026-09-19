@@ -35,3 +35,20 @@ PYSEC-2026-3547
 # ── PyNaCl 1.5.0 → 1.6.2 (transitive via discord.py voice) ──
 # owner: @vpu — review-by 2026-09-17
 PYSEC-2026-3002
+
+# ── anyio 4.13.0 → 4.14.2 (blocked: breaks MCP stdio teardown) ──
+# owner: @vpu — review-by 2026-10-03
+# `uv lock --upgrade-package anyio` resolves 4.14.2, but 4.14 enforces that a
+# cancel scope exits in the task that entered it, and our MCP manager/client
+# tear `stdio_client` down from another task: 5 tests in
+# tests/test_mcp_manager_integration.py fail ("Attempted to exit cancel scope in
+# a different task"), and mcp 1.30 on top of it hangs. The upgrade lands with the
+# MCP lifecycle fix (enter and exit each server's stack in one owner task).
+# Exposure meanwhile:
+#  - CVE-2026-63374 (GHSA-82r6-8w77-94w6): IDNA-2003 cert confusion in
+#    connect_tcp/TLSStream. Reachable via httpx's anyio backend, but only for
+#    non-ASCII host names on an already-hijacked connection; we dial none.
+#  - CVE-2026-64847 (GHSA-5p39-cfhj-2xmp): undrained stderr in anyio's
+#    process-pool workers. We never use anyio.to_process.
+CVE-2026-63374
+CVE-2026-64847

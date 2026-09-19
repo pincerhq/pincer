@@ -29,6 +29,7 @@ from pincer.api.ops import router as ops_router
 from pincer.api.public_demo import router as public_demo_router
 from pincer.api.schedules import router as schedules_router
 from pincer.api.skills import router as skills_router
+from pincer.api.telephony import router as telephony_router
 from pincer.api.voice import router as voice_api_router
 from pincer.config import get_settings_relaxed
 
@@ -76,6 +77,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logging.getLogger(__name__).warning("Agent not built at startup: %s", e)
             app.state.agent = None
 
+    # `pincer serve` runs the API without the CLI's agent wiring, so telemetry
+    # is started here too. Idempotent: `pincer run` has usually done it already.
+    try:
+        from pincer.config import get_settings_relaxed as _settings_for_telemetry
+        from pincer.voice.telemetry import runtime as telephony_telemetry
+
+        if not telephony_telemetry.enabled():
+            await telephony_telemetry.configure(_settings_for_telemetry())
+    except Exception:
+        logging.getLogger(__name__).debug("Telephony telemetry not started", exc_info=True)
+
     teams_channel = getattr(app.state, "teams_channel", None)
     if teams_channel is not None:
         sub_app = teams_channel.get_sub_app()
@@ -84,6 +96,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logging.getLogger(__name__).info("Teams sub-app mounted at /api/apps/teams")
 
     yield
+    try:
+        from pincer.voice.telemetry import runtime as telephony_telemetry
+
+        await telephony_telemetry.shutdown()
+    except Exception:
+        logging.getLogger(__name__).debug("Telephony telemetry shutdown failed", exc_info=True)
     await audit.shutdown()
 
 
@@ -193,6 +211,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router)
     app.include_router(voice_api_router)
     app.include_router(ops_router)
+    app.include_router(telephony_router)
     # The website's demo call: unauthenticated on purpose, rate-limited hard.
     app.include_router(public_demo_router)
 

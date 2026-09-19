@@ -11,6 +11,7 @@ import logging
 import re
 from datetime import UTC, datetime
 from typing import Any
+from uuid import uuid4
 
 from pincer.voice.briefing import BriefingError, CallBriefing, log_briefing_bound
 from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, truncate
@@ -360,13 +361,34 @@ async def make_phone_call(
                 briefing, validated, language=call_language, instructions=briefing.instructions
             )
 
+        # Telephony telemetry starts BEFORE the dial: an outbound call that
+        # Twilio rejects has no CallSid, and without a pre-dial trace it would
+        # be invisible in the dashboard exactly when someone asks why the call
+        # never happened. The temporary key is re-bound to the real SID below.
+        from pincer.voice.telemetry import hooks as telemetry
+
+        # Unique per ATTEMPT, not per destination. Keyed on the number, two
+        # calls to the same callee collided: the second `start_call` found the
+        # first's still-live pending entry and returned its tracer, so the
+        # second call's pre-dial events landed on the first call's row and its
+        # own `dial_accepted` re-key then found nothing to re-key.
+        trace_key = pre_state.call_sid if pre_state is not None else f"pending-{uuid4().hex}"
+        telemetry.dial_requested(
+            trace_key,
+            to_number=validated,
+            engine=str(getattr(settings, "voice_engine", "") or ""),
+            language=call_language,
+        )
+
         try:
             call = client.calls.create(**call_kwargs)
-        except Exception:
+        except Exception as e:
+            await telemetry.dial_rejected(trace_key, error=f"{type(e).__name__}: {e}"[:160])
             if engine is not None and pre_state is not None:
                 engine.discard_pending(pre_state)
             raise
 
+        telemetry.dial_accepted(trace_key, call.sid)
         if engine is not None and pre_state is not None:
             await engine.promote_pending(pre_state, call.sid)
         log_briefing_bound(call.sid, briefing)
