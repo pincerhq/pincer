@@ -17,7 +17,7 @@ function summary(p50: number | null, p95: number | null, count = 40) {
   }
 }
 
-function renderBars(stages: Record<string, ReturnType<typeof summary>>) {
+function renderBars(stages: Record<string, ReturnType<typeof summary> & { invalid?: number }>) {
   const data = { stages, unavailable: [] }
   return render(
     <MemoryRouter>
@@ -66,5 +66,23 @@ describe("stage bars and missing measurements", () => {
     renderBars({ agent_queue_ms: summary(0, 0) })
     expect(charted().some((t) => t.includes("Agent queue"))).toBe(true)
     expect(screen.queryByText(/Not measured:/)).toBeNull()
+  })
+})
+
+describe("stage bars and refused observations", () => {
+  it("shows refused negative durations next to the percentiles they would have skewed", () => {
+    renderBars({ llm_total_ms: { ...summary(120, 400), invalid: 3 } })
+    expect(screen.getByText(/Refused as impossible/).textContent).toContain("LLM generation 3")
+  })
+
+  it("still shows them when every observation of a stage was refused", () => {
+    // Refused observations are not in `count`, so this stage is never charted.
+    renderBars({ tts_total_ms: { ...summary(null, null, 0), invalid: 5 } })
+    expect(screen.getByText(/Refused as impossible/).textContent).toContain("5")
+  })
+
+  it("says nothing when nothing was refused", () => {
+    renderBars({ llm_total_ms: { ...summary(120, 400), invalid: 0 } })
+    expect(screen.queryByText(/Refused as impossible/)).toBeNull()
   })
 })

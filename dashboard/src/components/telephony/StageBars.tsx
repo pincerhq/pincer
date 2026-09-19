@@ -65,6 +65,13 @@ export function StageBars({
     })
     .sort((a, b) => b.p95 - a.p95)
 
+  // Negative durations the aggregator refused (a clock-ordering defect). Read
+  // off every stage, not `rows`: refused observations are not in `count`, so a
+  // stage where ALL of them were refused has count 0 and is filtered out above.
+  const refused = Object.entries(data.stages)
+    .filter(([, summary]) => (summary.invalid ?? 0) > 0)
+    .map(([key, summary]) => `${METRIC_LABELS[key] ?? key} ${summary.invalid}`)
+
   const unavailable = data.unavailable.filter((metric) => metric.available_on.length > 0)
 
   return (
@@ -111,6 +118,12 @@ export function StageBars({
         </>
       }
     >
+      {refused.length > 0 && (
+        <p className="mb-2 text-[10px] text-amber-400">
+          Refused as impossible (negative duration, a clock-ordering defect): {refused.join(", ")}. These
+          are excluded from the percentiles, not counted as 0ms.
+        </p>
+      )}
       {rows.length ? (
         <>
           <ResponsiveContainer width="100%" height={Math.max(200, rows.length * 36)}>
