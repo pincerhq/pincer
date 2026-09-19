@@ -618,6 +618,7 @@ async def test_a_rejected_dial_is_terminal(telemetry):
     aggregate = await queries.overview(telemetry, queries.CallFilters.for_hours(1))
     assert aggregate.calls["active"] == 0
     assert aggregate.rates["technical_failure_rate"]["denominator"] == 2
+    assert aggregate.rates["technical_failure_rate"]["numerator"] == 2
 
 
 # ── a closed row stays closed ────────────────────────────────────────
