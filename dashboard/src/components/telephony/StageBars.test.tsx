@@ -67,6 +67,12 @@ describe("stage bars and missing measurements", () => {
     expect(charted().some((t) => t.includes("Agent queue"))).toBe(true)
     expect(screen.queryByText(/Not measured:/)).toBeNull()
   })
+
+  it("names the unmeasured stages even when none can be charted", () => {
+    // The worst case: no bars at all, so the empty state must not hide the names.
+    renderBars({ tts_total_ms: summary(null, null) })
+    expect(screen.getByText(/Not measured:/).textContent).toContain("TTS")
+  })
 })
 
 describe("stage bars and refused observations", () => {

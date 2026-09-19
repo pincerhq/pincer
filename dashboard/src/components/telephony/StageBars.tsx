@@ -195,17 +195,16 @@ export function StageBars({
               )
             })}
           </div>
-
-          {unmeasured.length > 0 && (
-            <p className="mt-1.5 text-[10px] text-[var(--color-muted)]">
-              Not measured: {unmeasured.join(", ")} — these stages ran but report no percentile, so
-              they get no bar rather than a 0ms one.
-            </p>
-          )}
         </>
       ) : (
         <p className="py-10 text-center text-xs text-[var(--color-muted)]">
           No stage measurements in this window.
+        </p>
+      )}
+      {unmeasured.length > 0 && (
+        <p className="mt-1.5 text-[10px] text-[var(--color-muted)]">
+          Not measured: {unmeasured.join(", ")} — these stages ran but report no percentile, so
+          they get no bar rather than a 0ms one.
         </p>
       )}
     </Block>
