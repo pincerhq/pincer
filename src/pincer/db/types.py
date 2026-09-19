@@ -11,7 +11,8 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Dialect, Text
+from sqlalchemy import REAL, DateTime, Dialect, Text
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 
@@ -68,3 +69,21 @@ class JSONText(TypeDecorator[Any]):
         if not value:
             return None
         return json.loads(value)
+
+
+class Real(TypeDecorator[float]):
+    """An 8-byte float: `REAL` on SQLite, `DOUBLE PRECISION` on Postgres.
+
+    Postgres' `REAL` is 4 bytes. At today's epoch (~1.7e9 s) that resolves to
+    128 seconds, which put 23:59:59 into the next day, and money loses cents
+    after about $100k. SQLite's `REAL` is already 8 bytes. Migration 0013
+    widened the Postgres columns.
+    """
+
+    impl = REAL
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Dialect) -> TypeEngine[Any]:
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(DOUBLE_PRECISION())
+        return dialect.type_descriptor(REAL())

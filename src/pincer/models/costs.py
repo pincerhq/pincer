@@ -1,7 +1,9 @@
 """LLM and image-generation spend."""
 
-from sqlalchemy import REAL, Column, Index, Integer, Text
+from sqlalchemy import Column, Index, Integer, Text
 from sqlmodel import Field, SQLModel
+
+from pincer.db.types import Real
 
 
 class CostLog(SQLModel, table=True):
@@ -12,12 +14,12 @@ class CostLog(SQLModel, table=True):
     )
 
     id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
-    timestamp: float = Field(sa_column=Column(REAL(), nullable=False))
+    timestamp: float = Field(sa_column=Column(Real(), nullable=False))
     provider: str = Field(sa_column=Column(Text(), nullable=False))
     model: str = Field(sa_column=Column(Text(), nullable=False))
     input_tokens: int = Field(sa_column=Column(Integer(), nullable=False))
     output_tokens: int = Field(sa_column=Column(Integer(), nullable=False))
-    cost_usd: float = Field(sa_column=Column(REAL(), nullable=False))
+    cost_usd: float = Field(sa_column=Column(Real(), nullable=False))
     session_id: str | None = Field(default=None, sa_column=Column(Text()))
 
 
@@ -29,7 +31,7 @@ class ImageCostLog(SQLModel, table=True):
     )
 
     id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
-    timestamp: float = Field(sa_column=Column(REAL(), nullable=False))
+    timestamp: float = Field(sa_column=Column(Real(), nullable=False))
     provider: str = Field(sa_column=Column(Text(), nullable=False))
     model: str = Field(sa_column=Column(Text(), nullable=False))
-    cost_usd: float = Field(sa_column=Column(REAL(), nullable=False))
+    cost_usd: float = Field(sa_column=Column(Real(), nullable=False))

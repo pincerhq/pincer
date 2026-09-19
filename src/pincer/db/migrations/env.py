@@ -13,7 +13,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # The SQLModel tables are the schema's source of truth: `alembic revision
-# --autogenerate` diffs them against the database. Revisions 0001-0012 predate
+# --autogenerate` diffs them against the database. Revisions 0001-0013 predate
 # the models and stay raw SQL; `tests/test_schema_drift.py` keeps the models
 # and those revisions in step.
 target_metadata = metadata

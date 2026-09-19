@@ -1,8 +1,10 @@
 """The structured audit log of every action the agent takes."""
 
 import sqlalchemy as sa
-from sqlalchemy import REAL, Column, Index, Integer, Text
+from sqlalchemy import Column, Index, Integer, Text
 from sqlmodel import Field, SQLModel
+
+from pincer.db.types import Real
 
 
 class AuditLog(SQLModel, table=True):
@@ -24,7 +26,7 @@ class AuditLog(SQLModel, table=True):
     input_summary: str | None = Field(default=None, sa_column=Column(Text()))
     output_summary: str | None = Field(default=None, sa_column=Column(Text()))
     approved: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("1")))
-    cost_usd: float | None = Field(default=None, sa_column=Column(REAL(), server_default=sa.text("0.0")))
+    cost_usd: float | None = Field(default=None, sa_column=Column(Real(), server_default=sa.text("0.0")))
     duration_ms: int | None = Field(default=None, sa_column=Column(Integer()))
     ip_address: str | None = Field(default=None, sa_column=Column(Text()))
     channel: str | None = Field(default=None, sa_column=Column(Text()))

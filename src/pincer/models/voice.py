@@ -1,10 +1,10 @@
 """Phone calls: the call log, transcripts, actions, contacts, the dialling gate, messages, threads and analytics."""
 
 import sqlalchemy as sa
-from sqlalchemy import REAL, Boolean, Column, ForeignKey, Index, Integer, Text
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, Text
 from sqlmodel import Field, SQLModel
 
-from pincer.db.types import IsoText
+from pincer.db.types import IsoText, Real
 
 
 class VoiceCall(SQLModel, table=True):
@@ -50,7 +50,7 @@ class CallTranscript(SQLModel, table=True):
     call_id: str = Field(sa_column=Column(Text(), nullable=False))
     speaker: str = Field(sa_column=Column(Text(), nullable=False))
     text: str = Field(sa_column=Column(Text(), nullable=False))
-    confidence: float | None = Field(default=None, sa_column=Column(REAL(), server_default=sa.text("1.0")))
+    confidence: float | None = Field(default=None, sa_column=Column(Real(), server_default=sa.text("1.0")))
     is_final: bool | None = Field(default=None, sa_column=Column(Boolean(), server_default=sa.text("TRUE")))
     state: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     timestamp: str = Field(sa_column=Column(IsoText(), nullable=False))
@@ -187,7 +187,7 @@ class CallAnalytics(SQLModel, table=True):
     silence_ms: int | None = Field(default=None, sa_column=Column(Integer()))
     overlap_ms: int | None = Field(default=None, sa_column=Column(Integer()))
     interruptions: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
-    talk_ratio: float | None = Field(default=None, sa_column=Column(REAL()))
+    talk_ratio: float | None = Field(default=None, sa_column=Column(Real()))
     method: str = Field(sa_column=Column(Text(), nullable=False))
     sentiment: str | None = Field(default=None, sa_column=Column(Text()))
     sentiment_trajectory: str | None = Field(default=None, sa_column=Column(Text()))

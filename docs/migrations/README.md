@@ -30,17 +30,18 @@ newer one.
 
 The SQLModel tables in [`src/pincer/models/`](../../src/pincer/models/) are
 the source of truth for the schema, and Alembic's `target_metadata` points at
-them. `0001`–`0012` predate the models and stay hand-written SQL.
+them. `0001`–`0013` predate the models and stay hand-written SQL.
 `tests/test_schema_drift.py` checks that the models and those revisions
 describe the same schema, on SQLite and (in CI) on Postgres.
 
 To change the schema:
 
 1. Change the model. Keep storage types as they are (`IsoText` for timestamps,
-   which is `TEXT` on SQLite and `TIMESTAMP` on Postgres; `REAL` for floats;
+   which is `TEXT` on SQLite and `TIMESTAMP` on Postgres; `Real` for floats,
+   which is 8 bytes on both — never plain `REAL`, which is 4 bytes on Postgres;
    JSON stays in `TEXT`).
 2. Autogenerate the revision against a database at head:
-   `uv run alembic -c src/pincer/db/alembic.ini revision --autogenerate --rev-id 0013 -m "..."`
+   `uv run alembic -c src/pincer/db/alembic.ini revision --autogenerate --rev-id 0014 -m "..."`
    (revisions are numbered, not hashed; `PINCER_DATABASE_URL` picks the database).
 3. Review it. SQLite runs in batch mode (the table is rebuilt), and Alembic
    cannot see everything: data moves, renames (which it writes as a drop plus

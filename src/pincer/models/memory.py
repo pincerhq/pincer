@@ -1,8 +1,10 @@
 """Long-term memory: conversations, memories (plus the hand-written FTS5 index) and entities."""
 
 import sqlalchemy as sa
-from sqlalchemy import REAL, Column, Index, LargeBinary, Text
+from sqlalchemy import Column, Index, LargeBinary, Text
 from sqlmodel import Field, SQLModel
+
+from pincer.db.types import Real
 
 
 class Conversation(SQLModel, table=True):
@@ -15,8 +17,8 @@ class Conversation(SQLModel, table=True):
     messages_json: str | None = Field(
         default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("'[]'"))
     )
-    created_at: float = Field(sa_column=Column(REAL(), nullable=False))
-    updated_at: float = Field(sa_column=Column(REAL(), nullable=False))
+    created_at: float = Field(sa_column=Column(Real(), nullable=False))
+    updated_at: float = Field(sa_column=Column(Real(), nullable=False))
 
 
 class Memory(SQLModel, table=True):
@@ -31,7 +33,7 @@ class Memory(SQLModel, table=True):
     )
     tags: str | None = Field(default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("'[]'")))
     embedding_blob: bytes | None = Field(default=None, sa_column=Column(LargeBinary()))
-    created_at: float = Field(sa_column=Column(REAL(), nullable=False))
+    created_at: float = Field(sa_column=Column(Real(), nullable=False))
 
 
 class Entity(SQLModel, table=True):
@@ -45,4 +47,4 @@ class Entity(SQLModel, table=True):
     attributes_json: str | None = Field(
         default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("'{}'"))
     )
-    last_seen: float = Field(sa_column=Column(REAL(), nullable=False))
+    last_seen: float = Field(sa_column=Column(Real(), nullable=False))

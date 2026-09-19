@@ -1,8 +1,10 @@
 """Agent conversation sessions, one row per user and channel."""
 
 import sqlalchemy as sa
-from sqlalchemy import REAL, Column, Index, Text
+from sqlalchemy import Column, Index, Text
 from sqlmodel import Field, SQLModel
+
+from pincer.db.types import Real
 
 
 class ChatSession(SQLModel, table=True):
@@ -16,5 +18,5 @@ class ChatSession(SQLModel, table=True):
     session_metadata: str | None = Field(
         default=None, sa_column=Column("metadata", Text(), nullable=False, server_default=sa.text("'{}'"))
     )
-    created_at: float = Field(sa_column=Column(REAL(), nullable=False))
-    updated_at: float = Field(sa_column=Column(REAL(), nullable=False))
+    created_at: float = Field(sa_column=Column(Real(), nullable=False))
+    updated_at: float = Field(sa_column=Column(Real(), nullable=False))

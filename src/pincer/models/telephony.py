@@ -1,10 +1,10 @@
 """Telephony telemetry: per-call rows, the event timeline, spans and per-turn latencies."""
 
 import sqlalchemy as sa
-from sqlalchemy import REAL, Column, Index, Integer, Text
+from sqlalchemy import Column, Index, Integer, Text
 from sqlmodel import Field, SQLModel
 
-from pincer.db.types import IsoText
+from pincer.db.types import IsoText, Real
 
 
 class TelephonyCall(SQLModel, table=True):
@@ -42,9 +42,9 @@ class TelephonyCall(SQLModel, table=True):
     failure_category: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     termination_reason: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     failure_code: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
-    duration_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    setup_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    media_establish_ms: float | None = Field(default=None, sa_column=Column(REAL()))
+    duration_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    setup_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    media_establish_ms: float | None = Field(default=None, sa_column=Column(Real()))
     turn_count: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
     tool_count: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
     error_count: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
@@ -53,7 +53,7 @@ class TelephonyCall(SQLModel, table=True):
     interruption_count: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
     reconnect_count: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
     sampled: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("1")))
-    sample_rate_used: float | None = Field(default=None, sa_column=Column(REAL(), server_default=sa.text("1.0")))
+    sample_rate_used: float | None = Field(default=None, sa_column=Column(Real(), server_default=sa.text("1.0")))
     coverage: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("'full'")))
     config_json: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("'{}'")))
     updated_at: str | None = Field(default=None, sa_column=Column(IsoText()))
@@ -97,7 +97,7 @@ class TelephonySpan(SQLModel, table=True):
     end_utc: str | None = Field(default=None, sa_column=Column(IsoText()))
     start_mono_ns: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
     end_mono_ns: int | None = Field(default=None, sa_column=Column(Integer()))
-    duration_ms: float | None = Field(default=None, sa_column=Column(REAL()))
+    duration_ms: float | None = Field(default=None, sa_column=Column(Real()))
     status: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("'ok'")))
     attempt: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("1")))
     attributes: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("'{}'")))
@@ -121,20 +121,20 @@ class TelephonyTurn(SQLModel, table=True):
     model: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     language: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     streamed: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("1")))
-    response_latency_ms: float | None = Field(default=None, sa_column=Column(REAL()))
+    response_latency_ms: float | None = Field(default=None, sa_column=Column(Real()))
     response_latency_source: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
-    endpointing_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    stt_first_partial_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    stt_final_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    agent_queue_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    agent_prep_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    llm_ttft_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    llm_total_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    tool_total_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    tts_first_audio_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    tts_total_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    audio_queue_ms: float | None = Field(default=None, sa_column=Column(REAL()))
-    total_ms: float | None = Field(default=None, sa_column=Column(REAL()))
+    endpointing_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    stt_first_partial_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    stt_final_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    agent_queue_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    agent_prep_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    llm_ttft_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    llm_total_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    tool_total_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    tts_first_audio_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    tts_total_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    audio_queue_ms: float | None = Field(default=None, sa_column=Column(Real()))
+    total_ms: float | None = Field(default=None, sa_column=Column(Real()))
     tool_calls: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
     tool_retries: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
     tool_timeouts: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
@@ -142,7 +142,7 @@ class TelephonyTurn(SQLModel, table=True):
     cancelled: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
     error: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     bottleneck_stage: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
-    bottleneck_ms: float | None = Field(default=None, sa_column=Column(REAL()))
+    bottleneck_ms: float | None = Field(default=None, sa_column=Column(Real()))
     critical_path: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("'[]'")))
     complete: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("1")))
     created_at: str = Field(sa_column=Column(IsoText(), nullable=False))
