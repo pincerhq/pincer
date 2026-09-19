@@ -44,7 +44,15 @@ Dashboard (React + Vite + TS in `dashboard/`, pnpm 10+): `cd dashboard && pnpm i
 
 **Config** (`src/pincer/config/`) — `Settings` in `config/main.py` composes mixin classes (`LLMSettings`, `ChannelSettings`, `ToolSettings`, `APISettings`, `CoreSettings`, `MCPSettings`) via pydantic-settings. **Env prefix is `PINCER_`**; all fields use `Field(default=...)`. `pincer.toml` provides `[[mcp.servers]]` and integration config.
 
-**Memory** (`src/pincer/memory/`) — cross-channel SQLite store with FTS5 full-text + optional vector embeddings + auto-summarization. **Identity** (`src/pincer/core/identity.py`) maps users across channels; migrations add columns via the try/except "duplicate column" pattern.
+**Memory** (`src/pincer/memory/`) — cross-channel SQLite store with FTS5 full-text + optional vector embeddings + auto-summarization. **Identity** (`src/pincer/core/identity.py`) maps users across channels.
+
+**Data layer** (`src/pincer/db/`, `models/`, `repositories/`, `services/`) — moving from raw `aiosqlite` onto SQLModel, domain by domain (issue #212). Alembic migrations in `db/migrations/versions/` own the schema. Imports flow one way: `api/cli/voice/scheduler → services → repositories → models → db`.
+- `db/engine.py` `get_engine()` gives one async engine per event loop and URL.
+- `db/session.py` `session_scope()` is the unit of work; `DbSession` is the FastAPI dependency.
+- `db/dialect.py` covers the SQL that differs between SQLite and Postgres (`upsert`, `json_contains`, `day_bucket`).
+- `db/types.py` holds the column types that keep today's storage formats.
+- Repositories never commit; services own the transaction.
+- Test tables go on a private `registry()` so they stay out of Alembic's metadata. The `db_url` fixture runs a test on both dialects (Postgres needs `PINCER_TEST_PG_URL`).
 
 **Integrations** (`src/pincer/integrations/`) — `google/`, `ms365/`, `slack/` provide large REST-backed tool sets registered in `_run_agent()` when configured/authenticated.
 

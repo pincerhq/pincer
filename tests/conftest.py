@@ -250,3 +250,46 @@ def mock_agent():
     agent._costs = AsyncMock()
     agent._costs.get_today_spend.return_value = 0.42
     return agent
+
+
+# ── SQLModel layer ───────────────────────────────────────────────────
+
+
+def _postgres_test_url() -> str | None:
+    """A Postgres to run dialect-parametrised tests against, if one is configured.
+
+    CI's `postgres` job sets `PINCER_TEST_PG_URL`; locally, e.g.
+    `docker run -e POSTGRES_PASSWORD=pincer -p 5432:5432 postgres:16` and
+    `PINCER_TEST_PG_URL=postgresql://postgres:pincer@localhost:5432/postgres`.
+    """
+    return os.environ.get("PINCER_TEST_PG_URL") or None
+
+
+@pytest_asyncio.fixture(params=["sqlite", "postgres"])
+async def db_url(request: pytest.FixtureRequest, tmp_path: Path):
+    """An async database URL, once per dialect. Postgres is skipped unless
+    `PINCER_TEST_PG_URL` is set. The database is empty: tests create (and on
+    Postgres, drop) whatever tables they use."""
+    from pincer.db.engine import dispose_engines, to_async_url
+
+    if request.param == "sqlite":
+        yield to_async_url(f"sqlite:///{tmp_path / 'pincer.db'}")
+    else:
+        pg = _postgres_test_url()
+        if pg is None:
+            pytest.skip("PINCER_TEST_PG_URL not set")
+        yield to_async_url(pg)
+    await dispose_engines()
+
+
+@pytest_asyncio.fixture
+async def migrated_db(tmp_path: Path):
+    """A SQLite database at the latest Alembic revision, as an async URL."""
+    import asyncio
+
+    from pincer.db.engine import dispose_engines, ensure_schema_current, to_async_url
+
+    path = tmp_path / "pincer.db"
+    await asyncio.to_thread(ensure_schema_current, path)
+    yield to_async_url(f"sqlite:///{path}")
+    await dispose_engines()

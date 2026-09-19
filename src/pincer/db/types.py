@@ -1,0 +1,70 @@
+"""Column types that keep today's storage formats on both dialects.
+
+The migrations predate the models, so these types adapt to the DDL rather than
+the other way round: a model column must produce exactly the column type the
+migration created, on SQLite and on Postgres.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import DateTime, Dialect, Text
+from sqlalchemy.types import TypeDecorator, TypeEngine
+
+
+class IsoText(TypeDecorator[str]):
+    """An ISO-8601 timestamp that is a `str` in Python on every dialect.
+
+    Mirrors the migrations' `{NOW_COL}` token: `TEXT` on SQLite, `TIMESTAMP` on
+    Postgres. Callers keep passing and reading ISO strings. On SQLite the text
+    is stored verbatim. Postgres' `TIMESTAMP` has no zone, so the value is
+    stored as UTC and read back with `+00:00`, which is the form the app writes
+    (`datetime.now(UTC).isoformat()`). A string without an offset is taken to
+    already be UTC, as SQLite's `CURRENT_TIMESTAMP` is.
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Dialect) -> TypeEngine[Any]:
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(DateTime())
+        return dialect.type_descriptor(Text())
+
+    def process_bind_param(self, value: str | None, dialect: Dialect) -> Any:
+        if value is None or dialect.name != "postgresql":
+            return value
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+        return parsed
+
+    def process_result_value(self, value: Any, dialect: Dialect) -> str | None:
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=UTC).isoformat()
+        return value  # type: ignore[no-any-return]
+
+
+class JSONText(TypeDecorator[Any]):
+    """A JSON document stored as `TEXT`, as the migrations declare it.
+
+    Not SQLAlchemy's `JSON`: on Postgres that would expect a `json` column, and
+    these columns are `TEXT` there too. An empty string, which some columns
+    default to, reads back as `None`.
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: Dialect) -> str | None:
+        if value is None:
+            return None
+        return json.dumps(value)
+
+    def process_result_value(self, value: str | None, dialect: Dialect) -> Any:
+        if not value:
+            return None
+        return json.loads(value)
