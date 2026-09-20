@@ -197,7 +197,6 @@ module = [
     "pincer.tools.builtin.image_gen",
     "pincer.core.agent",
     "pincer.costs.budget",
-    "pincer.memory.store",
     "pincer.api.skills",
     "pincer.cli",
     "pincer.cli.*",

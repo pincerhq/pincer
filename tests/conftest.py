@@ -321,3 +321,24 @@ def migration_url(request: pytest.FixtureRequest, tmp_path: Path):
         with admin.connect() as conn:
             conn.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+
+@pytest_asyncio.fixture
+async def migrated_url(migration_url: str, tmp_path: Path):
+    """A database at head, once per dialect, as an async URL.
+
+    `migrated_db` is SQLite only; this one also covers Postgres, which is what
+    the dialect-specific schema (the FTS5 table vs. the tsvector column) needs.
+    """
+    import asyncio
+
+    from alembic import command
+
+    from pincer.db import build_config
+    from pincer.db.engine import dispose_engines, to_async_url
+
+    config = build_config(tmp_path / "unused.db")
+    config.set_main_option("sqlalchemy.url", migration_url)
+    await asyncio.to_thread(command.upgrade, config, "head")
+    yield to_async_url(migration_url)
+    await dispose_engines()

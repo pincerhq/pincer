@@ -49,12 +49,7 @@ async def _memory_stats() -> None:
     await store.initialize()
 
     total = await store.count()
-    assert store._db is not None
-    async with store._db.execute("SELECT COUNT(DISTINCT user_id) FROM memories") as cur:
-        row = await cur.fetchone()
-        users = row[0] if row else 0
-    async with store._db.execute("SELECT category, COUNT(*) FROM memories GROUP BY category") as cur:
-        categories = {r[0]: r[1] async for r in cur}
+    users, categories = await store.stats()
 
     console.print("[bold]Memory Stats[/bold]")
     console.print(f"  Total memories: {total}")

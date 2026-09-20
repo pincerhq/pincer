@@ -32,8 +32,12 @@ HAND_WRITTEN_TABLES = frozenset(
 )
 
 #: Indexes whose definition differs per dialect and so cannot be one model
-#: `Index`: `name COLLATE NOCASE` on SQLite, `lower(name)` on Postgres.
-HAND_WRITTEN_INDEXES = frozenset({"idx_phone_contacts_name"})
+#: `Index`: `name COLLATE NOCASE` on SQLite, `lower(name)` on Postgres, and
+#: the Postgres-only full-text index over memories (migration 0015).
+HAND_WRITTEN_INDEXES = frozenset({"idx_phone_contacts_name", "idx_memories_search"})
+
+#: Columns that exist on one dialect only, with no model behind them.
+HAND_WRITTEN_COLUMNS = frozenset({("memories", "search_vector")})
 
 
 def include_object(obj: Any, name: str | None, type_: str, reflected: bool, compare_to: Any) -> bool:
@@ -42,6 +46,9 @@ def include_object(obj: Any, name: str | None, type_: str, reflected: bool, comp
         return name not in HAND_WRITTEN_TABLES and not (name or "").startswith("sqlite_")
     if type_ == "index":
         return name not in HAND_WRITTEN_INDEXES
+    if type_ == "column":
+        table = getattr(getattr(obj, "table", None), "name", "")
+        return (table, name) not in HAND_WRITTEN_COLUMNS
     return True
 
 

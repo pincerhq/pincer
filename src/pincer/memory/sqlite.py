@@ -9,7 +9,6 @@ Tables:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import math
@@ -17,17 +16,16 @@ import struct
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-import aiosqlite
-
-from pincer.db import ensure_schema_current
+from pincer.db.engine import get_database_url, get_engine
 from pincer.memory.base import (
     PINCER_MEMORY_CATEGORY_TAG_PREFIX,
     PINCER_MEMORY_USER_TAG_PREFIX,
     BaseMemoryBackend,
     Memory,
 )
+from pincer.services.memory import MemoryService
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -66,43 +64,50 @@ def _unpack_embedding(blob: bytes) -> list[float]:
     return list(struct.unpack(f"{count}f", blob))
 
 
+#: How many of a user's entities one read returns. Entities are a handful per
+#: user; this is a guard against an unbounded read, not a paging feature.
+_ENTITY_PAGE = 1000
+
+
+def _memory_from_row(row: dict[str, Any], *, score: float = 0.0, tags: list[str] | None = None) -> Memory:
+    return Memory(
+        id=str(row["id"]),
+        user_id=str(row["user_id"]),
+        content=str(row["content"]),
+        category=str(row["category"]),
+        created_at=float(row["created_at"] or 0.0),
+        tags=tags if tags is not None else (json.loads(row["tags"]) if row["tags"] else []),
+        score=score,
+    )
+
+
 class SQLiteMemoryBackend(BaseMemoryBackend):
     """Async SQLite-backed memory store with full-text and vector search."""
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
-        self._db: aiosqlite.Connection | None = None
+        self._service: MemoryService | None = None
 
     async def initialize(self) -> None:
-        await asyncio.to_thread(ensure_schema_current, self._db_path)
-        self._db = await aiosqlite.connect(str(self._db_path))
-        await self._db.execute("PRAGMA journal_mode=WAL")
+        self._service = await MemoryService.for_path(self._db_path)
         logger.info("MemoryStore initialized at %s", self._db_path)
 
     async def close(self) -> None:
-        if self._db:
-            await self._db.close()
-            self._db = None
+        if self._service is not None:
+            self._service = None
+            await get_engine(get_database_url(self._db_path)).dispose()
+
+    @property
+    def _store(self) -> MemoryService:
+        if self._service is None:
+            raise RuntimeError("MemoryStore not initialized")
+        return self._service
 
     # ── Memories ──────────────────────────────────────────
 
     async def get_memory(self, memory_id: str) -> Memory | None:
-        assert self._db is not None
-        async with self._db.execute(
-            "SELECT id, user_id, content, category, created_at, tags FROM memories WHERE id = ?",
-            (memory_id,),
-        ) as cur:
-            row = await cur.fetchone()
-        if not row:
-            return None
-        return Memory(
-            id=row[0],
-            user_id=row[1],
-            content=row[2],
-            category=row[3],
-            created_at=row[4],
-            tags=json.loads(row[5]) if row[5] else [],
-        )
+        row = await self._store.get(memory_id)
+        return _memory_from_row(row) if row else None
 
     async def store_memory(
         self,
@@ -113,19 +118,23 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         extra_tags: list[str] | None = None,
     ) -> str:
         """Store a memory entry. Returns the new memory ID."""
-        assert self._db is not None
         mem_id = str(uuid.uuid4())
         blob = _pack_embedding(embedding) if embedding else None
 
         tags = [f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}", f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:{category}"]
         if extra_tags and isinstance(extra_tags, list):
             tags += extra_tags
-        await self._db.execute(
-            "INSERT INTO memories (id, user_id, content, category, tags, embedding_blob, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (mem_id, user_id, content, category, json.dumps(tags), blob, time.time()),
+        await self._store.add(
+            {
+                "id": mem_id,
+                "user_id": user_id,
+                "content": content,
+                "category": category,
+                "tags": json.dumps(tags),
+                "embedding_blob": blob,
+                "created_at": time.time(),
+            }
         )
-        await self._db.commit()
         logger.debug("Stored memory %s for user %s [%s]", mem_id[:8], user_id, category)
         return mem_id
 
@@ -142,7 +151,6 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         Replaces any prior profile entry so the latest information wins.
         Returns the new memory id, or None if no fields were provided.
         """
-        assert self._db is not None
         parts: list[str] = []
         if name:
             parts.append(f"The user's name is {name}.")
@@ -153,11 +161,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         if not parts:
             return None
 
-        await self._db.execute(
-            "DELETE FROM memories WHERE user_id = ? AND category = 'profile'",
-            (user_id,),
-        )
-        await self._db.commit()
+        await self._store.delete_for_user(user_id, category="profile")
 
         return await self.store_memory(
             user_id=user_id,
@@ -172,54 +176,13 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         limit: int = 20,
         tags: list[str] | None = None,
     ) -> list[Memory]:
-        """Full-text search over memories using FTS5, with optional tag filtering (OR logic)."""
-        assert self._db is not None
-        words = [w.strip() for w in query.split() if w.strip()]
-        if not words:
-            return []
-        fts_terms = " OR ".join(f'"{w}"' for w in words)
+        """Full-text search over memories, with optional tag filtering (OR logic).
 
-        conditions = ["memories_fts MATCH ?"]
-        params: list[object] = [fts_terms]
-
-        if user_id:
-            conditions.append("m.user_id = ?")
-            params.append(user_id)
-
-        tag_join = ""
-        if tags:
-            tag_join = ", json_each(m.tags) t"
-            conditions.append(f"t.value IN ({','.join('?' * len(tags))})")
-            params.extend(tags)
-
-        where = " AND ".join(conditions)
-        params.append(limit)
-
-        sql = f"""
-            SELECT DISTINCT m.id, m.user_id, m.content, m.category, m.created_at,
-                   m.tags, rank
-            FROM memories_fts f
-            JOIN memories m ON m.rowid = f.rowid{tag_join}
-            WHERE {where}
-            ORDER BY rank
-            LIMIT ?
+        The engine is whatever the database has: FTS5 on SQLite, a stored
+        tsvector on Postgres (see `pincer.repositories.memory_search`).
         """
-
-        results: list[Memory] = []
-        async with self._db.execute(sql, params) as cursor:
-            async for row in cursor:
-                results.append(
-                    Memory(
-                        id=row[0],
-                        user_id=row[1],
-                        content=row[2],
-                        category=row[3],
-                        created_at=row[4],
-                        tags=json.loads(row[5]) if row[5] else [],
-                        score=abs(float(row[6])) if row[6] else 0.0,
-                    )
-                )
-        return results
+        rows = await self._store.full_text(query, user_id=user_id, limit=limit, tags=tags)
+        return [_memory_from_row(row, score=float(row.get("score") or 0.0)) for row in rows]
 
     async def search_similar(
         self,
@@ -229,48 +192,20 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         tags: list[str] | None = None,
     ) -> list[Memory]:
         """Vector similarity search using cosine similarity on embeddings, with optional tag filtering (OR logic)."""
-        assert self._db is not None
-
-        if user_id:
-            sql = (
-                "SELECT id, user_id, content, category, embedding_blob, created_at, tags "
-                "FROM memories WHERE user_id = ? AND embedding_blob IS NOT NULL"
-            )
-            sql_params: tuple[object, ...] = (user_id,)
-        else:
-            sql = (
-                "SELECT id, user_id, content, category, embedding_blob, created_at, tags "
-                "FROM memories WHERE embedding_blob IS NOT NULL"
-            )
-            sql_params = ()
+        rows = await self._store.search(user_id=user_id, with_embedding=True, limit=None)
 
         tag_set = set(tags) if tags else None
-
         scored: list[tuple[float, Memory]] = []
-        async with self._db.execute(sql, sql_params) as cursor:
-            async for row in cursor:
-                record_tags: list[str] = json.loads(row[6]) if row[6] else []
-                if tag_set and not tag_set.intersection(record_tags):
-                    continue
-                stored_emb = _unpack_embedding(row[4])
-                score = _cosine_similarity(embedding, stored_emb)
-                scored.append(
-                    (
-                        score,
-                        Memory(
-                            id=row[0],
-                            user_id=row[1],
-                            content=row[2],
-                            category=row[3],
-                            created_at=row[5],
-                            score=score,
-                            tags=record_tags,
-                        ),
-                    )
-                )
+        for row in rows:
+            record_tags: list[str] = json.loads(row["tags"]) if row["tags"] else []
+            if tag_set and not tag_set.intersection(record_tags):
+                continue
+            stored_emb = _unpack_embedding(row["embedding_blob"])
+            score = _cosine_similarity(embedding, stored_emb)
+            scored.append((score, _memory_from_row(row, score=score, tags=record_tags)))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [m for _, m in scored[:limit]]
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [memory for _score, memory in scored[:limit]]
 
     async def update_memory(
         self,
@@ -280,32 +215,18 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         tags: list[str] | None = None,
     ) -> None:
         """Update an existing memory in place. Only non-None fields are changed."""
-        assert self._db is not None
-        updates: list[str] = []
-        params: list[object] = []
+        values: dict[str, Any] = {}
         if content is not None:
-            updates.append("content = ?")
-            params.append(content)
+            values["content"] = content
         if category is not None:
-            updates.append("category = ?")
-            params.append(category)
+            values["category"] = category
         if tags is not None:
-            updates.append("tags = ?")
-            params.append(json.dumps(tags))
-        if not updates:
-            return
-        params.append(memory_id)
-        await self._db.execute(
-            f"UPDATE memories SET {', '.join(updates)} WHERE id = ?",
-            params,
-        )
-        await self._db.commit()
+            values["tags"] = json.dumps(tags)
+        await self._store.set_fields(memory_id, values)
 
     async def delete_memory(self, memory_id: str) -> None:
         """Delete a single memory by ID."""
-        assert self._db is not None
-        await self._db.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
-        await self._db.commit()
+        await self._store.delete(memory_id)
 
     async def count(
         self,
@@ -315,54 +236,11 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         match_all_tags: bool = False,
     ) -> int:
         """Return total number of memory records matching the given filters."""
-        assert self._db is not None
-
-        conditions: list[str] = []
-        sql_params: list[object] = []
-
-        if user_id is not None:
-            conditions.append("m.user_id = ?")
-            sql_params.append(user_id)
-        if category:
-            conditions.append("m.category = ?")
-            sql_params.append(category)
-
-        if tags and match_all_tags:
-            placeholders = ",".join("?" * len(tags))
-            tag_join = ", json_each(m.tags) t"
-            conditions.append(f"t.value IN ({placeholders})")
-            sql_params.extend(tags)
-            where = f"WHERE {' AND '.join(conditions)} " if conditions else ""
-            sql_params.append(len(tags))
-            sql = (
-                f"SELECT COUNT(*) FROM ("
-                f"SELECT m.id FROM memories m{tag_join} {where}"
-                f"GROUP BY m.id HAVING COUNT(DISTINCT t.value) = ?"
-                f")"
-            )
-        elif tags:
-            placeholders = ",".join("?" * len(tags))
-            tag_join = ", json_each(m.tags) t"
-            conditions.append(f"t.value IN ({placeholders})")
-            sql_params.extend(tags)
-            where = f"WHERE {' AND '.join(conditions)} " if conditions else ""
-            sql = f"SELECT COUNT(DISTINCT m.id) FROM memories m{tag_join} {where}"
-        else:
-            where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-            sql = f"SELECT COUNT(*) FROM memories m {where}"
-
-        async with self._db.execute(sql, sql_params) as cur:
-            row = await cur.fetchone()
-        return int(row[0]) if row else 0
+        return await self._store.count(user_id=user_id, category=category, tags=tags, match_all_tags=match_all_tags)
 
     async def delete_user_memories(self, user_id: str) -> int:
         """Delete all memory records for a user. Returns the number of deleted rows."""
-        assert self._db is not None
-        async with self._db.execute("SELECT COUNT(*) FROM memories WHERE user_id = ?", (user_id,)) as cur:
-            row = await cur.fetchone()
-        deleted = int(row[0]) if row else 0
-        await self._db.execute("DELETE FROM memories WHERE user_id = ?", (user_id,))
-        await self._db.commit()
+        deleted = await self._store.delete_for_user(user_id)
         logger.info("Deleted %d memories for user %s", deleted, user_id)
         return deleted
 
@@ -376,73 +254,19 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         match_all_tags: bool = False,
     ) -> list[Memory]:
         """List memories, newest first, with optional filtering and pagination."""
-        assert self._db is not None
+        rows = await self._store.search(
+            user_id=user_id,
+            category=category,
+            tags=tags,
+            match_all_tags=match_all_tags,
+            limit=limit,
+            offset=offset,
+        )
+        return [_memory_from_row(row) for row in rows]
 
-        conditions: list[str] = []
-        sql_params: list[object] = []
-
-        if user_id is not None:
-            conditions.append("m.user_id = ?")
-            sql_params.append(user_id)
-
-        if category:
-            conditions.append("m.category = ?")
-            sql_params.append(category)
-
-        if tags and match_all_tags:
-            # AND logic: every tag must appear — use GROUP BY + HAVING COUNT
-            placeholders = ",".join("?" * len(tags))
-            tag_join = ", json_each(m.tags) t"
-            conditions.append(f"t.value IN ({placeholders})")
-            sql_params.extend(tags)
-            where_clause = f"WHERE {' AND '.join(conditions)} " if conditions else ""
-            sql_params.extend([len(tags), limit, offset])
-            sql = (
-                f"SELECT m.id, m.user_id, m.content, m.category, m.created_at, m.tags "
-                f"FROM memories m{tag_join} "
-                f"{where_clause}"
-                f"GROUP BY m.id "
-                f"HAVING COUNT(DISTINCT t.value) = ? "
-                f"ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
-            )
-        elif tags:
-            # OR logic (default): any matching tag is sufficient
-            placeholders = ",".join("?" * len(tags))
-            tag_join = ", json_each(m.tags) t"
-            conditions.append(f"t.value IN ({placeholders})")
-            sql_params.extend(tags)
-            where_clause = f"WHERE {' AND '.join(conditions)} " if conditions else ""
-            sql_params.extend([limit, offset])
-            sql = (
-                f"SELECT DISTINCT m.id, m.user_id, m.content, m.category, m.created_at, m.tags "
-                f"FROM memories m{tag_join} "
-                f"{where_clause}"
-                f"ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
-            )
-        else:
-            where_clause = f"WHERE {' AND '.join(conditions)} " if conditions else ""
-            sql_params.extend([limit, offset])
-            sql = (
-                f"SELECT m.id, m.user_id, m.content, m.category, m.created_at, m.tags "
-                f"FROM memories m "
-                f"{where_clause}"
-                f"ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
-            )
-
-        results: list[Memory] = []
-        async with self._db.execute(sql, sql_params) as cursor:
-            async for row in cursor:
-                results.append(
-                    Memory(
-                        id=row[0],
-                        user_id=row[1],
-                        content=row[2],
-                        category=row[3],
-                        created_at=row[4],
-                        tags=json.loads(row[5]) if row[5] else [],
-                    )
-                )
-        return results
+    async def stats(self) -> tuple[int, dict[str, int]]:
+        """(distinct users, memories per category), for `pincer memory stats`."""
+        return await self._store.stats()
 
     # ── Entities ──────────────────────────────────────────
 
@@ -454,76 +278,50 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         attributes: dict[str, str] | None = None,
     ) -> str:
         """Store or update a named entity. Returns entity ID."""
-        assert self._db is not None
         now = time.time()
-        attrs_json = json.dumps(attributes or {})
-
-        # Upsert: update if same user+name+type exists
-        async with self._db.execute(
-            "SELECT id FROM entities WHERE user_id = ? AND name = ? AND type = ?",
-            (user_id, name, entity_type),
-        ) as cursor:
-            row = await cursor.fetchone()
-
-        if row:
-            ent_id = str(row[0])
-            await self._db.execute(
-                "UPDATE entities SET attributes_json = ?, last_seen = ? WHERE id = ?",
-                (attrs_json, now, ent_id),
-            )
-        else:
-            ent_id = str(uuid.uuid4())
-            await self._db.execute(
-                "INSERT INTO entities (id, user_id, name, type, attributes_json, last_seen) VALUES (?, ?, ?, ?, ?, ?)",
-                (ent_id, user_id, name, entity_type, attrs_json, now),
-            )
-
-        await self._db.commit()
+        existing = await self._store.entities_for(user_id, type_=entity_type, limit=_ENTITY_PAGE)
+        ent_id = next((str(row["id"]) for row in existing if row["name"] == name), str(uuid.uuid4()))
+        await self._store.upsert_entity(
+            {
+                "id": ent_id,
+                "user_id": user_id,
+                "name": name,
+                "type": entity_type,
+                "attributes_json": json.dumps(attributes or {}),
+                "last_seen": now,
+            }
+        )
         return ent_id
 
     async def get_entities(self, user_id: str, entity_type: str | None = None) -> list[Entity]:
         """Get all entities for a user, optionally filtered by type."""
-        assert self._db is not None
-        if entity_type:
-            sql = (
-                "SELECT id, user_id, name, type, attributes_json, last_seen "
-                "FROM entities WHERE user_id = ? AND type = ? ORDER BY last_seen DESC"
+        rows = await self._store.entities_for(user_id, type_=entity_type, limit=_ENTITY_PAGE)
+        return [
+            Entity(
+                id=str(row["id"]),
+                user_id=str(row["user_id"]),
+                name=str(row["name"]),
+                type=str(row["type"]),
+                attributes=json.loads(row["attributes_json"] or "{}"),
+                last_seen=float(row["last_seen"] or 0.0),
             )
-            sql_params: tuple[str, ...] = (user_id, entity_type)
-        else:
-            sql = (
-                "SELECT id, user_id, name, type, attributes_json, last_seen "
-                "FROM entities WHERE user_id = ? ORDER BY last_seen DESC"
-            )
-            sql_params = (user_id,)
-
-        results: list[Entity] = []
-        async with self._db.execute(sql, sql_params) as cursor:
-            async for row in cursor:
-                results.append(
-                    Entity(
-                        id=row[0],
-                        user_id=row[1],
-                        name=row[2],
-                        type=row[3],
-                        attributes=json.loads(row[4]),
-                        last_seen=row[5],
-                    )
-                )
-        return results
+            for row in rows
+        ]
 
     # ── Conversations ─────────────────────────────────────
 
     async def store_conversation(self, user_id: str, channel: str, messages_json: str) -> str:
         """Archive a conversation snapshot."""
-        assert self._db is not None
         conv_id = str(uuid.uuid4())
         now = time.time()
-        await self._db.execute(
-            "INSERT INTO conversations "
-            "(id, user_id, channel, messages_json, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (conv_id, user_id, channel, messages_json, now, now),
+        await self._store.add_conversation(
+            {
+                "id": conv_id,
+                "user_id": user_id,
+                "channel": channel,
+                "messages_json": messages_json,
+                "created_at": now,
+                "updated_at": now,
+            }
         )
-        await self._db.commit()
         return conv_id
