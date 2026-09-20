@@ -8,11 +8,12 @@ migration created, on SQLite and on Postgres.
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import REAL, BigInteger, DateTime, Dialect, Integer, Text
-from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
+from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION, UUID
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
 
@@ -69,6 +70,48 @@ class JSONText(TypeDecorator[Any]):
         if not value:
             return None
         return json.loads(value)
+
+
+class Uuid7(TypeDecorator[str]):
+    """A row id Pincer minted: `uuid` on Postgres, `TEXT` on SQLite.
+
+    Postgres is the primary target and gets the native 16-byte type, with its
+    own equality and index. SQLite has no uuid type and stores the canonical
+    36-character string — the documented degradation, for lightweight and test
+    setups. Both compare in the same order, because the canonical form is
+    fixed-width lowercase hex: sorting it as text is sorting the uuid by its
+    bytes, which for a v7 is sorting by time.
+
+    `str` in Python on both dialects, for the same reason `IsoText` keeps
+    `str`: these ids are already strings everywhere they go — memory tags,
+    path parameters, tool arguments, log lines, the dashboard's JSON. A
+    `uuid.UUID` here would buy nothing on the wire (Postgres gets its native
+    column either way) and cost a conversion at every one of those boundaries.
+
+    The empty string is the app's "no id" sentinel on a few nullable columns;
+    it binds as NULL, which is what the column actually means.
+    """
+
+    impl = Text
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Dialect) -> TypeEngine[Any]:
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(UUID())
+        return dialect.type_descriptor(Text())
+
+    def process_bind_param(self, value: str | None, dialect: Dialect) -> Any:
+        if value is None or value == "":
+            return None
+        # Parse on both dialects, not just Postgres: a lenient SQLite branch
+        # would let a malformed id through locally and fail only in CI.
+        parsed = uuid.UUID(str(value))
+        return parsed if dialect.name == "postgresql" else str(parsed)
+
+    def process_result_value(self, value: Any, dialect: Dialect) -> str | None:
+        if value is None:
+            return None
+        return str(value)
 
 
 class BigInt(TypeDecorator[int]):
