@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+from support import seeded_id
 
 from pincer.db.engine import get_engine
 from pincer.models.telephony import TelephonyCall, TelephonyEvent, TelephonySpan, TelephonyTurn
@@ -21,12 +22,15 @@ from pincer.voice.telemetry import queries, store
 
 _TABLES = [TelephonyCall.__table__, TelephonyEvent.__table__, TelephonySpan.__table__, TelephonyTurn.__table__]
 
+CALL = seeded_id("call-1")
+TURN = seeded_id("turn-1")
+
 EARLIER = "2026-09-01T10:00:00+00:00"
 LATER = "2026-09-01T10:05:00+00:00"
 
 _EVENT = {
     "event_id": "e0",
-    "call_id": "c1",
+    "call_id": CALL,
     "provider_call_id": "",
     "trace_id": "",
     "span_id": "",
@@ -40,7 +44,7 @@ _EVENT = {
 
 _SPAN = {
     "span_id": "s0",
-    "call_id": "c1",
+    "call_id": CALL,
     "trace_id": "",
     "parent_span_id": "",
     "turn_id": "",
@@ -93,11 +97,11 @@ async def _row(url: str, table: str, key_column: str, key: str) -> dict:
 async def test_counters_accumulate_across_independent_writes(url):
     """Each turn adds one; a writer that overwrote would lose the others."""
     service = TelemetryService(url)
-    await service.upsert_call("c1", {"registered_at": EARLIER, "turn_count": 1, "error_count": 1})
-    await service.upsert_call("c1", {"turn_count": 1})
-    await service.upsert_call("c1", {"turn_count": 1, "error_count": 2})
+    await service.upsert_call(CALL, {"registered_at": EARLIER, "turn_count": 1, "error_count": 1})
+    await service.upsert_call(CALL, {"turn_count": 1})
+    await service.upsert_call(CALL, {"turn_count": 1, "error_count": 2})
 
-    row = await _row(url, "telephony_calls", "call_id", "c1")
+    row = await _row(url, "telephony_calls", "call_id", CALL)
     assert row["turn_count"] == 3
     assert row["error_count"] == 3
     assert row["registered_at"] == EARLIER  # written once, not re-stamped
@@ -105,35 +109,35 @@ async def test_counters_accumulate_across_independent_writes(url):
 
 async def test_everything_else_takes_the_incoming_value(url):
     service = TelemetryService(url)
-    await service.upsert_call("c1", {"engine": "media_streams", "language": "de"})
-    await service.upsert_call("c1", {"language": "en"})
+    await service.upsert_call(CALL, {"engine": "media_streams", "language": "de"})
+    await service.upsert_call(CALL, {"language": "en"})
 
-    row = await _row(url, "telephony_calls", "call_id", "c1")
+    row = await _row(url, "telephony_calls", "call_id", CALL)
     assert (row["engine"], row["language"]) == ("media_streams", "en")
 
 
 async def test_a_terminal_status_absorbs_later_writes(url):
     """A late Twilio callback must not re-open a call that has ended."""
     service = TelemetryService(url)
-    await service.upsert_call("c1", {"status": "active"})
-    await service.upsert_call("c1", {"status": "connected"})
-    await service.upsert_call("c1", {"status": "completed"})
-    await service.upsert_call("c1", {"status": "active"})  # the late callback
+    await service.upsert_call(CALL, {"status": "active"})
+    await service.upsert_call(CALL, {"status": "connected"})
+    await service.upsert_call(CALL, {"status": "completed"})
+    await service.upsert_call(CALL, {"status": "active"})  # the late callback
 
-    assert (await _row(url, "telephony_calls", "call_id", "c1"))["status"] == "completed"
+    assert (await _row(url, "telephony_calls", "call_id", CALL))["status"] == "completed"
 
 
 async def test_a_row_with_no_status_yet_accepts_one(url):
     """`dial_requested` can create the row before anything knows a status."""
     service = TelemetryService(url)
-    await service.upsert_call("c1", {"registered_at": EARLIER})
-    await service.upsert_call("c1", {"status": "active"})
-    assert (await _row(url, "telephony_calls", "call_id", "c1"))["status"] == "active"
+    await service.upsert_call(CALL, {"registered_at": EARLIER})
+    await service.upsert_call(CALL, {"status": "active"})
+    assert (await _row(url, "telephony_calls", "call_id", CALL))["status"] == "active"
 
 
 async def test_nothing_known_writes_nothing(url):
     service = TelemetryService(url)
-    await service.upsert_call("c1", {})
+    await service.upsert_call(CALL, {})
     engine = get_engine(url)
     async with engine.connect() as conn:
         count = (await conn.execute(sa.text("SELECT COUNT(*) FROM telephony_calls"))).scalar_one()
@@ -147,12 +151,12 @@ async def test_a_turn_is_written_once_however_often_it_is_reported(url):
     """A turn cancelled by barge-in is written when it is cancelled; a late
     completion updates that row rather than adding another."""
     service = TelemetryService(url)
-    await service.upsert_turn("t1", {"call_id": "c1", "turn_no": 1, "cancelled": 1, "created_at": EARLIER})
+    await service.upsert_turn(TURN, {"call_id": CALL, "turn_no": 1, "cancelled": 1, "created_at": EARLIER})
     await service.upsert_turn(
-        "t1", {"call_id": "c1", "turn_no": 1, "cancelled": 0, "total_ms": 900.0, "created_at": EARLIER}
+        TURN, {"call_id": CALL, "turn_no": 1, "cancelled": 0, "total_ms": 900.0, "created_at": EARLIER}
     )
 
-    row = await _row(url, "telephony_turns", "turn_id", "t1")
+    row = await _row(url, "telephony_turns", "turn_id", TURN)
     assert (row["cancelled"], row["total_ms"]) == (0, 900.0)
 
 
@@ -160,7 +164,7 @@ async def test_a_repeated_event_is_ignored_not_duplicated(url):
     service = TelemetryService(url)
     event = {
         "event_id": "e1",
-        "call_id": "c1",
+        "call_id": CALL,
         "provider_call_id": "",
         "trace_id": "",
         "span_id": "",
@@ -182,7 +186,7 @@ async def test_a_span_rewrite_updates_its_close(url):
     service = TelemetryService(url)
     span = {
         "span_id": "s1",
-        "call_id": "c1",
+        "call_id": CALL,
         "trace_id": "",
         "parent_span_id": "",
         "turn_id": "",
@@ -236,12 +240,12 @@ async def test_a_windowed_read_and_its_timestamps_survive_the_round_trip(url):
     where every caller and the dashboard expect the ISO string SQLite returns.
     """
     service = TelemetryService(url)
-    await service.upsert_call("c1", {"registered_at": EARLIER, "status": "completed"})
+    await service.upsert_call(CALL, {"registered_at": EARLIER, "status": "completed"})
 
     engine = get_engine(url)
     async with engine.connect() as conn:
         rows = await store.fetch(conn, "SELECT * FROM telephony_calls WHERE registered_at >= ?", [EARLIER])
-        assert [row["call_id"] for row in rows] == ["c1"]
+        assert [row["call_id"] for row in rows] == [CALL]
         assert rows[0]["registered_at"] == EARLIER
         # A window that starts later excludes it — the comparison is a real
         # timestamp comparison, not a string one that happens to sort.
@@ -254,7 +258,7 @@ async def test_events_and_spans_are_one_batch(url):
         [
             {
                 "event_id": f"e{i}",
-                "call_id": "c1",
+                "call_id": CALL,
                 "provider_call_id": "",
                 "trace_id": "",
                 "span_id": "",
@@ -288,9 +292,9 @@ async def test_the_windowed_read_paths_run_on_both_dialects(migrated_url, monkey
     monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
     service = TelemetryService(migrated_url)
     now = datetime.now(UTC).isoformat()
-    await service.upsert_call("c1", {"registered_at": now, "status": "completed", "direction": "inbound"})
+    await service.upsert_call(CALL, {"registered_at": now, "status": "completed", "direction": "inbound"})
     await service.upsert_turn(
-        "t1", {"call_id": "c1", "turn_no": 1, "created_at": now, "total_ms": 900.0, "response_latency_ms": 640.0}
+        TURN, {"call_id": CALL, "turn_no": 1, "created_at": now, "total_ms": 900.0, "response_latency_ms": 640.0}
     )
 
     unused = Path("unused.db")  # the URL above decides the database
@@ -300,10 +304,10 @@ async def test_the_windowed_read_paths_run_on_both_dialects(migrated_url, monkey
     assert aggregate.calls["total"] == 1
 
     table = await queries.search_calls(unused, filters)
-    assert [row["call_id"] for row in table["calls"]] == ["c1"]
+    assert [row["call_id"] for row in table["calls"]] == [CALL]
     assert table["calls"][0]["registered_at"] == now  # an ISO string, not a datetime
 
-    assert [turn["turn_id"] for turn in await queries.slowest_turns(unused, filters)] == ["t1"]
+    assert [turn["turn_id"] for turn in await queries.slowest_turns(unused, filters)] == [TURN]
 
 
 # ── the `?` rewriter ─────────────────────────────────────────────────

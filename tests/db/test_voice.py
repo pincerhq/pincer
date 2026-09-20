@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from support import seeded_id
 
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
@@ -81,11 +82,13 @@ async def test_the_thread_columns_are_re_derived_from_the_membership(url):
     calls = CallsService(url)
     async with session_scope(url) as session:
         session.add(
-            CallThread(thread_id="th_1", subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER)
+            CallThread(
+                thread_id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
+            )
         )
         await session.flush()
         await ThreadMemberRepository(session).attach(
-            {"call_sid": "CA1", "thread_id": "th_1", "attach_kind": "origin", "attached_at": EARLIER}
+            {"call_sid": "CA1", "thread_id": seeded_id("th_1"), "attach_kind": "origin", "attached_at": EARLIER}
         )
 
     await calls.save_call(
@@ -93,7 +96,7 @@ async def test_the_thread_columns_are_re_derived_from_the_membership(url):
     )
 
     stored = await calls.get("CA1")
-    assert (stored["thread_id"], stored["thread_attach_kind"]) == ("th_1", "origin")
+    assert (stored["thread_id"], stored["thread_attach_kind"]) == (seeded_id("th_1"), "origin")
     # ... and the member row gains the call's own facts, which outlive it.
     async with session_scope(url) as session:
         member = await ThreadMemberRepository(session).for_call("CA1")
@@ -106,7 +109,7 @@ async def test_a_call_with_no_thread_gets_empty_thread_columns(url):
         {"call_sid": "CA1", "direction": "inbound", "started_at": EARLIER}, thread_columns_from_members=True
     )
     stored = await calls.get("CA1")
-    assert (stored["thread_id"], stored["thread_attach_kind"]) == ("", "")
+    assert (stored["thread_id"], stored["thread_attach_kind"]) == (None, "")
 
 
 async def test_transcript_lines_and_actions_round_trip(url):
@@ -133,31 +136,34 @@ async def test_merging_a_thread_leaves_the_target_s_own_calls_alone(url):
     keeps the kind it was attached with."""
     calls = CallsService(url)
     threads = ThreadsService(url)
-    for thread_id in ("th_src", "th_dst"):
+    for label in ("th_src", "th_dst"):
         await threads.create(
             {
-                "thread_id": thread_id,
-                "subject": thread_id,
+                "thread_id": seeded_id(label),
+                "subject": label,
                 "origin": "user_task",
                 "created_at": EARLIER,
                 "updated_at": EARLIER,
             }
         )
-    for sid, thread_id, kind in (("CA_src", "th_src", "origin"), ("CA_dst", "th_dst", "inbound_matched")):
+    for sid, label, kind in (("CA_src", "th_src", "origin"), ("CA_dst", "th_dst", "inbound_matched")):
         await calls.save_call({"call_sid": sid, "direction": "inbound", "started_at": EARLIER})
         await threads.attach(
-            {"call_sid": sid, "thread_id": thread_id, "attach_kind": kind, "attached_at": EARLIER},
+            {"call_sid": sid, "thread_id": seeded_id(label), "attach_kind": kind, "attached_at": EARLIER},
             touched_at=EARLIER,
         )
 
-    await threads.merge_into("th_src", "th_dst", attach_kind="manual", stamp=LATER)
+    await threads.merge_into(seeded_id("th_src"), seeded_id("th_dst"), attach_kind="manual", stamp=LATER)
 
     moved = await calls.get("CA_src")
     already_there = await calls.get("CA_dst")
-    assert (moved["thread_id"], moved["thread_attach_kind"]) == ("th_dst", "manual")
-    assert (already_there["thread_id"], already_there["thread_attach_kind"]) == ("th_dst", "inbound_matched")
+    assert (moved["thread_id"], moved["thread_attach_kind"]) == (seeded_id("th_dst"), "manual")
+    assert (already_there["thread_id"], already_there["thread_attach_kind"]) == (
+        seeded_id("th_dst"),
+        "inbound_matched",
+    )
     # ... and the member rows say the same thing as the call rows.
-    kinds = {row["call_sid"]: row["attach_kind"] for row in await threads.calls("th_dst")}
+    kinds = {row["call_sid"]: row["attach_kind"] for row in await threads.calls(seeded_id("th_dst"))}
     assert kinds == {"CA_src": "manual", "CA_dst": "inbound_matched"}
 
 

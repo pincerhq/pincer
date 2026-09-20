@@ -30,11 +30,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
 from sqlalchemy import bindparam, text
 
 from pincer.db.engine import get_database_url, get_engine
-from pincer.db.types import IsoText
+from pincer.db.types import IsoText, Uuid7
 from pincer.repositories.telemetry import EVENT_COLUMNS, SPAN_COLUMNS
 from pincer.services.telemetry import TelemetryService
 
@@ -162,42 +163,59 @@ async def connect(db_path: str | Path) -> AsyncIterator[AsyncConnection]:
 #: compare — ids, names, statuses, `LIKE` needles (which carry `%`) and numbers.
 _ISO_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 
+#: A canonical uuid, as `Uuid7` stores one.
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
 _ISO_TEXT = IsoText()
 
 
+_UUID7 = Uuid7()
+
+
 def _bound(name: str, value: Any) -> BindParameter[Any]:
-    """One parameter, typed if it is a timestamp.
+    """One parameter, typed if the column it is compared against needs it.
 
     The write path binds each parameter to its model column's type; a read
-    written as raw SQL has no column to take one from. Without this an ISO
-    string goes straight at a `TIMESTAMP` column and Postgres refuses it — so
-    every windowed read (the overview, call search, every alert) would fail
-    while the unwindowed ones worked.
+    written as raw SQL has no column to take one from. Two types need saying
+    out loud, and both fail on Postgres only:
+
+    * an ISO string at a `TIMESTAMP` column — every windowed read (the
+      overview, call search, every alert) would be refused;
+    * a `str` at a `uuid` column — since 0018 that is `call_id` and `turn_id`,
+      so the call detail, its timeline and the exports would be refused.
+
+    Matching on the value's shape rather than the column's is what a raw query
+    allows. A `LIKE` needle carries `%` and a CallSid is not a uuid, so neither
+    is caught by accident.
     """
     if isinstance(value, str) and _ISO_STAMP.match(value):
         return bindparam(name, value, type_=_ISO_TEXT)
+    if isinstance(value, str) and _UUID.fullmatch(value):
+        return bindparam(name, value, type_=_UUID7)
     return bindparam(name, value)
 
 
 async def fetch(db: AsyncConnection, sql: str, params: Sequence[Any] = ()) -> list[Any]:
     """Run one read, returning rows addressable by column name.
 
-    Timestamps come back as the ISO strings every caller and the dashboard
-    expect, on both dialects: Postgres hands back a naive `datetime` for a
-    `TIMESTAMP` column, and `SELECT *` through `text()` has no result type to
-    convert it. An offset-less string would be read as local time by the
-    browser.
+    Values come back in the form every caller and the dashboard expect, on
+    both dialects: `SELECT *` through `text()` has no result type, so Postgres
+    would otherwise hand back a naive `datetime` for a `TIMESTAMP` column and a
+    `uuid.UUID` for a `uuid` one. The first would be read as local time by the
+    browser; the second would be serialised as a repr.
     """
     statement, values = _named(sql, params)
     stmt = text(statement).bindparams(*(_bound(name, value) for name, value in values.items()))
     result = await db.execute(stmt)
-    return [
-        {
-            column: _ISO_TEXT.process_result_value(value, db.dialect) if isinstance(value, datetime) else value
-            for column, value in row.items()
-        }
-        for row in result.mappings().all()
-    ]
+    return [{column: _as_python(value, db.dialect) for column, value in row.items()} for row in result.mappings().all()]
+
+
+def _as_python(value: Any, dialect: Any) -> Any:
+    if isinstance(value, datetime):
+        return _ISO_TEXT.process_result_value(value, dialect)
+    if isinstance(value, UUID):
+        return str(value)
+    return value
 
 
 async def tables_present(db: AsyncConnection) -> bool:

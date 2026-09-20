@@ -2,11 +2,13 @@
 
 import contextlib
 import importlib.util
+import json
 import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 import sqlalchemy as sa
 from alembic import command
 from alembic.script import ScriptDirectory
@@ -927,15 +929,24 @@ def test_full_pre_alembic_runtime_voice_db_upgrades_to_head(tmp_path: Path) -> N
 
     con = sqlite3.connect(str(db_path))
     try:
+        # `thread_id` is NULL, not '': 0018 retired the empty-string sentinel,
+        # which is not a uuid and would not cast on Postgres.
         assert con.execute(
             "SELECT call_sid, direction, from_number, inbound_intent, thread_id FROM voice_calls"
-        ).fetchall() == [("CA_runtime", "inbound", "+493333333333", "question", "")]
+        ).fetchall() == [("CA_runtime", "inbound", "+493333333333", "question", None)]
 
         assert con.execute("SELECT speaker, text FROM call_transcripts").fetchall() == [("agent", "Guten Tag")]
         assert con.execute("SELECT tier, deny_reason FROM call_actions").fetchall() == [("X", "tier_x")]
         assert con.execute("SELECT caller_name, matter FROM inbound_messages").fetchall() == [("Anna", "Rueckruf")]
-        assert con.execute("SELECT thread_id, subject FROM call_threads").fetchall() == [("th_1", "Angebot")]
-        assert con.execute("SELECT call_sid, thread_id FROM call_thread_members").fetchall() == [("CA_runtime", "th_1")]
+        # The thread keeps its subject and loses its old hand-made id: 0018
+        # converts it, so the value is a v7 uuid rather than `th_1`.
+        ((thread_id, subject),) = con.execute("SELECT thread_id, subject FROM call_threads").fetchall()
+        assert subject == "Angebot"
+        assert uuid.UUID(thread_id).version == 7
+        # The member still points at its thread — both sides rewritten from one map.
+        assert con.execute("SELECT call_sid, thread_id FROM call_thread_members").fetchall() == [
+            ("CA_runtime", thread_id)
+        ]
         assert con.execute("SELECT call_sid, method FROM call_analytics").fetchall() == [("CA_runtime", "exact")]
 
         # 0001 must still have created the non-voice schema it owns.
@@ -1226,3 +1237,157 @@ def test_0017_round_trips(migration_url, tmp_path):
     command.upgrade(cfg, "0017")
     with _connect(migration_url) as conn:
         assert conn.execute(sa.text("SELECT COUNT(*) FROM call_transcripts")).scalar_one() == 5
+
+
+# ── 0018: the minted text keys become UUIDv7 ─────────────────────────
+
+_T0 = "2026-09-01T10:00:00+00:00"
+
+#: A call with its telemetry, a thread with a member, and a memory tagged
+#: with that thread — every relation 0018 has to keep, plus the orphans and
+#: sentinels it has to resolve before the values can cast.
+_SEED_0017 = (
+    "INSERT INTO telephony_calls (call_id, registered_at) VALUES ('call-old', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO telephony_turns (turn_id, call_id, created_at) "
+    "VALUES ('turn-old', 'call-old', '2026-09-01T10:00:01+00:00')",
+    "INSERT INTO telephony_events (event_id, call_id, turn_id, name, ts_utc) "
+    "VALUES ('ev-1', 'call-old', 'turn-old', 'call.registered', '2026-09-01T10:00:02+00:00')",
+    # turn_id carries the '' sentinel, which is not a uuid.
+    "INSERT INTO telephony_events (event_id, call_id, turn_id, name, ts_utc) "
+    "VALUES ('ev-2', 'call-old', '', 'call.ended', '2026-09-01T10:00:03+00:00')",
+    # an event whose call was purged by retention — a real orphan
+    "INSERT INTO telephony_events (event_id, call_id, name, ts_utc) "
+    "VALUES ('ev-orphan', 'call-gone', 'call.ended', '2026-09-01T10:00:04+00:00')",
+    "INSERT INTO telephony_spans (span_id, call_id, turn_id, name, start_utc) "
+    "VALUES ('span-1', 'call-old', 'turn-old', 'llm', '2026-09-01T10:00:02+00:00')",
+    "INSERT INTO call_threads (thread_id, subject, origin, created_at, updated_at) "
+    "VALUES ('thr_old', 'Angebot', 'inbound', '2026-09-01T10:00:00+00:00', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO call_thread_members (call_sid, thread_id, attached_at) "
+    "VALUES ('CA_1', 'thr_old', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO voice_calls (id, call_sid, started_at, thread_id) "
+    "VALUES ('01a00000-0000-7000-8000-000000000001', 'CA_1', '2026-09-01T10:00:00+00:00', 'thr_old')",
+    "INSERT INTO memories (id, user_id, content, category, tags, created_at) "
+    "VALUES ('mem-old', 'usr_a', 'Angebot besprochen', 'general', '[\"thread:thr_old\", \"call:CA_1\"]', 1788256800.0)",
+    "INSERT INTO conversations (id, user_id, channel, messages_json, created_at, updated_at) "
+    "VALUES ('conv-old', 'usr_a', 'voice', '[]', 1788256800.0, 1788256800.0)",
+    "INSERT INTO entities (id, user_id, name, type, attributes_json, last_seen) "
+    "VALUES ('ent-old', 'usr_a', 'Ada', 'person', '{}', 1788256800.0)",
+)
+
+
+def _seed_0017(url: str, tmp_path: Path):
+    cfg = _config(url, tmp_path)
+    command.upgrade(cfg, "0017")
+    with _connect(url) as conn:
+        for insert in _SEED_0017:
+            conn.execute(sa.text(insert))
+    return cfg
+
+
+def test_0018_rewrites_both_sides_of_every_reference(migration_url, tmp_path):
+    """The point of the revision: a key and everything pointing at it move
+    together, from one map, so nothing is left naming a row that is gone."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        call_id = conn.execute(sa.text("SELECT call_id FROM telephony_calls")).scalar_one()
+        turn_id = conn.execute(sa.text("SELECT turn_id FROM telephony_turns")).scalar_one()
+        thread_id = conn.execute(sa.text("SELECT thread_id FROM call_threads")).scalar_one()
+
+        for value in (call_id, turn_id, thread_id):
+            assert uuid.UUID(str(value)).version == 7
+
+        assert conn.execute(sa.text("SELECT call_id FROM telephony_turns")).scalar_one() == call_id
+        assert conn.execute(sa.text("SELECT call_id FROM telephony_spans")).scalar_one() == call_id
+        assert conn.execute(sa.text("SELECT turn_id FROM telephony_spans")).scalar_one() == turn_id
+        assert (
+            conn.execute(sa.text("SELECT turn_id FROM telephony_events WHERE event_id = 'ev-1'")).scalar_one()
+            == turn_id
+        )
+        assert conn.execute(sa.text("SELECT thread_id FROM call_thread_members")).scalar_one() == thread_id
+        assert conn.execute(sa.text("SELECT thread_id FROM voice_calls")).scalar_one() == thread_id
+
+
+def test_0018_retires_the_empty_string_sentinel(migration_url, tmp_path):
+    """`''` meant "no turn". It is not a uuid, so it becomes what it meant."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        assert (
+            conn.execute(sa.text("SELECT turn_id FROM telephony_events WHERE event_id = 'ev-2'")).scalar_one() is None
+        )
+
+
+def test_0018_drops_telemetry_whose_call_is_already_gone(migration_url, tmp_path):
+    """Retention deletes a call and leaves its events; `call_id` is NOT NULL,
+    so an orphan cannot be nulled and cannot cast. It goes."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        remaining = conn.execute(sa.text("SELECT event_id FROM telephony_events")).all()
+    assert sorted(row[0] for row in remaining) == ["ev-1", "ev-2"]
+
+
+def test_0018_rewrites_the_thread_id_copied_into_memory_tags(migration_url, tmp_path):
+    """A thread id has a second home in `memories.tags`, and the thread's one
+    note is found by that tag. A stale tag would split it in two silently."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        thread_id = conn.execute(sa.text("SELECT thread_id FROM call_threads")).scalar_one()
+        tags = json.loads(conn.execute(sa.text("SELECT tags FROM memories")).scalar_one())
+
+    assert tags == [f"thread:{thread_id}", "call:CA_1"]  # the call_sid is Twilio's and does not move
+
+
+def test_0018_leaves_the_identifiers_that_are_not_ours_alone(migration_url, tmp_path):
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        assert conn.execute(sa.text("SELECT span_id FROM telephony_spans")).scalar_one() == "span-1"
+        assert (
+            conn.execute(sa.text("SELECT event_id FROM telephony_events WHERE name = 'call.registered'")).scalar_one()
+            == "ev-1"
+        )
+        assert conn.execute(sa.text("SELECT call_sid FROM voice_calls")).scalar_one() == "CA_1"
+
+
+def test_0018_keeps_full_text_search_working_on_sqlite(migration_url, tmp_path):
+    """`memories_fts` is keyed on the rowid, which an id rewrite does not move
+    — but the triggers fire on every UPDATE, so the index is rebuilt to be sure."""
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("FTS5 is the SQLite search path")
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        found = conn.execute(
+            sa.text(
+                "SELECT m.id FROM memories_fts f JOIN memories m ON m.rowid = f.rowid "
+                "WHERE memories_fts MATCH 'Angebot'"
+            )
+        ).all()
+        stored = conn.execute(sa.text("SELECT id FROM memories")).scalar_one()
+    assert [row[0] for row in found] == [stored]
+
+
+def test_0018_round_trips_without_losing_the_ids(migration_url, tmp_path):
+    """Down only reverts the storage type: the ids stay UUIDv7 strings, which
+    the pre-0018 code reads happily because it never parsed the format."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+    with _connect(migration_url) as conn:
+        before = conn.execute(sa.text("SELECT call_id FROM telephony_calls")).scalar_one()
+
+    command.downgrade(cfg, "0017")
+    with _connect(migration_url) as conn:
+        assert str(conn.execute(sa.text("SELECT call_id FROM telephony_calls")).scalar_one()) == str(before)
+        # and the sentinel is back where the old code expects it
+        assert conn.execute(sa.text("SELECT turn_id FROM telephony_events WHERE event_id = 'ev-2'")).scalar_one() == ""
+
+    command.upgrade(cfg, "0018")

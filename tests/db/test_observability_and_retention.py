@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from support import seeded_id
 
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
@@ -186,11 +187,11 @@ async def test_an_analytics_row_survives_but_its_rationale_does_not(url):
 async def test_the_telemetry_purge_has_its_own_window(url):
     await _add(
         url,
-        TelephonyCall(call_id="c_old", registered_at=OLD),
-        TelephonyCall(call_id="c_new", registered_at=RECENT),
-        TelephonyEvent(event_id="e1", call_id="c_old", name="dial", ts_utc=OLD),
-        TelephonySpan(span_id="s1", call_id="c_old", name="llm", start_utc=OLD),
-        TelephonyTurn(turn_id="t1", call_id="c_old", created_at=OLD),
+        TelephonyCall(call_id=seeded_id("c_old"), registered_at=OLD),
+        TelephonyCall(call_id=seeded_id("c_new"), registered_at=RECENT),
+        TelephonyEvent(event_id="e1", call_id=seeded_id("c_old"), name="dial", ts_utc=OLD),
+        TelephonySpan(span_id="s1", call_id=seeded_id("c_old"), name="llm", start_utc=OLD),
+        TelephonyTurn(turn_id=seeded_id("t1"), call_id=seeded_id("c_old"), created_at=OLD),
     )
 
     deleted = await RetentionService(url).purge_telemetry(CUTOFF)

@@ -8,6 +8,7 @@ is only "done" with evidence in the call that supposedly satisfied it.
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -97,7 +98,7 @@ class FakeLLM:
 async def test_thread_create_on_task_call(manager, tmp_path):
     """A new outbound task call opens a thread and attaches as `origin`."""
     thread = await manager.create("Termin Dr. Müller", primary_number="+4930222", contact_name="Dr. Müller")
-    assert thread.thread_id.startswith("thr_")
+    assert uuid.UUID(thread.thread_id).version == 7  # was `thr_` + hex before 0018
     assert thread.status == STATUS_OPEN
     assert thread.origin == "user_task"
 

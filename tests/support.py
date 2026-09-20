@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from pincer.db.ids import new_id
+from pincer.db.ids import Uuid7Sequence, new_id
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -59,3 +59,39 @@ async def fill_row_ids(db: aiosqlite.Connection, *tables: str) -> None:
         for (rowid,) in rows:
             await db.execute(f"UPDATE {table} SET id = ? WHERE rowid = ?", (new_id(), rowid))  # noqa: S608
     await db.commit()
+
+
+_MINTED: dict[str, str] = {}
+_SEQUENCE = Uuid7Sequence()
+#: A fixed point in time, so a run's ids are stable and readable in failures.
+_EPOCH_MS = 1_788_256_800_000
+
+
+def seeded_id(label: str) -> str:
+    """A stable UUIDv7 for a test's shorthand id — `seeded_id("m1")`.
+
+    Tests read better naming rows `m1`, `m2`, `call-a` than pasting uuids, but
+    `Uuid7` refuses anything that is not one (on SQLite too, deliberately: a
+    lenient branch there would let the suite pass locally and fail in CI's
+    postgres job). This keeps the shorthand and mints a real id behind it.
+
+    Same label, same id, for the life of the process — so a test can seed with
+    one and assert with the other. Ids are handed out in first-use order, so
+    `m1` sorts before `m2` and reads that order back from the database.
+    """
+    if label not in _MINTED:
+        _MINTED[label] = _SEQUENCE.next(_EPOCH_MS)
+    return _MINTED[label]
+
+
+def label_of(value: object) -> str:
+    """The shorthand behind a `seeded_id`, for readable assertions.
+
+    `[label_of(row["id"]) for row in rows] == ["m2", "m1"]` says what the test
+    means; comparing raw uuids would not.
+    """
+    text = str(value)
+    for label, minted in _MINTED.items():
+        if minted == text:
+            return label
+    return text
