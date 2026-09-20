@@ -4,7 +4,7 @@ import sqlalchemy as sa
 from sqlalchemy import Column, Index, Integer, Text
 from sqlmodel import Field, SQLModel
 
-from pincer.db.types import IsoText, Real
+from pincer.db.types import BigInt, IsoText, Real
 
 
 class TelephonyCall(SQLModel, table=True):
@@ -75,7 +75,7 @@ class TelephonyEvent(SQLModel, table=True):
     turn_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     name: str = Field(sa_column=Column(Text(), nullable=False))
     ts_utc: str = Field(sa_column=Column(IsoText(), nullable=False))
-    mono_ns: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
+    mono_ns: int | None = Field(default=None, sa_column=Column(BigInt(), server_default=sa.text("0")))
     seq: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
     attributes: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("'{}'")))
 
@@ -95,8 +95,8 @@ class TelephonySpan(SQLModel, table=True):
     name: str = Field(sa_column=Column(Text(), nullable=False))
     start_utc: str = Field(sa_column=Column(IsoText(), nullable=False))
     end_utc: str | None = Field(default=None, sa_column=Column(IsoText()))
-    start_mono_ns: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
-    end_mono_ns: int | None = Field(default=None, sa_column=Column(Integer()))
+    start_mono_ns: int | None = Field(default=None, sa_column=Column(BigInt(), server_default=sa.text("0")))
+    end_mono_ns: int | None = Field(default=None, sa_column=Column(BigInt()))
     duration_ms: float | None = Field(default=None, sa_column=Column(Real()))
     status: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("'ok'")))
     attempt: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("1")))

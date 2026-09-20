@@ -1,6 +1,7 @@
 """Shared test fixtures."""
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -265,6 +266,35 @@ def _postgres_test_url() -> str | None:
     return os.environ.get("PINCER_TEST_PG_URL") or None
 
 
+@pytest.fixture(scope="session")
+def postgres_scratch_url() -> Iterator[str]:
+    """One throwaway Postgres database for this test run.
+
+    Not `PINCER_TEST_PG_URL` itself: the tests that use it drop and recreate
+    their tables, so two runs pointed at the same server — CI and a developer,
+    or two matrix jobs — would pull each other's tables out mid-test and report
+    "relation does not exist" as if it were a code bug.
+    """
+    import uuid
+
+    import sqlalchemy as sa
+
+    base = _postgres_test_url()
+    if base is None:
+        pytest.skip("PINCER_TEST_PG_URL not set")
+    server = sa.engine.make_url(base).set(drivername="postgresql+psycopg")
+    name = f"pincer_test_{uuid.uuid4().hex[:12]}"
+    admin = sa.create_engine(server, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(sa.text(f'CREATE DATABASE "{name}"'))
+    try:
+        yield server.set(database=name).render_as_string(hide_password=False)
+    finally:
+        with admin.connect() as conn:
+            conn.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
 @pytest_asyncio.fixture(params=["sqlite", "postgres"])
 async def db_url(request: pytest.FixtureRequest, tmp_path: Path):
     """An async database URL, once per dialect. Postgres is skipped unless
@@ -275,10 +305,7 @@ async def db_url(request: pytest.FixtureRequest, tmp_path: Path):
     if request.param == "sqlite":
         yield to_async_url(f"sqlite:///{tmp_path / 'pincer.db'}")
     else:
-        pg = _postgres_test_url()
-        if pg is None:
-            pytest.skip("PINCER_TEST_PG_URL not set")
-        yield to_async_url(pg)
+        yield to_async_url(request.getfixturevalue("postgres_scratch_url"))
     await dispose_engines()
 
 

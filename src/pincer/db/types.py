@@ -11,7 +11,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import REAL, DateTime, Dialect, Text
+from sqlalchemy import REAL, BigInteger, DateTime, Dialect, Integer, Text
 from sqlalchemy.dialects.postgresql import DOUBLE_PRECISION
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
@@ -69,6 +69,25 @@ class JSONText(TypeDecorator[Any]):
         if not value:
             return None
         return json.loads(value)
+
+
+class BigInt(TypeDecorator[int]):
+    """A 64-bit integer: `INTEGER` on SQLite, `BIGINT` on Postgres.
+
+    Postgres' `INTEGER` is 4 bytes, which `time.monotonic_ns()` outruns 2.15
+    seconds after boot. SQLite's `INTEGER` is already 64-bit and its DDL says
+    `INTEGER`, so the type must not render as `BIGINT` there or every one of
+    those columns would read as drift. Migration 0016 widened the Postgres
+    columns.
+    """
+
+    impl = Integer
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Dialect) -> TypeEngine[Any]:
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(BigInteger())
+        return dialect.type_descriptor(Integer())
 
 
 class Real(TypeDecorator[float]):

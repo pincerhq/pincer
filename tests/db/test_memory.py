@@ -8,6 +8,7 @@ migrated database rather than `create_all`.
 from __future__ import annotations
 
 import json
+import struct
 
 import pytest
 
@@ -125,6 +126,20 @@ async def test_stats_count_users_and_categories(url):
     assert by_category == {"general": 2, "profile": 1}
 
 
+async def test_only_embedded_memories_come_back_for_a_similarity_search(url):
+    """`search_similar` unpacks every row's blob, so a row without one crashes it.
+
+    Almost every real memory has no embedding, so losing this predicate is a
+    hard failure on the first similarity search rather than a rare one.
+    """
+    await _store(url, "plain")
+    await _store(url, "embedded", embedding_blob=struct.pack("3f", 0.1, 0.2, 0.3))
+
+    rows = await MemoryService(url).search(with_embedding=True)
+    assert [row["id"] for row in rows] == ["embedded"]
+    assert struct.unpack("3f", rows[0]["embedding_blob"]) == pytest.approx((0.1, 0.2, 0.3))
+
+
 # ── entities ─────────────────────────────────────────────────────────
 
 
@@ -149,6 +164,16 @@ async def test_an_entity_is_one_row_per_user_name_and_type(url):
     assert rows[0]["id"] == "e1"  # the first sighting keeps its id
     assert json.loads(rows[0]["attributes_json"]) == {"role": "dentist"}
     assert rows[0]["last_seen"] == 2.0
+
+
+async def test_an_upsert_returns_the_id_of_the_row_that_now_holds_it(url):
+    """The caller's candidate id, or the stored one — never a row that is not there."""
+    service = MemoryService(url)
+    entity = {"user_id": "usr_a", "name": "Ada", "type": "person", "attributes_json": "{}", "last_seen": 1.0}
+
+    assert await service.upsert_entity({**entity, "id": "e1"}) == "e1"
+    assert await service.upsert_entity({**entity, "id": "e2", "last_seen": 2.0}) == "e1"
+    assert [row["id"] for row in await service.entities_for("usr_a")] == ["e1"]
 
 
 async def test_entities_are_newest_first_and_filtered_by_type(url):
@@ -184,6 +209,12 @@ async def test_full_text_search_finds_and_ranks(migrated_url):
 
     # Several words are ORed, as the old FTS5 query did.
     assert {row["id"] for row in await service.full_text("boiler dentist")} == {"boiler", "dentist"}
+
+    # Best match first, and it is an order, not a set: `core.agent` keeps only
+    # the top few, so a reversed sort would recall the least relevant memories.
+    ranked = await service.full_text("boiler March")
+    assert [row["id"] for row in ranked] == ["boiler", "dentist"]
+    assert ranked[0]["score"] > ranked[1]["score"]
     assert await service.full_text("") == []
     assert await service.full_text("nonexistentword") == []
 
@@ -197,3 +228,33 @@ async def test_full_text_search_is_scoped_to_a_user_and_its_tags(migrated_url):
     assert {row["id"] for row in await service.full_text("shared", user_id="usr_a")} == {"mine", "untagged"}
     assert {row["id"] for row in await service.full_text("shared", user_id="usr_a", tags=["work"])} == {"mine"}
     assert len(await service.full_text("shared", limit=1)) == 1
+
+
+async def test_a_tagged_match_outside_the_top_hits_is_still_found(migrated_url):
+    """The tag filter belongs in the search, not after its LIMIT.
+
+    Filtering the engine's top `limit` ids afterwards loses any tagged match
+    that ranks below them — here, the one row of 25 that carries the tag.
+    """
+    service = MemoryService(migrated_url)
+    for i in range(24):
+        await _store(migrated_url, f"plain{i}", content="the weekly meeting")
+    await _store(migrated_url, "tagged", content="the weekly meeting", tags=["important"])
+
+    found = await service.full_text("meeting", limit=20, tags=["important"])
+    assert [row["id"] for row in found] == ["tagged"]
+
+
+async def test_punctuation_in_a_query_is_searched_for_not_parsed(migrated_url):
+    """Both engines read their query as syntax; a user types prose.
+
+    `!`, `?` and an apostrophe are operators to `to_tsquery` and `"` ends an
+    FTS5 string — each of these used to raise rather than search.
+    """
+    service = MemoryService(migrated_url)
+    await _store(migrated_url, "boiler", content="the boiler is broken")
+
+    for query in ("Hey! where is the boiler?", "don't forget the boiler!", "boiler :-)", 'he"llo boiler', "boiler <b>"):
+        assert [row["id"] for row in await service.full_text(query)] == ["boiler"], query
+    # Punctuation alone matches nothing, and still does not raise.
+    assert await service.full_text("!! ??") == []

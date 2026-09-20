@@ -78,6 +78,12 @@ class MemoryRepository(BaseRepository[Memory, str]):
             stmt = stmt.offset(offset)
         return (await self.session.exec(stmt)).all()
 
+    async def by_ids(self, ids: Sequence[str]) -> Sequence[Memory]:
+        """The rows for `ids`, in no particular order — the caller has the ranking."""
+        if not ids:
+            return []
+        return (await self.session.exec(select(Memory).where(col(Memory.id).in_(list(ids))))).all()
+
     async def count(
         self,
         *,
@@ -130,7 +136,7 @@ class EntityRepository(BaseRepository[Entity, str]):
         )
         return int((await self.session.exec(stmt)).rowcount)
 
-    async def for_user(self, user_id: str, *, type_: str | None = None, limit: int) -> Sequence[Entity]:
+    async def for_user(self, user_id: str, *, type_: str | None = None, limit: int | None = None) -> Sequence[Entity]:
         where = [col(Entity.user_id) == user_id]
         if type_:
             where.append(col(Entity.type) == type_)

@@ -72,6 +72,20 @@ def json_contains(dialect: str, column: Any, value: str) -> ColumnElement[bool]:
     return cast(document, JSONB).op("?", return_type=Boolean)(value)
 
 
+def json_contains_sql(dialect: str, column: str, parameter: str) -> str:
+    """`json_contains` as a SQL fragment, for the hand-written search queries.
+
+    The full-text engines are raw SQL — FTS5 and `tsvector` have no construct
+    to build — so a tag filter has to go into that SQL as text to be applied
+    before the `LIMIT` rather than after it. Same two dialect forms as
+    `json_contains`, which everything on the query builder uses.
+    """
+    document = f"NULLIF({column}, '')"
+    if dialect == "sqlite":
+        return f"EXISTS (SELECT 1 FROM json_each({document}) WHERE value = :{parameter})"
+    return f"CAST({document} AS JSONB) ? :{parameter}"
+
+
 def day_bucket(dialect: str, epoch_seconds: Any) -> ColumnElement[str]:
     """The UTC calendar day (`YYYY-MM-DD`) of an epoch-seconds column."""
     if dialect == "sqlite":

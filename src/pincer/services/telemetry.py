@@ -19,11 +19,6 @@ if TYPE_CHECKING:
 
 
 class TelemetryService(DatabaseService):
-    #: One connection, reused. Telemetry is a single writer per process, and a
-    #: connection (and so a thread) per write costs milliseconds of audio-loop
-    #: delay at 25 concurrent calls — the overhead test measures it.
-    pooled = True
-
     def __init__(self, url: str | None = None) -> None:
         super().__init__(url)
         self._sql = TelemetryStatements()
@@ -34,7 +29,7 @@ class TelemetryService(DatabaseService):
         A session would buy an identity map for rows nobody reads back, and
         pay for it in loop time behind the audio path.
         """
-        engine = get_engine(self._url, pooled=self.pooled)
+        engine = get_engine(self._url)
         async with engine.begin() as conn:
             await conn.execute(statement, params)
 
@@ -42,7 +37,7 @@ class TelemetryService(DatabaseService):
         """One batch of timeline records: events and closed spans together."""
         if not events and not spans:
             return
-        engine = get_engine(self._url, pooled=self.pooled)
+        engine = get_engine(self._url)
         async with engine.begin() as conn:
             if events:
                 await conn.execute(self._sql.events(), list(events))

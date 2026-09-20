@@ -14,8 +14,9 @@ import asyncio
 import logging
 import os
 import weakref
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from alembic import command
 from alembic.config import Config
@@ -24,11 +25,17 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 logger = logging.getLogger(__name__)
 
 #: Async driver per backend. Alembic and `get_sync_url` speak the plain
 #: backend name; the runtime engine needs the asyncio driver for it.
 _ASYNC_DRIVERS = {"sqlite": "aiosqlite", "postgresql": "asyncpg"}
+
+#: The driver Alembic runs on, per backend.
+_SYNC_DRIVERS = {"sqlite": "sqlite+pysqlite", "postgresql": "postgresql+psycopg"}
 
 #: How long a SQLite writer waits on another connection's lock before failing.
 #: Several processes share one file (the app, the tasks worker, `pincer mcp
@@ -42,12 +49,8 @@ _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 # current, but this cache also skips the repeated Config/connection setup
 # that runs on every one of the ~8 modules' `.initialize()` calls per process.
 #
-# This guard is process-local only: it does not protect against two separate
-# OS processes (e.g. a manual `pincer db upgrade` racing a live `pincer run`,
-# or multiple server workers) upgrading the same file concurrently. SQLite's
-# busy-timeout means the worst case there is a transient "database is locked"
-# error, not corruption — but it is not deduplicated the way in-process calls
-# are.
+# It is process-local, which is why the upgrade itself takes a file lock: see
+# `_migration_lock`.
 _ensured_paths: set[str] = set()
 
 
@@ -61,16 +64,16 @@ def get_sync_url(db_path: Path) -> str:
     """
     override = os.environ.get("PINCER_DATABASE_URL")
     if override:
-        backend = make_url(override).get_backend_name()
-        if backend not in _ASYNC_DRIVERS:
-            raise RuntimeError(
-                f"PINCER_DATABASE_URL names {backend!r}; supported backends are {sorted(_ASYNC_DRIVERS)}"
-            )
-        if backend == "postgresql":
-            # Alembic runs synchronously, so it needs the sync driver even
-            # though everything else uses asyncpg.
-            return make_url(override).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
-        return override
+        parsed = make_url(override)
+        backend = parsed.get_backend_name()
+        if backend not in _SYNC_DRIVERS:
+            raise RuntimeError(f"PINCER_DATABASE_URL names {backend!r}; supported backends are {sorted(_SYNC_DRIVERS)}")
+        # Alembic runs synchronously, so the driver in the override is replaced
+        # with the sync one for this backend even though everything else uses
+        # the asyncio driver. An async driver here would otherwise reach
+        # Alembic's synchronous `engine_from_config` and fail at startup with
+        # `MissingGreenlet`, naming nothing that points back at this variable.
+        return parsed.set(drivername=_SYNC_DRIVERS[backend]).render_as_string(hide_password=False)
     return f"sqlite:///{db_path}"
 
 
@@ -84,6 +87,43 @@ def build_config(db_path: Path) -> Config:
     return cfg
 
 
+@contextmanager
+def _migration_lock(db_path: Path) -> Iterator[None]:
+    """Hold an exclusive lock for the duration of one upgrade.
+
+    Two processes upgrading the same SQLite file at once do not merely contend:
+    SQLite has no transactional DDL, so the loser is not rolled back. Both read
+    `alembic_version`, both run the same `CREATE TABLE`, and one dies with
+    "table already exists" — having left the version stamped at a revision
+    whose DDL was only half applied, which the next start will not re-run. The
+    prod compose file starts `pincer` and `pincer-tasks` against one volume, so
+    a first deploy hits exactly this.
+
+    A lock file next to the database serialises them. It is advisory and local
+    to one host, which matches SQLite. Postgres needs none: its DDL *is*
+    transactional, so a concurrent upgrade either waits on the `alembic_version`
+    row or rolls back whole. Nor does a database with no file to share — an
+    in-memory one is private to the process that opened it.
+    """
+    url = make_url(get_sync_url(db_path))
+    on_disk = url.get_backend_name() == "sqlite" and (url.database or ":memory:") != ":memory:"
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - not POSIX
+        on_disk = False
+    if not on_disk:
+        yield
+        return
+
+    lock_path = db_path.parent / f"{db_path.name}.migrate.lock"
+    handle = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(handle)
+
+
 def ensure_schema_current(db_path: Path) -> None:
     """Apply any pending Alembic migrations to `db_path`, bringing it to head.
 
@@ -95,7 +135,8 @@ def ensure_schema_current(db_path: Path) -> None:
         return
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    command.upgrade(build_config(db_path), "head")
+    with _migration_lock(db_path):
+        command.upgrade(build_config(db_path), "head")
     _ensured_paths.add(resolved)
     logger.debug("Schema at head for %s", db_path)
 
@@ -138,14 +179,8 @@ _engines: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, AsyncEn
 _engines_pid = os.getpid()
 
 
-def get_engine(url: str | None = None, *, pooled: bool = False) -> AsyncEngine:
+def get_engine(url: str | None = None) -> AsyncEngine:
     """The shared async engine for `url` (default: the configured database).
-
-    `pooled` keeps SQLite connections open between units of work instead of
-    opening one per transaction. Only for a single owner writing on its own
-    schedule — telemetry's sink — where the thread per connection costs more
-    than the pool risks. Everything else shares the file with other processes
-    and must not hold connections; see `_create_engine`.
 
     Must be called from a running event loop; see the note on `_engines`.
     """
@@ -159,10 +194,9 @@ def get_engine(url: str | None = None, *, pooled: bool = False) -> AsyncEngine:
     per_loop = _engines.get(loop)
     if per_loop is None:
         per_loop = _engines[loop] = {}
-    key = f"{resolved}|pooled" if pooled else resolved
-    engine = per_loop.get(key)
+    engine = per_loop.get(resolved)
     if engine is None:
-        engine = per_loop[key] = _create_engine(resolved, pooled=pooled)
+        engine = per_loop[resolved] = _create_engine(resolved)
     return engine
 
 
@@ -173,20 +207,18 @@ async def dispose_engines() -> None:
         await engine.dispose()
 
 
-def _create_engine(url: str, *, pooled: bool = False) -> AsyncEngine:
+def _create_engine(url: str) -> AsyncEngine:
     backend = make_url(url).get_backend_name()
     if backend == "sqlite":
-        # NullPool by default: a pooled SQLite connection keeps its transaction
+        # NullPool, always: a pooled SQLite connection keeps its transaction
         # state (and so its write lock) alive between units of work, which
-        # deadlocks the several processes and event loops that share one file.
+        # starves the other processes and event loops that share one file.
         # Opening per unit of work is what the aiosqlite stores did all along.
-        # A `pooled` engine keeps ONE connection instead, for an owner that
-        # writes on its own schedule and would otherwise pay a thread per write.
-        engine = (
-            create_async_engine(url, pool_size=1, max_overflow=0, pool_recycle=300)
-            if pooled
-            else create_async_engine(url, poolclass=NullPool)
-        )
+        # Telemetry ran on a single pooled connection for a while, on the
+        # theory that a thread per write cost audio-loop time; measured, it
+        # cost none (p95 0.4-0.9 ms either way) and it failed one driven call
+        # in four with "database is locked".
+        engine = create_async_engine(url, poolclass=NullPool)
         event.listen(engine.sync_engine, "connect", _apply_sqlite_pragmas)
         return engine
     # A pooled Postgres connection can be dropped server-side while idle.
@@ -214,8 +246,9 @@ async def init_database(db_path: Path | None = None) -> str:
     """Bring the configured database to head, once, at startup.
 
     Every store used to do this in its own `initialize()`; one call at the
-    entry points (`pincer run`, the API lifespan, `pincer mcp serve`, the
-    tasks worker) covers all of them. Returns the runtime URL.
+    entry points — the API lifespan, and `_build_core`, which both `pincer run`
+    and `pincer run tasks` go through — covers all of them. Returns the runtime
+    URL.
     """
     if db_path is None:
         from pincer.config import get_settings_relaxed

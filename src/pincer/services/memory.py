@@ -60,23 +60,24 @@ class MemoryService(DatabaseService):
     ) -> list[dict[str, Any]]:
         """Memories matching `query`, best match first, each with its `score`.
 
-        The text engine returns ids and scores; the rows themselves (and any
-        tag filter) come from the same place every other read does.
+        The text engine applies the whole filter and returns at most `limit`
+        ids; only those rows are then read. Both halves matter: filtering after
+        the engine's `LIMIT` would drop a tagged match ranked below it, and
+        reading the rows unfiltered would pull the user's entire memory table —
+        embeddings included — through Python on every turn.
         """
         async with session_scope(self._url) as session:
             engine = search_for(dialect_of(session))
-            ranked = await engine.ids_for(session, query, user_id=user_id, limit=limit)
+            ranked = await engine.ids_for(session, query, user_id=user_id, limit=limit, tags=tags)
             if not ranked:
                 return []
             scores = dict(ranked)
-            repo = MemoryRepository(session)
-            rows = await repo.search(user_id=user_id, tags=tags, limit=None)
-            found = [_as_dict(row) for row in rows if row.id in scores]
+            found = [_as_dict(row) for row in await MemoryRepository(session).by_ids(list(scores))]
 
         for row in found:
             row["score"] = scores.get(str(row["id"]), 0.0)
         found.sort(key=lambda row: row["score"], reverse=True)
-        return found[:limit]
+        return found
 
     async def stats(self) -> tuple[int, dict[str, int]]:
         """(distinct users, memories per category) — what `pincer memory stats` shows."""
@@ -113,21 +114,30 @@ class MemoryService(DatabaseService):
 
     # ── entities ─────────────────────────────────────────────────────
 
-    async def upsert_entity(self, values: dict[str, Any]) -> None:
-        """One row per (user, name, type); a later sighting updates it."""
+    async def upsert_entity(self, values: dict[str, Any]) -> str:
+        """One row per (user, name, type); a later sighting updates it.
+
+        Returns the id of the row that now holds this entity — the caller's
+        `id` for a new one, the stored id for an existing one. The caller
+        cannot know which in advance, and handing back its own candidate id
+        after an update would name a row that does not exist.
+        """
         async with session_scope(self._url) as session:
             repo = EntityRepository(session)
             existing = await repo.find(str(values["user_id"]), str(values["name"]), str(values["type"]))
             if existing is None:
                 await repo.add(Entity(**values), refresh=False)
-                return
+                return str(values["id"])
             await repo.touch(
                 str(existing.id),
                 attributes_json=str(values["attributes_json"]),
                 last_seen=float(values["last_seen"]),
             )
+            return str(existing.id)
 
-    async def entities_for(self, user_id: str, *, type_: str | None = None, limit: int) -> list[dict[str, Any]]:
+    async def entities_for(
+        self, user_id: str, *, type_: str | None = None, limit: int | None = None
+    ) -> list[dict[str, Any]]:
         async with session_scope(self._url) as session:
             rows = await EntityRepository(session).for_user(user_id, type_=type_, limit=limit)
         return [_as_dict(row) for row in rows]

@@ -18,10 +18,6 @@ class DatabaseService:
     engine per unit of work — so a single instance serves any event loop.
     """
 
-    #: Keep connections open between units of work. Only for a service with a
-    #: single owner writing on its own schedule; see `pincer.db.engine`.
-    pooled: bool = False
-
     def __init__(self, url: str | None = None) -> None:
         self._url = url
 

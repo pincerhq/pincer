@@ -1,9 +1,10 @@
 """
-SQLite persistence for telephony telemetry.
+Persistence for telephony telemetry.
 
-Schema is owned by Alembic revision 0010; this module only reads and writes.
-It follows the same convention as the rest of the voice subsystem: DDL through
-migrations, queries through `aiosqlite` directly.
+Schema is owned by Alembic revisions 0010 and 0016; this module only reads and
+writes. Writes go through `pincer.services.telemetry`; the reads here are the
+legacy `?`-parameterised queries, run on the shared engine so they work on both
+dialects.
 
 Three properties the write path must have, because the data arrives from an
 unreliable world:
@@ -24,32 +25,28 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from pincer.db.engine import get_database_url, get_engine
+from pincer.db.types import IsoText
 from pincer.repositories.telemetry import EVENT_COLUMNS, SPAN_COLUMNS
 from pincer.services.telemetry import TelemetryService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
+    from sqlalchemy import BindParameter
     from sqlalchemy.ext.asyncio import AsyncConnection
 
     from pincer.voice.telemetry.records import TelemetryEvent, TelemetrySpan
 
 logger = logging.getLogger(__name__)
-
-_EVENT_COLUMNS = (
-    "event_id, call_id, provider_call_id, trace_id, span_id, turn_id, name, ts_utc, mono_ns, seq, attributes"
-)
-_SPAN_COLUMNS = (
-    "span_id, call_id, trace_id, parent_span_id, turn_id, name, start_utc, end_utc, "
-    "start_mono_ns, end_mono_ns, duration_ms, status, attempt, attributes"
-)
 
 CALL_FIELDS = (
     "provider_call_id",
@@ -131,53 +128,6 @@ TURN_FIELDS = (
     "created_at",
 )
 
-#: Counters an upsert ADDS to rather than replaces. A call accumulates errors
-#: and interruptions across many independent writes; a plain overwrite would
-#: leave the last writer's view of a running total.
-_ACCUMULATING = frozenset(
-    {
-        "turn_count",
-        "tool_count",
-        "error_count",
-        "timeout_count",
-        "retry_count",
-        "interruption_count",
-        "reconnect_count",
-    }
-)
-
-#: The only statuses a call row may be moved OUT of. Everything else — the
-#: statuses `CallTracer.finish` writes: "completed", "failed", "ended" — is
-#: terminal and ABSORBING.
-#:
-#: Stated as the live set rather than the terminal set on purpose: a terminal
-#: status added later is then absorbing by default, whereas a forgotten entry
-#: in a terminal list would silently re-open the hole. The live set is written
-#: in exactly two places (`CallTracer.registered` and `.answered`).
-#:
-#: Why this lives in the UPDATE and not in a Python guard: Twilio retries
-#: status callbacks for minutes, and by the time a late one lands the original
-#: `CallTracer` may have been evicted (`runtime._MAX_TRACERS`, a 900 s context
-#: TTL) or the process restarted. A caller then builds a FRESH tracer whose
-#: `_finished` is False — see `hooks.call_declined` — and an in-memory flag
-#: cannot see the terminal write the previous instance made. The row can.
-LIVE_STATUSES = ("active", "connected")
-
-_STATUS_ASSIGNMENT = "status=CASE WHEN COALESCE(telephony_calls.status,'') IN ('', {live}) THEN excluded.status ELSE telephony_calls.status END".format(  # noqa: E501
-    live=", ".join(f"'{s}'" for s in LIVE_STATUSES)
-)
-
-
-def _assignment(column: str) -> str:
-    """The `DO UPDATE SET` clause for one column."""
-    if column in _ACCUMULATING:
-        return f"{column}=telephony_calls.{column}+excluded.{column}"
-    if column == "status":
-        # COALESCE covers the row `dial_requested()` can create before anything
-        # has set a status at all: NULL is not terminal, it is "not yet known".
-        return _STATUS_ASSIGNMENT
-    return f"{column}=excluded.{column}"
-
 
 def _named(sql: str, params: Sequence[Any]) -> tuple[str, dict[str, Any]]:
     """Positional `?` placeholders as named ones.
@@ -207,11 +157,47 @@ async def connect(db_path: str | Path) -> AsyncIterator[AsyncConnection]:
         yield conn
 
 
+#: An ISO-8601 timestamp, as the telemetry columns store it. Loose on purpose:
+#: it only has to separate a timestamp from the other things these queries
+#: compare — ids, names, statuses, `LIKE` needles (which carry `%`) and numbers.
+_ISO_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
+
+_ISO_TEXT = IsoText()
+
+
+def _bound(name: str, value: Any) -> BindParameter[Any]:
+    """One parameter, typed if it is a timestamp.
+
+    The write path binds each parameter to its model column's type; a read
+    written as raw SQL has no column to take one from. Without this an ISO
+    string goes straight at a `TIMESTAMP` column and Postgres refuses it — so
+    every windowed read (the overview, call search, every alert) would fail
+    while the unwindowed ones worked.
+    """
+    if isinstance(value, str) and _ISO_STAMP.match(value):
+        return bindparam(name, value, type_=_ISO_TEXT)
+    return bindparam(name, value)
+
+
 async def fetch(db: AsyncConnection, sql: str, params: Sequence[Any] = ()) -> list[Any]:
-    """Run one read, returning rows addressable by column name."""
+    """Run one read, returning rows addressable by column name.
+
+    Timestamps come back as the ISO strings every caller and the dashboard
+    expect, on both dialects: Postgres hands back a naive `datetime` for a
+    `TIMESTAMP` column, and `SELECT *` through `text()` has no result type to
+    convert it. An offset-less string would be read as local time by the
+    browser.
+    """
     statement, values = _named(sql, params)
-    result = await db.execute(text(statement), values)
-    return list(result.mappings().all())
+    stmt = text(statement).bindparams(*(_bound(name, value) for name, value in values.items()))
+    result = await db.execute(stmt)
+    return [
+        {
+            column: _ISO_TEXT.process_result_value(value, db.dialect) if isinstance(value, datetime) else value
+            for column, value in row.items()
+        }
+        for row in result.mappings().all()
+    ]
 
 
 async def tables_present(db: AsyncConnection) -> bool:

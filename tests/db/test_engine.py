@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.pool import NullPool
 
 from pincer.db.engine import (
     SQLITE_BUSY_TIMEOUT_MS,
@@ -14,6 +18,7 @@ from pincer.db.engine import (
     get_database_url,
     get_engine,
     get_sync_url,
+    init_database,
     to_async_url,
 )
 
@@ -39,16 +44,39 @@ def test_the_runtime_url_follows_the_migration_url(monkeypatch, tmp_path):
 
 
 def test_postgres_is_addressable_now_that_every_domain_uses_the_engine(monkeypatch, tmp_path):
-    monkeypatch.setenv("PINCER_DATABASE_URL", "postgresql://u@h/db")
-    assert get_database_url(tmp_path / "p.db") == "postgresql+asyncpg://u@h/db"
-    # Alembic runs synchronously, so migrations use the sync driver.
-    assert get_sync_url(tmp_path / "p.db") == "postgresql+psycopg://u@h/db"
+    monkeypatch.setenv("PINCER_DATABASE_URL", "postgresql://u:secret@h/db")
+    assert get_database_url(tmp_path / "p.db") == "postgresql+asyncpg://u:secret@h/db"
+    # Alembic runs synchronously, so migrations use the sync driver. The
+    # password has to survive being re-rendered, or Alembic authenticates as
+    # `***` and the process dies at startup on a password error.
+    assert get_sync_url(tmp_path / "p.db") == "postgresql+psycopg://u:secret@h/db"
 
 
 def test_an_unsupported_backend_in_the_configured_url_is_refused(monkeypatch, tmp_path):
     monkeypatch.setenv("PINCER_DATABASE_URL", "mysql://u@h/db")
     with pytest.raises(RuntimeError, match="mysql"):
         get_sync_url(tmp_path / "p.db")
+
+
+def test_an_async_driver_in_the_configured_url_still_gives_alembic_a_sync_one(monkeypatch, tmp_path):
+    """Alembic's `engine_from_config` is synchronous: an async driver reaches it
+    as `MissingGreenlet` at startup, naming nothing that points back here."""
+    monkeypatch.setenv("PINCER_DATABASE_URL", "sqlite+aiosqlite:////tmp/x.db")
+    assert get_sync_url(tmp_path / "p.db") == "sqlite+pysqlite:////tmp/x.db"
+
+
+async def test_sqlite_connections_are_never_held_between_units_of_work(tmp_path: Path):
+    """A pooled SQLite connection keeps its write lock alive between units of
+    work, and the other processes sharing the file get "database is locked".
+
+    Telemetry ran on one pooled connection for a while: it failed a driven
+    call in four, and measuring showed it bought no audio-loop time at all.
+    """
+    engine = get_engine(to_async_url(f"sqlite:///{tmp_path / 'p.db'}"))
+    try:
+        assert isinstance(engine.pool, NullPool)
+    finally:
+        await dispose_engines()
 
 
 async def test_sqlite_connections_get_the_shared_pragmas(tmp_path: Path):
@@ -106,3 +134,59 @@ def test_each_event_loop_gets_its_own_engine(tmp_path: Path):
 def test_an_engine_needs_a_running_loop(tmp_path: Path):
     with pytest.raises(RuntimeError):
         get_engine(to_async_url(f"sqlite:///{tmp_path / 'p.db'}"))
+
+
+def test_several_processes_can_migrate_one_fresh_database_at_once(tmp_path: Path):
+    """The prod compose file starts two containers on one volume.
+
+    SQLite has no transactional DDL, so without a lock the loser of this race
+    is not rolled back: it dies on a `CREATE TABLE` the winner already ran,
+    having left `alembic_version` stamped at a revision only half applied.
+    """
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import asyncio, sys\n"
+        "from pathlib import Path\n"
+        "from pincer.db.engine import init_database\n"
+        "asyncio.run(init_database(Path(sys.argv[1])))\n"
+    )
+    db_path = tmp_path / "fresh.db"
+
+    started = [
+        subprocess.Popen(  # noqa: S603 - fixed argv, test-local script
+            [sys.executable, str(worker), str(db_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(4)
+    ]
+    failures = [process.communicate()[1] for process in started if process.wait() != 0]
+    assert failures == []
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM alembic_version").fetchone()[0] == 1
+
+
+async def test_init_database_migrates_the_configured_database_and_names_it(monkeypatch, tmp_path: Path):
+    """The entry points call this and discard the URL; `db_path=None` is the
+    branch `pincer run` actually takes, through the settings."""
+    monkeypatch.delenv("PINCER_DATABASE_URL", raising=False)
+    db_path = tmp_path / "configured.db"
+
+    class _Settings:
+        pass
+
+    settings = _Settings()
+    settings.db_path = db_path
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
+
+    try:
+        url = await init_database()
+        assert url == to_async_url(f"sqlite:///{db_path}")
+        with sqlite3.connect(db_path) as conn:
+            # Not just "a file exists": the schema is actually at head.
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"alembic_version", "memories", "telephony_calls"} <= tables
+    finally:
+        await dispose_engines()

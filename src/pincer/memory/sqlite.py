@@ -64,11 +64,6 @@ def _unpack_embedding(blob: bytes) -> list[float]:
     return list(struct.unpack(f"{count}f", blob))
 
 
-#: How many of a user's entities one read returns. Entities are a handful per
-#: user; this is a guard against an unbounded read, not a paging feature.
-_ENTITY_PAGE = 1000
-
-
 def _memory_from_row(row: dict[str, Any], *, score: float = 0.0, tags: list[str] | None = None) -> Memory:
     return Memory(
         id=str(row["id"]),
@@ -278,24 +273,22 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         attributes: dict[str, str] | None = None,
     ) -> str:
         """Store or update a named entity. Returns entity ID."""
-        now = time.time()
-        existing = await self._store.entities_for(user_id, type_=entity_type, limit=_ENTITY_PAGE)
-        ent_id = next((str(row["id"]) for row in existing if row["name"] == name), str(uuid.uuid4()))
-        await self._store.upsert_entity(
+        return await self._store.upsert_entity(
             {
-                "id": ent_id,
+                # A candidate, used only if this entity is new; the store
+                # matches on (user, name, type) and returns the id that won.
+                "id": str(uuid.uuid4()),
                 "user_id": user_id,
                 "name": name,
                 "type": entity_type,
                 "attributes_json": json.dumps(attributes or {}),
-                "last_seen": now,
+                "last_seen": time.time(),
             }
         )
-        return ent_id
 
     async def get_entities(self, user_id: str, entity_type: str | None = None) -> list[Entity]:
         """Get all entities for a user, optionally filtered by type."""
-        rows = await self._store.entities_for(user_id, type_=entity_type, limit=_ENTITY_PAGE)
+        rows = await self._store.entities_for(user_id, type_=entity_type)
         return [
             Entity(
                 id=str(row["id"]),
