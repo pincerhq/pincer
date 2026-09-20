@@ -164,6 +164,13 @@ class TranscriptRepository(BaseRepository[CallTranscript, str]):
         where = [col(CallTranscript.call_id) == call_id]
         if final_only:
             where.append(col(CallTranscript.is_final).is_(True))
+        # `id` breaks a timestamp tie, and utterances inside one second are
+        # the normal case. That still works now the key is a UUIDv7: the
+        # canonical form is fixed-width lowercase hex, so ordering it as text
+        # is ordering the uuid by its bytes, which for a v7 is ordering by
+        # time — and rows written in the same millisecond are separated by the
+        # generator's counter. Migration 0017 gave the pre-existing rows ids
+        # carrying their own timestamps, so history sorts the same way.
         return await self.list(*where, order_by=[col(CallTranscript.timestamp), col(CallTranscript.id)], limit=limit)
 
 

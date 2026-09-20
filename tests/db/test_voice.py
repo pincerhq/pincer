@@ -187,6 +187,36 @@ async def test_a_message_survives_a_failing_intent_stamp(url, monkeypatch):
     assert row.matter == "call back"
 
 
+# ── the ordering the key is responsible for ──────────────────────────
+
+
+async def test_utterances_spoken_in_one_second_keep_their_order(url):
+    """`transcript_for` orders by `(timestamp, id)`, and a call's utterances
+    routinely share a timestamp — so the key is what keeps them in the order
+    they were spoken. A random key would scramble the transcript, which reads
+    as the caller and the agent talking over each other.
+
+    A UUIDv7 holds that line because it sorts by time and, inside one
+    millisecond, by the generator's counter.
+    """
+    calls = CallsService(url)
+    spoken = ["one", "two", "three", "four", "five"]
+    await calls.add_transcript_lines(
+        [{"call_id": "CA1", "speaker": "caller", "text": text, "timestamp": EARLIER} for text in spoken]
+    )
+
+    assert [line["text"] for line in await calls.transcript_for("CA1")] == spoken
+
+
+async def test_messages_left_in_one_second_come_back_newest_first(url):
+    """`newest` orders by `(created_at DESC, id DESC)`, same reasoning."""
+    messages = MessagesService(url)
+    for index in range(4):
+        await messages.record({"call_sid": f"CA{index}", "matter": str(index), "created_at": EARLIER})
+
+    assert [row["matter"] for row in await messages.newest(10)] == ["3", "2", "1", "0"]
+
+
 # ── contacts ─────────────────────────────────────────────────────────
 
 

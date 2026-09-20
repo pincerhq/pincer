@@ -28,6 +28,8 @@ class InboundMessageRepository(BaseRepository[InboundMessage, str]):
         return int((await self.session.exec(stmt)).rowcount)
 
     async def newest(self, limit: int) -> Sequence[InboundMessage]:
+        # `id` breaks a timestamp tie; see `TranscriptRepository.for_call` for
+        # why a UUIDv7 key still orders by time.
         return await self.list(
             order_by=[col(InboundMessage.created_at).desc(), col(InboundMessage.id).desc()], limit=limit
         )
