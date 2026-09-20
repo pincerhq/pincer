@@ -406,7 +406,7 @@ class SlackChannel(BaseChannel):
         timeout: float = 120.0,
     ) -> bool:
         """Send approval buttons and wait for user's response (True = approved)."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         fut: asyncio.Future[bool] = loop.create_future()
         self._pending_approvals[approval_id] = fut
 

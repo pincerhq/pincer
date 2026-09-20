@@ -231,7 +231,7 @@ today) and Postgres (a future target) — see `pincer/db/engine.py` and
 pincer/
 ├── .env.example                    # Environment variables template
 ├── .gitignore
-├── .python-version                 # Python 3.12+
+├── .python-version                 # Python 3.14+
 ├── Dockerfile                      # Container image
 ├── docker-compose.yml              # Docker Compose setup
 ├── main.py                         # Application entry point
@@ -424,7 +424,7 @@ pincer/
 
 | Layer | Technology |
 |-------|-----------|
-| Language | Python 3.12+ |
+| Language | Python 3.14+ |
 | Package Manager | uv (with hatchling build backend) |
 | LLM Clients | `anthropic`, `openai` |
 | HTTP | `httpx` |

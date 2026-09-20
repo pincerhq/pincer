@@ -4,13 +4,13 @@ version = "0.8.0"
 description = "Your personal AI agent. Text it on WhatsApp. It does stuff. 🦜"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 keywords = ["ai", "agent", "whatsapp", "telegram", "llm", "assistant", "pincer"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Communications :: Chat",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -110,8 +110,8 @@ dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=6.0.0",
-    "ruff>=0.8.0",
-    "mypy>=1.13.0",
+    "ruff>=0.14.0",
+    "mypy>=1.18.0",
     "bandit>=1.7.0",
     "types-croniter>=1.0.0",
     "types-qrcode>=8.0.0",
@@ -154,6 +154,11 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 
 [tool.ruff]
+# Deliberately behind `requires-python`. This setting governs the syntax the
+# formatter may EMIT, and at py314 it rewrites every `except (A, B):` into
+# PEP 758's unparenthesised `except A, B:` — 94 lines across 38 files, no
+# benefit, and unreadable to anyone not tracking 3.14 syntax. Raise it when
+# there is a reason to use 3.13+ syntax, not merely to match the floor.
 target-version = "py312"
 line-length = 120
 
@@ -174,7 +179,7 @@ extend-ignore = ["N814", "N818"]
 "src/pincer/api/**" = ["TC001", "TC002", "TC003"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 strict = true
 ignore_missing_imports = true
 warn_unused_ignores = false

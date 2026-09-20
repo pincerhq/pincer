@@ -1161,7 +1161,7 @@ async def _run_agent(settings: Settings) -> None:
             )
         if channel == "telegram" and tg is not None:
             raw_id = await _raw_id(user_id, "telegram")
-            fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
+            fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
             _pending_ask[user_id] = fut  # keyed on canonical so on_message lookup works
             try:
                 await tg.send(

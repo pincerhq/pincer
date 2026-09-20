@@ -154,8 +154,8 @@ docker run -d \
 For a basic Ubuntu/Debian server:
 
 ```bash
-# Install Python 3.12
-sudo apt update && sudo apt install -y python3.12 python3.12-venv
+# Install Python 3.14
+sudo apt update && sudo apt install -y python3.14 python3.14-venv
 
 # Install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh

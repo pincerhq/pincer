@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project
 
-Pincer (`pincer-agent`) is a self-hosted, security-first AI agent that operates across messaging channels (Telegram, WhatsApp, Discord, Slack, Signal, Email, Voice, Web) with 300+ native tools plus unlimited tools via MCP. Pure Python 3.12+ / `asyncio` — **no agent framework** (no LangChain, CrewAI, etc.), just provider SDKs (`anthropic`, `openai`) directly. The codebase is intentionally auditable. When building or extending LLM-facing functionality, prefer the latest Codex models and consult the `Codex-api` skill for current model IDs.
+Pincer (`pincer-agent`) is a self-hosted, security-first AI agent that operates across messaging channels (Telegram, WhatsApp, Discord, Slack, Signal, Email, Voice, Web) with 300+ native tools plus unlimited tools via MCP. Pure Python 3.14+ / `asyncio` — **no agent framework** (no LangChain, CrewAI, etc.), just provider SDKs (`anthropic`, `openai`) directly. The codebase is intentionally auditable. When building or extending LLM-facing functionality, prefer the latest Codex models and consult the `Codex-api` skill for current model IDs.
 
 ## Commands
 
