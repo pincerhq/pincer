@@ -41,8 +41,22 @@ def _retrying() -> Any:
 
 
 @router.actor(confirmation_mode="auto", on_error="nack")
-async def run_scheduled_action(schedule_id: int) -> None:
-    """Execute a due cron schedule (briefing, custom action, ...)."""
+async def run_scheduled_action(schedule_id: str | int) -> None:
+    """Execute a due cron schedule (briefing, custom action, ...).
+
+    `int` is accepted for one release only. Schedule ids became UUIDv7 in
+    migration 0017, and a job enqueued before that deploy is still sitting in
+    the queue carrying the old integer — which now names no row, and on
+    Postgres is not even a valid key. Drop it loudly rather than letting it
+    fail as an unexplained lookup miss. Drain the queue and this branch can go.
+    """
+    if isinstance(schedule_id, int):
+        logger.warning(
+            "Scheduled action dropped: id=%s was enqueued before schedule ids became UUIDv7 "
+            "(migration 0017) and no longer names a row",
+            schedule_id,
+        )
+        return
     logger.info("Scheduled action starting: schedule_id=%s", schedule_id)
     settings = get_settings()
     store = CronScheduler(settings.db_path)

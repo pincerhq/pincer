@@ -4,7 +4,8 @@ import sqlalchemy as sa
 from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, Text
 from sqlmodel import Field, SQLModel
 
-from pincer.db.types import IsoText, Real
+from pincer.db.ids import new_id
+from pincer.db.types import IsoText, Real, Uuid7
 
 
 class VoiceCall(SQLModel, table=True):
@@ -13,10 +14,9 @@ class VoiceCall(SQLModel, table=True):
         Index("idx_calls_thread", "thread_id"),
         Index("idx_voice_calls_failure", "failure_code"),
         Index("idx_voice_calls_started", "started_at"),
-        {"sqlite_autoincrement": True},
     )
 
-    id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     call_sid: str = Field(sa_column=Column(Text(), unique=True, nullable=False))
     direction: str | None = Field(
         default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("'inbound'"))
@@ -43,10 +43,9 @@ class CallTranscript(SQLModel, table=True):
     __table_args__ = (
         Index("idx_call_transcripts_call", "call_id"),
         Index("idx_call_transcripts_ts", "timestamp"),
-        {"sqlite_autoincrement": True},
     )
 
-    id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     call_id: str = Field(sa_column=Column(Text(), nullable=False))
     speaker: str = Field(sa_column=Column(Text(), nullable=False))
     text: str = Field(sa_column=Column(Text(), nullable=False))
@@ -61,10 +60,9 @@ class CallAction(SQLModel, table=True):
     __table_args__ = (
         Index("idx_call_actions_call", "call_id"),
         Index("idx_call_actions_ts", "timestamp"),
-        {"sqlite_autoincrement": True},
     )
 
-    id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     call_id: str = Field(sa_column=Column(Text(), nullable=False))
     action_type: str = Field(sa_column=Column(Text(), nullable=False))
     tool_name: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
@@ -79,12 +77,9 @@ class CallAction(SQLModel, table=True):
 
 class PhoneContact(SQLModel, table=True):
     __tablename__ = "phone_contacts"
-    __table_args__ = (
-        Index("idx_phone_contacts_user", "user_id"),
-        {"sqlite_autoincrement": True},
-    )
+    __table_args__ = (Index("idx_phone_contacts_user", "user_id"),)
 
-    id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     user_id: str | None = Field(default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("''")))
     name: str = Field(sa_column=Column(Text(), nullable=False))
     phone_number: str = Field(sa_column=Column(Text(), nullable=False))
@@ -111,10 +106,9 @@ class OutboundCallLog(SQLModel, table=True):
     __table_args__ = (
         Index("idx_outbound_log_day", "local_day"),
         Index("idx_outbound_log_number", "phone_number", "placed_at"),
-        {"sqlite_autoincrement": True},
     )
 
-    id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     phone_number: str = Field(sa_column=Column(Text(), nullable=False))
     user_id: str | None = Field(default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("''")))
     channel: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
@@ -125,12 +119,9 @@ class OutboundCallLog(SQLModel, table=True):
 
 class InboundMessage(SQLModel, table=True):
     __tablename__ = "inbound_messages"
-    __table_args__ = (
-        Index("idx_inbound_messages_call", "call_sid"),
-        {"sqlite_autoincrement": True},
-    )
+    __table_args__ = (Index("idx_inbound_messages_call", "call_sid"),)
 
-    id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     call_sid: str = Field(sa_column=Column(Text(), nullable=False))
     caller_name: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     caller_name_unverified: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))

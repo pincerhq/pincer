@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from pincer.db.engine import get_engine
@@ -171,7 +173,7 @@ async def test_a_message_survives_a_failing_intent_stamp(url, monkeypatch):
         {"call_sid": "CA1", "matter": "call back", "created_at": EARLIER}, inbound_intent="message"
     )
 
-    assert message_id > 0
+    assert uuid.UUID(message_id).version == 7
     async with session_scope(url) as session:
         from pincer.repositories.voice import InboundMessageRepository
 
@@ -255,7 +257,7 @@ async def test_a_retaken_message_replaces_the_earlier_one_and_stamps_the_call(ur
     await messages.record({"call_sid": "CA1", "matter": "first", "created_at": EARLIER}, inbound_intent="message")
     message_id = await messages.record({"call_sid": "CA1", "matter": "second", "created_at": LATER})
 
-    assert message_id > 0
+    assert uuid.UUID(message_id).version == 7
     async with session_scope(url) as session:
         from pincer.repositories.voice import InboundMessageRepository
 

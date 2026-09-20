@@ -543,7 +543,7 @@ def _register_schedule_tools(tools: ToolRegistry, settings: Settings, report: di
             "properties": {
                 "name": {"type": "string"},
                 "schedule_id": {
-                    "type": "integer",
+                    "type": "string",
                     "description": "Only needed if multiple schedules share the same name",
                 },
             },
@@ -561,7 +561,7 @@ def _register_schedule_tools(tools: ToolRegistry, settings: Settings, report: di
                 "name": {"type": "string"},
                 "enabled": {"type": "boolean"},
                 "schedule_id": {
-                    "type": "integer",
+                    "type": "string",
                     "description": "Only needed if multiple schedules share the same name",
                 },
             },

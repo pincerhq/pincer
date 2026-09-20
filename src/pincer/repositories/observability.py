@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-class AppointmentOutcomeRepository(BaseRepository[AppointmentOutcome, int]):
+class AppointmentOutcomeRepository(BaseRepository[AppointmentOutcome, str]):
     model = AppointmentOutcome
 
     async def record(self, values: dict[str, Any]) -> None:
@@ -84,7 +84,7 @@ class CallCostRepository(BaseRepository[CallCost, str]):
         return {sid: float(total or 0.0) for sid, total in (await self.session.exec(stmt)).all()}
 
 
-class CanaryRunRepository(BaseRepository[CanaryRun, int]):
+class CanaryRunRepository(BaseRepository[CanaryRun, str]):
     model = CanaryRun
 
     async def since(self, cutoff: str, *, failed_only: bool = False) -> Sequence[CanaryRun]:

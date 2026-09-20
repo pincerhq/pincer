@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from sqlalchemy import ColumnElement
 
 
-class AuditLogRepository(BaseRepository[AuditLog, int]):
+class AuditLogRepository(BaseRepository[AuditLog, str]):
     model = AuditLog
 
     @staticmethod

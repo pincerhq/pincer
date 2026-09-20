@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import aiosqlite
 import pytest
+from support import fill_row_ids
 
 from pincer.voice import status_notify
 from pincer.voice.engine import CallDirection, CallState
@@ -236,6 +237,7 @@ class TestTranscriptTool:
                 ("CA_t1", "caller", "Der Termin ist bestätigt.", "2026-08-16T10:00:02+00:00"),
             )
             await db.commit()
+            await fill_row_ids(db)
 
     async def test_returns_masked_transcript(self, tmp_path, monkeypatch):
         db_path = tmp_path / "pincer.db"

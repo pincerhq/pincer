@@ -63,7 +63,7 @@ class Schedule:
     )
 
     def __init__(self, row: dict[str, Any]) -> None:
-        self.id: int = row["id"]
+        self.id: str = row["id"]
         self.pincer_user_id: str = row["pincer_user_id"]
         self.name: str = row["name"]
         self.cron_expr: str = row["cron_expr"]
@@ -115,13 +115,13 @@ class CronScheduler:
         pincer_user_id: str,
         tz: str = "UTC",
         channel: str = "telegram",
-    ) -> int:
+    ) -> str:
         return await self._svc.add(name, cron_expr, action, pincer_user_id, tz, channel)
 
-    async def remove(self, schedule_id: int, pincer_user_id: str) -> bool:
+    async def remove(self, schedule_id: str, pincer_user_id: str) -> bool:
         return await self._svc.remove(schedule_id, pincer_user_id)
 
-    async def toggle(self, schedule_id: int, enabled: bool, pincer_user_id: str) -> bool:
+    async def toggle(self, schedule_id: str, enabled: bool, pincer_user_id: str) -> bool:
         return await self._svc.toggle(schedule_id, enabled, pincer_user_id)
 
     async def list_schedules(self, pincer_user_id: str) -> list[dict[str, Any]]:
@@ -131,7 +131,7 @@ class CronScheduler:
         """All schedules across all users, unordered (caller classifies/sorts)."""
         return await self._svc.list_all()
 
-    async def get(self, schedule_id: int) -> Schedule | None:
+    async def get(self, schedule_id: str) -> Schedule | None:
         row = await self._svc.get(schedule_id)
         return Schedule(row) if row is not None else None
 

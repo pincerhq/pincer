@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import aiosqlite
 import pytest
+from support import fill_row_ids
 
 from pincer.voice import analytics as an
 from pincer.voice.analytics import (
@@ -366,6 +367,7 @@ async def _seed_call(db_path: str, call_sid: str, started_at: datetime, directio
             (call_sid, direction, started_at.isoformat(), (started_at + timedelta(minutes=1)).isoformat()),
         )
         await db.commit()
+        await fill_row_ids(db)
 
 
 async def test_analytics_round_trip(db_path):

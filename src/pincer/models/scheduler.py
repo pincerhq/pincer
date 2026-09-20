@@ -4,7 +4,8 @@ import sqlalchemy as sa
 from sqlalchemy import Column, Index, Integer, Text, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
-from pincer.db.types import IsoText
+from pincer.db.ids import new_id
+from pincer.db.types import IsoText, Uuid7
 
 
 class Schedule(SQLModel, table=True):
@@ -16,10 +17,9 @@ class Schedule(SQLModel, table=True):
             sqlite_where=sa.text("enabled = 1"),
             postgresql_where=sa.text("enabled = 1"),
         ),
-        {"sqlite_autoincrement": True},
     )
 
-    id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     pincer_user_id: str = Field(sa_column=Column(Text(), nullable=False))
     name: str = Field(sa_column=Column(Text(), nullable=False))
     cron_expr: str = Field(sa_column=Column(Text(), nullable=False))
@@ -43,12 +43,9 @@ class Schedule(SQLModel, table=True):
 
 class EventTrigger(SQLModel, table=True):
     __tablename__ = "event_triggers"
-    __table_args__ = (
-        UniqueConstraint("trigger_type", "trigger_key"),
-        {"sqlite_autoincrement": True},
-    )
+    __table_args__ = (UniqueConstraint("trigger_type", "trigger_key"),)
 
-    id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     trigger_type: str = Field(sa_column=Column(Text(), nullable=False))
     trigger_key: str = Field(sa_column=Column(Text(), nullable=False))
     pincer_user_id: str = Field(sa_column=Column(Text(), nullable=False))
@@ -60,9 +57,8 @@ class EventTrigger(SQLModel, table=True):
 
 class BriefingConfig(SQLModel, table=True):
     __tablename__ = "briefing_configs"
-    __table_args__ = {"sqlite_autoincrement": True}
 
-    id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     pincer_user_id: str = Field(sa_column=Column(Text(), unique=True, nullable=False))
     sections: str | None = Field(
         default=None,

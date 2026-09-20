@@ -4,7 +4,8 @@ import sqlalchemy as sa
 from sqlalchemy import Column, Index, Integer, Text
 from sqlmodel import Field, SQLModel
 
-from pincer.db.types import IsoText, Real
+from pincer.db.ids import new_id
+from pincer.db.types import IsoText, Real, Uuid7
 
 
 class AppointmentOutcome(SQLModel, table=True):
@@ -12,10 +13,9 @@ class AppointmentOutcome(SQLModel, table=True):
     __table_args__ = (
         Index("idx_appointment_outcomes_recorded", "recorded_at"),
         Index("idx_appointment_outcomes_task", "task_id", unique=True),
-        {"sqlite_autoincrement": True},
     )
 
-    id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     task_id: str = Field(sa_column=Column(Text(), nullable=False))
     call_sid: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     result: str = Field(sa_column=Column(Text(), nullable=False))
@@ -48,12 +48,9 @@ class CallCost(SQLModel, table=True):
 
 class CanaryRun(SQLModel, table=True):
     __tablename__ = "canary_runs"
-    __table_args__ = (
-        Index("idx_canary_runs_ran_at", "ran_at"),
-        {"sqlite_autoincrement": True},
-    )
+    __table_args__ = (Index("idx_canary_runs_ran_at", "ran_at"),)
 
-    id: int | None = Field(default=None, sa_column=Column(Integer(), primary_key=True, autoincrement=True))
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     ran_at: str = Field(sa_column=Column(IsoText(), nullable=False))
     ok: int = Field(sa_column=Column(Integer(), nullable=False))
     skipped: int | None = Field(default=None, sa_column=Column(Integer(), nullable=False, server_default=sa.text("0")))

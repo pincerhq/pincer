@@ -42,7 +42,7 @@ class DoNotCallRepository(BaseRepository[DoNotCallNumber, str]):
         return await self.list(order_by=[col(DoNotCallNumber.added_at).desc()])
 
 
-class OutboundCallLogRepository(BaseRepository[OutboundCallLog, int]):
+class OutboundCallLogRepository(BaseRepository[OutboundCallLog, str]):
     model = OutboundCallLog
 
     async def count_for_day(self, local_day: str) -> int:

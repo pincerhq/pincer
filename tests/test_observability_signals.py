@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
+from support import fill_row_ids
 
 from pincer.observability.failure_codes import (
     EXCLUDED_FROM_SLO,
@@ -70,6 +71,7 @@ async def _seed_calls(settings, codes: list[str], hours_ago: float = 0.5) -> Non
                 (f"CA{i}_{code}", started, ended, code),
             )
         await db.commit()
+        await fill_row_ids(db)
 
 
 def _write_turns(settings, totals_ms: list[float], hours_ago: float = 0.1) -> None:
@@ -296,6 +298,7 @@ async def _seed_costs(settings, totals: list[float], hours_ago: float = 1.0) -> 
                 (f"CA_cost_{hours_ago}_{i}", total, recorded),
             )
         await db.commit()
+        await fill_row_ids(db)
 
 
 async def test_cost_per_call_is_a_ratio_to_the_baseline(settings):

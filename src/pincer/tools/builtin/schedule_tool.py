@@ -46,8 +46,8 @@ async def _resolve_schedule_id(
     scheduler: CronScheduler,
     pincer_user_id: str,
     name: str,
-    schedule_id: int | None,
-) -> int:
+    schedule_id: str | None,
+) -> str:
     """Resolve a schedule by explicit id or by name, scoped to the calling user."""
     if schedule_id is not None:
         return schedule_id
@@ -59,7 +59,7 @@ async def _resolve_schedule_id(
     if len(matches) > 1:
         ids = ", ".join(str(m["id"]) for m in matches)
         raise ValueError(f"Multiple schedules named '{name}' found (ids: {ids}). Pass schedule_id to disambiguate.")
-    return int(matches[0]["id"])
+    return str(matches[0]["id"])
 
 
 def make_schedule_create_handler(tool_registry: ToolRegistry) -> Callable[..., Awaitable[str]]:
@@ -207,7 +207,7 @@ async def schedule_list(context: dict[str, Any] | None = None) -> str:
 
 async def schedule_remove(
     name: str,
-    schedule_id: int | None = None,
+    schedule_id: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> str:
     """Remove a scheduled job by name (or schedule_id if names collide)."""
@@ -229,7 +229,7 @@ async def schedule_remove(
 async def schedule_toggle(
     name: str,
     enabled: bool,
-    schedule_id: int | None = None,
+    schedule_id: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> str:
     """Enable or disable a scheduled job by name (or schedule_id if names collide)."""

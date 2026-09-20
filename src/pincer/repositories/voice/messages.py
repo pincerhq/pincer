@@ -14,14 +14,14 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-class InboundMessageRepository(BaseRepository[InboundMessage, int]):
+class InboundMessageRepository(BaseRepository[InboundMessage, str]):
     model = InboundMessage
 
-    async def replace_for_call(self, call_sid: str, values: dict[str, Any]) -> int:
+    async def replace_for_call(self, call_sid: str, values: dict[str, Any]) -> str:
         """One message per call: a re-take replaces the earlier one."""
         await self.delete_where(col(InboundMessage.call_sid) == call_sid)
         row = await self.add(InboundMessage(**values))
-        return int(row.id or 0)
+        return row.id
 
     async def mark_delivered(self, call_sid: str, when: str) -> int:
         stmt = update(InboundMessage).where(col(InboundMessage.call_sid) == call_sid).values(delivered_to_owner_at=when)

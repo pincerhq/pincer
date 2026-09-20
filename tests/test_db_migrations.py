@@ -3,6 +3,8 @@
 import contextlib
 import importlib.util
 import sqlite3
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import sqlalchemy as sa
@@ -977,6 +979,31 @@ _SEED_0010 = {
 _LINK = "INSERT INTO channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '1', 'usr_a')"
 
 
+def _uuid7_tables() -> tuple[tuple[str, str, str], ...]:
+    """The table list migration 0017 converts, read from the revision itself."""
+    spec = importlib.util.spec_from_file_location(
+        "_rev_0017", Path(engine.__file__).parent / "migrations" / "versions" / "0017_uuid7_row_ids.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return tuple(module.TABLES)
+
+
+def _shape(inspector: sa.Inspector, table: str) -> dict[str, object]:
+    """Everything about a table except the type of its `id` column."""
+    return {
+        "columns": sorted((c["name"], bool(c["nullable"])) for c in inspector.get_columns(table) if c["name"] != "id"),
+        "indexes": sorted(
+            (i["name"], tuple(i["column_names"]), bool(i.get("unique"))) for i in inspector.get_indexes(table)
+        ),
+        "unique": sorted(
+            (u.get("name") or "", tuple(u["column_names"])) for u in inspector.get_unique_constraints(table)
+        ),
+        "pk": tuple(inspector.get_pk_constraint(table)["constrained_columns"]),
+    }
+
+
 @contextlib.contextmanager
 def _connect(url: str):
     engine = sa.create_engine(url)
@@ -1050,3 +1077,152 @@ def test_0011_skips_tables_that_are_already_renamed(tmp_path):
     assert "cost_logs" in tables and "cost_log" not in tables
     assert "registry_skills" not in tables and "skill_registry" not in tables
     assert "audit_logs" in tables
+
+
+# ── 0017: autoincrement primary keys become UUIDv7 ───────────────────
+
+#: One row per converted table, seeded at 0016 with the old integer keys.
+#: `call_transcripts` and `inbound_messages` get several rows sharing one
+#: timestamp, because the ordering they rely on is the point of the backfill.
+_SEED_0016 = (
+    "INSERT INTO audit_logs (id, timestamp, user_id, action) VALUES (1, '2026-09-01T10:00:00+00:00', 'usr_a', 'act')",
+    "INSERT INTO cost_logs (id, timestamp, provider, model, input_tokens, output_tokens, cost_usd) "
+    "VALUES (1, 1788256800.0, 'anthropic', 'm', 1, 1, 0.5)",
+    "INSERT INTO image_cost_logs (id, timestamp, provider, model, cost_usd) "
+    "VALUES (1, 1788256800.0, 'openai', 'm', 0.5)",
+    "INSERT INTO schedules (id, pincer_user_id, name, cron_expr, action, next_run_at) "
+    "VALUES (1, 'usr_a', 'nightly', '0 0 * * *', '{}', '2026-09-02T00:00:00+00:00')",
+    "INSERT INTO event_triggers (id, trigger_type, trigger_key, pincer_user_id) VALUES (1, 'webhook', 'wh_1', 'usr_a')",
+    "INSERT INTO briefing_configs (id, pincer_user_id) VALUES (1, 'usr_a')",
+    "INSERT INTO appointment_outcomes (id, task_id, result, recorded_at) "
+    "VALUES (1, 'task-1', 'booked', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO canary_runs (id, ran_at, ok) VALUES (1, '2026-09-01T10:00:00+00:00', 1)",
+    "INSERT INTO voice_calls (id, call_sid, direction, started_at) "
+    "VALUES (1, 'CA_one', 'inbound', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO call_actions (id, call_id, action_type, timestamp) "
+    "VALUES (1, 'CA_one', 'dial', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO phone_contacts (id, name, phone_number) VALUES (1, 'Ada', '+15550001111')",
+    "INSERT INTO outbound_call_logs (id, phone_number, placed_at, local_day) "
+    "VALUES (1, '+15550001111', '2026-09-01T10:00:00+00:00', '2026-09-01')",
+)
+
+#: Five utterances in one second. Only the key keeps them in spoken order.
+_SEED_TRANSCRIPTS = tuple(
+    "INSERT INTO call_transcripts (id, call_id, speaker, text, timestamp) "
+    f"VALUES ({index}, 'CA_one', 'caller', 'line {index}', '2026-09-01T10:00:00+00:00')"
+    for index in range(1, 6)
+)
+
+_SEED_MESSAGES = tuple(
+    "INSERT INTO inbound_messages (id, call_sid, created_at) "
+    f"VALUES ({index}, 'CA_{index}', '2026-09-01T10:00:00+00:00')"
+    for index in range(1, 4)
+)
+
+_CONVERTED = [table for table, _column, _kind in _uuid7_tables()]
+
+
+def test_0017_gives_every_row_a_v7_uuid_and_keeps_it(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0016")
+    with _connect(migration_url) as conn:
+        for insert in (*_SEED_0016, *_SEED_TRANSCRIPTS, *_SEED_MESSAGES):
+            conn.execute(sa.text(insert))
+
+    command.upgrade(cfg, "0017")
+
+    with _connect(migration_url) as conn:
+        for table in _CONVERTED:
+            ids = [row[0] for row in conn.execute(sa.text(f"SELECT id FROM {table}")).all()]  # noqa: S608
+            assert ids, f"{table} lost its rows"
+            for value in ids:
+                assert uuid.UUID(str(value)).version == 7, f"{table}.id is not a v7 uuid: {value!r}"
+
+
+def test_0017_keeps_same_timestamp_rows_in_their_original_order(migration_url, tmp_path):
+    """The key is the tiebreaker `call_transcripts` and `inbound_messages` use.
+
+    Fresh random ids would pass every other assertion here and silently
+    scramble a call's transcript.
+    """
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0016")
+    with _connect(migration_url) as conn:
+        for insert in (*_SEED_0016, *_SEED_TRANSCRIPTS, *_SEED_MESSAGES):
+            conn.execute(sa.text(insert))
+
+    command.upgrade(cfg, "0017")
+
+    with _connect(migration_url) as conn:
+        spoken = conn.execute(sa.text("SELECT text FROM call_transcripts ORDER BY timestamp, id")).all()
+        assert [row[0] for row in spoken] == [f"line {index}" for index in range(1, 6)]
+
+        calls = conn.execute(sa.text("SELECT call_sid FROM inbound_messages ORDER BY created_at DESC, id DESC")).all()
+        assert [row[0] for row in calls] == ["CA_3", "CA_2", "CA_1"]
+
+
+def test_0017_stamps_each_id_with_the_row_s_own_creation_time(migration_url, tmp_path):
+    """Not merely "in order" — the id has to carry *when the row was made*.
+
+    Minting fresh ids during the migration would keep the relative order
+    (uuid7 is monotonic per process) while claiming every historical row was
+    written the moment the migration ran. Then `ORDER BY id` stops agreeing
+    with `ORDER BY created_at`, and a 2026 row is indistinguishable from a
+    2020 one.
+    """
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0016")
+    with _connect(migration_url) as conn:
+        for insert in (*_SEED_0016, *_SEED_TRANSCRIPTS, *_SEED_MESSAGES):
+            conn.execute(sa.text(insert))
+
+    command.upgrade(cfg, "0017")
+
+    seeded_ms = int(datetime(2026, 9, 1, 10, 0, tzinfo=UTC).timestamp() * 1000)
+    with _connect(migration_url) as conn:
+        for table in ("audit_logs", "voice_calls", "call_transcripts", "canary_runs", "cost_logs"):
+            row_id = conn.execute(sa.text(f"SELECT id FROM {table} LIMIT 1")).scalar_one()  # noqa: S608
+            stamped = uuid.UUID(str(row_id)).int >> 80
+            assert stamped == seeded_ms, f"{table}.id carries {stamped}, not the row's own time {seeded_ms}"
+
+
+def test_0017_leaves_every_table_otherwise_exactly_as_it_was(migration_url, tmp_path):
+    """The SQLite half rebuilds each table from reflection rather than from
+    frozen DDL, so this is what guarantees nothing was dropped on the way:
+    same columns, same nullability, same indexes, same unique constraints."""
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0016")
+    with _connect(migration_url) as conn:
+        before = {table: _shape(sa.inspect(conn), table) for table in _CONVERTED}
+
+    command.upgrade(cfg, "0017")
+
+    with _connect(migration_url) as conn:
+        after = {table: _shape(sa.inspect(conn), table) for table in _CONVERTED}
+
+    for table in _CONVERTED:
+        assert after[table]["columns"] == before[table]["columns"], table
+        assert after[table]["indexes"] == before[table]["indexes"], table
+        assert after[table]["unique"] == before[table]["unique"], table
+        assert after[table]["pk"] == before[table]["pk"], table
+
+
+def test_0017_round_trips(migration_url, tmp_path):
+    """Down is lossy by design — ids are renumbered, not restored — so this
+    asserts the shape survives and the rows do, not the original values."""
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0016")
+    with _connect(migration_url) as conn:
+        for insert in (*_SEED_0016, *_SEED_TRANSCRIPTS, *_SEED_MESSAGES):
+            conn.execute(sa.text(insert))
+
+    command.upgrade(cfg, "0017")
+    command.downgrade(cfg, "0016")
+
+    with _connect(migration_url) as conn:
+        ids = [row[0] for row in conn.execute(sa.text("SELECT id FROM call_transcripts ORDER BY id")).all()]
+        assert ids == [1, 2, 3, 4, 5]
+
+    command.upgrade(cfg, "0017")
+    with _connect(migration_url) as conn:
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM call_transcripts")).scalar_one() == 5

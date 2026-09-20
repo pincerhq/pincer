@@ -10,6 +10,7 @@ import pytest
 from typer.testing import CliRunner
 
 from pincer.cli import app
+from pincer.db.ids import new_id
 
 runner = CliRunner()
 
@@ -76,9 +77,10 @@ def _make_schedules_db(path: object, rows: list[tuple[str, str, str, str, int]] 
     ensure_schema_current(Path(str(path)))
     conn = sqlite3.connect(str(path))
     for row in rows or []:
+        # The id is a model-side default, so a raw insert has to supply one.
         conn.execute(
-            "INSERT INTO schedules (pincer_user_id, name, cron_expr, action, enabled) VALUES (?, ?, ?, ?, ?)",
-            row,
+            "INSERT INTO schedules (id, pincer_user_id, name, cron_expr, action, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+            (new_id(), *row),
         )
     conn.commit()
     conn.close()

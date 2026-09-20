@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
+from support import fill_row_ids
 
 from pincer.observability.pilot_review import (
     detect_name_risks,
@@ -229,6 +230,7 @@ async def _seed(settings, count: int, *, language: str = "de", code: str = "none
                 (sid, (started + timedelta(seconds=5)).isoformat()),
             )
         await db.commit()
+        await fill_row_ids(db)
 
 
 async def test_sampling_is_deterministic_from_the_seed(settings):
@@ -321,6 +323,7 @@ async def test_export_refuses_a_call_with_no_transcript(settings):
             (datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat()),
         )
         await db.commit()
+        await fill_row_ids(db)
     with pytest.raises(ValueError, match="No stored transcript"):
         await export_persona_fixture(settings, "CAempty")
 
@@ -340,6 +343,7 @@ async def test_export_refuses_a_call_with_only_agent_turns(settings):
             (started,),
         )
         await db.commit()
+        await fill_row_ids(db)
     with pytest.raises(ValueError, match="no callee turns"):
         await export_persona_fixture(settings, "CAagent")
 
@@ -378,6 +382,7 @@ async def test_export_surfaces_names_for_human_review(settings):
             (started,),
         )
         await db.commit()
+        await fill_row_ids(db)
 
     fixture = await export_persona_fixture(settings, "CAname")
     assert "Schneider" in fixture["review_required"]["possible_names"]

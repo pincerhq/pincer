@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import aiosqlite
 import pytest
+from support import fill_row_ids
 
 from pincer.voice.retention import (
     ensure_voice_tables,
@@ -36,6 +37,7 @@ async def _seed(db_path) -> None:
             ("CA_old", "tool_call", _iso(100), "CA_new", "tool_call", _iso(1)),
         )
         await db.commit()
+        await fill_row_ids(db)
 
 
 @pytest.fixture
@@ -71,6 +73,7 @@ async def test_purge_skips_missing_tables(voice_db):
     async with aiosqlite.connect(str(voice_db)) as db:
         await db.execute("CREATE TABLE unrelated (id INTEGER)")
         await db.commit()
+        await fill_row_ids(db)
 
     deleted = await purge_expired_voice_data(voice_db, retention_days=90)
     assert deleted == {}
@@ -152,6 +155,7 @@ async def test_outbound_call_log_is_purged(tmp_path):
             [("+4915112345678", "u1", old, "2026-01-01"), ("+4915112345678", "u1", recent, "2026-08-20")],
         )
         await db.commit()
+        await fill_row_ids(db)
 
     deleted = await purge_expired_voice_data(db_path, retention_days=90)
     assert deleted.get("outbound_call_logs") == 1
@@ -196,6 +200,7 @@ async def test_call_actions_migration_adds_policy_columns(tmp_path):
             "output_summary TEXT DEFAULT '', user_confirmed INTEGER, timestamp TEXT NOT NULL);"
         )
         await db.commit()
+        await fill_row_ids(db)
         await ensure_voice_tables(db)
         await ensure_voice_tables(db)  # idempotent
         cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(call_actions)")}

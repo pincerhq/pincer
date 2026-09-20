@@ -657,7 +657,7 @@ def _summary_from_row(row: Mapping[str, Any], cost_usd: float | None = None) -> 
 
 
 class InboundMessageOut(BaseModel):
-    id: int
+    id: str
     call_sid: str
     caller_name: str = ""
     caller_name_unverified: bool = False
@@ -679,7 +679,7 @@ async def inbound_messages(limit: int = Query(default=50, ge=1, le=500)) -> list
         return []
     return [
         InboundMessageOut(
-            id=int(r["id"]),
+            id=str(r["id"]),
             call_sid=r["call_sid"] or "",
             caller_name=mask_pii(r["caller_name"] or ""),
             caller_name_unverified=bool(r["caller_name_unverified"]),
@@ -788,7 +788,7 @@ class ScheduledCallIn(BaseModel):
 
 
 class ScheduledCallOut(BaseModel):
-    id: int
+    id: str
     target_number: str
     target_name: str = ""
     purpose: str
@@ -811,7 +811,7 @@ def _scheduled_call_out(row: dict[str, Any]) -> ScheduledCallOut | None:
     if not isinstance(action, dict) or action.get("type") != ACTION_TYPE:
         return None
     return ScheduledCallOut(
-        id=int(row["id"]),
+        id=str(row["id"]),
         target_number=str(action.get("target_number", "")),
         target_name=str(action.get("target_name", "")),
         purpose=str(action.get("purpose", "")),
@@ -915,7 +915,7 @@ async def schedule_call(body: ScheduledCallIn) -> ScheduledCallOut:
 
 
 @router.delete("/calls/scheduled/{schedule_id}", status_code=204)
-async def cancel_scheduled_call(schedule_id: int) -> None:
+async def cancel_scheduled_call(schedule_id: str) -> None:
     """Call it off. Only removes schedules this feature created."""
     from pincer.scheduler.cron import CronScheduler
 

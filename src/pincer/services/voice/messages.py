@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class MessagesService(DatabaseService):
-    async def record(self, values: dict[str, Any], *, inbound_intent: str = "") -> int:
+    async def record(self, values: dict[str, Any], *, inbound_intent: str = "") -> str:
         """Store the message and, when known, stamp the call's intent.
 
         The intent is stamped separately and best-effort: it is a label on the

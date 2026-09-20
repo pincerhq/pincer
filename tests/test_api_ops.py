@@ -11,6 +11,7 @@ import pytest
 os.environ.setdefault("PINCER_ANTHROPIC_API_KEY", "sk-ant-test-key")
 
 from fastapi.testclient import TestClient
+from support import fill_row_ids
 
 from pincer.api.server import create_app
 from pincer.observability.call_costs import ensure_call_costs_table
@@ -48,6 +49,7 @@ async def _seed(db_path, rows: list[tuple[str, str, float]]) -> None:
                 (sid, cost, cost * 0.7, cost * 0.3, datetime.now(UTC).isoformat()),
             )
         await db.commit()
+        await fill_row_ids(db)
 
 
 # ── Golden signals ───────────────────────────────────────────────────
@@ -208,6 +210,7 @@ async def test_call_without_a_cost_record_reports_none(client, tmp_path):
             (started.isoformat(), started.isoformat()),
         )
         await db.commit()
+        await fill_row_ids(db)
 
     call = client.get("/api/voice/calls").json()[0]
     assert call["cost_usd"] is None

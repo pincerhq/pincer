@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-class ContactRepository(BaseRepository[PhoneContact, int]):
+class ContactRepository(BaseRepository[PhoneContact, str]):
     model = PhoneContact
 
     async def all_by_name(self) -> Sequence[PhoneContact]:

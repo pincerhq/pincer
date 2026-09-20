@@ -12,6 +12,7 @@ import pytest
 os.environ.setdefault("PINCER_ANTHROPIC_API_KEY", "sk-ant-test-key")
 
 from fastapi.testclient import TestClient
+from support import fill_row_ids
 
 from pincer.api.server import create_app
 from pincer.db import ensure_schema_current
@@ -73,6 +74,7 @@ async def _seed_db(db_path):
             ((started + timedelta(seconds=10)).isoformat(),),
         )
         await db.commit()
+        await fill_row_ids(db)
 
 
 class _FakeEngine:
@@ -215,6 +217,7 @@ async def test_contacts(client, tmp_path):
             "VALUES ('Zoe', '+15550009999', 'personal', ''), ('Dr. Ada', '+15550008888', 'doctor', 'dentist')"
         )
         await db.commit()
+        await fill_row_ids(db)
 
     r = client.get("/api/voice/contacts")
     assert r.status_code == 200
@@ -425,6 +428,7 @@ async def threads_api(client, tmp_path):
             ),
         )
         await db.commit()
+        await fill_row_ids(db)
     return SimpleNamespace(client=client, manager=manager, thread=thread)
 
 
@@ -542,6 +546,7 @@ async def test_calls_survive_a_pre_sprint13_database(client, tmp_path):
             "VALUES ('CA_legacy', 'outbound', '2026-08-20T16:43:37+00:00', '2026-08-20T16:44:00+00:00')"
         )
         await db.commit()
+        await fill_row_ids(db)
 
     rows = client.get("/api/voice/calls").json()
     assert [r["call_sid"] for r in rows] == ["CA_legacy"]
@@ -591,6 +596,7 @@ async def test_expired_commitment_filter(threads_api):
             ),
         )
         await db.commit()
+        await fill_row_ids(db)
 
     rows = client.get("/api/voice/threads", params={"has_expired_commitments": "true"}).json()
     assert [t["thread_id"] for t in rows] == [expired_id]

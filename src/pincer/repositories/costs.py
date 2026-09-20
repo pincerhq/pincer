@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-class CostLogRepository(BaseRepository[CostLog, int]):
+class CostLogRepository(BaseRepository[CostLog, str]):
     model = CostLog
 
     async def spend_since(self, start: float) -> float:
@@ -77,7 +77,7 @@ class CostLogRepository(BaseRepository[CostLog, int]):
         return col(CostLog.timestamp) >= start, col(CostLog.timestamp) < end
 
 
-class ImageCostLogRepository(BaseRepository[ImageCostLog, int]):
+class ImageCostLogRepository(BaseRepository[ImageCostLog, str]):
     model = ImageCostLog
 
     async def spend_since(self, start: float) -> float:

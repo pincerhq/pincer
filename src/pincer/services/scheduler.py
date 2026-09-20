@@ -59,7 +59,7 @@ class ScheduleService(DatabaseService):
         pincer_user_id: str,
         tz: str = "UTC",
         channel: str = "telegram",
-    ) -> int:
+    ) -> str:
         if not croniter.is_valid(cron_expr):
             raise ValueError(f"Invalid cron expression: {cron_expr}")
         try:
@@ -81,11 +81,11 @@ class ScheduleService(DatabaseService):
                     next_run_at=next_run_at,
                 )
             )
-            schedule_id = int(row.id or 0)
+            schedule_id = row.id
         logger.info("Schedule added: %s (cron=%s, tz=%s)", name, cron_expr, tz)
         return schedule_id
 
-    async def remove(self, schedule_id: int, pincer_user_id: str) -> bool:
+    async def remove(self, schedule_id: str, pincer_user_id: str) -> bool:
         async with session_scope(self._url) as session:
             removed = await ScheduleRepository(session).delete_for_user(schedule_id, pincer_user_id)
         if removed:
@@ -94,7 +94,7 @@ class ScheduleService(DatabaseService):
             logger.warning("Schedule remove no-op: id=%s not found for user", schedule_id)
         return bool(removed)
 
-    async def toggle(self, schedule_id: int, enabled: bool, pincer_user_id: str) -> bool:
+    async def toggle(self, schedule_id: str, enabled: bool, pincer_user_id: str) -> bool:
         async with session_scope(self._url) as session:
             changed = await ScheduleRepository(session).set_enabled(
                 schedule_id, enabled, pincer_user_id, now=_sql_now()
@@ -116,7 +116,7 @@ class ScheduleService(DatabaseService):
             rows = await ScheduleRepository(session).list()
         return [_as_row(row) for row in rows]
 
-    async def get(self, schedule_id: int) -> dict[str, Any] | None:
+    async def get(self, schedule_id: str) -> dict[str, Any] | None:
         async with session_scope(self._url) as session:
             row = await ScheduleRepository(session).get(schedule_id)
         if row is None:
@@ -131,7 +131,7 @@ class ScheduleService(DatabaseService):
         logger.debug("Due-schedule query: %d due as of %s", len(rows), now_utc)
         return [_as_row(row) for row in rows]
 
-    async def mark_fired(self, schedule_id: int, next_run_at: str) -> None:
+    async def mark_fired(self, schedule_id: str, next_run_at: str) -> None:
         async with session_scope(self._url) as session:
             await ScheduleRepository(session).mark_fired(schedule_id, next_run_at=next_run_at, now=_sql_now())
         logger.debug("Schedule marked fired: id=%s next_run_at=%s", schedule_id, next_run_at)

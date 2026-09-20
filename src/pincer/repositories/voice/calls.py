@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-class CallRepository(BaseRepository[VoiceCall, int]):
+class CallRepository(BaseRepository[VoiceCall, str]):
     model = VoiceCall
 
     async def save(self, values: dict[str, Any]) -> None:
@@ -151,7 +151,7 @@ class CallRepository(BaseRepository[VoiceCall, int]):
         return [(ended, delivered) for ended, delivered in (await self.session.exec(stmt)).all()]
 
 
-class TranscriptRepository(BaseRepository[CallTranscript, int]):
+class TranscriptRepository(BaseRepository[CallTranscript, str]):
     model = CallTranscript
 
     async def add_many(self, rows: Sequence[CallTranscript]) -> None:
@@ -167,7 +167,7 @@ class TranscriptRepository(BaseRepository[CallTranscript, int]):
         return await self.list(*where, order_by=[col(CallTranscript.timestamp), col(CallTranscript.id)], limit=limit)
 
 
-class CallActionRepository(BaseRepository[CallAction, int]):
+class CallActionRepository(BaseRepository[CallAction, str]):
     model = CallAction
 
     async def add_many(self, rows: Sequence[CallAction]) -> None:

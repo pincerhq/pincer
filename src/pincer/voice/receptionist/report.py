@@ -139,7 +139,7 @@ async def persist_inbound_message(
     reception: dict[str, Any],
     *,
     delivered_at: str | None = None,
-) -> int | None:
+) -> str | None:
     """Insert the inbound_messages row (idempotent per call). Returns the row id."""
     if not db_path:
         return None

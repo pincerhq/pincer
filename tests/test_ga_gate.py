@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
+from support import fill_row_ids
 
 from pincer.observability.call_costs import ensure_call_costs_table
 from pincer.observability.ga_gate import (
@@ -62,6 +63,7 @@ async def _seed_calls(settings, codes: list[str], days_ago: float = 1.0) -> None
                 (f"CA{days_ago}_{i}", started.isoformat(), (started + timedelta(seconds=60)).isoformat(), code),
             )
         await db.commit()
+        await fill_row_ids(db)
 
 
 async def _seed_costs(settings, totals: list[float]) -> None:
@@ -73,6 +75,7 @@ async def _seed_costs(settings, totals: list[float]) -> None:
                 (f"CAcost{i}", total, total * 0.6, total * 0.4, datetime.now(UTC).isoformat()),
             )
         await db.commit()
+        await fill_row_ids(db)
 
 
 def _write_turns(settings, per_language: dict[str, list[float]]) -> None:

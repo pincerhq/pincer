@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import aiosqlite
 import pytest
+from support import fill_row_ids
 
 from pincer.voice import threads as th
 from pincer.voice.outcome import CallOutcome
@@ -59,6 +60,7 @@ async def _seed_call(db_path: str, call_sid: str, started_at: datetime, directio
             (call_sid, direction, started_at.isoformat(), (started_at + timedelta(minutes=2)).isoformat()),
         )
         await db.commit()
+        await fill_row_ids(db)
 
 
 def _outcome(**kwargs) -> CallOutcome:

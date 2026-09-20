@@ -6,6 +6,7 @@ import json
 
 import aiosqlite
 import pytest
+from support import fill_row_ids
 
 from pincer.observability.call_costs import call_context
 from pincer.tools.registry import ToolRegistry
@@ -81,6 +82,7 @@ async def test_contact_lookup_reads_phone_contacts(settings, tmp_path):
         await db.execute("CREATE TABLE phone_contacts (name TEXT, phone_number TEXT, category TEXT, notes TEXT)")
         await db.execute("INSERT INTO phone_contacts VALUES ('Dr. Müller', '+4930123', 'doctor', 'secret notes')")
         await db.commit()
+        await fill_row_ids(db)
     registry = ToolRegistry()
     register_call_tools(registry, settings)
     rows = json.loads(await registry.execute("contact_lookup", {"name": "müll"}))

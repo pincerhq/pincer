@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
+from support import fill_row_ids
 
 from pincer.observability.slo import (
     MIN_BUDGET_SAMPLE,
@@ -52,6 +53,7 @@ async def _seed_calls(settings, codes: list[str], *, delivered_after_s: float | 
                 (f"CA{i}_{code}", started.isoformat(), ended.isoformat(), code, delivered),
             )
         await db.commit()
+        await fill_row_ids(db)
 
 
 def _write_turns(settings, totals_ms: list[float]) -> None:
@@ -74,6 +76,7 @@ async def _seed_canary(settings, results: list[bool]) -> None:
                 ((datetime.now(UTC) - timedelta(hours=i)).isoformat(), int(ok)),
             )
         await db.commit()
+        await fill_row_ids(db)
 
 
 # ── Call attempt success ─────────────────────────────────────────────

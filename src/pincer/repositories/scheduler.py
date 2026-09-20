@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-class ScheduleRepository(BaseRepository[Schedule, int]):
+class ScheduleRepository(BaseRepository[Schedule, str]):
     model = Schedule
 
     async def for_user(self, pincer_user_id: str) -> Sequence[Schedule]:
@@ -33,10 +33,10 @@ class ScheduleRepository(BaseRepository[Schedule, int]):
             order_by=[col(Schedule.next_run_at)],
         )
 
-    async def delete_for_user(self, schedule_id: int, pincer_user_id: str) -> int:
+    async def delete_for_user(self, schedule_id: str, pincer_user_id: str) -> int:
         return await self.delete_where(col(Schedule.id) == schedule_id, col(Schedule.pincer_user_id) == pincer_user_id)
 
-    async def set_enabled(self, schedule_id: int, enabled: bool, pincer_user_id: str, *, now: str) -> int:
+    async def set_enabled(self, schedule_id: str, enabled: bool, pincer_user_id: str, *, now: str) -> int:
         """Returns the number of rows changed — 0 when the id is another user's."""
         return await self._update(
             {"enabled": int(enabled), "updated_at": now},
@@ -44,7 +44,7 @@ class ScheduleRepository(BaseRepository[Schedule, int]):
             col(Schedule.pincer_user_id) == pincer_user_id,
         )
 
-    async def mark_fired(self, schedule_id: int, *, next_run_at: str, now: str) -> int:
+    async def mark_fired(self, schedule_id: str, *, next_run_at: str, now: str) -> int:
         return await self._update(
             {"last_run_at": now, "next_run_at": next_run_at, "updated_at": now},
             col(Schedule.id) == schedule_id,
@@ -57,7 +57,7 @@ class ScheduleRepository(BaseRepository[Schedule, int]):
         return int(result.rowcount)
 
 
-class EventTriggerRepository(BaseRepository[EventTrigger, int]):
+class EventTriggerRepository(BaseRepository[EventTrigger, str]):
     model = EventTrigger
 
     async def is_processed(self, trigger_type: str, trigger_key: str) -> bool:
@@ -84,7 +84,7 @@ class EventTriggerRepository(BaseRepository[EventTrigger, int]):
         )
 
 
-class BriefingConfigRepository(BaseRepository[BriefingConfig, int]):
+class BriefingConfigRepository(BaseRepository[BriefingConfig, str]):
     model = BriefingConfig
 
     async def for_user(self, pincer_user_id: str) -> BriefingConfig | None:
