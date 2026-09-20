@@ -13,6 +13,7 @@ from pincer.db.engine import (
     dispose_engines,
     get_database_url,
     get_engine,
+    get_sync_url,
     to_async_url,
 )
 
@@ -37,11 +38,17 @@ def test_the_runtime_url_follows_the_migration_url(monkeypatch, tmp_path):
     assert get_database_url(tmp_path / "p.db") == "sqlite+aiosqlite:////elsewhere/x.db"
 
 
-def test_the_postgres_guard_still_holds_for_the_configured_url(monkeypatch, tmp_path):
-    """Lifted only once every domain runs on the engine (plan phase 9)."""
+def test_postgres_is_addressable_now_that_every_domain_uses_the_engine(monkeypatch, tmp_path):
     monkeypatch.setenv("PINCER_DATABASE_URL", "postgresql://u@h/db")
-    with pytest.raises(RuntimeError, match="migrations-only"):
-        get_database_url(tmp_path / "p.db")
+    assert get_database_url(tmp_path / "p.db") == "postgresql+asyncpg://u@h/db"
+    # Alembic runs synchronously, so migrations use the sync driver.
+    assert get_sync_url(tmp_path / "p.db") == "postgresql+psycopg://u@h/db"
+
+
+def test_an_unsupported_backend_in_the_configured_url_is_refused(monkeypatch, tmp_path):
+    monkeypatch.setenv("PINCER_DATABASE_URL", "mysql://u@h/db")
+    with pytest.raises(RuntimeError, match="mysql"):
+        get_sync_url(tmp_path / "p.db")
 
 
 async def test_sqlite_connections_get_the_shared_pragmas(tmp_path: Path):

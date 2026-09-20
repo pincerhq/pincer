@@ -134,12 +134,17 @@ class CoreComponents:
 async def _build_core(settings: Settings) -> CoreComponents:
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
+    from pincer.db.engine import init_database
     from pincer.llm.cost_tracker import CostTracker
     from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import get_audit_logger
     from pincer.security.rate_limiter import get_rate_limiter
     from pincer.tools.bootstrap import register_default_tools
     from pincer.tools.registry import ToolRegistry
+
+    # One migration for the whole process; the stores' own checks are
+    # process-cached and become a no-op after this.
+    await init_database(settings.db_path)
 
     # Initialize components
     session_mgr = SessionManager(settings.db_path, settings.max_session_messages)

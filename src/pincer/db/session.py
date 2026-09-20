@@ -20,19 +20,20 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 
-def get_sessionmaker(url: str | None = None) -> async_sessionmaker[AsyncSession]:
+def get_sessionmaker(url: str | None = None, *, pooled: bool = False) -> async_sessionmaker[AsyncSession]:
     """A session factory bound to the shared engine for `url`.
 
     `expire_on_commit=False`: services return models after the scope commits,
     and an expired attribute would trigger a lazy load outside any session.
+    `pooled` is for a single-owner writer; see `pincer.db.engine.get_engine`.
     """
-    return async_sessionmaker(get_engine(url), class_=AsyncSession, expire_on_commit=False)
+    return async_sessionmaker(get_engine(url, pooled=pooled), class_=AsyncSession, expire_on_commit=False)
 
 
 @asynccontextmanager
-async def session_scope(url: str | None = None) -> AsyncIterator[AsyncSession]:
+async def session_scope(url: str | None = None, *, pooled: bool = False) -> AsyncIterator[AsyncSession]:
     """One unit of work: commit on success, roll back on any exception."""
-    async with get_sessionmaker(url)() as session:
+    async with get_sessionmaker(url, pooled=pooled)() as session:
         try:
             yield session
             await session.commit()

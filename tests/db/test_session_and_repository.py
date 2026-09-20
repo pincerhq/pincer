@@ -83,7 +83,7 @@ async def test_a_scope_rolls_everything_back_when_it_raises(url):
 
 
 def test_a_route_gets_one_unit_of_work_per_request(url, monkeypatch):
-    monkeypatch.setattr("pincer.db.session.get_engine", lambda _url=None: get_engine(url))
+    monkeypatch.setattr("pincer.db.session.get_engine", lambda _url=None, **kwargs: get_engine(url, **kwargs))
     app = FastAPI()
 
     @app.post("/widgets/{name}")

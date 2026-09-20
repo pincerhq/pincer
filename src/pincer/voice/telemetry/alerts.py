@@ -109,15 +109,12 @@ async def _turn_rows(db_path: str | Path, window_min: int) -> list[Any]:
     async with queries.store.connect(db_path) as db:
         if not await queries.store.tables_present(db):
             return []
-        cursor = await db.execute(
+        return await queries.store.fetch(
+            db,
             "SELECT t.*, c.provider_call_id FROM telephony_turns t "
             "JOIN telephony_calls c ON c.call_id = t.call_id WHERE t.created_at >= ?",
             (since,),
         )
-        try:
-            return list(await cursor.fetchall())
-        finally:
-            await cursor.close()
 
 
 async def _response_latency(db_path: str | Path, settings: Any, window_min: int, min_turns: int) -> TelephonyAlert:
@@ -263,14 +260,13 @@ async def _stage_timeouts(db_path: str | Path, settings: Any, window_min: int) -
     async with queries.store.connect(db_path) as db:
         if not await queries.store.tables_present(db):
             return []
-        cursor = await db.execute(
+        rows = await queries.store.fetch(
+            db,
             "SELECT e.attributes, e.name, c.provider_call_id FROM telephony_events e "
             "JOIN telephony_calls c ON c.call_id = e.call_id "
             "WHERE e.ts_utc >= ? AND e.name IN ('timeout', 'error')",
             (since,),
         )
-        rows = list(await cursor.fetchall())
-        await cursor.close()
 
     for row in rows:
         attrs = queries.store.loads(row["attributes"], {})

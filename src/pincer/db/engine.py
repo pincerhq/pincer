@@ -1,10 +1,11 @@
 """URL resolution, async engines and the migration runner for Pincer's database.
 
-Alembic owns schema DDL. Application queries are moving, domain by domain, from
-raw `aiosqlite` onto SQLModel repositories that run on the async engines built
-here (`get_engine`); modules not yet migrated still open their own `aiosqlite`
-connections. Either way, `ensure_schema_current` brings a database to the latest
-revision before anything queries it.
+Alembic owns schema DDL. Application queries all run on the async engines built
+here (`get_engine`), through the repositories in `pincer.repositories`; nothing
+in the runtime opens its own driver connection any more, so the configured URL
+may name SQLite or Postgres. `init_database` is the one call a process makes at
+startup: it brings the database to the latest revision before anything queries
+it.
 """
 
 from __future__ import annotations
@@ -51,23 +52,24 @@ _ensured_paths: set[str] = set()
 
 
 def get_sync_url(db_path: Path) -> str:
-    """Build the synchronous SQLAlchemy URL Alembic runs migrations against.
+    """The synchronous SQLAlchemy URL Alembic runs migrations against.
 
-    `PINCER_DATABASE_URL` is accepted as an override so the migrations
-    themselves can be exercised against Postgres (e.g. in CI), but the
-    runtime layer — every module under `pincer.memory`/`pincer.core`/etc. —
-    still talks to `db_path` directly via `aiosqlite`. Pointing the override
-    at Postgres would migrate a database nothing reads while the app keeps
-    querying an empty SQLite file, so it's rejected here rather than left to
-    fail confusingly downstream.
+    `PINCER_DATABASE_URL` overrides it, and may now name Postgres: the runtime
+    reads and writes through `pincer.repositories`, which is dialect-agnostic
+    (`pincer.db.dialect` covers what differs). Postgres needs the `postgres`
+    extra for its drivers — asyncpg at runtime, psycopg for the migrations.
     """
     override = os.environ.get("PINCER_DATABASE_URL")
     if override:
-        if not override.startswith("sqlite"):
+        backend = make_url(override).get_backend_name()
+        if backend not in _ASYNC_DRIVERS:
             raise RuntimeError(
-                "PINCER_DATABASE_URL targets a non-SQLite database, but the runtime "
-                "layer is still aiosqlite. Postgres support is migrations-only for now."
+                f"PINCER_DATABASE_URL names {backend!r}; supported backends are {sorted(_ASYNC_DRIVERS)}"
             )
+        if backend == "postgresql":
+            # Alembic runs synchronously, so it needs the sync driver even
+            # though everything else uses asyncpg.
+            return make_url(override).set(drivername="postgresql+psycopg").render_as_string(hide_password=False)
         return override
     return f"sqlite:///{db_path}"
 
@@ -136,8 +138,14 @@ _engines: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, AsyncEn
 _engines_pid = os.getpid()
 
 
-def get_engine(url: str | None = None) -> AsyncEngine:
+def get_engine(url: str | None = None, *, pooled: bool = False) -> AsyncEngine:
     """The shared async engine for `url` (default: the configured database).
+
+    `pooled` keeps SQLite connections open between units of work instead of
+    opening one per transaction. Only for a single owner writing on its own
+    schedule — telemetry's sink — where the thread per connection costs more
+    than the pool risks. Everything else shares the file with other processes
+    and must not hold connections; see `_create_engine`.
 
     Must be called from a running event loop; see the note on `_engines`.
     """
@@ -151,9 +159,10 @@ def get_engine(url: str | None = None) -> AsyncEngine:
     per_loop = _engines.get(loop)
     if per_loop is None:
         per_loop = _engines[loop] = {}
-    engine = per_loop.get(resolved)
+    key = f"{resolved}|pooled" if pooled else resolved
+    engine = per_loop.get(key)
     if engine is None:
-        engine = per_loop[resolved] = _create_engine(resolved)
+        engine = per_loop[key] = _create_engine(resolved, pooled=pooled)
     return engine
 
 
@@ -164,14 +173,20 @@ async def dispose_engines() -> None:
         await engine.dispose()
 
 
-def _create_engine(url: str) -> AsyncEngine:
+def _create_engine(url: str, *, pooled: bool = False) -> AsyncEngine:
     backend = make_url(url).get_backend_name()
     if backend == "sqlite":
-        # NullPool: a pooled SQLite connection keeps its transaction state (and
-        # so its write lock) alive between units of work, which deadlocks the
-        # several processes and event loops that share one file. Opening per
-        # unit of work is what the aiosqlite stores did all along.
-        engine = create_async_engine(url, poolclass=NullPool)
+        # NullPool by default: a pooled SQLite connection keeps its transaction
+        # state (and so its write lock) alive between units of work, which
+        # deadlocks the several processes and event loops that share one file.
+        # Opening per unit of work is what the aiosqlite stores did all along.
+        # A `pooled` engine keeps ONE connection instead, for an owner that
+        # writes on its own schedule and would otherwise pay a thread per write.
+        engine = (
+            create_async_engine(url, pool_size=1, max_overflow=0, pool_recycle=300)
+            if pooled
+            else create_async_engine(url, poolclass=NullPool)
+        )
         event.listen(engine.sync_engine, "connect", _apply_sqlite_pragmas)
         return engine
     # A pooled Postgres connection can be dropped server-side while idle.
@@ -193,3 +208,18 @@ def _apply_sqlite_pragmas(dbapi_connection: Any, _record: Any) -> None:
         cursor.execute("PRAGMA foreign_keys=OFF")
     finally:
         cursor.close()
+
+
+async def init_database(db_path: Path | None = None) -> str:
+    """Bring the configured database to head, once, at startup.
+
+    Every store used to do this in its own `initialize()`; one call at the
+    entry points (`pincer run`, the API lifespan, `pincer mcp serve`, the
+    tasks worker) covers all of them. Returns the runtime URL.
+    """
+    if db_path is None:
+        from pincer.config import get_settings_relaxed
+
+        db_path = get_settings_relaxed().db_path
+    await asyncio.to_thread(ensure_schema_current, db_path)
+    return get_database_url(db_path)

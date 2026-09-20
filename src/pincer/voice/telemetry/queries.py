@@ -28,7 +28,6 @@ from pincer.voice.telemetry.outcomes import DENOMINATORS, FailureCategory, is_un
 if TYPE_CHECKING:
     from pathlib import Path
 
-    import aiosqlite
 
 logger = logging.getLogger(__name__)
 
@@ -164,12 +163,8 @@ class Aggregate:
         }
 
 
-async def _fetch(db: aiosqlite.Connection, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> list[Any]:
-    cursor = await db.execute(sql, tuple(params))
-    try:
-        return list(await cursor.fetchall())
-    finally:
-        await cursor.close()
+async def _fetch(db: Any, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> list[Any]:
+    return await store.fetch(db, sql, params)
 
 
 async def search_calls(
