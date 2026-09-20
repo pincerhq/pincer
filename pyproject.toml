@@ -198,7 +198,6 @@ module = [
     "pincer.core.agent",
     "pincer.core.identity",
     "pincer.costs.budget",
-    "pincer.security.audit",
     "pincer.memory.store",
     "pincer.api.skills",
     "pincer.cli",

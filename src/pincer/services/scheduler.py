@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
 from croniter import croniter
@@ -23,9 +23,7 @@ from pincer.repositories.scheduler import (
     EventTriggerRepository,
     ScheduleRepository,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pincer.services.base import DatabaseService
 
 logger = logging.getLogger(__name__)
 
@@ -48,23 +46,6 @@ def _sql_now() -> str:
 
 def _next_run_utc(cron_expr: str, tz: str) -> str:
     return croniter(cron_expr, datetime.now(ZoneInfo(tz))).get_next(datetime).astimezone(UTC).isoformat()
-
-
-class DatabaseService:
-    """Base for services bound to one database URL and nothing else."""
-
-    def __init__(self, url: str | None = None) -> None:
-        self._url = url
-
-    @classmethod
-    async def for_path(cls, db_path: Path) -> Any:
-        """A service on `db_path`, brought to head first."""
-        import asyncio
-
-        from pincer.db.engine import ensure_schema_current, get_database_url
-
-        await asyncio.to_thread(ensure_schema_current, db_path)
-        return cls(get_database_url(db_path))
 
 
 class ScheduleService(DatabaseService):

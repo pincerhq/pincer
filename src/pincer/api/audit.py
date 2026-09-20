@@ -8,7 +8,8 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
-from pincer.security.audit import AuditAction, get_audit_logger
+from pincer.security.audit import AuditAction
+from pincer.services.audit import AuditServiceDep
 
 router = APIRouter(prefix="/api/audit", tags=["audit"])
 
@@ -36,6 +37,7 @@ def _row_to_entry(row: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("")
 async def get_audit(
+    audit: AuditServiceDep,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     action: str | None = Query(default=None),
@@ -47,15 +49,9 @@ async def get_audit(
     audit_action = None
     if action:
         with suppress(ValueError):
-            audit_action = AuditAction(action)
-    logger = await get_audit_logger()
-    total = await logger.count(
-        user_id=user,
-        action=audit_action,
-        since=since,
-        until=until,
-    )
-    rows = await logger.query(
+            audit_action = AuditAction(action).value
+    total = await audit.count(user_id=user, action=audit_action, since=since, until=until)
+    rows = await audit.query(
         user_id=user,
         action=audit_action,
         since=since,
@@ -69,11 +65,11 @@ async def get_audit(
 
 @router.get("/stats")
 async def get_audit_stats(
+    audit: AuditServiceDep,
     since: str | None = Query(default=None, description="ISO date for 'today' filter"),
 ) -> dict[str, Any]:
     """Get aggregate audit statistics."""
-    logger = await get_audit_logger()
-    stats = await logger.get_stats(since=since)
+    stats = await audit.stats(since=since)
     return {
         "total_entries": stats.get("total_entries", 0),
         "by_action": stats.get("by_action", {}),

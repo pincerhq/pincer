@@ -28,6 +28,7 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import aiosqlite
@@ -461,11 +462,12 @@ def security_findings(settings: Settings | Any) -> Criterion:
 
 
 async def _count_blocked_dials(settings: Settings | Any, days: int) -> int:
-    """Dials the abuse gate refused, read straight from the database.
+    """Dials the abuse gate refused, counted from the audit log.
 
     Deliberately NOT via `get_audit_logger()`: that singleton owns a batched
-    writer and a long-lived connection which never gets shut down here, and a
-    one-shot CLI invocation would hang on exit waiting for it.
+    writer and a background flush task which never gets shut down here, and a
+    one-shot CLI invocation would hang on exit waiting for it. `AuditService`
+    holds nothing, so reading through it is safe.
 
     It reads the unified database, where `AuditLogger` writes. It used to read
     `<data_dir>/audit.db`, which migration 0003 imported from and then left
@@ -475,15 +477,10 @@ async def _count_blocked_dials(settings: Settings | Any, days: int) -> int:
     if db_path is None:
         return 0
     try:
-        async with aiosqlite.connect(str(db_path)) as conn:
-            cursor = await conn.execute(
-                "SELECT COUNT(*) FROM audit_logs WHERE action = ? AND timestamp >= ?",
-                ("voice_call_blocked", _cutoff(days)),
-            )
-            row = await cursor.fetchone()
-        return int(row[0]) if row else 0
-    except aiosqlite.OperationalError:
-        return 0
+        from pincer.services.audit import AuditService
+
+        audit = await AuditService.for_path(Path(str(db_path)))
+        return await audit.count(action="voice_call_blocked", since=_cutoff(days))
     except Exception:
         logger.debug("Blocked-dial audit count failed", exc_info=True)
         return 0

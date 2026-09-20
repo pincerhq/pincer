@@ -8,7 +8,6 @@ Exportable as JSON/CSV for compliance audits.
 from __future__ import annotations
 
 import asyncio
-import json
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -17,9 +16,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiosqlite
-
-from pincer.db import ensure_schema_current
+from pincer.services.audit import MAX_SUMMARY_LENGTH, AuditService
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -75,21 +72,19 @@ class AuditEntry:
 class AuditLogger:
     """Async audit logger backed by SQLite with batched writes."""
 
-    MAX_SUMMARY_LENGTH = 2000
+    #: Kept as a class attribute for callers that read it.
+    MAX_SUMMARY_LENGTH = MAX_SUMMARY_LENGTH
 
     def __init__(self, db_path: str | Path = "data/pincer.db") -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db: aiosqlite.Connection | None = None
+        self._service: AuditService | None = None
         self._write_queue: asyncio.Queue[AuditEntry] = asyncio.Queue(maxsize=10000)
         self._flush_task: asyncio.Task[None] | None = None
         self._running = False
 
     async def initialize(self) -> None:
-        await asyncio.to_thread(ensure_schema_current, self.db_path)
-        self._db = await aiosqlite.connect(str(self.db_path))
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA synchronous=NORMAL")
+        self._service = await AuditService.for_path(self.db_path)
         self._running = True
         self._flush_task = asyncio.create_task(self._flush_loop())
 
@@ -100,9 +95,13 @@ class AuditLogger:
             with suppress(asyncio.CancelledError):
                 await self._flush_task
         await self._flush_pending()
-        if self._db:
-            await self._db.close()
-            self._db = None
+        self._service = None
+
+    @property
+    def service(self) -> AuditService:
+        if self._service is None:
+            raise RuntimeError("AuditLogger not initialized")
+        return self._service
 
     async def log(self, entry: AuditEntry) -> None:
         """Queue an audit entry for batch writing (non-blocking)."""
@@ -138,39 +137,7 @@ class AuditLogger:
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """Query audit logs with filters."""
-        assert self._db is not None
-
-        conditions: list[str] = []
-        params: list[Any] = []
-
-        if user_id:
-            conditions.append("user_id = ?")
-            params.append(user_id)
-        if action:
-            conditions.append("action = ?")
-            params.append(action.value)
-        if tool:
-            conditions.append("tool = ?")
-            params.append(tool)
-        if since:
-            conditions.append("timestamp >= ?")
-            params.append(since)
-        if until:
-            conditions.append("timestamp <= ?")
-            params.append(until)
-
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        sql = f"""
-            SELECT * FROM audit_logs {where}
-            ORDER BY timestamp DESC
-            LIMIT ? OFFSET ?
-        """
-        params.extend([limit, offset])
-
-        async with self._db.execute(sql, params) as cursor:
-            columns = [desc[0] for desc in cursor.description]
-            rows = await cursor.fetchall()
-            return [dict(zip(columns, row, strict=False)) for row in rows]
+        return await self.service.query(user_id, action.value if action else None, tool, since, until, limit, offset)
 
     async def count(
         self,
@@ -181,33 +148,7 @@ class AuditLogger:
         until: str | None = None,
     ) -> int:
         """Count audit log entries matching filters."""
-        assert self._db is not None
-
-        conditions: list[str] = []
-        params: list[Any] = []
-
-        if user_id:
-            conditions.append("user_id = ?")
-            params.append(user_id)
-        if action:
-            conditions.append("action = ?")
-            params.append(action.value)
-        if tool:
-            conditions.append("tool = ?")
-            params.append(tool)
-        if since:
-            conditions.append("timestamp >= ?")
-            params.append(since)
-        if until:
-            conditions.append("timestamp <= ?")
-            params.append(until)
-
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        sql = f"SELECT COUNT(*) FROM audit_logs {where}"  # noqa: S608
-
-        async with self._db.execute(sql, params) as cursor:
-            row = await cursor.fetchone()
-            return int(row[0]) if row else 0
+        return await self.service.count(user_id, action.value if action else None, tool, since, until)
 
     async def export_json(
         self,
@@ -217,84 +158,11 @@ class AuditLogger:
         until: str | None = None,
     ) -> int:
         """Export audit logs to JSON file. Returns number of records exported."""
-        assert self._db is not None
-
-        conditions: list[str] = []
-        params: list[Any] = []
-
-        if user_id:
-            conditions.append("user_id = ?")
-            params.append(user_id)
-        if since:
-            conditions.append("timestamp >= ?")
-            params.append(since)
-        if until:
-            conditions.append("timestamp <= ?")
-            params.append(until)
-
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        sql = f"SELECT * FROM audit_logs {where} ORDER BY timestamp ASC"
-
-        output_path = Path(output_path)
-        count = 0
-
-        async with self._db.execute(sql, params) as cursor:
-            columns = [desc[0] for desc in cursor.description]
-            with open(output_path, "w") as f:
-                f.write("[\n")
-                first = True
-                async for row in cursor:
-                    if not first:
-                        f.write(",\n")
-                    record = dict(zip(columns, row, strict=False))
-                    if record.get("metadata_json"):
-                        try:
-                            record["metadata"] = json.loads(record.pop("metadata_json"))
-                        except json.JSONDecodeError:
-                            record["metadata"] = {}
-                    f.write(f"  {json.dumps(record, default=str)}")
-                    first = False
-                    count += 1
-                f.write("\n]")
-
-        return count
+        return await self.service.export_json(output_path, user_id, since, until)
 
     async def get_stats(self, since: str | None = None) -> dict[str, Any]:
         """Get summary statistics for audit logs."""
-        assert self._db is not None
-
-        params: list[str] = [since] if since else []
-
-        def where(*extra: str) -> str:
-            conditions = (["timestamp >= ?"] if since else []) + list(extra)
-            return f"WHERE {' AND '.join(conditions)}" if conditions else ""
-
-        stats: dict[str, Any] = {}
-
-        async with self._db.execute(f"SELECT COUNT(*) FROM audit_logs {where()}", params) as cursor:
-            row = await cursor.fetchone()
-            stats["total_entries"] = row[0] if row else 0
-
-        async with self._db.execute(
-            f"SELECT action, COUNT(*) FROM audit_logs {where()} GROUP BY action ORDER BY COUNT(*) DESC", params
-        ) as cursor:
-            stats["by_action"] = {row[0]: row[1] async for row in cursor}
-
-        async with self._db.execute(
-            f"SELECT tool, COUNT(*) FROM audit_logs {where('tool IS NOT NULL')} GROUP BY tool ORDER BY COUNT(*) DESC",
-            params,
-        ) as cursor:
-            stats["by_tool"] = {row[0]: row[1] async for row in cursor}
-
-        async with self._db.execute(f"SELECT SUM(cost_usd) FROM audit_logs {where()}", params) as cursor:
-            row = await cursor.fetchone()
-            stats["total_cost_usd"] = round(row[0] or 0.0, 6)
-
-        async with self._db.execute(f"SELECT COUNT(*) FROM audit_logs {where('approved = 0')}", params) as cursor:
-            row = await cursor.fetchone()
-            stats["failed_actions"] = row[0] if row else 0
-
-        return stats
+        return await self.service.stats(since)
 
     # ── Internal ──────────────────────────────────────────
 
@@ -304,7 +172,7 @@ class AuditLogger:
             await self._flush_pending()
 
     async def _flush_pending(self) -> None:
-        if self._db is None or self._write_queue.empty():
+        if self._service is None or self._write_queue.empty():
             return
 
         entries: list[AuditEntry] = []
@@ -317,36 +185,10 @@ class AuditLogger:
         if not entries:
             return
 
-        sql = """
-            INSERT INTO audit_logs
-            (timestamp, user_id, session_id, action, tool, input_summary,
-             output_summary, approved, cost_usd, duration_ms, ip_address,
-             channel, metadata_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        rows = [
-            (
-                e.timestamp,
-                e.user_id,
-                e.session_id,
-                e.action.value if isinstance(e.action, AuditAction) else e.action,
-                e.tool,
-                (e.input_summary or "")[: self.MAX_SUMMARY_LENGTH],
-                (e.output_summary or "")[: self.MAX_SUMMARY_LENGTH],
-                1 if e.approved else 0,
-                e.cost_usd,
-                e.duration_ms,
-                e.ip_address,
-                e.channel,
-                json.dumps(e.metadata) if e.metadata else None,
-            )
-            for e in entries
-        ]
-
         try:
-            await self._db.executemany(sql, rows)
-            await self._db.commit()
+            await self._service.add_batch(entries)
         except Exception:
+            # Keep them for the next flush rather than losing the evidence.
             for entry in entries:
                 try:
                     self._write_queue.put_nowait(entry)
@@ -360,7 +202,7 @@ _audit_logger: AuditLogger | None = None
 async def get_audit_logger(db_path: str | Path | None = None) -> AuditLogger:
     """Singleton accessor for the audit logger."""
     global _audit_logger
-    if _audit_logger is None or _audit_logger._db is None:
+    if _audit_logger is None or not _audit_logger._running:
         if _audit_logger is None:
             if db_path is None:
                 try:
