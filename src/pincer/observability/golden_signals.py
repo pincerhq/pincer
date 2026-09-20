@@ -131,10 +131,12 @@ async def call_success_rate(settings: Settings | Any, window_hours: float | None
     completed = 0
     try:
         rows = await _calls(settings).terminated_between(_cutoff(hours))
-    except Exception:
-        # A database from before the Sprint 9 migration simply has no data for
-        # this signal yet.
-        logger.debug("call_success_rate query failed", exc_info=True)
+    except SQLAlchemyError:
+        # A database from before the Sprint 9 migration has no data for this
+        # signal yet. Logged at WARNING, not DEBUG: a locked or corrupt
+        # database reads exactly the same as an empty one here, and silently
+        # reporting "no data" is how an alert stops firing unnoticed.
+        logger.warning("call_success_rate query failed — reporting no data", exc_info=True)
         return Signal("call_success_rate", None, "ratio", 0, min_sample, target, f"{hours:g}h")
 
     for row in rows:
@@ -171,8 +173,8 @@ async def call_attempt_success_rate(settings: Settings | Any, window_hours: floa
     excluded_count = 0
     try:
         rows = await _calls(settings).terminated_between(_cutoff(window_hours))
-    except Exception:
-        logger.debug("call_attempt_success_rate query failed", exc_info=True)
+    except SQLAlchemyError:
+        logger.warning("call_attempt_success_rate query failed — reporting no data", exc_info=True)
         return Signal("call_attempt_success_rate", None, "ratio", 0, 1, target, f"{window_hours:g}h")
 
     for row in rows:
@@ -211,8 +213,8 @@ async def booking_success_rate(settings: Settings | Any, window_hours: float | N
 
     try:
         results = await BookingsService(get_database_url(Path(str(settings.db_path)))).results_since(_cutoff(hours))
-    except Exception:
-        logger.debug("booking_success_rate query failed", exc_info=True)
+    except SQLAlchemyError:
+        logger.warning("booking_success_rate query failed — reporting no data", exc_info=True)
         return Signal("booking_success_rate", None, "ratio", 0, min_sample, target, f"{hours:g}h")
 
     by_result: dict[str, int] = {}
@@ -412,8 +414,8 @@ async def busy_capacity(settings: Settings | Any, window_hours: float = 24.0) ->
     try:
         busy = await _calls(settings).started_since(_cutoff(window_hours), failure_code=FailureCode.BUSY_CAPACITY.value)
         count = len(busy)
-    except Exception:
-        logger.debug("busy_capacity signal failed", exc_info=True)
+    except SQLAlchemyError:
+        logger.warning("busy_capacity signal failed — reporting zero", exc_info=True)
     return Signal(
         name="busy_capacity",
         value=float(count),

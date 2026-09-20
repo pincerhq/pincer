@@ -92,7 +92,7 @@ async def sample_calls(
         calls_service = CallsService(get_database_url(Path(str(settings.db_path))))
         rows = await calls_service.terminated_between(_cutoff(days), language=language, only_failures=only_failures)
     except Exception:
-        logger.debug("Spot-check sampling failed", exc_info=True)
+        logger.warning("Spot-check sampling failed — no calls to review", exc_info=True)
         return []
 
     if not rows:
@@ -147,13 +147,12 @@ async def _transcript(settings: Settings | Any, call_sid: str) -> list[dict[str,
     """Final transcript lines, PII-masked."""
     try:
         calls_service = CallsService(get_database_url(Path(str(settings.db_path))))
-        lines = await calls_service.transcript_for(call_sid)
+        lines = await calls_service.transcript_for(call_sid, final_only=True)
     except Exception:
         return []
     return [
         {"speaker": str(r["speaker"] or ""), "text": mask_pii(str(r["text"] or "")), "state": str(r["state"] or "")}
         for r in lines
-        if r["is_final"]
     ]
 
 

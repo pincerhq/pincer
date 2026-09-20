@@ -121,6 +121,10 @@ class CallsService(DatabaseService):
             rows = await CallRepository(session).started_since(cutoff, failure_code=failure_code)
         return [_as_dict(row) for row in rows]
 
+    async def count_since(self, cutoff: str, *, failure_code: str | None = None) -> int:
+        async with session_scope(self._url) as session:
+            return await CallRepository(session).count_since(cutoff, failure_code=failure_code)
+
     async def report_delivery_since(self, cutoff: str) -> list[tuple[str | None, str | None]]:
         async with session_scope(self._url) as session:
             return list(await CallRepository(session).reported_since(cutoff))

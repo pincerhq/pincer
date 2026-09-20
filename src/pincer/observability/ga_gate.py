@@ -145,8 +145,20 @@ async def _read(settings: Settings | Any, what: str, read: Callable[[], Awaitabl
     try:
         return await read()
     except Exception:
-        logger.debug("GA gate read failed: %s", what, exc_info=True)
+        # The gate reports INSUFFICIENT rather than failing, so a read that
+        # could not run must be loud: "not enough data" and "could not look"
+        # are indistinguishable in the report.
+        logger.warning("GA gate read failed: %s — counting as no data", what, exc_info=True)
         return []
+
+
+async def _count(settings: Settings | Any, what: str, read: Callable[[], Awaitable[int]]) -> int:
+    """A reporting count, returning 0 when there is nothing to count yet."""
+    try:
+        return await read()
+    except Exception:
+        logger.warning("GA gate count failed: %s — counting as zero", what, exc_info=True)
+        return 0
 
 
 def _url(settings: Settings | Any) -> str:
@@ -565,13 +577,11 @@ async def alert_quality(settings: Settings | Any, days: int) -> Criterion:
     if canary_failures:
         fired["canary_failed"] = len(canary_failures)
 
-    stuck = await _read(
-        settings,
-        "stuck calls",
-        lambda: CallsService(_url(settings)).started_since(_cutoff(days), failure_code="stuck"),
+    stuck_count = await _count(
+        settings, "stuck calls", lambda: CallsService(_url(settings)).count_since(_cutoff(days), failure_code="stuck")
     )
-    if stuck:
-        fired["stuck_calls"] = len(stuck)
+    if stuck_count:
+        fired["stuck_calls"] = stuck_count
 
     return Criterion(
         key="alert_quality",

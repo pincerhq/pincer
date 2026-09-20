@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, update
+from sqlalchemy import update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
@@ -133,18 +133,21 @@ class ThreadMemberRepository(BaseRepository[CallThreadMember, str]):
         """A thread's members, each with its call row when the call still exists.
 
         A member whose call has been purged comes back with `None` rather than
-        being dropped: the thread keeps a stub for it (§5). Ordered by when the
-        call happened, falling back to when it was attached; `call_sid` breaks
-        ties, since SQLite's `rowid` has no Postgres equivalent.
+        being dropped: the thread keeps a stub for it (§5).
+
+        Ordered by when the call happened, falling back to when it was
+        attached, with `call_sid` breaking ties (SQLite's `rowid` has no
+        Postgres equivalent). Sorted here rather than in SQL: the fallback
+        needs an empty-string check, and `call_started_at` is `TEXT` on SQLite
+        but `TIMESTAMP` on Postgres, where comparing it to `''` is an error.
         """
-        when = func.coalesce(func.nullif(col(CallThreadMember.call_started_at), ""), col(CallThreadMember.attached_at))
         stmt = (
             select(CallThreadMember, VoiceCall)
             .outerjoin(VoiceCall, col(VoiceCall.call_sid) == col(CallThreadMember.call_sid))
             .where(col(CallThreadMember.thread_id) == thread_id)
-            .order_by(when, col(CallThreadMember.call_sid))
         )
-        return [(member, call) for member, call in (await self.session.exec(stmt)).all()]
+        rows = [(member, call) for member, call in (await self.session.exec(stmt)).all()]
+        return sorted(rows, key=lambda pair: (pair[0].call_started_at or pair[0].attached_at or "", pair[0].call_sid))
 
     async def move_thread(self, from_thread_id: str, to_thread_id: str, *, attach_kind: str, attached_at: str) -> int:
         stmt = (

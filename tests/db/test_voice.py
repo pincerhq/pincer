@@ -19,7 +19,14 @@ from pincer.models.voice import (
     VoiceCall,
 )
 from pincer.repositories.voice import ThreadMemberRepository
-from pincer.services.voice import AnalyticsService, CallsService, ContactsService, MessagesService, SafetyGateService
+from pincer.services.voice import (
+    AnalyticsService,
+    CallsService,
+    ContactsService,
+    MessagesService,
+    SafetyGateService,
+    ThreadsService,
+)
 
 _TABLES = [
     model.__table__
@@ -117,6 +124,59 @@ async def test_transcript_lines_and_actions_round_trip(url):
     assert [action["tool_name"] for action in await calls.actions_for("CA1")] == ["calendar"]
     assert await calls.actions_for("CA2") == []
     assert await calls.add_transcript_lines([]) is None  # nothing to write is not an error
+
+
+async def test_merging_a_thread_leaves_the_target_s_own_calls_alone(url):
+    """Only the moved calls become `manual`: a call already in the target
+    keeps the kind it was attached with."""
+    calls = CallsService(url)
+    threads = ThreadsService(url)
+    for thread_id in ("th_src", "th_dst"):
+        await threads.create(
+            {
+                "thread_id": thread_id,
+                "subject": thread_id,
+                "origin": "user_task",
+                "created_at": EARLIER,
+                "updated_at": EARLIER,
+            }
+        )
+    for sid, thread_id, kind in (("CA_src", "th_src", "origin"), ("CA_dst", "th_dst", "inbound_matched")):
+        await calls.save_call({"call_sid": sid, "direction": "inbound", "started_at": EARLIER})
+        await threads.attach(
+            {"call_sid": sid, "thread_id": thread_id, "attach_kind": kind, "attached_at": EARLIER},
+            touched_at=EARLIER,
+        )
+
+    await threads.merge_into("th_src", "th_dst", attach_kind="manual", stamp=LATER)
+
+    moved = await calls.get("CA_src")
+    already_there = await calls.get("CA_dst")
+    assert (moved["thread_id"], moved["thread_attach_kind"]) == ("th_dst", "manual")
+    assert (already_there["thread_id"], already_there["thread_attach_kind"]) == ("th_dst", "inbound_matched")
+    # ... and the member rows say the same thing as the call rows.
+    kinds = {row["call_sid"]: row["attach_kind"] for row in await threads.calls("th_dst")}
+    assert kinds == {"CA_src": "manual", "CA_dst": "inbound_matched"}
+
+
+async def test_a_message_survives_a_failing_intent_stamp(url, monkeypatch):
+    """The label on the call is worth less than the message the caller left."""
+    from pincer.repositories.voice import CallRepository
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("no such column")
+
+    monkeypatch.setattr(CallRepository, "set_fields", _boom)
+    message_id = await MessagesService(url).record(
+        {"call_sid": "CA1", "matter": "call back", "created_at": EARLIER}, inbound_intent="message"
+    )
+
+    assert message_id > 0
+    async with session_scope(url) as session:
+        from pincer.repositories.voice import InboundMessageRepository
+
+        (row,) = await InboundMessageRepository(session).for_call("CA1")
+    assert row.matter == "call back"
 
 
 # ── contacts ─────────────────────────────────────────────────────────

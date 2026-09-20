@@ -93,6 +93,12 @@ class CanaryRunRepository(BaseRepository[CanaryRun, int]):
             where.append(col(CanaryRun.ok) == 0)
         return await self.list(*where)
 
+    async def counts_since(self, cutoff: str) -> tuple[int, int]:
+        """(runs, healthy runs) since `cutoff` — the availability SLO's input."""
+        stmt = select(func.count(), func.sum(CanaryRun.ok)).where(col(CanaryRun.ran_at) >= cutoff)
+        total, healthy = (await self.session.exec(stmt)).one()
+        return int(total or 0), int(healthy or 0)
+
     async def newest(self, limit: int) -> Sequence[CanaryRun]:
         stmt = select(CanaryRun).order_by(col(CanaryRun.ran_at).desc()).limit(limit)
         return (await self.session.exec(stmt)).all()

@@ -66,6 +66,10 @@ class CanaryService(DatabaseService):
             rows = await CanaryRunRepository(session).since(cutoff, failed_only=failed_only)
         return [{name: getattr(row, name) for name in CanaryRun.model_fields} for row in rows]
 
+    async def counts_since(self, cutoff: str) -> tuple[int, int]:
+        async with session_scope(self._url) as session:
+            return await CanaryRunRepository(session).counts_since(cutoff)
+
     async def recent(self, limit: int = 20) -> list[dict[str, Any]]:
         """Most recent runs, newest first."""
         async with session_scope(self._url) as session:

@@ -223,9 +223,8 @@ async def availability_slo(settings: Settings | Any, now: datetime | None = None
     ok = 0
     total = 0
     try:
-        runs = await CanaryService(get_database_url(Path(str(settings.db_path)))).runs_since(_cutoff(hours))
-        total = len(runs)
-        ok = sum(1 for run in runs if run["ok"])
+        canary = CanaryService(get_database_url(Path(str(settings.db_path))))
+        total, ok = await canary.counts_since(_cutoff(hours))
     except Exception:
         total, ok = 0, 0
 

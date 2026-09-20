@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
@@ -40,6 +40,15 @@ class CallRepository(BaseRepository[VoiceCall, int]):
     async def by_sid(self, call_sid: str) -> VoiceCall | None:
         stmt = select(VoiceCall).where(col(VoiceCall.call_sid) == call_sid)
         return (await self.session.exec(stmt)).first()
+
+    async def reassign_thread(self, from_thread_id: str, to_thread_id: str, *, attach_kind: str) -> int:
+        """Repoint the calls of one thread at another, and only those."""
+        stmt = (
+            update(VoiceCall)
+            .where(col(VoiceCall.thread_id) == from_thread_id)
+            .values(thread_id=to_thread_id, thread_attach_kind=attach_kind)
+        )
+        return int((await self.session.exec(stmt)).rowcount)
 
     async def set_fields(self, call_sid: str, values: dict[str, Any]) -> int:
         stmt = update(VoiceCall).where(col(VoiceCall.call_sid) == call_sid).values(**values)
@@ -124,6 +133,13 @@ class CallRepository(BaseRepository[VoiceCall, int]):
         if failure_code is not None:
             where.append(col(VoiceCall.failure_code) == failure_code)
         return await self.list(*where, order_by=[col(VoiceCall.started_at).desc()])
+
+    async def count_since(self, cutoff: str, *, failure_code: str | None = None) -> int:
+        where = [col(VoiceCall.started_at) >= cutoff]
+        if failure_code is not None:
+            where.append(col(VoiceCall.failure_code) == failure_code)
+        stmt = select(func.count()).select_from(VoiceCall).where(*where)
+        return int((await self.session.exec(stmt)).one())
 
     async def reported_since(self, cutoff: str) -> Sequence[tuple[str | None, str | None]]:
         """(ended_at, report_delivered_at) for calls whose report went out."""

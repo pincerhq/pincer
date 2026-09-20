@@ -99,13 +99,13 @@ class ThreadsService(DatabaseService):
     async def merge_into(self, source_thread_id: str, target_thread_id: str, *, attach_kind: str, stamp: str) -> None:
         """Move every call of one thread into another, in one transaction."""
         async with session_scope(self._url) as session:
-            members = ThreadMemberRepository(session)
-            await members.move_thread(source_thread_id, target_thread_id, attach_kind=attach_kind, attached_at=stamp)
-            calls = CallRepository(session)
-            for member in await members.with_calls(target_thread_id):
-                await calls.set_fields(
-                    str(member[0].call_sid), {"thread_id": target_thread_id, "thread_attach_kind": attach_kind}
-                )
+            # The calls are repointed by their OLD thread id, so a call that
+            # was already in the target keeps the attach kind it was attached
+            # with — only the moved ones become `attach_kind`.
+            await CallRepository(session).reassign_thread(source_thread_id, target_thread_id, attach_kind=attach_kind)
+            await ThreadMemberRepository(session).move_thread(
+                source_thread_id, target_thread_id, attach_kind=attach_kind, attached_at=stamp
+            )
             await ThreadRepository(session).set_fields(target_thread_id, {"updated_at": stamp})
 
     async def record_outcome(self, call_sid: str, *, outcome_code: str, task_result: str) -> None:

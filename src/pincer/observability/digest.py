@@ -25,6 +25,8 @@ from pincer.observability.failure_codes import FailureCode, describe
 if TYPE_CHECKING:
     from pincer.config import Settings
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from pincer.db.engine import get_database_url
 from pincer.services.observability import CallCostsService
 from pincer.services.voice import CallsService
@@ -66,9 +68,10 @@ async def _period(settings: Settings | Any, start_hours_ago: float, end_hours_ag
 
         costs = await CallCostsService(get_database_url(db_path)).recorded_since(start, end)
         period.cost_usd = sum(float(row["total_usd"] or 0.0) for row in costs)
-    except Exception:
-        # An empty period is the honest answer when the tables are not there.
-        logger.debug("Digest period aggregation failed", exc_info=True)
+    except SQLAlchemyError:
+        # An empty period is the honest answer when the tables are not there —
+        # but a database that cannot be read is worth saying out loud.
+        logger.warning("Digest period aggregation failed — reporting an empty period", exc_info=True)
     return period
 
 
