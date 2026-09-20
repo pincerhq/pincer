@@ -16,8 +16,8 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from pincer.config import get_settings_relaxed
-from pincer.scheduler.cron import CronScheduler, is_one_time_cron
+from pincer.scheduler.cron import is_one_time_cron
+from pincer.services.scheduler import ScheduleServiceDep
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
@@ -50,14 +50,12 @@ def _row_to_task(row: dict[str, Any], timing: str) -> dict[str, Any]:
 
 @router.get("")
 async def list_scheduled_tasks(
+    schedules: ScheduleServiceDep,
     include_past: bool = Query(default=False, description="Also include already-fired one-off tasks"),
 ) -> dict[str, Any]:
     """List scheduled tasks: recurring + upcoming by default, plus past one-offs on request."""
     try:
-        settings = get_settings_relaxed()
-        scheduler = CronScheduler(settings.db_path)
-        await scheduler.ensure_table()
-        rows = await scheduler.list_all()
+        rows = await schedules.list_all()
     except Exception as e:
         logger.exception("Failed to list schedules")
         raise HTTPException(status_code=500, detail="Failed to list schedules") from e

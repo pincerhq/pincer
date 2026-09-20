@@ -12,20 +12,21 @@ Users customize via briefing_configs table.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiosqlite
 import httpx
 
 from pincer.config import get_settings
-from pincer.db import ensure_schema_current
+from pincer.db.engine import get_database_url
+from pincer.services.scheduler import BriefingConfigService
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from pincer.core.agent import Agent
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ class ProactiveAgent:
 
     def __init__(self, db_path: Path, agent: Agent | None = None) -> None:
         self._db_path = str(db_path)
+        self._briefing_config: BriefingConfigService | None = None
         self._http = httpx.AsyncClient(timeout=15)
         self._agent = agent
 
@@ -44,7 +46,14 @@ class ProactiveAgent:
 
     async def ensure_table(self) -> None:
         """Ensure the briefing_configs table is at head (see pincer.db.migrations)."""
-        await asyncio.to_thread(ensure_schema_current, Path(self._db_path))
+        self._briefing_config = await BriefingConfigService.for_path(Path(self._db_path))
+
+    @property
+    def _config(self) -> BriefingConfigService:
+        """The service, built on first use for callers that skip `ensure_table`."""
+        if self._briefing_config is None:
+            self._briefing_config = BriefingConfigService(get_database_url(Path(self._db_path)))
+        return self._briefing_config
 
     # ── Main briefing generator ──────────────────
 
@@ -59,7 +68,7 @@ class ProactiveAgent:
 
         parts = [f"Good morning! Briefing for {datetime.now().strftime('%A, %B %d')}:\n"]
 
-        section_builders = {
+        section_builders: dict[str, Callable[[], Awaitable[str]]] = {
             "weather": lambda: self._weather(config.get("weather_location", "Berlin,DE")),
             "calendar": self._calendar,
             "email": self._email,
@@ -159,44 +168,14 @@ class ProactiveAgent:
     # ── Config management ────────────────────────
 
     async def _get_briefing_config(self, pincer_user_id: str) -> dict[str, Any]:
-        async with aiosqlite.connect(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            rows = await db.execute_fetchall(
-                "SELECT * FROM briefing_configs WHERE pincer_user_id = ?",
-                (pincer_user_id,),
-            )
-            if rows:
-                return dict(rows[0])
-            await db.execute(
-                "INSERT INTO briefing_configs (pincer_user_id) VALUES (?)",
-                (pincer_user_id,),
-            )
-            await db.commit()
-            return {
-                "sections": '["weather","calendar","email","news"]',
-                "custom_sections": "[]",
-                "weather_location": "Berlin,DE",
-                "news_topics": '["technology","business"]',
-            }
+        return await self._config.get_or_create(pincer_user_id)
 
     async def update_briefing_config(
         self,
         pincer_user_id: str,
         **kwargs: Any,
     ) -> None:
-        valid = {"sections", "custom_sections", "weather_location", "news_topics"}
-        updates = {k: v for k, v in kwargs.items() if k in valid}
-        if not updates:
-            return
-        set_clause = ", ".join(f"{k} = ?" for k in updates)
-        values = list(updates.values()) + [pincer_user_id]
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                f"UPDATE briefing_configs SET {set_clause}, "  # noqa: S608
-                "updated_at = datetime('now') WHERE pincer_user_id = ?",
-                values,
-            )
-            await db.commit()
+        await self._config.update(pincer_user_id, **kwargs)
 
     # ── Custom action handler (for scheduler) ────
 

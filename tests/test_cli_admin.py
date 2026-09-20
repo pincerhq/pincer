@@ -67,21 +67,14 @@ def test_db_history_shows_log(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None
 
 
 def _make_schedules_db(path: object, rows: list[tuple[str, str, str, str, int]] | None = None) -> None:
+    """A migrated database, optionally seeded — `schedule list` brings the file
+    to head itself, as every other store does."""
+    from pathlib import Path
+
+    from pincer.db import ensure_schema_current
+
+    ensure_schema_current(Path(str(path)))
     conn = sqlite3.connect(str(path))
-    conn.execute(
-        """
-        CREATE TABLE schedules (
-            id INTEGER PRIMARY KEY,
-            pincer_user_id TEXT NOT NULL,
-            name TEXT NOT NULL,
-            cron_expr TEXT NOT NULL,
-            action TEXT NOT NULL,
-            channel TEXT NOT NULL DEFAULT 'telegram',
-            timezone TEXT NOT NULL DEFAULT 'UTC',
-            enabled INTEGER NOT NULL DEFAULT 1
-        )
-        """
-    )
     for row in rows or []:
         conn.execute(
             "INSERT INTO schedules (pincer_user_id, name, cron_expr, action, enabled) VALUES (?, ?, ?, ?, ?)",
@@ -91,7 +84,7 @@ def _make_schedules_db(path: object, rows: list[tuple[str, str, str, str, int]] 
     conn.close()
 
 
-def test_schedule_list_missing_table(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_schedule_list_migrates_a_fresh_database(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     db_path = tmp_path / "empty.db"
     sqlite3.connect(str(db_path)).close()
 
@@ -102,7 +95,7 @@ def test_schedule_list_missing_table(monkeypatch: pytest.MonkeyPatch, tmp_path) 
     result = runner.invoke(app, ["schedule", "list"])
 
     assert result.exit_code == 0
-    assert "table not created yet" in result.output
+    assert "No scheduled tasks." in result.output
 
 
 def test_schedule_list_empty(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -117,6 +110,29 @@ def test_schedule_list_empty(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
 
     assert result.exit_code == 0
     assert "No scheduled tasks." in result.output
+
+
+def test_schedule_list_survives_an_unreadable_database(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A listing must not traceback when the schedules cannot be read."""
+    db_path = tmp_path / "broken.db"
+    _make_schedules_db(db_path)
+
+    mock_settings = MagicMock()
+    mock_settings.db_path = db_path
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
+    monkeypatch.setattr(
+        "pincer.services.scheduler.ScheduleService.list_all",
+        _raise_db_error,
+    )
+
+    result = runner.invoke(app, ["schedule", "list"])
+
+    assert result.exit_code == 0
+    assert "table not created yet" in result.output
+
+
+async def _raise_db_error(*_args: object, **_kwargs: object) -> None:
+    raise RuntimeError("no such table: schedules")
 
 
 def test_schedule_list_shows_rows(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]

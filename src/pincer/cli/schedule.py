@@ -16,21 +16,19 @@ async def schedule_list() -> None:
 
 
 async def _schedule_list() -> None:
-    import aiosqlite as _aiosqlite
     from rich.table import Table
 
     from pincer.config import get_settings_relaxed
+    from pincer.services.scheduler import ScheduleService
 
     settings = get_settings_relaxed()
-    async with _aiosqlite.connect(str(settings.db_path)) as db:
-        try:
-            async with db.execute(
-                "SELECT name, cron_expr, pincer_user_id, timezone, enabled FROM schedules ORDER BY name"
-            ) as cur:
-                rows = [(r[0], r[1], r[2], r[3], r[4]) async for r in cur]
-        except Exception:
-            console.print("[dim]No scheduled tasks (table not created yet).[/dim]")
-            return
+    try:
+        service = await ScheduleService.for_path(settings.db_path)
+        schedules = sorted(await service.list_all(), key=lambda s: s["name"])
+    except Exception:
+        console.print("[dim]No scheduled tasks (table not created yet).[/dim]")
+        return
+    rows = [(s["name"], s["cron_expr"], s["pincer_user_id"], s["timezone"], s["enabled"]) for s in schedules]
 
     if not rows:
         console.print("[dim]No scheduled tasks.[/dim]")

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 from unittest.mock import patch
 
 import aiosqlite
@@ -16,13 +15,7 @@ from fastapi.testclient import TestClient
 
 from pincer.api.schedules import router
 from pincer.scheduler.cron import CronScheduler
-
-
-@pytest.fixture
-def client() -> TestClient:
-    app = FastAPI()
-    app.include_router(router)
-    return TestClient(app)
+from pincer.services.scheduler import ScheduleService, get_schedule_service
 
 
 @pytest_asyncio.fixture
@@ -33,10 +26,20 @@ async def scheduler(tmp_path: Path) -> AsyncIterator[CronScheduler]:
     yield sched
 
 
-def _fake_settings(db_path: str) -> Any:
-    settings = type("Settings", (), {})()
-    settings.db_path = db_path
-    return settings
+@pytest.fixture
+def client(scheduler: CronScheduler) -> TestClient:
+    """The routes read the same database the `scheduler` fixture writes to."""
+    app = FastAPI()
+    app.include_router(router)
+    service = ScheduleService(_async_url(scheduler._db_path))
+    app.dependency_overrides[get_schedule_service] = lambda: service
+    return TestClient(app)
+
+
+def _async_url(db_path: str) -> str:
+    from pincer.db.engine import to_async_url
+
+    return to_async_url(f"sqlite:///{db_path}")
 
 
 async def _mark_fired(scheduler: CronScheduler, schedule_id: int) -> None:
@@ -52,8 +55,7 @@ async def _mark_fired(scheduler: CronScheduler, schedule_id: int) -> None:
 @pytest.mark.asyncio
 class TestSchedulesApi:
     async def test_empty_db(self, client: TestClient, scheduler: CronScheduler) -> None:
-        with patch("pincer.api.schedules.get_settings_relaxed", return_value=_fake_settings(scheduler._db_path)):
-            resp = client.get("/api/schedules")
+        resp = client.get("/api/schedules")
         assert resp.status_code == 200
         assert resp.json() == {"tasks": [], "total": 0, "future_count": 0, "past_count": 0}
 
@@ -63,8 +65,7 @@ class TestSchedulesApi:
         await scheduler.add("daily digest", "0 8 * * *", {"type": "briefing"}, "usr_a")
         await scheduler.add("one_off", "5 9 15 8 *", {"type": "custom", "prompt": "hi"}, "usr_a")
 
-        with patch("pincer.api.schedules.get_settings_relaxed", return_value=_fake_settings(scheduler._db_path)):
-            resp = client.get("/api/schedules")
+        resp = client.get("/api/schedules")
 
         data = resp.json()
         assert data["total"] == 2
@@ -95,8 +96,7 @@ class TestSchedulesApi:
             )
             await db.commit()
 
-        with patch("pincer.api.schedules.get_settings_relaxed", return_value=_fake_settings(scheduler._db_path)):
-            resp = client.get("/api/schedules")
+        resp = client.get("/api/schedules")
 
         data = resp.json()
         assert [t["name"] for t in data["tasks"]] == ["sooner", "later"]
@@ -105,8 +105,7 @@ class TestSchedulesApi:
         sid = await scheduler.add("one_off", "5 9 15 8 *", {"type": "custom", "prompt": "hi"}, "usr_a")
         await _mark_fired(scheduler, sid)
 
-        with patch("pincer.api.schedules.get_settings_relaxed", return_value=_fake_settings(scheduler._db_path)):
-            resp = client.get("/api/schedules")
+        resp = client.get("/api/schedules")
 
         data = resp.json()
         assert data["total"] == 0
@@ -131,8 +130,7 @@ class TestSchedulesApi:
             )
             await db.commit()
 
-        with patch("pincer.api.schedules.get_settings_relaxed", return_value=_fake_settings(scheduler._db_path)):
-            resp = client.get("/api/schedules", params={"include_past": "true"})
+        resp = client.get("/api/schedules", params={"include_past": "true"})
 
         data = resp.json()
         past_names = [t["name"] for t in data["tasks"] if t["timing"] == "past"]
@@ -143,21 +141,14 @@ class TestSchedulesApi:
         await scheduler.add("job_a", "0 8 * * *", {"type": "briefing"}, "usr_a")
         await scheduler.add("job_b", "0 9 * * *", {"type": "briefing"}, "usr_b")
 
-        with patch("pincer.api.schedules.get_settings_relaxed", return_value=_fake_settings(scheduler._db_path)):
-            resp = client.get("/api/schedules")
+        resp = client.get("/api/schedules")
 
         data = resp.json()
         assert {t["pincer_user_id"] for t in data["tasks"]} == {"usr_a", "usr_b"}
 
     async def test_db_failure_returns_500_not_empty_payload(self, client: TestClient, scheduler: CronScheduler) -> None:
         """Regression: a DB/migration failure must surface as an error, not look like 'no schedules'."""
-        with (
-            patch("pincer.api.schedules.get_settings_relaxed", return_value=_fake_settings(scheduler._db_path)),
-            patch(
-                "pincer.api.schedules.CronScheduler.list_all",
-                side_effect=RuntimeError("db exploded"),
-            ),
-        ):
+        with patch.object(ScheduleService, "list_all", side_effect=RuntimeError("db exploded")):
             resp = client.get("/api/schedules")
 
         assert resp.status_code == 500

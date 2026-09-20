@@ -195,8 +195,6 @@ module = [
     "pincer.tools.builtin.email_tool",
     "pincer.tools.builtin.calendar_tool",
     "pincer.tools.builtin.image_gen",
-    "pincer.scheduler.proactive",
-    "pincer.scheduler.triggers",
     "pincer.core.agent",
     "pincer.core.identity",
     "pincer.costs.budget",
