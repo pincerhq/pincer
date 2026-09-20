@@ -11,17 +11,18 @@ message is a lost customer.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-import aiosqlite
 
 from pincer.voice.receptionist.intents import INTENT_AFTER_HOURS, INTENT_APPOINTMENT, INTENT_MESSAGE
 
 if TYPE_CHECKING:
     from pincer.voice.receptionist.profile import BusinessProfile
+
+from pincer.db.engine import get_database_url
+from pincer.services.voice import MessagesService
 
 logger = logging.getLogger(__name__)
 
@@ -144,33 +145,21 @@ async def persist_inbound_message(
         return None
     slots = dict(reception.get("slots") or {})
     try:
-        from pincer.voice.retention import ensure_voice_tables
-
-        async with aiosqlite.connect(db_path) as db:
-            await ensure_voice_tables(db)
-            await db.execute("DELETE FROM inbound_messages WHERE call_sid = ?", (call_sid,))
-            cursor = await db.execute(
-                "INSERT INTO inbound_messages (call_sid, caller_name, caller_name_unverified, callback_number, "
-                "callback_unverified, matter, urgent, created_at, delivered_to_owner_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    call_sid,
-                    str(slots.get("caller_name") or ""),
-                    int(bool(slots.get("caller_name_unverified"))),
-                    str(slots.get("callback_number") or ""),
-                    int(bool(slots.get("callback_unverified"))),
-                    str(slots.get("matter") or ""),
-                    int(bool(slots.get("urgent"))),
-                    datetime.now(UTC).isoformat(),
-                    delivered_at,
-                ),
-            )
-            intent = str(reception.get("intent") or "")
-            if intent:
-                with contextlib.suppress(Exception):
-                    await db.execute("UPDATE voice_calls SET inbound_intent = ? WHERE call_sid = ?", (intent, call_sid))
-            await db.commit()
-            return int(cursor.lastrowid or 0)
+        messages = await MessagesService.for_path(Path(str(db_path)))
+        return await messages.record(
+            {
+                "call_sid": call_sid,
+                "caller_name": str(slots.get("caller_name") or ""),
+                "caller_name_unverified": int(bool(slots.get("caller_name_unverified"))),
+                "callback_number": str(slots.get("callback_number") or ""),
+                "callback_unverified": int(bool(slots.get("callback_unverified"))),
+                "matter": str(slots.get("matter") or ""),
+                "urgent": int(bool(slots.get("urgent"))),
+                "created_at": datetime.now(UTC).isoformat(),
+                "delivered_to_owner_at": delivered_at,
+            },
+            inbound_intent=str(reception.get("intent") or ""),
+        )
     except Exception:
         logger.exception("inbound_messages persist failed [%s]", call_sid)
         return None
@@ -180,12 +169,8 @@ async def stamp_delivered(db_path: str, call_sid: str) -> None:
     if not db_path:
         return
     try:
-        async with aiosqlite.connect(db_path) as db:
-            await db.execute(
-                "UPDATE inbound_messages SET delivered_to_owner_at = ? WHERE call_sid = ?",
-                (datetime.now(UTC).isoformat(), call_sid),
-            )
-            await db.commit()
+        messages = MessagesService(get_database_url(Path(str(db_path))))
+        await messages.mark_delivered(call_sid, datetime.now(UTC).isoformat())
     except Exception:
         logger.debug("delivered_to_owner_at stamp failed [%s]", call_sid, exc_info=True)
 

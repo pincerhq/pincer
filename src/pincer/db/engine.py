@@ -21,6 +21,7 @@ from alembic.config import Config
 from sqlalchemy import event
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,11 @@ async def dispose_engines() -> None:
 def _create_engine(url: str) -> AsyncEngine:
     backend = make_url(url).get_backend_name()
     if backend == "sqlite":
-        engine = create_async_engine(url)
+        # NullPool: a pooled SQLite connection keeps its transaction state (and
+        # so its write lock) alive between units of work, which deadlocks the
+        # several processes and event loops that share one file. Opening per
+        # unit of work is what the aiosqlite stores did all along.
+        engine = create_async_engine(url, poolclass=NullPool)
         event.listen(engine.sync_engine, "connect", _apply_sqlite_pragmas)
         return engine
     # A pooled Postgres connection can be dropped server-side while idle.

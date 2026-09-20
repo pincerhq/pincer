@@ -206,7 +206,9 @@ async def test_call_actions_migration_adds_policy_columns(tmp_path):
             "tool_execute", "google__create_event", output_summary="ok", tier="W", approval_mode="off"
         )
         transcript.log_action("tool_denied", "email_send", tier="X", deny_reason="tier_x")
-        await transcript.save_to_db(db)
+        from pincer.services.voice import CallsService
+
+        await transcript.save_to_db(await CallsService.for_path(db_path))
         rows = await db.execute_fetchall(
             "SELECT action_type, tier, approval_mode, deny_reason FROM call_actions WHERE call_id='CA_mig' ORDER BY id"
         )

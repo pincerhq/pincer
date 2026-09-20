@@ -25,18 +25,18 @@ from __future__ import annotations
 
 import logging
 import re
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiosqlite
-
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    import aiosqlite
 
     from pincer.config import Settings
+
+from pincer.services.voice import SafetyGateService
 
 logger = logging.getLogger(__name__)
 
@@ -322,18 +322,10 @@ async def ensure_outbound_tables(conn: aiosqlite.Connection) -> None:
     await ensure_schema_for_connection(conn)
 
 
-@asynccontextmanager
-async def _db(settings: Settings | Any) -> AsyncIterator[aiosqlite.Connection]:
-    """Open the guard tables, always closing the connection.
-
-    `aiosqlite.Connection.__aenter__` awaits the object again, so the
-    connection must be created *inside* the context manager rather than
-    awaited first and then entered — doing both starts its worker thread twice.
-    """
-    async with aiosqlite.connect(str(settings.db_path)) as conn:
-        conn.row_factory = aiosqlite.Row
-        await ensure_outbound_tables(conn)
-        yield conn
+async def _gate(settings: Settings | Any) -> SafetyGateService:
+    """The store behind the gate, with the schema brought to head."""
+    service: SafetyGateService = await SafetyGateService.for_path(Path(str(settings.db_path)))
+    return service
 
 
 def normalize_number(number: str) -> str:
@@ -359,48 +351,43 @@ async def add_do_not_call(
     key = normalize_number(number)
     if not key:
         return False
-    async with _db(settings) as conn:
-        cursor = await conn.execute("SELECT 1 FROM do_not_call_numbers WHERE phone_number = ?", (key,))
-        already = await cursor.fetchone() is not None
-        await conn.execute(
-            "INSERT INTO do_not_call_numbers (phone_number, reason, source, call_sid, added_at) VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(phone_number) DO UPDATE SET reason=excluded.reason, source=excluded.source",
-            (key, reason, source, call_sid, datetime.now(UTC).isoformat()),
-        )
-        await conn.commit()
-    if not already:
+    gate = await _gate(settings)
+    added = await gate.add_do_not_call(
+        {
+            "phone_number": key,
+            "reason": reason,
+            "source": source,
+            "call_sid": call_sid,
+            "added_at": datetime.now(UTC).isoformat(),
+        }
+    )
+    if added:
         from pincer.voice.pii_guard import mask_phone_number
 
         # Masked at the call site as well as by the root filter: this line is
         # emitted from CLI paths that never run `_setup_logging`.
         logger.warning("Added to do-not-call list: %s (source=%s, reason=%s)", mask_phone_number(key), source, reason)
-    return not already
+    return added
 
 
 async def remove_do_not_call(settings: Settings | Any, number: str) -> bool:
     """Remove a number from the do-not-call list (explicit user override)."""
     key = normalize_number(number)
-    async with _db(settings) as conn:
-        cursor = await conn.execute("DELETE FROM do_not_call_numbers WHERE phone_number = ?", (key,))
-        await conn.commit()
-        return bool(cursor.rowcount)
+    gate = await _gate(settings)
+    return await gate.remove_do_not_call(key)
 
 
 async def is_do_not_call(settings: Settings | Any, number: str) -> bool:
     key = normalize_number(number)
     if not key:
         return False
-    async with _db(settings) as conn:
-        cursor = await conn.execute("SELECT 1 FROM do_not_call_numbers WHERE phone_number = ?", (key,))
-        return await cursor.fetchone() is not None
+    gate = await _gate(settings)
+    return await gate.is_do_not_call(key)
 
 
 async def list_do_not_call(settings: Settings | Any) -> list[dict[str, str]]:
-    async with _db(settings) as conn:
-        rows = await conn.execute_fetchall(
-            "SELECT phone_number, reason, source, call_sid, added_at FROM do_not_call_numbers ORDER BY added_at DESC"
-        )
-    return [dict(row) for row in rows]
+    gate = await _gate(settings)
+    return await gate.list_do_not_call()
 
 
 # Callee opt-out intent, EN + DE + UK. Deliberately narrow: only unambiguous
@@ -459,45 +446,35 @@ async def record_outbound_call(
     """Record a placed call. Feeds the daily cap and the target cooldown."""
     from pincer.voice.localtime import voice_today_str
 
-    async with _db(settings) as conn:
-        await conn.execute(
-            "INSERT INTO outbound_call_logs (phone_number, user_id, channel, call_sid, placed_at, local_day) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                normalize_number(number),
-                user_id,
-                channel,
-                call_sid,
-                datetime.now(UTC).isoformat(),
-                voice_today_str(settings),
-            ),
-        )
-        await conn.commit()
+    gate = await _gate(settings)
+    await gate.log_outbound(
+        {
+            "phone_number": normalize_number(number),
+            "user_id": user_id,
+            "channel": channel,
+            "call_sid": call_sid,
+            "placed_at": datetime.now(UTC).isoformat(),
+            "local_day": voice_today_str(settings),
+        }
+    )
 
 
 async def calls_today(settings: Settings | Any) -> int:
     """Outbound calls placed today (voice-local day) across all users/channels."""
     from pincer.voice.localtime import voice_today_str
 
-    async with _db(settings) as conn:
-        cursor = await conn.execute(
-            "SELECT COUNT(*) FROM outbound_call_logs WHERE local_day = ?", (voice_today_str(settings),)
-        )
-        row = await cursor.fetchone()
-    return int(row[0]) if row else 0
+    gate = await _gate(settings)
+    return await gate.calls_today(voice_today_str(settings))
 
 
 async def _recent_target_calls(settings: Settings | Any, number: str, window_min: int) -> list[datetime]:
     cutoff = datetime.now(UTC) - timedelta(minutes=window_min)
-    async with _db(settings) as conn:
-        rows = await conn.execute_fetchall(
-            "SELECT placed_at FROM outbound_call_logs WHERE phone_number = ? AND placed_at >= ? ORDER BY placed_at ASC",
-            (normalize_number(number), cutoff.isoformat()),
-        )
+    gate = await _gate(settings)
+    placed = await gate.placed_since(normalize_number(number), cutoff.isoformat())
     stamps: list[datetime] = []
-    for row in rows:
+    for stamp in placed:
         try:
-            parsed = datetime.fromisoformat(str(row[0]))
+            parsed = datetime.fromisoformat(str(stamp))
         except (TypeError, ValueError):
             continue
         stamps.append(parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC))
