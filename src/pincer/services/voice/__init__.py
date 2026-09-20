@@ -5,5 +5,13 @@ from pincer.services.voice.calls import CallsService
 from pincer.services.voice.contacts import ContactsService
 from pincer.services.voice.messages import MessagesService
 from pincer.services.voice.safety import SafetyGateService
+from pincer.services.voice.threads import ThreadsService
 
-__all__ = ["AnalyticsService", "CallsService", "ContactsService", "MessagesService", "SafetyGateService"]
+__all__ = [
+    "AnalyticsService",
+    "CallsService",
+    "ContactsService",
+    "MessagesService",
+    "SafetyGateService",
+    "ThreadsService",
+]

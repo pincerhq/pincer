@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
-from pincer.models.voice import CallThread, CallThreadMember
+from pincer.models.voice import CallThread, CallThreadMember, VoiceCall
 from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
@@ -27,8 +27,14 @@ class ThreadRepository(BaseRepository[CallThread, str]):
         stmt = update(CallThread).where(col(CallThread.thread_id) == thread_id).values(**values)
         return int((await self.session.exec(stmt)).rowcount)
 
-    async def open_for_number(self, primary_number: str, status: str, updated_since: str) -> CallThread | None:
-        """The most recently updated open thread for a number, if any."""
+    async def for_number(
+        self, primary_number: str, status: str, updated_since: str, limit: int
+    ) -> Sequence[CallThread]:
+        """Threads for a number in a status, most recently active first.
+
+        More than one is the caller's problem to refuse: an ambiguous match
+        must not be guessed at.
+        """
         stmt = (
             select(CallThread)
             .where(
@@ -37,14 +43,36 @@ class ThreadRepository(BaseRepository[CallThread, str]):
                 col(CallThread.updated_at) >= updated_since,
             )
             .order_by(col(CallThread.updated_at).desc())
-            .limit(1)
+            .limit(limit)
         )
-        return (await self.session.exec(stmt)).first()
+        return (await self.session.exec(stmt)).all()
 
     async def stale_ids(self, status: str, older_than: str) -> Sequence[str]:
         stmt = select(CallThread.thread_id).where(
             col(CallThread.status) != status, col(CallThread.updated_at) < older_than
         )
+        return (await self.session.exec(stmt)).all()
+
+    async def search(
+        self,
+        *,
+        statuses: Sequence[str] = (),
+        query: str = "",
+        limit: int,
+        offset: int = 0,
+    ) -> Sequence[CallThread]:
+        """Threads by most recent activity, newest first."""
+        stmt = select(CallThread)
+        if statuses:
+            stmt = stmt.where(col(CallThread.status).in_(list(statuses)))
+        if query:
+            like = f"%{query}%"
+            stmt = stmt.where(
+                col(CallThread.subject).like(like)
+                | col(CallThread.contact_name).like(like)
+                | col(CallThread.primary_number).like(like)
+            )
+        stmt = stmt.order_by(col(CallThread.updated_at).desc()).limit(limit).offset(offset)
         return (await self.session.exec(stmt)).all()
 
 
@@ -100,6 +128,23 @@ class ThreadMemberRepository(BaseRepository[CallThreadMember, str]):
             .values(outcome_code=outcome_code, task_result=task_result)
         )
         return int((await self.session.exec(stmt)).rowcount)
+
+    async def with_calls(self, thread_id: str) -> Sequence[tuple[CallThreadMember, VoiceCall | None]]:
+        """A thread's members, each with its call row when the call still exists.
+
+        A member whose call has been purged comes back with `None` rather than
+        being dropped: the thread keeps a stub for it (§5). Ordered by when the
+        call happened, falling back to when it was attached; `call_sid` breaks
+        ties, since SQLite's `rowid` has no Postgres equivalent.
+        """
+        when = func.coalesce(func.nullif(col(CallThreadMember.call_started_at), ""), col(CallThreadMember.attached_at))
+        stmt = (
+            select(CallThreadMember, VoiceCall)
+            .outerjoin(VoiceCall, col(VoiceCall.call_sid) == col(CallThreadMember.call_sid))
+            .where(col(CallThreadMember.thread_id) == thread_id)
+            .order_by(when, col(CallThreadMember.call_sid))
+        )
+        return [(member, call) for member, call in (await self.session.exec(stmt)).all()]
 
     async def move_thread(self, from_thread_id: str, to_thread_id: str, *, attach_kind: str, attached_at: str) -> int:
         stmt = (
