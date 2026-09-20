@@ -69,10 +69,71 @@ class CallsService(DatabaseService):
         async with session_scope(self._url) as session:
             await CallActionRepository(session).add_many([CallAction(**row) for row in rows])
 
-    async def transcript_for(self, call_id: str) -> list[dict[str, Any]]:
+    async def transcript_for(
+        self, call_id: str, *, limit: int | None = None, final_only: bool = False
+    ) -> list[dict[str, Any]]:
         async with session_scope(self._url) as session:
-            rows = await TranscriptRepository(session).for_call(call_id)
+            rows = await TranscriptRepository(session).for_call(call_id, limit=limit, final_only=final_only)
         return [_as_dict(row) for row in rows]
+
+    async def page_with_thread(
+        self,
+        *,
+        direction: str | None = None,
+        completed: bool | None = None,
+        thread_id: str | None = None,
+        limit: int,
+        offset: int,
+    ) -> list[dict[str, Any]]:
+        """A page of calls, each with its thread's subject as `thread_subject`."""
+        async with session_scope(self._url) as session:
+            rows = await CallRepository(session).page_with_thread(
+                direction=direction, completed=completed, thread_id=thread_id, limit=limit, offset=offset
+            )
+        return [{**_as_dict(call), "thread_subject": subject} for call, subject in rows]
+
+    async def get_with_thread(self, call_sid: str) -> dict[str, Any] | None:
+        async with session_scope(self._url) as session:
+            found = await CallRepository(session).with_thread(call_sid)
+        if found is None:
+            return None
+        call, subject = found
+        return {**_as_dict(call), "thread_subject": subject}
+
+    async def terminated_between(
+        self,
+        start: str,
+        end: str | None = None,
+        *,
+        language: str | None = None,
+        only_failures: bool = False,
+        failure_code: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Calls that ended, newest first — what every report reads."""
+        async with session_scope(self._url) as session:
+            rows = await CallRepository(session).terminated_between(
+                start, end, language=language, only_failures=only_failures, failure_code=failure_code
+            )
+        return [_as_dict(row) for row in rows]
+
+    async def started_since(self, cutoff: str, *, failure_code: str | None = None) -> list[dict[str, Any]]:
+        async with session_scope(self._url) as session:
+            rows = await CallRepository(session).started_since(cutoff, failure_code=failure_code)
+        return [_as_dict(row) for row in rows]
+
+    async def report_delivery_since(self, cutoff: str) -> list[tuple[str | None, str | None]]:
+        async with session_scope(self._url) as session:
+            return list(await CallRepository(session).reported_since(cutoff))
+
+    async def newest_for_user(self, pincer_user_id: str) -> dict[str, Any] | None:
+        async with session_scope(self._url) as session:
+            rows = await CallRepository(session).newest_for_user(pincer_user_id)
+        return _as_dict(rows[0]) if rows else None
+
+    async def get_for_user(self, call_sid: str, pincer_user_id: str) -> dict[str, Any] | None:
+        async with session_scope(self._url) as session:
+            row = await CallRepository(session).owned_by(call_sid, pincer_user_id)
+        return None if row is None else _as_dict(row)
 
     async def actions_for(self, call_id: str) -> list[dict[str, Any]]:
         async with session_scope(self._url) as session:

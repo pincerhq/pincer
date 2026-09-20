@@ -45,6 +45,10 @@ class SafetyGateService(DatabaseService):
         async with session_scope(self._url) as session:
             await OutboundCallLogRepository(session).add(OutboundCallLog(**values), refresh=False)
 
+    async def dialled_after_objection(self, cutoff: str) -> list[tuple[str, str]]:
+        async with session_scope(self._url) as session:
+            return list(await OutboundCallLogRepository(session).dialled_after_objection(cutoff))
+
     async def calls_today(self, local_day: str) -> int:
         async with session_scope(self._url) as session:
             return await OutboundCallLogRepository(session).count_for_day(local_day)

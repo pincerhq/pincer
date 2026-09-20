@@ -22,6 +22,11 @@ class MessagesService(DatabaseService):
                 await CallRepository(session).set_fields(str(values["call_sid"]), {"inbound_intent": inbound_intent})
         return message_id
 
+    async def newest(self, limit: int) -> list[dict[str, Any]]:
+        async with session_scope(self._url) as session:
+            rows = await InboundMessageRepository(session).newest(limit)
+        return [{name: getattr(row, name) for name in row.__class__.model_fields} for row in rows]
+
     async def mark_delivered(self, call_sid: str, when: str) -> None:
         async with session_scope(self._url) as session:
             await InboundMessageRepository(session).mark_delivered(call_sid, when)

@@ -9,11 +9,14 @@ so old transcripts legitimately disappear while memory notes keep the facts.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
-import aiosqlite
+from sqlalchemy.exc import SQLAlchemyError
 
 from pincer.config import get_settings
+from pincer.db.engine import get_database_url
+from pincer.services.voice import CallsService
 from pincer.voice.pii_guard import mask_pii
 
 logger = logging.getLogger(__name__)
@@ -34,44 +37,27 @@ async def get_call_transcript(call_sid: str = "", context: dict[str, Any] | None
     db_path = str(settings.db_path)
 
     try:
-        async with aiosqlite.connect(db_path) as db:
-            db.row_factory = aiosqlite.Row
+        calls = CallsService(get_database_url(Path(db_path)))
 
-            if not call_sid.strip():
-                rows = list(
-                    await db.execute_fetchall(
-                        "SELECT call_sid, to_number, started_at FROM voice_calls "
-                        "WHERE pincer_user_id = ? ORDER BY started_at DESC LIMIT 1",
-                        (pincer_user_id,),
-                    )
-                )
-                if not rows:
-                    return "No calls found."
-                call_sid = rows[0]["call_sid"]
+        if not call_sid.strip():
+            newest = await calls.newest_for_user(pincer_user_id)
+            if newest is None:
+                return "No calls found."
+            call_sid = str(newest["call_sid"])
 
-            call_rows = list(
-                await db.execute_fetchall(
-                    "SELECT call_sid, to_number, from_number, started_at FROM voice_calls "
-                    "WHERE call_sid = ? AND pincer_user_id = ?",
-                    (call_sid.strip(), pincer_user_id),
-                )
-            )
-            if not call_rows:
-                return f"No transcript found for call {call_sid}."
-            entries = list(
-                await db.execute_fetchall(
-                    "SELECT speaker, text, timestamp FROM call_transcripts WHERE call_id = ? ORDER BY id LIMIT ?",
-                    (call_sid.strip(), MAX_LINES),
-                )
-            )
-    except aiosqlite.Error as e:
+        # Scoped to the caller: a Call SID is not an authorisation.
+        call = await calls.get_for_user(call_sid.strip(), pincer_user_id)
+        if call is None:
+            return f"No transcript found for call {call_sid}."
+        entries = await calls.transcript_for(call_sid.strip(), limit=MAX_LINES)
+    except SQLAlchemyError as e:
         logger.warning("Transcript lookup failed: %s", e)
         return "No call transcripts available yet."
 
     if not entries:
         return f"Call {call_sid} exists but has no stored transcript (it may have been purged by retention)."
 
-    row = dict(call_rows[0])
+    row = call
     target = row.get("to_number") or row.get("from_number") or ""
     started = str(row.get("started_at", ""))[:16].replace("T", " ")
     header = f"Transcript of call {call_sid} ({target}, {started})"

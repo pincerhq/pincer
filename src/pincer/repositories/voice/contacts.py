@@ -17,6 +17,11 @@ if TYPE_CHECKING:
 class ContactRepository(BaseRepository[PhoneContact, int]):
     model = PhoneContact
 
+    async def all_by_name(self) -> Sequence[PhoneContact]:
+        """Every contact, ordered by name regardless of case."""
+        stmt = select(PhoneContact).order_by(func.lower(col(PhoneContact.name)))
+        return (await self.session.exec(stmt)).all()
+
     async def search_by_name(self, fragment: str, limit: int = 5) -> Sequence[tuple[str, str, str | None]]:
         """Case-insensitive name search: (name, number, category).
 

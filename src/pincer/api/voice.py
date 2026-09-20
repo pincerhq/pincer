@@ -31,20 +31,24 @@ import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
-import aiosqlite
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import SQLAlchemyError
 
 from pincer.config import get_settings_relaxed
 from pincer.voice.pii_guard import mask_pii
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Mapping
 
     from pincer.voice.engine import VoiceEngine
+
+from pincer.db.engine import ensure_schema_current, get_database_url
+from pincer.services.voice import CallsService, ContactsService, MessagesService
 
 logger = logging.getLogger(__name__)
 
@@ -73,19 +77,24 @@ def _get_engine() -> VoiceEngine | None:
 _schema_ready_for: str = ""
 
 
-@asynccontextmanager
-async def _db() -> AsyncIterator[aiosqlite.Connection]:
-    global _schema_ready_for  # noqa: PLW0603
-    settings = get_settings_relaxed()
-    db_path = str(settings.db_path)
-    async with aiosqlite.connect(db_path) as conn:
-        conn.row_factory = aiosqlite.Row
-        if _schema_ready_for != db_path:
-            from pincer.voice.retention import ensure_voice_tables
+async def _voice_url() -> str:
+    """The configured database, brought to head once per path.
 
-            await ensure_voice_tables(conn)
-            _schema_ready_for = db_path
-        yield conn
+    Ensuring it on every read would migrate in front of each query; never
+    ensuring it would leave a fresh install answering "no calls" from a
+    database that simply has no tables yet.
+    """
+    global _schema_ready_for  # noqa: PLW0603
+    db_path = str(get_settings_relaxed().db_path)
+    url = get_database_url(Path(db_path))
+    if _schema_ready_for != db_path:
+        await asyncio.to_thread(ensure_schema_current, Path(db_path))
+        _schema_ready_for = db_path
+    return url
+
+
+async def _calls() -> CallsService:
+    return CallsService(await _voice_url())
 
 
 def _duration_seconds(started_at: str, ended_at: str | None) -> int:
@@ -612,7 +621,7 @@ def _briefing_preview(state: Any) -> str:
     return mask_pii(briefing.preview(ACTIVE_PREVIEW_CHARS)) if briefing is not None else ""
 
 
-def _row_value(row: aiosqlite.Row, key: str) -> Any:
+def _row_value(row: Mapping[str, Any], key: str) -> Any:
     """Column value, or None when the DB predates the Sprint 9 migration."""
     try:
         return row[key]
@@ -620,7 +629,7 @@ def _row_value(row: aiosqlite.Row, key: str) -> Any:
         return None
 
 
-def _summary_from_row(row: aiosqlite.Row, cost_usd: float | None = None) -> CallSummary:
+def _summary_from_row(row: Mapping[str, Any], cost_usd: float | None = None) -> CallSummary:
     from pincer.observability.failure_codes import describe
 
     ended_at = row["ended_at"]
@@ -663,13 +672,11 @@ class InboundMessageOut(BaseModel):
 @router.get("/messages", response_model=list[InboundMessageOut])
 async def inbound_messages(limit: int = Query(default=50, ge=1, le=500)) -> list[InboundMessageOut]:
     """Messages taken by the receptionist, newest first (PII-masked like every read surface)."""
-    async with _db() as conn:
-        try:
-            rows = await conn.execute_fetchall(
-                "SELECT * FROM inbound_messages ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
-            )
-        except aiosqlite.OperationalError:
-            return []
+    try:
+        messages = MessagesService(await _voice_url())
+        rows = await messages.newest(limit)
+    except SQLAlchemyError:
+        return []
     return [
         InboundMessageOut(
             id=int(r["id"]),
@@ -725,31 +732,14 @@ async def list_calls(
     status: str | None = Query(default=None, pattern="^(active|completed)$"),
     thread_id: str | None = Query(default=None, max_length=32),
 ) -> list[CallSummary]:
-    sql = (
-        "SELECT c.call_sid, c.direction, c.from_number, c.to_number, c.started_at, c.ended_at, c.failure_code, "
-        "c.thread_id, c.thread_attach_kind, t.subject AS thread_subject "
-        "FROM voice_calls c LEFT JOIN call_threads t ON t.thread_id = c.thread_id"
-    )
-    where: list[str] = []
-    args: list[Any] = []
-    if direction:
-        where.append("c.direction = ?")
-        args.append(direction)
-    if status:
-        where.append("c.ended_at IS NOT NULL" if status == "completed" else "c.ended_at IS NULL")
-    if thread_id:
-        where.append("c.thread_id = ?")
-        args.append(thread_id)
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY c.started_at DESC LIMIT ? OFFSET ?"
-    args += [limit, offset]
-
-    async with _db() as conn:
-        try:
-            rows = await conn.execute_fetchall(sql, args)
-        except aiosqlite.OperationalError:  # voice tables not created yet
-            return []
+    completed = None if status is None else status == "completed"
+    try:
+        calls = await _calls()
+        rows = await calls.page_with_thread(
+            direction=direction, completed=completed, thread_id=thread_id, limit=limit, offset=offset
+        )
+    except SQLAlchemyError:  # voice tables not created yet
+        return []
 
     # One batched cost lookup for the page, not one per row.
     from pincer.observability.call_costs import get_call_costs
@@ -942,31 +932,15 @@ async def cancel_scheduled_call(schedule_id: int) -> None:
 
 @router.get("/calls/{call_sid}", response_model=CallDetail)
 async def call_detail(call_sid: str) -> CallDetail:
-    async with _db() as conn:
-        try:
-            cursor = await conn.execute(
-                "SELECT c.call_sid, c.direction, c.from_number, c.to_number, c.started_at, c.ended_at, "
-                "c.failure_code, c.thread_id, c.thread_attach_kind, c.briefing_json, "
-                "t.subject AS thread_subject "
-                "FROM voice_calls c LEFT JOIN call_threads t ON t.thread_id = c.thread_id "
-                "WHERE c.call_sid = ?",
-                (call_sid,),
-            )
-            row = await cursor.fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail="Call not found")
-
-            t_rows = await conn.execute_fetchall(
-                "SELECT speaker, text, confidence, state, timestamp "
-                "FROM call_transcripts WHERE call_id = ? AND is_final = 1 ORDER BY timestamp ASC, id ASC",
-                (call_sid,),
-            )
-            a_rows = await conn.execute_fetchall(
-                "SELECT * FROM call_actions WHERE call_id = ? ORDER BY timestamp ASC, id ASC",
-                (call_sid,),
-            )
-        except aiosqlite.OperationalError as e:
-            raise HTTPException(status_code=404, detail="Call not found") from e
+    try:
+        calls = await _calls()
+        row = await calls.get_with_thread(call_sid)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Call not found")
+        t_rows = await calls.transcript_for(call_sid, final_only=True)
+        a_rows = await calls.actions_for(call_sid)
+    except SQLAlchemyError as e:
+        raise HTTPException(status_code=404, detail="Call not found") from e
 
     from pincer.observability.call_costs import get_call_cost
 
@@ -1187,7 +1161,7 @@ async def list_threads(
             offset=offset,
             has_expired_commitments=has_expired_commitments,
         )
-    except aiosqlite.OperationalError:  # voice tables not created yet
+    except SQLAlchemyError:  # voice tables not created yet
         return []
     out: list[ThreadOut] = []
     for thread in found:
@@ -1317,13 +1291,11 @@ async def voice_approval_decide(approval_id: str, body: VoiceApprovalDecision) -
 
 @router.get("/contacts", response_model=list[Contact])
 async def contacts() -> list[Contact]:
-    async with _db() as conn:
-        try:
-            rows = await conn.execute_fetchall(
-                "SELECT name, phone_number, category, notes FROM phone_contacts ORDER BY name COLLATE NOCASE ASC"
-            )
-        except aiosqlite.OperationalError:  # table only exists once contacts are used
-            return []
+    try:
+        contacts_service = ContactsService(await _voice_url())
+        rows = await contacts_service.all()
+    except SQLAlchemyError:  # no contacts stored yet
+        return []
     return [
         Contact(
             name=r["name"] or "",

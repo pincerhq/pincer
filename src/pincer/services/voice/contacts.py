@@ -10,6 +10,14 @@ from pincer.services.base import DatabaseService
 
 
 class ContactsService(DatabaseService):
+    async def all(self) -> list[dict[str, Any]]:
+        async with session_scope(self._url) as session:
+            rows = await ContactRepository(session).all_by_name()
+        return [
+            {"name": row.name, "phone_number": row.phone_number, "category": row.category, "notes": row.notes}
+            for row in rows
+        ]
+
     async def search(self, fragment: str, limit: int = 5) -> list[dict[str, Any]]:
         async with session_scope(self._url) as session:
             rows = await ContactRepository(session).search_by_name(fragment, limit)

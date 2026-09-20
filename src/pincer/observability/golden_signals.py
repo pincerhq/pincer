@@ -22,19 +22,21 @@ ignore the pager.
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-import aiosqlite
 
 from pincer.observability.failure_codes import EXCLUDED_FROM_SLO, FailureCode
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
     from pincer.config import Settings
+
+from sqlalchemy.exc import SQLAlchemyError
+
+from pincer.db.engine import get_database_url
+from pincer.services.observability import BookingsService, CallCostsService
+from pincer.services.voice import CallsService
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +96,6 @@ class GoldenSignals:
         }
 
 
-@asynccontextmanager
-async def _db(settings: Settings | Any) -> AsyncIterator[aiosqlite.Connection]:
-    async with aiosqlite.connect(str(settings.db_path)) as conn:
-        conn.row_factory = aiosqlite.Row
-        yield conn
-
-
 def _cutoff(hours: float) -> str:
     return (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
 
@@ -118,9 +113,8 @@ def percentile(values: list[float], pct: float) -> float | None:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
 
 
-async def _table_exists(conn: aiosqlite.Connection, table: str) -> bool:
-    cursor = await conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,))
-    return await cursor.fetchone() is not None
+def _calls(settings: Settings | Any) -> CallsService:
+    return CallsService(get_database_url(Path(str(settings.db_path))))
 
 
 # ── 1. Call success rate ─────────────────────────────────────────────
@@ -136,16 +130,11 @@ async def call_success_rate(settings: Settings | Any, window_hours: float | None
     total = 0
     completed = 0
     try:
-        async with _db(settings) as conn:
-            if not await _table_exists(conn, "voice_calls"):
-                return Signal("call_success_rate", None, "ratio", 0, min_sample, target, f"{hours:g}h")
-            rows = await conn.execute_fetchall(
-                "SELECT failure_code FROM voice_calls WHERE ended_at IS NOT NULL AND started_at >= ?",
-                (_cutoff(hours),),
-            )
-    except aiosqlite.OperationalError:
-        # failure_code predates nothing else — a DB from before the Sprint 9
-        # migration simply has no data for this signal yet.
+        rows = await _calls(settings).terminated_between(_cutoff(hours))
+    except Exception:
+        # A database from before the Sprint 9 migration simply has no data for
+        # this signal yet.
+        logger.debug("call_success_rate query failed", exc_info=True)
         return Signal("call_success_rate", None, "ratio", 0, min_sample, target, f"{hours:g}h")
 
     for row in rows:
@@ -181,14 +170,9 @@ async def call_attempt_success_rate(settings: Settings | Any, window_hours: floa
     completed = 0
     excluded_count = 0
     try:
-        async with _db(settings) as conn:
-            if not await _table_exists(conn, "voice_calls"):
-                return Signal("call_attempt_success_rate", None, "ratio", 0, 1, target, f"{window_hours:g}h")
-            rows = await conn.execute_fetchall(
-                "SELECT failure_code FROM voice_calls WHERE ended_at IS NOT NULL AND started_at >= ?",
-                (_cutoff(window_hours),),
-            )
-    except aiosqlite.OperationalError:
+        rows = await _calls(settings).terminated_between(_cutoff(window_hours))
+    except Exception:
+        logger.debug("call_attempt_success_rate query failed", exc_info=True)
         return Signal("call_attempt_success_rate", None, "ratio", 0, 1, target, f"{window_hours:g}h")
 
     for row in rows:
@@ -226,19 +210,14 @@ async def booking_success_rate(settings: Settings | Any, window_hours: float | N
     target = float(getattr(settings, "alert_booking_success_min", 0.70))
 
     try:
-        async with _db(settings) as conn:
-            if not await _table_exists(conn, "appointment_outcomes"):
-                return Signal("booking_success_rate", None, "ratio", 0, min_sample, target, f"{hours:g}h")
-            rows = await conn.execute_fetchall(
-                "SELECT result FROM appointment_outcomes WHERE recorded_at >= ?",
-                (_cutoff(hours),),
-            )
-    except aiosqlite.OperationalError:
+        results = await BookingsService(get_database_url(Path(str(settings.db_path)))).results_since(_cutoff(hours))
+    except Exception:
+        logger.debug("booking_success_rate query failed", exc_info=True)
         return Signal("booking_success_rate", None, "ratio", 0, min_sample, target, f"{hours:g}h")
 
     by_result: dict[str, int] = {}
-    for row in rows:
-        result = str(row["result"] or "unknown")
+    for stored in results:
+        result = str(stored or "unknown")
         by_result[result] = by_result.get(result, 0) + 1
 
     cooperative = sum(count for result, count in by_result.items() if result not in ("unreachable", "voicemail"))
@@ -380,14 +359,13 @@ async def cost_per_call(settings: Settings | Any, window_hours: float = 24.0) ->
     min_calls = int(getattr(settings, "alert_cost_min_calls", 10))
 
     async def _totals(start_hours_ago: float, end_hours_ago: float = 0.0) -> list[float]:
-        async with _db(settings) as conn:
-            if not await _table_exists(conn, "call_costs"):
-                return []
-            rows = await conn.execute_fetchall(
-                "SELECT total_usd FROM call_costs WHERE recorded_at >= ? AND recorded_at < ?",
-                (_cutoff(start_hours_ago), _cutoff(end_hours_ago)),
-            )
-        return [float(r["total_usd"] or 0.0) for r in rows]
+        """Priced calls in the window; none when nothing has been priced yet."""
+        costs = CallCostsService(get_database_url(Path(str(settings.db_path))))
+        try:
+            rows = await costs.recorded_since(_cutoff(start_hours_ago), _cutoff(end_hours_ago))
+        except SQLAlchemyError:
+            return []
+        return [float(row["total_usd"] or 0.0) for row in rows]
 
     try:
         recent = await _totals(window_hours)
@@ -396,7 +374,7 @@ async def cost_per_call(settings: Settings | Any, window_hours: float = 24.0) ->
         # both p95s, the ratio collapses toward 1.0, and the alert never fires
         # — the exact failure this rule exists to catch.
         baseline = await _totals(baseline_days * 24.0, window_hours)
-    except aiosqlite.OperationalError:
+    except SQLAlchemyError:
         recent, baseline = [], []
 
     recent_p95 = percentile(recent, 0.95)
@@ -432,15 +410,8 @@ async def busy_capacity(settings: Settings | Any, window_hours: float = 24.0) ->
     busy_capacity) in the window. Alarm when the count exceeds 5/day."""
     count = 0
     try:
-        async with _db(settings) as conn:
-            if await _table_exists(conn, "voice_calls"):
-                row = await (
-                    await conn.execute(
-                        "SELECT COUNT(*) AS n FROM voice_calls WHERE failure_code = ? AND started_at >= ?",
-                        (FailureCode.BUSY_CAPACITY.value, _cutoff(window_hours)),
-                    )
-                ).fetchone()
-                count = int(row["n"] if row else 0)
+        busy = await _calls(settings).started_since(_cutoff(window_hours), failure_code=FailureCode.BUSY_CAPACITY.value)
+        count = len(busy)
     except Exception:
         logger.debug("busy_capacity signal failed", exc_info=True)
     return Signal(

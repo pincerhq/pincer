@@ -44,6 +44,10 @@ class AppointmentOutcomeRepository(BaseRepository[AppointmentOutcome, int]):
             )
         )
 
+    async def results_since(self, since: str) -> Sequence[str]:
+        stmt = select(AppointmentOutcome.result).where(col(AppointmentOutcome.recorded_at) >= since)
+        return (await self.session.exec(stmt)).all()
+
     async def counts_by_result(self, since: str) -> dict[str, int]:
         stmt = (
             select(AppointmentOutcome.result, func.count())
@@ -69,6 +73,12 @@ class CallCostRepository(BaseRepository[CallCost, str]):
             )
         )
 
+    async def recorded_since(self, since: str, end: str | None = None) -> Sequence[CallCost]:
+        where = [col(CallCost.recorded_at) >= since]
+        if end:
+            where.append(col(CallCost.recorded_at) < end)
+        return await self.list(*where)
+
     async def totals_for(self, call_sids: Sequence[str]) -> dict[str, float]:
         stmt = select(CallCost.call_sid, CallCost.total_usd).where(col(CallCost.call_sid).in_(list(call_sids)))
         return {sid: float(total or 0.0) for sid, total in (await self.session.exec(stmt)).all()}
@@ -76,6 +86,12 @@ class CallCostRepository(BaseRepository[CallCost, str]):
 
 class CanaryRunRepository(BaseRepository[CanaryRun, int]):
     model = CanaryRun
+
+    async def since(self, cutoff: str, *, failed_only: bool = False) -> Sequence[CanaryRun]:
+        where = [col(CanaryRun.ran_at) >= cutoff]
+        if failed_only:
+            where.append(col(CanaryRun.ok) == 0)
+        return await self.list(*where)
 
     async def newest(self, limit: int) -> Sequence[CanaryRun]:
         stmt = select(CanaryRun).order_by(col(CanaryRun.ran_at).desc()).limit(limit)

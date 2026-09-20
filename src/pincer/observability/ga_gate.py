@@ -31,12 +31,16 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiosqlite
-
 from pincer.observability.failure_codes import EXCLUDED_FROM_SLO, FailureCode
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from pincer.config import Settings
+
+from pincer.db.engine import get_database_url
+from pincer.services.observability import BookingsService, CallCostsService, CanaryService
+from pincer.services.voice import CallsService, SafetyGateService
 
 logger = logging.getLogger(__name__)
 
@@ -136,17 +140,17 @@ def _cutoff(days: int) -> str:
     return (datetime.now(UTC) - timedelta(days=days)).isoformat()
 
 
-async def _rows(settings: Settings | Any, sql: str, params: tuple[Any, ...]) -> list[aiosqlite.Row]:
-    """Query, returning [] when the table does not exist yet."""
+async def _read(settings: Settings | Any, what: str, read: Callable[[], Awaitable[list[Any]]]) -> list[Any]:
+    """Run a reporting read, returning [] when there is nothing to read yet."""
     try:
-        async with aiosqlite.connect(str(settings.db_path)) as conn:
-            conn.row_factory = aiosqlite.Row
-            return list(await conn.execute_fetchall(sql, params))
-    except aiosqlite.OperationalError:
-        return []
+        return await read()
     except Exception:
-        logger.exception("GA gate query failed: %s", sql.split()[0:3])
+        logger.debug("GA gate read failed: %s", what, exc_info=True)
         return []
+
+
+def _url(settings: Settings | Any) -> str:
+    return get_database_url(Path(str(settings.db_path)))
 
 
 # ── Criteria ─────────────────────────────────────────────────────────
@@ -154,10 +158,8 @@ async def _rows(settings: Settings | Any, sql: str, params: tuple[Any, ...]) -> 
 
 async def call_volume_and_success(settings: Settings | Any, days: int, t: GAThresholds) -> list[Criterion]:
     """≥200 production calls, ≥95% success excluding no-answer, zero stuck."""
-    rows = await _rows(
-        settings,
-        "SELECT failure_code FROM voice_calls WHERE ended_at IS NOT NULL AND started_at >= ?",
-        (_cutoff(days),),
+    rows = await _read(
+        settings, "terminated calls", lambda: CallsService(_url(settings)).terminated_between(_cutoff(days))
     )
     excluded = {str(c) for c in EXCLUDED_FROM_SLO}
 
@@ -237,14 +239,12 @@ async def call_volume_and_success(settings: Settings | Any, days: int, t: GAThre
 
 async def booking_success(settings: Settings | Any, days: int, t: GAThresholds) -> Criterion:
     """≥80% on cooperative callees, ≥70% overall for appointment calls."""
-    rows = await _rows(
-        settings,
-        "SELECT result FROM appointment_outcomes WHERE recorded_at >= ?",
-        (_cutoff(days),),
+    rows = await _read(
+        settings, "booking outcomes", lambda: BookingsService(_url(settings)).results_since(_cutoff(days))
     )
     by_result: dict[str, int] = {}
     for row in rows:
-        result = str(row["result"] or "unknown")
+        result = str(row or "unknown")
         by_result[result] = by_result.get(result, 0) + 1
 
     overall_total = sum(by_result.values())
@@ -380,11 +380,7 @@ async def cost_per_call(settings: Settings | Any, days: int, t: GAThresholds) ->
     good news that still needs to reach whoever sets the price. Only overshoot
     fails, since that is the number the pricing decision depends on.
     """
-    rows = await _rows(
-        settings,
-        "SELECT total_usd, twilio_usd, stt_usd, tts_usd, llm_usd FROM call_costs WHERE recorded_at >= ?",
-        (_cutoff(days),),
-    )
+    rows = await _read(settings, "call costs", lambda: CallCostsService(_url(settings)).recorded_since(_cutoff(days)))
     totals = [float(r["total_usd"] or 0.0) for r in rows]
 
     if len(totals) < t.min_priced_calls:
@@ -513,12 +509,10 @@ async def compliance_incidents(settings: Settings | Any, days: int) -> Criterion
 
     # Did any call actually go out to a do-not-call number? The gate blocks
     # them, so a violation means something reached Twilio around the gate.
-    violations = await _rows(
+    violations = await _read(
         settings,
-        "SELECT o.phone_number, o.placed_at FROM outbound_call_logs o "
-        "JOIN do_not_call_numbers d ON d.phone_number = o.phone_number "
-        "WHERE o.placed_at >= ? AND o.placed_at > d.added_at",
-        (_cutoff(days),),
+        "dials after an objection",
+        lambda: SafetyGateService(_url(settings)).dialled_after_objection(_cutoff(days)),
     )
 
     blocked = await _count_blocked_dials(settings, days)
@@ -563,16 +557,18 @@ async def alert_quality(settings: Settings | Any, days: int) -> Criterion:
     # design), so the durable record of alert-worthy events is what the
     # database kept: failed canary runs and reaped calls.
     fired: dict[str, int] = {}
-    canary_failures = await _rows(
-        settings, "SELECT reason FROM canary_runs WHERE ran_at >= ? AND ok = 0", (_cutoff(days),)
+    canary_failures = await _read(
+        settings,
+        "failed canary runs",
+        lambda: CanaryService(_url(settings)).runs_since(_cutoff(days), failed_only=True),
     )
     if canary_failures:
         fired["canary_failed"] = len(canary_failures)
 
-    stuck = await _rows(
+    stuck = await _read(
         settings,
-        "SELECT call_sid FROM voice_calls WHERE failure_code = 'stuck' AND started_at >= ?",
-        (_cutoff(days),),
+        "stuck calls",
+        lambda: CallsService(_url(settings)).started_since(_cutoff(days), failure_code="stuck"),
     )
     if stuck:
         fired["stuck_calls"] = len(stuck)

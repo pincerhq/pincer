@@ -49,6 +49,18 @@ class OutboundCallLogRepository(BaseRepository[OutboundCallLog, int]):
         stmt = select(func.count()).select_from(OutboundCallLog).where(col(OutboundCallLog.local_day) == local_day)
         return int((await self.session.exec(stmt)).one())
 
+    async def dialled_after_objection(self, cutoff: str) -> Sequence[tuple[str, str]]:
+        """Dials placed to a number that had already objected — the compliance
+        violation the gate exists to prevent."""
+        stmt = (
+            select(OutboundCallLog.phone_number, OutboundCallLog.placed_at)
+            .join(DoNotCallNumber, col(DoNotCallNumber.phone_number) == col(OutboundCallLog.phone_number))
+            .where(
+                col(OutboundCallLog.placed_at) >= cutoff, col(OutboundCallLog.placed_at) > col(DoNotCallNumber.added_at)
+            )
+        )
+        return [(number, placed) for number, placed in (await self.session.exec(stmt)).all()]
+
     async def placed_since(self, phone_number: str, cutoff: str) -> Sequence[str]:
         stmt = (
             select(OutboundCallLog.placed_at)

@@ -27,5 +27,10 @@ class InboundMessageRepository(BaseRepository[InboundMessage, int]):
         stmt = update(InboundMessage).where(col(InboundMessage.call_sid) == call_sid).values(delivered_to_owner_at=when)
         return int((await self.session.exec(stmt)).rowcount)
 
+    async def newest(self, limit: int) -> Sequence[InboundMessage]:
+        return await self.list(
+            order_by=[col(InboundMessage.created_at).desc(), col(InboundMessage.id).desc()], limit=limit
+        )
+
     async def for_call(self, call_sid: str) -> Sequence[InboundMessage]:
         return await self.list(col(InboundMessage.call_sid) == call_sid)
