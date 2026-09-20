@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
-from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -15,13 +13,8 @@ from fastapi.testclient import TestClient
 from pincer.api.identity import router
 from pincer.channels.base import ChannelType
 from pincer.core.identity import IdentityResolver
-
-
-@pytest.fixture
-def client() -> TestClient:
-    app = FastAPI()
-    app.include_router(router)
-    return TestClient(app)
+from pincer.db.engine import to_async_url
+from pincer.services.identity import IdentityService, get_identity_service
 
 
 @pytest_asyncio.fixture
@@ -32,10 +25,14 @@ async def resolver(tmp_path: Path) -> AsyncIterator[IdentityResolver]:
     yield r
 
 
-def _fake_settings(db_path: str) -> Any:
-    settings = type("Settings", (), {})()
-    settings.db_path = db_path
-    return settings
+@pytest.fixture
+def client(resolver: IdentityResolver) -> TestClient:
+    """The routes read the same database the `resolver` fixture writes to."""
+    app = FastAPI()
+    app.include_router(router)
+    service = IdentityService(to_async_url(f"sqlite:///{resolver._db_path}"))
+    app.dependency_overrides[get_identity_service] = lambda: service
+    return TestClient(app)
 
 
 @pytest.mark.asyncio
@@ -45,8 +42,7 @@ class TestIdentityApi:
         await resolver.link_if_new(uid, ChannelType.WHATSAPP, "491234567890")
         await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
 
-        with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):
-            resp = client.get("/api/identity")
+        resp = client.get("/api/identity")
 
         assert resp.status_code == 200
         data = resp.json()
@@ -60,8 +56,7 @@ class TestIdentityApi:
     ) -> None:
         uid = await resolver.resolve(ChannelType.TELEGRAM, 99999)
 
-        with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):
-            resp = client.get("/api/identity")
+        resp = client.get("/api/identity")
 
         data = resp.json()
         entry = next(i for i in data["identities"] if i["pincer_user_id"] == uid)
@@ -75,8 +70,7 @@ class TestIdentityApi:
         await resolver.link_if_new(uid, ChannelType.WHATSAPP, "491234567891")
         await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
 
-        with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):
-            resp = client.get(f"/api/identity/{uid}")
+        resp = client.get(f"/api/identity/{uid}")
 
         assert resp.status_code == 200
         data = resp.json()
@@ -93,8 +87,7 @@ class TestIdentityApi:
             )
             await db.commit()
 
-        with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):
-            resp = client.get("/api/identity")
+        resp = client.get("/api/identity")
 
         data = resp.json()
         entry = next(i for i in data["identities"] if i["pincer_user_id"] == uid)
@@ -110,8 +103,7 @@ class TestIdentityApi:
             )
             await db.commit()
 
-        with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):
-            resp = client.get(f"/api/identity/{uid}")
+        resp = client.get(f"/api/identity/{uid}")
 
         assert resp.json()["timezone"] == "Europe/Berlin"
 
@@ -125,8 +117,7 @@ class TestIdentityApi:
             )
             await db.commit()
 
-        with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):
-            resp = client.get("/api/identity")
+        resp = client.get("/api/identity")
 
         data = resp.json()
         entry = next(i for i in data["identities"] if i["pincer_user_id"] == uid)
@@ -142,8 +133,7 @@ class TestIdentityApi:
             )
             await db.commit()
 
-        with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):
-            resp = client.get(f"/api/identity/{uid}")
+        resp = client.get(f"/api/identity/{uid}")
 
         assert resp.json()["email"] == "jane@example.com"
 
@@ -151,8 +141,7 @@ class TestIdentityApi:
         uid = await resolver.resolve(ChannelType.TELEGRAM, 66666)
         await resolver.touch_active_channel(uid, ChannelType.TELEGRAM)
 
-        with patch("pincer.api.identity.get_settings_relaxed", return_value=_fake_settings(resolver._db_path)):
-            resp = client.get("/api/identity", params={"search": "66666"})
+        resp = client.get("/api/identity", params={"search": "66666"})
 
         data = resp.json()
         assert len(data["identities"]) == 1

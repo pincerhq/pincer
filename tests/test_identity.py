@@ -9,6 +9,13 @@ from pincer.channels.base import ChannelType
 from pincer.core.identity import IdentityProfile, IdentityResolver
 
 
+def _rows(resolver):
+    """A connection to the resolver's database, for asserting on stored rows."""
+    import aiosqlite
+
+    return aiosqlite.connect(resolver._db_path)
+
+
 @pytest_asyncio.fixture
 async def resolver(tmp_path):
     db_path = tmp_path / "pincer.db"
@@ -44,7 +51,7 @@ class TestIdentityResolver:
             99999,
             display_name="Test User",
         )
-        async with resolver._get_db() as db:
+        async with _rows(resolver) as db:
             cursor = await db.execute(
                 "SELECT display_name FROM identity_profiles WHERE pincer_user_id = ?",
                 (uid,),
@@ -113,7 +120,7 @@ class TestIdentityResolver:
         uid = await r.resolve(ChannelType.WHATSAPP, "491234567890")
 
         # Their LID is not yet in the DB
-        async with r._get_db() as db:
+        async with _rows(r) as db:
             cursor = await db.execute(
                 "SELECT pincer_user_id FROM channel_identities "
                 "WHERE channel = 'whatsapp' AND channel_user_id = '35240793874528'",
@@ -201,7 +208,7 @@ class TestActiveChannel:
 
         await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
 
-        async with resolver._get_db() as db:
+        async with _rows(resolver) as db:
             cursor = await db.execute(
                 "SELECT active_channel, active_channel_updated_at FROM identity_profiles WHERE pincer_user_id = ?",
                 (uid,),
@@ -231,7 +238,7 @@ class TestActiveChannel:
         (e.g. cleaned up), fall back to preferred_channel instead of erroring."""
         uid = await resolver.resolve(ChannelType.TELEGRAM, 33333)
 
-        async with resolver._get_db() as db:
+        async with _rows(resolver) as db:
             await db.execute(
                 "UPDATE identity_profiles SET active_channel = 'whatsapp' WHERE pincer_user_id = ?",
                 (uid,),
@@ -258,7 +265,7 @@ class TestActiveChannel:
 
         # Simulate real elapsed time (sqlite datetime('now') has 1s resolution,
         # too coarse to observe a difference from two touches back-to-back).
-        async with resolver._get_db() as db:
+        async with _rows(resolver) as db:
             await db.execute(
                 "UPDATE identity_profiles SET active_channel_updated_at = datetime('now', '-1 hour') "
                 "WHERE pincer_user_id = ?",
@@ -280,7 +287,7 @@ class TestActiveChannel:
         await resolver.touch_active_channel(uid, ChannelType.TELEGRAM)
         await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
 
-        async with resolver._get_db() as db:
+        async with _rows(resolver) as db:
             cursor = await db.execute("SELECT active_channel FROM identity_profiles WHERE pincer_user_id = ?", (uid,))
             row = await cursor.fetchone()
         assert row[0] == "whatsapp"
@@ -292,7 +299,7 @@ class TestActiveChannel:
         await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
 
         # Backdate active_channel_updated_at by 31 minutes (past the 30-minute window).
-        async with resolver._get_db() as db:
+        async with _rows(resolver) as db:
             await db.execute(
                 "UPDATE identity_profiles SET active_channel_updated_at = "
                 "datetime('now', '-31 minutes') WHERE pincer_user_id = ?",
@@ -317,7 +324,7 @@ class TestActiveChannel:
         await resolver.link_if_new(uid, ChannelType.WHATSAPP, "491234567895")
         await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
 
-        async with resolver._get_db() as db:
+        async with _rows(resolver) as db:
             await db.execute(
                 "UPDATE identity_profiles SET active_channel_updated_at = "
                 "datetime('now', '-1 day') WHERE pincer_user_id = ?",
@@ -334,7 +341,7 @@ class TestActiveChannel:
         uid = await resolver.resolve(ChannelType.TELEGRAM, 55560)
         await resolver.link_if_new(uid, ChannelType.WHATSAPP, "491234567896")
 
-        async with resolver._get_db() as db:
+        async with _rows(resolver) as db:
             await db.execute(
                 "UPDATE identity_profiles SET active_channel = 'whatsapp', active_channel_updated_at = NULL "
                 "WHERE pincer_user_id = ?",
@@ -372,7 +379,7 @@ class TestActiveChannel:
         # Existing row (and touch_active_channel on it) must keep working post-migration.
         await r.touch_active_channel("usr_old", ChannelType.WHATSAPP)
 
-        async with r._get_db() as db:
+        async with _rows(r) as db:
             cursor = await db.execute("PRAGMA table_info(identity_profiles)")
             col_names = {row[1] for row in await cursor.fetchall()}
         assert "active_channel" in col_names
@@ -593,7 +600,7 @@ class TestNamedCanonicalId:
         assert tg_uid == "carol"
 
         # Old hash-based identity should no longer exist
-        async with r_with_name._get_db() as db:
+        async with _rows(r_with_name) as db:
             cursor = await db.execute(
                 "SELECT pincer_user_id FROM identity_profiles WHERE pincer_user_id = ?",
                 (original_uid,),
