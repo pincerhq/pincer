@@ -36,7 +36,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -48,6 +47,7 @@ if TYPE_CHECKING:
     from pincer.llm.base import BaseLLMProvider
 
 from pincer.db.engine import get_database_url
+from pincer.db.ids import new_id
 from pincer.services.voice import CallsService, ThreadsService
 
 logger = logging.getLogger(__name__)
@@ -211,7 +211,8 @@ class ThreadUpdate:
 
 
 def new_thread_id() -> str:
-    return "thr_" + secrets.token_hex(6)
+    """A thread id. Was `thr_` + hex; nothing ever branched on the prefix."""
+    return new_id()
 
 
 def _now() -> str:

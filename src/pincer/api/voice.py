@@ -54,6 +54,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
+#: A thread id is a canonical uuid (36) since 0018; it was `thr_` + hex
+#: (16) before that, and both still have to be accepted — an id that is
+#: merely unknown belongs in a 404, not a 422.
+_THREAD_ID_MAX = 36
+
 
 def _get_engine() -> VoiceEngine | None:
     """Live engine, or None when voice isn't running (API-only, voice off)."""
@@ -250,7 +255,7 @@ class InitiateCallIn(BaseModel):
     language: str = Field(default="", max_length=8)  # '' = default language
     target_name: str = Field(default="", max_length=120)  # who is being called (optional)
     # Sprint 13 §4.2: continue an existing matter (validated: exists, not closed)
-    thread_id: str = Field(default="", max_length=32)
+    thread_id: str = Field(default="", max_length=_THREAD_ID_MAX)
 
 
 class InitiateCallOut(BaseModel):
@@ -268,7 +273,7 @@ class ScheduleAppointmentIn(BaseModel):
     language: str = Field(default="", max_length=8)
     attendees: str = Field(default="", max_length=2000)
     location_or_meet: str = Field(default="", max_length=500)
-    thread_id: str = Field(default="", max_length=32)
+    thread_id: str = Field(default="", max_length=_THREAD_ID_MAX)
 
 
 class ScheduleAppointmentOut(BaseModel):
@@ -730,7 +735,7 @@ async def list_calls(
     offset: int = Query(default=0, ge=0),
     direction: str | None = Query(default=None, pattern="^(inbound|outbound)$"),
     status: str | None = Query(default=None, pattern="^(active|completed)$"),
-    thread_id: str | None = Query(default=None, max_length=32),
+    thread_id: str | None = Query(default=None, max_length=_THREAD_ID_MAX),
 ) -> list[CallSummary]:
     completed = None if status is None else status == "completed"
     try:
@@ -783,7 +788,7 @@ class ScheduledCallIn(BaseModel):
     target_name: str = Field(default="", max_length=120)
     language: str = Field(default="", max_length=8)
     instructions: str = Field(default="", max_length=4000)
-    thread_id: str = Field(default="", max_length=32)
+    thread_id: str = Field(default="", max_length=_THREAD_ID_MAX)
     timezone: str = Field(default="", max_length=64)
 
 
@@ -1062,7 +1067,7 @@ class ThreadAssignIn(BaseModel):
 
 
 class ThreadMergeIn(BaseModel):
-    source_thread_id: str = Field(min_length=1, max_length=32)
+    source_thread_id: str = Field(min_length=1, max_length=_THREAD_ID_MAX)
 
 
 def _thread_manager() -> Any:

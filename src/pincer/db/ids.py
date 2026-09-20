@@ -83,3 +83,18 @@ class Uuid7Sequence:
             self._ms = ms
             self._counter = 0
         return uuid7_at(self._ms, self._counter)
+
+
+def is_id(value: object) -> bool:
+    """True when `value` could be a row id this module minted.
+
+    For the lookup edges. `Uuid7` refuses a malformed id when it binds one,
+    which is right for a write — a bad id must not become a row — but wrong
+    for a read, where the honest answer to "is there a row called
+    `nonexistent-id`?" is no, not a 500.
+    """
+    try:
+        uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True

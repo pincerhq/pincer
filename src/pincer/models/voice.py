@@ -33,7 +33,7 @@ class VoiceCall(SQLModel, table=True):
     language: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     report_delivered_at: str | None = Field(default=None, sa_column=Column(IsoText()))
     inbound_intent: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
-    thread_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    thread_id: str | None = Field(default=None, sa_column=Column(Uuid7()))
     thread_attach_kind: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     briefing_json: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
 
@@ -137,7 +137,7 @@ class CallThread(SQLModel, table=True):
     __tablename__ = "call_threads"
     __table_args__ = (Index("idx_threads_number_status", "primary_number", "status"),)
 
-    thread_id: str = Field(sa_column=Column(Text(), primary_key=True))
+    thread_id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     subject: str = Field(sa_column=Column(Text(), nullable=False))
     status: str | None = Field(default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("'open'")))
     origin: str = Field(sa_column=Column(Text(), nullable=False))
@@ -157,7 +157,7 @@ class CallThreadMember(SQLModel, table=True):
     __table_args__ = (Index("idx_thread_members_thread", "thread_id"),)
 
     call_sid: str = Field(sa_column=Column(Text(), primary_key=True))
-    thread_id: str = Field(sa_column=Column(Text(), ForeignKey("call_threads.thread_id"), nullable=False))
+    thread_id: str = Field(sa_column=Column(Uuid7(), ForeignKey("call_threads.thread_id"), nullable=False))
     attach_kind: str | None = Field(
         default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("''"))
     )

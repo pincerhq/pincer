@@ -4,7 +4,8 @@ import sqlalchemy as sa
 from sqlalchemy import Column, Index, Integer, Text
 from sqlmodel import Field, SQLModel
 
-from pincer.db.types import BigInt, IsoText, Real
+from pincer.db.ids import new_id
+from pincer.db.types import BigInt, IsoText, Real, Uuid7
 
 
 class TelephonyCall(SQLModel, table=True):
@@ -16,7 +17,7 @@ class TelephonyCall(SQLModel, table=True):
         Index("idx_tel_calls_tenant", "tenant_id"),
     )
 
-    call_id: str = Field(sa_column=Column(Text(), primary_key=True))
+    call_id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     provider_call_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     trace_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     direction: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
@@ -68,11 +69,11 @@ class TelephonyEvent(SQLModel, table=True):
     )
 
     event_id: str = Field(sa_column=Column(Text(), primary_key=True))
-    call_id: str = Field(sa_column=Column(Text(), nullable=False))
+    call_id: str = Field(sa_column=Column(Uuid7(), nullable=False))
     provider_call_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     trace_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     span_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
-    turn_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    turn_id: str | None = Field(default=None, sa_column=Column(Uuid7()))
     name: str = Field(sa_column=Column(Text(), nullable=False))
     ts_utc: str = Field(sa_column=Column(IsoText(), nullable=False))
     mono_ns: int | None = Field(default=None, sa_column=Column(BigInt(), server_default=sa.text("0")))
@@ -88,10 +89,10 @@ class TelephonySpan(SQLModel, table=True):
     )
 
     span_id: str = Field(sa_column=Column(Text(), primary_key=True))
-    call_id: str = Field(sa_column=Column(Text(), nullable=False))
+    call_id: str = Field(sa_column=Column(Uuid7(), nullable=False))
     trace_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     parent_span_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
-    turn_id: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
+    turn_id: str | None = Field(default=None, sa_column=Column(Uuid7()))
     name: str = Field(sa_column=Column(Text(), nullable=False))
     start_utc: str = Field(sa_column=Column(IsoText(), nullable=False))
     end_utc: str | None = Field(default=None, sa_column=Column(IsoText()))
@@ -111,8 +112,8 @@ class TelephonyTurn(SQLModel, table=True):
         Index("idx_tel_turns_latency", "response_latency_ms"),
     )
 
-    turn_id: str = Field(sa_column=Column(Text(), primary_key=True))
-    call_id: str = Field(sa_column=Column(Text(), nullable=False))
+    turn_id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    call_id: str = Field(sa_column=Column(Uuid7(), nullable=False))
     turn_no: int | None = Field(default=None, sa_column=Column(Integer(), server_default=sa.text("0")))
     trigger: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
     started_at: str | None = Field(default=None, sa_column=Column(IsoText()))

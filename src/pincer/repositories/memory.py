@@ -14,6 +14,7 @@ from sqlalchemy import and_, func, or_, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, json_contains
+from pincer.db.ids import is_id
 from pincer.models.memory import Conversation, Entity, Memory
 from pincer.repositories.base import BaseRepository
 
@@ -112,6 +113,10 @@ class MemoryRepository(BaseRepository[Memory, str]):
         return int((await self.session.exec(stmt)).rowcount)
 
     async def delete_by_id(self, memory_id: str) -> int:
+        """Deleting an id that could never exist removes nothing, quietly —
+        the same reasoning as `BaseRepository.get`."""
+        if not is_id(memory_id):
+            return 0
         return await self.delete_where(col(Memory.id) == memory_id)
 
     async def delete_for_user(self, user_id: str, *, category: str | None = None) -> int:

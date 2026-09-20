@@ -36,6 +36,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from pincer.db.ids import new_id
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -48,15 +50,29 @@ _MAX_TRACKED_CALLS = 2000
 
 
 def new_trace_id() -> str:
+    """A W3C trace-context trace id: 32 hex characters, not a UUID."""
     return secrets.token_hex(16)
 
 
 def new_span_id() -> str:
+    """A W3C trace-context span id: 16 hex characters, not a UUID."""
     return secrets.token_hex(8)
 
 
 def new_call_id() -> str:
-    return secrets.token_hex(16)
+    """Our own id for a call, minted before the provider has told us anything."""
+    return new_id()
+
+
+def new_turn_id() -> str:
+    """Our own id for a turn.
+
+    Split out from `new_span_id`, which it used to borrow. A turn is a row in
+    `telephony_turns` and gets a UUIDv7 like every other row Pincer mints; a
+    span id has to stay 16 hex characters because it goes on the wire in a
+    `traceparent` header. The two were only ever the same by accident.
+    """
+    return new_id()
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,7 +333,7 @@ def current_span_id() -> str:
 
 
 def start_turn(turn_no: int, *, trigger: str = "caller_speech") -> TurnContext:
-    return TurnContext(turn_id=new_span_id(), turn_no=turn_no, span_id=new_span_id(), trigger=trigger)
+    return TurnContext(turn_id=new_turn_id(), turn_no=turn_no, span_id=new_span_id(), trigger=trigger)
 
 
 def reset_for_tests() -> None:

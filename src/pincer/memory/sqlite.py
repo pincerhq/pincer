@@ -14,11 +14,11 @@ import logging
 import math
 import struct
 import time
-import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pincer.db.engine import get_database_url, get_engine
+from pincer.db.ids import new_id
 from pincer.memory.base import (
     PINCER_MEMORY_CATEGORY_TAG_PREFIX,
     PINCER_MEMORY_USER_TAG_PREFIX,
@@ -113,7 +113,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         extra_tags: list[str] | None = None,
     ) -> str:
         """Store a memory entry. Returns the new memory ID."""
-        mem_id = str(uuid.uuid4())
+        mem_id = new_id()
         blob = _pack_embedding(embedding) if embedding else None
 
         tags = [f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}", f"{PINCER_MEMORY_CATEGORY_TAG_PREFIX}:{category}"]
@@ -277,7 +277,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
             {
                 # A candidate, used only if this entity is new; the store
                 # matches on (user, name, type) and returns the id that won.
-                "id": str(uuid.uuid4()),
+                "id": new_id(),
                 "user_id": user_id,
                 "name": name,
                 "type": entity_type,
@@ -305,7 +305,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
 
     async def store_conversation(self, user_id: str, channel: str, messages_json: str) -> str:
         """Archive a conversation snapshot."""
-        conv_id = str(uuid.uuid4())
+        conv_id = new_id()
         now = time.time()
         await self._store.add_conversation(
             {

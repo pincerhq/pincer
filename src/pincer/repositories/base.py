@@ -12,6 +12,9 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from sqlalchemy import delete
 from sqlmodel import SQLModel, select
 
+from pincer.db.ids import is_id
+from pincer.db.types import Uuid7
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -27,8 +30,27 @@ class BaseRepository[M: SQLModel, PK]:
         self.session = session
 
     async def get(self, pk: PK) -> M | None:
+        """The row with this key, or None.
+
+        A key that could never name a row — a malformed id in a URL or a tool
+        argument — is None rather than an error. `Uuid7` refuses to bind one,
+        which is what a write needs, but a lookup's honest answer is "no such
+        row": the caller turns that into a 404, not a 500.
+        """
+        if self._has_minted_key() and not is_id(pk):
+            return None
         found: M | None = await self.session.get(self.model, pk)
         return found
+
+    @classmethod
+    def _has_minted_key(cls) -> bool:
+        """True when this table's key is a single id Pincer mints.
+
+        `channel_identities` has a two-column natural key, and every Twilio
+        SID and phone-number key is plain text; none of those is guarded.
+        """
+        columns = list(cls.model.__table__.primary_key.columns)
+        return len(columns) == 1 and isinstance(columns[0].type, Uuid7)
 
     async def add(self, obj: M, *, refresh: bool = True) -> M:
         """Stage `obj` and flush, so its generated id is set — this replaces
