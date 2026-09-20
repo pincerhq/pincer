@@ -293,7 +293,7 @@ export interface ScheduledTaskAction {
 }
 
 export interface ScheduledTask {
-  id: number
+  id: string
   pincer_user_id: string
   name: string
   kind: "recurring" | "one_time"
