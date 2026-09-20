@@ -51,6 +51,7 @@ Dashboard (React + Vite + TS in `dashboard/`, pnpm 10+): `cd dashboard && pnpm i
 - `db/session.py` `session_scope()` is the unit of work; `DbSession` is the FastAPI dependency.
 - `db/dialect.py` covers the SQL that differs between SQLite and Postgres (`upsert`, `json_contains`, `day_bucket`).
 - `db/types.py` holds the column types that keep today's storage formats.
+- `db/ids.py` mints every row id Pincer owns: a UUIDv7, `Uuid7` on the column (native `uuid` on Postgres, canonical string on SQLite). Ids that come from elsewhere — Twilio CallSids, `pincer_user_id`, W3C trace/span ids, the SHA-1 event key — are not UUIDs and are not converted. See [docs/migrations/README.md](docs/migrations/README.md#row-identifiers).
 - Repositories never commit; services own the transaction.
 - Raw `aiosqlite` is gone from the runtime; `tests/db/test_no_stray_sqlite.py` lists the few remaining test seams and fails on any new one.
 - Test tables go on a private `registry()` so they stay out of Alembic's metadata. The `db_url` fixture runs a test on both dialects (Postgres needs `PINCER_TEST_PG_URL`).
