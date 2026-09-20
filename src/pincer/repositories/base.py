@@ -30,12 +30,20 @@ class BaseRepository[M: SQLModel, PK]:
         found: M | None = await self.session.get(self.model, pk)
         return found
 
-    async def add(self, obj: M) -> M:
-        """Stage `obj` and flush, so server-generated values (an autoincrement
-        id, a column default) are on it — this replaces `cursor.lastrowid`."""
+    async def add(self, obj: M, *, refresh: bool = True) -> M:
+        """Stage `obj` and flush, so its generated id is set — this replaces
+        `cursor.lastrowid`.
+
+        `refresh` re-reads the row so server-side column defaults are loaded
+        too; it costs a SELECT. Pass `refresh=False` when the caller only
+        writes and discards the object, since reading an unloaded default
+        afterwards would raise rather than lazy-load (there is no greenlet
+        context outside the session).
+        """
         self.session.add(obj)
         await self.session.flush()
-        await self.session.refresh(obj)
+        if refresh:
+            await self.session.refresh(obj)
         return obj
 
     async def list(

@@ -314,6 +314,24 @@ async def test_blocked_dials_are_evidence_of_health_not_failure(settings):
     assert "blocked_dials" in criterion.evidence
 
 
+async def test_blocked_dials_are_counted_from_the_unified_database(settings):
+    """Where AuditLogger actually writes — not the legacy audit.db that
+    migration 0003 imported from and left behind."""
+    from pincer.security.audit import AuditAction, AuditEntry, AuditLogger
+
+    audit = AuditLogger(db_path=settings.db_path)
+    await audit.initialize()
+    try:
+        await audit.log(
+            AuditEntry(user_id="usr", action=AuditAction.VOICE_CALL_BLOCKED, input_summary="blocked: quiet_hours")
+        )
+    finally:
+        await audit.shutdown()  # drains the write queue
+
+    criterion = await compliance_incidents(settings, 14)
+    assert criterion.evidence["blocked_dials"] == 1
+
+
 # ── Manual criteria ──────────────────────────────────────────────────
 
 

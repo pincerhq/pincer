@@ -103,11 +103,18 @@ class CostService:
         local endpoint) forces zero cost.
         """
         cost = 0.0 if is_free else calculate_cost(model, input_tokens, output_tokens)
+        # The check reads in its own transaction, deliberately, rather than
+        # sharing one with the insert below: a SQLite transaction that reads
+        # first and writes after fails outright with SQLITE_BUSY_SNAPSHOT if
+        # another process committed in between, and `busy_timeout` does not
+        # retry that one. The budget is advisory to a hair's breadth either
+        # way; failing an LLM turn over it is not.
+        if cost > 0 and self.daily_budget > 0:
+            today_spent = await self.get_today_spend()
+            if today_spent + cost > self.daily_budget:
+                raise BudgetExceededError(spent=today_spent + cost, limit=self.daily_budget)
+
         async with session_scope(self._url) as session:
-            if cost > 0 and self.daily_budget > 0:
-                today_spent = await self._today_spend(session)
-                if today_spent + cost > self.daily_budget:
-                    raise BudgetExceededError(spent=today_spent + cost, limit=self.daily_budget)
             await CostLogRepository(session).add(
                 CostLog(
                     timestamp=time.time(),
@@ -117,7 +124,8 @@ class CostService:
                     output_tokens=output_tokens,
                     cost_usd=cost,
                     session_id=session_id,
-                )
+                ),
+                refresh=False,
             )
 
         # Sprint 9 (T9.1): attribute this spend to the voice call currently
@@ -139,7 +147,8 @@ class CostService:
     async def add_image_cost(self, cost_usd: float, provider: str, model: str = "") -> None:
         async with session_scope(self._url) as session:
             await ImageCostLogRepository(session).add(
-                ImageCostLog(timestamp=time.time(), provider=provider, model=model, cost_usd=cost_usd)
+                ImageCostLog(timestamp=time.time(), provider=provider, model=model, cost_usd=cost_usd),
+                refresh=False,
             )
 
     # ── reads ────────────────────────────────────────────────────────

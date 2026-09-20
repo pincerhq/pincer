@@ -68,6 +68,9 @@ def test_autogenerate_at_head_produces_an_empty_revision(migration_url, tmp_path
     finally:
         engine.dispose()
     assert script.upgrade_ops.is_empty(), script.upgrade_ops.as_diffs()
+    # Both directions: under render_as_batch a leftover nullability change in
+    # downgrade() would rebuild every table it names.
+    assert script.downgrade_ops.is_empty(), script.downgrade_ops.as_diffs()
 
 
 def test_every_live_table_has_a_model(migration_url, tmp_path):

@@ -58,11 +58,18 @@ def upsert(
 
 
 def json_contains(dialect: str, column: Any, value: str) -> ColumnElement[bool]:
-    """True when the JSON array stored (as text) in `column` contains `value`."""
+    """True when the JSON array stored (as text) in `column` contains `value`.
+
+    Rows holding no JSON at all simply do not match: several of these columns
+    default to the empty string, and parsing that is an error on both dialects
+    rather than an empty result. `NULLIF` turns it into NULL first — a WHERE
+    clause cannot guard it, since the parse happens per row either way.
+    """
+    document = func.nullif(column, "")
     if dialect == "sqlite":
-        elements = func.json_each(column).table_valued("value")
+        elements = func.json_each(document).table_valued("value")
         return exists().where(elements.c.value == value)
-    return cast(column, JSONB).op("?", return_type=Boolean)(value)
+    return cast(document, JSONB).op("?", return_type=Boolean)(value)
 
 
 def day_bucket(dialect: str, epoch_seconds: Any) -> ColumnElement[str]:

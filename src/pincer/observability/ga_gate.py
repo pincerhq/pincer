@@ -461,19 +461,23 @@ def security_findings(settings: Settings | Any) -> Criterion:
 
 
 async def _count_blocked_dials(settings: Settings | Any, days: int) -> int:
-    """Dials the abuse gate refused, read straight from audit.db.
+    """Dials the abuse gate refused, read straight from the database.
 
     Deliberately NOT via `get_audit_logger()`: that singleton owns a batched
     writer and a long-lived connection which never gets shut down here, and a
     one-shot CLI invocation would hang on exit waiting for it.
+
+    It reads the unified database, where `AuditLogger` writes. It used to read
+    `<data_dir>/audit.db`, which migration 0003 imported from and then left
+    behind untouched — so every dial blocked since then was invisible here.
     """
-    audit_db = getattr(settings, "data_dir", None)
-    if audit_db is None:
+    db_path = getattr(settings, "db_path", None)
+    if db_path is None:
         return 0
     try:
-        async with aiosqlite.connect(str(audit_db / "audit.db")) as conn:
+        async with aiosqlite.connect(str(db_path)) as conn:
             cursor = await conn.execute(
-                "SELECT COUNT(*) FROM audit_log WHERE action = ? AND timestamp >= ?",
+                "SELECT COUNT(*) FROM audit_logs WHERE action = ? AND timestamp >= ?",
                 ("voice_call_blocked", _cutoff(days)),
             )
             row = await cursor.fetchone()

@@ -188,6 +188,21 @@ async def test_json_contains_matches_array_elements(url):
     assert [w.name for w in found] == ["a"]
 
 
+async def test_json_contains_skips_rows_holding_no_json(url):
+    """Several of these columns default to the empty string; parsing that is
+    an error on both dialects, so such rows must simply not match."""
+    async with session_scope(url) as session:
+        await WidgetRepository(session).add(Widget(name="empty"))  # tags IS NULL
+        await session.exec(text("UPDATE phase0_widgets SET tags = '' WHERE name = 'empty'"))
+        await WidgetRepository(session).add(Widget(name="tagged", tags=["urgent"]))
+
+    async with session_scope(url) as session:
+        found = await WidgetRepository(session).list(
+            json_contains(dialect_of(session), Widget.__table__.c.tags, "urgent")
+        )
+    assert [w.name for w in found] == ["tagged"]
+
+
 async def test_day_bucket_is_the_utc_calendar_day(url):
     async with session_scope(url) as session:
         repo = WidgetRepository(session)
