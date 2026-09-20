@@ -112,8 +112,8 @@ def test_schedule_list_empty(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     assert "No scheduled tasks." in result.output
 
 
-def test_schedule_list_survives_an_unreadable_database(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """A listing must not traceback when the schedules cannot be read."""
+def test_schedule_list_reports_an_unreadable_database(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """A broken store must not read as an empty one."""
     db_path = tmp_path / "broken.db"
     _make_schedules_db(db_path)
 
@@ -127,8 +127,9 @@ def test_schedule_list_survives_an_unreadable_database(monkeypatch: pytest.Monke
 
     result = runner.invoke(app, ["schedule", "list"])
 
-    assert result.exit_code == 0
-    assert "table not created yet" in result.output
+    assert result.exit_code == 1
+    assert "Could not read the schedules" in result.output
+    assert "no such table" in result.output
 
 
 async def _raise_db_error(*_args: object, **_kwargs: object) -> None:

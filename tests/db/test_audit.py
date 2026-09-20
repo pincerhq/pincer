@@ -59,6 +59,22 @@ async def test_long_summaries_are_capped(url):
     assert len((await service.query())[0]["input_summary"]) == MAX_SUMMARY_LENGTH
 
 
+async def test_one_unstorable_entry_does_not_block_the_batch(url):
+    """The caller re-queues a failed batch, so a single bad entry would
+    otherwise stop audit persistence for good."""
+    service = AuditService(url)
+    await service.add_batch(
+        [
+            _entry(timestamp="2026-01-01T00:00:00+00:00", metadata={"obj": object()}),
+            _entry(timestamp="2026-01-02T00:00:00+00:00"),
+        ]
+    )
+    stored = await service.query()
+    assert len(stored) == 2
+    # The exotic value is stringified rather than failing the write.
+    assert "object object at" in json.loads(stored[1]["metadata_json"])["obj"]
+
+
 async def test_filters_and_paging(url):
     service = AuditService(url)
     await service.add_batch(

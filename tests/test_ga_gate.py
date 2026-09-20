@@ -314,6 +314,19 @@ async def test_blocked_dials_are_evidence_of_health_not_failure(settings):
     assert "blocked_dials" in criterion.evidence
 
 
+async def test_counting_blocked_dials_never_creates_a_database(settings, tmp_path):
+    """Reporting reads. It must not mkdir or migrate the live database."""
+    from pincer.observability.ga_gate import _count_blocked_dials
+
+    settings.data_dir = tmp_path / "absent"
+    missing = tmp_path / "absent" / "pincer.db"
+    settings.db_path = missing
+
+    assert await _count_blocked_dials(settings, 14) == 0
+    assert not missing.exists()
+    assert not missing.parent.exists()
+
+
 async def test_blocked_dials_are_counted_from_the_unified_database(settings):
     """Where AuditLogger actually writes — not the legacy audit.db that
     migration 0003 imported from and left behind."""

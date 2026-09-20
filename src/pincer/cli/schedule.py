@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
+import typer
 from async_typer import AsyncTyper
 
 from pincer.cli._shared import console
+
+logger = logging.getLogger(__name__)
 
 schedule_app = AsyncTyper(name="schedule", help="Manage scheduled tasks")
 
@@ -22,12 +27,16 @@ async def _schedule_list() -> None:
     from pincer.services.scheduler import ScheduleService
 
     settings = get_settings_relaxed()
+    # A failure to open or read the store is reported as such. Printing
+    # "no scheduled tasks" for it would make a broken database look like an
+    # empty one — exactly what the API's own regression test forbids.
     try:
         service = await ScheduleService.for_path(settings.db_path)
         schedules = sorted(await service.list_all(), key=lambda s: s["name"])
-    except Exception:
-        console.print("[dim]No scheduled tasks (table not created yet).[/dim]")
-        return
+    except Exception as e:
+        logger.exception("Listing schedules failed")
+        console.print(f"[red]Could not read the schedules: {e}[/red]")
+        raise typer.Exit(code=1) from e
     rows = [(s["name"], s["cron_expr"], s["pincer_user_id"], s["timezone"], s["enabled"]) for s in schedules]
 
     if not rows:

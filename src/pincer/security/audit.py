@@ -8,6 +8,7 @@ Exportable as JSON/CSV for compliance audits.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pincer.services.audit import MAX_SUMMARY_LENGTH, AuditService
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -189,6 +192,7 @@ class AuditLogger:
             await self._service.add_batch(entries)
         except Exception:
             # Keep them for the next flush rather than losing the evidence.
+            logger.warning("Audit flush failed; re-queued %d entries", len(entries), exc_info=True)
             for entry in entries:
                 try:
                     self._write_queue.put_nowait(entry)

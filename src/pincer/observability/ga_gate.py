@@ -477,9 +477,12 @@ async def _count_blocked_dials(settings: Settings | Any, days: int) -> int:
     if db_path is None:
         return 0
     try:
+        from pincer.db.engine import get_database_url
         from pincer.services.audit import AuditService
 
-        audit = await AuditService.for_path(Path(str(db_path)))
+        # Not `for_path`: reporting reads, and must not create the data
+        # directory or run migrations against the live database.
+        audit = AuditService(get_database_url(Path(str(db_path))))
         return await audit.count(action="voice_call_blocked", since=_cutoff(days))
     except Exception:
         logger.debug("Blocked-dial audit count failed", exc_info=True)

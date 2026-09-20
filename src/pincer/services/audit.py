@@ -7,6 +7,7 @@ block the path being audited — so one unit of work covers a whole batch.
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends
@@ -20,14 +21,28 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 #: Longest input/output summary stored, in characters.
 MAX_SUMMARY_LENGTH = 2000
 
 
 class AuditService(DatabaseService):
     async def add_batch(self, entries: Sequence[Any]) -> None:
-        """Persist a batch of `AuditEntry` objects in one transaction."""
-        rows = [_to_row(entry) for entry in entries]
+        """Persist a batch of `AuditEntry` objects in one transaction.
+
+        An entry that cannot be converted at all is dropped with a log line
+        rather than failing the batch: the caller re-queues a failed batch, so
+        one unconvertible entry would otherwise block every later write.
+        """
+        rows = []
+        for entry in entries:
+            try:
+                rows.append(_to_row(entry))
+            except Exception:
+                logger.exception("Dropping an audit entry that could not be stored: action=%s", entry.action)
+        if not rows:
+            return
         async with session_scope(self._url) as session:
             await AuditLogRepository(session).add_many(rows)
 
@@ -121,7 +136,9 @@ def _to_row(entry: Any) -> AuditLog:
         duration_ms=entry.duration_ms,
         ip_address=entry.ip_address,
         channel=entry.channel,
-        metadata_json=json.dumps(entry.metadata) if entry.metadata else None,
+        # `default=str` keeps an exotic value in someone's metadata from
+        # failing the write — the audit row matters more than its fidelity.
+        metadata_json=json.dumps(entry.metadata, default=str) if entry.metadata else None,
     )
 
 
