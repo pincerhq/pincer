@@ -181,7 +181,9 @@ class CallAnalytics(SQLModel, table=True):
     __tablename__ = "call_analytics"
     __table_args__ = (Index("idx_call_analytics_sentiment", "sentiment"),)
 
-    call_sid: str = Field(sa_column=Column(Text(), ForeignKey("voice_calls.call_sid"), primary_key=True))
+    # No foreign key to voice_calls: the retention purge deletes an expired
+    # call and keeps its analytics (migration 0014).
+    call_sid: str = Field(sa_column=Column(Text(), primary_key=True))
     agent_speech_ms: int | None = Field(default=None, sa_column=Column(Integer()))
     caller_speech_ms: int | None = Field(default=None, sa_column=Column(Integer()))
     silence_ms: int | None = Field(default=None, sa_column=Column(Integer()))

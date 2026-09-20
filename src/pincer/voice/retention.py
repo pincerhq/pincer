@@ -14,38 +14,34 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiosqlite
-
 if TYPE_CHECKING:
+    import aiosqlite
+
     from pincer.config import Settings
+
+from pincer.services import retention as retention_policy
+from pincer.services.retention import RetentionService
 
 logger = logging.getLogger(__name__)
 
-# Table -> timestamp column holding an ISO-8601 UTC string (lexicographic
-# comparison is chronological for these).
+# Table -> timestamp column, derived from the policy in
+# `pincer.services.retention` so the two cannot drift. What is absent is the
+# point of this note:
+#
+# * `do_not_call_numbers` — it records an Art. 21 objection; purging it would
+#   silently re-enable calls the callee refused.
+# * `call_analytics` — talk ratio, silence and sentiment are derived numbers
+#   about a call, not a recording of it, so they outlive the transcript like
+#   the Sprint 13 thread summaries do. Its `sentiment_rationale` is the
+#   exception: that sentence may quote what was said, so the purge NULLs it on
+#   the same schedule as the transcript it was drawn from.
+# * `call_threads` / `call_thread_members` — a thread's rolling summary and
+#   commitments are DERIVED facts (the Sprint 3 T3.3 memory-note precedent),
+#   and the member rows are what keeps a purged call visible in its thread as a
+#   stub (sid, date, outcome code) with no transcript. Threads are closed by
+#   the §5 auto-close job, not by the transcript purge.
 RETENTION_TABLES: dict[str, str] = {
-    "voice_calls": "started_at",
-    "call_transcripts": "timestamp",
-    "call_actions": "timestamp",
-    # Sprint 12: a taken message is personal data of the caller
-    "inbound_messages": "created_at",
-    # Sprint 8 (T8.3/T8.5): the abuse gate's dial log is personal data too and
-    # only needs to outlive the longest limit window (a day / the cooldown).
-    # `do_not_call_numbers` is deliberately NOT here: it records an Art. 21 objection,
-    # and purging it would silently re-enable calls the callee refused.
-    "outbound_call_logs": "placed_at",
-    # `call_analytics` is deliberately NOT here either: talk ratio, silence and
-    # sentiment are derived numbers about a call, not a recording of it, so
-    # they outlive the transcript like the Sprint 13 thread summaries do. Its
-    # `sentiment_rationale` is the exception — that sentence may quote what was
-    # said, so `purge_expired_voice_data` NULLs it on the same schedule as the
-    # transcript it was drawn from.
-    # Sprint 13: `call_threads` and `call_thread_members` are deliberately NOT
-    # here either. A thread's rolling summary and commitments are DERIVED
-    # facts (the Sprint 3 T3.3 memory-note precedent), and the member rows are
-    # what keeps a purged call visible in its thread as a stub (sid, date,
-    # outcome code) with no transcript. Threads are closed by the §5
-    # auto-close job, not by the transcript purge.
+    str(model.__tablename__): column.key for model, column in retention_policy.VOICE_TABLES
 }
 
 
@@ -79,30 +75,6 @@ async def ensure_voice_tables(db: aiosqlite.Connection) -> None:
     await ensure_schema_for_connection(db)
 
 
-async def _null_expired_rationales(db: aiosqlite.Connection, cutoff: str) -> int:
-    """Blank sentiment rationales for calls older than the retention cutoff.
-
-    Returns the number of rows changed. A missing table is not an error: a
-    deployment that has never run an analysed call simply has nothing to redact.
-    """
-    # The voice_calls rows for these calls are usually already gone by the time
-    # this runs (the table loop above deletes them first), so the analytics
-    # row's own timestamp is the primary test; the subquery covers the case
-    # where the call row is still present but already past the cutoff.
-    try:
-        cursor = await db.execute(
-            "UPDATE call_analytics SET sentiment_rationale = NULL "
-            "WHERE sentiment_rationale IS NOT NULL AND ("
-            "    created_at < ? "
-            "    OR call_sid IN (SELECT call_sid FROM voice_calls WHERE started_at < ?)"
-            ")",
-            (cutoff, cutoff),
-        )
-    except aiosqlite.OperationalError:
-        return 0
-    return int(cursor.rowcount or 0)
-
-
 async def purge_expired_voice_data(
     db_path: str | Path,
     retention_days: int,
@@ -117,31 +89,8 @@ async def purge_expired_voice_data(
         return {}
 
     cutoff = ((now or datetime.now(UTC)) - timedelta(days=retention_days)).isoformat()
-    deleted: dict[str, int] = {}
-
-    async with aiosqlite.connect(str(db_path)) as db:
-        for table, ts_column in RETENTION_TABLES.items():
-            exists = await db.execute_fetchall(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                (table,),
-            )
-            if not exists:
-                continue
-            cursor = await db.execute(
-                f"DELETE FROM {table} WHERE {ts_column} < ?",  # noqa: S608 - identifiers from module constant
-                (cutoff,),
-            )
-            if cursor.rowcount > 0:
-                deleted[table] = cursor.rowcount
-
-        # The analytics row survives; the one field that can quote the call
-        # does not. Keeping a grounded rationale ("said the third delay was
-        # unacceptable") after its transcript is gone would preserve exactly
-        # the content the purge exists to remove.
-        redacted = await _null_expired_rationales(db, cutoff)
-        if redacted:
-            deleted["call_analytics.sentiment_rationale"] = redacted
-        await db.commit()
+    service = await RetentionService.for_path(Path(str(db_path)))
+    deleted = await service.purge_voice(cutoff)
 
     if deleted:
         logger.info("Retention purge (cutoff=%s): %s", cutoff, deleted)
@@ -154,10 +103,7 @@ async def purge_expired_voice_data(
 #: transcript's. Diagnosing a latency regression needs weeks of history;
 #: keeping what was *said* that long would not be justifiable.
 TELEMETRY_TABLES: dict[str, str] = {
-    "telephony_events": "ts_utc",
-    "telephony_spans": "start_utc",
-    "telephony_turns": "created_at",
-    "telephony_calls": "registered_at",
+    str(model.__tablename__): column.key for model, column in retention_policy.TELEMETRY_TABLES
 }
 
 
@@ -174,22 +120,8 @@ async def purge_expired_telemetry(
     if retention_days <= 0:
         return {}
     cutoff = ((now or datetime.now(UTC)) - timedelta(days=retention_days)).isoformat()
-    deleted: dict[str, int] = {}
-    async with aiosqlite.connect(str(db_path)) as db:
-        for table, ts_column in TELEMETRY_TABLES.items():
-            exists = await db.execute_fetchall(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                (table,),
-            )
-            if not exists:
-                continue
-            cursor = await db.execute(
-                f"DELETE FROM {table} WHERE {ts_column} < ?",  # noqa: S608 - identifiers from module constant
-                (cutoff,),
-            )
-            if cursor.rowcount > 0:
-                deleted[table] = cursor.rowcount
-        await db.commit()
+    service = await RetentionService.for_path(Path(str(db_path)))
+    deleted = await service.purge_telemetry(cutoff)
     if deleted:
         logger.info("Telephony telemetry purge (cutoff=%s): %s", cutoff, deleted)
     return deleted

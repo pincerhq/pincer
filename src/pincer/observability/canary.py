@@ -35,10 +35,13 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pincer.config import Settings
+
+from pincer.services.observability import CanaryService
 
 logger = logging.getLogger(__name__)
 
@@ -56,55 +59,34 @@ _POLL_INTERVAL_S = 2.0
 # The table itself is Alembic-managed (0012).
 
 
-async def _ensure_schema(conn: Any) -> None:
-    from pincer.voice.retention import ensure_schema_for_connection
-
-    await ensure_schema_for_connection(conn)
-
-
 async def _persist_run(settings: Settings | Any, result: CanaryResult) -> None:
     """Record the run. Skipped runs are stored too — a gap in coverage is a
     fact the availability SLO needs, not something to hide."""
-    import aiosqlite
-
     try:
-        async with aiosqlite.connect(str(settings.db_path)) as conn:
-            await _ensure_schema(conn)
-            await conn.execute(
-                "INSERT INTO canary_runs (ran_at, ok, skipped, reason, call_sid, turns, duration_s) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    datetime.now(UTC).isoformat(),
-                    int(result.ok),
-                    int(result.skipped),
-                    result.reason[:300],
-                    result.call_sid,
-                    result.turns,
-                    round(result.duration_s, 2),
-                ),
-            )
-            await conn.commit()
+        service = await CanaryService.for_path(Path(str(settings.db_path)))
+        await service.record_run(
+            {
+                "ran_at": datetime.now(UTC).isoformat(),
+                "ok": int(result.ok),
+                "skipped": int(result.skipped),
+                "reason": result.reason[:300],
+                "call_sid": result.call_sid,
+                "turns": result.turns,
+                "duration_s": round(result.duration_s, 2),
+            }
+        )
     except Exception:
         logger.exception("Failed to persist canary run")
 
 
 async def recent_runs(settings: Settings | Any, limit: int = 20) -> list[dict[str, Any]]:
     """Most recent canary runs, newest first — for the CLI and the API."""
-    import aiosqlite
-
     try:
-        async with aiosqlite.connect(str(settings.db_path)) as conn:
-            conn.row_factory = aiosqlite.Row
-            await _ensure_schema(conn)
-            rows = await conn.execute_fetchall(
-                "SELECT ran_at, ok, skipped, reason, call_sid, turns, duration_s "
-                "FROM canary_runs ORDER BY ran_at DESC LIMIT ?",
-                (limit,),
-            )
+        service = await CanaryService.for_path(Path(str(settings.db_path)))
+        return await service.recent(limit)
     except Exception:
         logger.debug("canary history query failed", exc_info=True)
         return []
-    return [dict(r) for r in rows]
 
 
 @dataclass
