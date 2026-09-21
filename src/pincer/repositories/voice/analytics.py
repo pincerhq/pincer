@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func
+from sqlalchemy import func, or_, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
@@ -30,6 +30,25 @@ class AnalyticsRepository(BaseRepository[CallAnalytics, str]):
                 set_=lambda excluded: {name: excluded[name] for name in stored if name != "call_sid"},
             )
         )
+
+    async def redact_rationales_older_than(self, cutoff: str) -> int:
+        """Blank sentiment rationales for calls older than the cutoff.
+
+        The `voice_calls` rows are usually already gone by the time retention
+        runs, so the analytics row's own timestamp is the primary test; the
+        subquery covers a call row that is still present but already past the
+        cutoff.
+        """
+        expired_calls = select(col(VoiceCall.call_sid)).where(col(VoiceCall.started_at) < cutoff)
+        stmt = (
+            update(CallAnalytics)
+            .where(
+                col(CallAnalytics.sentiment_rationale).isnot(None),
+                or_(col(CallAnalytics.created_at) < cutoff, col(CallAnalytics.call_sid).in_(expired_calls)),
+            )
+            .values(sentiment_rationale=None)
+        )
+        return int((await self.session.exec(stmt)).rowcount or 0)
 
     async def for_calls(self, call_sids: Sequence[str]) -> Sequence[CallAnalytics]:
         """A page of calls in one query, not one query per row."""

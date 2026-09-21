@@ -9,13 +9,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete, or_, update
-from sqlmodel import col, select
-
 from pincer.db.session import session_scope
 from pincer.models.telephony import TelephonyCall, TelephonyEvent, TelephonySpan, TelephonyTurn
-from pincer.models.voice import CallAction, CallAnalytics, InboundMessage, OutboundCallLog, VoiceCall
+from pincer.models.voice import CallAction, InboundMessage, OutboundCallLog, VoiceCall
 from pincer.models.voice import CallTranscript as CallTranscriptModel
+from pincer.repositories.base import repository_for
+from pincer.repositories.voice import AnalyticsRepository
 from pincer.services.base import DatabaseService
 
 if TYPE_CHECKING:
@@ -53,7 +52,7 @@ class RetentionService(DatabaseService):
             # transcript is gone would preserve exactly the content the purge
             # exists to remove — and once the call row is deleted, nothing is
             # left to tell us the rationale belonged to an expired call.
-            redacted = await _redact_rationales(session, cutoff)
+            redacted = await AnalyticsRepository(session).redact_rationales_older_than(cutoff)
             deleted = await _delete_older(session, VOICE_TABLES, cutoff)
         if redacted:
             deleted["call_analytics.sentiment_rationale"] = redacted
@@ -67,28 +66,7 @@ class RetentionService(DatabaseService):
 async def _delete_older(session: Any, tables: Sequence[tuple[Any, Any]], cutoff: str) -> dict[str, int]:
     deleted: dict[str, int] = {}
     for model, timestamp in tables:
-        result = await session.exec(delete(model).where(timestamp < cutoff))
-        removed = int(result.rowcount or 0)
+        removed = await repository_for(model)(session).delete_older_than(timestamp, cutoff)
         if removed:
             deleted[str(model.__tablename__)] = removed
     return deleted
-
-
-async def _redact_rationales(session: Any, cutoff: str) -> int:
-    """Blank sentiment rationales for calls older than the cutoff.
-
-    The `voice_calls` rows are usually already gone by now (deleted above), so
-    the analytics row's own timestamp is the primary test; the subquery covers
-    a call row that is still present but already past the cutoff.
-    """
-    expired_calls = select(col(VoiceCall.call_sid)).where(col(VoiceCall.started_at) < cutoff)
-    stmt = (
-        update(CallAnalytics)
-        .where(
-            col(CallAnalytics.sentiment_rationale).isnot(None),
-            or_(col(CallAnalytics.created_at) < cutoff, col(CallAnalytics.call_sid).in_(expired_calls)),
-        )
-        .values(sentiment_rationale=None)
-    )
-    result = await session.exec(stmt)
-    return int(result.rowcount or 0)

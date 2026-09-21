@@ -7,6 +7,7 @@ unit of work is done.
 
 from __future__ import annotations
 
+from functools import cache
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from sqlalchemy import delete
@@ -92,3 +93,10 @@ class BaseRepository[M: SQLModel, PK]:
         REAL timestamp columns, an ISO string for the text ones.
         """
         return await self.delete_where(timestamp < cutoff)
+
+
+@cache
+def repository_for(model: type[SQLModel]) -> type[BaseRepository[Any, Any]]:
+    """A repository for `model` with only the generic operations, for a table
+    that has no domain repository of its own."""
+    return type(f"{model.__name__}Repository", (BaseRepository,), {"model": model})
