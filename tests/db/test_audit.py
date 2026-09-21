@@ -75,6 +75,14 @@ async def test_one_unstorable_entry_does_not_block_the_batch(url):
     assert "object object at" in json.loads(stored[1]["metadata_json"])["obj"]
 
 
+async def test_an_entry_with_no_action_is_dropped_not_re_raised(url):
+    """The drop's own log line read `entry.action`, so an entry missing it
+    failed the whole batch — which the caller re-queues, forever."""
+    service = AuditService(url)
+    await service.add_batch([object(), _entry(timestamp="2026-01-02T00:00:00+00:00")])
+    assert len(await service.query()) == 1
+
+
 async def test_filters_and_paging(url):
     service = AuditService(url)
     await service.add_batch(

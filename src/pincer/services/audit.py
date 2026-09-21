@@ -40,7 +40,12 @@ class AuditService(DatabaseService):
             try:
                 rows.append(_to_row(entry))
             except Exception:
-                logger.exception("Dropping an audit entry that could not be stored: action=%s", entry.action)
+                # `getattr`: the entry that failed may be the one without an
+                # `action`, and re-raising here would fail the whole batch.
+                logger.exception(
+                    "Dropping an audit entry that could not be stored: action=%s",
+                    getattr(entry, "action", "<unknown>"),
+                )
         if not rows:
             return
         async with session_scope(self._url) as session:

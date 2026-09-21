@@ -56,22 +56,25 @@ async def _period(settings: Settings | Any, start_hours_ago: float, end_hours_ag
     """Aggregate one window: `start_hours_ago` back to `end_hours_ago` ago."""
     period = DigestPeriod()
     start, end = _iso(start_hours_ago), _iso(end_hours_ago)
+    # Each half on its own: a failed cost query must not throw away the call
+    # counts already read. An empty half is the honest answer when its tables
+    # are not there — but a database that cannot be read is worth saying out loud.
+    url = get_database_url(Path(str(settings.db_path)))
     try:
-        db_path = Path(str(settings.db_path))
-        for call in await CallsService(get_database_url(db_path)).terminated_between(start, end):
+        for call in await CallsService(url).terminated_between(start, end):
             code = str(call["failure_code"] or FailureCode.NONE)
             period.calls += 1
             if code == FailureCode.NONE:
                 period.completed += 1
             else:
                 period.by_code[code] = period.by_code.get(code, 0) + 1
-
-        costs = await CallCostsService(get_database_url(db_path)).recorded_since(start, end)
+    except SQLAlchemyError:
+        logger.warning("Digest call aggregation failed — reporting no calls", exc_info=True)
+    try:
+        costs = await CallCostsService(url).recorded_since(start, end)
         period.cost_usd = sum(float(row["total_usd"] or 0.0) for row in costs)
     except SQLAlchemyError:
-        # An empty period is the honest answer when the tables are not there —
-        # but a database that cannot be read is worth saying out loud.
-        logger.warning("Digest period aggregation failed — reporting an empty period", exc_info=True)
+        logger.warning("Digest cost aggregation failed — reporting no cost", exc_info=True)
     return period
 
 

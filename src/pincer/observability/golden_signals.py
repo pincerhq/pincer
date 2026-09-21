@@ -21,6 +21,7 @@ ignore the pager.
 
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -30,6 +31,8 @@ from typing import TYPE_CHECKING, Any
 from pincer.observability.failure_codes import EXCLUDED_FROM_SLO, FailureCode
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from pincer.config import Settings
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -366,18 +369,16 @@ async def cost_per_call(settings: Settings | Any, window_hours: float = 24.0) ->
         try:
             rows = await costs.recorded_since(_cutoff(start_hours_ago), _cutoff(end_hours_ago))
         except SQLAlchemyError:
+            logger.warning("cost_per_call query failed — reporting no data", exc_info=True)
             return []
         return [float(row["total_usd"] or 0.0) for row in rows]
 
-    try:
-        recent = await _totals(window_hours)
-        # The baseline must EXCLUDE the window being judged. Overlapping them
-        # lets a spike raise its own baseline: today's expensive calls land in
-        # both p95s, the ratio collapses toward 1.0, and the alert never fires
-        # — the exact failure this rule exists to catch.
-        baseline = await _totals(baseline_days * 24.0, window_hours)
-    except SQLAlchemyError:
-        recent, baseline = [], []
+    recent = await _totals(window_hours)
+    # The baseline must EXCLUDE the window being judged. Overlapping them
+    # lets a spike raise its own baseline: today's expensive calls land in
+    # both p95s, the ratio collapses toward 1.0, and the alert never fires
+    # — the exact failure this rule exists to catch.
+    baseline = await _totals(baseline_days * 24.0, window_hours)
 
     recent_p95 = percentile(recent, 0.95)
     baseline_p95 = percentile(baseline, 0.95)
@@ -410,12 +411,15 @@ BUSY_CAPACITY_DAILY_THRESHOLD = 5
 async def busy_capacity(settings: Settings | Any, window_hours: float = 24.0) -> Signal:
     """Sprint 12 §10.3: inbound calls answered with the busy line (failure_code
     busy_capacity) in the window. Alarm when the count exceeds 5/day."""
-    count = 0
+    window = f"{int(window_hours)}h"
+    target = float(BUSY_CAPACITY_DAILY_THRESHOLD)
     try:
         busy = await _calls(settings).started_since(_cutoff(window_hours), failure_code=FailureCode.BUSY_CAPACITY.value)
-        count = len(busy)
     except SQLAlchemyError:
-        logger.warning("busy_capacity signal failed — reporting zero", exc_info=True)
+        # No data, not zero: a zero here reads as "no one was turned away".
+        logger.warning("busy_capacity signal failed — reporting no data", exc_info=True)
+        return Signal("busy_capacity", None, "count", 0, 0, target, window)
+    count = len(busy)
     return Signal(
         name="busy_capacity",
         value=float(count),
@@ -458,14 +462,30 @@ async def negative_sentiment(settings: Settings | Any, window_hours: float = 24.
     )
 
 
+async def _isolated(name: str, compute: Callable[[], Awaitable[Signal] | Signal]) -> Signal:
+    """One signal, which cannot take the others down with it.
+
+    Each signal handles the database errors it expects; this catches what it
+    does not — a bad `PINCER_DATABASE_URL`, a missing driver extra, a value
+    that will not parse — so the report and every alert rule still run, with
+    this one signal reporting no data.
+    """
+    try:
+        result = compute()
+        return await result if inspect.isawaitable(result) else result
+    except Exception:
+        logger.warning("%s signal failed — reporting no data", name, exc_info=True)
+        return Signal(name, None)
+
+
 async def collect(settings: Settings | Any, active_calls: dict[str, Any] | None = None) -> GoldenSignals:
     """Every golden signal, each in its own configured window."""
     return GoldenSignals(
-        call_success_rate=await call_success_rate(settings),
-        booking_success_rate=await booking_success_rate(settings),
-        turn_latency=await turn_latency(settings),
-        stuck_calls=stuck_calls(settings, active_calls),
-        cost_per_call=await cost_per_call(settings),
-        busy_capacity=await busy_capacity(settings),
-        negative_sentiment=await negative_sentiment(settings),
+        call_success_rate=await _isolated("call_success_rate", lambda: call_success_rate(settings)),
+        booking_success_rate=await _isolated("booking_success_rate", lambda: booking_success_rate(settings)),
+        turn_latency=await _isolated("turn_latency_p95", lambda: turn_latency(settings)),
+        stuck_calls=await _isolated("stuck_calls", lambda: stuck_calls(settings, active_calls)),
+        cost_per_call=await _isolated("cost_per_call", lambda: cost_per_call(settings)),
+        busy_capacity=await _isolated("busy_capacity", lambda: busy_capacity(settings)),
+        negative_sentiment=await _isolated("negative_sentiment", lambda: negative_sentiment(settings)),
     )
