@@ -540,6 +540,35 @@ class TestSeedFromConfig:
         tg_uid = await r.resolve(ChannelType.TELEGRAM, 12345)
         assert tg_uid == wa_uid
 
+    async def test_entries_sharing_a_pair_seed_one_identity(self, tmp_path):
+        """A pair two entries share joins them: every link is written after the loop,
+        so the second entry has to find the first one's pairs before they are stored."""
+        r = IdentityResolver(
+            tmp_path / "chained.db",
+            identity_map_config="telegram:111=whatsapp:222,whatsapp:222=slack:333",
+        )
+        await r.ensure_table()
+        await r.seed_from_config()
+
+        uids = {
+            await r.resolve(ChannelType.TELEGRAM, 111),
+            await r.resolve(ChannelType.WHATSAPP, "222"),
+            await r.resolve(ChannelType.SLACK, "333"),
+        }
+        assert len(uids) == 1
+
+    async def test_a_later_name_renames_a_pending_identity(self, tmp_path):
+        """A named entry that shares a pair with an unnamed earlier one names them both."""
+        r = IdentityResolver(
+            tmp_path / "renamed.db",
+            identity_map_config="telegram:111=whatsapp:222,jane@whatsapp:222=slack:333",
+        )
+        await r.ensure_table()
+        await r.seed_from_config()
+
+        assert await r.resolve(ChannelType.TELEGRAM, 111) == "jane"
+        assert await r.resolve(ChannelType.SLACK, "333") == "jane"
+
 
 @pytest.mark.asyncio
 class TestNamedCanonicalId:

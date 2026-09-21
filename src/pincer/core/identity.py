@@ -46,6 +46,7 @@ IdentityProfile` dict for the fields that string grammar has no room for
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import logging
 from dataclasses import dataclass
@@ -379,6 +380,22 @@ class IdentityResolver:
             return
 
         entries: list[SeedEntry] = []
+        # Every link is written in one transaction after the loop, so an entry
+        # cannot find the pairs an earlier entry claimed in the database; it
+        # finds them here instead, or one person sharing a channel pair across
+        # two entries would be split into two identities.
+        pending: dict[tuple[str, str], str] = {}
+
+        async def rename(old_uid: str, new_uid: str) -> None:
+            await self._rename_identity(old_uid, new_uid)
+            for key, uid in pending.items():
+                if uid == old_uid:
+                    pending[key] = new_uid
+            entries[:] = [
+                dataclasses.replace(entry, pincer_user_id=new_uid) if entry.pincer_user_id == old_uid else entry
+                for entry in entries
+            ]
+
         for raw_entry in self._identity_map_config.split(","):
             if ":" not in raw_entry:
                 continue
@@ -407,7 +424,7 @@ class IdentityResolver:
             # Collect all existing identities for the channels in this entry
             existing_uids: list[str] = []
             for _ch_str, ch_type, norm in resolved:
-                uid = await self._find_existing(ch_type, norm)
+                uid = await self._find_existing(ch_type, norm) or pending.get((ch_type.value, norm))
                 if uid and uid not in existing_uids:
                     existing_uids.append(uid)
 
@@ -418,7 +435,7 @@ class IdentityResolver:
                 for uid in existing_uids:
                     if uid != target_uid:
                         logger.info("Identity conflict resolved: merging %s into %s", uid, target_uid)
-                        await self._rename_identity(uid, target_uid)
+                        await rename(uid, target_uid)
                 pincer_uid = target_uid
             elif len(existing_uids) == 1:
                 existing_uid = existing_uids[0]
@@ -426,7 +443,7 @@ class IdentityResolver:
                     if existing_uid == name:
                         pincer_uid = name
                     elif existing_uid.startswith("usr_"):
-                        await self._rename_identity(existing_uid, name)
+                        await rename(existing_uid, name)
                         pincer_uid = name
                     else:
                         logger.warning(
@@ -463,6 +480,8 @@ class IdentityResolver:
                     backfill=config_fields,
                 )
             )
+            for _ch_str, ch_type, norm in resolved:
+                pending.setdefault((ch_type.value, norm), pincer_uid)
 
         await self._store.seed(entries)
         logger.info("Identity config seeded")
