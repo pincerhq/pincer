@@ -25,13 +25,13 @@ Create Date: 2026-09-20
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 import sqlalchemy as sa
 from alembic import op
 
 from pincer.db.ids import Uuid7Sequence
+from pincer.db.migration_helpers import drop_stale_batch_table, id_map, rewrite_from, to_ms
 
 revision = "0017"
 down_revision = "0016"
@@ -64,39 +64,16 @@ TABLES: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def _to_ms(value: Any, kind: str) -> int | None:
-    """Epoch milliseconds from whatever the driver handed back.
-
-    Branching on the Python type, not the dialect: an `IsoText` column returns
-    a `str` on SQLite and a naive `datetime` on Postgres, while
-    `audit_logs.timestamp` is plain TEXT and returns a `str` on both.
-    """
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        stamped = value if value.tzinfo else value.replace(tzinfo=UTC)
-        return _in_range(int(stamped.timestamp() * 1000))
-    if kind == "epoch":
-        try:
-            return _in_range(int(float(value) * 1000))
-        except (TypeError, ValueError, OverflowError):
-            return None
-    try:
-        parsed = datetime.fromisoformat(str(value))
-    except ValueError:
-        return None
-    return _in_range(int((parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).timestamp() * 1000))
-
-
-def _in_range(ms: int) -> int | None:
-    """A timestamp a UUIDv7 can carry, or None for one it cannot.
-
-    Nonsense happens: an epoch column holding milliseconds instead of seconds
-    reads as the year 58000. Treating it as "unknown time" keeps the row and
-    its position; raising would abort the upgrade, and on SQLite an aborted
-    upgrade is expensive — see `_drop_stale_batch_table`.
-    """
-    return ms if 0 <= ms <= 0xFFFF_FFFF_FFFF else None
+#: The one index in these tables whose definition SQLite's reflection cannot
+#: carry: `0001` declared it `COLLATE NOCASE`, and a batch rebuild re-emits it
+#: without the collation, silently. The index keeps its name, so nothing
+#: complains and the drift test cannot see it either.
+_COLLATED_INDEXES = {
+    "phone_contacts": (
+        "idx_phone_contacts_name",
+        "CREATE INDEX idx_phone_contacts_name ON phone_contacts(name COLLATE NOCASE)",
+    ),
+}
 
 
 def _new_ids(bind: sa.Connection, table: str, time_column: str, kind: str) -> list[tuple[str, int]]:
@@ -112,7 +89,7 @@ def _new_ids(bind: sa.Connection, table: str, time_column: str, kind: str) -> li
     carried: int | None = None
     stamped: list[tuple[Any, int | None]] = []
     for row in sorted(rows, key=lambda row: row[0]):
-        ms = _to_ms(row[1], kind)
+        ms = to_ms(row[1], kind)
         carried = ms if ms is not None else carried
         stamped.append((row[0], carried))
     # Rows before the first readable timestamp have nothing to inherit; they
@@ -128,30 +105,6 @@ def _new_ids(bind: sa.Connection, table: str, time_column: str, kind: str) -> li
 
 def _present(bind: sa.Connection) -> set[str]:
     return set(sa.inspect(bind).get_table_names())
-
-
-def _drop_stale_batch_table(table: str) -> None:
-    """Clear the wreckage of an upgrade that died mid-rebuild.
-
-    SQLite has no transactional DDL, so batch mode's first statement —
-    `CREATE TABLE _alembic_tmp_<t>` — lands in autocommit and survives the
-    rollback that follows any later failure. The revision then cannot be
-    retried: the next `upgrade` dies on "table already exists", and since the
-    app brings its own database to head at startup, it never boots again.
-    """
-    op.execute(f"DROP TABLE IF EXISTS _alembic_tmp_{table}")
-
-
-#: The one index in these tables whose definition SQLite's reflection cannot
-#: carry: `0001` declared it `COLLATE NOCASE`, and a batch rebuild re-emits it
-#: without the collation, silently. The index keeps its name, so nothing
-#: complains and the drift test cannot see it either.
-_COLLATED_INDEXES = {
-    "phone_contacts": (
-        "idx_phone_contacts_name",
-        "CREATE INDEX idx_phone_contacts_name ON phone_contacts(name COLLATE NOCASE)",
-    ),
-}
 
 
 def _restore_collated_index(table: str) -> None:
@@ -193,7 +146,7 @@ def upgrade() -> None:
             op.execute(f"ALTER TABLE {table} ALTER COLUMN id DROP DEFAULT")
             op.execute(f"ALTER TABLE {table} ALTER COLUMN id TYPE text USING id::text")
         else:
-            _drop_stale_batch_table(table)
+            drop_stale_batch_table(table)
             # Reflected, not transcribed: none of these tables has a single
             # CREATE TABLE in the tree matching its current shape — half were
             # renamed by 0011, and the voice tables were rebuilt by 0005 and
@@ -207,11 +160,8 @@ def upgrade() -> None:
             with op.batch_alter_table(table, recreate="always") as batch:
                 batch.alter_column("id", existing_type=sa.Integer(), type_=sa.Text(), nullable=False)
 
-        if mapping:
-            bind.execute(
-                sa.text(f"UPDATE {table} SET id = :new WHERE id = :old"),  # noqa: S608 - fixed identifiers
-                [{"new": new, "old": str(old)} for new, old in mapping],
-            )
+        with id_map(bind, table, {str(old): new for new, old in mapping}) as map_table:
+            rewrite_from(bind, table, "id", map_table)
 
         if not postgres:
             _restore_collated_index(table)
@@ -239,19 +189,17 @@ def downgrade() -> None:
         rows = bind.execute(sa.text(f"SELECT id FROM {table} ORDER BY id")).all()  # noqa: S608 - fixed identifiers
         # Both sides as text: the column is uuid when read and text when
         # written, and Postgres has no `text = uuid` operator to bridge that.
-        renumbered = [{"new": str(index), "old": str(row[0])} for index, row in enumerate(rows, start=1)]
+        renumbered = {str(row[0]): str(index) for index, row in enumerate(rows, start=1)}
 
         if postgres:
             op.execute(f"ALTER TABLE {table} ALTER COLUMN id TYPE text USING id::text")
         else:
+            drop_stale_batch_table(table)
             with op.batch_alter_table(table, recreate="always") as batch:
                 batch.alter_column("id", existing_type=sa.Text(), type_=sa.Text(), existing_nullable=True)
 
-        if renumbered:
-            bind.execute(
-                sa.text(f"UPDATE {table} SET id = :new WHERE id = :old"),  # noqa: S608 - fixed identifiers
-                renumbered,
-            )
+        with id_map(bind, table, renumbered) as map_table:
+            rewrite_from(bind, table, "id", map_table)
 
         if postgres:
             op.execute(f"ALTER TABLE {table} ALTER COLUMN id TYPE integer USING id::integer")
@@ -259,5 +207,11 @@ def downgrade() -> None:
             op.execute(f"SELECT setval('{table}_id_seq', COALESCE((SELECT MAX(id) FROM {table}), 0) + 1, false)")
             op.execute(f"ALTER TABLE {table} ALTER COLUMN id SET DEFAULT nextval('{table}_id_seq')")
         else:
-            with op.batch_alter_table(table, recreate="always") as batch:
+            drop_stale_batch_table(table)
+            # Back to what 0001, 0005, 0006 and 0012 created: AUTOINCREMENT, so
+            # a deleted row's id is never handed out again — the tiebreaker
+            # `call_transcripts` and `inbound_messages` order by depends on it.
+            with op.batch_alter_table(table, recreate="always", table_kwargs={"sqlite_autoincrement": True}) as batch:
                 batch.alter_column("id", existing_type=sa.Text(), type_=sa.Integer(), existing_nullable=True)
+            # Every batch rebuild re-emits this index without its collation.
+            _restore_collated_index(table)

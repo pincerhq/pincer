@@ -28,13 +28,13 @@ Create Date: 2026-09-20
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
-from typing import Any
+from contextlib import ExitStack
 
 import sqlalchemy as sa
 from alembic import op
 
 from pincer.db.ids import Uuid7Sequence
+from pincer.db.migration_helpers import drop_stale_batch_table, id_map, rewrite_from, to_ms
 
 revision = "0018"
 down_revision = "0017"
@@ -78,29 +78,32 @@ SENTINEL_DEFAULTS: tuple[tuple[str, str], ...] = (
 
 _FK = "call_thread_members_thread_id_fkey"
 
-
-def _to_ms(value: Any, kind: str) -> int | None:
-    """Epoch milliseconds, branching on the Python type the driver returned."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        stamped = value if value.tzinfo else value.replace(tzinfo=UTC)
-        return _in_range(int(stamped.timestamp() * 1000))
-    if kind == "epoch":
-        try:
-            return _in_range(int(float(value) * 1000))
-        except (TypeError, ValueError, OverflowError):
-            return None
-    try:
-        parsed = datetime.fromisoformat(str(value))
-    except ValueError:
-        return None
-    return _in_range(int((parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).timestamp() * 1000))
-
-
-def _in_range(ms: int) -> int | None:
-    """A timestamp a UUIDv7 can carry, or None for one it cannot."""
-    return ms if 0 <= ms <= 0xFFFF_FFFF_FFFF else None
+#: `memories_fts`'s triggers, verbatim from 0001. Rewriting `memories.id` does
+#: not move a row's rowid, which is all the index keys on, so leaving them live
+#: would be harmless — but that is an inference; dropping them for the rewrite
+#: and rebuilding the index afterwards makes it a guarantee.
+_MEMORY_FTS_TRIGGERS = {
+    "memories_ai": """
+    CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+        INSERT INTO memories_fts(rowid, content, category)
+        VALUES (new.rowid, new.content, new.category);
+    END
+    """,
+    "memories_ad": """
+    CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, content, category)
+        VALUES ('delete', old.rowid, old.content, old.category);
+    END
+    """,
+    "memories_au": """
+    CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
+        INSERT INTO memories_fts(memories_fts, rowid, content, category)
+        VALUES ('delete', old.rowid, old.content, old.category);
+        INSERT INTO memories_fts(rowid, content, category)
+        VALUES (new.rowid, new.content, new.category);
+    END
+    """,
+}
 
 
 def _mapping(bind: sa.Connection, table: str, key: str, time_column: str, kind: str) -> dict[str, str]:
@@ -115,7 +118,7 @@ def _mapping(bind: sa.Connection, table: str, key: str, time_column: str, kind: 
     carried: int | None = None
     stamped: list[tuple[str, int | None]] = []
     for row in sorted(rows, key=lambda row: str(row[0])):
-        ms = _to_ms(row[1], kind)
+        ms = to_ms(row[1], kind)
         carried = ms if ms is not None else carried
         stamped.append((str(row[0]), carried))
     earliest = next((ms for _old, ms in stamped if ms is not None), 0)
@@ -125,15 +128,6 @@ def _mapping(bind: sa.Connection, table: str, key: str, time_column: str, kind: 
         ((old, earliest if ms is None else ms) for old, ms in stamped), key=lambda item: (item[1], item[0])
     )
     return {old: sequence.next(ms) for old, ms in ordered}
-
-
-def _rewrite(bind: sa.Connection, table: str, column: str, mapping: dict[str, str]) -> None:
-    if not mapping:
-        return
-    bind.execute(
-        sa.text(f"UPDATE {table} SET {column} = :new WHERE {column} = :old"),  # noqa: S608 - fixed identifiers
-        [{"new": new, "old": old} for old, new in mapping.items()],
-    )
 
 
 def _retype(tables: set[str], table: str, column: str, to: str) -> None:
@@ -175,15 +169,28 @@ def upgrade() -> None:
         else:
             op.execute(f"UPDATE {table} SET {column} = NULL WHERE {missing}")  # noqa: S608 - fixed identifiers
 
-    for table, key, _time_column, _kind in KEYS:
-        if table not in tables:
-            continue
-        _rewrite(bind, table, key, maps[table])
-    for table, column, parent, _policy in REFERENCES:
-        if table in tables and parent in maps:
-            _rewrite(bind, table, column, maps[parent])
+    fts = not postgres and "memories_fts" in tables
+    if fts:
+        for trigger in _MEMORY_FTS_TRIGGERS:
+            op.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+
+    # One map table per converted table, each rewriting its key and every
+    # column that points at it in one statement per column.
+    with ExitStack() as stack:
+        map_tables = {table: stack.enter_context(id_map(bind, table, mapping)) for table, mapping in maps.items()}
+        for table, key, _time_column, _kind in KEYS:
+            if table in map_tables:
+                rewrite_from(bind, table, key, map_tables[table])
+        for table, column, parent, _policy in REFERENCES:
+            if table in tables and parent in map_tables:
+                rewrite_from(bind, table, column, map_tables[parent])
 
     _rewrite_memory_tags(bind, tables, maps.get("call_threads", {}))
+
+    if fts:
+        for ddl in _MEMORY_FTS_TRIGGERS.values():
+            op.execute(ddl)
+        op.execute("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')")
 
     for table, column in SENTINEL_DEFAULTS:
         if table not in tables:
@@ -191,7 +198,7 @@ def upgrade() -> None:
         if postgres:
             op.execute(f"ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT")
         else:
-            op.execute(f"DROP TABLE IF EXISTS _alembic_tmp_{table}")
+            drop_stale_batch_table(table)
             with op.batch_alter_table(table, recreate="always") as batch:
                 batch.alter_column(column, existing_type=sa.Text(), server_default=None)
 
@@ -268,5 +275,6 @@ def downgrade() -> None:
         if bind.dialect.name == "postgresql":
             op.execute(f"ALTER TABLE {table} ALTER COLUMN {column} SET DEFAULT ''")
         else:
+            drop_stale_batch_table(table)
             with op.batch_alter_table(table, recreate="always") as batch:
                 batch.alter_column(column, existing_type=sa.Text(), server_default=sa.text("''"))

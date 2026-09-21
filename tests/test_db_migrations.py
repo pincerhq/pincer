@@ -7,6 +7,7 @@ import sqlite3
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -1002,17 +1003,37 @@ def _uuid7_tables() -> tuple[tuple[str, str, str], ...]:
 
 
 def _shape(inspector: sa.Inspector, table: str) -> dict[str, object]:
-    """Everything about a table except the type of its `id` column."""
+    """Everything about a table except its column types.
+
+    Index predicates included: a batch rebuild that re-emitted
+    `idx_schedules_next_run` without its `WHERE enabled = 1` would otherwise
+    look identical.
+    """
     return {
         "columns": sorted((c["name"], bool(c["nullable"])) for c in inspector.get_columns(table) if c["name"] != "id"),
         "indexes": sorted(
-            (i["name"], tuple(i["column_names"]), bool(i.get("unique"))) for i in inspector.get_indexes(table)
+            (i["name"], tuple(i["column_names"]), bool(i.get("unique")), _predicate(i))
+            for i in inspector.get_indexes(table)
         ),
         "unique": sorted(
             (u.get("name") or "", tuple(u["column_names"])) for u in inspector.get_unique_constraints(table)
         ),
         "pk": tuple(inspector.get_pk_constraint(table)["constrained_columns"]),
     }
+
+
+def _predicate(index: dict[str, Any]) -> str:
+    options = index.get("dialect_options") or {}
+    where = options.get("sqlite_where") if options.get("sqlite_where") is not None else options.get("postgresql_where")
+    if where is None:
+        return ""
+    text = " ".join(str(where).split())
+    # Postgres hands the predicate back parenthesised; SQLite as written.
+    return text[1:-1] if text.startswith("(") and text.endswith(")") else text
+
+
+def _sqlite_ddl(conn: sa.Connection, name: str) -> str:
+    return str(conn.execute(sa.text("SELECT sql FROM sqlite_master WHERE name = :n"), {"n": name}).scalar_one())
 
 
 @contextlib.contextmanager
@@ -1197,25 +1218,30 @@ def test_0017_stamps_each_id_with_the_row_s_own_creation_time(migration_url, tmp
             assert stamped == seeded_ms, f"{table}.id carries {stamped}, not the row's own time {seeded_ms}"
 
 
-def test_0017_leaves_every_table_otherwise_exactly_as_it_was(migration_url, tmp_path):
+#: What 0018 rebuilds on SQLite to drop the `''` default, besides `voice_calls`.
+_REBUILT_BY_0018 = ["telephony_events", "telephony_spans"]
+
+
+def test_0017_and_0018_leave_every_rebuilt_table_otherwise_exactly_as_it_was(migration_url, tmp_path):
     """The SQLite half rebuilds each table from reflection rather than from
-    frozen DDL, so this is what guarantees nothing was dropped on the way:
-    same columns, same nullability, same indexes, same unique constraints."""
+    frozen DDL, so this is what guarantees nothing was dropped on the way to
+    head: same columns, same nullability, same indexes — predicates included —
+    and the same unique constraints."""
     cfg = _config(migration_url, tmp_path)
     command.upgrade(cfg, "0016")
     with _connect(migration_url) as conn:
-        before = {table: _shape(sa.inspect(conn), table) for table in _CONVERTED}
+        before = {table: _shape(sa.inspect(conn), table) for table in [*_CONVERTED, *_REBUILT_BY_0018]}
 
-    command.upgrade(cfg, "0017")
+    command.upgrade(cfg, "head")
 
     with _connect(migration_url) as conn:
-        after = {table: _shape(sa.inspect(conn), table) for table in _CONVERTED}
+        after = {table: _shape(sa.inspect(conn), table) for table in [*_CONVERTED, *_REBUILT_BY_0018]}
+        if migration_url.startswith("sqlite"):
+            assert "COLLATE NOCASE" in _sqlite_ddl(conn, "idx_phone_contacts_name")
 
-    for table in _CONVERTED:
-        assert after[table]["columns"] == before[table]["columns"], table
-        assert after[table]["indexes"] == before[table]["indexes"], table
-        assert after[table]["unique"] == before[table]["unique"], table
-        assert after[table]["pk"] == before[table]["pk"], table
+    assert ("idx_schedules_next_run", ("next_run_at",), False, "enabled = 1") in after["schedules"]["indexes"]
+    for table in before:
+        assert after[table] == before[table], table
 
 
 def test_0017_round_trips(migration_url, tmp_path):
@@ -1226,6 +1252,7 @@ def test_0017_round_trips(migration_url, tmp_path):
     with _connect(migration_url) as conn:
         for insert in (*_SEED_0016, *_SEED_TRANSCRIPTS, *_SEED_MESSAGES):
             conn.execute(sa.text(insert))
+        before = {table: _shape(sa.inspect(conn), table) for table in _CONVERTED}
 
     command.upgrade(cfg, "0017")
     command.downgrade(cfg, "0016")
@@ -1233,10 +1260,50 @@ def test_0017_round_trips(migration_url, tmp_path):
     with _connect(migration_url) as conn:
         ids = [row[0] for row in conn.execute(sa.text("SELECT id FROM call_transcripts ORDER BY id")).all()]
         assert ids == [1, 2, 3, 4, 5]
+        after = {table: _shape(sa.inspect(conn), table) for table in _CONVERTED}
+        if migration_url.startswith("sqlite"):
+            # What the rebuild cannot reflect: a deleted row's id must never
+            # come back (the transcript tiebreaker), and contacts sort without case.
+            for table in _CONVERTED:
+                assert "AUTOINCREMENT" in _sqlite_ddl(conn, table).upper(), table
+            assert "COLLATE NOCASE" in _sqlite_ddl(conn, "idx_phone_contacts_name")
+    for table in _CONVERTED:
+        assert after[table] == before[table], table
 
     command.upgrade(cfg, "0017")
     with _connect(migration_url) as conn:
         assert conn.execute(sa.text("SELECT COUNT(*) FROM call_transcripts")).scalar_one() == 5
+
+
+def test_an_interrupted_0014_does_not_wedge_every_later_upgrade(migration_url, tmp_path):
+    """SQLite has no transactional DDL: a rebuild that died after its CREATE
+    TABLE leaves the copy behind, and the retry — the app's own, at startup —
+    died on "table already exists"."""
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres DDL rolls back with the transaction")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0013")
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text("CREATE TABLE call_analytics_no_fk (call_sid TEXT PRIMARY KEY)"))
+
+    command.upgrade(cfg, "0014")
+    command.downgrade(cfg, "0013")  # the downgrade rebuilds through the same name
+
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text("CREATE TABLE call_analytics_no_fk (call_sid TEXT PRIMARY KEY)"))
+    command.upgrade(cfg, "head")
+
+
+def test_an_interrupted_0017_downgrade_can_be_retried(migration_url, tmp_path):
+    """The downgrade's batch rebuilds leave `_alembic_tmp_<t>` behind the same way."""
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres DDL rolls back with the transaction")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0017")
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text("CREATE TABLE _alembic_tmp_schedules (id INTEGER)"))
+
+    command.downgrade(cfg, "0016")
 
 
 # ── 0018: the minted text keys become UUIDv7 ─────────────────────────
@@ -1404,22 +1471,42 @@ def test_0018_leaves_the_identifiers_that_are_not_ours_alone(migration_url, tmp_
 
 
 def test_0018_keeps_full_text_search_working_on_sqlite(migration_url, tmp_path):
-    """`memories_fts` is keyed on the rowid, which an id rewrite does not move
-    — but the triggers fire on every UPDATE, so the index is rebuilt to be sure."""
+    """`memories_fts` is keyed on the rowid, which an id rewrite does not move.
+    0018 does not rely on that: it drops the triggers for the rewrite, puts them
+    back and rebuilds the index — so search still finds the old row, and a row
+    written afterwards is indexed too."""
     if not migration_url.startswith("sqlite"):
         pytest.skip("FTS5 is the SQLite search path")
     cfg = _seed_0017(migration_url, tmp_path)
     command.upgrade(cfg, "0018")
 
+    def search(conn: sa.Connection, term: str) -> list[str]:
+        return [
+            row[0]
+            for row in conn.execute(
+                sa.text(
+                    "SELECT m.id FROM memories_fts f JOIN memories m ON m.rowid = f.rowid "
+                    "WHERE memories_fts MATCH :term"
+                ),
+                {"term": term},
+            ).all()
+        ]
+
     with _connect(migration_url) as conn:
-        found = conn.execute(
-            sa.text(
-                "SELECT m.id FROM memories_fts f JOIN memories m ON m.rowid = f.rowid "
-                "WHERE memories_fts MATCH 'Angebot'"
-            )
-        ).all()
         stored = conn.execute(sa.text("SELECT id FROM memories")).scalar_one()
-    assert [row[0] for row in found] == [stored]
+        assert search(conn, "Angebot") == [stored]
+        triggers = {
+            row[0] for row in conn.execute(sa.text("SELECT name FROM sqlite_master WHERE type = 'trigger'")).all()
+        }
+        assert {"memories_ai", "memories_ad", "memories_au"} <= triggers
+        conn.execute(
+            sa.text(
+                "INSERT INTO memories (id, user_id, content, category, created_at) "
+                "VALUES (:id, 'usr_a', 'Rechnung bezahlt', 'note', 1)"
+            ),
+            {"id": str(uuid.uuid7())},
+        )
+        assert len(search(conn, "Rechnung")) == 1
 
 
 def test_0018_round_trips_without_losing_the_ids(migration_url, tmp_path):

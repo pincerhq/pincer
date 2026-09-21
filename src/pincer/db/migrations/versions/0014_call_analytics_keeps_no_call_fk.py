@@ -20,6 +20,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
+from pincer.db.migration_helpers import drop_stale_table
+
 revision = "0014"
 down_revision = "0013"
 branch_labels = None
@@ -58,6 +60,7 @@ def upgrade() -> None:
     if bind.dialect.name == "postgresql":
         op.execute("ALTER TABLE call_analytics DROP CONSTRAINT IF EXISTS call_analytics_call_sid_fkey")
         return
+    drop_stale_table("call_analytics_no_fk")
     op.execute(_CALL_ANALYTICS_NO_FK)
     op.execute(f"INSERT INTO call_analytics_no_fk ({_COLUMNS}) SELECT {_COLUMNS} FROM call_analytics")
     op.execute("DROP TABLE call_analytics")
@@ -78,6 +81,7 @@ def downgrade() -> None:
             "FOREIGN KEY (call_sid) REFERENCES voice_calls(call_sid)"
         )
         return
+    drop_stale_table("call_analytics_no_fk")
     op.execute(
         _CALL_ANALYTICS_NO_FK.replace(
             "call_sid TEXT PRIMARY KEY", "call_sid TEXT PRIMARY KEY REFERENCES voice_calls(call_sid)"
