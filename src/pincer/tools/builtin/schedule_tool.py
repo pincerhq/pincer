@@ -19,6 +19,7 @@ from croniter import croniter
 
 from pincer.channels.base import ChannelType
 from pincer.config import get_settings
+from pincer.db.ids import is_id
 from pincer.scheduler.cron import CronScheduler
 
 if TYPE_CHECKING:
@@ -50,6 +51,10 @@ async def _resolve_schedule_id(
 ) -> str:
     """Resolve a schedule by explicit id or by name, scoped to the calling user."""
     if schedule_id is not None:
+        # Ids were integers before migration 0017, and `schedule_list` numbers
+        # its lines, so "1" is a likely thing for the model to pass.
+        if not is_id(schedule_id):
+            raise ValueError(f"No schedule with id '{schedule_id}'. Use schedule_list to see your schedules.")
         return schedule_id
 
     existing = await scheduler.list_schedules(pincer_user_id)

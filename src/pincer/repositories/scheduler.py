@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
+from pincer.db.ids import is_id
 from pincer.models.scheduler import BriefingConfig, EventTrigger, Schedule
 from pincer.repositories.base import BaseRepository
 
@@ -34,10 +35,17 @@ class ScheduleRepository(BaseRepository[Schedule, str]):
         )
 
     async def delete_for_user(self, schedule_id: str, pincer_user_id: str) -> int:
+        # An id that could never exist names no row, quietly — the same
+        # reasoning as `BaseRepository.get`. Schedule ids were integers before
+        # 0017, and the tool that removes one takes its id from the model.
+        if not is_id(schedule_id):
+            return 0
         return await self.delete_where(col(Schedule.id) == schedule_id, col(Schedule.pincer_user_id) == pincer_user_id)
 
     async def set_enabled(self, schedule_id: str, enabled: bool, pincer_user_id: str, *, now: str) -> int:
-        """Returns the number of rows changed — 0 when the id is another user's."""
+        """Returns the number of rows changed — 0 when the id is another user's or no id at all."""
+        if not is_id(schedule_id):
+            return 0
         return await self._update(
             {"enabled": int(enabled), "updated_at": now},
             col(Schedule.id) == schedule_id,
@@ -45,6 +53,8 @@ class ScheduleRepository(BaseRepository[Schedule, str]):
         )
 
     async def mark_fired(self, schedule_id: str, *, next_run_at: str, now: str) -> int:
+        if not is_id(schedule_id):
+            return 0
         return await self._update(
             {"last_run_at": now, "next_run_at": next_run_at, "updated_at": now},
             col(Schedule.id) == schedule_id,

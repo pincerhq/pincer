@@ -13,6 +13,7 @@ from sqlalchemy import update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
+from pincer.db.ids import is_id
 from pincer.models.voice import CallThread, CallThreadMember, VoiceCall
 from pincer.repositories.base import BaseRepository
 
@@ -24,6 +25,9 @@ class ThreadRepository(BaseRepository[CallThread, str]):
     model = CallThread
 
     async def set_fields(self, thread_id: str, values: dict[str, Any]) -> int:
+        """An id that could never exist changes nothing, quietly — as `BaseRepository.get`."""
+        if not is_id(thread_id):
+            return 0
         stmt = update(CallThread).where(col(CallThread.thread_id) == thread_id).values(**values)
         return int((await self.session.exec(stmt)).rowcount)
 
@@ -83,15 +87,6 @@ class ThreadMemberRepository(BaseRepository[CallThreadMember, str]):
         stmt = select(CallThreadMember).where(col(CallThreadMember.call_sid) == call_sid)
         return (await self.session.exec(stmt)).first()
 
-    async def for_thread(self, thread_id: str) -> Sequence[CallThreadMember]:
-        """A thread's calls, oldest first; a member with no call date sorts last."""
-        stmt = (
-            select(CallThreadMember)
-            .where(col(CallThreadMember.thread_id) == thread_id)
-            .order_by(col(CallThreadMember.call_started_at), col(CallThreadMember.attached_at))
-        )
-        return (await self.session.exec(stmt)).all()
-
     async def attach(self, values: dict[str, Any]) -> None:
         """Attach a call to a thread; re-attaching moves it."""
         await self.session.exec(
@@ -141,6 +136,8 @@ class ThreadMemberRepository(BaseRepository[CallThreadMember, str]):
         needs an empty-string check, and `call_started_at` is `TEXT` on SQLite
         but `TIMESTAMP` on Postgres, where comparing it to `''` is an error.
         """
+        if not is_id(thread_id):
+            return []
         stmt = (
             select(CallThreadMember, VoiceCall)
             .outerjoin(VoiceCall, col(VoiceCall.call_sid) == col(CallThreadMember.call_sid))

@@ -67,6 +67,18 @@ async def test_remove_and_toggle_only_touch_the_owner_s_rows(url):
     assert await service.get(mine) is None
 
 
+@pytest.mark.parametrize("bad_id", ["3", "nonexistent-id", ""])
+async def test_an_id_that_could_never_exist_is_a_quiet_miss(url, bad_id):
+    """Ids were integers before 0017, and the tool passes the model's guess through."""
+    service = ScheduleService(url)
+    await service.add("mine", "0 8 * * *", {}, "usr_a")
+
+    assert await service.remove(bad_id, "usr_a") is False
+    assert await service.toggle(bad_id, False, "usr_a") is False
+    await service.mark_fired(bad_id, datetime.now(UTC).isoformat())
+    assert len(await service.list_all()) == 1
+
+
 async def test_due_returns_only_enabled_past_schedules_oldest_first(url):
     service = ScheduleService(url)
     past = await service.add("past", "0 8 * * *", {}, "usr_a")

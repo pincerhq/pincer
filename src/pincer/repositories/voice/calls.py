@@ -8,6 +8,7 @@ from sqlalchemy import func, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
+from pincer.db.ids import is_id
 from pincer.models.voice import CallAction, CallThread, CallTranscript, VoiceCall
 from pincer.repositories.base import BaseRepository
 
@@ -109,6 +110,10 @@ class CallRepository(BaseRepository[VoiceCall, str]):
         if completed is not None:
             where.append(col(VoiceCall.ended_at).isnot(None) if completed else col(VoiceCall.ended_at).is_(None))
         if thread_id:
+            # A thread id that could never exist has no calls, rather than
+            # failing to bind: it comes straight from a query parameter.
+            if not is_id(thread_id):
+                return []
             where.append(col(VoiceCall.thread_id) == thread_id)
         stmt = (
             select(VoiceCall, CallThread.subject)

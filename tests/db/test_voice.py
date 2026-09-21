@@ -167,6 +167,17 @@ async def test_merging_a_thread_leaves_the_target_s_own_calls_alone(url):
     assert kinds == {"CA_src": "manual", "CA_dst": "inbound_matched"}
 
 
+async def test_a_thread_id_that_could_never_exist_names_nothing(url):
+    """`?thread_id=` comes straight from the dashboard: a bad one filters to no calls."""
+    calls = CallsService(url)
+    threads = ThreadsService(url)
+    await calls.save_call({"call_sid": "CA_1", "direction": "inbound", "started_at": EARLIER})
+
+    assert await calls.page_with_thread(thread_id="thr_0123abcd", limit=10, offset=0) == []
+    assert await threads.calls("thr_0123abcd") == []
+    assert await threads.set_fields("thr_0123abcd", {"subject": "x"}) == 0
+
+
 async def test_a_message_survives_a_failing_intent_stamp(url, monkeypatch):
     """The label on the call is worth less than the message the caller left."""
     from pincer.repositories.voice import CallRepository
