@@ -17,11 +17,12 @@ import weakref
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode
 
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import event
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -42,6 +43,25 @@ _SYNC_DRIVERS = {"sqlite": "sqlite+pysqlite", "postgresql": "postgresql+psycopg"
 #: serve`, one-off CLI commands), so a short wait is normal, not an error.
 SQLITE_BUSY_TIMEOUT_MS = 5000
 
+#: libpq connection keys a Postgres URL carries in its query string — every
+#: managed Postgres hands out `?sslmode=require` — which psycopg (Alembic)
+#: reads from the URL but `asyncpg.connect()` refuses as keyword arguments.
+#: asyncpg does read them from a DSN, so that is where the runtime puts them.
+_LIBPQ_DSN_KEYS = frozenset(
+    {
+        "sslmode",
+        "sslcert",
+        "sslkey",
+        "sslrootcert",
+        "sslcrl",
+        "sslpassword",
+        "sslnegotiation",
+        "ssl_min_protocol_version",
+        "ssl_max_protocol_version",
+        "application_name",
+    }
+)
+
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 # Paths already confirmed at head in this process. Alembic's own
@@ -52,6 +72,14 @@ _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 # It is process-local, which is why the upgrade itself takes a file lock: see
 # `_migration_lock`.
 _ensured_paths: set[str] = set()
+
+# One engine per (event loop, URL). An engine's pooled connections are bound to
+# the loop that opened them — aiosqlite runs each on a worker thread that calls
+# back into that loop, and asyncpg sockets belong to it — so reusing an engine
+# from another loop (`asyncio.run` in the CLI, per-test loops) fails. Keyed
+# weakly: a loop that is gone takes its engines with it.
+_engines: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, AsyncEngine]] = weakref.WeakKeyDictionary()
+_engines_pid = os.getpid()
 
 
 def get_sync_url(db_path: Path) -> str:
@@ -105,17 +133,19 @@ def _migration_lock(db_path: Path) -> Iterator[None]:
     row or rolls back whole. Nor does a database with no file to share — an
     in-memory one is private to the process that opened it.
     """
-    url = make_url(get_sync_url(db_path))
-    on_disk = url.get_backend_name() == "sqlite" and (url.database or ":memory:") != ":memory:"
+    database = _database_file(get_sync_url(db_path))
     try:
         import fcntl
     except ImportError:  # pragma: no cover - not POSIX
-        on_disk = False
-    if not on_disk:
+        database = None
+    if database is None:
         yield
         return
 
-    lock_path = db_path.parent / f"{db_path.name}.migrate.lock"
+    # Next to the file actually being upgraded, which `PINCER_DATABASE_URL`
+    # may put somewhere other than `db_path`: two processes with different
+    # settings sharing one database must still take the same lock.
+    lock_path = database.parent / f"{database.name}.migrate.lock"
     handle = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(handle, fcntl.LOCK_EX)
@@ -124,17 +154,30 @@ def _migration_lock(db_path: Path) -> Iterator[None]:
         os.close(handle)
 
 
+def _database_file(sync_url: str) -> Path | None:
+    """The SQLite file `sync_url` names, resolved; None for Postgres or an in-memory database."""
+    url = make_url(sync_url)
+    if url.get_backend_name() != "sqlite" or (url.database or ":memory:") == ":memory:":
+        return None
+    return Path(url.database or "").resolve()
+
+
 def ensure_schema_current(db_path: Path) -> None:
     """Apply any pending Alembic migrations to `db_path`, bringing it to head.
 
     Blocking/synchronous — callers on the event loop must wrap this in
     `await asyncio.to_thread(ensure_schema_current, db_path)`.
     """
-    resolved = str(Path(db_path).resolve())
+    # Keyed by the database the URL resolves to, not by `db_path`, which
+    # `PINCER_DATABASE_URL` overrides.
+    sync_url = get_sync_url(db_path)
+    database = _database_file(sync_url)
+    resolved = str(database) if database is not None else sync_url
     if resolved in _ensured_paths:
         return
 
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if database is not None:
+        database.parent.mkdir(parents=True, exist_ok=True)
     with _migration_lock(db_path):
         command.upgrade(build_config(db_path), "head")
     _ensured_paths.add(resolved)
@@ -168,15 +211,6 @@ def default_database_url() -> str:
     from pincer.config import get_settings_relaxed
 
     return get_database_url(get_settings_relaxed().db_path)
-
-
-# One engine per (event loop, URL). An engine's pooled connections are bound to
-# the loop that opened them — aiosqlite runs each on a worker thread that calls
-# back into that loop, and asyncpg sockets belong to it — so reusing an engine
-# from another loop (`asyncio.run` in the CLI, per-test loops) fails. Keyed
-# weakly: a loop that is gone takes its engines with it.
-_engines: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, AsyncEngine]] = weakref.WeakKeyDictionary()
-_engines_pid = os.getpid()
 
 
 def get_engine(url: str | None = None) -> AsyncEngine:
@@ -222,7 +256,28 @@ def _create_engine(url: str) -> AsyncEngine:
         event.listen(engine.sync_engine, "connect", _apply_sqlite_pragmas)
         return engine
     # A pooled Postgres connection can be dropped server-side while idle.
-    return create_async_engine(url, pool_pre_ping=True)
+    target, connect_args = _asyncpg_connect_args(url)
+    return create_async_engine(target, pool_pre_ping=True, connect_args=connect_args)
+
+
+def _asyncpg_connect_args(url: str) -> tuple[URL, dict[str, Any]]:
+    """Move libpq's URL keys into a DSN, the one place asyncpg reads them.
+
+    SQLAlchemy hands every query key to `asyncpg.connect()` as a keyword, so a
+    `?sslmode=require` URL that Alembic migrates happily would fail every
+    runtime query. The host, port and credentials still come from the URL:
+    asyncpg prefers explicit arguments over the DSN's.
+    """
+    parsed = make_url(url)
+    binding = parsed.query.get("channel_binding")
+    if binding == "require":
+        raise ValueError("PINCER_DATABASE_URL asks for channel_binding=require, which asyncpg does not support")
+    moved = {key: value for key, value in parsed.query.items() if key in _LIBPQ_DSN_KEYS}
+    # `prefer` and `disable` ask for nothing asyncpg would refuse to do.
+    dropped = [*moved, *(["channel_binding"] if binding is not None else [])]
+    if not dropped:
+        return parsed, {}
+    return parsed.difference_update_query(dropped), {"dsn": "postgresql://?" + urlencode(moved, doseq=True)}
 
 
 def _apply_sqlite_pragmas(dbapi_connection: Any, _record: Any) -> None:
@@ -234,8 +289,11 @@ def _apply_sqlite_pragmas(dbapi_connection: Any, _record: Any) -> None:
     """
     cursor = dbapi_connection.cursor()
     try:
-        cursor.execute("PRAGMA journal_mode=WAL")
+        # The timeout first: converting a file still in rollback-journal mode
+        # to WAL needs a brief exclusive lock, and without a timeout a busy
+        # database refuses it outright with "database is locked".
         cursor.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.execute("PRAGMA foreign_keys=OFF")
     finally:

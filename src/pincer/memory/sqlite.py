@@ -17,7 +17,6 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from pincer.db.engine import get_database_url, get_engine
 from pincer.db.ids import new_id
 from pincer.memory.base import (
     PINCER_MEMORY_CATEGORY_TAG_PREFIX,
@@ -88,9 +87,8 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
         logger.info("MemoryStore initialized at %s", self._db_path)
 
     async def close(self) -> None:
-        if self._service is not None:
-            self._service = None
-            await get_engine(get_database_url(self._db_path)).dispose()
+        # The engine is shared; the process disposes it at shutdown.
+        self._service = None
 
     @property
     def _store(self) -> MemoryService:

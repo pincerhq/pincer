@@ -1714,6 +1714,10 @@ async def _run_agent(settings: Settings) -> None:
             await memory_store.close()
         if audit_logger:
             await audit_logger.shutdown()
+        # Last: every store above has finished with the shared engines.
+        from pincer.db.engine import dispose_engines
+
+        await dispose_engines()
         console.print("[green]Shutdown complete[/green]")
         # Cancel any lingering asyncio tasks (e.g. in-flight LLM calls from
         # channel update handlers) before exiting so the process doesn't hang.
@@ -1804,6 +1808,10 @@ async def _run_tasks_worker(settings: Settings) -> None:
             await core.memory_store.close()
         if core.audit_logger:
             await core.audit_logger.shutdown()
+        # Last: every store above has finished with the shared engines.
+        from pincer.db.engine import dispose_engines
+
+        await dispose_engines()
         console.print("[green]Tasks worker shutdown complete[/green]")
         _pending = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
         for _t in _pending:

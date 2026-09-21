@@ -112,6 +112,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logging.getLogger(__name__).debug("Telephony telemetry shutdown failed", exc_info=True)
     await audit.shutdown()
 
+    from pincer.db.engine import dispose_engines
+
+    await dispose_engines()
+
 
 def create_app() -> FastAPI:
     settings = get_settings_relaxed()

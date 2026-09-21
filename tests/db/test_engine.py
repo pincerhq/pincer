@@ -14,6 +14,7 @@ from sqlalchemy.pool import NullPool
 
 from pincer.db.engine import (
     SQLITE_BUSY_TIMEOUT_MS,
+    _asyncpg_connect_args,
     dispose_engines,
     get_database_url,
     get_engine,
@@ -63,6 +64,47 @@ def test_an_async_driver_in_the_configured_url_still_gives_alembic_a_sync_one(mo
     as `MissingGreenlet` at startup, naming nothing that points back here."""
     monkeypatch.setenv("PINCER_DATABASE_URL", "sqlite+aiosqlite:////tmp/x.db")
     assert get_sync_url(tmp_path / "p.db") == "sqlite+pysqlite:////tmp/x.db"
+
+
+def test_libpq_keys_reach_asyncpg_through_a_dsn_not_as_keywords():
+    """Every managed Postgres hands out `?sslmode=require`; asyncpg.connect()
+    has no `sslmode` keyword, so passing it through failed every query."""
+    target, connect_args = _asyncpg_connect_args(
+        "postgresql+asyncpg://u:p@db.example:6543/d?sslmode=require&application_name=pincer&target_session_attrs=read-write"
+    )
+    assert dict(target.query) == {"target_session_attrs": "read-write"}  # asyncpg takes this one itself
+    assert (target.host, target.port, target.database) == ("db.example", 6543, "d")
+    assert connect_args == {"dsn": "postgresql://?sslmode=require&application_name=pincer"}
+
+
+def test_channel_binding_is_dropped_unless_it_is_required():
+    target, connect_args = _asyncpg_connect_args("postgresql+asyncpg://u@h/d?channel_binding=prefer")
+    assert dict(target.query) == {}
+    assert connect_args == {"dsn": "postgresql://?"}
+    with pytest.raises(ValueError, match="channel_binding"):
+        _asyncpg_connect_args("postgresql+asyncpg://u@h/d?channel_binding=require")
+
+
+async def test_a_sslmode_url_opens_an_engine_that_reaches_the_socket():
+    """The reviewer's reproduction: before, `connect()` got an unexpected `sslmode` keyword."""
+    pytest.importorskip("asyncpg")
+    engine = get_engine(to_async_url("postgresql://u:p@127.0.0.1:1/db?sslmode=disable"))
+    with pytest.raises(OSError):
+        async with engine.connect():
+            pass
+    await dispose_engines()
+
+
+def test_the_migration_lock_sits_next_to_the_database_the_url_names(monkeypatch, tmp_path: Path):
+    """Two processes whose settings differ but whose override names one file must share a lock."""
+    shared = tmp_path / "shared" / "pincer.db"
+    monkeypatch.setenv("PINCER_DATABASE_URL", f"sqlite:///{shared}")
+
+    init_database_path = tmp_path / "settings" / "pincer.db"
+    asyncio.run(init_database(init_database_path))
+
+    assert (shared.parent / "pincer.db.migrate.lock").exists()
+    assert not init_database_path.parent.exists()
 
 
 async def test_sqlite_connections_are_never_held_between_units_of_work(tmp_path: Path):
@@ -161,8 +203,10 @@ def test_several_processes_can_migrate_one_fresh_database_at_once(tmp_path: Path
         )
         for _ in range(4)
     ]
-    failures = [process.communicate()[1] for process in started if process.wait() != 0]
-    assert failures == []
+    # `communicate()` before looking at the exit code: `wait()` on a child
+    # whose output fills the pipe buffer never returns.
+    finished = [(process, process.communicate()[1]) for process in started]
+    assert [stderr for process, stderr in finished if process.returncode != 0] == []
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM alembic_version").fetchone()[0] == 1

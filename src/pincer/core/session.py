@@ -13,7 +13,6 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from pincer.db.engine import get_database_url, get_engine
 from pincer.llm.base import LLMMessage, MessageRole
 from pincer.services.sessions import SessionService
 
@@ -102,9 +101,8 @@ class SessionManager:
         for session in self._cache.values():
             await self._persist(session)
         self._cache.clear()
-        if self._service is not None:
-            self._service = None
-            await get_engine(get_database_url(self._db_path)).dispose()
+        # The engine is shared; the process disposes it at shutdown.
+        self._service = None
 
     @property
     def _store(self) -> SessionService:

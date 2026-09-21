@@ -12,7 +12,7 @@ import asyncio
 from typing import TYPE_CHECKING, Any
 
 from pincer.db import ensure_schema_current
-from pincer.db.engine import get_database_url, get_engine
+from pincer.db.engine import get_database_url
 from pincer.services.costs import (
     DEFAULT_PRICING,
     PRICING,
@@ -41,13 +41,9 @@ class CostTracker:
         self._service = CostService(get_database_url(self._db_path), self._daily_budget)
 
     async def close(self) -> None:
-        """Release this loop's pooled connections to the database.
-
-        The engine is shared, so anything else on it simply reconnects.
-        """
-        if self._service is not None:
-            self._service = None
-            await get_engine(get_database_url(self._db_path)).dispose()
+        """Drop the service. The engine is shared, so the process disposes it
+        at shutdown (`dispose_engines`), not each store that used it."""
+        self._service = None
 
     @property
     def service(self) -> CostService:
