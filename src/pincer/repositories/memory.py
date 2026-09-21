@@ -109,6 +109,10 @@ class MemoryRepository(BaseRepository[Memory, str]):
         return {str(category): int(count) for category, count in (await self.session.exec(stmt)).all()}
 
     async def set_fields(self, memory_id: str, values: dict[str, Any]) -> int:
+        """Updating an id that could never exist changes nothing, quietly —
+        the same reasoning as `delete_by_id` and `BaseRepository.get`."""
+        if not is_id(memory_id):
+            return 0
         stmt = update(Memory).where(col(Memory.id) == memory_id).values(**values)
         return int((await self.session.exec(stmt)).rowcount)
 

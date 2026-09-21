@@ -73,6 +73,24 @@ def test_the_counter_orders_ids_inside_one_millisecond():
     assert {uuid.UUID(value).int >> 80 for value in ids} == {stamp}
 
 
+def test_a_counter_at_its_limits_stays_inside_its_own_bits():
+    """The 42-bit counter is split either side of the variant.
+
+    Small counters only exercise the low half, so a wrong shift or an
+    over-wide mask would go unnoticed until a value crossed into the high
+    half — where it would corrupt the version or variant nibble rather than
+    merely mis-order.
+    """
+    stamp = 1_600_000_000_000
+    for counter in (0, 2**30 - 1, 2**30, 2**42 - 1):
+        version, variant, ms = _bits(uuid7_at(stamp, counter))
+        assert (version, variant, ms) == (7, 0b10, stamp), counter
+
+    # and the split is monotonic across the boundary it spans
+    across = [uuid7_at(stamp, counter) for counter in (2**30 - 2, 2**30 - 1, 2**30, 2**30 + 1)]
+    assert across == sorted(across)
+
+
 def test_a_timestamp_or_counter_that_does_not_fit_is_refused():
     with pytest.raises(ValueError, match="48 bits"):
         uuid7_at(2**48)
@@ -102,6 +120,18 @@ def test_the_sequence_keeps_a_real_timestamp_when_time_moves_forward():
     sequence = Uuid7Sequence()
     sequence.next(1_000)
     assert _bits(sequence.next(5_000))[2] == 5_000
+
+
+def test_the_sequence_advances_the_clock_when_the_counter_runs_out():
+    """Unreachable in practice — 4.4 trillion rows in one millisecond — but
+    the branch exists so that the counter can never carry into the variant
+    bits, and without it the sequence would repeat an id."""
+    sequence = Uuid7Sequence()
+    sequence._ms = 1_600_000_000_000  # noqa: SLF001 - the overflow is otherwise unreachable
+    sequence._counter = 2**42 - 2  # noqa: SLF001
+    before, at_limit, after = sequence.next(None), sequence.next(None), sequence.next(None)
+    assert before < at_limit < after
+    assert _bits(after)[2] == 1_600_000_000_001, "the clock did not advance past the overflow"
 
 
 def test_the_sequence_starts_at_the_epoch_when_it_has_nothing_to_go_on():

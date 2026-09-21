@@ -20,7 +20,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from uuid import UUID
 
+from pincer.db.ids import is_id
 from pincer.voice.telemetry import store
 from pincer.voice.telemetry.histogram import DEFAULT_BUCKETS_MS, LatencyHistogram
 from pincer.voice.telemetry.outcomes import DENOMINATORS, FailureCategory, is_unexpected_disconnect
@@ -107,7 +109,11 @@ class CallFilters:
         if self.search:
             needle = f"%{self.search.strip()}%"
             clauses.append(
-                f"({alias}.call_id LIKE ? OR {alias}.provider_call_id LIKE ? OR {alias}.trace_id LIKE ? "
+                # `call_id` is a uuid column and Postgres has no `uuid LIKE
+                # text`; the cast reads the same on both dialects. It costs no
+                # index — a leading-wildcard LIKE could not use one anyway.
+                f"(CAST({alias}.call_id AS TEXT) LIKE ? OR {alias}.provider_call_id LIKE ? "
+                f"OR {alias}.trace_id LIKE ? "
                 f"OR {alias}.from_number_masked LIKE ? OR {alias}.to_number_masked LIKE ?)"
             )
             params.extend([needle] * 5)
@@ -223,8 +229,16 @@ def _call_row(row: Any) -> dict[str, Any]:
 
 async def get_call(db_path: str | Path, call_ref: str, *, scope: TenantScope | None = None) -> dict[str, Any] | None:
     """One call by internal id or by provider CallSid."""
-    where = "(c.call_id = ? OR c.provider_call_id = ?)"
-    params: list[Any] = [call_ref, call_ref]
+    # A reference that is not a uuid can only be a provider CallSid, so the
+    # uuid column is not compared at all. Binding one value against both
+    # `call_id` (uuid) and `provider_call_id` (text) cannot be typed correctly
+    # for both, and on Postgres whichever side guessed wrong is an error.
+    if is_id(call_ref):
+        where = "(c.call_id = ? OR c.provider_call_id = ?)"
+        params: list[Any] = [UUID(call_ref), call_ref]
+    else:
+        where = "c.provider_call_id = ?"
+        params = [call_ref]
     if scope is not None:
         where, params = scope.apply(where, params)
     async with store.connect(db_path) as db:
@@ -241,13 +255,15 @@ async def get_events(db_path: str | Path, call_id: str, *, limit: int = 5000) ->
     which is what makes a late Twilio status callback land where it belongs
     instead of at the bottom.
     """
+    if not is_id(call_id):
+        return []
     async with store.connect(db_path) as db:
         if not await store.tables_present(db):
             return []
         rows = await _fetch(
             db,
             "SELECT * FROM telephony_events WHERE call_id = ? ORDER BY ts_utc ASC, seq ASC LIMIT ?",
-            [call_id, int(limit)],
+            [UUID(call_id), int(limit)],
         )
     out: list[dict[str, Any]] = []
     for row in rows:
@@ -265,13 +281,15 @@ async def get_spans(db_path: str | Path, call_id: str, *, limit: int = 5000) -> 
     stamps, so overlapping spans stay correctly positioned relative to each
     other even if the wall clock was stepped mid-call.
     """
+    if not is_id(call_id):
+        return []
     async with store.connect(db_path) as db:
         if not await store.tables_present(db):
             return []
         rows = await _fetch(
             db,
             "SELECT * FROM telephony_spans WHERE call_id = ? ORDER BY start_mono_ns ASC LIMIT ?",
-            [call_id, int(limit)],
+            [UUID(call_id), int(limit)],
         )
     if not rows:
         return []
@@ -290,13 +308,15 @@ async def get_spans(db_path: str | Path, call_id: str, *, limit: int = 5000) -> 
 
 
 async def get_turns(db_path: str | Path, call_id: str) -> list[dict[str, Any]]:
+    if not is_id(call_id):
+        return []
     async with store.connect(db_path) as db:
         if not await store.tables_present(db):
             return []
         rows = await _fetch(
             db,
             "SELECT * FROM telephony_turns WHERE call_id = ? ORDER BY turn_no ASC",
-            [call_id],
+            [UUID(call_id)],
         )
     out: list[dict[str, Any]] = []
     for row in rows:

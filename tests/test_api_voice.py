@@ -12,7 +12,7 @@ import pytest
 os.environ.setdefault("PINCER_ANTHROPIC_API_KEY", "sk-ant-test-key")
 
 from fastapi.testclient import TestClient
-from support import fill_row_ids
+from support import SEED_ID_SQL
 
 from pincer.api.server import create_app
 from pincer.db import ensure_schema_current
@@ -47,8 +47,8 @@ async def _seed_db(db_path):
             ("CA003", "outbound", 10, False),
         ]:
             await db.execute(
-                "INSERT INTO voice_calls (call_sid, direction, from_number, to_number, started_at, ended_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO voice_calls (id, call_sid, direction, from_number, to_number, started_at, ended_at) "
+                f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?, ?, ?)",
                 (
                     sid,
                     direction,
@@ -59,22 +59,22 @@ async def _seed_db(db_path):
                 ),
             )
         await db.execute(
-            "INSERT INTO call_transcripts (call_id, speaker, text, confidence, is_final, state, timestamp) "
-            "VALUES ('CA001', 'caller', 'My SSN is 123-45-6789 thanks', 0.9, 1, 'conversing', ?)",
+            "INSERT INTO call_transcripts (id, call_id, speaker, text, confidence, is_final, state, timestamp) "
+            f"VALUES ({SEED_ID_SQL}, 'CA001', 'caller', 'My SSN is 123-45-6789 thanks', 0.9, 1, 'conversing', ?)",
             (started.isoformat(),),
         )
         await db.execute(
-            "INSERT INTO call_transcripts (call_id, speaker, text, confidence, is_final, state, timestamp) "
-            "VALUES ('CA001', 'agent', 'partial utterance', 1.0, 0, 'conversing', ?)",
+            "INSERT INTO call_transcripts (id, call_id, speaker, text, confidence, is_final, state, timestamp) "
+            f"VALUES ({SEED_ID_SQL}, 'CA001', 'agent', 'partial utterance', 1.0, 0, 'conversing', ?)",
             ((started + timedelta(seconds=5)).isoformat(),),
         )
         await db.execute(
-            "INSERT INTO call_actions (call_id, action_type, tool_name, input_summary, output_summary, "
-            "user_confirmed, timestamp) VALUES ('CA001', 'tool_call', 'get_weather', 'Berlin', 'Sunny', 1, ?)",
+            "INSERT INTO call_actions (id, call_id, action_type, tool_name, input_summary, output_summary, "
+            f"user_confirmed, timestamp) VALUES ({SEED_ID_SQL}, 'CA001', 'tool_call', 'get_weather', 'Berlin', "
+            "'Sunny', 1, ?)",
             ((started + timedelta(seconds=10)).isoformat(),),
         )
         await db.commit()
-        await fill_row_ids(db)
 
 
 class _FakeEngine:
@@ -213,11 +213,11 @@ async def test_contacts(client, tmp_path):
 
     async with aiosqlite.connect(tmp_path / "pincer.db") as db:
         await db.execute(
-            "INSERT INTO phone_contacts (name, phone_number, category, notes) "
-            "VALUES ('Zoe', '+15550009999', 'personal', ''), ('Dr. Ada', '+15550008888', 'doctor', 'dentist')"
+            f"INSERT INTO phone_contacts (id, name, phone_number, category, notes) "
+            f"VALUES ({SEED_ID_SQL}, 'Zoe', '+15550009999', 'personal', ''), "
+            f"({SEED_ID_SQL}, 'Dr. Ada', '+15550008888', 'doctor', 'dentist')"
         )
         await db.commit()
-        await fill_row_ids(db)
 
     r = client.get("/api/voice/contacts")
     assert r.status_code == 200
@@ -428,7 +428,6 @@ async def threads_api(client, tmp_path):
             ),
         )
         await db.commit()
-        await fill_row_ids(db)
     return SimpleNamespace(client=client, manager=manager, thread=thread)
 
 
@@ -542,11 +541,12 @@ async def test_calls_survive_a_pre_sprint13_database(client, tmp_path):
             "started_at TEXT NOT NULL, ended_at TEXT)"
         )
         await db.execute(
+            # A deliberately pre-Sprint-13 table: the key is still an INTEGER
+            # here, so this one seeds the old way on purpose.
             "INSERT INTO voice_calls (call_sid, direction, started_at, ended_at) "
             "VALUES ('CA_legacy', 'outbound', '2026-08-20T16:43:37+00:00', '2026-08-20T16:44:00+00:00')"
         )
         await db.commit()
-        await fill_row_ids(db)
 
     rows = client.get("/api/voice/calls").json()
     assert [r["call_sid"] for r in rows] == ["CA_legacy"]
@@ -596,7 +596,6 @@ async def test_expired_commitment_filter(threads_api):
             ),
         )
         await db.commit()
-        await fill_row_ids(db)
 
     rows = client.get("/api/voice/threads", params={"has_expired_commitments": "true"}).json()
     assert [t["thread_id"] for t in rows] == [expired_id]

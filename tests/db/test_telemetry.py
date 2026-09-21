@@ -310,6 +310,74 @@ async def test_the_windowed_read_paths_run_on_both_dialects(migrated_url, monkey
     assert [turn["turn_id"] for turn in await queries.slowest_turns(unused, filters)] == [TURN]
 
 
+async def test_a_call_is_found_by_either_of_its_two_names(migrated_url, monkeypatch):
+    """`get_call` takes an internal id OR a provider CallSid, and compares one
+    value against a uuid column and a text column in the same clause.
+
+    Only one of those can be typed correctly for a given value, so the query
+    has to stop asking — and on Postgres the wrong guess is not a miss, it is
+    `operator does not exist`. This is the whole call-detail surface: the page,
+    its timeline, its export, and `pincer telephony call`.
+    """
+    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    service = TelemetryService(migrated_url)
+    now = datetime.now(UTC).isoformat()
+    await service.upsert_call(CALL, {"registered_at": now, "provider_call_id": "CA_provider", "status": "completed"})
+    await service.write_records([{**_EVENT, "event_id": "ev-1", "call_id": CALL, "ts_utc": now}], [])
+    await service.upsert_turn(TURN, {"call_id": CALL, "turn_no": 1, "created_at": now})
+
+    unused = Path("unused.db")
+    by_id = await queries.get_call(unused, CALL)
+    by_sid = await queries.get_call(unused, "CA_provider")
+    assert by_id is not None and by_sid is not None
+    assert by_id["call_id"] == by_sid["call_id"] == CALL
+
+    # An id that names nothing is an empty answer, not an error — and one that
+    # could never be an id at all must not reach the uuid column.
+    assert await queries.get_call(unused, "CA_never_dialled") is None
+    assert await queries.get_call(unused, "not-an-id-at-all") is None
+
+    # The per-call timelines compare the same uuid column.
+    assert [event["event_id"] for event in await queries.get_events(unused, CALL)] == ["ev-1"]
+    assert [turn["turn_id"] for turn in await queries.get_turns(unused, CALL)] == [TURN]
+    assert await queries.get_spans(unused, CALL) == []
+    assert await queries.get_events(unused, "not-an-id-at-all") == []
+
+
+async def test_the_call_search_box_matches_an_id_as_text(migrated_url, monkeypatch):
+    """The search box `LIKE`s across `call_id`, and Postgres has no
+    `uuid LIKE text` — so the column is cast rather than the needle typed."""
+    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    service = TelemetryService(migrated_url)
+    now = datetime.now(UTC).isoformat()
+    await service.upsert_call(CALL, {"registered_at": now, "provider_call_id": "CA_provider"})
+
+    unused = Path("unused.db")
+    found = await queries.search_calls(unused, queries.CallFilters.for_hours(24, search=CALL[:8]))
+    assert [row["call_id"] for row in found["calls"]] == [CALL]
+
+    by_sid = await queries.search_calls(unused, queries.CallFilters.for_hours(24, search="CA_prov"))
+    assert [row["call_id"] for row in by_sid["calls"]] == [CALL]
+
+
+async def test_a_uuid_shaped_tenant_is_still_a_text_column(migrated_url, monkeypatch):
+    """`tenant_id` is text, and a deployment may well name tenants with uuids.
+
+    Typing a parameter by its shape sent that one at a text column; the header
+    is caller-supplied, so it was a 500 anyone could trigger.
+    """
+    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    tenant = seeded_id("tenant-1")
+    service = TelemetryService(migrated_url)
+    now = datetime.now(UTC).isoformat()
+    await service.upsert_call(CALL, {"registered_at": now, "tenant_id": tenant})
+
+    unused = Path("unused.db")
+    scope = queries.TenantScope(allowed=(tenant,))
+    found = await queries.search_calls(unused, queries.CallFilters.for_hours(24), scope=scope)
+    assert [row["call_id"] for row in found["calls"]] == [CALL]
+
+
 # ── the `?` rewriter ─────────────────────────────────────────────────
 
 

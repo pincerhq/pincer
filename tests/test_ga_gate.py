@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
-from support import fill_row_ids
+from support import SEED_ID_SQL
 
 from pincer.observability.call_costs import ensure_call_costs_table
 from pincer.observability.ga_gate import (
@@ -58,12 +58,11 @@ async def _seed_calls(settings, codes: list[str], days_ago: float = 1.0) -> None
         await ensure_voice_tables(db)
         for i, code in enumerate(codes):
             await db.execute(
-                "INSERT INTO voice_calls (call_sid, direction, started_at, ended_at, failure_code, language) "
-                "VALUES (?, 'outbound', ?, ?, ?, 'de')",
+                f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code, language) "
+                f"VALUES ({SEED_ID_SQL}, ?, 'outbound', ?, ?, ?, 'de')",
                 (f"CA{days_ago}_{i}", started.isoformat(), (started + timedelta(seconds=60)).isoformat(), code),
             )
         await db.commit()
-        await fill_row_ids(db)
 
 
 async def _seed_costs(settings, totals: list[float]) -> None:
@@ -75,7 +74,6 @@ async def _seed_costs(settings, totals: list[float]) -> None:
                 (f"CAcost{i}", total, total * 0.6, total * 0.4, datetime.now(UTC).isoformat()),
             )
         await db.commit()
-        await fill_row_ids(db)
 
 
 def _write_turns(settings, per_language: dict[str, list[float]]) -> None:

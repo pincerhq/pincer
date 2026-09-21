@@ -66,6 +66,9 @@ REFERENCES: tuple[tuple[str, str, str, str], ...] = (
     ("call_thread_members", "thread_id", "call_threads", "delete"),
 )
 
+#: Each converted table's key column, for the orphan sweep's subquery.
+KEY_OF = {table: key for table, key, _time, _kind in KEYS}
+
 #: Columns whose `DEFAULT ''` has to go: the sentinel is not a uuid.
 SENTINEL_DEFAULTS: tuple[tuple[str, str], ...] = (
     ("voice_calls", "thread_id"),
@@ -82,25 +85,46 @@ def _to_ms(value: Any, kind: str) -> int | None:
         return None
     if isinstance(value, datetime):
         stamped = value if value.tzinfo else value.replace(tzinfo=UTC)
-        return int(stamped.timestamp() * 1000)
+        return _in_range(int(stamped.timestamp() * 1000))
     if kind == "epoch":
         try:
-            return int(float(value) * 1000)
-        except (TypeError, ValueError):
+            return _in_range(int(float(value) * 1000))
+        except (TypeError, ValueError, OverflowError):
             return None
     try:
         parsed = datetime.fromisoformat(str(value))
     except ValueError:
         return None
-    return int((parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).timestamp() * 1000)
+    return _in_range(int((parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)).timestamp() * 1000))
+
+
+def _in_range(ms: int) -> int | None:
+    """A timestamp a UUIDv7 can carry, or None for one it cannot."""
+    return ms if 0 <= ms <= 0xFFFF_FFFF_FFFF else None
 
 
 def _mapping(bind: sa.Connection, table: str, key: str, time_column: str, kind: str) -> dict[str, str]:
-    """old id -> new id, in the order the rows already had."""
+    """old id -> new id, in the order the rows should be dated.
+
+    A row whose creation time is missing or unreadable inherits the previous
+    row's rather than sorting to the front, which would date it to 1970 and
+    move it ahead of every dated row. `telephony_calls.registered_at` is
+    nullable, so this is reachable.
+    """
     rows = bind.execute(sa.text(f"SELECT {key}, {time_column} FROM {table}")).all()  # noqa: S608 - fixed identifiers
-    ordered = sorted(rows, key=lambda row: (_to_ms(row[1], kind) is not None, _to_ms(row[1], kind) or 0, str(row[0])))
+    carried: int | None = None
+    stamped: list[tuple[str, int | None]] = []
+    for row in sorted(rows, key=lambda row: str(row[0])):
+        ms = _to_ms(row[1], kind)
+        carried = ms if ms is not None else carried
+        stamped.append((str(row[0]), carried))
+    earliest = next((ms for _old, ms in stamped if ms is not None), 0)
+
     sequence = Uuid7Sequence()
-    return {str(row[0]): sequence.next(_to_ms(row[1], kind)) for row in ordered}
+    ordered = sorted(
+        ((old, earliest if ms is None else ms) for old, ms in stamped), key=lambda item: (item[1], item[0])
+    )
+    return {old: sequence.next(ms) for old, ms in ordered}
 
 
 def _rewrite(bind: sa.Connection, table: str, column: str, mapping: dict[str, str]) -> None:
@@ -136,21 +160,20 @@ def upgrade() -> None:
     }
 
     # Orphans and sentinels first, so that every value left can cast.
+    #
+    # The stale set is resolved in SQL rather than gathered into an `IN` list:
+    # retention deletes a call and leaves its telemetry behind (see
+    # `services.retention`), so on a long-lived deployment the orphans number
+    # in the tens of thousands — and psycopg caps a statement at 65535
+    # parameters, which would abort the upgrade with no way forward.
     for table, column, parent, policy in REFERENCES:
         if table not in tables or parent not in maps:
             continue
-        known = set(maps[parent])
-        rows = bind.execute(sa.text(f"SELECT DISTINCT {column} FROM {table}")).all()  # noqa: S608
-        stale = [str(row[0]) for row in rows if row[0] is not None and str(row[0]) not in known]
-        if not stale:
-            continue
-        clause = f"{column} IN :stale"
-        statement = (
-            f"DELETE FROM {table} WHERE {clause}"
-            if policy == "delete"
-            else f"UPDATE {table} SET {column} = NULL WHERE {clause}"
-        )  # noqa: S608, E501
-        bind.execute(sa.text(statement).bindparams(sa.bindparam("stale", expanding=True)), {"stale": stale})
+        missing = f"{column} IS NOT NULL AND {column} NOT IN (SELECT {KEY_OF[parent]} FROM {parent})"
+        if policy == "delete":
+            op.execute(f"DELETE FROM {table} WHERE {missing}")  # noqa: S608 - fixed identifiers
+        else:
+            op.execute(f"UPDATE {table} SET {column} = NULL WHERE {missing}")  # noqa: S608 - fixed identifiers
 
     for table, key, _time_column, _kind in KEYS:
         if table not in tables:
@@ -168,6 +191,7 @@ def upgrade() -> None:
         if postgres:
             op.execute(f"ALTER TABLE {table} ALTER COLUMN {column} DROP DEFAULT")
         else:
+            op.execute(f"DROP TABLE IF EXISTS _alembic_tmp_{table}")
             with op.batch_alter_table(table, recreate="always") as batch:
                 batch.alter_column(column, existing_type=sa.Text(), server_default=None)
 

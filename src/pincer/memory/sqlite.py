@@ -130,7 +130,7 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
                 "created_at": time.time(),
             }
         )
-        logger.debug("Stored memory %s for user %s [%s]", mem_id[:8], user_id, category)
+        logger.debug("Stored memory %s for user %s [%s]", mem_id[-8:], user_id, category)
         return mem_id
 
     async def add_profile(

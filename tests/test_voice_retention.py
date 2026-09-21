@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import aiosqlite
 import pytest
-from support import fill_row_ids
+from support import SEED_ID_SQL
 
 from pincer.voice.retention import (
     ensure_voice_tables,
@@ -25,19 +25,20 @@ async def _seed(db_path) -> None:
     async with aiosqlite.connect(str(db_path)) as db:
         await ensure_voice_tables(db)
         await db.execute(
-            "INSERT INTO voice_calls (call_sid, started_at) VALUES (?, ?), (?, ?)",
+            f"INSERT INTO voice_calls (id, call_sid, started_at) VALUES ({SEED_ID_SQL}, ?, ?), ({SEED_ID_SQL}, ?, ?)",
             ("CA_old", _iso(100), "CA_new", _iso(1)),
         )
         await db.execute(
-            "INSERT INTO call_transcripts (call_id, speaker, text, timestamp) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+            f"INSERT INTO call_transcripts (id, call_id, speaker, text, timestamp) "
+            f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?), ({SEED_ID_SQL}, ?, ?, ?, ?)",
             ("CA_old", "caller", "old utterance", _iso(100), "CA_new", "caller", "new utterance", _iso(1)),
         )
         await db.execute(
-            "INSERT INTO call_actions (call_id, action_type, timestamp) VALUES (?, ?, ?), (?, ?, ?)",
+            f"INSERT INTO call_actions (id, call_id, action_type, timestamp) "
+            f"VALUES ({SEED_ID_SQL}, ?, ?, ?), ({SEED_ID_SQL}, ?, ?, ?)",
             ("CA_old", "tool_call", _iso(100), "CA_new", "tool_call", _iso(1)),
         )
         await db.commit()
-        await fill_row_ids(db)
 
 
 @pytest.fixture
@@ -73,7 +74,6 @@ async def test_purge_skips_missing_tables(voice_db):
     async with aiosqlite.connect(str(voice_db)) as db:
         await db.execute("CREATE TABLE unrelated (id INTEGER)")
         await db.commit()
-        await fill_row_ids(db)
 
     deleted = await purge_expired_voice_data(voice_db, retention_days=90)
     assert deleted == {}
@@ -151,11 +151,11 @@ async def test_outbound_call_log_is_purged(tmp_path):
     async with aiosqlite.connect(db_path) as db:
         await ensure_outbound_tables(db)
         await db.executemany(
-            "INSERT INTO outbound_call_logs (phone_number, user_id, placed_at, local_day) VALUES (?, ?, ?, ?)",
+            f"INSERT INTO outbound_call_logs (id, phone_number, user_id, placed_at, local_day) "
+            f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?)",
             [("+4915112345678", "u1", old, "2026-01-01"), ("+4915112345678", "u1", recent, "2026-08-20")],
         )
         await db.commit()
-        await fill_row_ids(db)
 
     deleted = await purge_expired_voice_data(db_path, retention_days=90)
     assert deleted.get("outbound_call_logs") == 1
@@ -200,7 +200,6 @@ async def test_call_actions_migration_adds_policy_columns(tmp_path):
             "output_summary TEXT DEFAULT '', user_confirmed INTEGER, timestamp TEXT NOT NULL);"
         )
         await db.commit()
-        await fill_row_ids(db)
         await ensure_voice_tables(db)
         await ensure_voice_tables(db)  # idempotent
         cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(call_actions)")}

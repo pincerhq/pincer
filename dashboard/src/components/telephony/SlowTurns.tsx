@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom"
 import type { TelephonyTurn } from "@/api/types"
+import { shortId } from "@/lib/formatters"
 import { ROUTES } from "@/lib/constants"
 import { CriticalPathBar } from "./CriticalPathBar"
 import { Ms, stageLabel } from "./shared"
@@ -24,7 +25,7 @@ export function SlowTurns({ turns }: { turns: TelephonyTurn[] }) {
               to={`${ROUTES.TELEPHONY_CALL.replace(":callRef", turn.provider_call_id || turn.call_id)}?turn=${turn.turn_id}`}
               className="font-mono text-[var(--color-accent)] hover:underline"
             >
-              {turn.provider_call_id || turn.call_id.slice(0, 12)}
+              {turn.provider_call_id || shortId(turn.call_id)}
             </Link>
             <span className="text-[var(--color-muted)]">turn {turn.turn_no}</span>
             <span className="ml-auto font-semibold tabular-nums">

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import aiosqlite
 import pytest
-from support import fill_row_ids
+from support import SEED_ID_SQL
 
 from pincer.voice import status_notify
 from pincer.voice.engine import CallDirection, CallState
@@ -224,20 +224,21 @@ class TestTranscriptTool:
         async with aiosqlite.connect(str(db_path)) as db:
             await ensure_voice_tables(db)
             await db.execute(
-                "INSERT INTO voice_calls (call_sid, direction, to_number, pincer_user_id, started_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO voice_calls (id, call_sid, direction, to_number, pincer_user_id, started_at) "
+                f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?, ?)",
                 ("CA_t1", "outbound", "+491761234567", "tester", "2026-08-16T10:00:00+00:00"),
             )
             await db.execute(
-                "INSERT INTO call_transcripts (call_id, speaker, text, timestamp) VALUES (?, ?, ?, ?)",
+                "INSERT INTO call_transcripts (id, call_id, speaker, text, timestamp) "
+                f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?)",
                 ("CA_t1", "agent", "My card number is 4111 1111 1111 1111 okay?", "2026-08-16T10:00:01+00:00"),
             )
             await db.execute(
-                "INSERT INTO call_transcripts (call_id, speaker, text, timestamp) VALUES (?, ?, ?, ?)",
+                "INSERT INTO call_transcripts (id, call_id, speaker, text, timestamp) "
+                f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?)",
                 ("CA_t1", "caller", "Der Termin ist bestätigt.", "2026-08-16T10:00:02+00:00"),
             )
             await db.commit()
-            await fill_row_ids(db)
 
     async def test_returns_masked_transcript(self, tmp_path, monkeypatch):
         db_path = tmp_path / "pincer.db"

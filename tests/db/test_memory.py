@@ -55,6 +55,11 @@ async def test_a_memory_round_trips(url):
     assert stored["content"] == "the boiler is serviced in March"
     assert json.loads(stored["tags"]) == ["user:usr_a", "home"]
     assert await service.get(seeded_id("missing")) is None
+    # And an id that could never name a row is a miss, not an error: it
+    # reaches the API as a 404 rather than a 500. See `BaseRepository.get`.
+    assert await service.get("not-an-id-at-all") is None
+    assert await service.set_fields("not-an-id-at-all", {"content": "x"}) is None
+    await service.delete("not-an-id-at-all")
 
 
 async def test_listing_is_newest_first_and_pages(url):

@@ -1331,6 +1331,52 @@ def test_0018_drops_telemetry_whose_call_is_already_gone(migration_url, tmp_path
     assert sorted(row[0] for row in remaining) == ["ev-1", "ev-2"]
 
 
+def test_0018_applies_each_orphan_policy_to_the_column_it_names(migration_url, tmp_path):
+    """The `null` and `delete` policies differ by whether the column can be
+    NULL, and getting one wrong deletes production rows instead of dropping a
+    link. Only the telephony pair was covered; these are the thread ones."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    with _connect(migration_url) as conn:
+        # A call pointing at a thread that no longer exists: nullable, so the
+        # call survives and loses the link.
+        conn.execute(
+            sa.text(
+                "INSERT INTO voice_calls (id, call_sid, started_at, thread_id) "
+                "VALUES ('01a00000-0000-7000-8000-000000000002', 'CA_2', :now, 'thr_gone')"
+            ),
+            {"now": _T0},
+        )
+        # A membership row pointing at one: NOT NULL, so the row goes. Only
+        # SQLite can hold such a row at all — Postgres enforces the foreign
+        # key, which is why these policies exist for the SQLite side.
+        if migration_url.startswith("sqlite"):
+            conn.execute(
+                sa.text(
+                    "INSERT INTO call_thread_members (call_sid, thread_id, attached_at) "
+                    "VALUES ('CA_2', 'thr_gone', :now)"
+                ),
+                {"now": _T0},
+            )
+        # A span whose turn is gone: nullable, so the span survives.
+        conn.execute(
+            sa.text(
+                "INSERT INTO telephony_spans (span_id, call_id, turn_id, name, start_utc) "
+                "VALUES ('span-orphan', 'call-old', 'turn-gone', 'llm', :now)"
+            ),
+            {"now": _T0},
+        )
+
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        kept = conn.execute(sa.text("SELECT thread_id FROM voice_calls WHERE call_sid = 'CA_2'")).scalar_one()
+        assert kept is None, "a call must survive losing its thread"
+        members = conn.execute(sa.text("SELECT call_sid FROM call_thread_members")).all()
+        assert [row[0] for row in members] == ["CA_1"], "the orphaned membership row should be gone"
+        span = conn.execute(sa.text("SELECT turn_id FROM telephony_spans WHERE span_id = 'span-orphan'")).scalar_one()
+        assert span is None, "a span must survive losing its turn"
+
+
 def test_0018_rewrites_the_thread_id_copied_into_memory_tags(migration_url, tmp_path):
     """A thread id has a second home in `memories.tags`, and the thread's one
     note is found by that tag. A stale tag would split it in two silently."""

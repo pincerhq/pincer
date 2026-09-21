@@ -11,7 +11,7 @@ import pytest
 os.environ.setdefault("PINCER_ANTHROPIC_API_KEY", "sk-ant-test-key")
 
 from fastapi.testclient import TestClient
-from support import fill_row_ids
+from support import SEED_ID_SQL
 
 from pincer.api.server import create_app
 from pincer.observability.call_costs import ensure_call_costs_table
@@ -39,9 +39,9 @@ async def _seed(db_path, rows: list[tuple[str, str, float]]) -> None:
         await ensure_call_costs_table(db)
         for sid, code, cost in rows:
             await db.execute(
-                "INSERT INTO voice_calls (call_sid, direction, from_number, to_number, started_at, ended_at, "
-                "failure_code, engine, language) VALUES (?, 'outbound', '+4915100000001', '+4915100000002', "
-                "?, ?, ?, 'conversation_relay', 'de')",
+                "INSERT INTO voice_calls (id, call_sid, direction, from_number, to_number, started_at, ended_at, "
+                f"failure_code, engine, language) VALUES ({SEED_ID_SQL}, ?, 'outbound', '+4915100000001', "
+                "'+4915100000002', ?, ?, ?, 'conversation_relay', 'de')",
                 (sid, started.isoformat(), (started + timedelta(seconds=60)).isoformat(), code),
             )
             await db.execute(
@@ -49,7 +49,6 @@ async def _seed(db_path, rows: list[tuple[str, str, float]]) -> None:
                 (sid, cost, cost * 0.7, cost * 0.3, datetime.now(UTC).isoformat()),
             )
         await db.commit()
-        await fill_row_ids(db)
 
 
 # ── Golden signals ───────────────────────────────────────────────────
@@ -205,12 +204,11 @@ async def test_call_without_a_cost_record_reports_none(client, tmp_path):
     async with aiosqlite.connect(tmp_path / "pincer.db") as db:
         await ensure_voice_tables(db)
         await db.execute(
-            "INSERT INTO voice_calls (call_sid, direction, started_at, ended_at, failure_code) "
-            "VALUES ('CA_nocost', 'inbound', ?, ?, 'none')",
+            "INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
+            f"VALUES ({SEED_ID_SQL}, 'CA_nocost', 'inbound', ?, ?, 'none')",
             (started.isoformat(), started.isoformat()),
         )
         await db.commit()
-        await fill_row_ids(db)
 
     call = client.get("/api/voice/calls").json()[0]
     assert call["cost_usd"] is None

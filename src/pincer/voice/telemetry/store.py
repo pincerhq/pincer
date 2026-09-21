@@ -163,9 +163,6 @@ async def connect(db_path: str | Path) -> AsyncIterator[AsyncConnection]:
 #: compare — ids, names, statuses, `LIKE` needles (which carry `%`) and numbers.
 _ISO_STAMP = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
 
-#: A canonical uuid, as `Uuid7` stores one.
-_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
-
 _ISO_TEXT = IsoText()
 
 
@@ -173,25 +170,26 @@ _UUID7 = Uuid7()
 
 
 def _bound(name: str, value: Any) -> BindParameter[Any]:
-    """One parameter, typed if the column it is compared against needs it.
+    """One parameter, typed for the column it is compared against.
 
     The write path binds each parameter to its model column's type; a read
-    written as raw SQL has no column to take one from. Two types need saying
-    out loud, and both fail on Postgres only:
+    written as raw SQL has no column to take one from, and on Postgres an
+    untyped value at a typed column is refused outright.
 
-    * an ISO string at a `TIMESTAMP` column — every windowed read (the
-      overview, call search, every alert) would be refused;
-    * a `str` at a `uuid` column — since 0018 that is `call_id` and `turn_id`,
-      so the call detail, its timeline and the exports would be refused.
+    Timestamps are recognised by shape, which is safe: these queries compare
+    an ISO string against nothing but a timestamp column.
 
-    Matching on the value's shape rather than the column's is what a raw query
-    allows. A `LIKE` needle carries `%` and a CallSid is not a uuid, so neither
-    is caught by accident.
+    **Ids are not.** The caller passes a `uuid.UUID` to mean "compare this
+    against a uuid column", because shape alone cannot decide it — the same
+    string is compared against `call_id` (uuid) and `provider_call_id` (text)
+    in one clause, a uuid-shaped `tenant_id` belongs to a text column, and a
+    `LIKE` needle must stay text whatever it looks like. Guessing got all
+    three wrong.
     """
     if isinstance(value, str) and _ISO_STAMP.match(value):
         return bindparam(name, value, type_=_ISO_TEXT)
-    if isinstance(value, str) and _UUID.fullmatch(value):
-        return bindparam(name, value, type_=_UUID7)
+    if isinstance(value, UUID):
+        return bindparam(name, str(value), type_=_UUID7)
     return bindparam(name, value)
 
 
