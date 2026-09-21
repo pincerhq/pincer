@@ -17,8 +17,8 @@ from support import seeded_id
 
 from pincer.db.engine import get_engine
 from pincer.models.telephony import TelephonyCall, TelephonyEvent, TelephonySpan, TelephonyTurn
-from pincer.services.telemetry import TelemetryService
-from pincer.voice.telemetry import queries, store
+from pincer.services.telemetry import CallFilters, TelemetryService
+from pincer.voice.telemetry import queries
 
 _TABLES = [TelephonyCall.__table__, TelephonyEvent.__table__, TelephonySpan.__table__, TelephonyTurn.__table__]
 
@@ -233,23 +233,19 @@ async def test_a_real_monotonic_clock_reading_fits(url):
 
 
 async def test_a_windowed_read_and_its_timestamps_survive_the_round_trip(url):
-    """The read path is raw SQL, so it has no column to take a type from.
-
-    Untyped, an ISO string goes straight at a `TIMESTAMP` column — which
-    Postgres refuses — and a timestamp read back comes home as a `datetime`
-    where every caller and the dashboard expect the ISO string SQLite returns.
-    """
+    """An ISO string binds at a `TIMESTAMP` column on Postgres, and a timestamp
+    comes home as the ISO string SQLite returns, not a `datetime`."""
     service = TelemetryService(url)
     await service.upsert_call(CALL, {"registered_at": EARLIER, "status": "completed"})
 
-    engine = get_engine(url)
-    async with engine.connect() as conn:
-        rows = await store.fetch(conn, "SELECT * FROM telephony_calls WHERE registered_at >= ?", [EARLIER])
+    async with service.reads() as reads:
+        assert reads is not None
+        rows = await reads.calls(CallFilters(since=EARLIER).where(), limit=10)
         assert [row["call_id"] for row in rows] == [CALL]
         assert rows[0]["registered_at"] == EARLIER
         # A window that starts later excludes it — the comparison is a real
         # timestamp comparison, not a string one that happens to sort.
-        assert await store.fetch(conn, "SELECT * FROM telephony_calls WHERE registered_at >= ?", [LATER]) == []
+        assert await reads.calls(CallFilters(since=LATER).where(), limit=10) == []
 
 
 async def test_events_and_spans_are_one_batch(url):
@@ -360,6 +356,49 @@ async def test_the_call_search_box_matches_an_id_as_text(migrated_url, monkeypat
     assert [row["call_id"] for row in by_sid["calls"]] == [CALL]
 
 
+async def test_the_call_search_box_ignores_case_on_both_dialects(migrated_url, monkeypatch):
+    """SQLite's LIKE ignores ASCII case and Postgres' does not, so one
+    dialect used to find a call the other could not."""
+    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    service = TelemetryService(migrated_url)
+    now = datetime.now(UTC).isoformat()
+    await service.upsert_call(CALL, {"registered_at": now, "provider_call_id": "CA_Provider"})
+
+    unused = Path("unused.db")
+    for needle in ("ca_prov", "CA_PROVIDER", CALL[:8].upper()):
+        found = await queries.search_calls(unused, queries.CallFilters.for_hours(24, search=needle))
+        assert [row["call_id"] for row in found["calls"]] == [CALL], needle
+
+
+async def test_a_search_term_is_taken_literally(migrated_url, monkeypatch):
+    """`%` and `_` in the box are characters, not wildcards."""
+    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    service = TelemetryService(migrated_url)
+    now = datetime.now(UTC).isoformat()
+    await service.upsert_call(CALL, {"registered_at": now, "provider_call_id": "CAxprovider"})
+
+    unused = Path("unused.db")
+    for needle in ("CA_provider", "%"):
+        found = await queries.search_calls(unused, queries.CallFilters.for_hours(24, search=needle))
+        assert found["calls"] == [], needle
+
+
+async def test_a_filter_that_looks_like_a_timestamp_is_still_compared_as_text(migrated_url, monkeypatch):
+    """Filters come straight from query parameters. Typing a value by its
+    shape sent `status=2026-13-45T00:00` to `datetime.fromisoformat` — a 500 on
+    Postgres only — and a well-formed one at a text column as a timestamp."""
+    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    service = TelemetryService(migrated_url)
+    now = datetime.now(UTC).isoformat()
+    await service.upsert_call(CALL, {"registered_at": now, "status": "completed"})
+
+    unused = Path("unused.db")
+    for status in ("2026-13-45T00:00", "2026-01-01T00:00"):
+        filters = queries.CallFilters.for_hours(24, status=status)
+        assert (await queries.search_calls(unused, filters))["calls"] == []
+        assert (await queries.overview(unused, filters)).calls["total"] == 0
+
+
 async def test_a_uuid_shaped_tenant_is_still_a_text_column(migrated_url, monkeypatch):
     """`tenant_id` is text, and a deployment may well name tenants with uuids.
 
@@ -376,27 +415,3 @@ async def test_a_uuid_shaped_tenant_is_still_a_text_column(migrated_url, monkeyp
     scope = queries.TenantScope(allowed=(tenant,))
     found = await queries.search_calls(unused, queries.CallFilters.for_hours(24), scope=scope)
     assert [row["call_id"] for row in found["calls"]] == [CALL]
-
-
-# ── the `?` rewriter ─────────────────────────────────────────────────
-
-
-def test_positional_placeholders_become_named_ones_in_order():
-    statement, values = store._named("SELECT * FROM t WHERE a = ? AND b > ?", ["x", 3])
-    assert statement == "SELECT * FROM t WHERE a = :p0 AND b > :p1"
-    assert values == {"p0": "x", "p1": 3}
-    assert store._named("SELECT 1", []) == ("SELECT 1", {})
-
-
-def test_a_placeholder_count_that_does_not_match_is_refused():
-    """Loudly, rather than binding the wrong value to the wrong column.
-
-    The rewriter reads the SQL character by character, so it also counts a `?`
-    that is not a placeholder — a quoted literal, or Postgres' JSONB `?`
-    operator. Such a query has to be written with a named parameter instead;
-    this is what stops one from silently mis-binding.
-    """
-    with pytest.raises(ValueError, match="2 placeholders for 1 parameters"):
-        store._named("SELECT * FROM t WHERE a = ? AND b = ?", ["only-one"])
-    with pytest.raises(ValueError, match="1 placeholders for 0 parameters"):
-        store._named("SELECT * FROM t WHERE name = 'what?'", [])

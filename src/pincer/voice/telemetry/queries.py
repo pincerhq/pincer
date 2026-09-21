@@ -4,7 +4,7 @@ Read side: call search, per-call detail, and the aggregate overview.
 Aggregation rules that are enforced here rather than trusted to callers:
 
 * Percentiles come off a :class:`LatencyHistogram` built from raw observations
-  streamed out of SQLite. Percentiles are never averaged, and a comparison
+  streamed out of the database. Percentiles are never averaged, and a comparison
   (provider A vs B, model X vs Y) builds a separate histogram per group.
 * Every aggregate carries its own ``count``. A p99 over nine turns is reported
   with ``sufficient_samples: false`` rather than quietly rendered as fact.
@@ -18,17 +18,36 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
-from uuid import UUID
 
-from pincer.db.ids import is_id
+from pincer.services.telemetry import CallFilters, TenantScope
 from pincer.voice.telemetry import store
 from pincer.voice.telemetry.histogram import DEFAULT_BUCKETS_MS, LatencyHistogram
 from pincer.voice.telemetry.outcomes import DENOMINATORS, FailureCategory, is_unexpected_disconnect
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from sqlalchemy import ColumnElement
+
+    from pincer.services.telemetry import TelemetryService
+
+__all__ = [
+    "DEFAULT_MIN_SAMPLES",
+    "STAGE_COLUMNS",
+    "Aggregate",
+    "CallFilters",
+    "TenantScope",
+    "export_turns",
+    "get_call",
+    "get_events",
+    "get_spans",
+    "get_turns",
+    "overview",
+    "search_calls",
+    "slowest_turns",
+]
 
 
 logger = logging.getLogger(__name__)
@@ -54,92 +73,6 @@ STAGE_COLUMNS: tuple[str, ...] = (
 DEFAULT_MIN_SAMPLES = 20
 
 _MAX_ROWS = 50_000
-
-
-@dataclass(slots=True)
-class CallFilters:
-    """Everything the overview and the call table can be sliced by."""
-
-    since: str = ""
-    until: str = ""
-    environment: str = ""
-    app_version: str = ""
-    tenant_id: str = ""
-    direction: str = ""
-    provider: str = ""
-    engine: str = ""
-    model: str = ""
-    language: str = ""
-    status: str = ""
-    failure_category: str = ""
-    failure_code: str = ""
-    search: str = ""
-
-    @classmethod
-    def for_hours(cls, hours: float, **kwargs: Any) -> CallFilters:
-        since = (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
-        return cls(since=since, **kwargs)
-
-    def where(self, *, alias: str = "c") -> tuple[str, list[Any]]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        simple = {
-            "environment": self.environment,
-            "app_version": self.app_version,
-            "tenant_id": self.tenant_id,
-            "direction": self.direction,
-            "provider": self.provider,
-            "engine": self.engine,
-            "model": self.model,
-            "language": self.language,
-            "status": self.status,
-            "failure_category": self.failure_category,
-            "failure_code": self.failure_code,
-        }
-        for column, value in simple.items():
-            if value:
-                clauses.append(f"{alias}.{column} = ?")
-                params.append(value)
-        if self.since:
-            clauses.append(f"{alias}.registered_at >= ?")
-            params.append(self.since)
-        if self.until:
-            clauses.append(f"{alias}.registered_at <= ?")
-            params.append(self.until)
-        if self.search:
-            needle = f"%{self.search.strip()}%"
-            clauses.append(
-                # `call_id` is a uuid column and Postgres has no `uuid LIKE
-                # text`; the cast reads the same on both dialects. It costs no
-                # index — a leading-wildcard LIKE could not use one anyway.
-                f"(CAST({alias}.call_id AS TEXT) LIKE ? OR {alias}.provider_call_id LIKE ? "
-                f"OR {alias}.trace_id LIKE ? "
-                f"OR {alias}.from_number_masked LIKE ? OR {alias}.to_number_masked LIKE ?)"
-            )
-            params.extend([needle] * 5)
-        return (" AND ".join(clauses) or "1=1"), params
-
-
-@dataclass(slots=True)
-class TenantScope:
-    """Which tenants the caller may see.
-
-    ``None`` means unrestricted (single-tenant deployment or an operator with
-    global access). An empty tuple means "no tenants" and every query returns
-    nothing — fail closed, never fail open.
-    """
-
-    allowed: tuple[str, ...] | None = None
-
-    def apply(self, where: str, params: list[Any], *, alias: str = "c") -> tuple[str, list[Any]]:
-        if self.allowed is None:
-            return where, params
-        if not self.allowed:
-            # The clause is replaced outright, so its placeholders go with it —
-            # keeping the old params here leaves a parameter with nothing to bind.
-            return "1=0", []
-        placeholders = ", ".join("?" for _ in self.allowed)
-        return f"({where}) AND {alias}.tenant_id IN ({placeholders})", [*params, *self.allowed]
 
 
 @dataclass
@@ -169,8 +102,12 @@ class Aggregate:
         }
 
 
-async def _fetch(db: Any, sql: str, params: list[Any] | tuple[Any, ...] = ()) -> list[Any]:
-    return await store.fetch(db, sql, params)
+def _telemetry(db_path: str | Path) -> TelemetryService:
+    return store.service(db_path)
+
+
+def _scoped(filters: CallFilters, scope: TenantScope | None) -> list[ColumnElement[bool]]:
+    return [*filters.where(), *(scope.where() if scope is not None else [])]
 
 
 async def search_calls(
@@ -184,33 +121,13 @@ async def search_calls(
     order: str = "desc",
 ) -> dict[str, Any]:
     """Paginated call table with a total count for the pager."""
-    sortable = {
-        "registered_at",
-        "duration_ms",
-        "turn_count",
-        "setup_ms",
-        "status",
-        "direction",
-        "engine",
-        "failure_code",
-    }
-    sort_column = sort if sort in sortable else "registered_at"
-    direction = "ASC" if str(order).lower() == "asc" else "DESC"
-
-    where, params = filters.where()
-    if scope is not None:
-        where, params = scope.apply(where, params)
-
-    async with store.connect(db_path) as db:
-        if not await store.tables_present(db):
+    where = _scoped(filters, scope)
+    async with _telemetry(db_path).reads() as reads:
+        if reads is None:
             return {"total": 0, "calls": [], "limit": limit, "offset": offset}
-        total_rows = await _fetch(db, f"SELECT COUNT(*) AS n FROM telephony_calls c WHERE {where}", params)  # noqa: S608
-        total = int(total_rows[0]["n"]) if total_rows else 0
-        rows = await _fetch(
-            db,
-            f"SELECT * FROM telephony_calls c WHERE {where} "  # noqa: S608
-            f"ORDER BY c.{sort_column} {direction} LIMIT ? OFFSET ?",
-            [*params, int(limit), int(offset)],
+        total = await reads.count_calls(where)
+        rows = await reads.calls(
+            where, limit=int(limit), offset=int(offset), sort=sort, descending=str(order).lower() != "asc"
         )
     return {
         "total": total,
@@ -220,8 +137,8 @@ async def search_calls(
     }
 
 
-def _call_row(row: Any) -> dict[str, Any]:
-    data = {key: row[key] for key in row.keys()}  # noqa: SIM118 - aiosqlite.Row iterates values, not keys
+def _call_row(row: dict[str, Any]) -> dict[str, Any]:
+    data = dict(row)
     data["config"] = store.loads(data.pop("config_json", None), {})
     data["sampled"] = bool(data.get("sampled", 1))
     return data
@@ -229,23 +146,11 @@ def _call_row(row: Any) -> dict[str, Any]:
 
 async def get_call(db_path: str | Path, call_ref: str, *, scope: TenantScope | None = None) -> dict[str, Any] | None:
     """One call by internal id or by provider CallSid."""
-    # A reference that is not a uuid can only be a provider CallSid, so the
-    # uuid column is not compared at all. Binding one value against both
-    # `call_id` (uuid) and `provider_call_id` (text) cannot be typed correctly
-    # for both, and on Postgres whichever side guessed wrong is an error.
-    if is_id(call_ref):
-        where = "(c.call_id = ? OR c.provider_call_id = ?)"
-        params: list[Any] = [UUID(call_ref), call_ref]
-    else:
-        where = "c.provider_call_id = ?"
-        params = [call_ref]
-    if scope is not None:
-        where, params = scope.apply(where, params)
-    async with store.connect(db_path) as db:
-        if not await store.tables_present(db):
+    async with _telemetry(db_path).reads() as reads:
+        if reads is None:
             return None
-        rows = await _fetch(db, f"SELECT * FROM telephony_calls c WHERE {where} LIMIT 1", params)  # noqa: S608
-    return _call_row(rows[0]) if rows else None
+        row = await reads.call(call_ref, scope.where() if scope is not None else [])
+    return _call_row(row) if row else None
 
 
 async def get_events(db_path: str | Path, call_id: str, *, limit: int = 5000) -> list[dict[str, Any]]:
@@ -255,19 +160,12 @@ async def get_events(db_path: str | Path, call_id: str, *, limit: int = 5000) ->
     which is what makes a late Twilio status callback land where it belongs
     instead of at the bottom.
     """
-    if not is_id(call_id):
-        return []
-    async with store.connect(db_path) as db:
-        if not await store.tables_present(db):
+    async with _telemetry(db_path).reads() as reads:
+        if reads is None:
             return []
-        rows = await _fetch(
-            db,
-            "SELECT * FROM telephony_events WHERE call_id = ? ORDER BY ts_utc ASC, seq ASC LIMIT ?",
-            [UUID(call_id), int(limit)],
-        )
+        rows = await reads.events(call_id, limit=int(limit))
     out: list[dict[str, Any]] = []
-    for row in rows:
-        data = {key: row[key] for key in row.keys()}  # noqa: SIM118 - aiosqlite.Row iterates values, not keys
+    for data in rows:
         data["attributes"] = store.loads(data.pop("attributes", None), {})
         data.pop("mono_ns", None)  # process-local; meaningless to a browser
         out.append(data)
@@ -281,22 +179,15 @@ async def get_spans(db_path: str | Path, call_id: str, *, limit: int = 5000) -> 
     stamps, so overlapping spans stay correctly positioned relative to each
     other even if the wall clock was stepped mid-call.
     """
-    if not is_id(call_id):
-        return []
-    async with store.connect(db_path) as db:
-        if not await store.tables_present(db):
+    async with _telemetry(db_path).reads() as reads:
+        if reads is None:
             return []
-        rows = await _fetch(
-            db,
-            "SELECT * FROM telephony_spans WHERE call_id = ? ORDER BY start_mono_ns ASC LIMIT ?",
-            [UUID(call_id), int(limit)],
-        )
+        rows = await reads.spans(call_id, limit=int(limit))
     if not rows:
         return []
     origin = min(int(r["start_mono_ns"] or 0) for r in rows)
     out: list[dict[str, Any]] = []
-    for row in rows:
-        data = {key: row[key] for key in row.keys()}  # noqa: SIM118 - aiosqlite.Row iterates values, not keys
+    for data in rows:
         data["attributes"] = store.loads(data.pop("attributes", None), {})
         start_ns = int(data.pop("start_mono_ns", 0) or 0)
         end_ns = data.pop("end_mono_ns", None)
@@ -308,19 +199,12 @@ async def get_spans(db_path: str | Path, call_id: str, *, limit: int = 5000) -> 
 
 
 async def get_turns(db_path: str | Path, call_id: str) -> list[dict[str, Any]]:
-    if not is_id(call_id):
-        return []
-    async with store.connect(db_path) as db:
-        if not await store.tables_present(db):
+    async with _telemetry(db_path).reads() as reads:
+        if reads is None:
             return []
-        rows = await _fetch(
-            db,
-            "SELECT * FROM telephony_turns WHERE call_id = ? ORDER BY turn_no ASC",
-            [UUID(call_id)],
-        )
+        rows = await reads.turns(call_id)
     out: list[dict[str, Any]] = []
-    for row in rows:
-        data = {key: row[key] for key in row.keys()}  # noqa: SIM118 - aiosqlite.Row iterates values, not keys
+    for data in rows:
         data["critical_path"] = store.loads(data.pop("critical_path", None), [])
         data["complete"] = bool(data["complete"])
         data["interrupted"] = bool(data["interrupted"])
@@ -344,22 +228,12 @@ async def slowest_turns(
     what ``client.ts`` types this endpoint's response as), and 0/1 satisfies
     that type at run time right up until the first ``=== true``.
     """
-    where, params = filters.where()
-    if scope is not None:
-        where, params = scope.apply(where, params)
-    async with store.connect(db_path) as db:
-        if not await store.tables_present(db):
+    async with _telemetry(db_path).reads() as reads:
+        if reads is None:
             return []
-        rows = await _fetch(
-            db,
-            "SELECT t.*, c.provider_call_id, c.direction FROM telephony_turns t "
-            f"JOIN telephony_calls c ON c.call_id = t.call_id WHERE {where} "  # noqa: S608
-            "AND t.response_latency_ms IS NOT NULL ORDER BY t.response_latency_ms DESC LIMIT ?",
-            [*params, int(limit)],
-        )
+        rows = await reads.slowest_turns(_scoped(filters, scope), limit=int(limit))
     out: list[dict[str, Any]] = []
-    for row in rows:
-        data = {key: row[key] for key in row.keys()}  # noqa: SIM118 - aiosqlite.Row iterates values, not keys
+    for data in rows:
         data["critical_path"] = store.loads(data.pop("critical_path", None), [])
         data["complete"] = bool(data["complete"])
         data["interrupted"] = bool(data["interrupted"])
@@ -380,28 +254,23 @@ async def export_turns(
     For the download path: flat rows, no nested critical path (a JSON blob in a
     CSV cell helps nobody — the per-call API serves the path when it is wanted).
     """
-    where, params = filters.where()
-    if scope is not None:
-        where, params = scope.apply(where, params)
-    async with store.connect(db_path) as db:
-        if not await store.tables_present(db):
+    async with _telemetry(db_path).reads() as reads:
+        if reads is None:
             return []
-        rows = await _fetch(
-            db,
-            "SELECT t.*, c.provider_call_id AS provider_call_id FROM telephony_turns t "
-            f"JOIN telephony_calls c ON c.call_id = t.call_id WHERE {where} "  # noqa: S608
-            "ORDER BY t.created_at DESC LIMIT ?",
-            [*params, int(limit)],
-        )
+        rows = await reads.newest_turns(_scoped(filters, scope), limit=int(limit))
     out: list[dict[str, Any]] = []
-    for row in rows:
-        data = {key: row[key] for key in row.keys()}  # noqa: SIM118 - aiosqlite.Row iterates values, not keys
+    for data in rows:
         data.pop("critical_path", None)
         data["interrupted"] = bool(data["interrupted"])
         data["cancelled"] = bool(data["cancelled"])
         data["complete"] = bool(data["complete"])
         out.append(data)
     return out
+
+
+#: Transport-level signals, which live only as events (they have no per-turn
+#: grain), so they are counted separately rather than inferred.
+_TRANSPORT_EVENTS = ("audio.gap", "bargein.detected", "audio.buffer_cleared", "reconnect")
 
 
 async def overview(
@@ -413,39 +282,21 @@ async def overview(
     trend_buckets: int = 24,
 ) -> Aggregate:
     """The telephony overview page, computed in one pass over the window."""
-    where, params = filters.where()
-    if scope is not None:
-        where, params = scope.apply(where, params)
+    where = _scoped(filters, scope)
 
     agg = Aggregate()
-    async with store.connect(db_path) as db:
-        if not await store.tables_present(db):
+    async with _telemetry(db_path).reads() as reads:
+        if reads is None:
             agg.coverage = {
                 "telemetry_tables": False,
                 "note": "Telephony telemetry tables are not present — run `pincer db upgrade`.",
             }
             return agg
 
-        call_rows = await _fetch(db, f"SELECT * FROM telephony_calls c WHERE {where} LIMIT ?", [*params, _MAX_ROWS])  # noqa: S608
-        turn_rows = await _fetch(
-            db,
-            "SELECT t.*, c.engine AS call_engine, c.model AS call_model, c.provider AS call_provider, "
-            "c.direction AS call_direction, c.registered_at AS call_registered_at "
-            f"FROM telephony_turns t JOIN telephony_calls c ON c.call_id = t.call_id WHERE {where} LIMIT ?",  # noqa: S608
-            [*params, _MAX_ROWS],
-        )
-        # Transport-level signals live only as events (they have no per-turn
-        # grain), so they are counted separately rather than inferred.
-        event_rows = await _fetch(
-            db,
-            "SELECT e.name AS name, COUNT(*) AS n FROM telephony_events e "
-            f"JOIN telephony_calls c ON c.call_id = e.call_id WHERE {where} "  # noqa: S608
-            "AND e.name IN ('audio.gap', 'bargein.detected', 'audio.buffer_cleared', 'reconnect') "
-            "GROUP BY e.name",
-            params,
-        )
+        call_rows = await reads.calls(where, limit=_MAX_ROWS)
+        turn_rows = await reads.turns_with_call_facts(where, limit=_MAX_ROWS)
+        event_counts = await reads.event_counts(where, _TRANSPORT_EVENTS)
 
-    event_counts = {str(row["name"]): int(row["n"]) for row in event_rows}
     agg.calls = _call_counts(call_rows)
     agg.rates = _rates(call_rows)
     agg.reliability = _reliability(call_rows, turn_rows, event_counts)

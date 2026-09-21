@@ -8,14 +8,18 @@ from the audio loop.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 from pincer.db.engine import get_engine
-from pincer.repositories.telemetry import TelemetryStatements
+from pincer.repositories.telemetry import EVENT_COLUMNS, SPAN_COLUMNS, TelemetryStatements
+from pincer.repositories.telemetry_reads import CallFilters, TelemetryReads, TenantScope
 from pincer.services.base import DatabaseService
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
+
+__all__ = ["CallFilters", "TelemetryReads", "TelemetryService", "TenantScope"]
 
 
 class TelemetryService(DatabaseService):
@@ -43,6 +47,20 @@ class TelemetryService(DatabaseService):
                 await conn.execute(self._sql.events(), list(events))
             if spans:
                 await conn.execute(self._sql.spans(), list(spans))
+
+    async def write_rows(self, events: Sequence[tuple[Any, ...]], spans: Sequence[tuple[Any, ...]]) -> None:
+        """`write_records` for positional rows, in the order records' `to_row()` produces them."""
+        await self.write_records(
+            [dict(zip(EVENT_COLUMNS, row, strict=True)) for row in events],
+            [dict(zip(SPAN_COLUMNS, row, strict=True)) for row in spans],
+        )
+
+    @asynccontextmanager
+    async def reads(self) -> AsyncIterator[TelemetryReads | None]:
+        """The read side on one connection, or None while the tables do not exist yet."""
+        async with get_engine(self._url).connect() as conn:
+            reads = TelemetryReads(conn)
+            yield reads if await reads.tables_present() else None
 
     async def upsert_call(self, call_id: str, known: dict[str, Any]) -> None:
         if not known:

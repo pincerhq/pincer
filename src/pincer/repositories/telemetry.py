@@ -100,6 +100,15 @@ SPAN_COLUMNS = (
 )
 
 
+#: The model tables these statements write, for their column types.
+_TABLES: dict[str, Any] = {
+    "telephony_calls": TelephonyCall.__table__,  # type: ignore[attr-defined]
+    "telephony_events": TelephonyEvent.__table__,  # type: ignore[attr-defined]
+    "telephony_spans": TelephonySpan.__table__,  # type: ignore[attr-defined]
+    "telephony_turns": TelephonyTurn.__table__,  # type: ignore[attr-defined]
+}
+
+
 def _call_assignment(column: str) -> str:
     """The `DO UPDATE SET` clause for one column of the call row."""
     if column in ACCUMULATING:
@@ -116,15 +125,6 @@ def _insert(table: str, columns: Sequence[str], conflict: str, assignments: str 
     values = ", ".join(f":{column}" for column in columns)
     tail = f"DO UPDATE SET {assignments}" if assignments else "DO NOTHING"
     return f"INSERT INTO {table} ({names}) VALUES ({values}) ON CONFLICT ({conflict}) {tail}"  # noqa: S608
-
-
-#: The model tables these statements write, for their column types.
-_TABLES: dict[str, Any] = {
-    "telephony_calls": TelephonyCall.__table__,  # type: ignore[attr-defined]
-    "telephony_events": TelephonyEvent.__table__,  # type: ignore[attr-defined]
-    "telephony_spans": TelephonySpan.__table__,  # type: ignore[attr-defined]
-    "telephony_turns": TelephonyTurn.__table__,  # type: ignore[attr-defined]
-}
 
 
 class TelemetryStatements:
