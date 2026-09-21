@@ -3,7 +3,7 @@
 Delegates all storage to an external sqlite-vec-memory MCP server via tool calls.
 user_id and category are encoded as tags: ["user:{user_id}", "category:{category}"].
 
-Limitations vs SQLiteMemoryBackend:
+Limitations vs SqlMemoryBackend:
 - search_similar() is not supported (MCP server computes its own embeddings)
 - update_memory() is not supported (tag preservation requires a GET, which is unavailable)
 - count() is approximate (fetches up to 10 000 records and counts client-side)

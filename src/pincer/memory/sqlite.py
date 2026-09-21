@@ -1,5 +1,7 @@
 """
-SQLite-backed memory store with FTS5 full-text search and optional vector similarity.
+The memory store on the configured database, with full-text search and optional
+vector similarity. Full-text search is FTS5 on SQLite and a `tsvector` column on
+Postgres (`pincer.repositories.memory_search`).
 
 Tables:
 - conversations: archived conversation snapshots
@@ -75,8 +77,8 @@ def _memory_from_row(row: dict[str, Any], *, score: float = 0.0, tags: list[str]
     )
 
 
-class SQLiteMemoryBackend(BaseMemoryBackend):
-    """Async SQLite-backed memory store with full-text and vector search."""
+class SqlMemoryBackend(BaseMemoryBackend):
+    """The memory store, with full-text and vector search, on SQLite or Postgres."""
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
@@ -316,3 +318,8 @@ class SQLiteMemoryBackend(BaseMemoryBackend):
             }
         )
         return conv_id
+
+
+#: The name this backend had when it was SQLite-only. The module keeps its name
+#: for the same reason: importers of either still work.
+SQLiteMemoryBackend = SqlMemoryBackend

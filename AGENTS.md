@@ -55,6 +55,12 @@ Dashboard (React + Vite + TS in `dashboard/`, pnpm 10+): `cd dashboard && pnpm i
 - Repositories never commit; services own the transaction.
 - Raw `aiosqlite` is gone from the runtime; `tests/db/test_no_stray_sqlite.py` lists the few remaining test seams and fails on any new one.
 - Test tables go on a private `registry()` so they stay out of Alembic's metadata. The `db_url` fixture runs a test on both dialects (Postgres needs `PINCER_TEST_PG_URL`).
+- Where this departs from issue #212, on purpose:
+  - Services take a database URL and open their own `session_scope()`; routers get them through `*ServiceDep` (`AuditServiceDep`, `CallsServiceDep`, …). `DbSession` is there for a route that needs a raw session, and none does yet.
+  - Repositories return table models. The mapping to the old public dataclasses lives in the services (`_to_row`, `_as_dict`), not in `to_domain()` adapters.
+  - No `Float32Blob` or `CIText`: embeddings are packed as float32 in `memory/sqlite.py`, and `phone_contacts` gets case-insensitivity from `func.lower()`, with the index built per dialect in the migrations.
+  - The telemetry writes (`repositories/telemetry.py`) are precompiled `text()` upserts, not Core `upsert()`: building the statement per write cost ~7 ms of audio-loop time at 25 concurrent calls, against ~0.7 ms. The reads are Core `select()`.
+  - `observability/ga_gate.py` counts blocked dials from the unified database, where `AuditLogger` writes, not from the legacy `audit.db`, which stopped receiving rows at migration 0003.
 
 **Integrations** (`src/pincer/integrations/`) — `google/`, `ms365/`, `slack/` provide large REST-backed tool sets registered in `_run_agent()` when configured/authenticated.
 

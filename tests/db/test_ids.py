@@ -66,6 +66,24 @@ def test_a_backfilled_id_is_shaped_like_a_minted_one():
     assert _bits(uuid7_at(1_600_000_000_000))[:2] == _bits(new_id())[:2]
 
 
+def test_a_backfilled_id_is_the_stdlib_s_layout_bit_for_bit():
+    """`uuid7_at` writes the counter where CPython's `uuid7()` does.
+
+    Version and variant alone would pass for any split of the 42 counter bits
+    either side of the variant. So: take the counter CPython actually used for
+    each id it minted, rebuild the id with `uuid7_at`, and compare everything
+    but the 32-bit random tail. Many samples, because a fresh millisecond
+    starts from a random counter and so exercises both halves of the split.
+    """
+    if not hasattr(uuid, "_last_counter_v7"):
+        pytest.skip("this CPython keeps no counter to compare against")
+    for _ in range(2_000):
+        minted = uuid.uuid7()
+        counter = uuid._last_counter_v7  # the counter this id was built from
+        ms = minted.int >> 80
+        assert uuid.UUID(uuid7_at(ms, counter)).int >> 32 == minted.int >> 32
+
+
 def test_the_counter_orders_ids_inside_one_millisecond():
     stamp = 1_600_000_000_000
     ids = [uuid7_at(stamp, counter) for counter in range(500)]

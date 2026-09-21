@@ -1,6 +1,6 @@
 """Long-term memory storage.
 
-`SQLiteMemoryBackend` owns the behaviour — embedding packing, cosine scoring,
+`SqlMemoryBackend` owns the behaviour — embedding packing, cosine scoring,
 what a profile memory means. This owns the rows, and picks the full-text
 engine the database actually has.
 """

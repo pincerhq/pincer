@@ -46,8 +46,9 @@ To change the schema:
    mints, which is a native `uuid` on Postgres and the canonical 36-character
    string on SQLite; JSON stays in `TEXT`).
 2. Autogenerate the revision against a database at head:
-   `uv run alembic -c src/pincer/db/alembic.ini revision --autogenerate --rev-id 0014 -m "..."`
-   (revisions are numbered, not hashed; `PINCER_DATABASE_URL` picks the database).
+   `uv run alembic -c src/pincer/db/alembic.ini revision --autogenerate --rev-id NNNN -m "..."`
+   (revisions are numbered, not hashed: `NNNN` is the next free number after the
+   newest file in `versions/`; `PINCER_DATABASE_URL` picks the database).
 3. Review it. SQLite runs in batch mode (the table is rebuilt), and Alembic
    cannot see everything: data moves, renames (which it writes as a drop plus
    an add) and anything in the list below are yours to write.
