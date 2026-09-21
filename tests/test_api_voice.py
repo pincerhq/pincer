@@ -147,6 +147,38 @@ def test_list_calls_empty_when_tables_missing(client):
     assert r.json() == []
 
 
+@pytest.mark.parametrize(
+    ("path", "service", "method"),
+    [
+        ("/api/voice/calls", "pincer.services.voice.CallsService", "page_with_thread"),
+        ("/api/voice/calls/CA_x", "pincer.services.voice.CallsService", "detail"),
+        ("/api/voice/messages", "pincer.services.voice.MessagesService", "newest"),
+        ("/api/voice/contacts", "pincer.services.voice.ContactsService", "all"),
+        ("/api/voice/threads", "pincer.voice.threads.ThreadManager", "list_threads"),
+    ],
+)
+def test_a_failing_database_is_an_error_not_an_empty_history(monkeypatch, tmp_path, path, service, method):
+    """An unreachable database must not answer "no calls" (or 404 for a call that exists)."""
+    from sqlalchemy.exc import OperationalError
+
+    from pincer.config import get_settings_relaxed
+
+    async def down(*_args, **_kwargs):
+        raise OperationalError("SELECT 1", {}, Exception("server closed the connection"))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
+    get_settings_relaxed.cache_clear()
+    monkeypatch.setattr(f"{service}.{method}", down)
+    try:
+        response = TestClient(create_app(), raise_server_exceptions=False).get(path)
+    finally:
+        get_settings_relaxed.cache_clear()
+    assert response.status_code == 500
+
+
 async def test_list_calls_seeded(client, tmp_path):
     await _seed_db(tmp_path / "pincer.db")
 

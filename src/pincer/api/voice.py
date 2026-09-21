@@ -31,13 +31,11 @@ import re
 import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
-from sqlalchemy.exc import SQLAlchemyError
 
 from pincer.config import get_settings_relaxed
 from pincer.voice.pii_guard import mask_pii
@@ -47,8 +45,7 @@ if TYPE_CHECKING:
 
     from pincer.voice.engine import VoiceEngine
 
-from pincer.db.engine import ensure_schema_current, get_database_url
-from pincer.services.voice import CallsService, ContactsService, MessagesService
+from pincer.services.voice import CallsServiceDep, ContactsServiceDep, MessagesServiceDep
 
 logger = logging.getLogger(__name__)
 
@@ -68,38 +65,6 @@ def _get_engine() -> VoiceEngine | None:
         return get_engine()
     except ImportError:  # pragma: no cover — voice extra not installed
         return None
-
-
-# The voice schema is ensured once per process, on the first query. Until
-# Sprint 13 the API was a pure reader and could assume the writer had migrated
-# first; now its queries reference `voice_calls.thread_id` and `call_threads`,
-# so an API that starts against a database whose last write predates Sprint 13
-# would raise OperationalError on EVERY call query — and the `except
-# OperationalError: return []` guards below would report that as "no calls",
-# silently emptying the user's whole call history until the next call ended.
-# Keyed by database path rather than a bare flag, so pointing at a different
-# database (tests, a restored backup) re-checks instead of trusting a stale yes.
-_schema_ready_for: str = ""
-
-
-async def _voice_url() -> str:
-    """The configured database, brought to head once per path.
-
-    Ensuring it on every read would migrate in front of each query; never
-    ensuring it would leave a fresh install answering "no calls" from a
-    database that simply has no tables yet.
-    """
-    global _schema_ready_for  # noqa: PLW0603
-    db_path = str(get_settings_relaxed().db_path)
-    url = get_database_url(Path(db_path))
-    if _schema_ready_for != db_path:
-        await asyncio.to_thread(ensure_schema_current, Path(db_path))
-        _schema_ready_for = db_path
-    return url
-
-
-async def _calls() -> CallsService:
-    return CallsService(await _voice_url())
 
 
 def _duration_seconds(started_at: str, ended_at: str | None) -> int:
@@ -675,13 +640,11 @@ class InboundMessageOut(BaseModel):
 
 
 @router.get("/messages", response_model=list[InboundMessageOut])
-async def inbound_messages(limit: int = Query(default=50, ge=1, le=500)) -> list[InboundMessageOut]:
+async def inbound_messages(
+    messages: MessagesServiceDep, limit: int = Query(default=50, ge=1, le=500)
+) -> list[InboundMessageOut]:
     """Messages taken by the receptionist, newest first (PII-masked like every read surface)."""
-    try:
-        messages = MessagesService(await _voice_url())
-        rows = await messages.newest(limit)
-    except SQLAlchemyError:
-        return []
+    rows = await messages.newest(limit)
     return [
         InboundMessageOut(
             id=str(r["id"]),
@@ -731,6 +694,7 @@ async def receptionist_stats(days: int = Query(default=7, ge=1, le=90)) -> Recep
 
 @router.get("/calls", response_model=list[CallSummary])
 async def list_calls(
+    calls: CallsServiceDep,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     direction: str | None = Query(default=None, pattern="^(inbound|outbound)$"),
@@ -738,13 +702,9 @@ async def list_calls(
     thread_id: str | None = Query(default=None, max_length=_THREAD_ID_MAX),
 ) -> list[CallSummary]:
     completed = None if status is None else status == "completed"
-    try:
-        calls = await _calls()
-        rows = await calls.page_with_thread(
-            direction=direction, completed=completed, thread_id=thread_id, limit=limit, offset=offset
-        )
-    except SQLAlchemyError:  # voice tables not created yet
-        return []
+    rows = await calls.page_with_thread(
+        direction=direction, completed=completed, thread_id=thread_id, limit=limit, offset=offset
+    )
 
     # One batched cost lookup for the page, not one per row.
     from pincer.observability.call_costs import get_call_costs
@@ -936,16 +896,11 @@ async def cancel_scheduled_call(schedule_id: str) -> None:
 
 
 @router.get("/calls/{call_sid}", response_model=CallDetail)
-async def call_detail(call_sid: str) -> CallDetail:
-    try:
-        calls = await _calls()
-        row = await calls.get_with_thread(call_sid)
-        if row is None:
-            raise HTTPException(status_code=404, detail="Call not found")
-        t_rows = await calls.transcript_for(call_sid, final_only=True)
-        a_rows = await calls.actions_for(call_sid)
-    except SQLAlchemyError as e:
-        raise HTTPException(status_code=404, detail="Call not found") from e
+async def call_detail(call_sid: str, calls: CallsServiceDep) -> CallDetail:
+    found = await calls.detail(call_sid)
+    if found is None:
+        raise HTTPException(status_code=404, detail="Call not found")
+    row, t_rows, a_rows = found
 
     from pincer.observability.call_costs import get_call_cost
 
@@ -1158,16 +1113,13 @@ async def list_threads(
     """Threads, newest activity first. `q` matches subject, contact, or number."""
     statuses = _parse_statuses(status)
     manager = _thread_manager()
-    try:
-        found = await manager.list_threads(
-            status=statuses,
-            query=q,
-            limit=limit,
-            offset=offset,
-            has_expired_commitments=has_expired_commitments,
-        )
-    except SQLAlchemyError:  # voice tables not created yet
-        return []
+    found = await manager.list_threads(
+        status=statuses,
+        query=q,
+        limit=limit,
+        offset=offset,
+        has_expired_commitments=has_expired_commitments,
+    )
     out: list[ThreadOut] = []
     for thread in found:
         calls = await manager.calls(thread.thread_id)
@@ -1295,12 +1247,8 @@ async def voice_approval_decide(approval_id: str, body: VoiceApprovalDecision) -
 
 
 @router.get("/contacts", response_model=list[Contact])
-async def contacts() -> list[Contact]:
-    try:
-        contacts_service = ContactsService(await _voice_url())
-        rows = await contacts_service.all()
-    except SQLAlchemyError:  # no contacts stored yet
-        return []
+async def contacts(contacts_service: ContactsServiceDep) -> list[Contact]:
+    rows = await contacts_service.all()
     return [
         Contact(
             name=r["name"] or "",

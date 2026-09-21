@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Annotated, Any
+
+from fastapi import Depends
 
 from pincer.db.session import session_scope
 from pincer.repositories.voice import CallRepository, InboundMessageRepository
@@ -40,3 +42,13 @@ class MessagesService(DatabaseService):
     async def mark_delivered(self, call_sid: str, when: str) -> None:
         async with session_scope(self._url) as session:
             await InboundMessageRepository(session).mark_delivered(call_sid, when)
+
+
+async def get_messages_service() -> MessagesService:
+    """FastAPI dependency: the receptionist's messages on the configured database."""
+    from pincer.config import get_settings_relaxed
+
+    return await MessagesService.for_path(get_settings_relaxed().db_path)
+
+
+MessagesServiceDep = Annotated[MessagesService, Depends(get_messages_service)]

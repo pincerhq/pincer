@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
+
+from fastapi import Depends
 
 from pincer.db.session import session_scope
 from pincer.models.voice import CallAction, CallTranscript
@@ -100,6 +102,21 @@ class CallsService(DatabaseService):
         call, subject = found
         return {**_as_dict(call), "thread_subject": subject}
 
+    async def detail(self, call_sid: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]] | None:
+        """The call with its thread subject, final transcript and actions — one read, one snapshot."""
+        async with session_scope(self._url) as session:
+            found = await CallRepository(session).with_thread(call_sid)
+            if found is None:
+                return None
+            transcript = await TranscriptRepository(session).for_call(call_sid, final_only=True)
+            actions = await CallActionRepository(session).for_call(call_sid)
+        call, subject = found
+        return (
+            {**_as_dict(call), "thread_subject": subject},
+            [_as_dict(row) for row in transcript],
+            [_as_dict(row) for row in actions],
+        )
+
     async def terminated_between(
         self,
         start: str,
@@ -147,3 +164,13 @@ class CallsService(DatabaseService):
 
 def _as_dict(row: Any) -> dict[str, Any]:
     return {name: getattr(row, name) for name in row.__class__.model_fields}
+
+
+async def get_calls_service() -> CallsService:
+    """FastAPI dependency: calls, transcripts and actions on the configured database."""
+    from pincer.config import get_settings_relaxed
+
+    return await CallsService.for_path(get_settings_relaxed().db_path)
+
+
+CallsServiceDep = Annotated[CallsService, Depends(get_calls_service)]
