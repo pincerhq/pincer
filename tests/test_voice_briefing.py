@@ -499,6 +499,7 @@ async def test_mark_call_answered_is_idempotent(voice):
 async def test_talk_time_excludes_the_ringing(voice):
     """Ringing is not silence: the accumulator is re-anchored on answer."""
     import asyncio
+    import time
 
     from pincer.voice.analytics import get_accumulator
 
@@ -506,15 +507,17 @@ async def test_talk_time_excludes_the_ringing(voice):
     pre = await voice.engine.register_pending_outbound(briefing, TARGET, language="en")
     await voice.engine.promote_pending(pre, "CA_ring2")
 
-    # The ring must dwarf mark_call_answered's own cost (the on_call_start
-    # callback runs cold on a standalone test run, ~50ms) so a dial-anchored
-    # clock (>= the full ring) stays distinguishable from a fresh one.
-    await asyncio.sleep(0.5)  # stand-in for the ring
+    await asyncio.sleep(0.05)  # stand-in for the ring
+    # Compared against the moment of pickup, not an elapsed-time budget:
+    # mark_call_answered's on_call_start callback runs the first database
+    # touch, which migrates a fresh schema — hundreds of ms on a CI runner —
+    # and that cost must not decide whether the anchor moved.
+    answered = time.monotonic()
     await voice.engine.mark_call_answered("CA_ring2")
 
     accumulator = get_accumulator(voice.engine.get_call_state("CA_ring2"))
     assert accumulator is not None
-    assert accumulator._now_ms() < 400, "the talk-time clock starts at answer, not at dial"
+    assert accumulator._t0 >= answered, "the talk-time clock starts at answer, not at dial"
 
 
 async def test_started_at_is_re_anchored_on_answer(voice):
