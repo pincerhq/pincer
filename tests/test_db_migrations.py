@@ -1052,6 +1052,33 @@ def _config(url: str, tmp_path: Path):
     return cfg
 
 
+# ── migration_helpers.id_map ───────────────────────────────────────────
+
+
+def test_id_map_lets_the_real_error_through_on_postgres(migration_url):
+    """A statement that fails inside the `with` block aborts the Postgres
+    transaction. Cleaning up the temporary table in a `finally` would then
+    issue a `DROP` on that aborted transaction, which itself raises
+    `InFailedSqlTransaction` — burying the statement that actually failed
+    under a report about the cleanup instead. SQLite has no such state."""
+    if not migration_url.startswith("postgresql"):
+        pytest.skip("SQLite has no aborted-transaction state to trip over")
+    from pincer.db.migration_helpers import id_map
+
+    engine = sa.create_engine(migration_url)
+    try:
+        with (
+            engine.connect() as conn,
+            conn.begin(),
+            pytest.raises(sa.exc.ProgrammingError, match="nonexistent_table") as excinfo,
+            id_map(conn, "widgets", {"a": "b"}),
+        ):
+            conn.execute(sa.text("SELECT * FROM nonexistent_table"))
+        assert not isinstance(excinfo.value.__context__, sa.exc.InternalError)
+    finally:
+        engine.dispose()
+
+
 def test_0011_renames_every_singular_table_and_keeps_its_rows(migration_url, tmp_path):
     cfg = _config(migration_url, tmp_path)
     command.upgrade(cfg, "0010")

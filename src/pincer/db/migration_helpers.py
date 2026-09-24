@@ -78,6 +78,13 @@ def id_map(bind: sa.Connection, name: str, mapping: Mapping[str, str]) -> Iterat
     the pairs to the `UPDATE` itself is one statement per row — against the
     largest tables Pincer has, `telephony_events` among them. Temporary, so a
     failed upgrade leaves nothing behind for the retry to trip over.
+
+    Dropped only on the way out, not in a `finally`: on Postgres, a caller that
+    raises has already aborted the transaction, so a `DROP` here would itself
+    raise `InFailedSqlTransaction` and bury the real error under it — the
+    `ExitStack` in 0018 holds one of these per table, so that would be a stack
+    of them. The rollback discards the temporary table regardless, and the
+    `DROP TABLE IF EXISTS` above already covers a leftover on retry.
     """
     table = f"_uuid7_map_{name}"
     bind.execute(sa.text(f"DROP TABLE IF EXISTS {table}"))
@@ -87,10 +94,8 @@ def id_map(bind: sa.Connection, name: str, mapping: Mapping[str, str]) -> Iterat
             sa.text(f"INSERT INTO {table} (old, new) VALUES (:old, :new)"),  # noqa: S608 - fixed identifiers
             [{"old": old, "new": new} for old, new in mapping.items()],
         )
-    try:
-        yield table
-    finally:
-        bind.execute(sa.text(f"DROP TABLE IF EXISTS {table}"))
+    yield table
+    bind.execute(sa.text(f"DROP TABLE IF EXISTS {table}"))
 
 
 def rewrite_from(bind: sa.Connection, table: str, column: str, map_table: str) -> None:
