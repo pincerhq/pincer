@@ -1474,10 +1474,31 @@ def test_0018_keeps_full_text_search_working_on_sqlite(migration_url, tmp_path):
     """`memories_fts` is keyed on the rowid, which an id rewrite does not move.
     0018 does not rely on that: it drops the triggers for the rewrite, puts them
     back and rebuilds the index — so search still finds the old row, and a row
-    written afterwards is indexed too."""
+    written afterwards is indexed too.
+
+    None of that actually exercises the rebuild by itself: the id rewrite
+    never moves a rowid, so the index stays correct even if the trigger
+    cycle — and the `rebuild` — never ran. The row inserted below, with the
+    triggers down, is the part that pins it: only `upgrade 0018`'s own
+    `rebuild` can put a row into the index that no trigger ever wrote there.
+    """
     if not migration_url.startswith("sqlite"):
         pytest.skip("FTS5 is the SQLite search path")
     cfg = _seed_0017(migration_url, tmp_path)
+
+    # Desynchronise `memories_fts` before the upgrade ever touches it: with
+    # every trigger down, this row lands in `memories` but nowhere else.
+    with _connect(migration_url) as conn:
+        for trigger in ("memories_ai", "memories_ad", "memories_au"):
+            conn.execute(sa.text(f"DROP TRIGGER {trigger}"))
+        conn.execute(
+            sa.text(
+                "INSERT INTO memories (id, user_id, content, category, created_at) "
+                "VALUES (:id, 'usr_a', 'Vertrag unterschrieben', 'note', 1)"
+            ),
+            {"id": str(uuid.uuid4())},
+        )
+
     command.upgrade(cfg, "0018")
 
     def search(conn: sa.Connection, term: str) -> list[str]:
@@ -1493,8 +1514,13 @@ def test_0018_keeps_full_text_search_working_on_sqlite(migration_url, tmp_path):
         ]
 
     with _connect(migration_url) as conn:
-        stored = conn.execute(sa.text("SELECT id FROM memories")).scalar_one()
+        stored = conn.execute(sa.text("SELECT id FROM memories WHERE content = 'Angebot besprochen'")).scalar_one()
         assert search(conn, "Angebot") == [stored]
+
+        # Never written by a trigger — only findable if 0018 actually rebuilt.
+        stray = conn.execute(sa.text("SELECT id FROM memories WHERE content = 'Vertrag unterschrieben'")).scalar_one()
+        assert search(conn, "Vertrag") == [stray]
+
         triggers = {
             row[0] for row in conn.execute(sa.text("SELECT name FROM sqlite_master WHERE type = 'trigger'")).all()
         }
