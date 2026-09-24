@@ -469,7 +469,7 @@ def security_findings(settings: Settings | Any) -> Criterion:
     )
 
 
-async def _count_blocked_dials(settings: Settings | Any, days: int) -> int:
+async def _count_blocked_dials(settings: Settings | Any, days: int) -> int | None:
     """Dials the abuse gate refused, counted from the audit log.
 
     Deliberately NOT via `get_audit_logger()`: that singleton owns a batched
@@ -480,10 +480,15 @@ async def _count_blocked_dials(settings: Settings | Any, days: int) -> int:
     It reads the unified database, where `AuditLogger` writes. It used to read
     `<data_dir>/audit.db`, which migration 0003 imported from and then left
     behind untouched — so every dial blocked since then was invisible here.
+
+    Returns None, not 0, when the count could not be read — an unsupported
+    `PINCER_DATABASE_URL` or a missing `postgres` extra fail here too, and
+    `compliance_incidents` must not report "0 dial(s) correctly blocked" when
+    it never managed to look.
     """
     db_path = getattr(settings, "db_path", None)
     if db_path is None:
-        return 0
+        return None
     try:
         from pincer.db.engine import get_database_url
         from pincer.services.audit import AuditService
@@ -493,8 +498,8 @@ async def _count_blocked_dials(settings: Settings | Any, days: int) -> int:
         audit = AuditService(get_database_url(Path(str(db_path))))
         return await audit.count(action="voice_call_blocked", since=_cutoff(days))
     except Exception:
-        logger.debug("Blocked-dial audit count failed", exc_info=True)
-        return 0
+        logger.warning("Blocked-dial audit count failed — reporting no data", exc_info=True)
+        return None
 
 
 async def compliance_incidents(settings: Settings | Any, days: int) -> Criterion:
@@ -537,6 +542,10 @@ async def compliance_incidents(settings: Settings | Any, days: int) -> Criterion
         verdict = Verdict.FAIL
         summary = "Compliance settings weakened: " + "; ".join(problems)
         needed = "restore the DACH defaults (see .env.production.example)"
+    elif blocked is None:
+        verdict = Verdict.INSUFFICIENT
+        summary = f"{', '.join(settings_ok)} active; no opt-out violations; blocked-dial count unavailable"
+        needed = "fix the audit log read (see the GA gate's log output) and re-run"
     else:
         verdict = Verdict.PASS
         summary = f"{', '.join(settings_ok)} active; {blocked} dial(s) correctly blocked; no opt-out violations"

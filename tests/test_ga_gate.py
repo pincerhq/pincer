@@ -285,8 +285,17 @@ def test_security_passes_with_warnings_only(settings, monkeypatch):
 
 
 async def test_compliance_passes_with_guardrails_active(settings):
+    """PASS requires the blocked-dial count to have actually been read, not
+    just defaulted to zero — so the audit schema must be at head first."""
+    from pathlib import Path
+
+    from pincer.db.engine import ensure_schema_current
+
+    ensure_schema_current(Path(settings.db_path))
+
     criterion = await compliance_incidents(settings, 14)
     assert criterion.verdict is Verdict.PASS
+    assert criterion.evidence["blocked_dials"] == 0
 
 
 async def test_compliance_fails_on_weakened_consent(settings):
@@ -310,9 +319,24 @@ async def test_compliance_fails_on_a_do_not_call_violation(settings):
 
 async def test_blocked_dials_are_evidence_of_health_not_failure(settings):
     """The gate refusing calls is the system working."""
+    from pathlib import Path
+
+    from pincer.db.engine import ensure_schema_current
+
+    ensure_schema_current(Path(settings.db_path))
+
     criterion = await compliance_incidents(settings, 14)
     assert criterion.verdict is Verdict.PASS
     assert "blocked_dials" in criterion.evidence
+
+
+async def test_compliance_is_insufficient_when_the_blocked_dial_count_cannot_be_read(settings):
+    """The bug this guards: a read failure must not report "0 blocked" as if
+    the guardrails were verified — that is indistinguishable from a real 0."""
+    criterion = await compliance_incidents(settings, 14)
+    assert criterion.verdict is Verdict.INSUFFICIENT
+    assert criterion.evidence["blocked_dials"] is None
+    assert "unavailable" in criterion.summary
 
 
 async def test_counting_blocked_dials_never_creates_a_database(settings, tmp_path):
@@ -323,7 +347,7 @@ async def test_counting_blocked_dials_never_creates_a_database(settings, tmp_pat
     missing = tmp_path / "absent" / "pincer.db"
     settings.db_path = missing
 
-    assert await _count_blocked_dials(settings, 14) == 0
+    assert await _count_blocked_dials(settings, 14) is None
     assert not missing.exists()
     assert not missing.parent.exists()
 
