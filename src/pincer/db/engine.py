@@ -11,10 +11,12 @@ it.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import weakref
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
@@ -46,7 +48,12 @@ SQLITE_BUSY_TIMEOUT_MS = 5000
 #: libpq connection keys a Postgres URL carries in its query string — every
 #: managed Postgres hands out `?sslmode=require` — which psycopg (Alembic)
 #: reads from the URL but `asyncpg.connect()` refuses as keyword arguments.
-#: asyncpg does read them from a DSN, so that is where the runtime puts them.
+#: asyncpg's own DSN parser does understand them, translating each into the
+#: `ssl=`/`server_settings=` it would have wanted as a keyword, so that is
+#: where the runtime puts them. Any other libpq key landing in a DSN (e.g.
+#: `connect_timeout`, `keepalives`, `hostaddr`) is *not* specially parsed —
+#: it falls through to a raw Postgres server setting, which is wrong for a
+#: client-side option, so those are rejected instead of moved.
 _LIBPQ_DSN_KEYS = frozenset(
     {
         "sslmode",
@@ -61,6 +68,10 @@ _LIBPQ_DSN_KEYS = frozenset(
         "application_name",
     }
 )
+
+#: Keys the asyncpg SQLAlchemy dialect pops for itself before ever calling
+#: `asyncpg.connect()`, so they need neither moving nor rejecting.
+_ASYNCPG_DIALECT_KWARGS = frozenset({"async_fallback", "prepared_statement_cache_size"})
 
 _MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
@@ -260,6 +271,20 @@ def _create_engine(url: str) -> AsyncEngine:
     return create_async_engine(target, pool_pre_ping=True, connect_args=connect_args)
 
 
+@lru_cache(maxsize=1)
+def _asyncpg_connect_kwargs() -> frozenset[str]:
+    """The keyword arguments `asyncpg.connect()` accepts directly.
+
+    A query key by one of these names reaches `asyncpg.connect()` unchanged
+    (SQLAlchemy passes `url.query` straight through) and needs no rewriting.
+    Imported lazily: a postgres URL already requires asyncpg for `_create_engine`
+    itself, so this adds no import for a sqlite-only install.
+    """
+    import asyncpg
+
+    return frozenset(inspect.signature(asyncpg.connect).parameters) - {"dsn"}
+
+
 def _asyncpg_connect_args(url: str) -> tuple[URL, dict[str, Any]]:
     """Move libpq's URL keys into a DSN, the one place asyncpg reads them.
 
@@ -272,6 +297,15 @@ def _asyncpg_connect_args(url: str) -> tuple[URL, dict[str, Any]]:
     binding = parsed.query.get("channel_binding")
     if binding == "require":
         raise ValueError("PINCER_DATABASE_URL asks for channel_binding=require, which asyncpg does not support")
+    accepted = _asyncpg_connect_kwargs() | _ASYNCPG_DIALECT_KWARGS
+    unsupported = sorted(
+        key for key in parsed.query if key != "channel_binding" and key not in accepted and key not in _LIBPQ_DSN_KEYS
+    )
+    if unsupported:
+        raise ValueError(
+            f"PINCER_DATABASE_URL sets {unsupported}, which asyncpg neither accepts as a connection "
+            "keyword nor understands moved into a DSN; remove them or translate them to an asyncpg equivalent"
+        )
     moved = {key: value for key, value in parsed.query.items() if key in _LIBPQ_DSN_KEYS}
     # `prefer` and `disable` ask for nothing asyncpg would refuse to do.
     dropped = [*moved, *(["channel_binding"] if binding is not None else [])]
@@ -307,10 +341,19 @@ async def init_database(db_path: Path | None = None) -> str:
     entry points — the API lifespan, and `_build_core`, which both `pincer run`
     and `pincer run tasks` go through — covers all of them. Returns the runtime
     URL.
+
+    Also validates that URL against asyncpg, which `get_engine` only builds on
+    a domain's first query: Alembic migrates through psycopg regardless, which
+    understands strictly more of libpq than asyncpg does, so a URL that
+    migrates cleanly can still be one asyncpg refuses. Checking here turns
+    that into a boot failure instead of the first request's.
     """
     if db_path is None:
         from pincer.config import get_settings_relaxed
 
         db_path = get_settings_relaxed().db_path
     await asyncio.to_thread(ensure_schema_current, db_path)
-    return get_database_url(db_path)
+    url = get_database_url(db_path)
+    if make_url(url).get_backend_name() == "postgresql":
+        _asyncpg_connect_args(url)
+    return url

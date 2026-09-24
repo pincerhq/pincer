@@ -85,6 +85,23 @@ def test_channel_binding_is_dropped_unless_it_is_required():
         _asyncpg_connect_args("postgresql+asyncpg://u@h/d?channel_binding=require")
 
 
+@pytest.mark.parametrize(
+    "key", ["connect_timeout", "keepalives", "keepalives_idle", "hostaddr", "gssencmode", "options"]
+)
+def test_libpq_keys_asyncpg_cannot_honour_are_rejected_not_silently_dropped(key):
+    """These are neither an asyncpg.connect() keyword nor one the DSN parser
+    special-cases, so moving them into the DSN would silently turn them into
+    a Postgres server setting instead of the client-side option they name."""
+    with pytest.raises(ValueError, match=key):
+        _asyncpg_connect_args(f"postgresql+asyncpg://u@h/d?{key}=10")
+
+
+def test_a_key_asyncpg_connect_actually_accepts_reaches_it_unmoved():
+    target, connect_args = _asyncpg_connect_args("postgresql+asyncpg://u@h/d?command_timeout=5")
+    assert dict(target.query) == {"command_timeout": "5"}
+    assert connect_args == {}
+
+
 async def test_a_sslmode_url_opens_an_engine_that_reaches_the_socket():
     """The reviewer's reproduction: before, `connect()` got an unexpected `sslmode` keyword."""
     pytest.importorskip("asyncpg")
@@ -210,6 +227,18 @@ def test_several_processes_can_migrate_one_fresh_database_at_once(tmp_path: Path
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM alembic_version").fetchone()[0] == 1
+
+
+async def test_init_database_rejects_a_bad_postgres_url_at_boot_not_first_query(monkeypatch, tmp_path: Path):
+    """`init_database` runs once at startup; a URL asyncpg refuses should fail
+    there, not surface as the first request's error. Alembic migrates through
+    psycopg, which understands `channel_binding=require` even though asyncpg
+    does not, so migration alone would report a clean start."""
+    monkeypatch.setattr("pincer.db.engine.command.upgrade", lambda *a, **k: None)
+    monkeypatch.setenv("PINCER_DATABASE_URL", "postgresql://u@h/d?channel_binding=require")
+
+    with pytest.raises(ValueError, match="channel_binding"):
+        await init_database(tmp_path / "p.db")
 
 
 async def test_init_database_migrates_the_configured_database_and_names_it(monkeypatch, tmp_path: Path):
