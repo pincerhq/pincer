@@ -9,7 +9,7 @@ requires-python = ">=3.12"
 dependencies = [
     # Pinned to a released version, not `main` (unlike doctr's own `api/pyproject.toml`,
     # which intentionally tracks its dev branch) — reproducibility matters more here.
-    "python-doctr==1.0.1",
+    "python-doctr==1.1.0",
     # See src/ms365-mcp/pyproject.toml's comment: fastmcp 3.4.2's PyPI packaging is
     # broken (empty `fastmcp/__init__.py`, `FastMCP` unimportable). 3.2.4 is the
     # version this whole server is built and tested against.
