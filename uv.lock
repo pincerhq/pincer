@@ -3,8 +3,8 @@ revision = 3
 requires-python = ">=3.14"
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform != 'darwin'",
-    "python_full_version < '3.15' and sys_platform != 'darwin'",
     "python_full_version >= '3.15' and sys_platform == 'darwin'",
+    "python_full_version < '3.15' and sys_platform != 'darwin'",
     "python_full_version < '3.15' and sys_platform == 'darwin'",
 ]
 
@@ -4478,14 +4478,14 @@ wheels = [
 
 [[package]]
 name = "types-qrcode"
-version = "8.2.0.20260408"
+version = "8.2.0.20260518"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pillow" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/04/46/d1334f341c658adca57e66af7b699fd5dbb801556e78303bfd5146729813/types_qrcode-8.2.0.20260408.tar.gz", hash = "sha256:074478558852fd327728008a08ff1ef2b7bada29f6ec94df5fa91e1f2c1d2df5", size = 15213, upload-time = "2026-04-08T04:36:11.283Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f1/08/6f4cbdbdc1238e07ea0ad42ad45a6ea89fef6d5606782b0398bdf5a63f5f/types_qrcode-8.2.0.20260518.tar.gz", hash = "sha256:5079a2bf5fe57c8c44ae16867c5b41520522b58d21bb07e886770b7413160b04", size = 15280, upload-time = "2026-05-18T06:07:13.084Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/36/05/d9bab35be450b2c93bb288d5d4fdc849f8a812fb829c4b3c4ae99c4ef473/types_qrcode-8.2.0.20260408-py3-none-any.whl", hash = "sha256:19027b5db4bb9b46731ab91588f6ca5a8c0eeaaf794c3269a4b0643a9611bc25", size = 19864, upload-time = "2026-04-08T04:36:10.194Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/6f/48acc11e4b5cf84ab8a04d065691b3d6d16a535821ba5ad2efcc3548f227/types_qrcode-8.2.0.20260518-py3-none-any.whl", hash = "sha256:7dc344a5877a92c03e2ceeda33bc91af1e09cc8b574b87729c4b66ccb46b0f55", size = 19823, upload-time = "2026-05-18T06:07:12.257Z" },
 ]
 
 [[package]]
