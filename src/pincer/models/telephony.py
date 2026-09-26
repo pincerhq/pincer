@@ -9,7 +9,7 @@ from pincer.db.types import BigInt, IsoText, Real, Uuid7
 
 
 class TelephonyCall(SQLModel, table=True):
-    __tablename__ = "telephony_calls"
+    __tablename__ = "pincer_telephony_calls"
     __table_args__ = (
         Index("idx_tel_calls_provider_sid", "provider_call_id"),
         Index("idx_tel_calls_started", "registered_at"),
@@ -61,7 +61,7 @@ class TelephonyCall(SQLModel, table=True):
 
 
 class TelephonyEvent(SQLModel, table=True):
-    __tablename__ = "telephony_events"
+    __tablename__ = "pincer_telephony_events"
     __table_args__ = (
         Index("idx_tel_events_call", "call_id", "ts_utc", "seq"),
         Index("idx_tel_events_name", "name"),
@@ -82,7 +82,7 @@ class TelephonyEvent(SQLModel, table=True):
 
 
 class TelephonySpan(SQLModel, table=True):
-    __tablename__ = "telephony_spans"
+    __tablename__ = "pincer_telephony_spans"
     __table_args__ = (
         Index("idx_tel_spans_call", "call_id", "start_utc"),
         Index("idx_tel_spans_turn", "turn_id"),
@@ -105,7 +105,7 @@ class TelephonySpan(SQLModel, table=True):
 
 
 class TelephonyTurn(SQLModel, table=True):
-    __tablename__ = "telephony_turns"
+    __tablename__ = "pincer_telephony_turns"
     __table_args__ = (
         Index("idx_tel_turns_call", "call_id", "turn_no"),
         Index("idx_tel_turns_created", "created_at"),

@@ -186,7 +186,7 @@ When a message arrives in this gap, `IdentityMiddleware` cannot find the user in
 If you consistently see this (e.g. a user messages the bot the instant it restarts):
 
 1. Wait a few seconds after seeing `WhatsApp connected` in the console before sending a message.
-2. If a message was misidentified, delete the orphaned row from the identity database and re-send: `sqlite3 data/pincer.db "DELETE FROM channel_identities WHERE channel='whatsapp' AND channel_user_id='<lid>';"`.
+2. If a message was misidentified, delete the orphaned row from the identity database and re-send: `sqlite3 data/pincer.db "DELETE FROM pincer_channel_identities WHERE channel='whatsapp' AND channel_user_id='<lid>';"`.
 
 This is a known limitation; a readiness gate that queues messages until the identity map is seeded is tracked as a future improvement.
 

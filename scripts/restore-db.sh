@@ -51,7 +51,7 @@ db = sqlite3.connect(sys.argv[1])
 assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "integrity_check failed"
 tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
 print(f"integrity ok — {len(tables)} tables: {', '.join(sorted(tables)[:10])}...")
-for t in ("voice_calls", "call_transcripts"):
+for t in ("pincer_voice_calls", "pincer_call_transcripts"):
     if t in tables:
         print(f"  {t}: {db.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]} rows")
 PY

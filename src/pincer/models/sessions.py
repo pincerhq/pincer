@@ -8,7 +8,7 @@ from pincer.db.types import Real
 
 
 class ChatSession(SQLModel, table=True):
-    __tablename__ = "sessions"
+    __tablename__ = "pincer_sessions"
     __table_args__ = (Index("idx_session_user", "user_id", "channel"),)
 
     session_id: str = Field(sa_column=Column(Text(), primary_key=True))

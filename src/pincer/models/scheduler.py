@@ -9,7 +9,7 @@ from pincer.db.types import IsoText, Uuid7
 
 
 class Schedule(SQLModel, table=True):
-    __tablename__ = "schedules"
+    __tablename__ = "pincer_schedules"
     __table_args__ = (
         Index(
             "idx_schedules_next_run",
@@ -42,7 +42,7 @@ class Schedule(SQLModel, table=True):
 
 
 class EventTrigger(SQLModel, table=True):
-    __tablename__ = "event_triggers"
+    __tablename__ = "pincer_event_triggers"
     __table_args__ = (UniqueConstraint("trigger_type", "trigger_key"),)
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
@@ -56,7 +56,7 @@ class EventTrigger(SQLModel, table=True):
 
 
 class BriefingConfig(SQLModel, table=True):
-    __tablename__ = "briefing_configs"
+    __tablename__ = "pincer_briefing_configs"
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
     pincer_user_id: str = Field(sa_column=Column(Text(), unique=True, nullable=False))

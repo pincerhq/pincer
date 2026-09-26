@@ -9,7 +9,7 @@ from pincer.db.types import IsoText, Real, Uuid7
 
 
 class VoiceCall(SQLModel, table=True):
-    __tablename__ = "voice_calls"
+    __tablename__ = "pincer_voice_calls"
     __table_args__ = (
         Index("idx_calls_thread", "thread_id"),
         Index("idx_voice_calls_failure", "failure_code"),
@@ -39,7 +39,7 @@ class VoiceCall(SQLModel, table=True):
 
 
 class CallTranscript(SQLModel, table=True):
-    __tablename__ = "call_transcripts"
+    __tablename__ = "pincer_call_transcripts"
     __table_args__ = (
         Index("idx_call_transcripts_call", "call_id"),
         Index("idx_call_transcripts_ts", "timestamp"),
@@ -56,7 +56,7 @@ class CallTranscript(SQLModel, table=True):
 
 
 class CallAction(SQLModel, table=True):
-    __tablename__ = "call_actions"
+    __tablename__ = "pincer_call_actions"
     __table_args__ = (
         Index("idx_call_actions_call", "call_id"),
         Index("idx_call_actions_ts", "timestamp"),
@@ -76,7 +76,7 @@ class CallAction(SQLModel, table=True):
 
 
 class PhoneContact(SQLModel, table=True):
-    __tablename__ = "phone_contacts"
+    __tablename__ = "pincer_phone_contacts"
     __table_args__ = (Index("idx_phone_contacts_user", "user_id"),)
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
@@ -92,7 +92,7 @@ class PhoneContact(SQLModel, table=True):
 
 
 class DoNotCallNumber(SQLModel, table=True):
-    __tablename__ = "do_not_call_numbers"
+    __tablename__ = "pincer_do_not_call_numbers"
 
     phone_number: str = Field(sa_column=Column(Text(), primary_key=True))
     reason: str | None = Field(default=None, sa_column=Column(Text(), server_default=sa.text("''")))
@@ -102,7 +102,7 @@ class DoNotCallNumber(SQLModel, table=True):
 
 
 class OutboundCallLog(SQLModel, table=True):
-    __tablename__ = "outbound_call_logs"
+    __tablename__ = "pincer_outbound_call_logs"
     __table_args__ = (
         Index("idx_outbound_log_day", "local_day"),
         Index("idx_outbound_log_number", "phone_number", "placed_at"),
@@ -118,7 +118,7 @@ class OutboundCallLog(SQLModel, table=True):
 
 
 class InboundMessage(SQLModel, table=True):
-    __tablename__ = "inbound_messages"
+    __tablename__ = "pincer_inbound_messages"
     __table_args__ = (Index("idx_inbound_messages_call", "call_sid"),)
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
@@ -134,7 +134,7 @@ class InboundMessage(SQLModel, table=True):
 
 
 class CallThread(SQLModel, table=True):
-    __tablename__ = "call_threads"
+    __tablename__ = "pincer_call_threads"
     __table_args__ = (Index("idx_threads_number_status", "primary_number", "status"),)
 
     thread_id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
@@ -153,11 +153,11 @@ class CallThread(SQLModel, table=True):
 
 
 class CallThreadMember(SQLModel, table=True):
-    __tablename__ = "call_thread_members"
+    __tablename__ = "pincer_call_thread_members"
     __table_args__ = (Index("idx_thread_members_thread", "thread_id"),)
 
     call_sid: str = Field(sa_column=Column(Text(), primary_key=True))
-    thread_id: str = Field(sa_column=Column(Uuid7(), ForeignKey("call_threads.thread_id"), nullable=False))
+    thread_id: str = Field(sa_column=Column(Uuid7(), ForeignKey("pincer_call_threads.thread_id"), nullable=False))
     attach_kind: str | None = Field(
         default=None, sa_column=Column(Text(), nullable=False, server_default=sa.text("''"))
     )
@@ -169,7 +169,7 @@ class CallThreadMember(SQLModel, table=True):
 
 
 class CallAnalytics(SQLModel, table=True):
-    __tablename__ = "call_analytics"
+    __tablename__ = "pincer_call_analytics"
     __table_args__ = (Index("idx_call_analytics_sentiment", "sentiment"),)
 
     # No foreign key to voice_calls: the retention purge deletes an expired

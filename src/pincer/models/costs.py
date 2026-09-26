@@ -8,7 +8,7 @@ from pincer.db.types import Real, Uuid7
 
 
 class CostLog(SQLModel, table=True):
-    __tablename__ = "cost_logs"
+    __tablename__ = "pincer_cost_logs"
     __table_args__ = (Index("idx_cost_timestamp", "timestamp"),)
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
@@ -22,7 +22,7 @@ class CostLog(SQLModel, table=True):
 
 
 class ImageCostLog(SQLModel, table=True):
-    __tablename__ = "image_cost_logs"
+    __tablename__ = "pincer_image_cost_logs"
     __table_args__ = (Index("idx_image_cost_timestamp", "timestamp"),)
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))

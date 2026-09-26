@@ -39,13 +39,14 @@ async def _seed(db_path, rows: list[tuple[str, str, float]]) -> None:
         await ensure_call_costs_table(db)
         for sid, code, cost in rows:
             await db.execute(
-                "INSERT INTO voice_calls (id, call_sid, direction, from_number, to_number, started_at, ended_at, "
-                f"failure_code, engine, language) VALUES ({SEED_ID_SQL}, ?, 'outbound', '+4915100000001', "
-                "'+4915100000002', ?, ?, ?, 'conversation_relay', 'de')",
+                "INSERT INTO pincer_voice_calls (id, call_sid, direction, from_number, to_number, started_at, "
+                f"ended_at, failure_code, engine, language) VALUES ({SEED_ID_SQL}, ?, 'outbound', "
+                "'+4915100000001', '+4915100000002', ?, ?, ?, 'conversation_relay', 'de')",
                 (sid, started.isoformat(), (started + timedelta(seconds=60)).isoformat(), code),
             )
             await db.execute(
-                "INSERT INTO call_costs (call_sid, total_usd, twilio_usd, llm_usd, recorded_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO pincer_call_costs (call_sid, total_usd, twilio_usd, llm_usd, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?)",
                 (sid, cost, cost * 0.7, cost * 0.3, datetime.now(UTC).isoformat()),
             )
         await db.commit()
@@ -204,7 +205,7 @@ async def test_call_without_a_cost_record_reports_none(client, tmp_path):
     async with aiosqlite.connect(tmp_path / "pincer.db") as db:
         await ensure_voice_tables(db)
         await db.execute(
-            "INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
+            "INSERT INTO pincer_voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
             f"VALUES ({SEED_ID_SQL}, 'CA_nocost', 'inbound', ?, ?, 'none')",
             (started.isoformat(), started.isoformat()),
         )

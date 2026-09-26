@@ -142,11 +142,11 @@ async def test_the_voice_purge_deletes_expired_rows_and_keeps_the_rest(url):
     deleted = await RetentionService(url).purge_voice(CUTOFF)
 
     assert deleted == {
-        "voice_calls": 1,
-        "call_transcripts": 1,
-        "call_actions": 1,
-        "inbound_messages": 1,
-        "outbound_call_logs": 1,
+        "pincer_voice_calls": 1,
+        "pincer_call_transcripts": 1,
+        "pincer_call_actions": 1,
+        "pincer_inbound_messages": 1,
+        "pincer_outbound_call_logs": 1,
     }
     assert await _count(url, VoiceCall) == 1
     assert await _count(url, CallTranscript) == 1
@@ -175,7 +175,7 @@ async def test_an_analytics_row_survives_but_its_rationale_does_not(url):
 
     deleted = await RetentionService(url).purge_voice(CUTOFF)
 
-    assert deleted["call_analytics.sentiment_rationale"] == 1
+    assert deleted["pincer_call_analytics.sentiment_rationale"] == 1
     assert await _count(url, CallAnalytics) == 2  # both rows survive
     async with session_scope(url) as session:
         repo: BaseRepository = BaseRepository(session)
@@ -197,9 +197,9 @@ async def test_the_telemetry_purge_has_its_own_window(url):
     deleted = await RetentionService(url).purge_telemetry(CUTOFF)
 
     assert deleted == {
-        "telephony_events": 1,
-        "telephony_spans": 1,
-        "telephony_turns": 1,
-        "telephony_calls": 1,
+        "pincer_telephony_events": 1,
+        "pincer_telephony_spans": 1,
+        "pincer_telephony_turns": 1,
+        "pincer_telephony_calls": 1,
     }
     assert await _count(url, TelephonyCall) == 1

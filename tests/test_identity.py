@@ -53,7 +53,7 @@ class TestIdentityResolver:
         )
         async with _rows(resolver) as db:
             cursor = await db.execute(
-                "SELECT display_name FROM identity_profiles WHERE pincer_user_id = ?",
+                "SELECT display_name FROM pincer_identity_profiles WHERE pincer_user_id = ?",
                 (uid,),
             )
             row = await cursor.fetchone()
@@ -122,7 +122,7 @@ class TestIdentityResolver:
         # Their LID is not yet in the DB
         async with _rows(r) as db:
             cursor = await db.execute(
-                "SELECT pincer_user_id FROM channel_identities "
+                "SELECT pincer_user_id FROM pincer_channel_identities "
                 "WHERE channel = 'whatsapp' AND channel_user_id = '35240793874528'",
             )
             assert await cursor.fetchone() is None
@@ -210,7 +210,8 @@ class TestActiveChannel:
 
         async with _rows(resolver) as db:
             cursor = await db.execute(
-                "SELECT active_channel, active_channel_updated_at FROM identity_profiles WHERE pincer_user_id = ?",
+                "SELECT active_channel, active_channel_updated_at FROM pincer_identity_profiles "
+                "WHERE pincer_user_id = ?",
                 (uid,),
             )
             row = await cursor.fetchone()
@@ -240,7 +241,7 @@ class TestActiveChannel:
 
         async with _rows(resolver) as db:
             await db.execute(
-                "UPDATE identity_profiles SET active_channel = 'whatsapp' WHERE pincer_user_id = ?",
+                "UPDATE pincer_identity_profiles SET active_channel = 'whatsapp' WHERE pincer_user_id = ?",
                 (uid,),
             )
             await db.commit()
@@ -267,7 +268,7 @@ class TestActiveChannel:
         # too coarse to observe a difference from two touches back-to-back).
         async with _rows(resolver) as db:
             await db.execute(
-                "UPDATE identity_profiles SET active_channel_updated_at = datetime('now', '-1 hour') "
+                "UPDATE pincer_identity_profiles SET active_channel_updated_at = datetime('now', '-1 hour') "
                 "WHERE pincer_user_id = ?",
                 (uid,),
             )
@@ -288,7 +289,9 @@ class TestActiveChannel:
         await resolver.touch_active_channel(uid, ChannelType.WHATSAPP)
 
         async with _rows(resolver) as db:
-            cursor = await db.execute("SELECT active_channel FROM identity_profiles WHERE pincer_user_id = ?", (uid,))
+            cursor = await db.execute(
+                "SELECT active_channel FROM pincer_identity_profiles WHERE pincer_user_id = ?", (uid,)
+            )
             row = await cursor.fetchone()
         assert row[0] == "whatsapp"
 
@@ -301,7 +304,7 @@ class TestActiveChannel:
         # Backdate active_channel_updated_at by 31 minutes (past the 30-minute window).
         async with _rows(resolver) as db:
             await db.execute(
-                "UPDATE identity_profiles SET active_channel_updated_at = "
+                "UPDATE pincer_identity_profiles SET active_channel_updated_at = "
                 "datetime('now', '-31 minutes') WHERE pincer_user_id = ?",
                 (uid,),
             )
@@ -326,7 +329,7 @@ class TestActiveChannel:
 
         async with _rows(resolver) as db:
             await db.execute(
-                "UPDATE identity_profiles SET active_channel_updated_at = "
+                "UPDATE pincer_identity_profiles SET active_channel_updated_at = "
                 "datetime('now', '-1 day') WHERE pincer_user_id = ?",
                 (uid,),
             )
@@ -343,7 +346,7 @@ class TestActiveChannel:
 
         async with _rows(resolver) as db:
             await db.execute(
-                "UPDATE identity_profiles SET active_channel = 'whatsapp', active_channel_updated_at = NULL "
+                "UPDATE pincer_identity_profiles SET active_channel = 'whatsapp', active_channel_updated_at = NULL "
                 "WHERE pincer_user_id = ?",
                 (uid,),
             )
@@ -631,7 +634,7 @@ class TestNamedCanonicalId:
         # Old hash-based identity should no longer exist
         async with _rows(r_with_name) as db:
             cursor = await db.execute(
-                "SELECT pincer_user_id FROM identity_profiles WHERE pincer_user_id = ?",
+                "SELECT pincer_user_id FROM pincer_identity_profiles WHERE pincer_user_id = ?",
                 (original_uid,),
             )
             assert await cursor.fetchone() is None
@@ -686,7 +689,7 @@ class TestNamedCanonicalId:
         async with aiosqlite.connect(str(db_path)) as db:
             cursor = await db.execute(
                 "SELECT display_name, preferred_channel, email, timezone "
-                "FROM identity_profiles WHERE pincer_user_id = 'johndoe'",
+                "FROM pincer_identity_profiles WHERE pincer_user_id = 'johndoe'",
             )
             row = await cursor.fetchone()
         assert row == ("John Doe", "whatsapp", "johndoe@example.com", "Europe/Berlin")
@@ -706,7 +709,7 @@ class TestNamedCanonicalId:
 
         async with aiosqlite.connect(str(db_path)) as db:
             cursor = await db.execute(
-                "SELECT preferred_channel FROM identity_profiles WHERE pincer_user_id = 'johndoe'",
+                "SELECT preferred_channel FROM pincer_identity_profiles WHERE pincer_user_id = 'johndoe'",
             )
             row = await cursor.fetchone()
         assert row == ("telegram",)
@@ -729,7 +732,7 @@ class TestNamedCanonicalId:
 
         async with aiosqlite.connect(str(db_path)) as db:
             cursor = await db.execute(
-                "SELECT email, timezone FROM identity_profiles WHERE pincer_user_id = 'johndoe'",
+                "SELECT email, timezone FROM pincer_identity_profiles WHERE pincer_user_id = 'johndoe'",
             )
             row = await cursor.fetchone()
         assert row == ("johndoe@example.com", None)
@@ -805,7 +808,7 @@ class TestCleanup:
         # Row must still exist
         async with (
             aiosqlite.connect(str(db_path)) as db,
-            db.execute("SELECT COUNT(*) FROM channel_identities WHERE channel_user_id = '12345'") as cur,
+            db.execute("SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = '12345'") as cur,
         ):
             assert (await cur.fetchone())[0] == 1
         assert await r.resolve(ChannelType.TELEGRAM, 12345) == uid
@@ -823,7 +826,7 @@ class TestCleanup:
         uid = await r.resolve(ChannelType.TELEGRAM, 12345)
         async with aiosqlite.connect(str(db_path)) as db:
             await db.execute(
-                "INSERT INTO channel_identities (channel, channel_user_id, pincer_user_id) "
+                "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) "
                 "VALUES ('whatsapp', '35240793874528', ?)",
                 (uid,),
             )
@@ -833,11 +836,13 @@ class TestCleanup:
 
         async with aiosqlite.connect(str(db_path)) as db:
             async with db.execute(
-                "SELECT COUNT(*) FROM channel_identities WHERE channel_user_id = '35240793874528'"
+                "SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = '35240793874528'"
             ) as cur:
                 assert (await cur.fetchone())[0] == 0
             # Listed channels survive
-            async with db.execute("SELECT COUNT(*) FROM channel_identities WHERE channel_user_id = '12345'") as cur:
+            async with db.execute(
+                "SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = '12345'"
+            ) as cur:
                 assert (await cur.fetchone())[0] == 1
 
     async def test_cleanup_removes_channelless_identity_after_purge(self, tmp_path):
@@ -852,10 +857,10 @@ class TestCleanup:
         # Create an identity linked only to an unlisted channel
         async with aiosqlite.connect(str(db_path)) as db:
             await db.execute(
-                "INSERT INTO identity_profiles (pincer_user_id, preferred_channel) VALUES ('ghost', 'whatsapp')"
+                "INSERT INTO pincer_identity_profiles (pincer_user_id, preferred_channel) VALUES ('ghost', 'whatsapp')"
             )
             await db.execute(
-                "INSERT INTO channel_identities (channel, channel_user_id, pincer_user_id) "
+                "INSERT INTO pincer_channel_identities (channel, channel_user_id, pincer_user_id) "
                 "VALUES ('whatsapp', '35240793874528', 'ghost')"
             )
             await db.commit()
@@ -864,7 +869,7 @@ class TestCleanup:
 
         async with (
             aiosqlite.connect(str(db_path)) as db,
-            db.execute("SELECT COUNT(*) FROM identity_profiles WHERE pincer_user_id = 'ghost'") as cur,
+            db.execute("SELECT COUNT(*) FROM pincer_identity_profiles WHERE pincer_user_id = 'ghost'") as cur,
         ):
             assert (await cur.fetchone())[0] == 0
 
@@ -895,7 +900,7 @@ class TestCleanup:
 
         async with (
             aiosqlite.connect(str(db_path)) as db,
-            db.execute("SELECT COUNT(*) FROM channel_identities WHERE channel_user_id = '12345'") as cur,
+            db.execute("SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = '12345'") as cur,
         ):
             assert (await cur.fetchone())[0] == 1
         assert await r.resolve(ChannelType.TELEGRAM, 12345) == uid

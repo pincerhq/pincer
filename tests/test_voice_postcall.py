@@ -125,12 +125,14 @@ class TestPostCallProcessor:
 
         # Persistence: call row, transcript rows, and the outcome audit action
         async with aiosqlite.connect(str(settings.db_path)) as db:
-            calls = await db.execute_fetchall("SELECT call_sid, direction FROM voice_calls")
+            calls = await db.execute_fetchall("SELECT call_sid, direction FROM pincer_voice_calls")
             assert calls == [(CALL_SID, "outbound")]
-            entries = await db.execute_fetchall("SELECT COUNT(*) FROM call_transcripts WHERE call_id = ?", (CALL_SID,))
+            entries = await db.execute_fetchall(
+                "SELECT COUNT(*) FROM pincer_call_transcripts WHERE call_id = ?", (CALL_SID,)
+            )
             assert entries[0][0] == len(TRANSCRIPT_LINES)
             outcome_rows = await db.execute_fetchall(
-                "SELECT output_summary FROM call_actions WHERE call_id = ? AND action_type = 'outcome'",
+                "SELECT output_summary FROM pincer_call_actions WHERE call_id = ? AND action_type = 'outcome'",
                 (CALL_SID,),
             )
             assert len(outcome_rows) == 1
@@ -158,7 +160,7 @@ class TestPostCallProcessor:
         assert await memory.count(user_id="tester") == 0
         # Transcript still persisted
         async with aiosqlite.connect(str(settings.db_path)) as db:
-            entries = await db.execute_fetchall("SELECT COUNT(*) FROM call_transcripts")
+            entries = await db.execute_fetchall("SELECT COUNT(*) FROM pincer_call_transcripts")
             assert entries[0][0] == len(TRANSCRIPT_LINES)
 
     async def test_no_transcript_still_reports(self, tmp_path, notify_capture):
@@ -224,17 +226,17 @@ class TestTranscriptTool:
         async with aiosqlite.connect(str(db_path)) as db:
             await ensure_voice_tables(db)
             await db.execute(
-                "INSERT INTO voice_calls (id, call_sid, direction, to_number, pincer_user_id, started_at) "
+                "INSERT INTO pincer_voice_calls (id, call_sid, direction, to_number, pincer_user_id, started_at) "
                 f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?, ?)",
                 ("CA_t1", "outbound", "+491761234567", "tester", "2026-08-16T10:00:00+00:00"),
             )
             await db.execute(
-                "INSERT INTO call_transcripts (id, call_id, speaker, text, timestamp) "
+                "INSERT INTO pincer_call_transcripts (id, call_id, speaker, text, timestamp) "
                 f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?)",
                 ("CA_t1", "agent", "My card number is 4111 1111 1111 1111 okay?", "2026-08-16T10:00:01+00:00"),
             )
             await db.execute(
-                "INSERT INTO call_transcripts (id, call_id, speaker, text, timestamp) "
+                "INSERT INTO pincer_call_transcripts (id, call_id, speaker, text, timestamp) "
                 f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?)",
                 ("CA_t1", "caller", "Der Termin ist bestätigt.", "2026-08-16T10:00:02+00:00"),
             )

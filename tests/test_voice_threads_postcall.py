@@ -183,7 +183,7 @@ async def test_call_row_keeps_its_thread_columns_after_persist(threaded):
     async with aiosqlite.connect(threaded.settings.db_path) as db:
         db.row_factory = aiosqlite.Row
         cursor = await db.execute(
-            "SELECT thread_id, thread_attach_kind FROM voice_calls WHERE call_sid = ?", (CALL_SID,)
+            "SELECT thread_id, thread_attach_kind FROM pincer_voice_calls WHERE call_sid = ?", (CALL_SID,)
         )
         row = await cursor.fetchone()
     assert row["thread_id"] == threaded.thread.thread_id

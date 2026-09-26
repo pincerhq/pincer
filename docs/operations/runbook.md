@@ -175,7 +175,7 @@ mid-sentence.
 
 **Fix.**
 1. Confirm the call's language was resolved correctly:
-   `sqlite3 $PINCER_DATA_DIR/pincer.db "SELECT call_sid, language, failure_code FROM voice_calls ORDER BY started_at DESC LIMIT 10"`
+   `sqlite3 $PINCER_DATA_DIR/pincer.db "SELECT call_sid, language, failure_code FROM pincer_voice_calls ORDER BY started_at DESC LIMIT 10"`
 2. The guard buffers a drifting first sentence and regenerates once. Repeated
    drift on one model usually means the turn model was switched to a weaker one:
    check `PINCER_VOICE_TURN_MODEL` and the dashboard's telephony page (it
@@ -277,7 +277,7 @@ need telling.
 ```bash
 pincer voice ops status                                   # confirm zero stuck now
 sqlite3 $PINCER_DATA_DIR/pincer.db \
-  "SELECT call_sid, started_at, ended_at, failure_code FROM voice_calls WHERE failure_code='stuck' ORDER BY started_at DESC LIMIT 10"
+  "SELECT call_sid, started_at, ended_at, failure_code FROM pincer_voice_calls WHERE failure_code='stuck' ORDER BY started_at DESC LIMIT 10"
 docker compose -f docker-compose.prod.yml logs pincer | grep <call_sid>
 ```
 Common causes: a hung tool call inside a turn, an engine that stopped delivering
@@ -409,7 +409,7 @@ already excluded. A drop means calls are connecting and failing to close.
 
 ```bash
 sqlite3 $PINCER_DATA_DIR/pincer.db \
-  "SELECT result, COUNT(*) FROM appointment_outcomes WHERE recorded_at >= datetime('now','-1 day') GROUP BY result"
+  "SELECT result, COUNT(*) FROM pincer_appointment_outcomes WHERE recorded_at >= datetime('now','-1 day') GROUP BY result"
 ```
 
 | Dominant result | Meaning |
@@ -429,7 +429,7 @@ Read transcripts with `/transcript <call_sid>` or the dashboard.
 ```bash
 sqlite3 $PINCER_DATA_DIR/pincer.db \
   "SELECT call_sid, duration_seconds, twilio_usd, stt_usd, tts_usd, llm_usd, total_usd
-   FROM call_costs ORDER BY total_usd DESC LIMIT 10"
+   FROM pincer_call_costs ORDER BY total_usd DESC LIMIT 10"
 ```
 The component that dominates tells you the cause:
 
@@ -457,7 +457,7 @@ somebody was unhappy on the phone.
 sqlite3 $PINCER_DATA_DIR/pincer.db \
   "SELECT a.call_sid, c.started_at, c.direction, a.sentiment_trajectory,
           a.talk_ratio, a.interruptions, a.sentiment_rationale
-   FROM call_analytics a JOIN voice_calls c ON c.call_sid = a.call_sid
+   FROM pincer_call_analytics a JOIN pincer_voice_calls c ON c.call_sid = a.call_sid
    WHERE a.sentiment = 'negative'
    ORDER BY c.started_at DESC LIMIT 10"
 ```

@@ -75,7 +75,7 @@ pincer voice ops status          # p95 during the customer's busiest hour
 pincer voice ops slo             # is the latency budget burning at peak?
 sqlite3 $PINCER_DATA_DIR/pincer.db \
   "SELECT strftime('%Y-%m-%d %H', started_at) AS hour, COUNT(*)
-   FROM voice_calls GROUP BY hour ORDER BY 2 DESC LIMIT 10"   # actual peak concurrency proxy
+   FROM pincer_voice_calls GROUP BY hour ORDER BY 2 DESC LIMIT 10"   # actual peak concurrency proxy
 ```
 
 If the busiest hour shows more calls than the "comfortable" row above and the

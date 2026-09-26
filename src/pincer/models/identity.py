@@ -8,7 +8,7 @@ from pincer.db.types import IsoText
 
 
 class IdentityProfile(SQLModel, table=True):
-    __tablename__ = "identity_profiles"
+    __tablename__ = "pincer_identity_profiles"
 
     pincer_user_id: str = Field(sa_column=Column(Text(), primary_key=True))
     preferred_channel: str | None = Field(default=None, sa_column=Column(Text()))
@@ -23,13 +23,13 @@ class IdentityProfile(SQLModel, table=True):
 
 
 class ChannelIdentity(SQLModel, table=True):
-    __tablename__ = "channel_identities"
+    __tablename__ = "pincer_channel_identities"
     __table_args__ = (Index("idx_ci_pincer", "pincer_user_id"),)
 
     channel: str = Field(sa_column=Column(Text(), primary_key=True))
     channel_user_id: str = Field(sa_column=Column(Text(), primary_key=True))
     pincer_user_id: str = Field(
-        sa_column=Column(Text(), ForeignKey("identity_profiles.pincer_user_id"), nullable=False)
+        sa_column=Column(Text(), ForeignKey("pincer_identity_profiles.pincer_user_id"), nullable=False)
     )
     created_at: str | None = Field(
         default=None, sa_column=Column(IsoText(), server_default=sa.text("CURRENT_TIMESTAMP"))

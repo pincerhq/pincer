@@ -58,8 +58,8 @@ async def _seed_calls(settings, codes: list[str], days_ago: float = 1.0) -> None
         await ensure_voice_tables(db)
         for i, code in enumerate(codes):
             await db.execute(
-                f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code, language) "
-                f"VALUES ({SEED_ID_SQL}, ?, 'outbound', ?, ?, ?, 'de')",
+                "INSERT INTO pincer_voice_calls (id, call_sid, direction, started_at, ended_at, failure_code, "
+                f"language) VALUES ({SEED_ID_SQL}, ?, 'outbound', ?, ?, ?, 'de')",
                 (f"CA{days_ago}_{i}", started.isoformat(), (started + timedelta(seconds=60)).isoformat(), code),
             )
         await db.commit()
@@ -70,7 +70,8 @@ async def _seed_costs(settings, totals: list[float]) -> None:
         await ensure_call_costs_table(db)
         for i, total in enumerate(totals):
             await db.execute(
-                "INSERT INTO call_costs (call_sid, total_usd, twilio_usd, llm_usd, recorded_at) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO pincer_call_costs (call_sid, total_usd, twilio_usd, llm_usd, recorded_at) "
+                "VALUES (?, ?, ?, ?, ?)",
                 (f"CAcost{i}", total, total * 0.6, total * 0.4, datetime.now(UTC).isoformat()),
             )
         await db.commit()

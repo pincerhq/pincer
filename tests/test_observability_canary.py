@@ -260,7 +260,7 @@ async def _seed(settings, codes: list[str], hours_ago: float) -> None:
         await ensure_voice_tables(db)
         for i, code in enumerate(codes):
             await db.execute(
-                f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
+                f"INSERT INTO pincer_voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
                 f"VALUES ({SEED_ID_SQL}, ?, 'outbound', ?, ?, ?)",
                 (f"CA_{hours_ago}_{i}", started, started, code),
             )

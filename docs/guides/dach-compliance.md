@@ -63,7 +63,7 @@ A German/Austrian SMB deploying Pincer voice acts as **controller**; the provide
 4. **Records of processing (Art. 30 VZ/ROPA)** — add an entry for voice calling: categories (call audio, transcripts, phone numbers), purposes, retention (`PINCER_VOICE_TRANSCRIPT_RETENTION_DAYS`), recipients (table above).
 5. **Privacy notice** — callers must be informed (Art. 13): the consent announcement covers recording; link the full notice on your website/IVR.
 6. **Retention** — keep the default 90 days unless you have a documented reason; `0` (keep forever) conflicts with storage limitation and triggers a `pincer doctor` warning when recording is enabled.
-7. **Data subject requests** — transcripts are plain SQLite rows keyed by call SID and phone number; export with any SQLite client, delete by `DELETE FROM call_transcripts WHERE call_id = …` (deletions land in the audit log).
+7. **Data subject requests** — transcripts are plain SQLite rows keyed by call SID and phone number; export with any SQLite client, delete by `DELETE FROM pincer_call_transcripts WHERE call_id = …` (deletions land in the audit log).
 
 ## Live listen-in (monitoring)
 

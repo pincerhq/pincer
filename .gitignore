@@ -53,7 +53,7 @@ data/google_workspace_token.json
 docker-compose.override.yml
 
 # Internal and required MCP servers
-pincer.local.toml
+*.local.toml
 skills/*
 mcp-servers/*
 

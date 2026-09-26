@@ -10,24 +10,31 @@ import pincer.models  # noqa: F401 - registers every table model on the metadata
 
 metadata = SQLModel.metadata
 
+#: The table Alembic records the current revision in, everywhere a
+#: `MigrationContext` is configured — `env.py` for a real upgrade/downgrade,
+#: and `tests/test_schema_drift.py` for a standalone comparison against
+#: `metadata`. Not Alembic's default `alembic_version`, so it carries the
+#: same `pincer_` prefix as every table the migrations manage.
+VERSION_TABLE = "pincer_alembic_version"
+
 #: Schema objects the migrations own by hand, with no model behind them.
 #: Autogenerate must neither drop them nor try to create them.
 HAND_WRITTEN_TABLES = frozenset(
     {
-        # FTS5 virtual table over `memories` and its shadow tables (SQLite only;
-        # kept in sync by triggers).
-        "memories_fts",
-        "memories_fts_config",
-        "memories_fts_data",
-        "memories_fts_docsize",
-        "memories_fts_idx",
+        # FTS5 virtual table over `pincer_memories` and its shadow tables
+        # (SQLite only; kept in sync by triggers).
+        "pincer_memories_fts",
+        "pincer_memories_fts_config",
+        "pincer_memories_fts_data",
+        "pincer_memories_fts_docsize",
+        "pincer_memories_fts_idx",
         # Dormant: created by 0001, read and written by nothing.
-        "registry_skills",
-        "expenses",
-        "habits",
-        "habit_checkins",
-        "pomodoro_sessions",
-        "discord_threads",
+        "pincer_registry_skills",
+        "pincer_expenses",
+        "pincer_habits",
+        "pincer_habit_checkins",
+        "pincer_pomodoro_sessions",
+        "pincer_discord_threads",
     }
 )
 
@@ -37,7 +44,7 @@ HAND_WRITTEN_TABLES = frozenset(
 HAND_WRITTEN_INDEXES = frozenset({"idx_phone_contacts_name", "idx_memories_search"})
 
 #: Columns that exist on one dialect only, with no model behind them.
-HAND_WRITTEN_COLUMNS = frozenset({("memories", "search_vector")})
+HAND_WRITTEN_COLUMNS = frozenset({("pincer_memories", "search_vector")})
 
 
 def include_object(obj: Any, name: str | None, type_: str, reflected: bool, compare_to: Any) -> bool:

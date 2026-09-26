@@ -77,8 +77,8 @@ class Fts5Search:
         # a bare `"` would otherwise end the string and raise "unterminated".
         match = " OR ".join('"{}"'.format(word.replace('"', '""')) for word in words)
         sql = (
-            "SELECT m.id, f.rank FROM memories_fts f JOIN memories m ON m.rowid = f.rowid "
-            "WHERE memories_fts MATCH :match"
+            "SELECT m.id, f.rank FROM pincer_memories_fts f JOIN pincer_memories m ON m.rowid = f.rowid "
+            "WHERE pincer_memories_fts MATCH :match"
         )
         params: dict[str, object] = {"match": match, "limit": limit}
         if user_id:
@@ -117,7 +117,7 @@ class PostgresTextSearch:
         match = " or ".join('"{}"'.format(word.replace('"', "")) for word in words)
         sql = (
             "SELECT id, ts_rank(search_vector, websearch_to_tsquery('simple', :match)) AS score "
-            "FROM memories WHERE search_vector @@ websearch_to_tsquery('simple', :match)"
+            "FROM pincer_memories WHERE search_vector @@ websearch_to_tsquery('simple', :match)"
         )
         params: dict[str, object] = {"match": match, "limit": limit}
         if user_id:

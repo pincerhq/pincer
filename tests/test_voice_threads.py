@@ -56,7 +56,7 @@ async def _seed_call(db_path: str, call_sid: str, started_at: datetime, directio
     async with aiosqlite.connect(db_path) as db:
         await ensure_voice_tables(db)
         await db.execute(
-            "INSERT OR REPLACE INTO voice_calls (id, call_sid, direction, from_number, to_number, started_at, "
+            "INSERT OR REPLACE INTO pincer_voice_calls (id, call_sid, direction, from_number, to_number, started_at, "
             f"ended_at) VALUES ({SEED_ID_SQL}, ?, ?, '+4930111', '+4930222', ?, ?)",
             (call_sid, direction, started_at.isoformat(), (started_at + timedelta(minutes=2)).isoformat()),
         )
@@ -111,7 +111,7 @@ async def test_thread_create_on_task_call(manager, tmp_path):
     # The link is mirrored onto the call row for the /calls API surface.
     async with aiosqlite.connect(manager.db_path) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT thread_id, thread_attach_kind FROM voice_calls WHERE call_sid = 'CA1'")
+        cursor = await db.execute("SELECT thread_id, thread_attach_kind FROM pincer_voice_calls WHERE call_sid = 'CA1'")
         row = await cursor.fetchone()
     assert row["thread_id"] == thread.thread_id
     assert row["thread_attach_kind"] == KIND_ORIGIN
@@ -199,7 +199,9 @@ async def test_autoclose_only_touches_inactive_threads(manager):
     fresh = await manager.create("New matter")
     long_ago = (datetime.now(UTC) - timedelta(days=90)).isoformat()
     async with aiosqlite.connect(manager.db_path) as db:
-        await db.execute("UPDATE call_threads SET updated_at = ? WHERE thread_id = ?", (long_ago, stale.thread_id))
+        await db.execute(
+            "UPDATE pincer_call_threads SET updated_at = ? WHERE thread_id = ?", (long_ago, stale.thread_id)
+        )
         await db.commit()
 
     assert await manager.autoclose(30) == [stale.thread_id]
@@ -249,7 +251,7 @@ async def test_inbound_match_respects_status_and_window(manager):
     old = await manager.create("Old matter", primary_number="+4930333")
     async with aiosqlite.connect(manager.db_path) as db:
         await db.execute(
-            "UPDATE call_threads SET updated_at = ? WHERE thread_id = ?",
+            "UPDATE pincer_call_threads SET updated_at = ? WHERE thread_id = ?",
             ((datetime.now(UTC) - timedelta(days=30)).isoformat(), old.thread_id),
         )
         await db.commit()
@@ -378,7 +380,7 @@ async def test_purged_call_stub_survives(manager, tmp_path):
     )
 
     deleted = await purge_expired_voice_data(manager.db_path, retention_days=90)
-    assert deleted.get("voice_calls") == 1
+    assert deleted.get("pincer_voice_calls") == 1
 
     surviving = await manager.require(thread.thread_id)
     assert surviving.rolling_summary  # derived facts outlive the transcript

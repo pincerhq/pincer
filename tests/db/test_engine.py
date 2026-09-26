@@ -241,7 +241,7 @@ def test_several_processes_can_migrate_one_fresh_database_at_once(tmp_path: Path
 
     SQLite has no transactional DDL, so without a lock the loser of this race
     is not rolled back: it dies on a `CREATE TABLE` the winner already ran,
-    having left `alembic_version` stamped at a revision only half applied.
+    having left `pincer_alembic_version` stamped at a revision only half applied.
     """
     worker = tmp_path / "worker.py"
     worker.write_text(
@@ -273,7 +273,7 @@ def test_several_processes_can_migrate_one_fresh_database_at_once(tmp_path: Path
     assert [stderr for process, stderr in finished if process.returncode != 0] == []
 
     with sqlite3.connect(db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM alembic_version").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM pincer_alembic_version").fetchone()[0] == 1
 
 
 async def test_init_database_rejects_a_bad_postgres_url_at_boot_not_first_query(monkeypatch, tmp_path: Path):
@@ -307,6 +307,6 @@ async def test_init_database_migrates_the_configured_database_and_names_it(monke
         with sqlite3.connect(db_path) as conn:
             # Not just "a file exists": the schema is actually at head.
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"alembic_version", "memories", "telephony_calls"} <= tables
+        assert {"pincer_alembic_version", "pincer_memories", "pincer_telephony_calls"} <= tables
     finally:
         await dispose_engines()

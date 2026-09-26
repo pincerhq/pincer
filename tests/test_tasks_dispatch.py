@@ -23,7 +23,7 @@ async def store(tmp_path):
 async def _backdate(store: CronScheduler, schedule_id: int) -> None:
     async with aiosqlite.connect(str(store._db_path)) as db:
         await db.execute(
-            "UPDATE schedules SET next_run_at = ? WHERE id = ?",
+            "UPDATE pincer_schedules SET next_run_at = ? WHERE id = ?",
             ((datetime.now(UTC) - timedelta(minutes=5)).isoformat(), schedule_id),
         )
         await db.commit()

@@ -274,7 +274,7 @@ async def test_setup_orphan_outbound_terminates(voice):
 
     async with aiosqlite.connect(str(voice.settings.db_path)) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT direction, failure_code FROM voice_calls WHERE call_sid = 'CA_orphan'")
+        cursor = await db.execute("SELECT direction, failure_code FROM pincer_voice_calls WHERE call_sid = 'CA_orphan'")
         row = await cursor.fetchone()
     assert row is not None
     assert row["direction"] == "outbound"

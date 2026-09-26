@@ -17,29 +17,29 @@ from alembic.script import ScriptDirectory
 from pincer.db import build_config, engine, ensure_schema_current
 
 EXPECTED_TABLES = {
-    "conversations",
-    "memories",
-    "memories_fts",
-    "entities",
-    "sessions",
-    "identity_profiles",
-    "channel_identities",
-    "audit_logs",
-    "schedules",
-    "event_triggers",
-    "briefing_configs",
-    "cost_logs",
-    "image_cost_logs",
-    "registry_skills",
-    "expenses",
-    "habits",
-    "habit_checkins",
-    "pomodoro_sessions",
-    "discord_threads",
-    "voice_calls",
-    "call_transcripts",
-    "call_actions",
-    "phone_contacts",
+    "pincer_conversations",
+    "pincer_memories",
+    "pincer_memories_fts",
+    "pincer_entities",
+    "pincer_sessions",
+    "pincer_identity_profiles",
+    "pincer_channel_identities",
+    "pincer_audit_logs",
+    "pincer_schedules",
+    "pincer_event_triggers",
+    "pincer_briefing_configs",
+    "pincer_cost_logs",
+    "pincer_image_cost_logs",
+    "pincer_registry_skills",
+    "pincer_expenses",
+    "pincer_habits",
+    "pincer_habit_checkins",
+    "pincer_pomodoro_sessions",
+    "pincer_discord_threads",
+    "pincer_voice_calls",
+    "pincer_call_transcripts",
+    "pincer_call_actions",
+    "pincer_phone_contacts",
 }
 
 
@@ -58,7 +58,7 @@ def test_ensure_schema_current_creates_all_tables(tmp_path: Path) -> None:
 
     tables = _tables(db_path)
     assert tables >= EXPECTED_TABLES
-    assert "alembic_version" in tables
+    assert "pincer_alembic_version" in tables
 
 
 def test_ensure_schema_current_is_idempotent(tmp_path: Path) -> None:
@@ -69,7 +69,7 @@ def test_ensure_schema_current_is_idempotent(tmp_path: Path) -> None:
 
     con = sqlite3.connect(str(db_path))
     try:
-        count = con.execute("SELECT COUNT(*) FROM alembic_version").fetchone()[0]
+        count = con.execute("SELECT COUNT(*) FROM pincer_alembic_version").fetchone()[0]
     finally:
         con.close()
     assert count == 1
@@ -97,9 +97,13 @@ def test_memories_fts5_and_sync_triggers_present(tmp_path: Path) -> None:
 
     con = sqlite3.connect(str(db_path))
     try:
-        con.execute("INSERT INTO memories (id, user_id, content, created_at) VALUES ('m1', 'u1', 'hello world', 0)")
+        con.execute(
+            "INSERT INTO pincer_memories (id, user_id, content, created_at) VALUES ('m1', 'u1', 'hello world', 0)"
+        )
         con.commit()
-        rows = con.execute("SELECT content FROM memories_fts WHERE memories_fts MATCH 'hello'").fetchall()
+        rows = con.execute(
+            "SELECT content FROM pincer_memories_fts WHERE pincer_memories_fts MATCH 'hello'"
+        ).fetchall()
     finally:
         con.close()
     assert rows == [("hello world",)]
@@ -135,12 +139,14 @@ def test_legacy_identity_map_is_migrated_and_dropped(tmp_path: Path) -> None:
     con = sqlite3.connect(str(db_path))
     try:
         assert con.execute("SELECT name FROM sqlite_master WHERE name='identity_map'").fetchone() is None
-        meta = con.execute("SELECT pincer_user_id, preferred_channel, display_name FROM identity_profiles").fetchall()
+        meta = con.execute(
+            "SELECT pincer_user_id, preferred_channel, display_name FROM pincer_identity_profiles"
+        ).fetchall()
         assert meta == [("usr_abc", "telegram", "Alice")]
         links = {
             (channel, channel_user_id)
             for channel, channel_user_id in con.execute(
-                "SELECT channel, channel_user_id FROM channel_identities WHERE pincer_user_id = 'usr_abc'"
+                "SELECT channel, channel_user_id FROM pincer_channel_identities WHERE pincer_user_id = 'usr_abc'"
             ).fetchall()
         }
         assert links == {("telegram", "555111"), ("whatsapp", "491234567890")}
@@ -154,7 +160,7 @@ def test_identity_profiles_has_email_timezone_columns(tmp_path: Path) -> None:
 
     con = sqlite3.connect(str(db_path))
     try:
-        cols = {row[1] for row in con.execute("PRAGMA table_info(identity_profiles)").fetchall()}
+        cols = {row[1] for row in con.execute("PRAGMA table_info(pincer_identity_profiles)").fetchall()}
     finally:
         con.close()
     assert {"email", "timezone"} <= cols
@@ -197,7 +203,7 @@ def test_legacy_audit_db_is_imported_into_unified_db(tmp_path: Path) -> None:
 
     con = sqlite3.connect(str(db_path))
     try:
-        rows = con.execute("SELECT user_id, action FROM audit_logs").fetchall()
+        rows = con.execute("SELECT user_id, action FROM pincer_audit_logs").fetchall()
     finally:
         con.close()
     assert rows == [("usr_abc", "tool_call")]
@@ -299,7 +305,7 @@ def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> Non
 
     con = sqlite3.connect(str(db_path))
     try:
-        voice_cols = {row[1] for row in con.execute("PRAGMA table_info(voice_calls)").fetchall()}
+        voice_cols = {row[1] for row in con.execute("PRAGMA table_info(pincer_voice_calls)").fetchall()}
         assert {
             "call_sid",
             "direction",
@@ -326,7 +332,7 @@ def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> Non
                 consent_given,
                 started_at,
                 ended_at
-            FROM voice_calls
+            FROM pincer_voice_calls
             WHERE call_sid = 'CA_legacy'
             """
         ).fetchone()
@@ -345,7 +351,7 @@ def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> Non
         transcript = con.execute(
             """
             SELECT call_id, speaker, text
-            FROM call_transcripts
+            FROM pincer_call_transcripts
             WHERE call_id = 'CA_legacy'
             """
         ).fetchone()
@@ -364,7 +370,7 @@ def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> Non
                 tier,
                 approval_mode,
                 deny_reason
-            FROM call_actions
+            FROM pincer_call_actions
             WHERE call_id = 'CA_legacy'
             """
         ).fetchone()
@@ -379,8 +385,8 @@ def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> Non
 
         tables = _tables(db_path)
         assert {
-            "do_not_call_numbers",
-            "outbound_call_logs",
+            "pincer_do_not_call_numbers",
+            "pincer_outbound_call_logs",
         } <= tables
     finally:
         con.close()
@@ -600,13 +606,13 @@ def test_unversioned_modern_voice_schema_upgrades_to_head(
         row = con.execute(
             """
             SELECT call_sid, direction
-            FROM voice_calls
+            FROM pincer_voice_calls
             WHERE call_sid = 'CA_pre_alembic'
             """
         ).fetchone()
         assert row == ("CA_pre_alembic", "outbound")
 
-        voice_cols = {row[1] for row in con.execute("PRAGMA table_info(voice_calls)").fetchall()}
+        voice_cols = {row[1] for row in con.execute("PRAGMA table_info(pincer_voice_calls)").fetchall()}
         assert {
             "call_sid",
             "pincer_user_id",
@@ -617,16 +623,16 @@ def test_unversioned_modern_voice_schema_upgrades_to_head(
         } <= voice_cols
 
         assert {
-            "call_transcripts",
-            "call_actions",
-            "phone_contacts",
-            "inbound_messages",
-            "call_threads",
-            "call_thread_members",
-            "call_analytics",
+            "pincer_call_transcripts",
+            "pincer_call_actions",
+            "pincer_phone_contacts",
+            "pincer_inbound_messages",
+            "pincer_call_threads",
+            "pincer_call_thread_members",
+            "pincer_call_analytics",
         } <= _tables(db_path)
 
-        transcript_cols = {row[1] for row in con.execute("PRAGMA table_info(call_transcripts)").fetchall()}
+        transcript_cols = {row[1] for row in con.execute("PRAGMA table_info(pincer_call_transcripts)").fetchall()}
         assert {
             "call_id",
             "speaker",
@@ -637,7 +643,7 @@ def test_unversioned_modern_voice_schema_upgrades_to_head(
             "timestamp",
         } <= transcript_cols
 
-        action_cols = {row[1] for row in con.execute("PRAGMA table_info(call_actions)").fetchall()}
+        action_cols = {row[1] for row in con.execute("PRAGMA table_info(pincer_call_actions)").fetchall()}
         assert {
             "call_id",
             "action_type",
@@ -739,15 +745,15 @@ def test_unversioned_modern_voice_schema_backfills_missing_columns(
         assert con.execute(
             """
             SELECT call_sid, failure_code, engine, language, report_delivered_at
-            FROM voice_calls
+            FROM pincer_voice_calls
             """
         ).fetchall() == [("CA_old_runtime", "", "", "", None)]
 
-        assert con.execute("SELECT text FROM call_transcripts").fetchall() == [("kept across the upgrade",)]
+        assert con.execute("SELECT text FROM pincer_call_transcripts").fetchall() == [("kept across the upgrade",)]
 
-        assert con.execute("SELECT call_id, tier, approval_mode, deny_reason FROM call_actions").fetchall() == [
-            ("CA_old_runtime", "", "", "")
-        ]
+        assert con.execute(
+            "SELECT call_id, tier, approval_mode, deny_reason FROM pincer_call_actions"
+        ).fetchall() == [("CA_old_runtime", "", "", "")]
 
         indexes = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()}
         assert {
@@ -933,32 +939,41 @@ def test_full_pre_alembic_runtime_voice_db_upgrades_to_head(tmp_path: Path) -> N
         # `thread_id` is NULL, not '': 0018 retired the empty-string sentinel,
         # which is not a uuid and would not cast on Postgres.
         assert con.execute(
-            "SELECT call_sid, direction, from_number, inbound_intent, thread_id FROM voice_calls"
+            "SELECT call_sid, direction, from_number, inbound_intent, thread_id FROM pincer_voice_calls"
         ).fetchall() == [("CA_runtime", "inbound", "+493333333333", "question", None)]
 
-        assert con.execute("SELECT speaker, text FROM call_transcripts").fetchall() == [("agent", "Guten Tag")]
-        assert con.execute("SELECT tier, deny_reason FROM call_actions").fetchall() == [("X", "tier_x")]
-        assert con.execute("SELECT caller_name, matter FROM inbound_messages").fetchall() == [("Anna", "Rueckruf")]
+        assert con.execute("SELECT speaker, text FROM pincer_call_transcripts").fetchall() == [("agent", "Guten Tag")]
+        assert con.execute("SELECT tier, deny_reason FROM pincer_call_actions").fetchall() == [("X", "tier_x")]
+        assert con.execute("SELECT caller_name, matter FROM pincer_inbound_messages").fetchall() == [
+            ("Anna", "Rueckruf")
+        ]
         # The thread keeps its subject and loses its old hand-made id: 0018
         # converts it, so the value is a v7 uuid rather than `th_1`.
-        ((thread_id, subject),) = con.execute("SELECT thread_id, subject FROM call_threads").fetchall()
+        ((thread_id, subject),) = con.execute("SELECT thread_id, subject FROM pincer_call_threads").fetchall()
         assert subject == "Angebot"
         assert uuid.UUID(thread_id).version == 7
         # The member still points at its thread — both sides rewritten from one map.
-        assert con.execute("SELECT call_sid, thread_id FROM call_thread_members").fetchall() == [
+        assert con.execute("SELECT call_sid, thread_id FROM pincer_call_thread_members").fetchall() == [
             ("CA_runtime", thread_id)
         ]
-        assert con.execute("SELECT call_sid, method FROM call_analytics").fetchall() == [("CA_runtime", "exact")]
+        assert con.execute("SELECT call_sid, method FROM pincer_call_analytics").fetchall() == [
+            ("CA_runtime", "exact")
+        ]
 
         # 0001 must still have created the non-voice schema it owns.
-        assert {"memories", "identity_profiles", "audit_logs", "phone_contacts"} <= _tables(db_path)
+        assert {
+            "pincer_memories",
+            "pincer_identity_profiles",
+            "pincer_audit_logs",
+            "pincer_phone_contacts",
+        } <= _tables(db_path)
 
         # 0005's own tables are additive here.
-        assert {"do_not_call_numbers", "outbound_call_logs"} <= _tables(db_path)
+        assert {"pincer_do_not_call_numbers", "pincer_outbound_call_logs"} <= _tables(db_path)
 
         # The database is genuinely at head, not merely stamped.
         head = ScriptDirectory.from_config(build_config(db_path)).get_current_head()
-        assert con.execute("SELECT version_num FROM alembic_version").fetchone() == (head,)
+        assert con.execute("SELECT version_num FROM pincer_alembic_version").fetchone() == (head,)
     finally:
         con.close()
 
@@ -1262,7 +1277,10 @@ def test_0017_and_0018_leave_every_rebuilt_table_otherwise_exactly_as_it_was(mig
     command.upgrade(cfg, "head")
 
     with _connect(migration_url) as conn:
-        after = {table: _shape(sa.inspect(conn), table) for table in [*_CONVERTED, *_REBUILT_BY_0018]}
+        # 0019 has since prefixed every table; look each one up under its new
+        # name but keep it filed under the old one, so it still lines up with
+        # `before` and with the `after["schedules"]` lookup below.
+        after = {table: _shape(sa.inspect(conn), f"pincer_{table}") for table in [*_CONVERTED, *_REBUILT_BY_0018]}
         if migration_url.startswith("sqlite"):
             assert "COLLATE NOCASE" in _sqlite_ddl(conn, "idx_phone_contacts_name")
 

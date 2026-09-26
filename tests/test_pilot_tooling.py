@@ -215,18 +215,18 @@ async def _seed(settings, count: int, *, language: str = "de", code: str = "none
         for i in range(count):
             sid = f"CA{language}{code}{i:03d}"
             await db.execute(
-                f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code, language, "
-                f"from_number, to_number) VALUES ({SEED_ID_SQL}, ?, 'outbound', ?, ?, ?, ?, "
+                "INSERT INTO pincer_voice_calls (id, call_sid, direction, started_at, ended_at, failure_code, "
+                f"language, from_number, to_number) VALUES ({SEED_ID_SQL}, ?, 'outbound', ?, ?, ?, ?, "
                 "'+4915100000001', '+4930111222333')",
                 (sid, started.isoformat(), (started + timedelta(seconds=90)).isoformat(), code, language),
             )
             await db.execute(
-                f"INSERT INTO call_transcripts (id, call_id, speaker, text, is_final, state, timestamp) "
+                f"INSERT INTO pincer_call_transcripts (id, call_id, speaker, text, is_final, state, timestamp) "
                 f"VALUES ({SEED_ID_SQL}, ?, 'caller', ?, 1, '', ?)",
                 (sid, f"Hallo, hier ist die Praxis {i}. Meine Nummer ist +4930111222333.", started.isoformat()),
             )
             await db.execute(
-                f"INSERT INTO call_transcripts (id, call_id, speaker, text, is_final, state, timestamp) "
+                f"INSERT INTO pincer_call_transcripts (id, call_id, speaker, text, is_final, state, timestamp) "
                 f"VALUES ({SEED_ID_SQL}, ?, 'agent', 'Guten Tag, geht Dienstag um drei?', 1, 'freeform', ?)",
                 (sid, (started + timedelta(seconds=5)).isoformat()),
             )
@@ -318,7 +318,7 @@ async def test_export_refuses_a_call_with_no_transcript(settings):
     async with aiosqlite.connect(settings.db_path) as db:
         await ensure_voice_tables(db)
         await db.execute(
-            f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
+            f"INSERT INTO pincer_voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
             f"VALUES ({SEED_ID_SQL}, 'CAempty', 'outbound', ?, ?, 'no_answer')",
             (datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat()),
         )
@@ -332,12 +332,12 @@ async def test_export_refuses_a_call_with_only_agent_turns(settings):
     async with aiosqlite.connect(settings.db_path) as db:
         await ensure_voice_tables(db)
         await db.execute(
-            f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
+            f"INSERT INTO pincer_voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
             f"VALUES ({SEED_ID_SQL}, 'CAagent', 'outbound', ?, ?, 'silent_callee')",
             (started, started),
         )
         await db.execute(
-            f"INSERT INTO call_transcripts (id, call_id, speaker, text, is_final, state, timestamp) "
+            f"INSERT INTO pincer_call_transcripts (id, call_id, speaker, text, is_final, state, timestamp) "
             f"VALUES ({SEED_ID_SQL}, 'CAagent', 'agent', 'Hallo?', 1, '', ?)",
             (started,),
         )
@@ -370,12 +370,12 @@ async def test_export_surfaces_names_for_human_review(settings):
     async with aiosqlite.connect(settings.db_path) as db:
         await ensure_voice_tables(db)
         await db.execute(
-            f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code, language) "
+            f"INSERT INTO pincer_voice_calls (id, call_sid, direction, started_at, ended_at, failure_code, language) "
             f"VALUES ({SEED_ID_SQL}, 'CAname', 'outbound', ?, ?, 'none', 'de')",
             (started, started),
         )
         await db.execute(
-            f"INSERT INTO call_transcripts (id, call_id, speaker, text, is_final, state, timestamp) "
+            f"INSERT INTO pincer_call_transcripts (id, call_id, speaker, text, is_final, state, timestamp) "
             f"VALUES ({SEED_ID_SQL}, 'CAname', 'caller', 'Praxis Dr. Schneider, guten Tag', 1, '', ?)",
             (started,),
         )

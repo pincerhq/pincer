@@ -1093,7 +1093,7 @@ async def _seed_matched_thread(settings, *, number: str = CALLER):
     thread = await manager.create(THREAD_SUBJECT, primary_number=number, language="de")
     async with aiosqlite.connect(str(settings.db_path)) as db:
         await db.execute(
-            "UPDATE call_threads SET rolling_summary = ?, open_commitments = ? WHERE thread_id = ?",
+            "UPDATE pincer_call_threads SET rolling_summary = ?, open_commitments = ? WHERE thread_id = ?",
             (
                 THREAD_SUMMARY,
                 '[{"who":"callee","what":"schickt die Rechnung","due":null,'

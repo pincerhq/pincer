@@ -165,7 +165,7 @@ async def _persist_scenario(settings, scenario: Scenario) -> str:
 async def _failure_code(settings, call_sid: str) -> str | None:
     async with aiosqlite.connect(settings.db_path) as db:
         db.row_factory = aiosqlite.Row
-        cursor = await db.execute("SELECT failure_code FROM voice_calls WHERE call_sid = ?", (call_sid,))
+        cursor = await db.execute("SELECT failure_code FROM pincer_voice_calls WHERE call_sid = ?", (call_sid,))
         row = await cursor.fetchone()
     return str(row["failure_code"]) if row else None
 

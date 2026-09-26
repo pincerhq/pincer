@@ -9,7 +9,7 @@ from pincer.db.types import Real, Uuid7
 
 
 class Conversation(SQLModel, table=True):
-    __tablename__ = "conversations"
+    __tablename__ = "pincer_conversations"
     __table_args__ = (Index("idx_conv_user", "user_id", "channel"),)
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
@@ -23,7 +23,7 @@ class Conversation(SQLModel, table=True):
 
 
 class Memory(SQLModel, table=True):
-    __tablename__ = "memories"
+    __tablename__ = "pincer_memories"
     __table_args__ = (Index("idx_mem_user", "user_id", "category"),)
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
@@ -38,7 +38,7 @@ class Memory(SQLModel, table=True):
 
 
 class Entity(SQLModel, table=True):
-    __tablename__ = "entities"
+    __tablename__ = "pincer_entities"
     __table_args__ = (Index("idx_ent_user", "user_id", "type"),)
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))

@@ -79,7 +79,8 @@ def _make_schedules_db(path: object, rows: list[tuple[str, str, str, str, int]] 
     for row in rows or []:
         # The id is a model-side default, so a raw insert has to supply one.
         conn.execute(
-            "INSERT INTO schedules (id, pincer_user_id, name, cron_expr, action, enabled) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO pincer_schedules (id, pincer_user_id, name, cron_expr, action, enabled) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (new_id(), *row),
         )
     conn.commit()

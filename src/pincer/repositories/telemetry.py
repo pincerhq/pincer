@@ -59,8 +59,8 @@ ACCUMULATING = frozenset(
 LIVE_STATUSES = ("active", "connected")
 
 _STATUS_ASSIGNMENT = (
-    "status=CASE WHEN COALESCE(telephony_calls.status,'') IN ('', {live}) "
-    "THEN excluded.status ELSE telephony_calls.status END"
+    "status=CASE WHEN COALESCE(pincer_telephony_calls.status,'') IN ('', {live}) "
+    "THEN excluded.status ELSE pincer_telephony_calls.status END"
 ).format(live=", ".join(f"'{status}'" for status in LIVE_STATUSES))
 
 #: Span columns a re-write may change. A span is written once when it closes,
@@ -102,17 +102,17 @@ SPAN_COLUMNS = (
 
 #: The model tables these statements write, for their column types.
 _TABLES: dict[str, Any] = {
-    "telephony_calls": TelephonyCall.__table__,  # type: ignore[attr-defined]
-    "telephony_events": TelephonyEvent.__table__,  # type: ignore[attr-defined]
-    "telephony_spans": TelephonySpan.__table__,  # type: ignore[attr-defined]
-    "telephony_turns": TelephonyTurn.__table__,  # type: ignore[attr-defined]
+    "pincer_telephony_calls": TelephonyCall.__table__,  # type: ignore[attr-defined]
+    "pincer_telephony_events": TelephonyEvent.__table__,  # type: ignore[attr-defined]
+    "pincer_telephony_spans": TelephonySpan.__table__,  # type: ignore[attr-defined]
+    "pincer_telephony_turns": TelephonyTurn.__table__,  # type: ignore[attr-defined]
 }
 
 
 def _call_assignment(column: str) -> str:
     """The `DO UPDATE SET` clause for one column of the call row."""
     if column in ACCUMULATING:
-        return f"{column}=telephony_calls.{column}+excluded.{column}"
+        return f"{column}=pincer_telephony_calls.{column}+excluded.{column}"
     if column == "status":
         # COALESCE covers the row `dial_requested()` can create before anything
         # has set a status at all: NULL is not terminal, it is "not yet known".
@@ -145,11 +145,11 @@ class TelemetryStatements:
 
     def events(self) -> Executable:
         """Append to the timeline. A repeated event id is ignored, not an error."""
-        return self._statement("telephony_events", EVENT_COLUMNS, "event_id", None)
+        return self._statement("pincer_telephony_events", EVENT_COLUMNS, "event_id", None)
 
     def spans(self) -> Executable:
         return self._statement(
-            "telephony_spans",
+            "pincer_telephony_spans",
             SPAN_COLUMNS,
             "span_id",
             ", ".join(f"{column}=excluded.{column}" for column in _SPAN_UPDATES),
@@ -163,7 +163,7 @@ class TelemetryStatements:
         """
         columns = ("call_id", *known)
         return self._statement(
-            "telephony_calls",
+            "pincer_telephony_calls",
             columns,
             "call_id",
             ", ".join(_call_assignment(column) for column in known),
@@ -177,7 +177,7 @@ class TelemetryStatements:
         """
         columns = ("turn_id", *known)
         return self._statement(
-            "telephony_turns",
+            "pincer_telephony_turns",
             columns,
             "turn_id",
             ", ".join(f"{column}=excluded.{column}" for column in known),

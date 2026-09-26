@@ -363,7 +363,7 @@ async def _seed_call(db_path: str, call_sid: str, started_at: datetime, directio
     async with aiosqlite.connect(db_path) as db:
         await ensure_voice_tables(db)
         await db.execute(
-            f"INSERT OR REPLACE INTO voice_calls (id, call_sid, direction, started_at, ended_at) "
+            f"INSERT OR REPLACE INTO pincer_voice_calls (id, call_sid, direction, started_at, ended_at) "
             f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?)",
             (call_sid, direction, started_at.isoformat(), (started_at + timedelta(minutes=1)).isoformat()),
         )

@@ -140,16 +140,17 @@ def _migration_lock(db_path: Path) -> Iterator[None]:
 
     Two processes upgrading the same SQLite file at once do not merely contend:
     SQLite has no transactional DDL, so the loser is not rolled back. Both read
-    `alembic_version`, both run the same `CREATE TABLE`, and one dies with
-    "table already exists" — having left the version stamped at a revision
-    whose DDL was only half applied, which the next start will not re-run. The
-    prod compose file starts `pincer` and `pincer-tasks` against one volume, so
-    a first deploy hits exactly this.
+    `pincer_alembic_version`, both run the same `CREATE TABLE`, and one dies
+    with "table already exists" — having left the version stamped at a
+    revision whose DDL was only half applied, which the next start will not
+    re-run. The prod compose file starts `pincer` and `pincer-tasks` against
+    one volume, so a first deploy hits exactly this.
 
     A lock file next to the database serialises them. It is advisory and local
     to one host, which matches SQLite. Postgres needs none: its DDL *is*
-    transactional, so a concurrent upgrade either waits on the `alembic_version`
-    row or rolls back whole. Nor does a database with no file to share — an
+    transactional, so a concurrent upgrade either waits on the
+    `pincer_alembic_version` row or rolls back whole. Nor does a database with
+    no file to share — an
     in-memory one is private to the process that opened it.
     """
     database = _database_file(get_sync_url(db_path))

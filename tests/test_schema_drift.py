@@ -18,6 +18,7 @@ from alembic.migration import MigrationContext
 from pincer.db import build_config
 from pincer.db.metadata import (
     HAND_WRITTEN_TABLES,
+    VERSION_TABLE,
     compare_type,
     drop_sqlite_noise,
     include_object,
@@ -25,7 +26,12 @@ from pincer.db.metadata import (
     metadata,
 )
 
-_OPTS = {"include_object": include_object, "compare_type": compare_type, "compare_server_default": False}
+_OPTS = {
+    "include_object": include_object,
+    "compare_type": compare_type,
+    "compare_server_default": False,
+    "version_table": VERSION_TABLE,
+}
 
 
 def _migrate_to_head(url: str, tmp_path: Path) -> sa.Engine:
@@ -80,6 +86,6 @@ def test_every_live_table_has_a_model(migration_url, tmp_path):
     finally:
         engine.dispose()
     unmodelled = {t for t in tables if t not in metadata.tables and include_object(None, t, "table", True, None)}
-    assert unmodelled == {"alembic_version"}
+    assert unmodelled == {VERSION_TABLE}
     # And the hand-written list names nothing that has since gained a model.
     assert not HAND_WRITTEN_TABLES & set(metadata.tables)

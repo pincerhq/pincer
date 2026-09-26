@@ -46,7 +46,7 @@ async def _mark_fired(scheduler: CronScheduler, schedule_id: int) -> None:
     """Simulate a one-off schedule having already fired (sets last_run_at)."""
     async with aiosqlite.connect(scheduler._db_path) as db:
         await db.execute(
-            "UPDATE schedules SET last_run_at = ? WHERE id = ?",
+            "UPDATE pincer_schedules SET last_run_at = ? WHERE id = ?",
             (datetime.now(UTC).isoformat(), schedule_id),
         )
         await db.commit()
@@ -87,11 +87,11 @@ class TestSchedulesApi:
         async with aiosqlite.connect(scheduler._db_path) as db:
             now = datetime.now(UTC)
             await db.execute(
-                "UPDATE schedules SET next_run_at = ? WHERE id = ?",
+                "UPDATE pincer_schedules SET next_run_at = ? WHERE id = ?",
                 ((now + timedelta(days=5)).isoformat(), sid_later),
             )
             await db.execute(
-                "UPDATE schedules SET next_run_at = ? WHERE id = ?",
+                "UPDATE pincer_schedules SET next_run_at = ? WHERE id = ?",
                 ((now + timedelta(hours=1)).isoformat(), sid_sooner),
             )
             await db.commit()
@@ -121,11 +121,11 @@ class TestSchedulesApi:
         async with aiosqlite.connect(scheduler._db_path) as db:
             now = datetime.now(UTC)
             await db.execute(
-                "UPDATE schedules SET last_run_at = ? WHERE id = ?",
+                "UPDATE pincer_schedules SET last_run_at = ? WHERE id = ?",
                 ((now - timedelta(days=5)).isoformat(), sid_older),
             )
             await db.execute(
-                "UPDATE schedules SET last_run_at = ? WHERE id = ?",
+                "UPDATE pincer_schedules SET last_run_at = ? WHERE id = ?",
                 ((now - timedelta(hours=1)).isoformat(), sid_newer),
             )
             await db.commit()

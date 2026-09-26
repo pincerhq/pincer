@@ -412,7 +412,7 @@ async def test_out_of_order_events_are_ordered_at_read_time(telemetry):
     async with get_engine(get_database_url(Path(str(telemetry)))).connect() as db:
         await db.execute(
             sa.text(
-                "INSERT INTO telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
+                "INSERT INTO pincer_telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
                 "VALUES (:event_id, :call_id, :name, :ts_utc, :mono_ns, :seq)"
             ),
             {

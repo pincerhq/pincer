@@ -176,7 +176,7 @@ State these plainly rather than letting a customer discover them:
 | Right | How it is served |
 |---|---|
 | Access (Art. 15) | Transcripts and metadata are SQLite rows keyed by call SID and phone number; exportable with any SQLite client |
-| Erasure (Art. 17) | `DELETE FROM call_transcripts WHERE call_id = …` and the corresponding `voice_calls` / `call_actions` rows; deletions land in the audit log |
+| Erasure (Art. 17) | `DELETE FROM pincer_call_transcripts WHERE call_id = …` and the corresponding `pincer_voice_calls` / `pincer_call_actions` rows; deletions land in the audit log |
 | Objection (Art. 21) | `pincer voice dnc add <number>` — or the callee simply says so on the call, which adds them automatically |
 | Rectification (Art. 16) | Transcripts are a record of what was said and are not rewritten; corrections are appended as call actions |
 

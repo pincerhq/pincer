@@ -104,7 +104,7 @@ class TestCronScheduler:
 
         async with aiosqlite.connect(str(scheduler._db_path)) as db:
             await db.execute(
-                "UPDATE schedules SET next_run_at = ? WHERE id = ?",
+                "UPDATE pincer_schedules SET next_run_at = ? WHERE id = ?",
                 ((datetime.now(UTC) - timedelta(minutes=5)).isoformat(), sid),
             )
             await db.commit()
@@ -120,7 +120,7 @@ class TestCronScheduler:
 
         async with aiosqlite.connect(str(scheduler._db_path)) as db:
             await db.execute(
-                "UPDATE schedules SET next_run_at = ? WHERE id = ?",
+                "UPDATE pincer_schedules SET next_run_at = ? WHERE id = ?",
                 ((datetime.now(UTC) - timedelta(minutes=5)).isoformat(), sid),
             )
             await db.commit()

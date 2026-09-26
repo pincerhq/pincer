@@ -66,7 +66,7 @@ async def _seed_calls(settings, codes: list[str], hours_ago: float = 0.5) -> Non
         await ensure_voice_tables(db)
         for i, code in enumerate(codes):
             await db.execute(
-                f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
+                f"INSERT INTO pincer_voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
                 f"VALUES ({SEED_ID_SQL}, ?, 'outbound', ?, ?, ?)",
                 (f"CA{i}_{code}", started, ended, code),
             )
@@ -293,7 +293,7 @@ async def _seed_costs(settings, totals: list[float], hours_ago: float = 1.0) -> 
         await ensure_call_costs_table(db)
         for i, total in enumerate(totals):
             await db.execute(
-                "INSERT OR REPLACE INTO call_costs (call_sid, total_usd, recorded_at) VALUES (?, ?, ?)",
+                "INSERT OR REPLACE INTO pincer_call_costs (call_sid, total_usd, recorded_at) VALUES (?, ?, ?)",
                 (f"CA_cost_{hours_ago}_{i}", total, recorded),
             )
         await db.commit()

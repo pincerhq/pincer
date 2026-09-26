@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.db.session import session_scope
 from pincer.models.telephony import TelephonyCall, TelephonyEvent, TelephonySpan, TelephonyTurn
-from pincer.models.voice import CallAction, InboundMessage, OutboundCallLog, VoiceCall
+from pincer.models.voice import CallAction, CallAnalytics, InboundMessage, OutboundCallLog, VoiceCall
 from pincer.models.voice import CallTranscript as CallTranscriptModel
 from pincer.repositories.base import repository_for
 from pincer.repositories.voice import AnalyticsRepository
@@ -55,7 +55,7 @@ class RetentionService(DatabaseService):
             redacted = await AnalyticsRepository(session).redact_rationales_older_than(cutoff)
             deleted = await _delete_older(session, VOICE_TABLES, cutoff)
         if redacted:
-            deleted["call_analytics.sentiment_rationale"] = redacted
+            deleted[f"{CallAnalytics.__tablename__}.sentiment_rationale"] = redacted
         return deleted
 
     async def purge_telemetry(self, cutoff: str) -> dict[str, int]:

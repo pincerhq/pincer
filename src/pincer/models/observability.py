@@ -9,7 +9,7 @@ from pincer.db.types import IsoText, Real, Uuid7
 
 
 class AppointmentOutcome(SQLModel, table=True):
-    __tablename__ = "appointment_outcomes"
+    __tablename__ = "pincer_appointment_outcomes"
     __table_args__ = (
         Index("idx_appointment_outcomes_recorded", "recorded_at"),
         Index("idx_appointment_outcomes_task", "task_id", unique=True),
@@ -26,7 +26,7 @@ class AppointmentOutcome(SQLModel, table=True):
 
 
 class CallCost(SQLModel, table=True):
-    __tablename__ = "call_costs"
+    __tablename__ = "pincer_call_costs"
     __table_args__ = (Index("idx_call_costs_recorded", "recorded_at"),)
 
     call_sid: str = Field(sa_column=Column(Text(), primary_key=True))
@@ -47,7 +47,7 @@ class CallCost(SQLModel, table=True):
 
 
 class CanaryRun(SQLModel, table=True):
-    __tablename__ = "canary_runs"
+    __tablename__ = "pincer_canary_runs"
     __table_args__ = (Index("idx_canary_runs_ran_at", "ran_at"),)
 
     id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))

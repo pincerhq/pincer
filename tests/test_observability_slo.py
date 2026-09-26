@@ -48,7 +48,7 @@ async def _seed_calls(settings, codes: list[str], *, delivered_after_s: float | 
                 (ended + timedelta(seconds=delivered_after_s)).isoformat() if delivered_after_s is not None else None
             )
             await db.execute(
-                f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code, "
+                f"INSERT INTO pincer_voice_calls (id, call_sid, direction, started_at, ended_at, failure_code, "
                 f"report_delivered_at) VALUES ({SEED_ID_SQL}, ?, 'outbound', ?, ?, ?, ?)",
                 (f"CA{i}_{code}", started.isoformat(), ended.isoformat(), code, delivered),
             )
@@ -71,7 +71,7 @@ async def _seed_canary(settings, results: list[bool]) -> None:
         await ensure_schema_for_connection(db)
         for i, ok in enumerate(results):
             await db.execute(
-                f"INSERT INTO canary_runs (id, ran_at, ok, skipped) VALUES ({SEED_ID_SQL}, ?, ?, 0)",
+                f"INSERT INTO pincer_canary_runs (id, ran_at, ok, skipped) VALUES ({SEED_ID_SQL}, ?, ?, 0)",
                 ((datetime.now(UTC) - timedelta(hours=i)).isoformat(), int(ok)),
             )
         await db.commit()

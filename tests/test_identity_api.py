@@ -83,7 +83,7 @@ class TestIdentityApi:
         uid = await resolver.resolve(ChannelType.TELEGRAM, 77777)
         async with aiosqlite.connect(resolver._db_path) as db:
             await db.execute(
-                "UPDATE identity_profiles SET timezone = ? WHERE pincer_user_id = ?", ("Europe/Berlin", uid)
+                "UPDATE pincer_identity_profiles SET timezone = ? WHERE pincer_user_id = ?", ("Europe/Berlin", uid)
             )
             await db.commit()
 
@@ -99,7 +99,7 @@ class TestIdentityApi:
         uid = await resolver.resolve(ChannelType.TELEGRAM, 88888)
         async with aiosqlite.connect(resolver._db_path) as db:
             await db.execute(
-                "UPDATE identity_profiles SET timezone = ? WHERE pincer_user_id = ?", ("Europe/Berlin", uid)
+                "UPDATE pincer_identity_profiles SET timezone = ? WHERE pincer_user_id = ?", ("Europe/Berlin", uid)
             )
             await db.commit()
 
@@ -113,7 +113,7 @@ class TestIdentityApi:
         uid = await resolver.resolve(ChannelType.TELEGRAM, 79797)
         async with aiosqlite.connect(resolver._db_path) as db:
             await db.execute(
-                "UPDATE identity_profiles SET email = ? WHERE pincer_user_id = ?", ("jane@example.com", uid)
+                "UPDATE pincer_identity_profiles SET email = ? WHERE pincer_user_id = ?", ("jane@example.com", uid)
             )
             await db.commit()
 
@@ -129,7 +129,7 @@ class TestIdentityApi:
         uid = await resolver.resolve(ChannelType.TELEGRAM, 89898)
         async with aiosqlite.connect(resolver._db_path) as db:
             await db.execute(
-                "UPDATE identity_profiles SET email = ? WHERE pincer_user_id = ?", ("jane@example.com", uid)
+                "UPDATE pincer_identity_profiles SET email = ? WHERE pincer_user_id = ?", ("jane@example.com", uid)
             )
             await db.commit()
 

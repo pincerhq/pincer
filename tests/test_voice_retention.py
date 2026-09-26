@@ -25,16 +25,17 @@ async def _seed(db_path) -> None:
     async with aiosqlite.connect(str(db_path)) as db:
         await ensure_voice_tables(db)
         await db.execute(
-            f"INSERT INTO voice_calls (id, call_sid, started_at) VALUES ({SEED_ID_SQL}, ?, ?), ({SEED_ID_SQL}, ?, ?)",
+            f"INSERT INTO pincer_voice_calls (id, call_sid, started_at) "
+            f"VALUES ({SEED_ID_SQL}, ?, ?), ({SEED_ID_SQL}, ?, ?)",
             ("CA_old", _iso(100), "CA_new", _iso(1)),
         )
         await db.execute(
-            f"INSERT INTO call_transcripts (id, call_id, speaker, text, timestamp) "
+            f"INSERT INTO pincer_call_transcripts (id, call_id, speaker, text, timestamp) "
             f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?), ({SEED_ID_SQL}, ?, ?, ?, ?)",
             ("CA_old", "caller", "old utterance", _iso(100), "CA_new", "caller", "new utterance", _iso(1)),
         )
         await db.execute(
-            f"INSERT INTO call_actions (id, call_id, action_type, timestamp) "
+            f"INSERT INTO pincer_call_actions (id, call_id, action_type, timestamp) "
             f"VALUES ({SEED_ID_SQL}, ?, ?, ?), ({SEED_ID_SQL}, ?, ?, ?)",
             ("CA_old", "tool_call", _iso(100), "CA_new", "tool_call", _iso(1)),
         )
@@ -51,8 +52,12 @@ async def test_purge_deletes_only_expired_rows(voice_db):
 
     deleted = await purge_expired_voice_data(voice_db, retention_days=90)
 
-    assert deleted == {"voice_calls": 1, "call_transcripts": 1, "call_actions": 1}
-    remaining_keys = (("voice_calls", "call_sid"), ("call_transcripts", "call_id"), ("call_actions", "call_id"))
+    assert deleted == {"pincer_voice_calls": 1, "pincer_call_transcripts": 1, "pincer_call_actions": 1}
+    remaining_keys = (
+        ("pincer_voice_calls", "call_sid"),
+        ("pincer_call_transcripts", "call_id"),
+        ("pincer_call_actions", "call_id"),
+    )
     async with aiosqlite.connect(str(voice_db)) as db:
         for table, key_col in remaining_keys:
             rows = await db.execute_fetchall(f"SELECT {key_col} FROM {table}")  # noqa: S608
@@ -66,7 +71,7 @@ async def test_purge_zero_retention_is_noop(voice_db):
 
     assert deleted == {}
     async with aiosqlite.connect(str(voice_db)) as db:
-        rows = await db.execute_fetchall("SELECT COUNT(*) FROM call_transcripts")
+        rows = await db.execute_fetchall("SELECT COUNT(*) FROM pincer_call_transcripts")
         assert rows[0][0] == 2
 
 
@@ -97,11 +102,11 @@ async def test_run_retention_purge_writes_audit_entry(voice_db, tmp_path, monkey
 
         async with aiosqlite.connect(str(tmp_path / "audit.db")) as db:
             rows = await db.execute_fetchall(
-                "SELECT user_id, output_summary FROM audit_logs WHERE action = 'retention_purge'"
+                "SELECT user_id, output_summary FROM pincer_audit_logs WHERE action = 'retention_purge'"
             )
         assert len(rows) == 1
         assert rows[0][0] == "system"
-        assert "call_transcripts: 1 row(s)" in rows[0][1]
+        assert "pincer_call_transcripts: 1 row(s)" in rows[0][1]
     finally:
         await audit.shutdown()
 
@@ -123,7 +128,7 @@ async def test_run_retention_purge_no_deletions_no_audit(voice_db, tmp_path, mon
         assert deleted == {}
         await audit._flush_pending()
         async with aiosqlite.connect(str(tmp_path / "audit.db")) as db:
-            rows = await db.execute_fetchall("SELECT COUNT(*) FROM audit_logs")
+            rows = await db.execute_fetchall("SELECT COUNT(*) FROM pincer_audit_logs")
         assert rows[0][0] == 0
     finally:
         await audit.shutdown()
@@ -151,17 +156,17 @@ async def test_outbound_call_log_is_purged(tmp_path):
     async with aiosqlite.connect(db_path) as db:
         await ensure_outbound_tables(db)
         await db.executemany(
-            f"INSERT INTO outbound_call_logs (id, phone_number, user_id, placed_at, local_day) "
+            f"INSERT INTO pincer_outbound_call_logs (id, phone_number, user_id, placed_at, local_day) "
             f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?)",
             [("+4915112345678", "u1", old, "2026-01-01"), ("+4915112345678", "u1", recent, "2026-08-20")],
         )
         await db.commit()
 
     deleted = await purge_expired_voice_data(db_path, retention_days=90)
-    assert deleted.get("outbound_call_logs") == 1
+    assert deleted.get("pincer_outbound_call_logs") == 1
 
     async with aiosqlite.connect(db_path) as db:
-        rows = await db.execute_fetchall("SELECT placed_at FROM outbound_call_logs")
+        rows = await db.execute_fetchall("SELECT placed_at FROM pincer_outbound_call_logs")
     assert [r[0] for r in rows] == [recent]
 
 
@@ -202,7 +207,7 @@ async def test_call_actions_migration_adds_policy_columns(tmp_path):
         await db.commit()
         await ensure_voice_tables(db)
         await ensure_voice_tables(db)  # idempotent
-        cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(call_actions)")}
+        cols = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(pincer_call_actions)")}
         assert {"tier", "approval_mode", "deny_reason"} <= cols
 
         transcript = TranscriptLogger("CA_mig")
@@ -214,6 +219,7 @@ async def test_call_actions_migration_adds_policy_columns(tmp_path):
 
         await transcript.save_to_db(await CallsService.for_path(db_path))
         rows = await db.execute_fetchall(
-            "SELECT action_type, tier, approval_mode, deny_reason FROM call_actions WHERE call_id='CA_mig' ORDER BY id"
+            "SELECT action_type, tier, approval_mode, deny_reason FROM pincer_call_actions "
+            "WHERE call_id='CA_mig' ORDER BY id"
         )
         assert [tuple(r) for r in rows] == [("tool_execute", "W", "off", ""), ("tool_denied", "X", "", "tier_x")]

@@ -78,9 +78,9 @@ async def test_memory_note_tags_the_call(settings):
 async def test_contact_lookup_reads_phone_contacts(settings, tmp_path):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(settings.db_path) as db:
-        await db.execute("CREATE TABLE phone_contacts (name TEXT, phone_number TEXT, category TEXT, notes TEXT)")
+        await db.execute("CREATE TABLE pincer_phone_contacts (name TEXT, phone_number TEXT, category TEXT, notes TEXT)")
         await db.execute(
-            "INSERT INTO phone_contacts (name, phone_number, category, notes) "
+            "INSERT INTO pincer_phone_contacts (name, phone_number, category, notes) "
             "VALUES ('Dr. Müller', '+4930123', 'doctor', 'secret notes')"
         )
         await db.commit()

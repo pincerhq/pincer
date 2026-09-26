@@ -9,7 +9,7 @@ from pincer.db.types import Real, Uuid7
 
 
 class AuditLog(SQLModel, table=True):
-    __tablename__ = "audit_logs"
+    __tablename__ = "pincer_audit_logs"
     __table_args__ = (
         Index("idx_audit_action", "action"),
         Index("idx_audit_timestamp", "timestamp"),

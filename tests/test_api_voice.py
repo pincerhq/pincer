@@ -47,8 +47,8 @@ async def _seed_db(db_path):
             ("CA003", "outbound", 10, False),
         ]:
             await db.execute(
-                "INSERT INTO voice_calls (id, call_sid, direction, from_number, to_number, started_at, ended_at) "
-                f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO pincer_voice_calls (id, call_sid, direction, from_number, to_number, started_at, "
+                f"ended_at) VALUES ({SEED_ID_SQL}, ?, ?, ?, ?, ?, ?)",
                 (
                     sid,
                     direction,
@@ -59,17 +59,17 @@ async def _seed_db(db_path):
                 ),
             )
         await db.execute(
-            "INSERT INTO call_transcripts (id, call_id, speaker, text, confidence, is_final, state, timestamp) "
+            "INSERT INTO pincer_call_transcripts (id, call_id, speaker, text, confidence, is_final, state, timestamp) "
             f"VALUES ({SEED_ID_SQL}, 'CA001', 'caller', 'My SSN is 123-45-6789 thanks', 0.9, 1, 'conversing', ?)",
             (started.isoformat(),),
         )
         await db.execute(
-            "INSERT INTO call_transcripts (id, call_id, speaker, text, confidence, is_final, state, timestamp) "
+            "INSERT INTO pincer_call_transcripts (id, call_id, speaker, text, confidence, is_final, state, timestamp) "
             f"VALUES ({SEED_ID_SQL}, 'CA001', 'agent', 'partial utterance', 1.0, 0, 'conversing', ?)",
             ((started + timedelta(seconds=5)).isoformat(),),
         )
         await db.execute(
-            "INSERT INTO call_actions (id, call_id, action_type, tool_name, input_summary, output_summary, "
+            "INSERT INTO pincer_call_actions (id, call_id, action_type, tool_name, input_summary, output_summary, "
             f"user_confirmed, timestamp) VALUES ({SEED_ID_SQL}, 'CA001', 'tool_call', 'get_weather', 'Berlin', "
             "'Sunny', 1, ?)",
             ((started + timedelta(seconds=10)).isoformat(),),
@@ -245,7 +245,7 @@ async def test_contacts(client, tmp_path):
 
     async with aiosqlite.connect(tmp_path / "pincer.db") as db:
         await db.execute(
-            f"INSERT INTO phone_contacts (id, name, phone_number, category, notes) "
+            f"INSERT INTO pincer_phone_contacts (id, name, phone_number, category, notes) "
             f"VALUES ({SEED_ID_SQL}, 'Zoe', '+15550009999', 'personal', ''), "
             f"({SEED_ID_SQL}, 'Dr. Ada', '+15550008888', 'doctor', 'dentist')"
         )
@@ -451,7 +451,7 @@ async def threads_api(client, tmp_path):
     await manager.attach("CA_gone", thread.thread_id, th.KIND_FOLLOWUP)  # no voice_calls row = purged
     async with aiosqlite.connect(str(tmp_path / "pincer.db")) as db:
         await db.execute(
-            "UPDATE call_threads SET rolling_summary = ?, open_commitments = ? WHERE thread_id = ?",
+            "UPDATE pincer_call_threads SET rolling_summary = ?, open_commitments = ? WHERE thread_id = ?",
             (
                 "Dienstag angerufen.\nStand: wartet auf Rückruf.",
                 '[{"who":"callee","what":"ruft am Freitag zurück","due":null,'
@@ -565,6 +565,11 @@ async def test_calls_survive_a_pre_sprint13_database(client, tmp_path):
     db_path = tmp_path / "pincer.db"
     async with aiosqlite.connect(db_path) as db:
         await db.execute(
+            # Unprefixed on purpose: this simulates a table Alembic has never
+            # touched, which it only recognizes as its own under the
+            # pre-`0019` name. `ensure_schema_current` below (triggered by the
+            # app's own startup) reconciles it into `pincer_voice_calls` the
+            # same way it backfills any other legacy shape.
             "CREATE TABLE voice_calls ("
             "id INTEGER PRIMARY KEY AUTOINCREMENT, call_sid TEXT NOT NULL UNIQUE, "
             "direction TEXT NOT NULL DEFAULT 'inbound', from_number TEXT DEFAULT '', "
@@ -620,7 +625,7 @@ async def test_expired_commitment_filter(threads_api):
     expired_id = client.post("/api/voice/threads", json={"subject": "Überfällig"}).json()["thread_id"]
     async with aiosqlite.connect(str(threads_api.manager.db_path)) as db:
         await db.execute(
-            "UPDATE call_threads SET open_commitments = ? WHERE thread_id = ?",
+            "UPDATE pincer_call_threads SET open_commitments = ? WHERE thread_id = ?",
             (
                 '[{"who":"callee","what":"schickt die Unterlagen","due":"2026-01-01T10:00:00+00:00",'
                 '"status":"expired","source_call_sid":"CA002"}]',

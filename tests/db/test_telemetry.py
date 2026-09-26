@@ -101,7 +101,7 @@ async def test_counters_accumulate_across_independent_writes(url):
     await service.upsert_call(CALL, {"turn_count": 1})
     await service.upsert_call(CALL, {"turn_count": 1, "error_count": 2})
 
-    row = await _row(url, "telephony_calls", "call_id", CALL)
+    row = await _row(url, "pincer_telephony_calls", "call_id", CALL)
     assert row["turn_count"] == 3
     assert row["error_count"] == 3
     assert row["registered_at"] == EARLIER  # written once, not re-stamped
@@ -112,7 +112,7 @@ async def test_everything_else_takes_the_incoming_value(url):
     await service.upsert_call(CALL, {"engine": "media_streams", "language": "de"})
     await service.upsert_call(CALL, {"language": "en"})
 
-    row = await _row(url, "telephony_calls", "call_id", CALL)
+    row = await _row(url, "pincer_telephony_calls", "call_id", CALL)
     assert (row["engine"], row["language"]) == ("media_streams", "en")
 
 
@@ -124,7 +124,7 @@ async def test_a_terminal_status_absorbs_later_writes(url):
     await service.upsert_call(CALL, {"status": "completed"})
     await service.upsert_call(CALL, {"status": "active"})  # the late callback
 
-    assert (await _row(url, "telephony_calls", "call_id", CALL))["status"] == "completed"
+    assert (await _row(url, "pincer_telephony_calls", "call_id", CALL))["status"] == "completed"
 
 
 async def test_a_row_with_no_status_yet_accepts_one(url):
@@ -132,7 +132,7 @@ async def test_a_row_with_no_status_yet_accepts_one(url):
     service = TelemetryService(url)
     await service.upsert_call(CALL, {"registered_at": EARLIER})
     await service.upsert_call(CALL, {"status": "active"})
-    assert (await _row(url, "telephony_calls", "call_id", CALL))["status"] == "active"
+    assert (await _row(url, "pincer_telephony_calls", "call_id", CALL))["status"] == "active"
 
 
 async def test_nothing_known_writes_nothing(url):
@@ -140,7 +140,7 @@ async def test_nothing_known_writes_nothing(url):
     await service.upsert_call(CALL, {})
     engine = get_engine(url)
     async with engine.connect() as conn:
-        count = (await conn.execute(sa.text("SELECT COUNT(*) FROM telephony_calls"))).scalar_one()
+        count = (await conn.execute(sa.text("SELECT COUNT(*) FROM pincer_telephony_calls"))).scalar_one()
     assert count == 0
 
 
@@ -156,7 +156,7 @@ async def test_a_turn_is_written_once_however_often_it_is_reported(url):
         TURN, {"call_id": CALL, "turn_no": 1, "cancelled": 0, "total_ms": 900.0, "created_at": EARLIER}
     )
 
-    row = await _row(url, "telephony_turns", "turn_id", TURN)
+    row = await _row(url, "pincer_telephony_turns", "turn_id", TURN)
     assert (row["cancelled"], row["total_ms"]) == (0, 900.0)
 
 
@@ -178,7 +178,7 @@ async def test_a_repeated_event_is_ignored_not_duplicated(url):
     await service.write_records([event], [])
     await service.write_records([{**event, "name": "changed"}], [])
 
-    row = await _row(url, "telephony_events", "event_id", "e1")
+    row = await _row(url, "pincer_telephony_events", "event_id", "e1")
     assert row["name"] == "call.registered"  # the first write stands
 
 
@@ -207,7 +207,7 @@ async def test_a_span_rewrite_updates_its_close(url):
         [{**span, "start_utc": LATER, "start_mono_ns": 99, "end_utc": LATER, "duration_ms": 12.5, "status": "error"}],
     )
 
-    row = await _row(url, "telephony_spans", "span_id", "s1")
+    row = await _row(url, "pincer_telephony_spans", "span_id", "s1")
     assert (row["duration_ms"], row["status"]) == (12.5, "error")
     # A span that reset its start would misreport its duration and its place
     # on the critical path.
@@ -228,8 +228,8 @@ async def test_a_real_monotonic_clock_reading_fits(url):
         [{**_SPAN, "span_id": "s1", "start_mono_ns": mono, "end_mono_ns": mono + 1}],
     )
 
-    assert (await _row(url, "telephony_events", "event_id", "e1"))["mono_ns"] == mono
-    assert (await _row(url, "telephony_spans", "span_id", "s1"))["end_mono_ns"] == mono + 1
+    assert (await _row(url, "pincer_telephony_events", "event_id", "e1"))["mono_ns"] == mono
+    assert (await _row(url, "pincer_telephony_spans", "span_id", "s1"))["end_mono_ns"] == mono + 1
 
 
 async def test_a_windowed_read_and_its_timestamps_survive_the_round_trip(url):
@@ -271,7 +271,7 @@ async def test_events_and_spans_are_one_batch(url):
     )
     engine = get_engine(url)
     async with engine.connect() as conn:
-        count = (await conn.execute(sa.text("SELECT COUNT(*) FROM telephony_events"))).scalar_one()
+        count = (await conn.execute(sa.text("SELECT COUNT(*) FROM pincer_telephony_events"))).scalar_one()
     assert count == 3
 
 

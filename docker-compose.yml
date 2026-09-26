@@ -50,6 +50,28 @@ services:
       timeout: 5s
       retries: 5
 
+  postgres:
+    # pgvector's official image: stock Postgres with the `vector` extension
+    # preinstalled (still needs `CREATE EXTENSION vector` in the database).
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    profiles:
+      - http
+    environment:
+      POSTGRES_USER: ${PINCER_POSTGRES_USER:-pincer}
+      POSTGRES_PASSWORD: ${PINCER_POSTGRES_PASSWORD:-pincer}
+      POSTGRES_DB: ${PINCER_POSTGRES_DB:-pincer}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # Match the env above so a customised user/db is what gets probed.
+      test: ["CMD-SHELL", "pg_isready -U ${PINCER_POSTGRES_USER:-pincer} -d ${PINCER_POSTGRES_DB:-pincer}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Point Pincer at it from the http services with:
+    #   PINCER_DATABASE_URL=postgresql://pincer:pincer@postgres:5432/pincer
+
   newsapi-mcp:
     extends:
       file: ./src/pincer-mcps/docker-compose.yml
@@ -242,6 +264,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
       newsapi-mcp:
         condition: service_healthy
       openweathermap-mcp:
@@ -267,6 +291,7 @@ volumes:
   ms365-data:
   doctr-model-cache:
   redis-data:
+  postgres-data:
 
 networks:
   pincer-net:

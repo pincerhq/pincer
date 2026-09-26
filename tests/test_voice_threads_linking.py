@@ -255,7 +255,7 @@ async def _seed_summarised_thread(manager, number: str, subject: str) -> str:
     thread = await manager.create(subject, primary_number=number, language="de")
     async with __import__("aiosqlite").connect(manager.db_path) as db:
         await db.execute(
-            "UPDATE call_threads SET rolling_summary = ? WHERE thread_id = ?",
+            "UPDATE pincer_call_threads SET rolling_summary = ? WHERE thread_id = ?",
             ("Rechnung über 400 Euro offen.\nStand: wartet auf Rückruf.", thread.thread_id),
         )
         await db.commit()
@@ -383,7 +383,7 @@ async def test_stale_thread_outside_the_window_is_not_matched(settings, manager)
     thread = await manager.create("Alte Sache", primary_number="+4930999")
     async with __import__("aiosqlite").connect(manager.db_path) as db:
         await db.execute(
-            "UPDATE call_threads SET updated_at = ? WHERE thread_id = ?",
+            "UPDATE pincer_call_threads SET updated_at = ? WHERE thread_id = ?",
             ((datetime.now(UTC) - timedelta(days=30)).isoformat(), thread.thread_id),
         )
         await db.commit()
