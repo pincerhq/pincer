@@ -26,6 +26,11 @@ class CoreSettings(BaseModel):
         default=Path.home() / ".pincer",
         description="Data directory for database, logs, etc.",
     )
+    database_url: SecretStr | None = Field(
+        default=None,
+        description="SQLAlchemy URL for Pincer's database (sqlite or postgresql); "
+        "unset means the SQLite file under data_dir",
+    )
     skills_dir: Path = Field(
         default=Path.home() / ".pincer/skills",
         description="User-installed skills directory (SKILL.md subdirectories)",

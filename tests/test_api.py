@@ -119,9 +119,12 @@ def test_costs_by_tool(client):
 def test_status_channels_from_dotenv_only(tmp_path, monkeypatch):
     """Channel flags in /api/status must reflect .env, not just shell env."""
     from pincer.config import get_settings_relaxed
+    from pincer.config.main import _RelaxedSettings
 
     (tmp_path / ".env").write_text("PINCER_TELEGRAM_BOT_TOKEN=123456:TEST\nPINCER_DISCORD_BOT_TOKEN=discord-token\n")
     monkeypatch.chdir(tmp_path)
+    # Opt back in to dotenv reading, which conftest turns off for every test.
+    monkeypatch.setitem(_RelaxedSettings.model_config, "env_file", tmp_path / ".env")
     monkeypatch.delenv("PINCER_TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("PINCER_DISCORD_BOT_TOKEN", raising=False)
     monkeypatch.delenv("PINCER_WHATSAPP_ENABLED", raising=False)

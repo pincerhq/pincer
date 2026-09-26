@@ -43,6 +43,7 @@ OTHER = "+4915199999999"
 def settings(tmp_path) -> MagicMock:
     cfg = MagicMock()
     cfg.db_path = str(tmp_path / "pincer.db")
+    cfg.database_url = None
     cfg.voice_enabled = True
     cfg.voice_outbound_enabled = True
     cfg.voice_webhook_base_url = "https://voice.example.com"

@@ -100,8 +100,15 @@ def get_sync_url(db_path: Path) -> str:
     reads and writes through `pincer.repositories`, which is dialect-agnostic
     (`pincer.db.dialect` covers what differs). Postgres needs the `postgres`
     extra for its drivers — asyncpg at runtime, psycopg for the migrations.
+
+    Read through Settings, not os.environ, so a URL set only in `.env` is seen
+    by the very first call — `init_database` at startup — rather than after
+    something else has copied `.env` into the process environment.
     """
-    override = os.environ.get("PINCER_DATABASE_URL")
+    from pincer.config import get_settings_relaxed
+
+    configured = get_settings_relaxed().database_url
+    override = configured.get_secret_value() if configured else None
     if override:
         parsed = make_url(override)
         backend = parsed.get_backend_name()

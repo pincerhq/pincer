@@ -16,6 +16,7 @@ runner = CliRunner()
 def _settings_for(tmp_path, **overrides: object) -> MagicMock:  # type: ignore[no-untyped-def]
     settings = MagicMock()
     settings.db_path = tmp_path / "pincer.db"
+    settings.database_url = None
     settings.daily_budget_usd = 5.0
     for key, value in overrides.items():
         setattr(settings, key, value)

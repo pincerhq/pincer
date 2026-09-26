@@ -340,9 +340,12 @@ def test_dashboard_auth_token_pass_from_dotenv_only(tmp_path, monkeypatch):
     _check_dashboard_auth_token return PASS, not CRITICAL.
     """
     from pincer.config import get_settings_relaxed
+    from pincer.config.main import _RelaxedSettings
 
     (tmp_path / ".env").write_text("PINCER_DASHBOARD_TOKEN=a-secure-32-char-token-for-test\n")
     monkeypatch.chdir(tmp_path)
+    # Opt back in to dotenv reading, which conftest turns off for every test.
+    monkeypatch.setitem(_RelaxedSettings.model_config, "env_file", tmp_path / ".env")
     monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
 
     get_settings_relaxed.cache_clear()
@@ -357,11 +360,14 @@ def test_dashboard_auth_token_pass_from_dotenv_only(tmp_path, monkeypatch):
 def test_telegram_access_control_pass_from_dotenv_only(tmp_path, monkeypatch):
     """Telegram identity map configured only in .env must show as configured."""
     from pincer.config import get_settings_relaxed
+    from pincer.config.main import _RelaxedSettings
 
     (tmp_path / ".env").write_text(
         "PINCER_TELEGRAM_BOT_TOKEN=123456:TEST\nPINCER_IDENTITY_MAP=telegram:111=whatsapp:491111111111\n"
     )
     monkeypatch.chdir(tmp_path)
+    # Opt back in to dotenv reading, which conftest turns off for every test.
+    monkeypatch.setitem(_RelaxedSettings.model_config, "env_file", tmp_path / ".env")
     monkeypatch.delenv("PINCER_TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("PINCER_IDENTITY_MAP", raising=False)
 

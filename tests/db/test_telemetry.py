@@ -278,14 +278,14 @@ async def test_events_and_spans_are_one_batch(url):
 # ── the read paths, on both dialects ─────────────────────────────────
 
 
-async def test_the_windowed_read_paths_run_on_both_dialects(migrated_url, monkeypatch):
+async def test_the_windowed_read_paths_run_on_both_dialects(migrated_url, monkeypatch, set_database_url):
     """`queries` and `alerts` are the legacy `?`-parameterised SQL.
 
     Every one of them windows on a timestamp, and they had no coverage on
     Postgres at all — where an untyped ISO string at a `TIMESTAMP` column takes
     down the overview, the call table and every alert at once.
     """
-    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    set_database_url(migrated_url)
     service = TelemetryService(migrated_url)
     now = datetime.now(UTC).isoformat()
     await service.upsert_call(CALL, {"registered_at": now, "status": "completed", "direction": "inbound"})
@@ -306,7 +306,7 @@ async def test_the_windowed_read_paths_run_on_both_dialects(migrated_url, monkey
     assert [turn["turn_id"] for turn in await queries.slowest_turns(unused, filters)] == [TURN]
 
 
-async def test_a_call_is_found_by_either_of_its_two_names(migrated_url, monkeypatch):
+async def test_a_call_is_found_by_either_of_its_two_names(migrated_url, monkeypatch, set_database_url):
     """`get_call` takes an internal id OR a provider CallSid, and compares one
     value against a uuid column and a text column in the same clause.
 
@@ -315,7 +315,7 @@ async def test_a_call_is_found_by_either_of_its_two_names(migrated_url, monkeypa
     `operator does not exist`. This is the whole call-detail surface: the page,
     its timeline, its export, and `pincer telephony call`.
     """
-    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    set_database_url(migrated_url)
     service = TelemetryService(migrated_url)
     now = datetime.now(UTC).isoformat()
     await service.upsert_call(CALL, {"registered_at": now, "provider_call_id": "CA_provider", "status": "completed"})
@@ -340,10 +340,10 @@ async def test_a_call_is_found_by_either_of_its_two_names(migrated_url, monkeypa
     assert await queries.get_events(unused, "not-an-id-at-all") == []
 
 
-async def test_the_call_search_box_matches_an_id_as_text(migrated_url, monkeypatch):
+async def test_the_call_search_box_matches_an_id_as_text(migrated_url, monkeypatch, set_database_url):
     """The search box `LIKE`s across `call_id`, and Postgres has no
     `uuid LIKE text` — so the column is cast rather than the needle typed."""
-    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    set_database_url(migrated_url)
     service = TelemetryService(migrated_url)
     now = datetime.now(UTC).isoformat()
     await service.upsert_call(CALL, {"registered_at": now, "provider_call_id": "CA_provider"})
@@ -356,10 +356,10 @@ async def test_the_call_search_box_matches_an_id_as_text(migrated_url, monkeypat
     assert [row["call_id"] for row in by_sid["calls"]] == [CALL]
 
 
-async def test_the_call_search_box_ignores_case_on_both_dialects(migrated_url, monkeypatch):
+async def test_the_call_search_box_ignores_case_on_both_dialects(migrated_url, monkeypatch, set_database_url):
     """SQLite's LIKE ignores ASCII case and Postgres' does not, so one
     dialect used to find a call the other could not."""
-    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    set_database_url(migrated_url)
     service = TelemetryService(migrated_url)
     now = datetime.now(UTC).isoformat()
     await service.upsert_call(CALL, {"registered_at": now, "provider_call_id": "CA_Provider"})
@@ -370,9 +370,9 @@ async def test_the_call_search_box_ignores_case_on_both_dialects(migrated_url, m
         assert [row["call_id"] for row in found["calls"]] == [CALL], needle
 
 
-async def test_a_search_term_is_taken_literally(migrated_url, monkeypatch):
+async def test_a_search_term_is_taken_literally(migrated_url, monkeypatch, set_database_url):
     """`%` and `_` in the box are characters, not wildcards."""
-    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    set_database_url(migrated_url)
     service = TelemetryService(migrated_url)
     now = datetime.now(UTC).isoformat()
     await service.upsert_call(CALL, {"registered_at": now, "provider_call_id": "CAxprovider"})
@@ -383,11 +383,13 @@ async def test_a_search_term_is_taken_literally(migrated_url, monkeypatch):
         assert found["calls"] == [], needle
 
 
-async def test_a_filter_that_looks_like_a_timestamp_is_still_compared_as_text(migrated_url, monkeypatch):
+async def test_a_filter_that_looks_like_a_timestamp_is_still_compared_as_text(
+    migrated_url, monkeypatch, set_database_url
+):
     """Filters come straight from query parameters. Typing a value by its
     shape sent `status=2026-13-45T00:00` to `datetime.fromisoformat` — a 500 on
     Postgres only — and a well-formed one at a text column as a timestamp."""
-    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    set_database_url(migrated_url)
     service = TelemetryService(migrated_url)
     now = datetime.now(UTC).isoformat()
     await service.upsert_call(CALL, {"registered_at": now, "status": "completed"})
@@ -399,13 +401,13 @@ async def test_a_filter_that_looks_like_a_timestamp_is_still_compared_as_text(mi
         assert (await queries.overview(unused, filters)).calls["total"] == 0
 
 
-async def test_a_uuid_shaped_tenant_is_still_a_text_column(migrated_url, monkeypatch):
+async def test_a_uuid_shaped_tenant_is_still_a_text_column(migrated_url, monkeypatch, set_database_url):
     """`tenant_id` is text, and a deployment may well name tenants with uuids.
 
     Typing a parameter by its shape sent that one at a text column; the header
     is caller-supplied, so it was a 500 anyone could trigger.
     """
-    monkeypatch.setenv("PINCER_DATABASE_URL", migrated_url)
+    set_database_url(migrated_url)
     tenant = seeded_id("tenant-1")
     service = TelemetryService(migrated_url)
     now = datetime.now(UTC).isoformat()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 import subprocess
 import sys
@@ -12,6 +13,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.pool import NullPool
 
+from pincer.config import Settings
+from pincer.config.main import _RelaxedSettings
 from pincer.db.engine import (
     SQLITE_BUSY_TIMEOUT_MS,
     _asyncpg_connect_args,
@@ -36,16 +39,16 @@ def test_an_unsupported_backend_is_refused():
         to_async_url("mysql://u@h/db")
 
 
-def test_the_runtime_url_follows_the_migration_url(monkeypatch, tmp_path):
+def test_the_runtime_url_follows_the_migration_url(monkeypatch, tmp_path, set_database_url):
     monkeypatch.delenv("PINCER_DATABASE_URL", raising=False)
     assert get_database_url(tmp_path / "p.db") == f"sqlite+aiosqlite:///{tmp_path / 'p.db'}"
 
-    monkeypatch.setenv("PINCER_DATABASE_URL", "sqlite:////elsewhere/x.db")
+    set_database_url("sqlite:////elsewhere/x.db")
     assert get_database_url(tmp_path / "p.db") == "sqlite+aiosqlite:////elsewhere/x.db"
 
 
-def test_postgres_is_addressable_now_that_every_domain_uses_the_engine(monkeypatch, tmp_path):
-    monkeypatch.setenv("PINCER_DATABASE_URL", "postgresql://u:secret@h/db")
+def test_postgres_is_addressable_now_that_every_domain_uses_the_engine(monkeypatch, tmp_path, set_database_url):
+    set_database_url("postgresql://u:secret@h/db")
     assert get_database_url(tmp_path / "p.db") == "postgresql+asyncpg://u:secret@h/db"
     # Alembic runs synchronously, so migrations use the sync driver. The
     # password has to survive being re-rendered, or Alembic authenticates as
@@ -53,16 +56,44 @@ def test_postgres_is_addressable_now_that_every_domain_uses_the_engine(monkeypat
     assert get_sync_url(tmp_path / "p.db") == "postgresql+psycopg://u:secret@h/db"
 
 
-def test_an_unsupported_backend_in_the_configured_url_is_refused(monkeypatch, tmp_path):
-    monkeypatch.setenv("PINCER_DATABASE_URL", "mysql://u@h/db")
+def _use_dotenv(monkeypatch, dotenv: Path) -> None:
+    # Each Settings subclass carries its own model_config copy.
+    for cls in (Settings, _RelaxedSettings):
+        monkeypatch.setitem(cls.model_config, "env_file", dotenv)
+
+
+def test_a_url_set_only_in_dotenv_is_honoured(monkeypatch, tmp_path):
+    """`.env` used to reach the URL only through os.environ, which it joins when
+    the MCP config loads — after `init_database` had already migrated SQLite, so
+    the process then split between SQLite and an unmigrated Postgres."""
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("PINCER_DATABASE_URL=postgresql://u:secret@h/db\n")
+    monkeypatch.delenv("PINCER_DATABASE_URL", raising=False)
+    _use_dotenv(monkeypatch, dotenv)
+
+    assert get_sync_url(tmp_path / "p.db") == "postgresql+psycopg://u:secret@h/db"
+    assert "PINCER_DATABASE_URL" not in os.environ
+
+
+def test_the_environment_wins_over_dotenv(monkeypatch, tmp_path, set_database_url):
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("PINCER_DATABASE_URL=postgresql://u@from-dotenv/db\n")
+    _use_dotenv(monkeypatch, dotenv)
+    set_database_url("postgresql://u@from-env/db")
+
+    assert get_sync_url(tmp_path / "p.db") == "postgresql+psycopg://u@from-env/db"
+
+
+def test_an_unsupported_backend_in_the_configured_url_is_refused(monkeypatch, tmp_path, set_database_url):
+    set_database_url("mysql://u@h/db")
     with pytest.raises(RuntimeError, match="mysql"):
         get_sync_url(tmp_path / "p.db")
 
 
-def test_an_async_driver_in_the_configured_url_still_gives_alembic_a_sync_one(monkeypatch, tmp_path):
+def test_an_async_driver_in_the_configured_url_still_gives_alembic_a_sync_one(monkeypatch, tmp_path, set_database_url):
     """Alembic's `engine_from_config` is synchronous: an async driver reaches it
     as `MissingGreenlet` at startup, naming nothing that points back here."""
-    monkeypatch.setenv("PINCER_DATABASE_URL", "sqlite+aiosqlite:////tmp/x.db")
+    set_database_url("sqlite+aiosqlite:////tmp/x.db")
     assert get_sync_url(tmp_path / "p.db") == "sqlite+pysqlite:////tmp/x.db"
 
 
@@ -112,10 +143,10 @@ async def test_a_sslmode_url_opens_an_engine_that_reaches_the_socket():
     await dispose_engines()
 
 
-def test_the_migration_lock_sits_next_to_the_database_the_url_names(monkeypatch, tmp_path: Path):
+def test_the_migration_lock_sits_next_to_the_database_the_url_names(monkeypatch, tmp_path: Path, set_database_url):
     """Two processes whose settings differ but whose override names one file must share a lock."""
     shared = tmp_path / "shared" / "pincer.db"
-    monkeypatch.setenv("PINCER_DATABASE_URL", f"sqlite:///{shared}")
+    set_database_url(f"sqlite:///{shared}")
 
     init_database_path = tmp_path / "settings" / "pincer.db"
     asyncio.run(init_database(init_database_path))
@@ -229,13 +260,15 @@ def test_several_processes_can_migrate_one_fresh_database_at_once(tmp_path: Path
         assert conn.execute("SELECT COUNT(*) FROM alembic_version").fetchone()[0] == 1
 
 
-async def test_init_database_rejects_a_bad_postgres_url_at_boot_not_first_query(monkeypatch, tmp_path: Path):
+async def test_init_database_rejects_a_bad_postgres_url_at_boot_not_first_query(
+    monkeypatch, tmp_path: Path, set_database_url
+):
     """`init_database` runs once at startup; a URL asyncpg refuses should fail
     there, not surface as the first request's error. Alembic migrates through
     psycopg, which understands `channel_binding=require` even though asyncpg
     does not, so migration alone would report a clean start."""
     monkeypatch.setattr("pincer.db.engine.command.upgrade", lambda *a, **k: None)
-    monkeypatch.setenv("PINCER_DATABASE_URL", "postgresql://u@h/d?channel_binding=require")
+    set_database_url("postgresql://u@h/d?channel_binding=require")
 
     with pytest.raises(ValueError, match="channel_binding"):
         await init_database(tmp_path / "p.db")
@@ -248,7 +281,7 @@ async def test_init_database_migrates_the_configured_database_and_names_it(monke
     db_path = tmp_path / "configured.db"
 
     class _Settings:
-        pass
+        database_url = None
 
     settings = _Settings()
     settings.db_path = db_path

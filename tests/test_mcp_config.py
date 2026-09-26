@@ -264,6 +264,8 @@ def test_load_mcp_config_resolves_env_var_straight_from_dotenv(tmp_path: Path, m
     """
     monkeypatch.delenv("SOME_MCP_SERVER_TOKEN", raising=False)
     monkeypatch.chdir(tmp_path)
+    # conftest disables the dotenv loader for every test; this one is about it.
+    monkeypatch.setattr("pincer.mcp.config._DOTENV_CANDIDATES", (".env",))
     (tmp_path / ".env").write_text("SOME_MCP_SERVER_TOKEN=from-dotenv\n")
     toml_content = """
 [mcp]
