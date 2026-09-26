@@ -21,7 +21,6 @@ runner = CliRunner()
 def test_db_upgrade_applies_migrations(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     mock_settings = MagicMock()
     mock_settings.db_path = tmp_path / "pincer.db"
-    mock_settings.database_url = None
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
 
     calls: list[tuple[object, str]] = []
@@ -38,7 +37,6 @@ def test_db_upgrade_applies_migrations(monkeypatch: pytest.MonkeyPatch, tmp_path
 def test_db_current_shows_revision(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     mock_settings = MagicMock()
     mock_settings.db_path = tmp_path / "pincer.db"
-    mock_settings.database_url = None
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
 
     calls: list[tuple[object, bool]] = []
@@ -54,7 +52,6 @@ def test_db_current_shows_revision(monkeypatch: pytest.MonkeyPatch, tmp_path) ->
 def test_db_history_shows_log(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     mock_settings = MagicMock()
     mock_settings.db_path = tmp_path / "pincer.db"
-    mock_settings.database_url = None
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
 
     calls: list[tuple[object, bool]] = []
@@ -95,7 +92,6 @@ def test_schedule_list_migrates_a_fresh_database(monkeypatch: pytest.MonkeyPatch
 
     mock_settings = MagicMock()
     mock_settings.db_path = db_path
-    mock_settings.database_url = None
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
 
     result = runner.invoke(app, ["schedule", "list"])
@@ -110,7 +106,6 @@ def test_schedule_list_empty(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
 
     mock_settings = MagicMock()
     mock_settings.db_path = db_path
-    mock_settings.database_url = None
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
 
     result = runner.invoke(app, ["schedule", "list"])
@@ -126,7 +121,6 @@ def test_schedule_list_reports_an_unreadable_database(monkeypatch: pytest.Monkey
 
     mock_settings = MagicMock()
     mock_settings.db_path = db_path
-    mock_settings.database_url = None
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
     monkeypatch.setattr(
         "pincer.services.scheduler.ScheduleService.list_all",
@@ -150,7 +144,6 @@ def test_schedule_list_shows_rows(monkeypatch: pytest.MonkeyPatch, tmp_path) -> 
 
     mock_settings = MagicMock()
     mock_settings.db_path = db_path
-    mock_settings.database_url = None
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
 
     result = runner.invoke(app, ["schedule", "list"])
@@ -229,7 +222,6 @@ def test_mcp_server_config_prints_client_json(monkeypatch: pytest.MonkeyPatch) -
 def test_audit_default_shows_no_entries(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     mock_settings = MagicMock()
     mock_settings.db_path = tmp_path / "pincer.db"
-    mock_settings.database_url = None
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
 
     mock_logger = MagicMock()
@@ -248,7 +240,6 @@ def test_audit_default_shows_no_entries(monkeypatch: pytest.MonkeyPatch, tmp_pat
 def test_audit_shows_table_with_entries(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     mock_settings = MagicMock()
     mock_settings.db_path = tmp_path / "pincer.db"
-    mock_settings.database_url = None
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
 
     mock_logger = MagicMock()
@@ -279,7 +270,6 @@ def test_audit_shows_table_with_entries(monkeypatch: pytest.MonkeyPatch, tmp_pat
 def test_audit_invalid_action_filter(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     mock_settings = MagicMock()
     mock_settings.db_path = tmp_path / "pincer.db"
-    mock_settings.database_url = None
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
 
     mock_logger = MagicMock()
@@ -297,7 +287,6 @@ def test_audit_invalid_action_filter(monkeypatch: pytest.MonkeyPatch, tmp_path) 
 def test_audit_export(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     mock_settings = MagicMock()
     mock_settings.db_path = tmp_path / "pincer.db"
-    mock_settings.database_url = None
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
 
     mock_logger = MagicMock()
