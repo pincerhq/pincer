@@ -15,10 +15,10 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiosqlite
-
+from pincer.services.voice import CallsService
 from pincer.voice import analytics as an
 from pincer.voice import scheduling, status_notify, threads
 from pincer.voice.briefing import briefing_from_state, report_adherence
@@ -277,12 +277,8 @@ class PostCallProcessor:
         if not self._db_path:
             return
         try:
-            async with aiosqlite.connect(self._db_path) as db:
-                await db.execute(
-                    "UPDATE voice_calls SET report_delivered_at = ? WHERE call_sid = ?",
-                    (datetime.now(UTC).isoformat(), call_sid),
-                )
-                await db.commit()
+            calls = await CallsService.for_path(Path(str(self._db_path)))
+            await calls.set_fields(call_sid, {"report_delivered_at": datetime.now(UTC).isoformat()})
         except Exception:
             logger.debug("report_delivered_at stamp failed [%s]", call_sid, exc_info=True)
 
@@ -529,61 +525,35 @@ class PostCallProcessor:
             # the user to ignore the line that matters.
             return True
         try:
-            from pincer.voice.retention import ensure_voice_tables
-
-            async with aiosqlite.connect(self._db_path) as db:
-                await ensure_voice_tables(db)
-                # Sprint 9 (T9.3): failure_code, engine, and language ride
-                # along on the same row — they are what the golden signals and
-                # the weekly digest group by, and writing them here keeps the
-                # call row the single source of truth for "how did it go".
-                await db.execute(
-                    "INSERT OR REPLACE INTO voice_calls "
-                    "(call_sid, direction, from_number, to_number, pincer_user_id, started_at, ended_at, "
-                    "failure_code, engine, language) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        call_sid,
-                        state.direction.value,
-                        state.caller_number,
-                        state.target_number,
-                        state.pincer_user_id,
-                        state.started_at.isoformat(),
-                        (state.ended_at or datetime.now(UTC)).isoformat(),
-                        str(state.metadata.get("failure_code", "") or ""),
-                        state.engine_type,
-                        state.language,
-                    ),
-                )
-                # Sprint 13: INSERT OR REPLACE rewrites the whole row, so the
-                # thread columns have to be re-derived from call_thread_members
-                # (the durable membership record) rather than carried along.
-                # The same statement backfills the member row's start date, so
-                # a purged call still shows a date in its thread.
-                await db.execute(
-                    "UPDATE voice_calls SET "
-                    "thread_id = COALESCE((SELECT m.thread_id FROM call_thread_members m "
-                    "                      WHERE m.call_sid = voice_calls.call_sid), ''), "
-                    "thread_attach_kind = COALESCE((SELECT m.attach_kind FROM call_thread_members m "
-                    "                               WHERE m.call_sid = voice_calls.call_sid), '') "
-                    "WHERE call_sid = ?",
-                    (call_sid,),
-                )
-                await db.execute(
-                    "UPDATE call_thread_members SET call_started_at = ?, direction = ? WHERE call_sid = ?",
-                    (state.started_at.isoformat(), state.direction.value, call_sid),
-                )
-                # The briefing is stored verbatim so the dashboard can show
-                # exactly what the agent was told — not our rendering of it.
-                briefing = briefing_from_state(state)
-                if briefing is not None:
-                    await db.execute(
-                        "UPDATE voice_calls SET briefing_json = ? WHERE call_sid = ?",
-                        (briefing.to_json(), call_sid),
-                    )
-                await db.commit()
-                if transcript is not None:
-                    await transcript.save_to_db(db)
+            calls = await CallsService.for_path(Path(str(self._db_path)))
+            # Sprint 9 (T9.3): failure_code, engine and language ride along on
+            # the same row — they are what the golden signals and the weekly
+            # digest group by, and writing them here keeps the call row the
+            # single source of truth for "how did it go".
+            values: dict[str, Any] = {
+                "call_sid": call_sid,
+                "direction": state.direction.value,
+                "from_number": state.caller_number,
+                "to_number": state.target_number,
+                "pincer_user_id": state.pincer_user_id,
+                "started_at": state.started_at.isoformat(),
+                "ended_at": (state.ended_at or datetime.now(UTC)).isoformat(),
+                "failure_code": str(state.metadata.get("failure_code", "") or ""),
+                "engine": state.engine_type,
+                "language": state.language,
+            }
+            # The briefing is stored verbatim so the dashboard can show exactly
+            # what the agent was told — not our rendering of it.
+            briefing = briefing_from_state(state)
+            if briefing is not None:
+                values["briefing_json"] = briefing.to_json()
+            # Sprint 13: the thread columns are re-derived from
+            # call_thread_members (the durable membership record) rather than
+            # carried along, and the member row's call facts are backfilled, so
+            # a purged call still shows a date in its thread.
+            await calls.save_call(values, thread_columns_from_members=True)
+            if transcript is not None:
+                await transcript.save_to_db(calls)
         except Exception:
             logger.exception("Failed to persist call %s", call_sid)
             return False

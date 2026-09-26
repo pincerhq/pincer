@@ -37,7 +37,7 @@ calls is how a product ships on a lie, so `ready` requires every criterion to be
 | Booking success | ≥ 80% cooperative / ≥ 70% overall | `appointment_outcomes` |
 | Latency | p50 ≤ 1.2s, p95 ≤ 2.0s, **per language** | turn records |
 | Security | zero CRITICAL | `doctor --production` |
-| Compliance | consent + quiet hours active, zero opt-out violations | settings + `outbound_call_log` ⋈ `do_not_call` |
+| Compliance | consent + quiet hours active, zero opt-out violations | settings + `outbound_call_logs` ⋈ `do_not_call_numbers` |
 | Cost per call | within $0.12–$0.25 | `call_costs` |
 | Alert quality | 🧑 | canary + stuck history, judged by on-call |
 | Pilot feedback | 🧑 | [pilot-feedback.md](pilot-feedback.md) per customer |

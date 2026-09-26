@@ -1,5 +1,5 @@
 """
-Session management with SQLite storage.
+Session management, stored through `pincer.services.sessions`.
 
 A session = one conversation thread for one user on one channel.
 Stores message history, supports trimming, and provides context for the agent.
@@ -7,17 +7,14 @@ Stores message history, supports trimming, and provides context for the agent.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-import aiosqlite
-
-from pincer.db import ensure_schema_current
 from pincer.llm.base import LLMMessage, MessageRole
+from pincer.services.sessions import SessionService
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -87,28 +84,31 @@ class SessionManager:
     def __init__(self, db_path: Path, max_messages: int = 50) -> None:
         self._db_path = db_path
         self._max_messages = max_messages
-        self._db: aiosqlite.Connection | None = None
+        self._service: SessionService | None = None
         self._cache: dict[str, Session] = {}
 
     async def initialize(self) -> None:
-        await asyncio.to_thread(ensure_schema_current, self._db_path)
-        self._db = await aiosqlite.connect(str(self._db_path))
-        # Production DB discipline (Sprint 7, T7.4): WAL is a persistent,
-        # database-level setting — setting it here (the primary owner of
-        # pincer.db) covers every later connection from any module or the
-        # tasks-worker process. busy_timeout is per-connection: this long-lived
-        # writer must wait, not fail, when a short-lived reader holds the lock.
-        # Schema DDL itself lives in the Alembic migrations (ensure_schema_current).
-        await self._db.execute("PRAGMA journal_mode=WAL")
-        await self._db.execute("PRAGMA busy_timeout=5000")
+        """Bring the database to head and attach the store.
+
+        Production DB discipline (Sprint 7, T7.4): WAL and a 5s busy_timeout
+        are set on every connection the shared engine opens (see
+        `pincer.db.engine`), so this process and the tasks worker both wait on
+        a lock rather than failing. Schema DDL lives in the Alembic migrations.
+        """
+        self._service = await SessionService.for_path(self._db_path)
 
     async def close(self) -> None:
         for session in self._cache.values():
             await self._persist(session)
-        if self._db:
-            await self._db.close()
-            self._db = None
         self._cache.clear()
+        # The engine is shared; the process disposes it at shutdown.
+        self._service = None
+
+    @property
+    def _store(self) -> SessionService:
+        if self._service is None:
+            raise RuntimeError("SessionManager not initialized")
+        return self._service
 
     async def get_or_create(
         self,
@@ -126,37 +126,18 @@ class SessionManager:
         if key in self._cache:
             return self._cache[key]
 
-        assert self._db is not None
-        async with self._db.execute(
-            "SELECT session_id, messages, metadata, created_at, updated_at "
-            "FROM sessions WHERE session_id = ? "
-            "ORDER BY updated_at DESC LIMIT 1",
-            (key,),
-        ) as cursor:
-            row = await cursor.fetchone()
-
-        if not row:
-            # Fallback: try the old channel:user_id key for backward compat
-            fallback_key = _session_key(user_id, channel)
-            if fallback_key != key:
-                async with self._db.execute(
-                    "SELECT session_id, messages, metadata, created_at, updated_at "
-                    "FROM sessions WHERE user_id = ? AND channel = ? "
-                    "ORDER BY updated_at DESC LIMIT 1",
-                    (user_id, channel),
-                ) as cursor:
-                    row = await cursor.fetchone()
+        row = await self._store.load(key, user_id=user_id, channel=channel)
 
         if row:
-            messages = [LLMMessage.from_dict(m) for m in json.loads(row[1])]
+            messages = [LLMMessage.from_dict(m) for m in json.loads(row["messages"])]
             session = Session(
                 session_id=key,
                 user_id=user_id,
                 channel=channel,
                 messages=messages,
-                metadata=json.loads(row[2]),
-                created_at=row[3],
-                updated_at=row[4],
+                metadata=json.loads(row["metadata"]),
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
                 pincer_user_id=pincer_user_id,
             )
         else:
@@ -202,26 +183,13 @@ class SessionManager:
         await self._persist(session)
 
     async def _persist(self, session: Session) -> None:
-        """Write session to SQLite."""
-        assert self._db is not None
-        messages_json = json.dumps([m.to_dict() for m in session.messages])
-        metadata_json = json.dumps(session.metadata)
-        await self._db.execute(
-            """INSERT INTO sessions
-               (session_id, user_id, channel, messages, metadata, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(session_id) DO UPDATE SET
-                   messages = excluded.messages,
-                   metadata = excluded.metadata,
-                   updated_at = excluded.updated_at""",
-            (
-                session.session_id,
-                session.user_id,
-                session.channel,
-                messages_json,
-                metadata_json,
-                session.created_at,
-                session.updated_at,
-            ),
+        """Write the session out."""
+        await self._store.save(
+            session_id=session.session_id,
+            user_id=session.user_id,
+            channel=session.channel,
+            messages=json.dumps([m.to_dict() for m in session.messages]),
+            metadata=json.dumps(session.metadata),
+            created_at=session.created_at,
+            updated_at=session.updated_at,
         )
-        await self._db.commit()

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    import aiosqlite
+    from pincer.services.voice import CallsService
 
 logger = logging.getLogger(__name__)
 
@@ -214,47 +214,40 @@ class TranscriptLogger:
             )
         return claims
 
-    async def save_to_db(self, db: aiosqlite.Connection) -> None:
+    async def save_to_db(self, calls: CallsService) -> None:
         """Persist transcript and actions to the database."""
-        for entry in self._entries:
-            if not entry.is_final:
-                continue
-            await db.execute(
-                "INSERT INTO call_transcripts "
-                "(call_id, speaker, text, confidence, is_final, state, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    self._call_sid,
-                    entry.speaker,
-                    entry.text,
-                    entry.confidence,
-                    entry.is_final,
-                    entry.state,
-                    entry.timestamp,
-                ),
-            )
-
-        for action in self._actions:
-            await db.execute(
-                "INSERT INTO call_actions "
-                "(call_id, action_type, tool_name, input_summary, "
-                "output_summary, user_confirmed, timestamp, tier, approval_mode, deny_reason) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    self._call_sid,
-                    action.action_type,
-                    action.tool_name,
-                    action.input_summary,
-                    action.output_summary,
-                    action.user_confirmed,
-                    action.timestamp,
-                    action.tier,
-                    action.approval_mode,
-                    action.deny_reason,
-                ),
-            )
-
-        await db.commit()
+        await calls.add_transcript_lines(
+            [
+                {
+                    "call_id": self._call_sid,
+                    "speaker": entry.speaker,
+                    "text": entry.text,
+                    "confidence": entry.confidence,
+                    "is_final": entry.is_final,
+                    "state": entry.state,
+                    "timestamp": entry.timestamp,
+                }
+                for entry in self._entries
+                if entry.is_final
+            ]
+        )
+        await calls.add_actions(
+            [
+                {
+                    "call_id": self._call_sid,
+                    "action_type": action.action_type,
+                    "tool_name": action.tool_name,
+                    "input_summary": action.input_summary,
+                    "output_summary": action.output_summary,
+                    "user_confirmed": action.user_confirmed,
+                    "timestamp": action.timestamp,
+                    "tier": action.tier,
+                    "approval_mode": action.approval_mode,
+                    "deny_reason": action.deny_reason,
+                }
+                for action in self._actions
+            ]
+        )
         logger.info(
             "Transcript saved for %s: %d entries, %d actions",
             self._call_sid,

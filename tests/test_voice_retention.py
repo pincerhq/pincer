@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import aiosqlite
 import pytest
+from support import SEED_ID_SQL
 
 from pincer.voice.retention import (
     ensure_voice_tables,
@@ -24,15 +25,17 @@ async def _seed(db_path) -> None:
     async with aiosqlite.connect(str(db_path)) as db:
         await ensure_voice_tables(db)
         await db.execute(
-            "INSERT INTO voice_calls (call_sid, started_at) VALUES (?, ?), (?, ?)",
+            f"INSERT INTO voice_calls (id, call_sid, started_at) VALUES ({SEED_ID_SQL}, ?, ?), ({SEED_ID_SQL}, ?, ?)",
             ("CA_old", _iso(100), "CA_new", _iso(1)),
         )
         await db.execute(
-            "INSERT INTO call_transcripts (call_id, speaker, text, timestamp) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+            f"INSERT INTO call_transcripts (id, call_id, speaker, text, timestamp) "
+            f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?), ({SEED_ID_SQL}, ?, ?, ?, ?)",
             ("CA_old", "caller", "old utterance", _iso(100), "CA_new", "caller", "new utterance", _iso(1)),
         )
         await db.execute(
-            "INSERT INTO call_actions (call_id, action_type, timestamp) VALUES (?, ?, ?), (?, ?, ?)",
+            f"INSERT INTO call_actions (id, call_id, action_type, timestamp) "
+            f"VALUES ({SEED_ID_SQL}, ?, ?, ?), ({SEED_ID_SQL}, ?, ?, ?)",
             ("CA_old", "tool_call", _iso(100), "CA_new", "tool_call", _iso(1)),
         )
         await db.commit()
@@ -94,7 +97,7 @@ async def test_run_retention_purge_writes_audit_entry(voice_db, tmp_path, monkey
 
         async with aiosqlite.connect(str(tmp_path / "audit.db")) as db:
             rows = await db.execute_fetchall(
-                "SELECT user_id, output_summary FROM audit_log WHERE action = 'retention_purge'"
+                "SELECT user_id, output_summary FROM audit_logs WHERE action = 'retention_purge'"
             )
         assert len(rows) == 1
         assert rows[0][0] == "system"
@@ -120,7 +123,7 @@ async def test_run_retention_purge_no_deletions_no_audit(voice_db, tmp_path, mon
         assert deleted == {}
         await audit._flush_pending()
         async with aiosqlite.connect(str(tmp_path / "audit.db")) as db:
-            rows = await db.execute_fetchall("SELECT COUNT(*) FROM audit_log")
+            rows = await db.execute_fetchall("SELECT COUNT(*) FROM audit_logs")
         assert rows[0][0] == 0
     finally:
         await audit.shutdown()
@@ -148,16 +151,17 @@ async def test_outbound_call_log_is_purged(tmp_path):
     async with aiosqlite.connect(db_path) as db:
         await ensure_outbound_tables(db)
         await db.executemany(
-            "INSERT INTO outbound_call_log (phone_number, user_id, placed_at, local_day) VALUES (?, ?, ?, ?)",
+            f"INSERT INTO outbound_call_logs (id, phone_number, user_id, placed_at, local_day) "
+            f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?)",
             [("+4915112345678", "u1", old, "2026-01-01"), ("+4915112345678", "u1", recent, "2026-08-20")],
         )
         await db.commit()
 
     deleted = await purge_expired_voice_data(db_path, retention_days=90)
-    assert deleted.get("outbound_call_log") == 1
+    assert deleted.get("outbound_call_logs") == 1
 
     async with aiosqlite.connect(db_path) as db:
-        rows = await db.execute_fetchall("SELECT placed_at FROM outbound_call_log")
+        rows = await db.execute_fetchall("SELECT placed_at FROM outbound_call_logs")
     assert [r[0] for r in rows] == [recent]
 
 
@@ -206,7 +210,9 @@ async def test_call_actions_migration_adds_policy_columns(tmp_path):
             "tool_execute", "google__create_event", output_summary="ok", tier="W", approval_mode="off"
         )
         transcript.log_action("tool_denied", "email_send", tier="X", deny_reason="tier_x")
-        await transcript.save_to_db(db)
+        from pincer.services.voice import CallsService
+
+        await transcript.save_to_db(await CallsService.for_path(db_path))
         rows = await db.execute_fetchall(
             "SELECT action_type, tier, approval_mode, deny_reason FROM call_actions WHERE call_id='CA_mig' ORDER BY id"
         )

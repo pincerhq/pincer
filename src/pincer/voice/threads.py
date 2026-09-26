@@ -36,17 +36,19 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiosqlite
-
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from pincer.llm.base import BaseLLMProvider
+
+from pincer.db.engine import get_database_url
+from pincer.db.ids import new_id
+from pincer.services.voice import CallsService, ThreadsService
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +126,7 @@ class Thread:
     closed_at: str | None = None
 
     @classmethod
-    def from_row(cls, row: aiosqlite.Row) -> Thread:
+    def from_row(cls, row: Mapping[str, Any]) -> Thread:
         return cls(
             thread_id=str(row["thread_id"]),
             subject=str(row["subject"] or ""),
@@ -209,7 +211,8 @@ class ThreadUpdate:
 
 
 def new_thread_id() -> str:
-    return "thr_" + secrets.token_hex(6)
+    """A thread id. Was `thr_` + hex; nothing ever branched on the prefix."""
+    return new_id()
 
 
 def _now() -> str:
@@ -478,6 +481,7 @@ class ThreadManager:
         self._settings = settings
         self._llm = llm
         self._memory: Any = None
+        self._service: ThreadsService | None = None
         # The schema is ensured once per manager, not once per query: a thread
         # read is a handful of SELECTs, and re-running the full DDL script plus
         # every ALTER in front of each of them costs more than the query.
@@ -494,16 +498,17 @@ class ThreadManager:
     def db_path(self) -> str:
         return self._db_path
 
-    @contextlib.asynccontextmanager
-    async def _db(self) -> Any:
-        from pincer.voice.retention import ensure_voice_tables
+    def _url_for_store(self) -> str:
+        return get_database_url(Path(self._db_path))
 
-        async with aiosqlite.connect(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            if not self._schema_ready:
-                await ensure_voice_tables(db)
-                self._schema_ready = True
-            yield db
+    async def _store(self) -> ThreadsService:
+        """The store, with the schema ensured once per manager rather than
+        once per query: a thread read is a handful of SELECTs, and migrating
+        in front of each of them costs more than the query."""
+        if self._service is None or not self._schema_ready:
+            self._service = await ThreadsService.for_path(Path(self._db_path))
+            self._schema_ready = True
+        return self._service
 
     # ── Create / read ─────────────────────────────────────
 
@@ -534,33 +539,30 @@ class ThreadManager:
             created_at=stamp,
             updated_at=stamp,
         )
-        async with self._db() as db:
-            await db.execute(
-                "INSERT INTO call_threads (thread_id, subject, status, origin, primary_number, contact_name, "
-                "language, rolling_summary, open_commitments, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, '', '[]', ?, ?)",
-                (
-                    thread.thread_id,
-                    thread.subject,
-                    thread.status,
-                    thread.origin,
-                    thread.primary_number,
-                    thread.contact_name,
-                    thread.language,
-                    thread.created_at,
-                    thread.updated_at,
-                ),
-            )
-            await db.commit()
+        store = await self._store()
+        await store.create(
+            {
+                "thread_id": thread.thread_id,
+                "subject": thread.subject,
+                "status": thread.status,
+                "origin": thread.origin,
+                "primary_number": thread.primary_number,
+                "contact_name": thread.contact_name,
+                "language": thread.language,
+                "rolling_summary": "",
+                "open_commitments": "[]",
+                "created_at": thread.created_at,
+                "updated_at": thread.updated_at,
+            }
+        )
         logger.info("Thread created %s: %r (origin=%s)", thread.thread_id, thread.subject, thread.origin)
         return thread
 
     async def get(self, thread_id: str) -> Thread | None:
         if not thread_id:
             return None
-        async with self._db() as db:
-            cursor = await db.execute("SELECT * FROM call_threads WHERE thread_id = ?", (thread_id,))
-            row = await cursor.fetchone()
+        store = await self._store()
+        row = await store.get(thread_id)
         return Thread.from_row(row) if row is not None else None
 
     async def require(self, thread_id: str) -> Thread:
@@ -585,34 +587,16 @@ class ThreadManager:
         statuses = [status] if isinstance(status, str) else list(status)
         statuses = [s for s in (str(v).strip().lower() for v in statuses) if s]
 
-        sql = "SELECT * FROM call_threads"
-        where: list[str] = []
-        args: list[Any] = []
-        if statuses:
-            where.append(f"status IN ({', '.join('?' for _ in statuses)})")
-            args += statuses
-        if query:
-            where.append("(subject LIKE ? OR contact_name LIKE ? OR primary_number LIKE ?)")
-            args += [f"%{query}%"] * 3
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY updated_at DESC"
-
+        store = await self._store()
         if not has_expired_commitments:
-            sql += " LIMIT ? OFFSET ?"
-            args += [max(1, limit), max(0, offset)]
-            async with self._db() as db:
-                rows = await db.execute_fetchall(sql, args)
+            rows = await store.search(statuses=statuses, query=query, limit=max(1, limit), offset=max(0, offset))
             return [Thread.from_row(r) for r in rows]
 
         # Commitments live in a JSON column, so "has an expired one" is decided
         # in Python — which means paging has to happen after the filter, not in
         # SQL. Bounded by SCAN_LIMIT rather than unbounded, and a truncated
         # scan says so in the log instead of quietly under-reporting.
-        sql += " LIMIT ?"
-        args.append(EXPIRED_SCAN_LIMIT)
-        async with self._db() as db:
-            rows = await db.execute_fetchall(sql, args)
+        rows = await store.search(statuses=statuses, query=query, limit=EXPIRED_SCAN_LIMIT)
         if len(rows) >= EXPIRED_SCAN_LIMIT:
             logger.warning(
                 "Expired-commitment filter scanned the %d most recent threads; older ones were not considered",
@@ -630,45 +614,29 @@ class ThreadManager:
         """The thread a call belongs to ('' when threadless)."""
         if not call_sid:
             return ""
-        async with self._db() as db:
-            cursor = await db.execute("SELECT thread_id FROM call_thread_members WHERE call_sid = ?", (call_sid,))
-            row = await cursor.fetchone()
-        return str(row["thread_id"]) if row is not None else ""
+        store = await self._store()
+        return await store.thread_for_call(call_sid)
 
     async def calls(self, thread_id: str) -> list[ThreadCall]:
         """Ordered calls of a thread. A member row whose voice_calls row is
         gone is returned as a purged stub, not dropped (§5)."""
-        async with self._db() as db:
-            rows = await db.execute_fetchall(
-                "SELECT m.call_sid, m.thread_id, m.attach_kind, m.attached_at, m.call_started_at, "
-                "       m.direction, m.outcome_code, m.task_result, "
-                "       c.started_at AS live_started_at, c.ended_at AS live_ended_at, "
-                "       c.direction AS live_direction, c.failure_code AS live_failure_code, "
-                "       c.call_sid AS live_sid "
-                "FROM call_thread_members m LEFT JOIN voice_calls c ON c.call_sid = m.call_sid "
-                "WHERE m.thread_id = ? "
-                "ORDER BY COALESCE(NULLIF(m.call_started_at, ''), m.attached_at) ASC, m.rowid ASC",
-                (thread_id,),
+        store = await self._store()
+        return [
+            ThreadCall(
+                call_sid=str(row["call_sid"]),
+                thread_id=str(row["thread_id"]),
+                attach_kind=str(row["attach_kind"]),
+                attached_at=str(row["attached_at"]),
+                started_at=str(row["started_at"]),
+                ended_at=row["ended_at"],
+                direction=str(row["direction"]),
+                outcome_code=str(row["outcome_code"]),
+                task_result=str(row["task_result"]),
+                failure_code=str(row["failure_code"]),
+                purged=bool(row["purged"]),
             )
-        out: list[ThreadCall] = []
-        for row in rows:
-            live = row["live_sid"] is not None
-            out.append(
-                ThreadCall(
-                    call_sid=str(row["call_sid"]),
-                    thread_id=str(row["thread_id"]),
-                    attach_kind=str(row["attach_kind"] or ""),
-                    attached_at=str(row["attached_at"] or ""),
-                    started_at=str(row["live_started_at"] or row["call_started_at"] or ""),
-                    ended_at=row["live_ended_at"] if live else None,
-                    direction=str((row["live_direction"] if live else row["direction"]) or ""),
-                    outcome_code=str(row["outcome_code"] or ""),
-                    task_result=str(row["task_result"] or ""),
-                    failure_code=str(row["live_failure_code"] or "") if live else "",
-                    purged=not live,
-                )
-            )
-        return out
+            for row in await store.calls(thread_id)
+        ]
 
     # ── Attach (§4) ───────────────────────────────────────
 
@@ -698,26 +666,20 @@ class ThreadManager:
             )
 
         stamp = _now()
-        async with self._db() as db:
-            started_at, direction = "", ""
-            cursor = await db.execute("SELECT started_at, direction FROM voice_calls WHERE call_sid = ?", (call_sid,))
-            row = await cursor.fetchone()
-            if row is not None:
-                started_at, direction = str(row["started_at"] or ""), str(row["direction"] or "")
-            await db.execute(
-                "INSERT INTO call_thread_members "
-                "(call_sid, thread_id, attach_kind, attached_at, call_started_at, direction) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(call_sid) DO UPDATE SET thread_id = excluded.thread_id, "
-                "attach_kind = excluded.attach_kind, attached_at = excluded.attached_at",
-                (call_sid, thread_id, kind, stamp, started_at, direction),
-            )
-            await db.execute(
-                "UPDATE voice_calls SET thread_id = ?, thread_attach_kind = ? WHERE call_sid = ?",
-                (thread_id, kind, call_sid),
-            )
-            await db.execute("UPDATE call_threads SET updated_at = ? WHERE thread_id = ?", (stamp, thread_id))
-            await db.commit()
+        store = await self._store()
+        # The call's own facts are copied onto the member row, which outlives it.
+        call = await CallsService(self._url_for_store()).get(call_sid)
+        await store.attach(
+            {
+                "call_sid": call_sid,
+                "thread_id": thread_id,
+                "attach_kind": kind,
+                "attached_at": stamp,
+                "call_started_at": str((call or {}).get("started_at") or ""),
+                "direction": str((call or {}).get("direction") or ""),
+            },
+            touched_at=stamp,
+        )
 
         if thread.status == STATUS_RESOLVED and kind in REOPENING_KINDS:
             await self.reopen(thread_id, reason=f"new_call_{kind}")
@@ -725,12 +687,8 @@ class ThreadManager:
 
     async def detach(self, call_sid: str) -> None:
         """Remove a call from whatever thread it is in (manual reassign path)."""
-        async with self._db() as db:
-            await db.execute("DELETE FROM call_thread_members WHERE call_sid = ?", (call_sid,))
-            await db.execute(
-                "UPDATE voice_calls SET thread_id = '', thread_attach_kind = '' WHERE call_sid = ?", (call_sid,)
-            )
-            await db.commit()
+        store = await self._store()
+        await store.detach(call_sid)
 
     # ── Lifecycle (§5) ────────────────────────────────────
 
@@ -748,22 +706,15 @@ class ThreadManager:
             return thread
 
         stamp = _now()
-        sets = ["status = ?", "updated_at = ?"]
-        args: list[Any] = [status, stamp]
+        values: dict[str, Any] = {"status": status, "updated_at": stamp}
         if status == STATUS_RESOLVED:
-            sets.append("resolved_at = ?")
-            args.append(stamp)
+            values["resolved_at"] = stamp
         elif status == STATUS_CLOSED:
-            sets.append("closed_at = ?")
-            args.append(stamp)
+            values["closed_at"] = stamp
         elif status == STATUS_OPEN:
-            sets.append("resolved_at = NULL")
-        async with self._db() as db:
-            await db.execute(
-                f"UPDATE call_threads SET {', '.join(sets)} WHERE thread_id = ?",  # noqa: S608 - fixed fragments
-                (*args, thread_id),
-            )
-            await db.commit()
+            values["resolved_at"] = None
+        store = await self._store()
+        await store.set_fields(thread_id, values)
 
         await self._audit_lifecycle(thread, status, reason)
         logger.info("Thread %s: %s -> %s (%s)", thread_id, thread.status, status, reason or "no reason given")
@@ -806,12 +757,8 @@ class ThreadManager:
         if not title:
             raise ThreadError("A thread needs a subject.")
         await self.require(thread_id)
-        async with self._db() as db:
-            await db.execute(
-                "UPDATE call_threads SET subject = ?, updated_at = ? WHERE thread_id = ?",
-                (title, _now(), thread_id),
-            )
-            await db.commit()
+        store = await self._store()
+        await store.set_fields(thread_id, {"subject": title, "updated_at": _now()})
         return await self.require(thread_id)
 
     async def merge(self, source_thread_id: str, target_thread_id: str) -> Thread:
@@ -825,17 +772,8 @@ class ThreadManager:
             raise ThreadError(f"Thread {target_thread_id} is closed and cannot absorb another thread.")
 
         stamp = _now()
-        async with self._db() as db:
-            await db.execute(
-                "UPDATE call_thread_members SET thread_id = ?, attach_kind = ?, attached_at = ? WHERE thread_id = ?",
-                (target_thread_id, KIND_MANUAL, stamp, source_thread_id),
-            )
-            await db.execute(
-                "UPDATE voice_calls SET thread_id = ?, thread_attach_kind = ? WHERE thread_id = ?",
-                (target_thread_id, KIND_MANUAL, source_thread_id),
-            )
-            await db.execute("UPDATE call_threads SET updated_at = ? WHERE thread_id = ?", (stamp, target_thread_id))
-            await db.commit()
+        store = await self._store()
+        await store.merge_into(source_thread_id, target_thread_id, attach_kind=KIND_MANUAL, stamp=stamp)
 
         if source.status != STATUS_CLOSED:
             await self.close(source_thread_id, reason=f"merged_into:{target_thread_id}")
@@ -850,14 +788,10 @@ class ThreadManager:
         if days <= 0:
             return []
         cutoff = ((now or datetime.now(UTC)) - timedelta(days=days)).isoformat()
-        async with self._db() as db:
-            rows = await db.execute_fetchall(
-                "SELECT thread_id FROM call_threads WHERE status != ? AND updated_at < ?",
-                (STATUS_CLOSED, cutoff),
-            )
+        store = await self._store()
+        stale = await store.stale_ids(not_status=STATUS_CLOSED, older_than=cutoff)
         closed: list[str] = []
-        for row in rows:
-            thread_id = str(row["thread_id"])
+        for thread_id in stale:
             try:
                 await self.close(thread_id, reason=f"autoclose_after_{days}d")
                 closed.append(thread_id)
@@ -879,12 +813,8 @@ class ThreadManager:
         if not cleaned or within_days <= 0:
             return None
         cutoff = (datetime.now(UTC) - timedelta(days=within_days)).isoformat()
-        async with self._db() as db:
-            rows = await db.execute_fetchall(
-                "SELECT * FROM call_threads WHERE primary_number = ? AND status = ? AND updated_at >= ? "
-                "ORDER BY updated_at DESC LIMIT 3",
-                (cleaned, STATUS_OPEN, cutoff),
-            )
+        store = await self._store()
+        rows = await store.for_number(cleaned, status=STATUS_OPEN, updated_since=cutoff, limit=3)
         if len(rows) != 1:
             if len(rows) > 1:
                 logger.info("Inbound thread match ambiguous (%d open threads) — no attach", len(rows))
@@ -924,17 +854,17 @@ class ThreadManager:
         outcome_code = str(getattr(outcome, "outcome", "") or "")
         task_result = str(getattr(outcome, "task_result", "") or "")
         stamp = _now()
-        async with self._db() as db:
-            await db.execute(
-                "UPDATE call_threads SET rolling_summary = ?, open_commitments = ?, language = ?, updated_at = ? "
-                "WHERE thread_id = ?",
-                (summary, json.dumps(commitments, ensure_ascii=False), lang, stamp, thread_id),
-            )
-            await db.execute(
-                "UPDATE call_thread_members SET outcome_code = ?, task_result = ? WHERE call_sid = ?",
-                (outcome_code, truncate(task_result, 500), call_sid),
-            )
-            await db.commit()
+        store = await self._store()
+        await store.update_summary(
+            thread_id,
+            {
+                "rolling_summary": summary,
+                "open_commitments": json.dumps(commitments, ensure_ascii=False),
+                "language": lang,
+                "updated_at": stamp,
+            },
+        )
+        await store.record_outcome(call_sid, outcome_code=outcome_code, task_result=truncate(task_result, 500))
 
         thread.rolling_summary = summary
         thread.open_commitments = commitments

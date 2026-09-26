@@ -18,11 +18,16 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pincer.memory.base import BaseMemoryBackend
     from pincer.tools.registry import ToolRegistry
+
+from sqlalchemy.exc import OperationalError
+
+from pincer.db.engine import get_database_url
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +106,7 @@ def make_contact_lookup(settings: Any) -> Any:
         """Look up a phone contact by (partial) name in the user's phone contacts.
         Returns name, number and category; never returns anything else about the user.
         """
-        import aiosqlite
+        from pincer.services.voice import ContactsService
 
         query = str(name or "").strip()
         if not query:
@@ -110,15 +115,10 @@ def make_contact_lookup(settings: Any) -> Any:
         if not db_path:
             return json.dumps([])
         try:
-            async with aiosqlite.connect(db_path) as db:
-                db.row_factory = aiosqlite.Row
-                rows = await db.execute_fetchall(
-                    "SELECT name, phone_number, category FROM phone_contacts "
-                    "WHERE name LIKE ? ORDER BY name COLLATE NOCASE ASC LIMIT 5",
-                    (f"%{query}%",),
-                )
-        except aiosqlite.OperationalError:
-            return json.dumps([])  # table not created yet — no contacts
+            contacts = ContactsService(get_database_url(Path(db_path)))
+            rows = await contacts.search(query)
+        except OperationalError:
+            return json.dumps([])  # no database or no contacts table yet
         except Exception as e:
             logger.exception("contact_lookup failed")
             return f"Error: {e}"

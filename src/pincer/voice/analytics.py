@@ -29,13 +29,14 @@ import logging
 import time as _time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-import aiosqlite
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
+
+from pincer.db.engine import get_database_url
+from pincer.services.voice import AnalyticsService
 
 logger = logging.getLogger(__name__)
 
@@ -360,37 +361,33 @@ async def save_analytics(db_path: str | Path, call_sid: str, analytics: CallAnal
     if not db_path or not call_sid:
         return
     try:
-        from pincer.voice.retention import ensure_voice_tables
-
-        async with aiosqlite.connect(str(db_path)) as db:
-            await ensure_voice_tables(db)
-            await db.execute(
-                "INSERT OR REPLACE INTO call_analytics "
-                "(call_sid, agent_speech_ms, caller_speech_ms, silence_ms, overlap_ms, interruptions, "
-                "talk_ratio, method, sentiment, sentiment_trajectory, sentiment_rationale, sentiment_reason, "
-                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    call_sid,
-                    analytics.agent_speech_ms,
-                    analytics.caller_speech_ms,
-                    analytics.silence_ms,
-                    analytics.overlap_ms,
-                    analytics.interruptions,
-                    analytics.talk_ratio,
-                    analytics.method,
-                    analytics.sentiment,
-                    analytics.sentiment_trajectory,
-                    analytics.sentiment_rationale,
-                    analytics.sentiment_reason,
-                    analytics.created_at or datetime.now(UTC).isoformat(),
-                ),
-            )
-            await db.commit()
+        service = await AnalyticsService.for_path(Path(str(db_path)))
+        await service.save(
+            {
+                "call_sid": call_sid,
+                "agent_speech_ms": analytics.agent_speech_ms,
+                "caller_speech_ms": analytics.caller_speech_ms,
+                "silence_ms": analytics.silence_ms,
+                "overlap_ms": analytics.overlap_ms,
+                "interruptions": analytics.interruptions,
+                "talk_ratio": analytics.talk_ratio,
+                "method": analytics.method,
+                "sentiment": analytics.sentiment,
+                "sentiment_trajectory": analytics.sentiment_trajectory,
+                "sentiment_rationale": analytics.sentiment_rationale,
+                "sentiment_reason": analytics.sentiment_reason,
+                "created_at": analytics.created_at or datetime.now(UTC).isoformat(),
+            }
+        )
     except Exception:
         logger.exception("Analytics persistence failed [%s]", call_sid)
 
 
-def analytics_from_row(row: aiosqlite.Row) -> CallAnalytics:
+def analytics_from_row(row: Any) -> CallAnalytics:
+    """Build the dataclass from a stored row (a mapping or a model)."""
+    if not isinstance(row, dict):
+        row = {name: getattr(row, name) for name in CallAnalytics.__dataclass_fields__}
+
     def _int(key: str) -> int | None:
         value = row[key]
         return int(value) if value is not None else None
@@ -414,11 +411,10 @@ def analytics_from_row(row: aiosqlite.Row) -> CallAnalytics:
 
 async def load_analytics(db_path: str | Path, call_sid: str) -> CallAnalytics | None:
     try:
-        async with aiosqlite.connect(str(db_path)) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute("SELECT * FROM call_analytics WHERE call_sid = ?", (call_sid,))
-            row = await cursor.fetchone()
-    except aiosqlite.OperationalError:
+        service = AnalyticsService(get_database_url(Path(str(db_path))))
+        row = await service.get(call_sid)
+    except Exception:
+        logger.debug("analytics lookup failed [%s]", call_sid, exc_info=True)
         return None
     return analytics_from_row(row) if row is not None else None
 
@@ -427,17 +423,13 @@ async def load_many(db_path: str | Path, call_sids: list[str]) -> dict[str, Call
     """One batched lookup for a page of calls, not one query per row."""
     if not call_sids:
         return {}
-    placeholders = ", ".join("?" for _ in call_sids)
     try:
-        async with aiosqlite.connect(str(db_path)) as db:
-            db.row_factory = aiosqlite.Row
-            rows = await db.execute_fetchall(
-                f"SELECT * FROM call_analytics WHERE call_sid IN ({placeholders})",  # noqa: S608 - placeholders only
-                call_sids,
-            )
-    except aiosqlite.OperationalError:
+        service = AnalyticsService(get_database_url(Path(str(db_path))))
+        rows = await service.for_calls(call_sids)
+    except Exception:
+        logger.debug("analytics batch lookup failed", exc_info=True)
         return {}
-    return {str(r["call_sid"]): analytics_from_row(r) for r in rows}
+    return {call_sid: analytics_from_row(row) for call_sid, row in rows.items()}
 
 
 async def sentiment_distribution(
@@ -450,44 +442,27 @@ async def sentiment_distribution(
     from datetime import timedelta
 
     cutoff = (datetime.now(UTC) - timedelta(days=max(1, days))).isoformat()
-    sql = (
-        "SELECT a.sentiment AS sentiment, COUNT(*) AS n FROM call_analytics a "
-        "JOIN voice_calls c ON c.call_sid = a.call_sid "
-        "WHERE a.sentiment IS NOT NULL AND c.started_at >= ?"
-    )
-    args: list[Any] = [cutoff]
-    if direction:
-        sql += " AND c.direction = ?"
-        args.append(direction)
-    sql += " GROUP BY a.sentiment"
     try:
-        async with aiosqlite.connect(str(db_path)) as db:
-            db.row_factory = aiosqlite.Row
-            rows = await db.execute_fetchall(sql, args)
-    except aiosqlite.OperationalError:
+        service = AnalyticsService(get_database_url(Path(str(db_path))))
+        found = await service.sentiment_counts(cutoff, direction=direction or None)
+    except Exception:
+        logger.debug("sentiment distribution query failed", exc_info=True)
         return dict.fromkeys(SENTIMENTS, 0)
     counts = dict.fromkeys(SENTIMENTS, 0)
-    for row in rows:
-        key = str(row["sentiment"] or "")
+    for key, count in found.items():
         if key in counts:
-            counts[key] = int(row["n"])
+            counts[key] = count
     return counts
 
 
 async def count_negative_since(db_path: str | Path, cutoff_iso: str) -> int:
     """Negative-sentiment calls started at or after `cutoff_iso` (alert input)."""
     try:
-        async with aiosqlite.connect(str(db_path)) as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT COUNT(*) AS n FROM call_analytics a JOIN voice_calls c ON c.call_sid = a.call_sid "
-                "WHERE a.sentiment = 'negative' AND c.started_at >= ?",
-                (cutoff_iso,),
-            )
-            row = await cursor.fetchone()
-    except aiosqlite.OperationalError:
+        service = AnalyticsService(get_database_url(Path(str(db_path))))
+        return await service.negative_since(cutoff_iso)
+    except Exception:
+        logger.debug("negative-sentiment count failed", exc_info=True)
         return 0
-    return int(row["n"]) if row else 0
 
 
 # ── Report line (§5) ─────────────────────────────────────────────────

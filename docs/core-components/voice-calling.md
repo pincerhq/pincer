@@ -738,7 +738,7 @@ job), no server-side transcoding.
 3. Measured glass-to-ear delay ≤ 1 s (say a word, time it in the player).
 4. Open a third listener: "listener limit reached".
 5. Hang up: the player shows "Call ended" and collapses.
-6. `SELECT * FROM audit_log WHERE action='listen_in_session'` shows the session row(s).
+6. `SELECT * FROM audit_logs WHERE action='listen_in_session'` shows the session row(s).
 
 ### PII Protection
 

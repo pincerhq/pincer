@@ -26,34 +26,17 @@ whether the agent can negotiate a time.
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiosqlite
-
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
     from pincer.config import Settings
 
-logger = logging.getLogger(__name__)
+from pincer.services.observability import BookingsService
 
-BOOKING_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS appointment_outcomes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id TEXT NOT NULL,
-    call_sid TEXT DEFAULT '',
-    result TEXT NOT NULL,
-    language TEXT DEFAULT '',
-    attempts INTEGER DEFAULT 1,
-    detail TEXT DEFAULT '',
-    recorded_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_appointment_outcomes_recorded ON appointment_outcomes(recorded_at);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_appointment_outcomes_task ON appointment_outcomes(task_id);
-"""
+logger = logging.getLogger(__name__)
 
 
 class BookingResult(StrEnum):
@@ -62,15 +45,6 @@ class BookingResult(StrEnum):
     OUT_OF_SLOTS = "out_of_slots"
     DECLINED = "declined"
     UNREACHABLE = "unreachable"
-
-
-@asynccontextmanager
-async def _db(settings: Settings | Any) -> AsyncIterator[aiosqlite.Connection]:
-    async with aiosqlite.connect(str(settings.db_path)) as conn:
-        conn.row_factory = aiosqlite.Row
-        await conn.executescript(BOOKING_TABLE_SQL)
-        await conn.commit()
-        yield conn
 
 
 async def record_booking_outcome(
@@ -91,15 +65,18 @@ async def record_booking_outcome(
     """
     value = str(result)
     try:
-        async with _db(settings) as conn:
-            await conn.execute(
-                "INSERT INTO appointment_outcomes (task_id, call_sid, result, language, attempts, detail, "
-                "recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(task_id) DO UPDATE SET result=excluded.result, call_sid=excluded.call_sid, "
-                "attempts=excluded.attempts, detail=excluded.detail, recorded_at=excluded.recorded_at",
-                (task_id, call_sid, value, language, attempts, detail[:500], datetime.now(UTC).isoformat()),
-            )
-            await conn.commit()
+        service = await BookingsService.for_path(Path(str(settings.db_path)))
+        await service.record_outcome(
+            {
+                "task_id": task_id,
+                "call_sid": call_sid,
+                "result": value,
+                "language": language,
+                "attempts": attempts,
+                "detail": detail[:500],
+                "recorded_at": datetime.now(UTC).isoformat(),
+            }
+        )
     except Exception:
         logger.exception("Failed to record booking outcome for task %s", task_id)
         return
@@ -114,12 +91,8 @@ async def booking_breakdown(settings: Settings | Any, window_hours: float = 168.
     """`{result: count}` over the window — for the weekly digest."""
     cutoff = (datetime.now(UTC) - timedelta(hours=window_hours)).isoformat()
     try:
-        async with _db(settings) as conn:
-            rows = await conn.execute_fetchall(
-                "SELECT result, COUNT(*) AS n FROM appointment_outcomes WHERE recorded_at >= ? GROUP BY result",
-                (cutoff,),
-            )
+        service = await BookingsService.for_path(Path(str(settings.db_path)))
+        return await service.counts_by_result(cutoff)
     except Exception:
         logger.debug("booking breakdown query failed", exc_info=True)
         return {}
-    return {str(r["result"]): int(r["n"]) for r in rows}

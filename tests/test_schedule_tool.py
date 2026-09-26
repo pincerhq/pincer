@@ -270,6 +270,19 @@ class TestScheduleListRemoveToggle:
             result = await schedule_remove(name="a", schedule_id=sid, context=CTX)
         assert "Removed" in result
 
+    @pytest.mark.parametrize("bad_id", ["1", "not-an-id"])
+    async def test_a_schedule_id_that_could_never_exist_is_a_friendly_error(self, settings, schedule_create, bad_id):
+        """Ids were integers before 0017, and `schedule_list` numbers its lines."""
+        with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):
+            await schedule_create(name="a", cron_expr="0 8 * * *", prompt="p", context=CTX)
+            removed = await schedule_remove(name="a", schedule_id=bad_id, context=CTX)
+            toggled = await schedule_toggle(name="a", enabled=False, schedule_id=bad_id, context=CTX)
+            listing = await schedule_list(context=CTX)
+
+        assert removed.startswith("Error") and "schedule_list" in removed
+        assert toggled.startswith("Error") and "schedule_list" in toggled
+        assert "a" in listing and "disabled" not in listing
+
     async def test_remove_by_schedule_id_rejects_other_users_schedule(self, settings, schedule_create):
         """IDOR regression: an explicit schedule_id must not let one user delete another's schedule."""
         with patch("pincer.tools.builtin.schedule_tool.get_settings", return_value=settings):

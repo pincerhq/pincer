@@ -19,10 +19,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
-
 from pincer.config import get_settings
-from pincer.db import ensure_schema_current
+from pincer.db.engine import get_database_url
+from pincer.services.scheduler import EventTriggerService
 
 _UID_RE = re.compile(r"UID:\s*(\d+)")
 
@@ -38,10 +37,17 @@ class EventTriggerManager:
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
         self._seen_email_uids: set[str] | None = None
+        self._dedupe: EventTriggerService | None = None
 
     async def ensure_table(self) -> None:
         """Ensure the event_triggers table is at head (see pincer.db.migrations)."""
-        await asyncio.to_thread(ensure_schema_current, Path(self._db_path))
+        self._dedupe = await EventTriggerService.for_path(Path(self._db_path))
+
+    @property
+    def _service(self) -> EventTriggerService:
+        if self._dedupe is None:
+            self._dedupe = EventTriggerService(get_database_url(Path(self._db_path)))
+        return self._dedupe
 
     async def start(self) -> None:
         await self.ensure_table()
@@ -70,12 +76,7 @@ class EventTriggerManager:
     # ── Deduplication ────────────────────────────
 
     async def _is_processed(self, trigger_type: str, trigger_key: str) -> bool:
-        async with aiosqlite.connect(self._db_path) as db:
-            rows = await db.execute_fetchall(
-                "SELECT 1 FROM event_triggers WHERE trigger_type = ? AND trigger_key = ?",
-                (trigger_type, trigger_key),
-            )
-            return len(rows) > 0
+        return await self._service.is_processed(trigger_type, trigger_key)
 
     async def _mark_processed(
         self,
@@ -84,13 +85,7 @@ class EventTriggerManager:
         user_id: str,
         result: str = "",
     ) -> None:
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                "INSERT OR IGNORE INTO event_triggers "
-                "(trigger_type, trigger_key, pincer_user_id, result) VALUES (?, ?, ?, ?)",
-                (trigger_type, trigger_key, user_id, result),
-            )
-            await db.commit()
+        await self._service.mark_processed(trigger_type, trigger_key, user_id, result)
 
     # ── Email trigger ────────────────────────────
 

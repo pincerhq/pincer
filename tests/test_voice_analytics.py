@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import aiosqlite
 import pytest
+from support import SEED_ID_SQL
 
 from pincer.voice import analytics as an
 from pincer.voice.analytics import (
@@ -362,7 +363,8 @@ async def _seed_call(db_path: str, call_sid: str, started_at: datetime, directio
     async with aiosqlite.connect(db_path) as db:
         await ensure_voice_tables(db)
         await db.execute(
-            "INSERT OR REPLACE INTO voice_calls (call_sid, direction, started_at, ended_at) VALUES (?, ?, ?, ?)",
+            f"INSERT OR REPLACE INTO voice_calls (id, call_sid, direction, started_at, ended_at) "
+            f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?)",
             (call_sid, direction, started_at.isoformat(), (started_at + timedelta(minutes=1)).isoformat()),
         )
         await db.commit()

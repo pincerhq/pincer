@@ -388,10 +388,10 @@ class TestPersistFailureIsVisible:
         monkeypatch.setattr(PostCallProcessor, "_update_thread", _noop)
         if fail:
 
-            def _boom(*args, **kwargs):
+            async def _boom(*args, **kwargs):
                 raise RuntimeError("database is locked")
 
-            monkeypatch.setattr("aiosqlite.connect", _boom)
+            monkeypatch.setattr("pincer.services.voice.CallsService.save_call", _boom)
 
         processor = PostCallProcessor(SimpleNamespace(db_path=str(tmp_path / "voice.db"), voice_default_language="de"))
         report = await processor.process("CA_persist", self._state(receptionist=receptionist), self._transcript(), True)
@@ -414,10 +414,10 @@ class TestPersistFailureIsVisible:
         processor = PostCallProcessor(SimpleNamespace(db_path=str(tmp_path / "voice.db")))
         assert await processor._persist("CA_ok", self._state(), self._transcript()) is True
 
-        def _boom(*args, **kwargs):
+        async def _boom(*args, **kwargs):
             raise RuntimeError("disk full")
 
-        monkeypatch.setattr("aiosqlite.connect", _boom)
+        monkeypatch.setattr("pincer.services.voice.CallsService.save_call", _boom)
         assert await processor._persist("CA_bad", self._state(), self._transcript()) is False
 
     async def test_no_store_configured_is_not_reported_as_a_failure(self):

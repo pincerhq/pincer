@@ -10,7 +10,7 @@ Four components, three of which nobody was adding up before:
   this is where that counter finally becomes money).
 * **LLM** — tokens spent on the call's own turns.
 
-LLM attribution is the subtle one. `cost_log.session_id` is a *per-user* session,
+LLM attribution is the subtle one. `cost_logs.session_id` is a *per-user* session,
 not per-call, so summing by session would bill a user's chat traffic to whichever
 call happened to be running. Instead a `ContextVar` binds the current call SID
 for the duration of a turn; `CostTracker.record` reports into it. Since each turn
@@ -26,41 +26,22 @@ from __future__ import annotations
 
 import contextlib
 import logging
-from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import aiosqlite
-
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import Iterator
+
+    import aiosqlite
 
     from pincer.config import Settings
 
-logger = logging.getLogger(__name__)
+from pincer.services.observability import CallCostsService
 
-CALL_COSTS_SQL = """
-CREATE TABLE IF NOT EXISTS call_costs (
-    call_sid TEXT PRIMARY KEY,
-    direction TEXT DEFAULT '',
-    engine TEXT DEFAULT '',
-    language TEXT DEFAULT '',
-    duration_seconds INTEGER DEFAULT 0,
-    twilio_usd REAL DEFAULT 0.0,
-    stt_seconds REAL DEFAULT 0.0,
-    stt_usd REAL DEFAULT 0.0,
-    tts_characters INTEGER DEFAULT 0,
-    tts_usd REAL DEFAULT 0.0,
-    llm_input_tokens INTEGER DEFAULT 0,
-    llm_output_tokens INTEGER DEFAULT 0,
-    llm_usd REAL DEFAULT 0.0,
-    total_usd REAL DEFAULT 0.0,
-    recorded_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_call_costs_recorded ON call_costs(recorded_at);
-"""
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -251,45 +232,35 @@ def price_call(
 
 
 async def ensure_call_costs_table(db: aiosqlite.Connection) -> None:
-    await db.executescript(CALL_COSTS_SQL)
-    await db.commit()
+    """`call_costs` is Alembic-managed (0012); bring the file behind `db` to head."""
+    from pincer.voice.retention import ensure_schema_for_connection
 
-
-@asynccontextmanager
-async def _db(settings: Settings | Any) -> AsyncIterator[aiosqlite.Connection]:
-    async with aiosqlite.connect(str(settings.db_path)) as conn:
-        conn.row_factory = aiosqlite.Row
-        await ensure_call_costs_table(conn)
-        yield conn
+    await ensure_schema_for_connection(db)
 
 
 async def save_call_cost(settings: Settings | Any, cost: CallCost) -> None:
     """Persist the cost row and emit the cost metric. Never raises."""
     try:
-        async with _db(settings) as conn:
-            await conn.execute(
-                "INSERT OR REPLACE INTO call_costs (call_sid, direction, engine, language, duration_seconds, "
-                "twilio_usd, stt_seconds, stt_usd, tts_characters, tts_usd, llm_input_tokens, llm_output_tokens, "
-                "llm_usd, total_usd, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    cost.call_sid,
-                    cost.direction,
-                    cost.engine,
-                    cost.language,
-                    cost.duration_seconds,
-                    cost.twilio_usd,
-                    cost.stt_seconds,
-                    cost.stt_usd,
-                    cost.tts_characters,
-                    cost.tts_usd,
-                    cost.llm_input_tokens,
-                    cost.llm_output_tokens,
-                    cost.llm_usd,
-                    cost.total_usd,
-                    datetime.now(UTC).isoformat(),
-                ),
-            )
-            await conn.commit()
+        service = await CallCostsService.for_path(Path(str(settings.db_path)))
+        await service.save(
+            {
+                "call_sid": cost.call_sid,
+                "direction": cost.direction,
+                "engine": cost.engine,
+                "language": cost.language,
+                "duration_seconds": cost.duration_seconds,
+                "twilio_usd": cost.twilio_usd,
+                "stt_seconds": cost.stt_seconds,
+                "stt_usd": cost.stt_usd,
+                "tts_characters": cost.tts_characters,
+                "tts_usd": cost.tts_usd,
+                "llm_input_tokens": cost.llm_input_tokens,
+                "llm_output_tokens": cost.llm_output_tokens,
+                "llm_usd": cost.llm_usd,
+                "total_usd": cost.total_usd,
+                "recorded_at": datetime.now(UTC).isoformat(),
+            }
+        )
     except Exception:
         logger.exception("Failed to persist call cost for %s", cost.call_sid)
         return
@@ -318,27 +289,18 @@ async def save_call_cost(settings: Settings | Any, cost: CallCost) -> None:
 
 async def get_call_cost(settings: Settings | Any, call_sid: str) -> dict[str, Any] | None:
     try:
-        async with _db(settings) as conn:
-            cursor = await conn.execute("SELECT * FROM call_costs WHERE call_sid = ?", (call_sid,))
-            row = await cursor.fetchone()
+        service = await CallCostsService.for_path(Path(str(settings.db_path)))
+        return await service.get(call_sid)
     except Exception:
         logger.debug("call_costs lookup failed", exc_info=True)
         return None
-    return dict(row) if row else None
 
 
 async def get_call_costs(settings: Settings | Any, call_sids: list[str]) -> dict[str, float]:
     """`{call_sid: total_usd}` for a page of calls (one query, not N)."""
-    if not call_sids:
-        return {}
-    placeholders = ",".join("?" * len(call_sids))
     try:
-        async with _db(settings) as conn:
-            rows = await conn.execute_fetchall(
-                f"SELECT call_sid, total_usd FROM call_costs WHERE call_sid IN ({placeholders})",  # noqa: S608
-                call_sids,
-            )
+        service = await CallCostsService.for_path(Path(str(settings.db_path)))
+        return await service.totals_for(call_sids)
     except Exception:
         logger.debug("call_costs batch lookup failed", exc_info=True)
         return {}
-    return {str(r["call_sid"]): float(r["total_usd"] or 0.0) for r in rows}

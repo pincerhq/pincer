@@ -87,8 +87,8 @@ and is off by default (`PINCER_VOICE_RECORDING_ENABLED=false`).
 | Call metadata (`voice_calls`) | SQLite on the instance | `PINCER_VOICE_TRANSCRIPT_RETENTION_DAYS`, default **90 days** |
 | Utterance transcripts (`call_transcripts`) | SQLite | same |
 | Tool/action log (`call_actions`) | SQLite | same |
-| Do-not-call list (`do_not_call`) | SQLite | **Retained indefinitely by design** — it is the record of an objection under Art. 21 and deleting it would defeat its purpose |
-| Outbound call log (`outbound_call_log`) | SQLite | Retained for the abuse limits (daily cap, target cooldown); covered by the same purge window |
+| Do-not-call list (`do_not_call_numbers`) | SQLite | **Retained indefinitely by design** — it is the record of an objection under Art. 21 and deleting it would defeat its purpose |
+| Outbound call log (`outbound_call_logs`) | SQLite | Retained for the abuse limits (daily cap, target cooldown); covered by the same purge window |
 | Audit log (`data/audit.db`) | SQLite | Not auto-purged — it is the compliance record, including of the purges themselves |
 
 The purge runs daily at 03:30 in `PINCER_VOICE_TIMEZONE` and writes a

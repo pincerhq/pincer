@@ -21,20 +21,25 @@ ignore the pager.
 
 from __future__ import annotations
 
+import inspect
 import logging
-from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-import aiosqlite
 
 from pincer.observability.failure_codes import EXCLUDED_FROM_SLO, FailureCode
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import Awaitable, Callable
 
     from pincer.config import Settings
+
+from sqlalchemy.exc import SQLAlchemyError
+
+from pincer.db.engine import get_database_url
+from pincer.services.observability import BookingsService, CallCostsService
+from pincer.services.voice import CallsService
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +99,6 @@ class GoldenSignals:
         }
 
 
-@asynccontextmanager
-async def _db(settings: Settings | Any) -> AsyncIterator[aiosqlite.Connection]:
-    async with aiosqlite.connect(str(settings.db_path)) as conn:
-        conn.row_factory = aiosqlite.Row
-        yield conn
-
-
 def _cutoff(hours: float) -> str:
     return (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
 
@@ -118,9 +116,8 @@ def percentile(values: list[float], pct: float) -> float | None:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
 
 
-async def _table_exists(conn: aiosqlite.Connection, table: str) -> bool:
-    cursor = await conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,))
-    return await cursor.fetchone() is not None
+def _calls(settings: Settings | Any) -> CallsService:
+    return CallsService(get_database_url(Path(str(settings.db_path))))
 
 
 # ── 1. Call success rate ─────────────────────────────────────────────
@@ -136,16 +133,13 @@ async def call_success_rate(settings: Settings | Any, window_hours: float | None
     total = 0
     completed = 0
     try:
-        async with _db(settings) as conn:
-            if not await _table_exists(conn, "voice_calls"):
-                return Signal("call_success_rate", None, "ratio", 0, min_sample, target, f"{hours:g}h")
-            rows = await conn.execute_fetchall(
-                "SELECT failure_code FROM voice_calls WHERE ended_at IS NOT NULL AND started_at >= ?",
-                (_cutoff(hours),),
-            )
-    except aiosqlite.OperationalError:
-        # failure_code predates nothing else — a DB from before the Sprint 9
-        # migration simply has no data for this signal yet.
+        rows = await _calls(settings).terminated_between(_cutoff(hours))
+    except SQLAlchemyError:
+        # A database from before the Sprint 9 migration has no data for this
+        # signal yet. Logged at WARNING, not DEBUG: a locked or corrupt
+        # database reads exactly the same as an empty one here, and silently
+        # reporting "no data" is how an alert stops firing unnoticed.
+        logger.warning("call_success_rate query failed — reporting no data", exc_info=True)
         return Signal("call_success_rate", None, "ratio", 0, min_sample, target, f"{hours:g}h")
 
     for row in rows:
@@ -181,14 +175,9 @@ async def call_attempt_success_rate(settings: Settings | Any, window_hours: floa
     completed = 0
     excluded_count = 0
     try:
-        async with _db(settings) as conn:
-            if not await _table_exists(conn, "voice_calls"):
-                return Signal("call_attempt_success_rate", None, "ratio", 0, 1, target, f"{window_hours:g}h")
-            rows = await conn.execute_fetchall(
-                "SELECT failure_code FROM voice_calls WHERE ended_at IS NOT NULL AND started_at >= ?",
-                (_cutoff(window_hours),),
-            )
-    except aiosqlite.OperationalError:
+        rows = await _calls(settings).terminated_between(_cutoff(window_hours))
+    except SQLAlchemyError:
+        logger.warning("call_attempt_success_rate query failed — reporting no data", exc_info=True)
         return Signal("call_attempt_success_rate", None, "ratio", 0, 1, target, f"{window_hours:g}h")
 
     for row in rows:
@@ -226,19 +215,14 @@ async def booking_success_rate(settings: Settings | Any, window_hours: float | N
     target = float(getattr(settings, "alert_booking_success_min", 0.70))
 
     try:
-        async with _db(settings) as conn:
-            if not await _table_exists(conn, "appointment_outcomes"):
-                return Signal("booking_success_rate", None, "ratio", 0, min_sample, target, f"{hours:g}h")
-            rows = await conn.execute_fetchall(
-                "SELECT result FROM appointment_outcomes WHERE recorded_at >= ?",
-                (_cutoff(hours),),
-            )
-    except aiosqlite.OperationalError:
+        results = await BookingsService(get_database_url(Path(str(settings.db_path)))).results_since(_cutoff(hours))
+    except SQLAlchemyError:
+        logger.warning("booking_success_rate query failed — reporting no data", exc_info=True)
         return Signal("booking_success_rate", None, "ratio", 0, min_sample, target, f"{hours:g}h")
 
     by_result: dict[str, int] = {}
-    for row in rows:
-        result = str(row["result"] or "unknown")
+    for stored in results:
+        result = str(stored or "unknown")
         by_result[result] = by_result.get(result, 0) + 1
 
     cooperative = sum(count for result, count in by_result.items() if result not in ("unreachable", "voicemail"))
@@ -380,24 +364,21 @@ async def cost_per_call(settings: Settings | Any, window_hours: float = 24.0) ->
     min_calls = int(getattr(settings, "alert_cost_min_calls", 10))
 
     async def _totals(start_hours_ago: float, end_hours_ago: float = 0.0) -> list[float]:
-        async with _db(settings) as conn:
-            if not await _table_exists(conn, "call_costs"):
-                return []
-            rows = await conn.execute_fetchall(
-                "SELECT total_usd FROM call_costs WHERE recorded_at >= ? AND recorded_at < ?",
-                (_cutoff(start_hours_ago), _cutoff(end_hours_ago)),
-            )
-        return [float(r["total_usd"] or 0.0) for r in rows]
+        """Priced calls in the window; none when nothing has been priced yet."""
+        costs = CallCostsService(get_database_url(Path(str(settings.db_path))))
+        try:
+            rows = await costs.recorded_since(_cutoff(start_hours_ago), _cutoff(end_hours_ago))
+        except SQLAlchemyError:
+            logger.warning("cost_per_call query failed — reporting no data", exc_info=True)
+            return []
+        return [float(row["total_usd"] or 0.0) for row in rows]
 
-    try:
-        recent = await _totals(window_hours)
-        # The baseline must EXCLUDE the window being judged. Overlapping them
-        # lets a spike raise its own baseline: today's expensive calls land in
-        # both p95s, the ratio collapses toward 1.0, and the alert never fires
-        # — the exact failure this rule exists to catch.
-        baseline = await _totals(baseline_days * 24.0, window_hours)
-    except aiosqlite.OperationalError:
-        recent, baseline = [], []
+    recent = await _totals(window_hours)
+    # The baseline must EXCLUDE the window being judged. Overlapping them
+    # lets a spike raise its own baseline: today's expensive calls land in
+    # both p95s, the ratio collapses toward 1.0, and the alert never fires
+    # — the exact failure this rule exists to catch.
+    baseline = await _totals(baseline_days * 24.0, window_hours)
 
     recent_p95 = percentile(recent, 0.95)
     baseline_p95 = percentile(baseline, 0.95)
@@ -430,19 +411,15 @@ BUSY_CAPACITY_DAILY_THRESHOLD = 5
 async def busy_capacity(settings: Settings | Any, window_hours: float = 24.0) -> Signal:
     """Sprint 12 §10.3: inbound calls answered with the busy line (failure_code
     busy_capacity) in the window. Alarm when the count exceeds 5/day."""
-    count = 0
+    window = f"{int(window_hours)}h"
+    target = float(BUSY_CAPACITY_DAILY_THRESHOLD)
     try:
-        async with _db(settings) as conn:
-            if await _table_exists(conn, "voice_calls"):
-                row = await (
-                    await conn.execute(
-                        "SELECT COUNT(*) AS n FROM voice_calls WHERE failure_code = ? AND started_at >= ?",
-                        (FailureCode.BUSY_CAPACITY.value, _cutoff(window_hours)),
-                    )
-                ).fetchone()
-                count = int(row["n"] if row else 0)
-    except Exception:
-        logger.debug("busy_capacity signal failed", exc_info=True)
+        busy = await _calls(settings).started_since(_cutoff(window_hours), failure_code=FailureCode.BUSY_CAPACITY.value)
+    except SQLAlchemyError:
+        # No data, not zero: a zero here reads as "no one was turned away".
+        logger.warning("busy_capacity signal failed — reporting no data", exc_info=True)
+        return Signal("busy_capacity", None, "count", 0, 0, target, window)
+    count = len(busy)
     return Signal(
         name="busy_capacity",
         value=float(count),
@@ -485,14 +462,30 @@ async def negative_sentiment(settings: Settings | Any, window_hours: float = 24.
     )
 
 
+async def _isolated(name: str, compute: Callable[[], Awaitable[Signal] | Signal]) -> Signal:
+    """One signal, which cannot take the others down with it.
+
+    Each signal handles the database errors it expects; this catches what it
+    does not — a bad `PINCER_DATABASE_URL`, a missing driver extra, a value
+    that will not parse — so the report and every alert rule still run, with
+    this one signal reporting no data.
+    """
+    try:
+        result = compute()
+        return await result if inspect.isawaitable(result) else result
+    except Exception:
+        logger.warning("%s signal failed — reporting no data", name, exc_info=True)
+        return Signal(name, None)
+
+
 async def collect(settings: Settings | Any, active_calls: dict[str, Any] | None = None) -> GoldenSignals:
     """Every golden signal, each in its own configured window."""
     return GoldenSignals(
-        call_success_rate=await call_success_rate(settings),
-        booking_success_rate=await booking_success_rate(settings),
-        turn_latency=await turn_latency(settings),
-        stuck_calls=stuck_calls(settings, active_calls),
-        cost_per_call=await cost_per_call(settings),
-        busy_capacity=await busy_capacity(settings),
-        negative_sentiment=await negative_sentiment(settings),
+        call_success_rate=await _isolated("call_success_rate", lambda: call_success_rate(settings)),
+        booking_success_rate=await _isolated("booking_success_rate", lambda: booking_success_rate(settings)),
+        turn_latency=await _isolated("turn_latency_p95", lambda: turn_latency(settings)),
+        stuck_calls=await _isolated("stuck_calls", lambda: stuck_calls(settings, active_calls)),
+        cost_per_call=await _isolated("cost_per_call", lambda: cost_per_call(settings)),
+        busy_capacity=await _isolated("busy_capacity", lambda: busy_capacity(settings)),
+        negative_sentiment=await _isolated("negative_sentiment", lambda: negative_sentiment(settings)),
     )

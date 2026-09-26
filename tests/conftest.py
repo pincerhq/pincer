@@ -1,6 +1,7 @@
 """Shared test fixtures."""
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -250,3 +251,121 @@ def mock_agent():
     agent._costs = AsyncMock()
     agent._costs.get_today_spend.return_value = 0.42
     return agent
+
+
+# ── SQLModel layer ───────────────────────────────────────────────────
+
+
+def _postgres_test_url() -> str | None:
+    """A Postgres to run dialect-parametrised tests against, if one is configured.
+
+    CI's `postgres` job sets `PINCER_TEST_PG_URL`; locally, e.g.
+    `docker run -e POSTGRES_PASSWORD=pincer -p 5432:5432 postgres:16` and
+    `PINCER_TEST_PG_URL=postgresql://postgres:pincer@localhost:5432/postgres`.
+    """
+    return os.environ.get("PINCER_TEST_PG_URL") or None
+
+
+@pytest.fixture(scope="session")
+def postgres_scratch_url() -> Iterator[str]:
+    """One throwaway Postgres database for this test run.
+
+    Not `PINCER_TEST_PG_URL` itself: the tests that use it drop and recreate
+    their tables, so two runs pointed at the same server — CI and a developer,
+    or two matrix jobs — would pull each other's tables out mid-test and report
+    "relation does not exist" as if it were a code bug.
+    """
+    import uuid
+
+    import sqlalchemy as sa
+
+    base = _postgres_test_url()
+    if base is None:
+        pytest.skip("PINCER_TEST_PG_URL not set")
+    server = sa.engine.make_url(base).set(drivername="postgresql+psycopg")
+    name = f"pincer_test_{uuid.uuid4().hex[:12]}"
+    admin = sa.create_engine(server, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(sa.text(f'CREATE DATABASE "{name}"'))
+    try:
+        yield server.set(database=name).render_as_string(hide_password=False)
+    finally:
+        with admin.connect() as conn:
+            conn.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+@pytest_asyncio.fixture(params=["sqlite", "postgres"])
+async def db_url(request: pytest.FixtureRequest, tmp_path: Path):
+    """An async database URL, once per dialect. Postgres is skipped unless
+    `PINCER_TEST_PG_URL` is set. The database is empty: tests create (and on
+    Postgres, drop) whatever tables they use."""
+    from pincer.db.engine import dispose_engines, to_async_url
+
+    if request.param == "sqlite":
+        yield to_async_url(f"sqlite:///{tmp_path / 'pincer.db'}")
+    else:
+        yield to_async_url(request.getfixturevalue("postgres_scratch_url"))
+    await dispose_engines()
+
+
+@pytest_asyncio.fixture
+async def migrated_db(tmp_path: Path):
+    """A SQLite database at the latest Alembic revision, as an async URL."""
+    import asyncio
+
+    from pincer.db.engine import dispose_engines, ensure_schema_current, to_async_url
+
+    path = tmp_path / "pincer.db"
+    await asyncio.to_thread(ensure_schema_current, path)
+    yield to_async_url(f"sqlite:///{path}")
+    await dispose_engines()
+
+
+@pytest.fixture(params=["sqlite", "postgres"])
+def migration_url(request: pytest.FixtureRequest, tmp_path: Path):
+    """A sync URL for an empty database, once per dialect. Postgres gets a
+    throwaway database (the migrations create dozens of tables in `public`) and
+    is skipped unless `PINCER_TEST_PG_URL` is set."""
+    import uuid
+
+    import sqlalchemy as sa
+
+    if request.param == "sqlite":
+        yield f"sqlite:///{tmp_path / 'pincer.db'}"
+        return
+    base = _postgres_test_url()
+    if base is None:
+        pytest.skip("PINCER_TEST_PG_URL not set")
+    server = sa.engine.make_url(base).set(drivername="postgresql+psycopg")
+    name = f"pincer_mig_{uuid.uuid4().hex[:12]}"
+    admin = sa.create_engine(server, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(sa.text(f'CREATE DATABASE "{name}"'))
+    try:
+        yield server.set(database=name).render_as_string(hide_password=False)
+    finally:
+        with admin.connect() as conn:
+            conn.execute(sa.text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
+
+
+@pytest_asyncio.fixture
+async def migrated_url(migration_url: str, tmp_path: Path):
+    """A database at head, once per dialect, as an async URL.
+
+    `migrated_db` is SQLite only; this one also covers Postgres, which is what
+    the dialect-specific schema (the FTS5 table vs. the tsvector column) needs.
+    """
+    import asyncio
+
+    from alembic import command
+
+    from pincer.db import build_config
+    from pincer.db.engine import dispose_engines, to_async_url
+
+    config = build_config(tmp_path / "unused.db")
+    config.set_main_option("sqlalchemy.url", migration_url)
+    await asyncio.to_thread(command.upgrade, config, "head")
+    yield to_async_url(migration_url)
+    await dispose_engines()

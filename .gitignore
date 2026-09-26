@@ -56,3 +56,6 @@ docker-compose.override.yml
 pincer.local.toml
 skills/*
 mcp-servers/*
+
+# Migration lock files, written next to a SQLite database
+*.migrate.lock

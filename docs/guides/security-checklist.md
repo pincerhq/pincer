@@ -90,7 +90,7 @@ Single enforcement point: `voice/safety_gates.check_outbound_allowed`, called by
 | 3.2 | Per-target cooldown (default 60 min) | ✅ | `test_target_cooldown_bounds_calls_to_one_number` |
 | 3.3 | Quiet hours (default 20:00–08:00 local, §7 UWG) | ✅ | `test_quiet_hours_block_the_dial`, window wraps midnight |
 | 3.4 | Quiet-hours override is an explicit per-user allowlist | ✅ | `test_quiet_hours_override_user_may_still_call` |
-| 3.5 | `do_not_call` table consulted on every dial | ✅ | `test_do_not_call_blocks_the_dial`; `doctor` → `voice_do_not_call` reads the source of `make_phone_call` so a refactor around the gate fails the check |
+| 3.5 | `do_not_call_numbers` table consulted on every dial | ✅ | `test_do_not_call_blocks_the_dial`; `doctor` → `voice_do_not_call` reads the source of `make_phone_call` so a refactor around the gate fails the check |
 | 3.6 | Opt-out auto-detected from the callee's own words, EN + DE + UK | ✅ | `test_opt_out_intent_detected_in_both_languages` |
 | 3.7 | Ordinary speech does not trigger a false opt-out | ✅ | `test_opt_out_not_triggered_by_ordinary_speech` — a false positive silently blocks a number the user needs |
 | 3.8 | The list is honoured across **all** initiating users | ✅ | `test_do_not_call_is_honored_across_all_initiating_users` |

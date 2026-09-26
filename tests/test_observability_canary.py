@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
+from support import SEED_ID_SQL
 
 from pincer.observability import alerts as alerts_mod
 from pincer.observability.canary import CanaryResult, recent_runs, run_and_alert, run_canary
@@ -259,8 +260,8 @@ async def _seed(settings, codes: list[str], hours_ago: float) -> None:
         await ensure_voice_tables(db)
         for i, code in enumerate(codes):
             await db.execute(
-                "INSERT INTO voice_calls (call_sid, direction, started_at, ended_at, failure_code) "
-                "VALUES (?, 'outbound', ?, ?, ?)",
+                f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
+                f"VALUES ({SEED_ID_SQL}, ?, 'outbound', ?, ?, ?)",
                 (f"CA_{hours_ago}_{i}", started, started, code),
             )
         await db.commit()

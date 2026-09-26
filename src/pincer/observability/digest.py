@@ -15,30 +15,25 @@ separately — new failure modes are the ones worth a human's Monday morning.
 from __future__ import annotations
 
 import logging
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-import aiosqlite
 
 from pincer.observability.failure_codes import FailureCode, describe
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
     from pincer.config import Settings
+
+from sqlalchemy.exc import SQLAlchemyError
+
+from pincer.db.engine import get_database_url
+from pincer.services.observability import CallCostsService
+from pincer.services.voice import CallsService
 
 logger = logging.getLogger(__name__)
 
 WEEK_HOURS = 168.0
-
-
-@asynccontextmanager
-async def _db(settings: Settings | Any) -> AsyncIterator[aiosqlite.Connection]:
-    async with aiosqlite.connect(str(settings.db_path)) as conn:
-        conn.row_factory = aiosqlite.Row
-        yield conn
 
 
 def _iso(hours_ago: float) -> str:
@@ -60,34 +55,26 @@ class DigestPeriod:
 async def _period(settings: Settings | Any, start_hours_ago: float, end_hours_ago: float) -> DigestPeriod:
     """Aggregate one window: `start_hours_ago` back to `end_hours_ago` ago."""
     period = DigestPeriod()
+    start, end = _iso(start_hours_ago), _iso(end_hours_ago)
+    # Each half on its own: a failed cost query must not throw away the call
+    # counts already read. An empty half is the honest answer when its tables
+    # are not there — but a database that cannot be read is worth saying out loud.
+    url = get_database_url(Path(str(settings.db_path)))
     try:
-        async with _db(settings) as conn:
-            rows = await conn.execute_fetchall(
-                "SELECT failure_code FROM voice_calls WHERE ended_at IS NOT NULL "
-                "AND started_at >= ? AND started_at < ?",
-                (_iso(start_hours_ago), _iso(end_hours_ago)),
-            )
-            for row in rows:
-                code = str(row["failure_code"] or FailureCode.NONE)
-                period.calls += 1
-                if code == FailureCode.NONE:
-                    period.completed += 1
-                else:
-                    period.by_code[code] = period.by_code.get(code, 0) + 1
-
-            cursor = await conn.execute(
-                "SELECT COALESCE(SUM(total_usd), 0) AS spend FROM call_costs "
-                "WHERE recorded_at >= ? AND recorded_at < ?",
-                (_iso(start_hours_ago), _iso(end_hours_ago)),
-            )
-            cost_row = await cursor.fetchone()
-            if cost_row is not None:
-                period.cost_usd = float(cost_row["spend"] or 0.0)
-    except aiosqlite.OperationalError:
-        # Tables not created yet — an empty period is the honest answer.
-        pass
-    except Exception:
-        logger.exception("Digest period aggregation failed")
+        for call in await CallsService(url).terminated_between(start, end):
+            code = str(call["failure_code"] or FailureCode.NONE)
+            period.calls += 1
+            if code == FailureCode.NONE:
+                period.completed += 1
+            else:
+                period.by_code[code] = period.by_code.get(code, 0) + 1
+    except SQLAlchemyError:
+        logger.warning("Digest call aggregation failed — reporting no calls", exc_info=True)
+    try:
+        costs = await CallCostsService(url).recorded_since(start, end)
+        period.cost_usd = sum(float(row["total_usd"] or 0.0) for row in costs)
+    except SQLAlchemyError:
+        logger.warning("Digest cost aggregation failed — reporting no cost", exc_info=True)
     return period
 
 

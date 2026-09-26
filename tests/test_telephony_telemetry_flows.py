@@ -12,7 +12,10 @@ the asserted latencies are exact rather than "roughly".
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import sqlalchemy as sa
 
 from pincer.db import ensure_schema_current
 from pincer.voice.telemetry import hooks, queries, runtime
@@ -404,12 +407,22 @@ async def test_out_of_order_events_are_ordered_at_read_time(telemetry):
 
     call = await queries.get_call(telemetry, "CA_in")
     # Inject a late-arriving event stamped BEFORE the ones already stored.
-    from pincer.voice.telemetry import store
+    from pincer.db.engine import get_database_url, get_engine
 
-    async with store.connect(telemetry) as db:
+    async with get_engine(get_database_url(Path(str(telemetry)))).connect() as db:
         await db.execute(
-            "INSERT INTO telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) VALUES (?,?,?,?,?,?)",
-            ("late-1", call["call_id"], "call.provider_status", "1990-01-01T00:00:00+00:00", 0, 999),
+            sa.text(
+                "INSERT INTO telephony_events (event_id, call_id, name, ts_utc, mono_ns, seq) "
+                "VALUES (:event_id, :call_id, :name, :ts_utc, :mono_ns, :seq)"
+            ),
+            {
+                "event_id": "late-1",
+                "call_id": call["call_id"],
+                "name": "call.provider_status",
+                "ts_utc": "1990-01-01T00:00:00+00:00",
+                "mono_ns": 0,
+                "seq": 999,
+            },
         )
         await db.commit()
 

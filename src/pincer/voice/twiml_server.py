@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
@@ -249,28 +250,23 @@ async def _record_declined_call(
     if _settings is None:
         return
     try:
-        import aiosqlite
-
-        from pincer.voice.retention import ensure_voice_tables
+        from pincer.services.voice import CallsService
 
         now = datetime.now(UTC).isoformat()
-        async with aiosqlite.connect(str(_settings.db_path)) as db:
-            await ensure_voice_tables(db)
-            await db.execute(
-                "INSERT OR REPLACE INTO voice_calls (call_sid, direction, from_number, to_number, started_at, "
-                "ended_at, failure_code, engine, language) VALUES (?, 'inbound', ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    call_sid,
-                    caller,
-                    str(getattr(_settings, "twilio_phone_number", "") or ""),
-                    now,
-                    now,
-                    failure_code,
-                    str(getattr(_settings, "voice_engine", "") or ""),
-                    language,
-                ),
-            )
-            await db.commit()
+        calls = await CallsService.for_path(Path(str(_settings.db_path)))
+        await calls.save_call(
+            {
+                "call_sid": call_sid,
+                "direction": "inbound",
+                "from_number": caller,
+                "to_number": str(getattr(_settings, "twilio_phone_number", "") or ""),
+                "started_at": now,
+                "ended_at": now,
+                "failure_code": failure_code,
+                "engine": str(getattr(_settings, "voice_engine", "") or ""),
+                "language": language,
+            }
+        )
     except Exception:
         logger.debug("declined-call row failed [%s]", call_sid, exc_info=True)
 
@@ -776,29 +772,23 @@ async def _record_briefing_lost(call_sid: str, info: Any = None) -> None:
 
     if _settings is not None:
         try:
-            import aiosqlite
-
-            from pincer.voice.retention import ensure_voice_tables
+            from pincer.services.voice import CallsService
 
             now = datetime.now(UTC).isoformat()
-            async with aiosqlite.connect(str(_settings.db_path)) as db:
-                await ensure_voice_tables(db)
-                await db.execute(
-                    "INSERT OR REPLACE INTO voice_calls (call_sid, direction, from_number, to_number, "
-                    "started_at, ended_at, failure_code, engine, language) "
-                    "VALUES (?, 'outbound', ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        call_sid,
-                        str(getattr(_settings, "twilio_phone_number", "") or ""),
-                        str(getattr(info, "target_number", "") or "") if info is not None else "",
-                        now,
-                        now,
-                        str(FailureCode.BRIEFING_LOST),
-                        str(getattr(_settings, "voice_engine", "") or ""),
-                        language,
-                    ),
-                )
-                await db.commit()
+            calls = await CallsService.for_path(Path(str(_settings.db_path)))
+            await calls.save_call(
+                {
+                    "call_sid": call_sid,
+                    "direction": "outbound",
+                    "from_number": str(getattr(_settings, "twilio_phone_number", "") or ""),
+                    "to_number": str(getattr(info, "target_number", "") or "") if info is not None else "",
+                    "started_at": now,
+                    "ended_at": now,
+                    "failure_code": str(FailureCode.BRIEFING_LOST),
+                    "engine": str(getattr(_settings, "voice_engine", "") or ""),
+                    "language": language,
+                }
+            )
         except Exception:
             logger.debug("briefing-lost row failed [%s]", call_sid, exc_info=True)
 

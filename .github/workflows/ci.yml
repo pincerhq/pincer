@@ -50,6 +50,33 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
+  # The SQLModel layer must behave the same on Postgres as on SQLite. Every
+  # test parametrised by the `db_url` fixture runs its Postgres variant here
+  # (they skip elsewhere); the set grows as each domain moves onto the engine.
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: pincer
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PINCER_TEST_PG_URL: postgresql://postgres:pincer@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync --all-extras
+
+      - name: Database layer tests (SQLite + Postgres)
+        run: uv run pytest tests/db tests/test_db_migrations.py tests/test_schema_drift.py -v --no-cov
+
   # Sprint 8, T8.6: known-vulnerable dependencies fail the build. Untriaged
   # advisories block; triaged ones live in .security/pip-audit-ignore.txt with
   # an owner and a review date.

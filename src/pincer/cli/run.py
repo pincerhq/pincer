@@ -134,12 +134,17 @@ class CoreComponents:
 async def _build_core(settings: Settings) -> CoreComponents:
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
+    from pincer.db.engine import init_database
     from pincer.llm.cost_tracker import CostTracker
     from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import get_audit_logger
     from pincer.security.rate_limiter import get_rate_limiter
     from pincer.tools.bootstrap import register_default_tools
     from pincer.tools.registry import ToolRegistry
+
+    # One migration for the whole process; the stores' own checks are
+    # process-cached and become a no-op after this.
+    await init_database(settings.db_path)
 
     # Initialize components
     session_mgr = SessionManager(settings.db_path, settings.max_session_messages)
@@ -1156,7 +1161,7 @@ async def _run_agent(settings: Settings) -> None:
             )
         if channel == "telegram" and tg is not None:
             raw_id = await _raw_id(user_id, "telegram")
-            fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
+            fut: asyncio.Future[str] = asyncio.get_running_loop().create_future()
             _pending_ask[user_id] = fut  # keyed on canonical so on_message lookup works
             try:
                 await tg.send(
@@ -1709,6 +1714,10 @@ async def _run_agent(settings: Settings) -> None:
             await memory_store.close()
         if audit_logger:
             await audit_logger.shutdown()
+        # Last: every store above has finished with the shared engines.
+        from pincer.db.engine import dispose_engines
+
+        await dispose_engines()
         console.print("[green]Shutdown complete[/green]")
         # Cancel any lingering asyncio tasks (e.g. in-flight LLM calls from
         # channel update handlers) before exiting so the process doesn't hang.
@@ -1799,6 +1808,10 @@ async def _run_tasks_worker(settings: Settings) -> None:
             await core.memory_store.close()
         if core.audit_logger:
             await core.audit_logger.shutdown()
+        # Last: every store above has finished with the shared engines.
+        from pincer.db.engine import dispose_engines
+
+        await dispose_engines()
         console.print("[green]Tasks worker shutdown complete[/green]")
         _pending = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
         for _t in _pending:

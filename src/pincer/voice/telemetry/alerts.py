@@ -106,18 +106,8 @@ async def evaluate(db_path: str | Path, settings: Any) -> list[TelephonyAlert]:
 
 async def _turn_rows(db_path: str | Path, window_min: int) -> list[Any]:
     since = (datetime.now(UTC) - timedelta(minutes=window_min)).isoformat()
-    async with queries.store.connect(db_path) as db:
-        if not await queries.store.tables_present(db):
-            return []
-        cursor = await db.execute(
-            "SELECT t.*, c.provider_call_id FROM telephony_turns t "
-            "JOIN telephony_calls c ON c.call_id = t.call_id WHERE t.created_at >= ?",
-            (since,),
-        )
-        try:
-            return list(await cursor.fetchall())
-        finally:
-            await cursor.close()
+    async with queries.store.service(db_path).reads() as reads:
+        return [] if reads is None else await reads.turns_since(since)
 
 
 async def _response_latency(db_path: str | Path, settings: Any, window_min: int, min_turns: int) -> TelephonyAlert:
@@ -260,17 +250,10 @@ async def _stage_timeouts(db_path: str | Path, settings: Any, window_min: int) -
     since = (datetime.now(UTC) - timedelta(minutes=window_min)).isoformat()
     counts: dict[str, int] = {}
     evidence: dict[str, list[str]] = {}
-    async with queries.store.connect(db_path) as db:
-        if not await queries.store.tables_present(db):
+    async with queries.store.service(db_path).reads() as reads:
+        if reads is None:
             return []
-        cursor = await db.execute(
-            "SELECT e.attributes, e.name, c.provider_call_id FROM telephony_events e "
-            "JOIN telephony_calls c ON c.call_id = e.call_id "
-            "WHERE e.ts_utc >= ? AND e.name IN ('timeout', 'error')",
-            (since,),
-        )
-        rows = list(await cursor.fetchall())
-        await cursor.close()
+        rows = await reads.events_since(since, ("timeout", "error"))
 
     for row in rows:
         attrs = queries.store.loads(row["attributes"], {})

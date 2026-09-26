@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
+from support import SEED_ID_SQL
 
 from pincer.observability.failure_codes import (
     EXCLUDED_FROM_SLO,
@@ -65,8 +66,8 @@ async def _seed_calls(settings, codes: list[str], hours_ago: float = 0.5) -> Non
         await ensure_voice_tables(db)
         for i, code in enumerate(codes):
             await db.execute(
-                "INSERT INTO voice_calls (call_sid, direction, started_at, ended_at, failure_code) "
-                "VALUES (?, 'outbound', ?, ?, ?)",
+                f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code) "
+                f"VALUES ({SEED_ID_SQL}, ?, 'outbound', ?, ?, ?)",
                 (f"CA{i}_{code}", started, ended, code),
             )
         await db.commit()
@@ -351,6 +352,36 @@ async def test_collect_on_an_empty_system_is_all_insufficient(settings):
 
     signals = await collect(settings, active_calls={})
     assert evaluate(signals, settings) == []
+
+
+async def test_one_failing_signal_does_not_fail_the_report(settings, monkeypatch):
+    """Signals catch the database errors they expect. A bad URL or a missing
+    driver extra is neither, and used to take every signal and alert with it."""
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("PINCER_DATABASE_URL names 'mysql'")
+
+    monkeypatch.setattr("pincer.observability.golden_signals.cost_per_call", broken)
+    signals = await collect(settings, active_calls={})
+
+    assert signals.cost_per_call.name == "cost_per_call"
+    assert signals.cost_per_call.value is None
+    assert signals.call_success_rate.name == "call_success_rate"
+
+
+async def test_busy_capacity_that_cannot_be_read_is_no_data_not_zero(settings, monkeypatch):
+    """Zero reads as "nobody was turned away" — a healthy line."""
+    from sqlalchemy.exc import OperationalError
+
+    from pincer.observability.golden_signals import busy_capacity
+
+    async def locked(*_args, **_kwargs):
+        raise OperationalError("SELECT", {}, Exception("database is locked"))
+
+    monkeypatch.setattr("pincer.services.voice.CallsService.started_since", locked)
+    signal = await busy_capacity(settings)
+    assert signal.value is None
+    assert not signal.sufficient_data
 
 
 async def test_voice_schema_has_the_sprint9_columns(settings):

@@ -108,6 +108,6 @@ def _create_memory_backend(settings: Settings):  # type: ignore[return]
         from pincer.memory.mcp import MCPMemoryBackend
 
         return MCPMemoryBackend(server_name=settings.memory_mcp_server)
-    from pincer.memory.sqlite import SQLiteMemoryBackend
+    from pincer.memory.sqlite import SqlMemoryBackend
 
-    return SQLiteMemoryBackend(settings.db_path)
+    return SqlMemoryBackend(settings.db_path)

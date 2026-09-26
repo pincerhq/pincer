@@ -8,11 +8,13 @@ is only "done" with evidence in the call that supposedly satisfied it.
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import aiosqlite
 import pytest
+from support import SEED_ID_SQL
 
 from pincer.voice import threads as th
 from pincer.voice.outcome import CallOutcome
@@ -54,8 +56,8 @@ async def _seed_call(db_path: str, call_sid: str, started_at: datetime, directio
     async with aiosqlite.connect(db_path) as db:
         await ensure_voice_tables(db)
         await db.execute(
-            "INSERT OR REPLACE INTO voice_calls (call_sid, direction, from_number, to_number, started_at, ended_at) "
-            "VALUES (?, ?, '+4930111', '+4930222', ?, ?)",
+            "INSERT OR REPLACE INTO voice_calls (id, call_sid, direction, from_number, to_number, started_at, "
+            f"ended_at) VALUES ({SEED_ID_SQL}, ?, ?, '+4930111', '+4930222', ?, ?)",
             (call_sid, direction, started_at.isoformat(), (started_at + timedelta(minutes=2)).isoformat()),
         )
         await db.commit()
@@ -95,7 +97,7 @@ class FakeLLM:
 async def test_thread_create_on_task_call(manager, tmp_path):
     """A new outbound task call opens a thread and attaches as `origin`."""
     thread = await manager.create("Termin Dr. Müller", primary_number="+4930222", contact_name="Dr. Müller")
-    assert thread.thread_id.startswith("thr_")
+    assert uuid.UUID(thread.thread_id).version == 7  # was `thr_` + hex before 0018
     assert thread.status == STATUS_OPEN
     assert thread.origin == "user_task"
 

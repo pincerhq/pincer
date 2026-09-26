@@ -19,6 +19,7 @@ from croniter import croniter
 
 from pincer.channels.base import ChannelType
 from pincer.config import get_settings
+from pincer.db.ids import is_id
 from pincer.scheduler.cron import CronScheduler
 
 if TYPE_CHECKING:
@@ -33,7 +34,7 @@ def _is_unresolved_identity(pincer_user_id: str) -> bool:
     When PINCER_IDENTITY_MAP is configured and a sender isn't listed in it,
     the middleware hands downstream code a "{channel}:{native_id}" pseudo-id
     (see channels/middleware.py) purely so nothing sees an empty string —
-    it's never persisted to identity_meta/channel_identities, so a schedule
+    it's never persisted to identity_profiles/channel_identities, so a schedule
     stored under it can never be delivered later. This is a heuristic (a
     genuinely configured canonical name could coincidentally collide with
     this pattern), matching the same prefix check cli.py already uses to
@@ -46,10 +47,14 @@ async def _resolve_schedule_id(
     scheduler: CronScheduler,
     pincer_user_id: str,
     name: str,
-    schedule_id: int | None,
-) -> int:
+    schedule_id: str | None,
+) -> str:
     """Resolve a schedule by explicit id or by name, scoped to the calling user."""
     if schedule_id is not None:
+        # Ids were integers before migration 0017, and `schedule_list` numbers
+        # its lines, so "1" is a likely thing for the model to pass.
+        if not is_id(schedule_id):
+            raise ValueError(f"No schedule with id '{schedule_id}'. Use schedule_list to see your schedules.")
         return schedule_id
 
     existing = await scheduler.list_schedules(pincer_user_id)
@@ -59,7 +64,7 @@ async def _resolve_schedule_id(
     if len(matches) > 1:
         ids = ", ".join(str(m["id"]) for m in matches)
         raise ValueError(f"Multiple schedules named '{name}' found (ids: {ids}). Pass schedule_id to disambiguate.")
-    return int(matches[0]["id"])
+    return str(matches[0]["id"])
 
 
 def make_schedule_create_handler(tool_registry: ToolRegistry) -> Callable[..., Awaitable[str]]:
@@ -207,7 +212,7 @@ async def schedule_list(context: dict[str, Any] | None = None) -> str:
 
 async def schedule_remove(
     name: str,
-    schedule_id: int | None = None,
+    schedule_id: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> str:
     """Remove a scheduled job by name (or schedule_id if names collide)."""
@@ -229,7 +234,7 @@ async def schedule_remove(
 async def schedule_toggle(
     name: str,
     enabled: bool,
-    schedule_id: int | None = None,
+    schedule_id: str | None = None,
     context: dict[str, Any] | None = None,
 ) -> str:
     """Enable or disable a scheduled job by name (or schedule_id if names collide)."""

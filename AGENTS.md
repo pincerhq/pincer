@@ -4,7 +4,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 ## Project
 
-Pincer (`pincer-agent`) is a self-hosted, security-first AI agent that operates across messaging channels (Telegram, WhatsApp, Discord, Slack, Signal, Email, Voice, Web) with 300+ native tools plus unlimited tools via MCP. Pure Python 3.12+ / `asyncio` — **no agent framework** (no LangChain, CrewAI, etc.), just provider SDKs (`anthropic`, `openai`) directly. The codebase is intentionally auditable. When building or extending LLM-facing functionality, prefer the latest Codex models and consult the `Codex-api` skill for current model IDs.
+Pincer (`pincer-agent`) is a self-hosted, security-first AI agent that operates across messaging channels (Telegram, WhatsApp, Discord, Slack, Signal, Email, Voice, Web) with 300+ native tools plus unlimited tools via MCP. Pure Python 3.14+ / `asyncio` — **no agent framework** (no LangChain, CrewAI, etc.), just provider SDKs (`anthropic`, `openai`) directly. The codebase is intentionally auditable. When building or extending LLM-facing functionality, prefer the latest Codex models and consult the `Codex-api` skill for current model IDs.
 
 ## Commands
 
@@ -44,7 +44,23 @@ Dashboard (React + Vite + TS in `dashboard/`, pnpm 10+): `cd dashboard && pnpm i
 
 **Config** (`src/pincer/config/`) — `Settings` in `config/main.py` composes mixin classes (`LLMSettings`, `ChannelSettings`, `ToolSettings`, `APISettings`, `CoreSettings`, `MCPSettings`) via pydantic-settings. **Env prefix is `PINCER_`**; all fields use `Field(default=...)`. `pincer.toml` provides `[[mcp.servers]]` and integration config.
 
-**Memory** (`src/pincer/memory/`) — cross-channel SQLite store with FTS5 full-text + optional vector embeddings + auto-summarization. **Identity** (`src/pincer/core/identity.py`) maps users across channels; migrations add columns via the try/except "duplicate column" pattern.
+**Memory** (`src/pincer/memory/`) — cross-channel SQLite store with FTS5 full-text + optional vector embeddings + auto-summarization. **Identity** (`src/pincer/core/identity.py`) maps users across channels.
+
+**Data layer** (`src/pincer/db/`, `models/`, `repositories/`, `services/`) — SQLModel models, per-domain repositories and services (issue #212); the runtime runs on SQLite or Postgres. Alembic migrations in `db/migrations/versions/` own the schema. Imports flow one way: `api/cli/voice/scheduler → services → repositories → models → db`.
+- `db/engine.py` `get_engine()` gives one async engine per event loop and URL; `init_database()` is the one startup call that brings a database to head.
+- `db/session.py` `session_scope()` is the unit of work; `DbSession` is the FastAPI dependency.
+- `db/dialect.py` covers the SQL that differs between SQLite and Postgres (`upsert`, `json_contains`, `day_bucket`).
+- `db/types.py` holds the column types that keep today's storage formats.
+- `db/ids.py` mints every row id Pincer owns: a UUIDv7, `Uuid7` on the column (native `uuid` on Postgres, canonical string on SQLite). Ids that come from elsewhere — Twilio CallSids, `pincer_user_id`, W3C trace/span ids, the SHA-1 event key — are not UUIDs and are not converted. See [docs/migrations/README.md](docs/migrations/README.md#row-identifiers).
+- Repositories never commit; services own the transaction.
+- Raw `aiosqlite` is gone from the runtime; `tests/db/test_no_stray_sqlite.py` lists the few remaining test seams and fails on any new one.
+- Test tables go on a private `registry()` so they stay out of Alembic's metadata. The `db_url` fixture runs a test on both dialects (Postgres needs `PINCER_TEST_PG_URL`).
+- Where this departs from issue #212, on purpose:
+  - Services take a database URL and open their own `session_scope()`; routers get them through `*ServiceDep` (`AuditServiceDep`, `CallsServiceDep`, …). `DbSession` is there for a route that needs a raw session, and none does yet.
+  - Repositories return table models. The mapping to the old public dataclasses lives in the services (`_to_row`, `_as_dict`), not in `to_domain()` adapters.
+  - No `Float32Blob` or `CIText`: embeddings are packed as float32 in `memory/sqlite.py`, and `phone_contacts` gets case-insensitivity from `func.lower()`, with the index built per dialect in the migrations.
+  - The telemetry writes (`repositories/telemetry.py`) are precompiled `text()` upserts, not Core `upsert()`: building the statement per write cost ~7 ms of audio-loop time at 25 concurrent calls, against ~0.7 ms. The reads are Core `select()`.
+  - `observability/ga_gate.py` counts blocked dials from the unified database, where `AuditLogger` writes, not from the legacy `audit.db`, which stopped receiving rows at migration 0003.
 
 **Integrations** (`src/pincer/integrations/`) — `google/`, `ms365/`, `slack/` provide large REST-backed tool sets registered in `_run_agent()` when configured/authenticated.
 

@@ -1,9 +1,18 @@
 """Tests for the Alembic-managed schema in pincer.db."""
 
+import contextlib
+import importlib.util
+import json
 import sqlite3
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+import pytest
+import sqlalchemy as sa
 from alembic import command
+from alembic.script import ScriptDirectory
 
 from pincer.db import build_config, engine, ensure_schema_current
 
@@ -13,15 +22,15 @@ EXPECTED_TABLES = {
     "memories_fts",
     "entities",
     "sessions",
-    "identity_meta",
+    "identity_profiles",
     "channel_identities",
-    "audit_log",
+    "audit_logs",
     "schedules",
     "event_triggers",
-    "briefing_config",
-    "cost_log",
-    "image_cost_log",
-    "skill_registry",
+    "briefing_configs",
+    "cost_logs",
+    "image_cost_logs",
+    "registry_skills",
     "expenses",
     "habits",
     "habit_checkins",
@@ -126,7 +135,7 @@ def test_legacy_identity_map_is_migrated_and_dropped(tmp_path: Path) -> None:
     con = sqlite3.connect(str(db_path))
     try:
         assert con.execute("SELECT name FROM sqlite_master WHERE name='identity_map'").fetchone() is None
-        meta = con.execute("SELECT pincer_user_id, preferred_channel, display_name FROM identity_meta").fetchall()
+        meta = con.execute("SELECT pincer_user_id, preferred_channel, display_name FROM identity_profiles").fetchall()
         assert meta == [("usr_abc", "telegram", "Alice")]
         links = {
             (channel, channel_user_id)
@@ -139,13 +148,13 @@ def test_legacy_identity_map_is_migrated_and_dropped(tmp_path: Path) -> None:
         con.close()
 
 
-def test_identity_meta_has_email_timezone_columns(tmp_path: Path) -> None:
+def test_identity_profiles_has_email_timezone_columns(tmp_path: Path) -> None:
     db_path = tmp_path / "pincer.db"
     ensure_schema_current(db_path)
 
     con = sqlite3.connect(str(db_path))
     try:
-        cols = {row[1] for row in con.execute("PRAGMA table_info(identity_meta)").fetchall()}
+        cols = {row[1] for row in con.execute("PRAGMA table_info(identity_profiles)").fetchall()}
     finally:
         con.close()
     assert {"email", "timezone"} <= cols
@@ -188,7 +197,7 @@ def test_legacy_audit_db_is_imported_into_unified_db(tmp_path: Path) -> None:
 
     con = sqlite3.connect(str(db_path))
     try:
-        rows = con.execute("SELECT user_id, action FROM audit_log").fetchall()
+        rows = con.execute("SELECT user_id, action FROM audit_logs").fetchall()
     finally:
         con.close()
     assert rows == [("usr_abc", "tool_call")]
@@ -370,8 +379,8 @@ def test_voice_schema_reconcile_migrates_0001_legacy_rows(tmp_path: Path) -> Non
 
         tables = _tables(db_path)
         assert {
-            "do_not_call",
-            "outbound_call_log",
+            "do_not_call_numbers",
+            "outbound_call_logs",
         } <= tables
     finally:
         con.close()
@@ -921,24 +930,650 @@ def test_full_pre_alembic_runtime_voice_db_upgrades_to_head(tmp_path: Path) -> N
 
     con = sqlite3.connect(str(db_path))
     try:
+        # `thread_id` is NULL, not '': 0018 retired the empty-string sentinel,
+        # which is not a uuid and would not cast on Postgres.
         assert con.execute(
             "SELECT call_sid, direction, from_number, inbound_intent, thread_id FROM voice_calls"
-        ).fetchall() == [("CA_runtime", "inbound", "+493333333333", "question", "")]
+        ).fetchall() == [("CA_runtime", "inbound", "+493333333333", "question", None)]
 
         assert con.execute("SELECT speaker, text FROM call_transcripts").fetchall() == [("agent", "Guten Tag")]
         assert con.execute("SELECT tier, deny_reason FROM call_actions").fetchall() == [("X", "tier_x")]
         assert con.execute("SELECT caller_name, matter FROM inbound_messages").fetchall() == [("Anna", "Rueckruf")]
-        assert con.execute("SELECT thread_id, subject FROM call_threads").fetchall() == [("th_1", "Angebot")]
-        assert con.execute("SELECT call_sid, thread_id FROM call_thread_members").fetchall() == [("CA_runtime", "th_1")]
+        # The thread keeps its subject and loses its old hand-made id: 0018
+        # converts it, so the value is a v7 uuid rather than `th_1`.
+        ((thread_id, subject),) = con.execute("SELECT thread_id, subject FROM call_threads").fetchall()
+        assert subject == "Angebot"
+        assert uuid.UUID(thread_id).version == 7
+        # The member still points at its thread — both sides rewritten from one map.
+        assert con.execute("SELECT call_sid, thread_id FROM call_thread_members").fetchall() == [
+            ("CA_runtime", thread_id)
+        ]
         assert con.execute("SELECT call_sid, method FROM call_analytics").fetchall() == [("CA_runtime", "exact")]
 
         # 0001 must still have created the non-voice schema it owns.
-        assert {"memories", "identity_meta", "audit_log", "phone_contacts"} <= _tables(db_path)
+        assert {"memories", "identity_profiles", "audit_logs", "phone_contacts"} <= _tables(db_path)
 
         # 0005's own tables are additive here.
-        assert {"do_not_call", "outbound_call_log"} <= _tables(db_path)
+        assert {"do_not_call_numbers", "outbound_call_logs"} <= _tables(db_path)
 
         # The database is genuinely at head, not merely stamped.
-        assert con.execute("SELECT version_num FROM alembic_version").fetchone() == ("0010",)
+        head = ScriptDirectory.from_config(build_config(db_path)).get_current_head()
+        assert con.execute("SELECT version_num FROM alembic_version").fetchone() == (head,)
     finally:
         con.close()
+
+
+# ── 0011: plural table names ─────────────────────────────────────────
+
+
+def _renames() -> tuple[tuple[str, str], ...]:
+    """0011's own list, so the test cannot drift from the migration."""
+    path = Path(engine.__file__).parent / "migrations" / "versions" / "0011_plural_table_names.py"
+    spec = importlib.util.spec_from_file_location("migration_0011", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.RENAMES
+
+
+#: One row per renamed table, written at 0010 under the old name.
+_SEED_0010 = {
+    "audit_log": "INSERT INTO audit_log (timestamp, user_id, action) VALUES ('2026-01-01T00:00:00', 'usr_a', 'x')",
+    "cost_log": "INSERT INTO cost_log (timestamp, provider, model, input_tokens, output_tokens, cost_usd) "
+    "VALUES (1.0, 'anthropic', 'm', 1, 2, 0.5)",
+    "image_cost_log": "INSERT INTO image_cost_log (timestamp, provider, model, cost_usd) VALUES (1.0, 'p', 'm', 0.1)",
+    "outbound_call_log": "INSERT INTO outbound_call_log (phone_number, placed_at, local_day) "
+    "VALUES ('+4930111', '2026-01-01T00:00:00', '2026-01-01')",
+    "briefing_config": "INSERT INTO briefing_config (pincer_user_id) VALUES ('usr_a')",
+    "identity_meta": "INSERT INTO identity_meta (pincer_user_id, display_name) VALUES ('usr_a', 'Alice')",
+    "do_not_call": "INSERT INTO do_not_call (phone_number, added_at) VALUES ('+4930111', '2026-01-01T00:00:00')",
+    "skill_registry": "INSERT INTO skill_registry (skill_id, name, version, install_path) VALUES ('s', 'n', '1', '/p')",
+}
+_LINK = "INSERT INTO channel_identities (channel, channel_user_id, pincer_user_id) VALUES ('telegram', '1', 'usr_a')"
+
+
+def _uuid7_tables() -> tuple[tuple[str, str, str], ...]:
+    """The table list migration 0017 converts, read from the revision itself."""
+    spec = importlib.util.spec_from_file_location(
+        "_rev_0017", Path(engine.__file__).parent / "migrations" / "versions" / "0017_uuid7_row_ids.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return tuple(module.TABLES)
+
+
+def _shape(inspector: sa.Inspector, table: str) -> dict[str, object]:
+    """Everything about a table except its column types.
+
+    Index predicates included: a batch rebuild that re-emitted
+    `idx_schedules_next_run` without its `WHERE enabled = 1` would otherwise
+    look identical.
+    """
+    return {
+        "columns": sorted((c["name"], bool(c["nullable"])) for c in inspector.get_columns(table) if c["name"] != "id"),
+        "indexes": sorted(
+            (i["name"], tuple(i["column_names"]), bool(i.get("unique")), _predicate(i))
+            for i in inspector.get_indexes(table)
+        ),
+        "unique": sorted(
+            (u.get("name") or "", tuple(u["column_names"])) for u in inspector.get_unique_constraints(table)
+        ),
+        "pk": tuple(inspector.get_pk_constraint(table)["constrained_columns"]),
+    }
+
+
+def _predicate(index: dict[str, Any]) -> str:
+    options = index.get("dialect_options") or {}
+    where = options.get("sqlite_where") if options.get("sqlite_where") is not None else options.get("postgresql_where")
+    if where is None:
+        return ""
+    text = " ".join(str(where).split())
+    # Postgres hands the predicate back parenthesised; SQLite as written.
+    return text[1:-1] if text.startswith("(") and text.endswith(")") else text
+
+
+def _sqlite_ddl(conn: sa.Connection, name: str) -> str:
+    return str(conn.execute(sa.text("SELECT sql FROM sqlite_master WHERE name = :n"), {"n": name}).scalar_one())
+
+
+@contextlib.contextmanager
+def _connect(url: str):
+    engine = sa.create_engine(url)
+    try:
+        with engine.begin() as conn:
+            yield conn
+    finally:
+        engine.dispose()
+
+
+def _config(url: str, tmp_path: Path):
+    cfg = build_config(tmp_path / "unused.db")
+    cfg.set_main_option("sqlalchemy.url", url)
+    return cfg
+
+
+# ── migration_helpers.id_map ───────────────────────────────────────────
+
+
+def test_id_map_lets_the_real_error_through_on_postgres(migration_url):
+    """A statement that fails inside the `with` block aborts the Postgres
+    transaction. Cleaning up the temporary table in a `finally` would then
+    issue a `DROP` on that aborted transaction, which itself raises
+    `InFailedSqlTransaction` — burying the statement that actually failed
+    under a report about the cleanup instead. SQLite has no such state."""
+    if not migration_url.startswith("postgresql"):
+        pytest.skip("SQLite has no aborted-transaction state to trip over")
+    from pincer.db.migration_helpers import id_map
+
+    engine = sa.create_engine(migration_url)
+    try:
+        with (
+            engine.connect() as conn,
+            conn.begin(),
+            pytest.raises(sa.exc.ProgrammingError, match="nonexistent_table") as excinfo,
+            id_map(conn, "widgets", {"a": "b"}),
+        ):
+            conn.execute(sa.text("SELECT * FROM nonexistent_table"))
+        assert not isinstance(excinfo.value.__context__, sa.exc.InternalError)
+    finally:
+        engine.dispose()
+
+
+def test_0011_renames_every_singular_table_and_keeps_its_rows(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0010")
+    with _connect(migration_url) as conn:
+        for insert in _SEED_0010.values():
+            conn.execute(sa.text(insert))
+        conn.execute(sa.text(_LINK))
+
+    command.upgrade(cfg, "0011")
+
+    with _connect(migration_url) as conn:
+        inspector = sa.inspect(conn)
+        tables = set(inspector.get_table_names())
+        for old, new in _renames():
+            assert old not in tables, old
+            assert new in tables, new
+            assert conn.execute(sa.text(f"SELECT COUNT(*) FROM {new}")).scalar_one() == 1, new  # noqa: S608
+        # The foreign key followed the table instead of dangling.
+        (fk,) = inspector.get_foreign_keys("channel_identities")
+        assert fk["referred_table"] == "identity_profiles"
+        joined = conn.execute(
+            sa.text(
+                "SELECT p.display_name FROM channel_identities c "
+                "JOIN identity_profiles p ON p.pincer_user_id = c.pincer_user_id"
+            )
+        ).scalar_one()
+        assert joined == "Alice"
+
+
+def test_0011_downgrades_back_to_the_old_names(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0011")
+    command.downgrade(cfg, "0010")
+    with _connect(migration_url) as conn:
+        tables = set(sa.inspect(conn).get_table_names())
+    for old, new in _renames():
+        assert old in tables and new not in tables, (old, new)
+    command.upgrade(cfg, "0011")  # and forward again
+
+
+def test_0011_skips_tables_that_are_already_renamed(tmp_path):
+    """A database that is partway there (or never had a table) still upgrades."""
+    db_path = tmp_path / "pincer.db"
+    cfg = build_config(db_path)
+    command.upgrade(cfg, "0010")
+    con = sqlite3.connect(str(db_path))
+    try:
+        con.execute("ALTER TABLE cost_log RENAME TO cost_logs")
+        con.execute("DROP TABLE skill_registry")
+        con.commit()
+    finally:
+        con.close()
+    command.upgrade(cfg, "0011")
+    tables = _tables(db_path)
+    assert "cost_logs" in tables and "cost_log" not in tables
+    assert "registry_skills" not in tables and "skill_registry" not in tables
+    assert "audit_logs" in tables
+
+
+# ── 0017: autoincrement primary keys become UUIDv7 ───────────────────
+
+#: One row per converted table, seeded at 0016 with the old integer keys.
+#: `call_transcripts` and `inbound_messages` get several rows sharing one
+#: timestamp, because the ordering they rely on is the point of the backfill.
+_SEED_0016 = (
+    "INSERT INTO audit_logs (id, timestamp, user_id, action) VALUES (1, '2026-09-01T10:00:00+00:00', 'usr_a', 'act')",
+    "INSERT INTO cost_logs (id, timestamp, provider, model, input_tokens, output_tokens, cost_usd) "
+    "VALUES (1, 1788256800.0, 'anthropic', 'm', 1, 1, 0.5)",
+    "INSERT INTO image_cost_logs (id, timestamp, provider, model, cost_usd) "
+    "VALUES (1, 1788256800.0, 'openai', 'm', 0.5)",
+    "INSERT INTO schedules (id, pincer_user_id, name, cron_expr, action, next_run_at) "
+    "VALUES (1, 'usr_a', 'nightly', '0 0 * * *', '{}', '2026-09-02T00:00:00+00:00')",
+    "INSERT INTO event_triggers (id, trigger_type, trigger_key, pincer_user_id) VALUES (1, 'webhook', 'wh_1', 'usr_a')",
+    "INSERT INTO briefing_configs (id, pincer_user_id) VALUES (1, 'usr_a')",
+    "INSERT INTO appointment_outcomes (id, task_id, result, recorded_at) "
+    "VALUES (1, 'task-1', 'booked', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO canary_runs (id, ran_at, ok) VALUES (1, '2026-09-01T10:00:00+00:00', 1)",
+    "INSERT INTO voice_calls (id, call_sid, direction, started_at) "
+    "VALUES (1, 'CA_one', 'inbound', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO call_actions (id, call_id, action_type, timestamp) "
+    "VALUES (1, 'CA_one', 'dial', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO phone_contacts (id, name, phone_number) VALUES (1, 'Ada', '+15550001111')",
+    "INSERT INTO outbound_call_logs (id, phone_number, placed_at, local_day) "
+    "VALUES (1, '+15550001111', '2026-09-01T10:00:00+00:00', '2026-09-01')",
+)
+
+#: Five utterances in one second. Only the key keeps them in spoken order.
+_SEED_TRANSCRIPTS = tuple(
+    "INSERT INTO call_transcripts (id, call_id, speaker, text, timestamp) "
+    f"VALUES ({index}, 'CA_one', 'caller', 'line {index}', '2026-09-01T10:00:00+00:00')"
+    for index in range(1, 6)
+)
+
+_SEED_MESSAGES = tuple(
+    "INSERT INTO inbound_messages (id, call_sid, created_at) "
+    f"VALUES ({index}, 'CA_{index}', '2026-09-01T10:00:00+00:00')"
+    for index in range(1, 4)
+)
+
+_CONVERTED = [table for table, _column, _kind in _uuid7_tables()]
+
+
+def test_0017_gives_every_row_a_v7_uuid_and_keeps_it(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0016")
+    with _connect(migration_url) as conn:
+        for insert in (*_SEED_0016, *_SEED_TRANSCRIPTS, *_SEED_MESSAGES):
+            conn.execute(sa.text(insert))
+
+    command.upgrade(cfg, "0017")
+
+    with _connect(migration_url) as conn:
+        for table in _CONVERTED:
+            ids = [row[0] for row in conn.execute(sa.text(f"SELECT id FROM {table}")).all()]  # noqa: S608
+            assert ids, f"{table} lost its rows"
+            for value in ids:
+                assert uuid.UUID(str(value)).version == 7, f"{table}.id is not a v7 uuid: {value!r}"
+
+
+def test_0017_keeps_same_timestamp_rows_in_their_original_order(migration_url, tmp_path):
+    """The key is the tiebreaker `call_transcripts` and `inbound_messages` use.
+
+    Fresh random ids would pass every other assertion here and silently
+    scramble a call's transcript.
+    """
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0016")
+    with _connect(migration_url) as conn:
+        for insert in (*_SEED_0016, *_SEED_TRANSCRIPTS, *_SEED_MESSAGES):
+            conn.execute(sa.text(insert))
+
+    command.upgrade(cfg, "0017")
+
+    with _connect(migration_url) as conn:
+        spoken = conn.execute(sa.text("SELECT text FROM call_transcripts ORDER BY timestamp, id")).all()
+        assert [row[0] for row in spoken] == [f"line {index}" for index in range(1, 6)]
+
+        calls = conn.execute(sa.text("SELECT call_sid FROM inbound_messages ORDER BY created_at DESC, id DESC")).all()
+        assert [row[0] for row in calls] == ["CA_3", "CA_2", "CA_1"]
+
+
+def test_0017_stamps_each_id_with_the_row_s_own_creation_time(migration_url, tmp_path):
+    """Not merely "in order" — the id has to carry *when the row was made*.
+
+    Minting fresh ids during the migration would keep the relative order
+    (uuid7 is monotonic per process) while claiming every historical row was
+    written the moment the migration ran. Then `ORDER BY id` stops agreeing
+    with `ORDER BY created_at`, and a 2026 row is indistinguishable from a
+    2020 one.
+    """
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0016")
+    with _connect(migration_url) as conn:
+        for insert in (*_SEED_0016, *_SEED_TRANSCRIPTS, *_SEED_MESSAGES):
+            conn.execute(sa.text(insert))
+
+    command.upgrade(cfg, "0017")
+
+    seeded_ms = int(datetime(2026, 9, 1, 10, 0, tzinfo=UTC).timestamp() * 1000)
+    with _connect(migration_url) as conn:
+        for table in ("audit_logs", "voice_calls", "call_transcripts", "canary_runs", "cost_logs"):
+            row_id = conn.execute(sa.text(f"SELECT id FROM {table} LIMIT 1")).scalar_one()  # noqa: S608
+            stamped = uuid.UUID(str(row_id)).int >> 80
+            assert stamped == seeded_ms, f"{table}.id carries {stamped}, not the row's own time {seeded_ms}"
+
+
+#: What 0018 rebuilds on SQLite to drop the `''` default, besides `voice_calls`.
+_REBUILT_BY_0018 = ["telephony_events", "telephony_spans"]
+
+
+def test_0017_and_0018_leave_every_rebuilt_table_otherwise_exactly_as_it_was(migration_url, tmp_path):
+    """The SQLite half rebuilds each table from reflection rather than from
+    frozen DDL, so this is what guarantees nothing was dropped on the way to
+    head: same columns, same nullability, same indexes — predicates included —
+    and the same unique constraints."""
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0016")
+    with _connect(migration_url) as conn:
+        before = {table: _shape(sa.inspect(conn), table) for table in [*_CONVERTED, *_REBUILT_BY_0018]}
+
+    command.upgrade(cfg, "head")
+
+    with _connect(migration_url) as conn:
+        after = {table: _shape(sa.inspect(conn), table) for table in [*_CONVERTED, *_REBUILT_BY_0018]}
+        if migration_url.startswith("sqlite"):
+            assert "COLLATE NOCASE" in _sqlite_ddl(conn, "idx_phone_contacts_name")
+
+    assert ("idx_schedules_next_run", ("next_run_at",), False, "enabled = 1") in after["schedules"]["indexes"]
+    for table in before:
+        assert after[table] == before[table], table
+
+
+def test_0017_round_trips(migration_url, tmp_path):
+    """Down is lossy by design — ids are renumbered, not restored — so this
+    asserts the shape survives and the rows do, not the original values."""
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0016")
+    with _connect(migration_url) as conn:
+        for insert in (*_SEED_0016, *_SEED_TRANSCRIPTS, *_SEED_MESSAGES):
+            conn.execute(sa.text(insert))
+        before = {table: _shape(sa.inspect(conn), table) for table in _CONVERTED}
+
+    command.upgrade(cfg, "0017")
+    command.downgrade(cfg, "0016")
+
+    with _connect(migration_url) as conn:
+        ids = [row[0] for row in conn.execute(sa.text("SELECT id FROM call_transcripts ORDER BY id")).all()]
+        assert ids == [1, 2, 3, 4, 5]
+        after = {table: _shape(sa.inspect(conn), table) for table in _CONVERTED}
+        if migration_url.startswith("sqlite"):
+            # What the rebuild cannot reflect: a deleted row's id must never
+            # come back (the transcript tiebreaker), and contacts sort without case.
+            for table in _CONVERTED:
+                assert "AUTOINCREMENT" in _sqlite_ddl(conn, table).upper(), table
+            assert "COLLATE NOCASE" in _sqlite_ddl(conn, "idx_phone_contacts_name")
+    for table in _CONVERTED:
+        assert after[table] == before[table], table
+
+    command.upgrade(cfg, "0017")
+    with _connect(migration_url) as conn:
+        assert conn.execute(sa.text("SELECT COUNT(*) FROM call_transcripts")).scalar_one() == 5
+
+
+def test_an_interrupted_0014_does_not_wedge_every_later_upgrade(migration_url, tmp_path):
+    """SQLite has no transactional DDL: a rebuild that died after its CREATE
+    TABLE leaves the copy behind, and the retry — the app's own, at startup —
+    died on "table already exists"."""
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres DDL rolls back with the transaction")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0013")
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text("CREATE TABLE call_analytics_no_fk (call_sid TEXT PRIMARY KEY)"))
+
+    command.upgrade(cfg, "0014")
+    command.downgrade(cfg, "0013")  # the downgrade rebuilds through the same name
+
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text("CREATE TABLE call_analytics_no_fk (call_sid TEXT PRIMARY KEY)"))
+    command.upgrade(cfg, "head")
+
+
+def test_an_interrupted_0017_downgrade_can_be_retried(migration_url, tmp_path):
+    """The downgrade's batch rebuilds leave `_alembic_tmp_<t>` behind the same way."""
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("Postgres DDL rolls back with the transaction")
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0017")
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text("CREATE TABLE _alembic_tmp_schedules (id INTEGER)"))
+
+    command.downgrade(cfg, "0016")
+
+
+# ── 0018: the minted text keys become UUIDv7 ─────────────────────────
+
+_T0 = "2026-09-01T10:00:00+00:00"
+
+#: A call with its telemetry, a thread with a member, and a memory tagged
+#: with that thread — every relation 0018 has to keep, plus the orphans and
+#: sentinels it has to resolve before the values can cast.
+_SEED_0017 = (
+    "INSERT INTO telephony_calls (call_id, registered_at) VALUES ('call-old', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO telephony_turns (turn_id, call_id, created_at) "
+    "VALUES ('turn-old', 'call-old', '2026-09-01T10:00:01+00:00')",
+    "INSERT INTO telephony_events (event_id, call_id, turn_id, name, ts_utc) "
+    "VALUES ('ev-1', 'call-old', 'turn-old', 'call.registered', '2026-09-01T10:00:02+00:00')",
+    # turn_id carries the '' sentinel, which is not a uuid.
+    "INSERT INTO telephony_events (event_id, call_id, turn_id, name, ts_utc) "
+    "VALUES ('ev-2', 'call-old', '', 'call.ended', '2026-09-01T10:00:03+00:00')",
+    # an event whose call was purged by retention — a real orphan
+    "INSERT INTO telephony_events (event_id, call_id, name, ts_utc) "
+    "VALUES ('ev-orphan', 'call-gone', 'call.ended', '2026-09-01T10:00:04+00:00')",
+    "INSERT INTO telephony_spans (span_id, call_id, turn_id, name, start_utc) "
+    "VALUES ('span-1', 'call-old', 'turn-old', 'llm', '2026-09-01T10:00:02+00:00')",
+    "INSERT INTO call_threads (thread_id, subject, origin, created_at, updated_at) "
+    "VALUES ('thr_old', 'Angebot', 'inbound', '2026-09-01T10:00:00+00:00', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO call_thread_members (call_sid, thread_id, attached_at) "
+    "VALUES ('CA_1', 'thr_old', '2026-09-01T10:00:00+00:00')",
+    "INSERT INTO voice_calls (id, call_sid, started_at, thread_id) "
+    "VALUES ('01a00000-0000-7000-8000-000000000001', 'CA_1', '2026-09-01T10:00:00+00:00', 'thr_old')",
+    "INSERT INTO memories (id, user_id, content, category, tags, created_at) "
+    "VALUES ('mem-old', 'usr_a', 'Angebot besprochen', 'general', '[\"thread:thr_old\", \"call:CA_1\"]', 1788256800.0)",
+    "INSERT INTO conversations (id, user_id, channel, messages_json, created_at, updated_at) "
+    "VALUES ('conv-old', 'usr_a', 'voice', '[]', 1788256800.0, 1788256800.0)",
+    "INSERT INTO entities (id, user_id, name, type, attributes_json, last_seen) "
+    "VALUES ('ent-old', 'usr_a', 'Ada', 'person', '{}', 1788256800.0)",
+)
+
+
+def _seed_0017(url: str, tmp_path: Path):
+    cfg = _config(url, tmp_path)
+    command.upgrade(cfg, "0017")
+    with _connect(url) as conn:
+        for insert in _SEED_0017:
+            conn.execute(sa.text(insert))
+    return cfg
+
+
+def test_0018_rewrites_both_sides_of_every_reference(migration_url, tmp_path):
+    """The point of the revision: a key and everything pointing at it move
+    together, from one map, so nothing is left naming a row that is gone."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        call_id = conn.execute(sa.text("SELECT call_id FROM telephony_calls")).scalar_one()
+        turn_id = conn.execute(sa.text("SELECT turn_id FROM telephony_turns")).scalar_one()
+        thread_id = conn.execute(sa.text("SELECT thread_id FROM call_threads")).scalar_one()
+
+        for value in (call_id, turn_id, thread_id):
+            assert uuid.UUID(str(value)).version == 7
+
+        assert conn.execute(sa.text("SELECT call_id FROM telephony_turns")).scalar_one() == call_id
+        assert conn.execute(sa.text("SELECT call_id FROM telephony_spans")).scalar_one() == call_id
+        assert conn.execute(sa.text("SELECT turn_id FROM telephony_spans")).scalar_one() == turn_id
+        assert (
+            conn.execute(sa.text("SELECT turn_id FROM telephony_events WHERE event_id = 'ev-1'")).scalar_one()
+            == turn_id
+        )
+        assert conn.execute(sa.text("SELECT thread_id FROM call_thread_members")).scalar_one() == thread_id
+        assert conn.execute(sa.text("SELECT thread_id FROM voice_calls")).scalar_one() == thread_id
+
+
+def test_0018_retires_the_empty_string_sentinel(migration_url, tmp_path):
+    """`''` meant "no turn". It is not a uuid, so it becomes what it meant."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        assert (
+            conn.execute(sa.text("SELECT turn_id FROM telephony_events WHERE event_id = 'ev-2'")).scalar_one() is None
+        )
+
+
+def test_0018_drops_telemetry_whose_call_is_already_gone(migration_url, tmp_path):
+    """Retention deletes a call and leaves its events; `call_id` is NOT NULL,
+    so an orphan cannot be nulled and cannot cast. It goes."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        remaining = conn.execute(sa.text("SELECT event_id FROM telephony_events")).all()
+    assert sorted(row[0] for row in remaining) == ["ev-1", "ev-2"]
+
+
+def test_0018_applies_each_orphan_policy_to_the_column_it_names(migration_url, tmp_path):
+    """The `null` and `delete` policies differ by whether the column can be
+    NULL, and getting one wrong deletes production rows instead of dropping a
+    link. Only the telephony pair was covered; these are the thread ones."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    with _connect(migration_url) as conn:
+        # A call pointing at a thread that no longer exists: nullable, so the
+        # call survives and loses the link.
+        conn.execute(
+            sa.text(
+                "INSERT INTO voice_calls (id, call_sid, started_at, thread_id) "
+                "VALUES ('01a00000-0000-7000-8000-000000000002', 'CA_2', :now, 'thr_gone')"
+            ),
+            {"now": _T0},
+        )
+        # A membership row pointing at one: NOT NULL, so the row goes. Only
+        # SQLite can hold such a row at all — Postgres enforces the foreign
+        # key, which is why these policies exist for the SQLite side.
+        if migration_url.startswith("sqlite"):
+            conn.execute(
+                sa.text(
+                    "INSERT INTO call_thread_members (call_sid, thread_id, attached_at) "
+                    "VALUES ('CA_2', 'thr_gone', :now)"
+                ),
+                {"now": _T0},
+            )
+        # A span whose turn is gone: nullable, so the span survives.
+        conn.execute(
+            sa.text(
+                "INSERT INTO telephony_spans (span_id, call_id, turn_id, name, start_utc) "
+                "VALUES ('span-orphan', 'call-old', 'turn-gone', 'llm', :now)"
+            ),
+            {"now": _T0},
+        )
+
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        kept = conn.execute(sa.text("SELECT thread_id FROM voice_calls WHERE call_sid = 'CA_2'")).scalar_one()
+        assert kept is None, "a call must survive losing its thread"
+        members = conn.execute(sa.text("SELECT call_sid FROM call_thread_members")).all()
+        assert [row[0] for row in members] == ["CA_1"], "the orphaned membership row should be gone"
+        span = conn.execute(sa.text("SELECT turn_id FROM telephony_spans WHERE span_id = 'span-orphan'")).scalar_one()
+        assert span is None, "a span must survive losing its turn"
+
+
+def test_0018_rewrites_the_thread_id_copied_into_memory_tags(migration_url, tmp_path):
+    """A thread id has a second home in `memories.tags`, and the thread's one
+    note is found by that tag. A stale tag would split it in two silently."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        thread_id = conn.execute(sa.text("SELECT thread_id FROM call_threads")).scalar_one()
+        tags = json.loads(conn.execute(sa.text("SELECT tags FROM memories")).scalar_one())
+
+    assert tags == [f"thread:{thread_id}", "call:CA_1"]  # the call_sid is Twilio's and does not move
+
+
+def test_0018_leaves_the_identifiers_that_are_not_ours_alone(migration_url, tmp_path):
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+
+    with _connect(migration_url) as conn:
+        assert conn.execute(sa.text("SELECT span_id FROM telephony_spans")).scalar_one() == "span-1"
+        assert (
+            conn.execute(sa.text("SELECT event_id FROM telephony_events WHERE name = 'call.registered'")).scalar_one()
+            == "ev-1"
+        )
+        assert conn.execute(sa.text("SELECT call_sid FROM voice_calls")).scalar_one() == "CA_1"
+
+
+def test_0018_keeps_full_text_search_working_on_sqlite(migration_url, tmp_path):
+    """`memories_fts` is keyed on the rowid, which an id rewrite does not move.
+    0018 does not rely on that: it drops the triggers for the rewrite, puts them
+    back and rebuilds the index — so search still finds the old row, and a row
+    written afterwards is indexed too.
+
+    None of that actually exercises the rebuild by itself: the id rewrite
+    never moves a rowid, so the index stays correct even if the trigger
+    cycle — and the `rebuild` — never ran. The row inserted below, with the
+    triggers down, is the part that pins it: only `upgrade 0018`'s own
+    `rebuild` can put a row into the index that no trigger ever wrote there.
+    """
+    if not migration_url.startswith("sqlite"):
+        pytest.skip("FTS5 is the SQLite search path")
+    cfg = _seed_0017(migration_url, tmp_path)
+
+    # Desynchronise `memories_fts` before the upgrade ever touches it: with
+    # every trigger down, this row lands in `memories` but nowhere else.
+    with _connect(migration_url) as conn:
+        for trigger in ("memories_ai", "memories_ad", "memories_au"):
+            conn.execute(sa.text(f"DROP TRIGGER {trigger}"))
+        conn.execute(
+            sa.text(
+                "INSERT INTO memories (id, user_id, content, category, created_at) "
+                "VALUES (:id, 'usr_a', 'Vertrag unterschrieben', 'note', 1)"
+            ),
+            {"id": str(uuid.uuid4())},
+        )
+
+    command.upgrade(cfg, "0018")
+
+    def search(conn: sa.Connection, term: str) -> list[str]:
+        return [
+            row[0]
+            for row in conn.execute(
+                sa.text(
+                    "SELECT m.id FROM memories_fts f JOIN memories m ON m.rowid = f.rowid "
+                    "WHERE memories_fts MATCH :term"
+                ),
+                {"term": term},
+            ).all()
+        ]
+
+    with _connect(migration_url) as conn:
+        stored = conn.execute(sa.text("SELECT id FROM memories WHERE content = 'Angebot besprochen'")).scalar_one()
+        assert search(conn, "Angebot") == [stored]
+
+        # Never written by a trigger — only findable if 0018 actually rebuilt.
+        stray = conn.execute(sa.text("SELECT id FROM memories WHERE content = 'Vertrag unterschrieben'")).scalar_one()
+        assert search(conn, "Vertrag") == [stray]
+
+        triggers = {
+            row[0] for row in conn.execute(sa.text("SELECT name FROM sqlite_master WHERE type = 'trigger'")).all()
+        }
+        assert {"memories_ai", "memories_ad", "memories_au"} <= triggers
+        conn.execute(
+            sa.text(
+                "INSERT INTO memories (id, user_id, content, category, created_at) "
+                "VALUES (:id, 'usr_a', 'Rechnung bezahlt', 'note', 1)"
+            ),
+            {"id": str(uuid.uuid7())},
+        )
+        assert len(search(conn, "Rechnung")) == 1
+
+
+def test_0018_round_trips_without_losing_the_ids(migration_url, tmp_path):
+    """Down only reverts the storage type: the ids stay UUIDv7 strings, which
+    the pre-0018 code reads happily because it never parsed the format."""
+    cfg = _seed_0017(migration_url, tmp_path)
+    command.upgrade(cfg, "0018")
+    with _connect(migration_url) as conn:
+        before = conn.execute(sa.text("SELECT call_id FROM telephony_calls")).scalar_one()
+
+    command.downgrade(cfg, "0017")
+    with _connect(migration_url) as conn:
+        assert str(conn.execute(sa.text("SELECT call_id FROM telephony_calls")).scalar_one()) == str(before)
+        # and the sentinel is back where the old code expects it
+        assert conn.execute(sa.text("SELECT turn_id FROM telephony_events WHERE event_id = 'ev-2'")).scalar_one() == ""
+
+    command.upgrade(cfg, "0018")

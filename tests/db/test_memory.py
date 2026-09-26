@@ -1,0 +1,278 @@
+"""Memory on the repository/service layer, on SQLite and Postgres.
+
+Full-text search needs the schema the migrations build (the FTS5 table and its
+triggers on SQLite, the tsvector column on Postgres), so these run against a
+migrated database rather than `create_all`.
+"""
+
+from __future__ import annotations
+
+import json
+import struct
+
+import pytest
+from support import label_of, seeded_id
+
+from pincer.db.engine import get_engine
+from pincer.models.memory import Conversation, Entity, Memory
+from pincer.services.memory import MemoryService
+
+_TABLES = [Memory.__table__, Entity.__table__, Conversation.__table__]
+
+
+@pytest.fixture
+async def url(db_url: str):
+    engine = get_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda c: Memory.metadata.drop_all(c, tables=_TABLES))
+        await conn.run_sync(lambda c: Memory.metadata.create_all(c, tables=_TABLES))
+    yield db_url
+    async with engine.begin() as conn:
+        await conn.run_sync(lambda c: Memory.metadata.drop_all(c, tables=_TABLES))
+
+
+async def _store(url: str, memory_id: str, *, user_id: str = "usr_a", content: str = "hello", **kwargs) -> None:
+    values = {
+        "id": seeded_id(memory_id),
+        "user_id": user_id,
+        "content": content,
+        "category": kwargs.pop("category", "general"),
+        "tags": json.dumps(kwargs.pop("tags", [])),
+        "created_at": kwargs.pop("created_at", 1000.0),
+        **kwargs,
+    }
+    await MemoryService(url).add(values)
+
+
+# ── memories ─────────────────────────────────────────────────────────
+
+
+async def test_a_memory_round_trips(url):
+    service = MemoryService(url)
+    await _store(url, "m1", content="the boiler is serviced in March", tags=["user:usr_a", "home"])
+
+    stored = await service.get(seeded_id("m1"))
+    assert stored["content"] == "the boiler is serviced in March"
+    assert json.loads(stored["tags"]) == ["user:usr_a", "home"]
+    assert await service.get(seeded_id("missing")) is None
+    # And an id that could never name a row is a miss, not an error: it
+    # reaches the API as a 404 rather than a 500. See `BaseRepository.get`.
+    assert await service.get("not-an-id-at-all") is None
+    assert await service.set_fields("not-an-id-at-all", {"content": "x"}) is None
+    await service.delete("not-an-id-at-all")
+
+
+async def test_listing_is_newest_first_and_pages(url):
+    service = MemoryService(url)
+    for i in range(5):
+        await _store(url, f"m{i}", created_at=float(i))
+
+    newest = await service.search(user_id="usr_a", limit=2)
+    assert [label_of(row["id"]) for row in newest] == ["m4", "m3"]
+    assert [label_of(row["id"]) for row in await service.search(user_id="usr_a", limit=2, offset=2)] == ["m2", "m1"]
+
+
+async def test_tag_filters_match_any_or_all(url):
+    service = MemoryService(url)
+    await _store(url, "both", tags=["work", "urgent"])
+    await _store(url, "one", tags=["work"])
+    await _store(url, "none", tags=["home"])
+
+    any_of = await service.search(tags=["work", "urgent"])
+    assert {label_of(row["id"]) for row in any_of} == {"both", "one"}
+
+    all_of = await service.search(tags=["work", "urgent"], match_all_tags=True)
+    assert {label_of(row["id"]) for row in all_of} == {"both"}
+
+    assert await service.count(tags=["work"]) == 2
+    assert await service.count(tags=["work", "urgent"], match_all_tags=True) == 1
+
+
+async def test_a_memory_with_no_tags_is_not_matched_by_a_tag_filter(url):
+    """The tags column defaults to '[]' — parsing that must not error."""
+    service = MemoryService(url)
+    await _store(url, "untagged")
+    assert await service.search(tags=["work"]) == []
+    assert await service.count(tags=["work"]) == 0
+
+
+async def test_updates_and_deletes(url):
+    service = MemoryService(url)
+    await _store(url, "m1", content="before", category="general")
+
+    await service.set_fields(seeded_id("m1"), {"content": "after", "category": "profile"})
+    stored = await service.get(seeded_id("m1"))
+    assert (stored["content"], stored["category"]) == ("after", "profile")
+
+    await service.set_fields(seeded_id("m1"), {})  # nothing to change is not an error
+    await service.delete(seeded_id("m1"))
+    assert await service.get(seeded_id("m1")) is None
+
+
+async def test_deleting_a_user_s_memories_can_be_scoped_to_a_category(url):
+    service = MemoryService(url)
+    await _store(url, "p1", category="profile")
+    await _store(url, "g1", category="general")
+    await _store(url, "other", user_id="usr_b", category="profile")
+
+    assert await service.delete_for_user("usr_a", category="profile") == 1
+    assert {label_of(row["id"]) for row in await service.search()} == {"g1", "other"}
+    assert await service.delete_for_user("usr_a") == 1
+    assert {label_of(row["id"]) for row in await service.search()} == {"other"}
+
+
+async def test_stats_count_users_and_categories(url):
+    service = MemoryService(url)
+    await _store(url, "m1", user_id="usr_a", category="general")
+    await _store(url, "m2", user_id="usr_a", category="profile")
+    await _store(url, "m3", user_id="usr_b", category="general")
+
+    users, by_category = await service.stats()
+    assert users == 2
+    assert by_category == {"general": 2, "profile": 1}
+
+
+async def test_only_embedded_memories_come_back_for_a_similarity_search(url):
+    """`search_similar` unpacks every row's blob, so a row without one crashes it.
+
+    Almost every real memory has no embedding, so losing this predicate is a
+    hard failure on the first similarity search rather than a rare one.
+    """
+    await _store(url, "plain")
+    await _store(url, "embedded", embedding_blob=struct.pack("3f", 0.1, 0.2, 0.3))
+
+    rows = await MemoryService(url).search(with_embedding=True)
+    assert [label_of(row["id"]) for row in rows] == ["embedded"]
+    assert struct.unpack("3f", rows[0]["embedding_blob"]) == pytest.approx((0.1, 0.2, 0.3))
+
+
+# ── entities ─────────────────────────────────────────────────────────
+
+
+async def test_an_entity_is_one_row_per_user_name_and_type(url):
+    service = MemoryService(url)
+    await service.upsert_entity(
+        {
+            "id": seeded_id("e1"),
+            "user_id": "usr_a",
+            "name": "Ada",
+            "type": "person",
+            "attributes_json": "{}",
+            "last_seen": 1.0,
+        }
+    )
+    await service.upsert_entity(
+        {
+            "id": seeded_id("e2"),
+            "user_id": "usr_a",
+            "name": "Ada",
+            "type": "person",
+            "attributes_json": '{"role": "dentist"}',
+            "last_seen": 2.0,
+        }
+    )
+
+    rows = await service.entities_for("usr_a", limit=10)
+    assert len(rows) == 1
+    assert label_of(rows[0]["id"]) == "e1"  # the first sighting keeps its id
+    assert json.loads(rows[0]["attributes_json"]) == {"role": "dentist"}
+    assert rows[0]["last_seen"] == 2.0
+
+
+async def test_an_upsert_returns_the_id_of_the_row_that_now_holds_it(url):
+    """The caller's candidate id, or the stored one — never a row that is not there."""
+    service = MemoryService(url)
+    entity = {"user_id": "usr_a", "name": "Ada", "type": "person", "attributes_json": "{}", "last_seen": 1.0}
+
+    assert label_of(await service.upsert_entity({**entity, "id": seeded_id("e1")})) == "e1"
+    assert label_of(await service.upsert_entity({**entity, "id": seeded_id("e2"), "last_seen": 2.0})) == "e1"
+    assert [label_of(row["id"]) for row in await service.entities_for("usr_a")] == ["e1"]
+
+
+async def test_entities_are_newest_first_and_filtered_by_type(url):
+    service = MemoryService(url)
+    for entity_id, type_, last_seen in (("e1", "person", 1.0), ("e2", "place", 2.0), ("e3", "person", 3.0)):
+        await service.upsert_entity(
+            {
+                "id": seeded_id(entity_id),
+                "user_id": "usr_a",
+                "name": entity_id,
+                "type": type_,
+                "attributes_json": "{}",
+                "last_seen": last_seen,
+            }
+        )
+
+    assert [label_of(row["id"]) for row in await service.entities_for("usr_a", limit=10)] == ["e3", "e2", "e1"]
+    assert [label_of(row["id"]) for row in await service.entities_for("usr_a", type_="person", limit=10)] == [
+        "e3",
+        "e1",
+    ]
+
+
+# ── full-text search ─────────────────────────────────────────────────
+
+
+async def test_full_text_search_finds_and_ranks(migrated_url):
+    service = MemoryService(migrated_url)
+    await _store(migrated_url, "boiler", content="the boiler is serviced every March")
+    await _store(migrated_url, "dentist", content="dentist appointment in March")
+    await _store(migrated_url, "unrelated", content="nothing to do with anything")
+
+    found = await service.full_text("boiler")
+    assert [label_of(row["id"]) for row in found] == ["boiler"]
+    assert found[0]["score"] > 0
+
+    # Several words are ORed, as the old FTS5 query did.
+    assert {label_of(row["id"]) for row in await service.full_text("boiler dentist")} == {"boiler", "dentist"}
+
+    # Best match first, and it is an order, not a set: `core.agent` keeps only
+    # the top few, so a reversed sort would recall the least relevant memories.
+    ranked = await service.full_text("boiler March")
+    assert [label_of(row["id"]) for row in ranked] == ["boiler", "dentist"]
+    assert ranked[0]["score"] > ranked[1]["score"]
+    assert await service.full_text("") == []
+    assert await service.full_text("nonexistentword") == []
+
+
+async def test_full_text_search_is_scoped_to_a_user_and_its_tags(migrated_url):
+    service = MemoryService(migrated_url)
+    await _store(migrated_url, "mine", user_id="usr_a", content="shared subject", tags=["work"])
+    await _store(migrated_url, "theirs", user_id="usr_b", content="shared subject", tags=["work"])
+    await _store(migrated_url, "untagged", user_id="usr_a", content="shared subject")
+
+    assert {label_of(row["id"]) for row in await service.full_text("shared", user_id="usr_a")} == {"mine", "untagged"}
+    assert {label_of(row["id"]) for row in await service.full_text("shared", user_id="usr_a", tags=["work"])} == {
+        "mine"
+    }
+    assert len(await service.full_text("shared", limit=1)) == 1
+
+
+async def test_a_tagged_match_outside_the_top_hits_is_still_found(migrated_url):
+    """The tag filter belongs in the search, not after its LIMIT.
+
+    Filtering the engine's top `limit` ids afterwards loses any tagged match
+    that ranks below them — here, the one row of 25 that carries the tag.
+    """
+    service = MemoryService(migrated_url)
+    for i in range(24):
+        await _store(migrated_url, f"plain{i}", content="the weekly meeting")
+    await _store(migrated_url, "tagged", content="the weekly meeting", tags=["important"])
+
+    found = await service.full_text("meeting", limit=20, tags=["important"])
+    assert [label_of(row["id"]) for row in found] == ["tagged"]
+
+
+async def test_punctuation_in_a_query_is_searched_for_not_parsed(migrated_url):
+    """Both engines read their query as syntax; a user types prose.
+
+    `!`, `?` and an apostrophe are operators to `to_tsquery` and `"` ends an
+    FTS5 string — each of these used to raise rather than search.
+    """
+    service = MemoryService(migrated_url)
+    await _store(migrated_url, "boiler", content="the boiler is broken")
+
+    for query in ("Hey! where is the boiler?", "don't forget the boiler!", "boiler :-)", 'he"llo boiler', "boiler <b>"):
+        assert [label_of(row["id"]) for row in await service.full_text(query)] == ["boiler"], query
+    # Punctuation alone matches nothing, and still does not raise.
+    assert await service.full_text("!! ??") == []

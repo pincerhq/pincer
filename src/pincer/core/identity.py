@@ -7,7 +7,7 @@ all channels.
 
 Schema
 ------
-identity_meta     — one row per pincer user (preferred channel, display name)
+identity_profiles     — one row per pincer user (preferred channel, display name)
 channel_identities — many-to-many: (channel, channel_user_id) → pincer_user_id
 
 Config mapping (.env)
@@ -46,17 +46,17 @@ IdentityProfile` dict for the fields that string grammar has no room for
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-import aiosqlite
+from typing import TYPE_CHECKING, Any
 
 from pincer.channels.base import ChannelType
-from pincer.db import ensure_schema_current
+from pincer.db.engine import get_database_url
+from pincer.services.identity import IdentityService, SeedEntry
 
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel
@@ -96,6 +96,7 @@ class IdentityResolver:
         self._identity_map_config = identity_map_config
         self._profiles = profiles or {}
         self._seeded = asyncio.Event()
+        self._service: IdentityService | None = None
 
     # Bounded wait for mark_seeding_complete() in is_guest(), so a future
     # caller of rebuild_identity_map() that doesn't guarantee it eventually
@@ -117,8 +118,12 @@ class IdentityResolver:
         """
         self._seeded.set()
 
-    def _get_db(self) -> aiosqlite.Connection:
-        return aiosqlite.connect(self._db_path)
+    @property
+    def _store(self) -> IdentityService:
+        """The store, built on first use for callers that skip `ensure_table`."""
+        if self._service is None:
+            self._service = IdentityService(get_database_url(Path(self._db_path)))
+        return self._service
 
     @staticmethod
     def _normalize_id(channel: ChannelType | str, channel_user_id: str | int) -> str:
@@ -129,7 +134,7 @@ class IdentityResolver:
 
     async def ensure_table(self) -> None:
         """Ensure the identity schema is at head (see pincer.db.migrations)."""
-        await asyncio.to_thread(ensure_schema_current, Path(self._db_path))
+        self._service = await IdentityService.for_path(Path(self._db_path))
 
     async def find(
         self,
@@ -142,11 +147,10 @@ class IdentityResolver:
         Unlike resolve(), this never writes to the database.
         """
         normalized = self._normalize_id(channel, channel_user_id)
-        async with self._get_db() as db:
-            existing = await self._find_existing(db, channel, normalized)
-            if existing:
-                return existing
-            return await self._check_config_mapping(db, channel, normalized)
+        existing = await self._find_existing(channel, normalized)
+        if existing:
+            return existing
+        return await self._check_config_mapping(channel, normalized)
 
     async def is_guest(self, channel: ChannelType, channel_user_id: str | int) -> bool:
         """True if an identity map is configured and this sender is not in it.
@@ -185,19 +189,17 @@ class IdentityResolver:
         3. Create new identity
         """
         normalized = self._normalize_id(channel, channel_user_id)
-        async with self._get_db() as db:
-            db.row_factory = aiosqlite.Row
-            existing = await self._find_existing(db, channel, normalized)
-            if existing:
-                return existing
+        existing = await self._find_existing(channel, normalized)
+        if existing:
+            return existing
 
-            mapped = await self._check_config_mapping(db, channel, normalized)
-            if mapped:
-                return mapped
+        mapped = await self._check_config_mapping(channel, normalized)
+        if mapped:
+            return mapped
 
-            pincer_user_id = self._generate_user_id(channel, normalized)
-            await self._create_identity(db, pincer_user_id, channel, normalized, display_name)
-            return pincer_user_id
+        pincer_user_id = self._generate_user_id(channel, normalized)
+        await self._create_identity(pincer_user_id, channel, normalized, display_name)
+        return pincer_user_id
 
     async def link_if_new(
         self,
@@ -207,91 +209,38 @@ class IdentityResolver:
     ) -> None:
         """Link channel_user_id to an existing pincer_user_id if not already linked."""
         normalized = self._normalize_id(channel, channel_user_id)
-        async with self._get_db() as db:
-            existing = await self._find_existing(db, channel, normalized)
-            if not existing:
-                await self._link_channel(db, pincer_user_id, channel, normalized)
+        if not await self._find_existing(channel, normalized):
+            await self._link_channel(pincer_user_id, channel, normalized)
 
-    async def _find_existing(
-        self,
-        db: aiosqlite.Connection,
-        channel: ChannelType,
-        normalized_id: str,
-    ) -> str | None:
-        cursor = await db.execute(
-            "SELECT pincer_user_id FROM channel_identities WHERE channel = ? AND channel_user_id = ?",
-            (channel.value, normalized_id),
-        )
-        row = await cursor.fetchone()
-        return row[0] if row else None
+    async def _find_existing(self, channel: ChannelType, normalized_id: str) -> str | None:
+        return await self._store.user_for_channel(channel.value, normalized_id)
 
     async def _create_identity(
         self,
-        db: aiosqlite.Connection,
         pincer_user_id: str,
         channel: ChannelType,
         normalized_id: str,
         display_name: str | None = None,
     ) -> None:
-        await db.execute(
-            "INSERT OR IGNORE INTO identity_meta (pincer_user_id, preferred_channel, display_name) VALUES (?, ?, ?)",
-            (pincer_user_id, channel.value, display_name),
+        await self._store.create_identity(
+            pincer_user_id,
+            channel=channel.value,
+            channel_user_id=normalized_id,
+            display_name=display_name,
         )
-        await db.execute(
-            "INSERT OR IGNORE INTO channel_identities (channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
-            (channel.value, normalized_id, pincer_user_id),
-        )
-        await db.commit()
         logger.info("Identity created: %s (%s:%s)", pincer_user_id, channel.value, normalized_id)
 
-    async def _link_channel(
-        self,
-        db: aiosqlite.Connection,
-        pincer_user_id: str,
-        channel: ChannelType,
-        normalized_id: str,
-    ) -> None:
-        await db.execute(
-            "INSERT OR IGNORE INTO channel_identities (channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
-            (channel.value, normalized_id, pincer_user_id),
-        )
-        await db.commit()
+    async def _link_channel(self, pincer_user_id: str, channel: ChannelType, normalized_id: str) -> None:
+        await self._store.link_channel(pincer_user_id, channel.value, normalized_id)
         logger.info("Identity linked: %s ← %s:%s", pincer_user_id, channel.value, normalized_id)
 
-    async def _rename_identity(
-        self,
-        db: aiosqlite.Connection,
-        old_id: str,
-        new_id: str,
-    ) -> None:
-        """Rename a pincer_user_id across identity_meta, channel_identities, and sessions.
+    async def _rename_identity(self, old_id: str, new_id: str) -> None:
+        """Rename a pincer_user_id across identity_profiles, channel_identities, and sessions.
 
         Only called for auto-generated hash IDs (usr_...) to avoid overwriting
         intentionally-named identities.
         """
-        await db.execute(
-            "INSERT OR IGNORE INTO identity_meta "
-            "(pincer_user_id, preferred_channel, display_name) "
-            "SELECT ?, preferred_channel, display_name FROM identity_meta "
-            "WHERE pincer_user_id = ?",
-            (new_id, old_id),
-        )
-        await db.execute(
-            "UPDATE channel_identities SET pincer_user_id = ? WHERE pincer_user_id = ?",
-            (new_id, old_id),
-        )
-        await db.execute("DELETE FROM identity_meta WHERE pincer_user_id = ?", (old_id,))
-        try:
-            await db.execute(
-                "UPDATE sessions SET user_id = ? WHERE user_id = ?",
-                (new_id, old_id),
-            )
-            await db.execute(
-                "UPDATE sessions SET session_id = replace(session_id, ?, ?) WHERE session_id LIKE ?",
-                (old_id, new_id, f"%{old_id}%"),
-            )
-        except Exception:
-            pass  # sessions table may not exist yet
+        await self._store.rename_identity(old_id, new_id)
         logger.info(
             "Identity renamed: %s → %s "
             "(memory tags in MCP server still use %s — run 'pincer migrate-memories' to update)",
@@ -300,12 +249,7 @@ class IdentityResolver:
             old_id,
         )
 
-    async def _check_config_mapping(
-        self,
-        db: aiosqlite.Connection,
-        channel: ChannelType,
-        normalized_id: str,
-    ) -> str | None:
+    async def _check_config_mapping(self, channel: ChannelType, normalized_id: str) -> str | None:
         """Check PINCER_IDENTITY_MAP for a pre-configured identity or cross-channel link."""
         if not self._identity_map_config:
             return None
@@ -331,14 +275,14 @@ class IdentityResolver:
             for ch, cid in norm_pairs:
                 if f"{ch}:{cid}" == current_key:
                     continue
-                uid = await self._find_existing(db, ChannelType(ch), cid)
+                uid = await self._find_existing(ChannelType(ch), cid)
                 if uid:
-                    await self._link_channel(db, uid, channel, normalized_id)
+                    await self._link_channel(uid, channel, normalized_id)
                     return uid
 
             # No other side exists yet — establish a named identity now if configured
             if name:
-                await self._create_identity(db, name, channel, normalized_id)
+                await self._create_identity(name, channel, normalized_id)
                 return name
 
         return None
@@ -375,7 +319,7 @@ class IdentityResolver:
         If PINCER_IDENTITY_MAP is configured, the resolved internal IDs for
         every channel pair are the authoritative whitelist. Any
         channel_identities row whose (channel, channel_user_id) is NOT in the
-        whitelist is deleted, and any identity_meta row left with no channels is
+        whitelist is deleted, and any identity_profiles row left with no channels is
         deleted with it. Passing ``channels`` allows config IDs to be translated
         to real internal IDs before the whitelist is built.
 
@@ -406,35 +350,17 @@ class IdentityResolver:
             )
             return
 
-        async with self._get_db() as db:
-            cursor = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='identity_meta'")
-            if not await cursor.fetchone():
-                return
+        try:
+            unlisted, channelless = await self._store.prune(allowed)
+        except Exception:
+            # A database without the identity tables has nothing to clean.
+            logger.debug("Identity cleanup skipped: tables unavailable", exc_info=True)
+            return
 
-            cursor = await db.execute("SELECT channel, channel_user_id FROM channel_identities")
-            rows = await cursor.fetchall()
-
-            to_delete = [(ch, cid) for ch, cid in rows if (ch, cid) not in allowed]
-            for ch, cid in to_delete:
-                await db.execute(
-                    "DELETE FROM channel_identities WHERE channel = ? AND channel_user_id = ?",
-                    (ch, cid),
-                )
-
-            cursor = await db.execute(
-                """
-                DELETE FROM identity_meta
-                WHERE pincer_user_id NOT IN (SELECT pincer_user_id FROM channel_identities)
-                """
-            )
-            channelless = cursor.rowcount
-
-            await db.commit()
-
-        if to_delete or channelless:
+        if unlisted or channelless:
             logger.info(
                 "Identity cleanup: removed %d unlisted channel link(s), %d channelless identity/identities",
-                len(to_delete),
+                unlisted,
                 channelless,
             )
 
@@ -453,107 +379,112 @@ class IdentityResolver:
         if not self._identity_map_config:
             return
 
-        async with self._get_db() as db:
-            db.row_factory = aiosqlite.Row
-            for raw_entry in self._identity_map_config.split(","):
-                if ":" not in raw_entry:
-                    continue
+        entries: list[SeedEntry] = []
+        # Every link is written in one transaction after the loop, so an entry
+        # cannot find the pairs an earlier entry claimed in the database; it
+        # finds them here instead, or one person sharing a channel pair across
+        # two entries would be split into two identities.
+        pending: dict[tuple[str, str], str] = {}
+
+        async def rename(old_uid: str, new_uid: str) -> None:
+            await self._rename_identity(old_uid, new_uid)
+            for key, uid in pending.items():
+                if uid == old_uid:
+                    pending[key] = new_uid
+            entries[:] = [
+                dataclasses.replace(entry, pincer_user_id=new_uid) if entry.pincer_user_id == old_uid else entry
+                for entry in entries
+            ]
+
+        for raw_entry in self._identity_map_config.split(","):
+            if ":" not in raw_entry:
+                continue
+            try:
+                name, pairs = self._parse_mapping(raw_entry)
+            except ValueError:
+                logger.warning("Invalid identity map entry: %r", raw_entry.strip())
+                continue
+
+            # Resolve each pair's ID through the channel (phone → LID, etc.)
+            resolved: list[tuple[str, ChannelType, str]] = []
+            for ch_str, cid in pairs:
                 try:
-                    name, pairs = self._parse_mapping(raw_entry)
+                    ch_type = ChannelType(ch_str)
                 except ValueError:
-                    logger.warning("Invalid identity map entry: %r", raw_entry.strip())
+                    logger.warning("Unknown channel %r in identity map entry %r", ch_str, raw_entry.strip())
                     continue
+                norm = self._normalize_id(ch_type, cid)
+                if channels:
+                    norm = await self._resolve_via_channel(ch_type, norm, channels)
+                resolved.append((ch_str, ch_type, norm))
 
-                # Resolve each pair's ID through the channel (phone → LID, etc.)
-                resolved: list[tuple[str, ChannelType, str]] = []
-                for ch_str, cid in pairs:
-                    try:
-                        ch_type = ChannelType(ch_str)
-                    except ValueError:
-                        logger.warning("Unknown channel %r in identity map entry %r", ch_str, raw_entry.strip())
-                        continue
-                    norm = self._normalize_id(ch_type, cid)
-                    if channels:
-                        norm = await self._resolve_via_channel(ch_type, norm, channels)
-                    resolved.append((ch_str, ch_type, norm))
+            if not resolved:
+                continue
 
-                if not resolved:
-                    continue
+            # Collect all existing identities for the channels in this entry
+            existing_uids: list[str] = []
+            for _ch_str, ch_type, norm in resolved:
+                uid = await self._find_existing(ch_type, norm) or pending.get((ch_type.value, norm))
+                if uid and uid not in existing_uids:
+                    existing_uids.append(uid)
 
-                # Collect all existing identities for the channels in this entry
-                existing_uids: list[str] = []
-                for _ch_str, ch_type, norm in resolved:
-                    uid = await self._find_existing(db, ch_type, norm)
-                    if uid and uid not in existing_uids:
-                        existing_uids.append(uid)
-
-                # Determine or create the canonical pincer_user_id
-                if len(existing_uids) > 1:
-                    # Multiple distinct identities — merge them all into one
-                    target_uid = name or existing_uids[0]
-                    for uid in existing_uids:
-                        if uid != target_uid:
-                            logger.info("Identity conflict resolved: merging %s into %s", uid, target_uid)
-                            await self._rename_identity(db, uid, target_uid)
-                    pincer_uid = target_uid
-                elif len(existing_uids) == 1:
-                    existing_uid = existing_uids[0]
-                    if name:
-                        if existing_uid == name:
-                            pincer_uid = name
-                        elif existing_uid.startswith("usr_"):
-                            await self._rename_identity(db, existing_uid, name)
-                            pincer_uid = name
-                        else:
-                            logger.warning(
-                                "Named canonical ID %r ignored: identity already has name %r",
-                                name,
-                                existing_uid,
-                            )
-                            pincer_uid = existing_uid
-                    else:
-                        pincer_uid = existing_uid
-                else:
-                    # No existing identity — create fresh
-                    if name:
+            # Determine or create the canonical pincer_user_id
+            if len(existing_uids) > 1:
+                # Multiple distinct identities — merge them all into one
+                target_uid = name or existing_uids[0]
+                for uid in existing_uids:
+                    if uid != target_uid:
+                        logger.info("Identity conflict resolved: merging %s into %s", uid, target_uid)
+                        await rename(uid, target_uid)
+                pincer_uid = target_uid
+            elif len(existing_uids) == 1:
+                existing_uid = existing_uids[0]
+                if name:
+                    if existing_uid == name:
+                        pincer_uid = name
+                    elif existing_uid.startswith("usr_"):
+                        await rename(existing_uid, name)
                         pincer_uid = name
                     else:
-                        first_ch_str, first_ch_type, first_norm = resolved[0]
-                        pincer_uid = self._generate_user_id(first_ch_type, first_norm)
+                        logger.warning(
+                            "Named canonical ID %r ignored: identity already has name %r",
+                            name,
+                            existing_uid,
+                        )
+                        pincer_uid = existing_uid
+                else:
+                    pincer_uid = existing_uid
+            else:
+                # No existing identity — create fresh
+                if name:
+                    pincer_uid = name
+                else:
+                    first_ch_str, first_ch_type, first_norm = resolved[0]
+                    pincer_uid = self._generate_user_id(first_ch_type, first_norm)
 
-                first_channel = resolved[0][0]
-                profile = self._profiles.get(pincer_uid, IdentityProfile())
-                preferred_channel = profile.preferred_channel or first_channel
-                await db.execute(
-                    "INSERT OR IGNORE INTO identity_meta "
-                    "(pincer_user_id, preferred_channel, display_name, email, timezone) VALUES (?, ?, ?, ?, ?)",
-                    (pincer_uid, preferred_channel, profile.display_name, profile.email, profile.timezone),
+            first_channel = resolved[0][0]
+            profile = self._profiles.get(pincer_uid, IdentityProfile())
+            # `preferred_channel` is write-once at creation; day-to-day channel
+            # use is tracked by `active_channel` (see touch_active_channel).
+            config_fields: dict[str, Any] = {
+                "display_name": profile.display_name,
+                "preferred_channel": profile.preferred_channel,
+                "email": profile.email,
+                "timezone": profile.timezone,
+            }
+            entries.append(
+                SeedEntry(
+                    pincer_user_id=pincer_uid,
+                    channels=[(ch_str, norm) for ch_str, _ch_type, norm in resolved],
+                    insert={**config_fields, "preferred_channel": profile.preferred_channel or first_channel},
+                    backfill=config_fields,
                 )
-                if profile != IdentityProfile():
-                    # INSERT OR IGNORE above is a no-op for an identity that already
-                    # existed (e.g. created earlier via resolve()); COALESCE here
-                    # backfills profile fields onto it without clobbering an
-                    # existing value with NULL when only some are set. preferred_channel
-                    # is otherwise write-once (see touch_active_channel's docstring for
-                    # why active_channel, not this, tracks day-to-day channel use).
-                    await db.execute(
-                        "UPDATE identity_meta SET "
-                        "display_name = COALESCE(?, display_name), "
-                        "preferred_channel = COALESCE(?, preferred_channel), "
-                        "email = COALESCE(?, email), "
-                        "timezone = COALESCE(?, timezone) "
-                        "WHERE pincer_user_id = ?",
-                        (profile.display_name, profile.preferred_channel, profile.email, profile.timezone, pincer_uid),
-                    )
-                for ch_str, _ch_type, norm in resolved:
-                    await db.execute(
-                        "INSERT OR IGNORE INTO channel_identities "
-                        "(channel, channel_user_id, pincer_user_id) VALUES (?, ?, ?)",
-                        (ch_str, norm, pincer_uid),
-                    )
+            )
+            for _ch_str, ch_type, norm in resolved:
+                pending.setdefault((ch_type.value, norm), pincer_uid)
 
-            await db.commit()
-            logger.info("Identity config seeded")
+        await self._store.seed(entries)
+        logger.info("Identity config seeded")
 
     async def touch_active_channel(self, pincer_user_id: str, channel: ChannelType) -> None:
         """Record `channel` as this identity's most-recently-active channel.
@@ -567,13 +498,7 @@ class IdentityResolver:
         check would wrongly treat them as inactive and fall back to
         `preferred_channel`.
         """
-        async with self._get_db() as db:
-            await db.execute(
-                "UPDATE identity_meta SET active_channel = ?, active_channel_updated_at = datetime('now') "
-                "WHERE pincer_user_id = ?",
-                (channel.value, pincer_user_id),
-            )
-            await db.commit()
+        await self._store.touch_active_channel(pincer_user_id, channel.value)
 
     async def get_timezone(self, pincer_user_id: str) -> str:
         """This identity's IANA timezone, or "" when none is configured.
@@ -583,15 +508,9 @@ class IdentityResolver:
         opinion", not UTC, so a deployment-wide `settings.timezone` still wins
         over a hardcoded default.
         """
-        async with (
-            self._get_db() as db,
-            db.execute(
-                "SELECT timezone FROM identity_meta WHERE pincer_user_id = ?",
-                (pincer_user_id,),
-            ) as cursor,
-        ):
-            row = await cursor.fetchone()
-        return str(row[0]).strip() if row and row[0] else ""
+        profile = await self._store.profile(pincer_user_id)
+        timezone = profile.get("timezone") if profile else None
+        return str(timezone).strip() if timezone else ""
 
     async def get_preferred_channel(
         self,
@@ -615,33 +534,25 @@ class IdentityResolver:
         on half an hour ago may no longer be the right place to reach them,
         so a stale `active_channel` is worse than the durable fallback.
         """
-        async with self._get_db() as db:
-            db.row_factory = aiosqlite.Row
-            cursor = await db.execute(
-                "SELECT preferred_channel, active_channel, active_channel_updated_at "
-                "FROM identity_meta WHERE pincer_user_id = ?",
-                (pincer_user_id,),
-            )
-            meta = await cursor.fetchone()
-            if not meta:
-                raise ValueError(f"Unknown user: {pincer_user_id}")
+        meta = await self._store.profile(pincer_user_id)
+        if not meta:
+            raise ValueError(f"Unknown user: {pincer_user_id}")
 
-            active = meta["active_channel"]
-            active_updated_at = meta["active_channel_updated_at"]
-            preferred = meta["preferred_channel"]
-            all_channels = await self._get_all_channels_raw(db, pincer_user_id)
+        active = meta["active_channel"]
+        preferred = meta["preferred_channel"]
+        all_channels = await self._get_all_channels_raw(pincer_user_id)
 
-            active_fresh = self._is_within_age(active_updated_at, max_active_age_seconds)
-            if active and active in all_channels and active_fresh:
-                return ChannelType(active), all_channels[active]
+        active_fresh = self._is_within_age(meta["active_channel_updated_at"], max_active_age_seconds)
+        if active and active in all_channels and active_fresh:
+            return ChannelType(active), all_channels[active]
 
-            if preferred and preferred in all_channels:
-                return ChannelType(preferred), all_channels[preferred]
+        if preferred and preferred in all_channels:
+            return ChannelType(preferred), all_channels[preferred]
 
-            for ch_name, ch_id in all_channels.items():
-                return ChannelType(ch_name), ch_id
+        for ch_name, ch_id in all_channels.items():
+            return ChannelType(ch_name), ch_id
 
-            raise ValueError(f"No channels linked for user: {pincer_user_id}")
+        raise ValueError(f"No channels linked for user: {pincer_user_id}")
 
     @staticmethod
     def _is_within_age(timestamp: str | None, max_age_seconds: float | None) -> bool:
@@ -662,24 +573,14 @@ class IdentityResolver:
 
     async def get_all_channels(self, pincer_user_id: str) -> dict[ChannelType, str]:
         """Get all linked channels for a user (one entry per channel type)."""
-        async with self._get_db() as db:
-            raw = await self._get_all_channels_raw(db, pincer_user_id)
+        raw = await self._get_all_channels_raw(pincer_user_id)
         return {ChannelType(ch): cid for ch, cid in raw.items()}
 
-    async def _get_all_channels_raw(
-        self,
-        db: aiosqlite.Connection,
-        pincer_user_id: str,
-    ) -> dict[str, str]:
+    async def _get_all_channels_raw(self, pincer_user_id: str) -> dict[str, str]:
         """Return first seen channel_user_id per channel for this user."""
-        cursor = await db.execute(
-            "SELECT channel, channel_user_id FROM channel_identities WHERE pincer_user_id = ? ORDER BY created_at",
-            (pincer_user_id,),
-        )
         result: dict[str, str] = {}
-        async for row in cursor:
-            if row[0] not in result:
-                result[row[0]] = row[1]
+        for channel, channel_user_id in await self._store.channels_for(pincer_user_id):
+            result.setdefault(channel, channel_user_id)
         return result
 
     @staticmethod

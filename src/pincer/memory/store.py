@@ -1,5 +1,5 @@
-"""Backward-compatibility shim. Use SQLiteMemoryBackend directly for new code."""
+"""Backward-compatibility shim. Use SqlMemoryBackend directly for new code."""
 
-from pincer.memory.sqlite import SQLiteMemoryBackend as MemoryStore
+from pincer.memory.sqlite import SqlMemoryBackend as MemoryStore
 
 __all__ = ["MemoryStore"]

@@ -27,15 +27,17 @@ import random
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-import aiosqlite
 
 from pincer.observability.failure_codes import describe
 from pincer.voice.pii_guard import mask_phone_number, mask_pii
 
 if TYPE_CHECKING:
     from pincer.config import Settings
+
+from pincer.db.engine import get_database_url
+from pincer.services.voice import CallsService
 
 logger = logging.getLogger(__name__)
 
@@ -86,27 +88,11 @@ async def sample_calls(
     was random" is not a defensible answer when two people reach different
     conclusions from different ten calls.
     """
-    where = ["ended_at IS NOT NULL", "started_at >= ?"]
-    params: list[Any] = [_cutoff(days)]
-    if language:
-        where.append("language LIKE ?")
-        params.append(f"{language}%")
-    if only_failures:
-        where.append("failure_code NOT IN ('none', '')")
-
-    sql = (
-        "SELECT call_sid, direction, started_at, ended_at, language, failure_code, from_number, to_number "
-        f"FROM voice_calls WHERE {' AND '.join(where)} ORDER BY started_at DESC"
-    )
-
     try:
-        async with aiosqlite.connect(str(settings.db_path)) as conn:
-            conn.row_factory = aiosqlite.Row
-            rows = list(await conn.execute_fetchall(sql, params))
-    except aiosqlite.OperationalError:
-        return []
+        calls_service = CallsService(get_database_url(Path(str(settings.db_path))))
+        rows = await calls_service.terminated_between(_cutoff(days), language=language, only_failures=only_failures)
     except Exception:
-        logger.exception("Spot-check sampling failed")
+        logger.warning("Spot-check sampling failed — no calls to review", exc_info=True)
         return []
 
     if not rows:
@@ -160,18 +146,13 @@ def _duration(started_at: str, ended_at: Any) -> int:
 async def _transcript(settings: Settings | Any, call_sid: str) -> list[dict[str, str]]:
     """Final transcript lines, PII-masked."""
     try:
-        async with aiosqlite.connect(str(settings.db_path)) as conn:
-            conn.row_factory = aiosqlite.Row
-            rows = await conn.execute_fetchall(
-                "SELECT speaker, text, state FROM call_transcripts "
-                "WHERE call_id = ? AND is_final = 1 ORDER BY timestamp ASC, id ASC",
-                (call_sid,),
-            )
+        calls_service = CallsService(get_database_url(Path(str(settings.db_path))))
+        lines = await calls_service.transcript_for(call_sid, final_only=True)
     except Exception:
         return []
     return [
         {"speaker": str(r["speaker"] or ""), "text": mask_pii(str(r["text"] or "")), "state": str(r["state"] or "")}
-        for r in rows
+        for r in lines
     ]
 
 
@@ -301,12 +282,8 @@ async def export_persona_fixture(
         raise ValueError(f"No stored transcript for {call_sid}")
 
     try:
-        async with aiosqlite.connect(str(settings.db_path)) as conn:
-            conn.row_factory = aiosqlite.Row
-            cursor = await conn.execute(
-                "SELECT direction, language, failure_code FROM voice_calls WHERE call_sid = ?", (call_sid,)
-            )
-            row = await cursor.fetchone()
+        calls_service = CallsService(get_database_url(Path(str(settings.db_path))))
+        row = await calls_service.get(call_sid)
     except Exception:
         row = None
 

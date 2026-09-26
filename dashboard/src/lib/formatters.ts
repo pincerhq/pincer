@@ -47,3 +47,16 @@ export function formatTokens(tokens: number): string {
 export function formatPercent(value: number): string {
   return `${value.toFixed(0)}%`
 }
+
+/** A short, still-distinguishing form of a row id.
+ *
+ * Ids are UUIDv7, whose leading 12 hex digits are a millisecond timestamp:
+ * two calls minted in the same millisecond share all twelve, two in the same
+ * second share roughly the first nine, and everything in a given day shares
+ * the first five. Truncating from the front therefore stops
+ * identifying anything — which matters precisely when there is no provider
+ * CallSid to show instead. The tail is the counter and the random bits.
+ */
+export function shortId(id: string): string {
+  return id.length <= 12 ? id : id.slice(-12)
+}

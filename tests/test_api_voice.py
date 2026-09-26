@@ -12,6 +12,7 @@ import pytest
 os.environ.setdefault("PINCER_ANTHROPIC_API_KEY", "sk-ant-test-key")
 
 from fastapi.testclient import TestClient
+from support import SEED_ID_SQL
 
 from pincer.api.server import create_app
 from pincer.db import ensure_schema_current
@@ -46,8 +47,8 @@ async def _seed_db(db_path):
             ("CA003", "outbound", 10, False),
         ]:
             await db.execute(
-                "INSERT INTO voice_calls (call_sid, direction, from_number, to_number, started_at, ended_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO voice_calls (id, call_sid, direction, from_number, to_number, started_at, ended_at) "
+                f"VALUES ({SEED_ID_SQL}, ?, ?, ?, ?, ?, ?)",
                 (
                     sid,
                     direction,
@@ -58,18 +59,19 @@ async def _seed_db(db_path):
                 ),
             )
         await db.execute(
-            "INSERT INTO call_transcripts (call_id, speaker, text, confidence, is_final, state, timestamp) "
-            "VALUES ('CA001', 'caller', 'My SSN is 123-45-6789 thanks', 0.9, 1, 'conversing', ?)",
+            "INSERT INTO call_transcripts (id, call_id, speaker, text, confidence, is_final, state, timestamp) "
+            f"VALUES ({SEED_ID_SQL}, 'CA001', 'caller', 'My SSN is 123-45-6789 thanks', 0.9, 1, 'conversing', ?)",
             (started.isoformat(),),
         )
         await db.execute(
-            "INSERT INTO call_transcripts (call_id, speaker, text, confidence, is_final, state, timestamp) "
-            "VALUES ('CA001', 'agent', 'partial utterance', 1.0, 0, 'conversing', ?)",
+            "INSERT INTO call_transcripts (id, call_id, speaker, text, confidence, is_final, state, timestamp) "
+            f"VALUES ({SEED_ID_SQL}, 'CA001', 'agent', 'partial utterance', 1.0, 0, 'conversing', ?)",
             ((started + timedelta(seconds=5)).isoformat(),),
         )
         await db.execute(
-            "INSERT INTO call_actions (call_id, action_type, tool_name, input_summary, output_summary, "
-            "user_confirmed, timestamp) VALUES ('CA001', 'tool_call', 'get_weather', 'Berlin', 'Sunny', 1, ?)",
+            "INSERT INTO call_actions (id, call_id, action_type, tool_name, input_summary, output_summary, "
+            f"user_confirmed, timestamp) VALUES ({SEED_ID_SQL}, 'CA001', 'tool_call', 'get_weather', 'Berlin', "
+            "'Sunny', 1, ?)",
             ((started + timedelta(seconds=10)).isoformat(),),
         )
         await db.commit()
@@ -145,6 +147,38 @@ def test_list_calls_empty_when_tables_missing(client):
     assert r.json() == []
 
 
+@pytest.mark.parametrize(
+    ("path", "service", "method"),
+    [
+        ("/api/voice/calls", "pincer.services.voice.CallsService", "page_with_thread"),
+        ("/api/voice/calls/CA_x", "pincer.services.voice.CallsService", "detail"),
+        ("/api/voice/messages", "pincer.services.voice.MessagesService", "newest"),
+        ("/api/voice/contacts", "pincer.services.voice.ContactsService", "all"),
+        ("/api/voice/threads", "pincer.voice.threads.ThreadManager", "list_threads"),
+    ],
+)
+def test_a_failing_database_is_an_error_not_an_empty_history(monkeypatch, tmp_path, path, service, method):
+    """An unreachable database must not answer "no calls" (or 404 for a call that exists)."""
+    from sqlalchemy.exc import OperationalError
+
+    from pincer.config import get_settings_relaxed
+
+    async def down(*_args, **_kwargs):
+        raise OperationalError("SELECT 1", {}, Exception("server closed the connection"))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
+    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
+    get_settings_relaxed.cache_clear()
+    monkeypatch.setattr(f"{service}.{method}", down)
+    try:
+        response = TestClient(create_app(), raise_server_exceptions=False).get(path)
+    finally:
+        get_settings_relaxed.cache_clear()
+    assert response.status_code == 500
+
+
 async def test_list_calls_seeded(client, tmp_path):
     await _seed_db(tmp_path / "pincer.db")
 
@@ -211,8 +245,9 @@ async def test_contacts(client, tmp_path):
 
     async with aiosqlite.connect(tmp_path / "pincer.db") as db:
         await db.execute(
-            "INSERT INTO phone_contacts (name, phone_number, category, notes) "
-            "VALUES ('Zoe', '+15550009999', 'personal', ''), ('Dr. Ada', '+15550008888', 'doctor', 'dentist')"
+            f"INSERT INTO phone_contacts (id, name, phone_number, category, notes) "
+            f"VALUES ({SEED_ID_SQL}, 'Zoe', '+15550009999', 'personal', ''), "
+            f"({SEED_ID_SQL}, 'Dr. Ada', '+15550008888', 'doctor', 'dentist')"
         )
         await db.commit()
 
@@ -538,6 +573,8 @@ async def test_calls_survive_a_pre_sprint13_database(client, tmp_path):
             "started_at TEXT NOT NULL, ended_at TEXT)"
         )
         await db.execute(
+            # A deliberately pre-Sprint-13 table: the key is still an INTEGER
+            # here, so this one seeds the old way on purpose.
             "INSERT INTO voice_calls (call_sid, direction, started_at, ended_at) "
             "VALUES ('CA_legacy', 'outbound', '2026-08-20T16:43:37+00:00', '2026-08-20T16:44:00+00:00')"
         )

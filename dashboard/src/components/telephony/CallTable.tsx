@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom"
 import type { TelephonyCall } from "@/api/types"
+import { shortId } from "@/lib/formatters"
 import { ROUTES } from "@/lib/constants"
 import { cn } from "@/lib/utils"
 import { Ms } from "./shared"
@@ -76,7 +77,7 @@ export function CallTable({
                     to={ROUTES.TELEPHONY_CALL.replace(":callRef", call.provider_call_id || call.call_id)}
                     className="font-mono text-xs text-[var(--color-accent)] hover:underline"
                   >
-                    {call.provider_call_id || call.call_id.slice(0, 12)}
+                    {call.provider_call_id || shortId(call.call_id)}
                   </Link>
                   <div className="mt-0.5 font-mono text-[10px] text-[var(--color-muted)]">
                     {call.direction === "outbound" ? call.to_number_masked : call.from_number_masked}

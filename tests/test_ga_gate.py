@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
+from support import SEED_ID_SQL
 
 from pincer.observability.call_costs import ensure_call_costs_table
 from pincer.observability.ga_gate import (
@@ -57,8 +58,8 @@ async def _seed_calls(settings, codes: list[str], days_ago: float = 1.0) -> None
         await ensure_voice_tables(db)
         for i, code in enumerate(codes):
             await db.execute(
-                "INSERT INTO voice_calls (call_sid, direction, started_at, ended_at, failure_code, language) "
-                "VALUES (?, 'outbound', ?, ?, ?, 'de')",
+                f"INSERT INTO voice_calls (id, call_sid, direction, started_at, ended_at, failure_code, language) "
+                f"VALUES ({SEED_ID_SQL}, ?, 'outbound', ?, ?, ?, 'de')",
                 (f"CA{days_ago}_{i}", started.isoformat(), (started + timedelta(seconds=60)).isoformat(), code),
             )
         await db.commit()
@@ -284,8 +285,17 @@ def test_security_passes_with_warnings_only(settings, monkeypatch):
 
 
 async def test_compliance_passes_with_guardrails_active(settings):
+    """PASS requires the blocked-dial count to have actually been read, not
+    just defaulted to zero — so the audit schema must be at head first."""
+    from pathlib import Path
+
+    from pincer.db.engine import ensure_schema_current
+
+    ensure_schema_current(Path(settings.db_path))
+
     criterion = await compliance_incidents(settings, 14)
     assert criterion.verdict is Verdict.PASS
+    assert criterion.evidence["blocked_dials"] == 0
 
 
 async def test_compliance_fails_on_weakened_consent(settings):
@@ -309,9 +319,55 @@ async def test_compliance_fails_on_a_do_not_call_violation(settings):
 
 async def test_blocked_dials_are_evidence_of_health_not_failure(settings):
     """The gate refusing calls is the system working."""
+    from pathlib import Path
+
+    from pincer.db.engine import ensure_schema_current
+
+    ensure_schema_current(Path(settings.db_path))
+
     criterion = await compliance_incidents(settings, 14)
     assert criterion.verdict is Verdict.PASS
     assert "blocked_dials" in criterion.evidence
+
+
+async def test_compliance_is_insufficient_when_the_blocked_dial_count_cannot_be_read(settings):
+    """The bug this guards: a read failure must not report "0 blocked" as if
+    the guardrails were verified — that is indistinguishable from a real 0."""
+    criterion = await compliance_incidents(settings, 14)
+    assert criterion.verdict is Verdict.INSUFFICIENT
+    assert criterion.evidence["blocked_dials"] is None
+    assert "unavailable" in criterion.summary
+
+
+async def test_counting_blocked_dials_never_creates_a_database(settings, tmp_path):
+    """Reporting reads. It must not mkdir or migrate the live database."""
+    from pincer.observability.ga_gate import _count_blocked_dials
+
+    settings.data_dir = tmp_path / "absent"
+    missing = tmp_path / "absent" / "pincer.db"
+    settings.db_path = missing
+
+    assert await _count_blocked_dials(settings, 14) is None
+    assert not missing.exists()
+    assert not missing.parent.exists()
+
+
+async def test_blocked_dials_are_counted_from_the_unified_database(settings):
+    """Where AuditLogger actually writes — not the legacy audit.db that
+    migration 0003 imported from and left behind."""
+    from pincer.security.audit import AuditAction, AuditEntry, AuditLogger
+
+    audit = AuditLogger(db_path=settings.db_path)
+    await audit.initialize()
+    try:
+        await audit.log(
+            AuditEntry(user_id="usr", action=AuditAction.VOICE_CALL_BLOCKED, input_summary="blocked: quiet_hours")
+        )
+    finally:
+        await audit.shutdown()  # drains the write queue
+
+    criterion = await compliance_incidents(settings, 14)
+    assert criterion.evidence["blocked_dials"] == 1
 
 
 # ── Manual criteria ──────────────────────────────────────────────────

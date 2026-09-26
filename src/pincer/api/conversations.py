@@ -106,9 +106,9 @@ async def _open_backend(request: Request) -> AsyncIterator[BaseMemoryBackend]:
 
         store: BaseMemoryBackend = MCPMemoryBackend(server_name=settings.memory_mcp_server)
     else:
-        from pincer.memory.sqlite import SQLiteMemoryBackend
+        from pincer.memory.sqlite import SqlMemoryBackend
 
-        store = SQLiteMemoryBackend(settings.db_path)
+        store = SqlMemoryBackend(settings.db_path)
 
     await store.initialize()
     try:

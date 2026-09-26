@@ -29,10 +29,15 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pincer.config import Settings
+
+from pincer.db.engine import get_database_url
+from pincer.services.observability import CanaryService
+from pincer.services.voice import CallsService
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +153,6 @@ async def latency_slo(settings: Settings | Any, now: datetime | None = None) -> 
 
 async def report_delivery_slo(settings: Settings | Any, now: datetime | None = None) -> SLOStatus:
     """Post-call report reaches the initiating user within 30s of hangup."""
-    import aiosqlite
 
     hours, label = _month_window_hours(now)
     target = float(getattr(settings, "slo_report_delivery_s", 30.0))
@@ -157,20 +161,15 @@ async def report_delivery_slo(settings: Settings | Any, now: datetime | None = N
 
     delays: list[float] = []
     try:
-        async with aiosqlite.connect(str(settings.db_path)) as conn:
-            conn.row_factory = aiosqlite.Row
-            rows = await conn.execute_fetchall(
-                "SELECT ended_at, report_delivered_at FROM voice_calls "
-                "WHERE ended_at IS NOT NULL AND report_delivered_at IS NOT NULL AND started_at >= ?",
-                (_cutoff(hours),),
-            )
+        calls = CallsService(get_database_url(Path(str(settings.db_path))))
+        rows = await calls.report_delivery_since(_cutoff(hours))
     except Exception:
         rows = []
 
-    for row in rows:
+    for ended_at, delivered_at in rows:
         try:
-            ended = datetime.fromisoformat(str(row["ended_at"]))
-            delivered = datetime.fromisoformat(str(row["report_delivered_at"]))
+            ended = datetime.fromisoformat(str(ended_at))
+            delivered = datetime.fromisoformat(str(delivered_at))
         except (ValueError, TypeError):
             continue
         if ended.tzinfo is None:
@@ -215,7 +214,6 @@ async def availability_slo(settings: Settings | Any, now: datetime | None = None
     than presented as a measured number — an SLO nobody can audit is worse than
     an SLO that admits its own uncertainty.
     """
-    import aiosqlite
 
     hours, label = _month_window_hours(now)
     target = float(getattr(settings, "slo_availability", 0.995))
@@ -225,15 +223,8 @@ async def availability_slo(settings: Settings | Any, now: datetime | None = None
     ok = 0
     total = 0
     try:
-        async with aiosqlite.connect(str(settings.db_path)) as conn:
-            conn.row_factory = aiosqlite.Row
-            rows = await conn.execute_fetchall(
-                "SELECT ok FROM canary_runs WHERE ran_at >= ?",
-                (_cutoff(hours),),
-            )
-        for row in rows:
-            total += 1
-            ok += 1 if row["ok"] else 0
+        canary = CanaryService(get_database_url(Path(str(settings.db_path))))
+        total, ok = await canary.counts_since(_cutoff(hours))
     except Exception:
         total, ok = 0, 0
 

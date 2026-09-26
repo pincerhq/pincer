@@ -1,10 +1,12 @@
 """Tests for cron scheduler."""
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
 
+from pincer.db.ids import new_id
 from pincer.scheduler.cron import CronScheduler, Schedule, is_one_time_cron
 
 
@@ -27,7 +29,7 @@ class TestCronScheduler:
             "Europe/Berlin",
         )
         assert sid is not None
-        assert sid > 0
+        assert uuid.UUID(sid).version == 7
 
     async def test_invalid_cron(self, scheduler):
         with pytest.raises(ValueError, match="Invalid cron"):
@@ -63,7 +65,7 @@ class TestCronScheduler:
         assert await scheduler.toggle(sid, True, "usr_test") is True
 
     async def test_toggle_missing_schedule_is_noop(self, scheduler):
-        assert await scheduler.toggle(999999, True, "usr_test") is False
+        assert await scheduler.toggle(new_id(), True, "usr_test") is False
 
     async def test_remove_scoped_to_owner(self, scheduler):
         sid = await scheduler.add("x", "0 7 * * *", {"type": "test"}, "usr_a")
@@ -91,7 +93,7 @@ class TestCronScheduler:
         assert schedule.action["type"] == "briefing"
 
     async def test_get_missing_returns_none(self, scheduler):
-        assert await scheduler.get(999999) is None
+        assert await scheduler.get(new_id()) is None
 
     async def test_get_due_returns_past_due_only(self, scheduler):
         sid = await scheduler.add("due_now", "0 7 * * *", {"type": "test"}, "usr_test")

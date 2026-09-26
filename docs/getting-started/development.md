@@ -8,7 +8,7 @@ This guide covers local development setup, running tests, dashboard development,
 
 | Requirement | Version | Purpose |
 |-------------|---------|---------|
-| **Python** | >= 3.12 | Core runtime |
+| **Python** | >= 3.14 | Core runtime |
 | **uv** | Latest | Package manager (recommended) or pip |
 | **Node.js** | 18+ (LTS) | Dashboard (React + Vite) |
 | **pnpm** | 10+ | Dashboard package manager |

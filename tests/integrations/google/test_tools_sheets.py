@@ -36,15 +36,13 @@ async def test_list_sheets(mock_factory, mock_sheets_service):
     assert "February" in result
 
 
-def test_list_sheets_shows_workflow_hint(mock_factory, mock_sheets_service):
+async def test_list_sheets_shows_workflow_hint(mock_factory, mock_sheets_service):
     """list_sheets output includes a hint for calling get_sheet_values."""
-    import asyncio
-
     mock_sheets_service.spreadsheets().get().execute.return_value = {
         "properties": {"title": "Budget"},
         "sheets": [{"properties": {"title": "Sheet1", "index": 0, "sheetId": 0}}],
     }
-    result = asyncio.get_event_loop().run_until_complete(google__list_sheets(mock_factory, spreadsheet_id="ss1"))
+    result = await google__list_sheets(mock_factory, spreadsheet_id="ss1")
     assert "google__get_sheet_values" in result
 
 

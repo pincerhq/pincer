@@ -7,17 +7,16 @@ from typing import Any
 
 from fastapi import APIRouter, Query
 
-from pincer.llm.cost_tracker import get_cost_tracker
+from pincer.services.costs import CostServiceDep
 
 router = APIRouter(prefix="/api/costs", tags=["costs"])
 
 
 @router.get("/today")
-async def get_today_costs() -> dict[str, Any]:
-    tracker = await get_cost_tracker()
+async def get_today_costs(service: CostServiceDep) -> dict[str, Any]:
     today = datetime.now(UTC).strftime("%Y-%m-%d")
-    costs = await tracker.get_daily_costs(today)
-    budget = await tracker.get_budget_status()
+    costs = await service.get_daily_costs(today)
+    budget = await service.get_budget_status()
     return {
         "date": today,
         "total_usd": costs["total"],
@@ -36,12 +35,12 @@ async def get_today_costs() -> dict[str, Any]:
 
 @router.get("/history")
 async def get_cost_history(
+    service: CostServiceDep,
     days: int = Query(default=30, ge=1, le=365),
 ) -> dict[str, Any]:
-    tracker = await get_cost_tracker()
     end = datetime.now(UTC)
     start = end - timedelta(days=days)
-    history = await tracker.get_daily_history(
+    history = await service.get_daily_history(
         start=start.strftime("%Y-%m-%d"),
         end=end.strftime("%Y-%m-%d"),
     )
@@ -67,12 +66,12 @@ async def get_cost_history(
 
 @router.get("/by-tool")
 async def get_costs_by_tool(
+    service: CostServiceDep,
     days: int = Query(default=7, ge=1, le=90),
 ) -> dict[str, Any]:
-    tracker = await get_cost_tracker()
     end = datetime.now(UTC)
     start = end - timedelta(days=days)
-    breakdown = await tracker.get_costs_by_tool(
+    breakdown = await service.get_costs_by_tool(
         start=start.strftime("%Y-%m-%d"),
         end=end.strftime("%Y-%m-%d"),
     )
@@ -92,12 +91,12 @@ async def get_costs_by_tool(
 
 @router.get("/by-model")
 async def get_costs_by_model(
+    service: CostServiceDep,
     days: int = Query(default=7, ge=1, le=90),
 ) -> dict[str, Any]:
-    tracker = await get_cost_tracker()
     end = datetime.now(UTC)
     start = end - timedelta(days=days)
-    breakdown = await tracker.get_costs_by_model(
+    breakdown = await service.get_costs_by_model(
         start=start.strftime("%Y-%m-%d"),
         end=end.strftime("%Y-%m-%d"),
     )

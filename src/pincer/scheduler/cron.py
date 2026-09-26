@@ -2,7 +2,7 @@
 Persistent cron-based task scheduler — storage layer.
 
 - Standard cron expressions via croniter
-- SQLite persistence (survives restarts)
+- Persistence via `pincer.services.scheduler` (survives restarts)
 - Timezone-aware (per-schedule timezone)
 
 `CronScheduler` only owns CRUD and the due-schedule query; deciding *when*
@@ -14,7 +14,6 @@ source of truth it reads from and updates).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -22,10 +21,10 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import aiosqlite
 from croniter import croniter
 
-from pincer.db import ensure_schema_current
+from pincer.db.engine import get_database_url
+from pincer.services.scheduler import ScheduleService
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +63,7 @@ class Schedule:
     )
 
     def __init__(self, row: dict[str, Any]) -> None:
-        self.id: int = row["id"]
+        self.id: str = row["id"]
         self.pincer_user_id: str = row["pincer_user_id"]
         self.name: str = row["name"]
         self.cron_expr: str = row["cron_expr"]
@@ -85,14 +84,26 @@ class Schedule:
 
 
 class CronScheduler:
-    """SQLite-backed store for cron schedules — CRUD plus the due-schedule query."""
+    """Store for cron schedules — CRUD plus the due-schedule query.
+
+    Compatibility façade over `pincer.services.scheduler.ScheduleService`; new
+    code uses the service directly.
+    """
 
     def __init__(self, db_path: Path) -> None:
         self._db_path = str(db_path)
+        self._service: ScheduleService | None = None
 
     async def ensure_table(self) -> None:
         """Ensure the schedules table is at head (see pincer.db.migrations)."""
-        await asyncio.to_thread(ensure_schema_current, Path(self._db_path))
+        self._service = await ScheduleService.for_path(Path(self._db_path))
+
+    @property
+    def _svc(self) -> ScheduleService:
+        """The service, built on first use for callers that skip `ensure_table`."""
+        if self._service is None:
+            self._service = ScheduleService(get_database_url(Path(self._db_path)))
+        return self._service
 
     # ── CRUD ─────────────────────────────────────
 
@@ -104,111 +115,32 @@ class CronScheduler:
         pincer_user_id: str,
         tz: str = "UTC",
         channel: str = "telegram",
-    ) -> int:
-        if not croniter.is_valid(cron_expr):
-            raise ValueError(f"Invalid cron expression: {cron_expr}")
+    ) -> str:
+        return await self._svc.add(name, cron_expr, action, pincer_user_id, tz, channel)
 
-        try:
-            tzinfo = ZoneInfo(tz)
-        except Exception as e:
-            raise ValueError(f"Invalid timezone: {tz}") from e
+    async def remove(self, schedule_id: str, pincer_user_id: str) -> bool:
+        return await self._svc.remove(schedule_id, pincer_user_id)
 
-        next_run = croniter(cron_expr, datetime.now(tzinfo)).get_next(datetime)
-        next_run_utc = next_run.astimezone(UTC).isoformat()
-
-        async with aiosqlite.connect(self._db_path) as db:
-            cursor = await db.execute(
-                """INSERT INTO schedules
-                   (pincer_user_id, name, cron_expr, action, channel, timezone, next_run_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (pincer_user_id, name, cron_expr, json.dumps(action), channel, tz, next_run_utc),
-            )
-            await db.commit()
-            sid = cursor.lastrowid
-
-        logger.info("Schedule added: %s (cron=%s, tz=%s)", name, cron_expr, tz)
-        return sid  # type: ignore[return-value]
-
-    async def remove(self, schedule_id: int, pincer_user_id: str) -> bool:
-        async with aiosqlite.connect(self._db_path) as db:
-            cursor = await db.execute(
-                "DELETE FROM schedules WHERE id = ? AND pincer_user_id = ?",
-                (schedule_id, pincer_user_id),
-            )
-            await db.commit()
-            removed = cursor.rowcount > 0
-        if removed:
-            logger.info("Schedule removed: id=%s", schedule_id)
-        else:
-            logger.warning("Schedule remove no-op: id=%s not found for user", schedule_id)
-        return removed
-
-    async def toggle(self, schedule_id: int, enabled: bool, pincer_user_id: str) -> bool:
-        async with aiosqlite.connect(self._db_path) as db:
-            cursor = await db.execute(
-                "UPDATE schedules SET enabled = ?, updated_at = datetime('now') WHERE id = ? AND pincer_user_id = ?",
-                (int(enabled), schedule_id, pincer_user_id),
-            )
-            await db.commit()
-            toggled = cursor.rowcount > 0
-        if toggled:
-            logger.info("Schedule %s: id=%s", "enabled" if enabled else "disabled", schedule_id)
-        else:
-            logger.warning("Schedule toggle no-op: id=%s not found for user", schedule_id)
-        return toggled
+    async def toggle(self, schedule_id: str, enabled: bool, pincer_user_id: str) -> bool:
+        return await self._svc.toggle(schedule_id, enabled, pincer_user_id)
 
     async def list_schedules(self, pincer_user_id: str) -> list[dict[str, Any]]:
-        async with aiosqlite.connect(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            rows = await db.execute_fetchall(
-                "SELECT * FROM schedules WHERE pincer_user_id = ? ORDER BY next_run_at",
-                (pincer_user_id,),
-            )
-            return [dict(r) for r in rows]
+        return await self._svc.list_for_user(pincer_user_id)
 
     async def list_all(self) -> list[dict[str, Any]]:
         """All schedules across all users, unordered (caller classifies/sorts)."""
-        async with aiosqlite.connect(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            rows = await db.execute_fetchall("SELECT * FROM schedules")
-            return [dict(r) for r in rows]
+        return await self._svc.list_all()
 
-    async def get(self, schedule_id: int) -> Schedule | None:
-        async with aiosqlite.connect(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            rows = list(await db.execute_fetchall("SELECT * FROM schedules WHERE id = ?", (schedule_id,)))
-            if not rows:
-                logger.debug("Schedule lookup miss: id=%s", schedule_id)
-                return None
-            return Schedule(dict(rows[0]))
+    async def get(self, schedule_id: str) -> Schedule | None:
+        row = await self._svc.get(schedule_id)
+        return Schedule(row) if row is not None else None
 
     # ── Due-schedule query (polled by ScheduleDispatcher) ────
 
     async def get_due(self, now: datetime | None = None) -> list[Schedule]:
         """Enabled schedules whose next_run_at has passed. Does not mark them fired."""
-        now_utc = (now or datetime.now(UTC)).isoformat()
-        async with aiosqlite.connect(self._db_path) as db:
-            db.row_factory = aiosqlite.Row
-            rows = await db.execute_fetchall(
-                """SELECT * FROM schedules
-                   WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
-                   ORDER BY next_run_at""",
-                (now_utc,),
-            )
-            due = [Schedule(dict(row)) for row in rows]
-        logger.debug("Due-schedule query: %d due as of %s", len(due), now_utc)
-        return due
+        return [Schedule(row) for row in await self._svc.due(now)]
 
     async def mark_fired(self, schedule: Schedule) -> None:
         """Advance a schedule's next_run_at after it has been dispatched."""
-        next_run = schedule.compute_next_run()
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                """UPDATE schedules
-                   SET last_run_at = datetime('now'), next_run_at = ?,
-                       updated_at = datetime('now')
-                   WHERE id = ?""",
-                (next_run.isoformat(), schedule.id),
-            )
-            await db.commit()
-        logger.debug("Schedule marked fired: id=%s next_run_at=%s", schedule.id, next_run.isoformat())
+        await self._svc.mark_fired(schedule.id, schedule.compute_next_run().isoformat())

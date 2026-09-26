@@ -20,10 +20,10 @@ async def memory_search(query: str = typer.Argument(help="Search query")) -> Non
 
 async def _memory_search(query: str) -> None:
     from pincer.config import get_settings_relaxed
-    from pincer.memory.sqlite import SQLiteMemoryBackend
+    from pincer.memory.sqlite import SqlMemoryBackend
 
     settings = get_settings_relaxed()
-    store = SQLiteMemoryBackend(settings.db_path)
+    store = SqlMemoryBackend(settings.db_path)
     await store.initialize()
     results = await store.search_text(query, limit=10)
     if not results:
@@ -42,19 +42,14 @@ async def memory_stats() -> None:
 
 async def _memory_stats() -> None:
     from pincer.config import get_settings_relaxed
-    from pincer.memory.sqlite import SQLiteMemoryBackend
+    from pincer.memory.sqlite import SqlMemoryBackend
 
     settings = get_settings_relaxed()
-    store = SQLiteMemoryBackend(settings.db_path)
+    store = SqlMemoryBackend(settings.db_path)
     await store.initialize()
 
     total = await store.count()
-    assert store._db is not None
-    async with store._db.execute("SELECT COUNT(DISTINCT user_id) FROM memories") as cur:
-        row = await cur.fetchone()
-        users = row[0] if row else 0
-    async with store._db.execute("SELECT category, COUNT(*) FROM memories GROUP BY category") as cur:
-        categories = {r[0]: r[1] async for r in cur}
+    users, categories = await store.stats()
 
     console.print("[bold]Memory Stats[/bold]")
     console.print(f"  Total memories: {total}")
@@ -74,10 +69,10 @@ async def memory_clear(
 
 async def _memory_clear(user_id: str) -> None:
     from pincer.config import get_settings_relaxed
-    from pincer.memory.sqlite import SQLiteMemoryBackend
+    from pincer.memory.sqlite import SqlMemoryBackend
 
     settings = get_settings_relaxed()
-    store = SQLiteMemoryBackend(settings.db_path)
+    store = SqlMemoryBackend(settings.db_path)
     await store.initialize()
     await store.delete_user_memories(user_id)
     console.print(f"[green]Cleared memories for {user_id}[/green]")
@@ -97,10 +92,10 @@ async def memory_list(
 
 async def _memory_list(user_id: str | None, tags_str: str | None, limit: int, offset: int) -> None:
     from pincer.config import get_settings_relaxed
-    from pincer.memory.sqlite import SQLiteMemoryBackend
+    from pincer.memory.sqlite import SqlMemoryBackend
 
     settings = get_settings_relaxed()
-    store = SQLiteMemoryBackend(settings.db_path)
+    store = SqlMemoryBackend(settings.db_path)
     await store.initialize()
 
     tag_list = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else None
@@ -131,10 +126,10 @@ async def _memory_export(user_id: str, output: str) -> None:
     from pathlib import Path as _P
 
     from pincer.config import get_settings_relaxed
-    from pincer.memory.sqlite import SQLiteMemoryBackend
+    from pincer.memory.sqlite import SqlMemoryBackend
 
     settings = get_settings_relaxed()
-    store = SQLiteMemoryBackend(settings.db_path)
+    store = SqlMemoryBackend(settings.db_path)
     await store.initialize()
 
     memories = await store.list_memories(user_id=user_id, limit=100_000)

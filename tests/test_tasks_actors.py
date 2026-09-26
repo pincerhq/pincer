@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
+from pincer.db.ids import new_id
 from pincer.scheduler.cron import CronScheduler
 from pincer.tasks.actors import process_webhook, run_scheduled_action
 from pincer.tasks.context import set_context
@@ -51,9 +53,26 @@ class TestRunScheduledAction:
         set_context(router, proactive, triggers)
 
         with patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path)):
+            await run_scheduled_action(schedule_id=new_id())
+
+        router.send_to_user.assert_not_awaited()
+
+    async def test_a_job_enqueued_before_the_uuid_migration_is_dropped(self, store, tmp_path, caplog):
+        """Schedule ids became UUIDv7 in migration 0017, and a job queued
+        before that deploy still carries an integer that names no row — and
+        on Postgres is not a valid key at all. It is dropped with a warning
+        that says why, rather than failing as an unexplained lookup miss."""
+        router = AsyncMock()
+        set_context(router, AsyncMock(), AsyncMock())
+
+        with (
+            caplog.at_level(logging.WARNING, logger="pincer.tasks.actors"),
+            patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path)),
+        ):
             await run_scheduled_action(schedule_id=999999)
 
         router.send_to_user.assert_not_awaited()
+        assert "0017" in caplog.text
 
     async def test_delivery_failure_logged_as_error_not_delivered(self, store, tmp_path, caplog):
         """send_to_user returning False must not be logged/treated as a success."""

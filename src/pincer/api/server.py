@@ -65,6 +65,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         audit_db = settings.db_path
     except Exception:
         audit_db = Path("data/pincer.db")
+
+    # One migration for the whole process. Each store still checks (the check
+    # is process-cached), but a server that answers before the schema exists
+    # would report an empty database rather than an unready one.
+    from pincer.db.engine import init_database
+
+    await init_database(audit_db)
+
     audit = await get_audit_logger(audit_db)
 
     if not getattr(app.state, "agent", None):
@@ -103,6 +111,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logging.getLogger(__name__).debug("Telephony telemetry shutdown failed", exc_info=True)
     await audit.shutdown()
+
+    from pincer.db.engine import dispose_engines
+
+    await dispose_engines()
 
 
 def create_app() -> FastAPI:
