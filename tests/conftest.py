@@ -16,6 +16,8 @@ os.environ["PINCER_DATA_DIR"] = "/tmp/pincer-test"
 os.environ["PINCER_DAILY_BUDGET_USD"] = "100.0"
 
 from pincer.config import Settings
+from pincer.config.database import DatabaseSettings
+from pincer.config.main import _RelaxedSettings
 from pincer.core.session import SessionManager
 from pincer.llm.base import BaseLLMProvider, LLMResponse
 from pincer.llm.cost_tracker import CostTracker
@@ -33,6 +35,17 @@ def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
     kwarg overrides this).
     """
     monkeypatch.setitem(Settings.model_config, "env_file", None)
+    # pydantic copies model_config per subclass, so the relaxed variant behind
+    # get_settings_relaxed() needs its own patch or it still reads .env.
+    monkeypatch.setitem(_RelaxedSettings.model_config, "env_file", None)
+    # The database URL has its own settings class, read by `get_sync_url`.
+    monkeypatch.setitem(DatabaseSettings.model_config, "env_file", None)
+    # `load_mcp_config()` copies the project .env into os.environ for good, so
+    # a developer's real database URL could otherwise reach a later test.
+    monkeypatch.delenv("PINCER_DATABASE_URL", raising=False)
+    # ...and stop it doing so in the first place: without this the MCP config
+    # tests leave the developer's LLM provider settings behind for later ones.
+    monkeypatch.setattr("pincer.mcp.config._DOTENV_CANDIDATES", ())
 
 
 @pytest.fixture(autouse=True)

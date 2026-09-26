@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 import subprocess
 import sys
@@ -12,6 +13,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.pool import NullPool
 
+from pincer.config.database import DatabaseSettings
 from pincer.db.engine import (
     SQLITE_BUSY_TIMEOUT_MS,
     _asyncpg_connect_args,
@@ -51,6 +53,45 @@ def test_postgres_is_addressable_now_that_every_domain_uses_the_engine(monkeypat
     # password has to survive being re-rendered, or Alembic authenticates as
     # `***` and the process dies at startup on a password error.
     assert get_sync_url(tmp_path / "p.db") == "postgresql+psycopg://u:secret@h/db"
+
+
+def _use_dotenv(monkeypatch, tmp_path: Path, content: str) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text(content)
+    monkeypatch.setitem(DatabaseSettings.model_config, "env_file", dotenv)
+
+
+def test_a_url_set_only_in_dotenv_is_honoured(monkeypatch, tmp_path):
+    """`.env` used to reach the URL only through os.environ, which it joins when
+    the MCP config loads — after `init_database` had already migrated SQLite, so
+    the process then split between SQLite and an unmigrated Postgres."""
+    _use_dotenv(monkeypatch, tmp_path, "PINCER_DATABASE_URL=postgresql://u:secret@h/db\n")
+
+    assert get_sync_url(tmp_path / "p.db") == "postgresql+psycopg://u:secret@h/db"
+    assert "PINCER_DATABASE_URL" not in os.environ
+
+
+def test_the_environment_wins_over_dotenv(monkeypatch, tmp_path):
+    _use_dotenv(monkeypatch, tmp_path, "PINCER_DATABASE_URL=postgresql://u@from-dotenv/db\n")
+    monkeypatch.setenv("PINCER_DATABASE_URL", "postgresql://u@from-env/db")
+
+    assert get_sync_url(tmp_path / "p.db") == "postgresql+psycopg://u@from-env/db"
+
+
+def test_an_empty_url_in_the_environment_still_means_the_sqlite_file(monkeypatch, tmp_path):
+    """`PINCER_DATABASE_URL= pincer run` (or compose's `${PINCER_DATABASE_URL:-}`)
+    forces local SQLite; a URL in `.env` must not fill the blank in."""
+    _use_dotenv(monkeypatch, tmp_path, "PINCER_DATABASE_URL=postgresql://u@from-dotenv/db\n")
+    monkeypatch.setenv("PINCER_DATABASE_URL", "")
+
+    assert get_sync_url(tmp_path / "p.db") == f"sqlite:///{tmp_path / 'p.db'}"
+
+
+def test_an_invalid_unrelated_setting_does_not_break_url_resolution(monkeypatch, tmp_path):
+    monkeypatch.setenv("PINCER_LOG_LEVEL", "bogus")
+    monkeypatch.setenv("PINCER_DATABASE_URL", "postgresql://u@h/db")
+
+    assert get_sync_url(tmp_path / "p.db") == "postgresql+psycopg://u@h/db"
 
 
 def test_an_unsupported_backend_in_the_configured_url_is_refused(monkeypatch, tmp_path):
@@ -210,10 +251,16 @@ def test_several_processes_can_migrate_one_fresh_database_at_once(tmp_path: Path
         "asyncio.run(init_database(Path(sys.argv[1])))\n"
     )
     db_path = tmp_path / "fresh.db"
+    # The children get none of conftest's isolation, and would otherwise read
+    # the URL from the developer's real `.env` and migrate that database. Pin
+    # the URL, and run them away from the repo's `.env` / `../.env`.
+    env = {**os.environ, "PINCER_DATABASE_URL": f"sqlite:///{db_path}"}
 
     started = [
         subprocess.Popen(  # noqa: S603 - fixed argv, test-local script
             [sys.executable, str(worker), str(db_path)],
+            env=env,
+            cwd=tmp_path,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
