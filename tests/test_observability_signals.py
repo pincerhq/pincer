@@ -387,7 +387,7 @@ async def test_busy_capacity_that_cannot_be_read_is_no_data_not_zero(settings, m
 async def test_voice_schema_has_the_sprint9_columns(settings):
     async with aiosqlite.connect(settings.db_path) as db:
         await ensure_voice_tables(db)
-        columns = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(voice_calls)")}
+        columns = {row[1] for row in await db.execute_fetchall("PRAGMA table_info(pincer_voice_calls)")}
 
     assert {
         "failure_code",

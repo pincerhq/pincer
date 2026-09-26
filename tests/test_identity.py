@@ -383,7 +383,7 @@ class TestActiveChannel:
         await r.touch_active_channel("usr_old", ChannelType.WHATSAPP)
 
         async with _rows(r) as db:
-            cursor = await db.execute("PRAGMA table_info(identity_profiles)")
+            cursor = await db.execute("PRAGMA table_info(pincer_identity_profiles)")
             col_names = {row[1] for row in await cursor.fetchall()}
         assert "active_channel" in col_names
         assert "active_channel_updated_at" in col_names

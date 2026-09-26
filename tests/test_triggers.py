@@ -30,7 +30,7 @@ class TestEnsureTable:
 
         async with aiosqlite.connect(str(db)) as conn:
             rows = await conn.execute_fetchall(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name='event_triggers'"
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='pincer_event_triggers'"
             )
         assert rows
 
