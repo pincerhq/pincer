@@ -44,7 +44,7 @@ jobs:
         run: uv run bandit -r src/pincer -ll -s B101,B104,B310,B608
 
       - name: Upload coverage reports to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         if: always()
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
