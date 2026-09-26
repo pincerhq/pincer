@@ -101,9 +101,7 @@ def test_memories_fts5_and_sync_triggers_present(tmp_path: Path) -> None:
             "INSERT INTO pincer_memories (id, user_id, content, created_at) VALUES ('m1', 'u1', 'hello world', 0)"
         )
         con.commit()
-        rows = con.execute(
-            "SELECT content FROM pincer_memories_fts WHERE pincer_memories_fts MATCH 'hello'"
-        ).fetchall()
+        rows = con.execute("SELECT content FROM pincer_memories_fts WHERE pincer_memories_fts MATCH 'hello'").fetchall()
     finally:
         con.close()
     assert rows == [("hello world",)]
@@ -751,9 +749,9 @@ def test_unversioned_modern_voice_schema_backfills_missing_columns(
 
         assert con.execute("SELECT text FROM pincer_call_transcripts").fetchall() == [("kept across the upgrade",)]
 
-        assert con.execute(
-            "SELECT call_id, tier, approval_mode, deny_reason FROM pincer_call_actions"
-        ).fetchall() == [("CA_old_runtime", "", "", "")]
+        assert con.execute("SELECT call_id, tier, approval_mode, deny_reason FROM pincer_call_actions").fetchall() == [
+            ("CA_old_runtime", "", "", "")
+        ]
 
         indexes = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()}
         assert {
@@ -956,9 +954,7 @@ def test_full_pre_alembic_runtime_voice_db_upgrades_to_head(tmp_path: Path) -> N
         assert con.execute("SELECT call_sid, thread_id FROM pincer_call_thread_members").fetchall() == [
             ("CA_runtime", thread_id)
         ]
-        assert con.execute("SELECT call_sid, method FROM pincer_call_analytics").fetchall() == [
-            ("CA_runtime", "exact")
-        ]
+        assert con.execute("SELECT call_sid, method FROM pincer_call_analytics").fetchall() == [("CA_runtime", "exact")]
 
         # 0001 must still have created the non-voice schema it owns.
         assert {
