@@ -84,10 +84,18 @@ def test_downgrade_base_then_upgrade_head_round_trips(tmp_path: Path) -> None:
 
     command.downgrade(cfg, "base")
     tables_after_downgrade = _tables(db_path)
-    assert not (EXPECTED_TABLES & tables_after_downgrade)
+    legacy_tables = {t.removeprefix("pincer_") for t in EXPECTED_TABLES}
+    assert not ((EXPECTED_TABLES | legacy_tables) & tables_after_downgrade)
 
     command.upgrade(cfg, "head")
     assert _tables(db_path) >= EXPECTED_TABLES
+
+
+def test_offline_sql_mode_is_explicitly_refused(tmp_path: Path) -> None:
+    db_path = tmp_path / "pincer.db"
+    cfg = build_config(db_path)
+    with pytest.raises(SystemExit, match="Offline --sql migrations are not supported"):
+        command.upgrade(cfg, "head", sql=True)
 
 
 def test_memories_fts5_and_sync_triggers_present(tmp_path: Path) -> None:

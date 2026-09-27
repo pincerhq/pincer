@@ -69,16 +69,7 @@ def _get_url() -> str:
 
 
 def run_migrations_offline() -> None:
-    context.configure(
-        url=_get_url(),
-        target_metadata=target_metadata,
-        include_object=include_object,
-        literal_binds=True,
-        dialect_opts={"paramstyle": "named"},
-        version_table=VERSION_TABLE,
-    )
-    with context.begin_transaction():
-        context.run_migrations()
+    raise SystemExit("Offline --sql migrations are not supported; run upgrades online.")
 
 
 def run_migrations_online() -> None:
