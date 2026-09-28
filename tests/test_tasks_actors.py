@@ -107,6 +107,20 @@ class TestRunScheduledAction:
 
         router.send_to_user.assert_not_awaited()
 
+    async def test_unknown_action_type_disables_schedule(self, store, tmp_path):
+        """A schedule whose action type has no handler self-disables so it
+        stops being re-dispatched on every tick (issue #217: `webhook_retry`
+        fired forever because nothing ever turned it off)."""
+        sid = await store.add("weird", "* * * * *", {"type": "webhook_retry"}, "usr_test")
+
+        set_context(AsyncMock(), AsyncMock(), AsyncMock())
+
+        with patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path)):
+            await run_scheduled_action(schedule_id=sid)
+
+        schedule = await store.get(sid)
+        assert schedule.enabled is False
+
     async def test_handler_failure_reraises_after_retries(self, store, tmp_path, caplog):
         """A handler that keeps failing propagates so repid's on_error='nack' can ack-and-DLQ it."""
         sid = await store.add("morning", "0 7 * * *", {"type": "briefing"}, "usr_test")

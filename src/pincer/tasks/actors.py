@@ -24,6 +24,23 @@ from pincer.tasks.context import get_deliverer, get_proactive, get_triggers
 
 logger = logging.getLogger(__name__)
 
+# Keep in sync with the `handlers` dict built in `run_scheduled_action` below —
+# this is that dict's key set, available without constructing the handlers
+# themselves (each of which needs `settings`). `pincer doctor` imports this to
+# flag schedules whose action type will hit the no-handler branch.
+KNOWN_SCHEDULE_ACTION_TYPES = frozenset(
+    {
+        "briefing",
+        "custom",
+        "retention_purge",
+        "ops_alert_scan",
+        "voice_canary",
+        "voice_weekly_digest",
+        "thread_autoclose",
+        "voice_call",
+    }
+)
+
 
 # Retries wrap the entire handler call below, not just a narrow I/O call — a
 # transient failure after a handler's side effect (e.g. sending a briefing)
@@ -94,7 +111,12 @@ async def run_scheduled_action(schedule_id: str | int) -> None:
     }
     handler = handlers.get(action_type)
     if handler is None:
-        logger.warning("No handler for action type: %s (schedule_id=%s)", action_type, schedule_id)
+        logger.warning(
+            "No handler for action type: %s (schedule_id=%s) — disabling schedule to stop repeated no-op runs",
+            action_type,
+            schedule_id,
+        )
+        await store.toggle(schedule_id, False, schedule.pincer_user_id)
         return
 
     try:

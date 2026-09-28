@@ -1,5 +1,6 @@
 """Tests for the security doctor."""
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -29,8 +30,8 @@ def test_run_all_returns_report(doctor_env):
     # 31 original + 7 MCP + 3 MCP security + 1 WA neonize + 3 voice DACH
     # + 1 ElevenLabs + 4 voice security (Sprint 8) + 2 observability (Sprint 9)
     # + 3 in-call tool execution (Sprint 11) + 2 receptionist (Sprint 12)
-    # + 1 live listen-in announce gate (Sprint 15)
-    assert len(report.checks) == 59
+    # + 1 live listen-in announce gate (Sprint 15) + 1 schedule action types (issue #217)
+    assert len(report.checks) == 60
 
     assert 0 <= report.score <= 100
 
@@ -1479,3 +1480,54 @@ def test_voice_canary_warns_about_quiet_hours_gap():
     result = SecurityDoctor()._check_voice_canary(_obs_cfg(voice_quiet_hours_override_users=""))
     assert result.status == CheckStatus.WARNING
     assert "quiet hours" in result.message
+
+
+# ── Schedule action type check (issue #217) ───────────────
+
+
+def _sched_cfg(tmp_path):
+    return SimpleNamespace(db_path=tmp_path / "pincer.db")
+
+
+def _seed_schedules(tmp_path, *rows):
+    """rows: (name, action_dict, enabled) tuples. Always ensures the table exists,
+    so even the zero-schedule case reflects a real (empty) query, not a missing table."""
+    from pincer.scheduler.cron import CronScheduler
+
+    async def _seed():
+        store = CronScheduler(tmp_path / "pincer.db")
+        await store.ensure_table()
+        for name, action, enabled in rows:
+            sid = await store.add(name, "* * * * *", action, "usr_test")
+            if not enabled:
+                await store.toggle(sid, False, "usr_test")
+
+    asyncio.run(_seed())
+
+
+def test_schedule_action_types_pass_with_no_schedules(tmp_path):
+    _seed_schedules(tmp_path)
+    result = SecurityDoctor()._check_schedule_action_types(_sched_cfg(tmp_path))
+    assert result.status == CheckStatus.PASS
+
+
+def test_schedule_action_types_pass_with_known_type(tmp_path):
+    _seed_schedules(tmp_path, ("morning", {"type": "briefing"}, True))
+    result = SecurityDoctor()._check_schedule_action_types(_sched_cfg(tmp_path))
+    assert result.status == CheckStatus.PASS
+
+
+def test_schedule_action_types_critical_when_enabled_unknown(tmp_path):
+    """The live version of issue #217: an enabled schedule firing no-ops every tick."""
+    _seed_schedules(tmp_path, ("weird", {"type": "webhook_retry"}, True))
+    result = SecurityDoctor()._check_schedule_action_types(_sched_cfg(tmp_path))
+    assert result.status == CheckStatus.CRITICAL
+    assert "webhook_retry" in result.message
+
+
+def test_schedule_action_types_warns_when_only_disabled_unknown(tmp_path):
+    """Already self-disabled by `run_scheduled_action` — stale, not actively firing."""
+    _seed_schedules(tmp_path, ("weird", {"type": "webhook_retry"}, False))
+    result = SecurityDoctor()._check_schedule_action_types(_sched_cfg(tmp_path))
+    assert result.status == CheckStatus.WARNING
+    assert "webhook_retry" in result.message

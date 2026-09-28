@@ -170,11 +170,12 @@ class SecurityDoctor:
         report.checks.append(self._check_signal_phone_set(settings))
         report.checks.append(self._check_signal_api_local(settings))
         report.checks.append(self._check_signal_access_control(settings))
-        # Runtime (4 checks)
+        # Runtime (5 checks)
         report.checks.append(self._check_not_running_as_root())
         report.checks.append(self._check_audit_logging_enabled(settings))
         report.checks.append(self._check_skill_sandbox_enabled(settings))
         report.checks.append(self._check_tool_approval_mode(settings))
+        report.checks.append(self._check_schedule_action_types(settings))
         # MCP (8 checks, Sprint 8)
         report.checks.append(self._check_mcp_config_valid())
         report.checks.append(self._check_mcp_sandbox_enabled())
@@ -1964,6 +1965,66 @@ class SecurityDoctor:
             "skill_sandbox_enabled",
             CheckStatus.PASS,
             "Skill sandbox enabled",
+            category="runtime",
+        )
+
+    def _check_schedule_action_types(self, cfg: Settings | None = None) -> CheckResult:
+        """Issue #217: a schedule whose `action.type` has no handler in
+        `run_scheduled_action` silently no-ops on every tick it comes due,
+        with nothing but a log line to show for it. `run_scheduled_action`
+        now self-disables such a schedule the first time it hits this case,
+        but this check is the audit trail: it catches one that hasn't fired
+        yet, and confirms a disabled one actually got cleaned up.
+        """
+        import asyncio
+        import json
+
+        from pincer.scheduler.cron import CronScheduler
+        from pincer.tasks.actors import KNOWN_SCHEDULE_ACTION_TYPES
+
+        settings = self._cfg(cfg)
+        try:
+            rows = asyncio.run(CronScheduler(settings.db_path).list_all())
+        except Exception as e:
+            return CheckResult(
+                "schedule_action_types",
+                CheckStatus.SKIPPED,
+                f"Could not read schedules: {e}",
+                category="runtime",
+            )
+
+        unknown_enabled: list[str] = []
+        unknown_disabled: list[str] = []
+        for row in rows:
+            action = json.loads(row["action"]) if isinstance(row["action"], str) else row["action"]
+            action_type = action.get("type", "custom")
+            if action_type in KNOWN_SCHEDULE_ACTION_TYPES:
+                continue
+            target = unknown_enabled if row["enabled"] else unknown_disabled
+            target.append(f"{row['name']} ({action_type})")
+
+        if unknown_enabled:
+            return CheckResult(
+                "schedule_action_types",
+                CheckStatus.CRITICAL,
+                f"{len(unknown_enabled)} enabled schedule(s) have no handler and are firing "
+                f"no-ops every tick: {', '.join(unknown_enabled)}",
+                fix_hint="Disable or delete these schedules, or register a handler for their action type",
+                category="runtime",
+            )
+        if unknown_disabled:
+            return CheckResult(
+                "schedule_action_types",
+                CheckStatus.WARNING,
+                f"{len(unknown_disabled)} disabled schedule(s) reference an unknown action type "
+                f"(already self-disabled, safe to delete): {', '.join(unknown_disabled)}",
+                fix_hint="Delete these schedule rows once confirmed obsolete",
+                category="runtime",
+            )
+        return CheckResult(
+            "schedule_action_types",
+            CheckStatus.PASS,
+            "All schedules have a registered handler for their action type",
             category="runtime",
         )
 
