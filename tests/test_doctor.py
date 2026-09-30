@@ -1525,6 +1525,29 @@ def test_schedule_action_types_critical_when_enabled_unknown(tmp_path):
     assert "webhook_retry" in result.message
 
 
+async def test_schedule_action_types_runs_inside_a_running_loop(tmp_path):
+    """`GET /api/doctor` and `ga_gate.evaluate()` call `run_all()` from a running loop."""
+    await asyncio.to_thread(_seed_schedules, tmp_path, ("weird", {"type": "webhook_retry"}, True))
+    result = SecurityDoctor()._check_schedule_action_types(_sched_cfg(tmp_path))
+    assert result.status == CheckStatus.CRITICAL
+    assert "webhook_retry" in result.message
+
+
+def test_schedule_action_types_skips_without_creating_database(tmp_path):
+    result = SecurityDoctor()._check_schedule_action_types(_sched_cfg(tmp_path))
+    assert result.status == CheckStatus.SKIPPED
+    assert result.message == "No database yet"
+    assert not (tmp_path / "pincer.db").exists()
+
+
+def test_schedule_action_types_skip_message_omits_sql(tmp_path):
+    (tmp_path / "pincer.db").touch()
+    result = SecurityDoctor()._check_schedule_action_types(_sched_cfg(tmp_path))
+    assert result.status == CheckStatus.SKIPPED
+    assert "SELECT" not in result.message
+    assert "\n" not in result.message
+
+
 def test_schedule_action_types_warns_when_only_disabled_unknown(tmp_path):
     """Already self-disabled by `run_scheduled_action` — stale, not actively firing."""
     _seed_schedules(tmp_path, ("weird", {"type": "webhook_retry"}, False))

@@ -1977,19 +1977,46 @@ class SecurityDoctor:
         yet, and confirms a disabled one actually got cleaned up.
         """
         import asyncio
+        import concurrent.futures
         import json
 
-        from pincer.scheduler.cron import CronScheduler
+        from pincer.db.engine import _database_file, get_database_url, get_sync_url
+        from pincer.services.scheduler import ScheduleService
         from pincer.tasks.actors import KNOWN_SCHEDULE_ACTION_TYPES
 
         settings = self._cfg(cfg)
-        try:
-            rows = asyncio.run(CronScheduler(settings.db_path).list_all())
-        except Exception as e:
+        # Opening a SQLite file that isn't there creates it; a fresh install
+        # has nothing to audit yet, so don't leave an empty database behind.
+        database = _database_file(get_sync_url(settings.db_path))
+        if database is not None and not database.exists():
             return CheckResult(
                 "schedule_action_types",
                 CheckStatus.SKIPPED,
-                f"Could not read schedules: {e}",
+                "No database yet",
+                category="runtime",
+            )
+
+        def _read_rows() -> list[dict[str, Any]]:
+            return asyncio.run(ScheduleService(get_database_url(settings.db_path)).list_all())
+
+        try:
+            # `run_all()` is also called from inside a running loop
+            # (`GET /api/doctor`, `ga_gate.evaluate()`), where `asyncio.run`
+            # refuses to start; give the query a loop of its own on a worker.
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                rows = _read_rows()
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    rows = ex.submit(_read_rows).result()
+        except Exception as e:
+            # SQLAlchemy appends the full statement after the first line.
+            reason = (str(e).splitlines() or [type(e).__name__])[0]
+            return CheckResult(
+                "schedule_action_types",
+                CheckStatus.SKIPPED,
+                f"Could not read schedules: {reason}",
                 category="runtime",
             )
 
