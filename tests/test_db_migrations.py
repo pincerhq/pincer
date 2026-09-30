@@ -1599,3 +1599,35 @@ def test_0018_round_trips_without_losing_the_ids(migration_url, tmp_path):
         assert conn.execute(sa.text("SELECT turn_id FROM telephony_events WHERE event_id = 'ev-2'")).scalar_one() == ""
 
     command.upgrade(cfg, "0018")
+
+
+# ── 0020: orphaned webhook_retry schedules ─────────────────────────────
+
+
+def test_0020_deletes_webhook_retry_schedules_and_keeps_the_rest(migration_url, tmp_path):
+    """Issue #217: the `webhook_retry` row has no handler anywhere, enabled or
+    already self-disabled; every other schedule, including one whose action
+    isn't valid JSON, is left alone."""
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0019")
+    rows = {
+        "webhook_retry": ('{"type": "webhook_retry"}', 1),
+        "webhook_retry_disabled": ('{"type": "webhook_retry"}', 0),
+        "morning_briefing": ('{"type": "briefing"}', 1),
+        "untyped": ("{}", 1),
+        "garbled": ("not json", 1),
+    }
+    with _connect(migration_url) as conn:
+        for name, (action, enabled) in rows.items():
+            conn.execute(
+                sa.text(
+                    "INSERT INTO pincer_schedules (id, pincer_user_id, name, cron_expr, action, enabled) "
+                    "VALUES (:id, 'usr_test', :name, '* * * * *', :action, :enabled)"
+                ),
+                {"id": str(uuid.uuid4()), "name": name, "action": action, "enabled": enabled},
+            )
+
+    command.upgrade(cfg, "0020")
+    with _connect(migration_url) as conn:
+        left = set(conn.execute(sa.text("SELECT name FROM pincer_schedules")).scalars())
+    assert left == {"morning_briefing", "untyped", "garbled"}

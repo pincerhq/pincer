@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 
+from pincer.channels.base import ChannelType
 from pincer.db.ids import new_id
 from pincer.scheduler.cron import CronScheduler
 from pincer.tasks.actors import process_webhook, run_scheduled_action
@@ -94,7 +95,7 @@ class TestRunScheduledAction:
         assert any("NOT delivered" in r.message for r in caplog.records)
         assert not any("delivered:" in r.message for r in caplog.records)
 
-    async def test_unknown_action_type_is_noop(self, store, tmp_path):
+    async def test_unknown_action_type_runs_no_handler(self, store, tmp_path):
         sid = await store.add("weird", "0 7 * * *", {"type": "unknown"}, "usr_test")
 
         router = AsyncMock()
@@ -105,7 +106,58 @@ class TestRunScheduledAction:
         with patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path)):
             await run_scheduled_action(schedule_id=sid)
 
+        proactive.generate_briefing.assert_not_awaited()
+        proactive.run_custom_action.assert_not_awaited()
+
+    async def test_unknown_action_type_notifies_owner(self, store, tmp_path):
+        """The disable is permanent and may hit a valid schedule under version
+        skew (older worker, newer action type), so the owner is told."""
+        sid = await store.add("weird", "0 7 * * *", {"type": "webhook_retry"}, "usr_test", channel="discord")
+
+        router = AsyncMock()
+        set_context(router, AsyncMock(), AsyncMock())
+
+        with patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path)):
+            await run_scheduled_action(schedule_id=sid)
+
+        router.send_to_user.assert_awaited_once()
+        args, kwargs = router.send_to_user.call_args
+        assert args[0] == "usr_test"
+        assert '"weird"' in args[1]
+        assert "webhook_retry" in args[1]
+        assert kwargs["prefer"] == ChannelType.DISCORD
+
+    async def test_unknown_action_type_logs_when_disable_fails(self, store, tmp_path, caplog):
+        sid = await store.add("weird", "0 7 * * *", {"type": "webhook_retry"}, "usr_test")
+
+        router = AsyncMock()
+        set_context(router, AsyncMock(), AsyncMock())
+
+        with (
+            patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path)),
+            patch.object(CronScheduler, "toggle", AsyncMock(return_value=False)),
+            caplog.at_level(logging.ERROR, logger="pincer.tasks.actors"),
+        ):
+            await run_scheduled_action(schedule_id=sid)
+
+        assert any("Could not disable schedule" in r.message for r in caplog.records)
         router.send_to_user.assert_not_awaited()
+
+    async def test_unknown_action_type_notice_failure_does_not_raise(self, store, tmp_path, caplog):
+        sid = await store.add("weird", "0 7 * * *", {"type": "webhook_retry"}, "usr_test")
+
+        router = AsyncMock()
+        router.send_to_user = AsyncMock(side_effect=RuntimeError("channel down"))
+        set_context(router, AsyncMock(), AsyncMock())
+
+        with (
+            patch("pincer.tasks.actors.get_settings", return_value=_fake_settings(tmp_path)),
+            caplog.at_level(logging.ERROR, logger="pincer.tasks.actors"),
+        ):
+            await run_scheduled_action(schedule_id=sid)
+
+        assert (await store.get(sid)).enabled is False
+        assert any("Disabled-schedule notice failed" in r.message for r in caplog.records)
 
     async def test_unknown_action_type_disables_schedule(self, store, tmp_path):
         """A schedule whose action type has no handler self-disables so it

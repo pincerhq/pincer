@@ -116,7 +116,40 @@ async def run_scheduled_action(schedule_id: str | int) -> None:
             action_type,
             schedule_id,
         )
-        await store.toggle(schedule_id, False, schedule.pincer_user_id)
+        disabled = await store.toggle(schedule_id, False, schedule.pincer_user_id)
+        if not disabled:
+            logger.error(
+                "Could not disable schedule with unknown action type: schedule_id=%s name=%s type=%s",
+                schedule_id,
+                schedule.name,
+                action_type,
+            )
+            return
+        # The disable is permanent, and a worker older than the API that
+        # created the schedule (or than the release that added the action
+        # type) lands here for a perfectly valid schedule. System schedules
+        # are seeded by name and never re-enabled on upgrade, so tell the
+        # owner rather than let it go dark with only a log line.
+        notice = (
+            f'Your scheduled task "{schedule.name}" was turned off: this Pincer worker has no handler '
+            f'for its "{action_type}" action. If it was created by a newer version of Pincer, '
+            "re-enable it once every worker is upgraded."
+        )
+        try:
+            delivered = await get_deliverer().send_to_user(
+                schedule.pincer_user_id,
+                notice,
+                prefer=ChannelType(schedule.channel),
+            )
+        except Exception:
+            logger.exception("Disabled-schedule notice failed: schedule_id=%s", schedule_id)
+            return
+        if not delivered:
+            logger.error(
+                "Disabled-schedule notice NOT delivered (no reachable channel for user): schedule_id=%s user=%s",
+                schedule_id,
+                schedule.pincer_user_id,
+            )
         return
 
     try:
