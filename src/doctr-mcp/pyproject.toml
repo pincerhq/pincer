@@ -13,7 +13,7 @@ dependencies = [
     # See src/ms365-mcp/pyproject.toml's comment: fastmcp 3.4.2's PyPI packaging is
     # broken (empty `fastmcp/__init__.py`, `FastMCP` unimportable). 3.2.4 is the
     # version this whole server is built and tested against.
-    "fastmcp==3.2.4",
+    "fastmcp==4.0.3",
     # Imported directly for JSONResponse in server.py — already a transitive dep of
     # fastmcp/starlette, but listed explicitly since it's used directly here.
     "fastapi>=0.115.0",
