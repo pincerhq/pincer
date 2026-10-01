@@ -38,8 +38,11 @@ def settings(tmp_path) -> MagicMock:
     return cfg
 
 
+# Seeded rows stay inside the last hour. The SLO window starts at the top of the
+# calendar month but never covers less than an hour, so anything older would
+# drop out of it in the first hours of a month.
 async def _seed_calls(settings, codes: list[str], *, delivered_after_s: float | None = None) -> None:
-    started = datetime.now(UTC) - timedelta(hours=1)
+    started = datetime.now(UTC) - timedelta(minutes=30)
     ended = started + timedelta(seconds=60)
     async with aiosqlite.connect(settings.db_path) as db:
         await ensure_voice_tables(db)
@@ -72,7 +75,7 @@ async def _seed_canary(settings, results: list[bool]) -> None:
         for i, ok in enumerate(results):
             await db.execute(
                 f"INSERT INTO pincer_canary_runs (id, ran_at, ok, skipped) VALUES ({SEED_ID_SQL}, ?, ?, 0)",
-                ((datetime.now(UTC) - timedelta(hours=i)).isoformat(), int(ok)),
+                ((datetime.now(UTC) - timedelta(minutes=i)).isoformat(), int(ok)),
             )
         await db.commit()
 
