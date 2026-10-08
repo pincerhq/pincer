@@ -4,6 +4,16 @@ from pydantic import BaseModel, Field, SecretStr, field_validator
 
 
 class ChannelSettings(BaseModel):
+    # Sendblue direct iMessage/SMS. Empty allowlist denies all senders.
+    sendblue_enabled: bool = Field(default=False)
+    sendblue_api_key: SecretStr = Field(default=SecretStr(""))
+    sendblue_api_secret: SecretStr = Field(default=SecretStr(""))
+    sendblue_signing_secret: SecretStr = Field(default=SecretStr(""))
+    sendblue_from_number: str = Field(default="")
+    sendblue_allow_from: list[str] = Field(default_factory=list)
+    sendblue_webhook_host: str = Field(default="127.0.0.1")
+    sendblue_webhook_port: int = Field(default=8787, ge=1, le=65535)
+
     # ── Telegram ─────────────────────────────────────────
     telegram_bot_token: SecretStr = Field(default=SecretStr(""), description="Telegram bot token")
     telegram_guests_allowed: bool = Field(

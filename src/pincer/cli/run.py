@@ -1195,7 +1195,7 @@ async def _run_agent(settings: Settings) -> None:
             except Exception:
                 logger.debug("WA tool_event notify failed", exc_info=True)
 
-    if tg is not None or wa is not None or ms is not None:
+    if tg is not None or wa is not None or ms is not None or settings.sendblue_enabled:
         agent._approval_callback = _channel_approval
         agent._ask_user_callback = _channel_ask_user
         agent._tool_event_callback = _channel_tool_event
@@ -1397,6 +1397,19 @@ async def _run_agent(settings: Settings) -> None:
                 console.print(f"[yellow]Signal failed: {e}[/yellow]")
         else:
             console.print("[yellow]Signal enabled but PINCER_SIGNAL_PHONE_NUMBER not set[/yellow]")
+
+    if settings.sendblue_enabled:
+        try:
+            from pincer.channels.sendblue import SendblueChannel
+
+            sendblue = SendblueChannel(settings, identity=identity)
+            await sendblue.start(on_message)
+            channel_map[sendblue.name] = sendblue
+            router.register(ChannelType.SENDBLUE, sendblue)
+            console.print("[green]Sendblue webhook listening at /webhooks/sendblue[/green]")
+        except Exception as exc:
+            # Do not expose credentials embedded in provider/config exceptions.
+            console.print(f"[yellow]Sendblue failed to start ({type(exc).__name__}); check settings and port[/yellow]")
 
     # Slack channel (optional — requires PINCER_SLACK_BOT_TOKEN + PINCER_SLACK_APP_TOKEN)
     slk = None

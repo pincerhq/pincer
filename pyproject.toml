@@ -64,6 +64,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sendblue = ["aiohttp>=3.11.18"]
 browser = ["playwright>=1.40.0"]
 memory = ["sqlite-vec>=0.1.0"]
 pdf = ["pymupdf>=1.24.0"]
@@ -105,7 +106,7 @@ telemetry = [
     "pincer-telemetry",
 ]
 tasks-redis = ["repid[redis]"]
-all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry,tasks-redis,postgres]"]
+all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,sendblue,local,telemetry,tasks-redis,postgres]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",

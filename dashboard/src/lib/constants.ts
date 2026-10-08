@@ -60,6 +60,7 @@ export const REFETCH_INTERVALS = {
 } as const
 
 export const CHANNEL_COLORS: Record<string, string> = {
+  sendblue: "#007AFF",
   telegram: "#2AABEE",
   whatsapp: "#25D366",
   discord: "#5865F2",
