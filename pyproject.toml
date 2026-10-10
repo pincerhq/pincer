@@ -61,6 +61,9 @@ dependencies = [
     # or postgresql+asyncpg via the `postgres` extra).
     "sqlmodel>=0.0.42",
     "sqlalchemy[asyncio]>=2.0.36",
+    # Per-identity API auth: Argon2id password hashes and HS256 session JWTs.
+    "argon2-cffi>=23.1.0",
+    "PyJWT>=2.8.0",
 ]
 
 [project.optional-dependencies]
