@@ -11,6 +11,7 @@ import {
   Plug,
   Stethoscope,
   Settings,
+  UserRound,
   PanelLeftClose,
   PanelLeft,
   LogOut,
@@ -33,6 +34,7 @@ const navigation = [
   { name: "Integrations", href: ROUTES.INTEGRATIONS, icon: Plug },
   { name: "Security", href: ROUTES.DOCTOR, icon: Stethoscope },
   { name: "Settings", href: ROUTES.SETTINGS, icon: Settings },
+  { name: "Account", href: ROUTES.ACCOUNT, icon: UserRound },
 ]
 
 export function Sidebar() {

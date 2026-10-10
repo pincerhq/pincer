@@ -51,7 +51,12 @@ export interface ListenStateDetail {
 }
 
 export interface ListenSessionOptions {
-  url: string
+  /**
+   * Socket URL, or a function producing one. The function runs for EVERY
+   * connection attempt (the reconnect included) because the URL carries a
+   * short-lived ticket; if it rejects, the attempt counts as a failed connect.
+   */
+  url: string | (() => Promise<string>)
   onState: (state: ListenState, detail: ListenStateDetail) => void
   onFrame: (track: ListenTrack, payloadB64: string) => void
   /** Socket factory — defaults to `new WebSocket(url)`. */
@@ -60,11 +65,13 @@ export interface ListenSessionOptions {
   reconnectDelayMs?: number
 }
 
-/** ws(s):// URL of the listener socket for `callSid`, token as a query param
- *  (a browser cannot put an Authorization header on a WebSocket upgrade). */
-export function listenUrl(baseUrl: string, callSid: string, token: string | null): string {
+/** ws(s):// URL of the listener socket for `callSid`, the listen ticket as a
+ *  query param (a browser cannot put an Authorization header on a WebSocket
+ *  upgrade). Only ever a ticket — never an access token, refresh token or API
+ *  key: URLs end up in logs. No ticket (auth disabled) → no query param. */
+export function listenUrl(baseUrl: string, callSid: string, ticket: string | null): string {
   const base = baseUrl.replace(/\/$/, "").replace(/^http/, "ws")
-  const qs = token ? `?token=${encodeURIComponent(token)}` : ""
+  const qs = ticket ? `?token=${encodeURIComponent(ticket)}` : ""
   return `${base}/api/voice/listen/${encodeURIComponent(callSid)}${qs}`
 }
 
@@ -136,10 +143,33 @@ export class ListenSession {
   }
 
   private open(): void {
-    const connect = this.opts.connect ?? ((url: string) => new WebSocket(url) as unknown as WebSocketLike)
+    const source = this.opts.url
+    if (typeof source === "string") {
+      this.connect(source)
+      return
+    }
+    let pending: Promise<string>
+    try {
+      pending = source()
+    } catch {
+      this.setState("error", { reason: "ticket_failed" })
+      return
+    }
+    pending.then(
+      (url) => {
+        if (!this.stopped) this.connect(url)
+      },
+      () => {
+        if (!this.stopped) this.setState("error", { reason: "ticket_failed" })
+      },
+    )
+  }
+
+  private connect(url: string): void {
+    const connect = this.opts.connect ?? ((u: string) => new WebSocket(u) as unknown as WebSocketLike)
     let ws: WebSocketLike
     try {
-      ws = connect(this.opts.url)
+      ws = connect(url)
     } catch {
       this.setState("error", { reason: "connect_failed" })
       return

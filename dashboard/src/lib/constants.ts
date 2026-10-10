@@ -17,6 +17,7 @@ export const ROUTES = {
   INTEGRATION: "/integrations/:slug",
   DOCTOR: "/doctor",
   SETTINGS: "/settings",
+  ACCOUNT: "/account",
   LOGIN: "/login",
 } as const
 

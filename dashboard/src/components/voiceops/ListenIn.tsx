@@ -13,7 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Headphones, Square, Volume2, VolumeX } from "lucide-react"
 import type { VoiceActiveCall } from "@/api/types"
-import { getBaseUrl, getToken } from "@/api/client"
+import { getBaseUrl, pincer } from "@/api/client"
 import { Button } from "@/components/ui/button"
 import {
   ListenSession,
@@ -111,7 +111,12 @@ export function ListenPanel({ callSid, player, onClose }: ListenPanelProps) {
   // Connect once per (call, player); stop on unmount.
   useEffect(() => {
     const session = new ListenSession({
-      url: listenUrl(getBaseUrl(), callSid, getToken()),
+      // A fresh ticket per connection attempt, reconnect included: it is only
+      // valid for a minute.
+      url: async () => {
+        const { ticket } = await pincer.listenTicket(callSid)
+        return listenUrl(getBaseUrl(), callSid, ticket || null)
+      },
       onState: (next, d) => {
         setState(next)
         setDetail(d)

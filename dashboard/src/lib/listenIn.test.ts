@@ -50,7 +50,7 @@ function makeSession(overrides: Partial<ConstructorParameters<typeof ListenSessi
 const START = { type: "start", call_sid: "CA1", tracks: ["inbound", "outbound"], listener_count: 2 }
 
 describe("listenUrl", () => {
-  it("switches http(s) to ws(s) and carries the token as a query param", () => {
+  it("switches http(s) to ws(s) and carries the ticket as a query param", () => {
     expect(listenUrl("https://pincer.example.com/", "CA1", "tok/en")).toBe(
       "wss://pincer.example.com/api/voice/listen/CA1?token=tok%2Fen",
     )
@@ -163,5 +163,72 @@ describe("ListenSession state machine", () => {
     ws.serverSend({ type: "media", track: "inbound", payload: "early" })
     expect(frames).toHaveLength(0)
     expect(session.state).toBe("connecting")
+  })
+
+  describe("per-connection ticket (url as a function)", () => {
+    function ticketed() {
+      let n = 0
+      const url = vi.fn(async () => listenUrl("http://x", "CA1", `ticket-${++n}`))
+      return { url, ...makeSession({ url }) }
+    }
+
+    it("fetches a ticket before connecting and puts it in the URL", async () => {
+      const { session, url } = ticketed()
+      session.start()
+      expect(session.state).toBe("connecting")
+      expect(FakeSocket.instances).toHaveLength(0) // not before the ticket is in
+      await vi.advanceTimersByTimeAsync(0)
+      expect(url).toHaveBeenCalledTimes(1)
+      expect(FakeSocket.instances[0].url).toBe("ws://x/api/voice/listen/CA1?token=ticket-1")
+    })
+
+    it("fetches a NEW ticket for the reconnect", async () => {
+      const { session, url } = ticketed()
+      session.start()
+      await vi.advanceTimersByTimeAsync(0)
+      const first = FakeSocket.instances[0]
+      first.open()
+      first.serverSend(START)
+      first.serverClose(1006)
+      await vi.advanceTimersByTimeAsync(10)
+      expect(url).toHaveBeenCalledTimes(2)
+      expect(FakeSocket.instances).toHaveLength(2)
+      expect(FakeSocket.instances[1].url).toBe("ws://x/api/voice/listen/CA1?token=ticket-2")
+      expect(session.state).toBe("listening")
+    })
+
+    it("a failed ticket fetch is an error, with no socket opened", async () => {
+      const { session, states } = makeSession({ url: () => Promise.reject(new Error("401")) })
+      session.start()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(session.state).toBe("error")
+      expect(states.at(-1)).toEqual(["error", { reason: "ticket_failed" }])
+      expect(FakeSocket.instances).toHaveLength(0)
+    })
+
+    it("a failed ticket fetch on the reconnect is an error too", async () => {
+      let n = 0
+      const url = vi.fn(() =>
+        ++n === 1 ? Promise.resolve("ws://x/api/voice/listen/CA1?token=t1") : Promise.reject(new Error("down")),
+      )
+      const { session } = makeSession({ url })
+      session.start()
+      await vi.advanceTimersByTimeAsync(0)
+      FakeSocket.instances[0].open()
+      FakeSocket.instances[0].serverSend(START)
+      FakeSocket.instances[0].serverClose(1006)
+      await vi.advanceTimersByTimeAsync(10)
+      expect(session.state).toBe("error")
+      expect(FakeSocket.instances).toHaveLength(1)
+    })
+
+    it("stop() while the ticket is in flight opens no socket", async () => {
+      const { session } = ticketed()
+      session.start()
+      session.stop()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(FakeSocket.instances).toHaveLength(0)
+      expect(session.state).toBe("idle")
+    })
   })
 })
