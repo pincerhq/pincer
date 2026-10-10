@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
 from pincer.api.audit import router as audit_router
+from pincer.api.auth import router as auth_router
 from pincer.api.auth_guard import (
     PUBLIC_PATHS,
     SELF_AUTHENTICATED_PREFIXES,
@@ -153,6 +154,12 @@ def create_app() -> FastAPI:
         lockout_seconds=int(getattr(settings, "auth_lockout_seconds", 300)),
     )
     app.state.auth_guard = auth_guard
+    # Login is also throttled per account: the IP above comes from an
+    # unverified X-Forwarded-For, so it cannot be the only key.
+    app.state.login_guard = AuthGuard(
+        max_failures=auth_guard.max_failures,
+        lockout_seconds=auth_guard.lockout_seconds,
+    )
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -213,6 +220,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(auth_router)
     app.include_router(costs_router)
     app.include_router(audit_router)
     app.include_router(conversations_router)

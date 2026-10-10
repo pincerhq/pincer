@@ -34,6 +34,10 @@ PUBLIC_PATHS = (
     "/api/health",
     "/api/docs",
     "/api/openapi.json",
+    # Where a caller without a token gets one. Both run the brute-force guard
+    # themselves (see pincer.api.auth).
+    "/api/auth/login",
+    "/api/auth/refresh",
     # The website's "try it now" call: there is no token on a marketing page.
     # It defends itself instead — feature flag, explicit consent, and three
     # rate limits (see pincer.api.public_demo).
