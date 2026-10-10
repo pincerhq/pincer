@@ -24,6 +24,7 @@ EXPECTED_TABLES = {
     "pincer_sessions",
     "pincer_identity_profiles",
     "pincer_channel_identities",
+    "pincer_identity_credentials",
     "pincer_audit_logs",
     "pincer_schedules",
     "pincer_event_triggers",
@@ -1631,3 +1632,56 @@ def test_0020_deletes_webhook_retry_schedules_and_keeps_the_rest(migration_url, 
     with _connect(migration_url) as conn:
         left = set(conn.execute(sa.text("SELECT name FROM pincer_schedules")).scalars())
     assert left == {"morning_briefing", "untyped", "garbled"}
+
+
+# ── 0021: identity credentials ─────────────────────────────────────────
+
+
+def test_0021_identity_credentials_constraints(migration_url, tmp_path):
+    """Issue #228: one credentials row per identity, an API key hash names at
+    most one of them, and an identity with only a password has none."""
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "head")
+    insert = sa.text(
+        "INSERT INTO pincer_identity_credentials (pincer_user_id, password_hash, api_key_hash) "
+        "VALUES (:uid, :password_hash, :api_key_hash)"
+    )
+    with _connect(migration_url) as conn:
+        for uid in ("alice", "bob", "carol"):
+            conn.execute(sa.text("INSERT INTO pincer_identity_profiles (pincer_user_id) VALUES (:uid)"), {"uid": uid})
+        conn.execute(insert, {"uid": "alice", "password_hash": "$argon2id$x", "api_key_hash": "h1"})
+        # Two identities without a key: NULL is not a duplicate of NULL.
+        conn.execute(insert, {"uid": "bob", "password_hash": "$argon2id$y", "api_key_hash": None})
+        conn.execute(insert, {"uid": "carol", "password_hash": None, "api_key_hash": None})
+        row = conn.execute(
+            sa.text("SELECT token_version, created_at FROM pincer_identity_credentials WHERE pincer_user_id = 'alice'")
+        ).one()
+        assert row.token_version == 0
+        assert row.created_at is not None
+
+    with pytest.raises(sa.exc.IntegrityError), _connect(migration_url) as conn:
+        conn.execute(insert, {"uid": "alice", "password_hash": None, "api_key_hash": "h9"})
+    with pytest.raises(sa.exc.IntegrityError), _connect(migration_url) as conn:
+        conn.execute(sa.text("UPDATE pincer_identity_credentials SET api_key_hash = 'h1' WHERE pincer_user_id = 'bob'"))
+
+    inspector_engine = sa.create_engine(migration_url)
+    try:
+        foreign_keys = sa.inspect(inspector_engine).get_foreign_keys("pincer_identity_credentials")
+    finally:
+        inspector_engine.dispose()
+    assert [(fk["referred_table"], fk["options"].get("ondelete")) for fk in foreign_keys] == [
+        ("pincer_identity_profiles", "CASCADE")
+    ]
+
+
+def test_0021_round_trips(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "0020")
+    engine_ = sa.create_engine(migration_url)
+    try:
+        assert "pincer_identity_credentials" not in sa.inspect(engine_).get_table_names()
+        command.upgrade(cfg, "head")
+        assert "pincer_identity_credentials" in sa.inspect(engine_).get_table_names()
+    finally:
+        engine_.dispose()

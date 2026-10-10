@@ -1,7 +1,8 @@
-"""Cross-channel identity: `identity_profiles` and `channel_identities`.
+"""Cross-channel identity: `identity_profiles`, `channel_identities` and
+`identity_credentials`.
 
 One profile per Pincer user; one `channel_identities` row per (channel,
-channel user id) pair pointing at it.
+channel user id) pair pointing at it; at most one credentials row per profile.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ from sqlalchemy import delete, func, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
-from pincer.models.identity import ChannelIdentity, IdentityProfile
+from pincer.models.identity import ChannelIdentity, IdentityCredential, IdentityProfile
 from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
@@ -63,6 +64,15 @@ class IdentityProfileRepository(BaseRepository[IdentityProfile, str]):
 
     async def delete_by_id(self, pincer_user_id: str) -> int:
         return await self.delete_where(col(IdentityProfile.pincer_user_id) == pincer_user_id)
+
+    async def find_by_email_ci(self, email: str) -> Sequence[IdentityProfile]:
+        """Profiles whose email matches, ignoring case.
+
+        At most two: the caller only needs to tell "exactly one" from "none"
+        and "ambiguous", and an email is not unique across identities.
+        """
+        stmt = select(IdentityProfile).where(func.lower(col(IdentityProfile.email)) == email.strip().lower()).limit(2)
+        return (await self.session.exec(stmt)).all()
 
     async def search(self, term: str | None, limit: int) -> Sequence[IdentityProfile]:
         """Profiles, oldest first. `term` matches a Pincer user id or any of
@@ -136,3 +146,95 @@ class ChannelIdentityRepository(BaseRepository[ChannelIdentity, tuple[str, str]]
         return await self.delete_where(
             col(ChannelIdentity.channel) == channel, col(ChannelIdentity.channel_user_id) == channel_user_id
         )
+
+
+class IdentityCredentialRepository(BaseRepository[IdentityCredential, str]):
+    model = IdentityCredential
+
+    async def by_api_key_hash(self, api_key_hash: str) -> IdentityCredential | None:
+        stmt = select(IdentityCredential).where(col(IdentityCredential.api_key_hash) == api_key_hash)
+        return (await self.session.exec(stmt)).first()
+
+    async def set_password(self, pincer_user_id: str, password_hash: str, *, now: str) -> None:
+        """Store a new password and invalidate the sessions issued under the old one."""
+        await self.session.exec(
+            upsert(
+                dialect_of(self.session),
+                IdentityCredential,
+                {
+                    "pincer_user_id": pincer_user_id,
+                    "password_hash": password_hash,
+                    "password_updated_at": now,
+                    "created_at": now,
+                },
+                index_elements=["pincer_user_id"],
+                set_={
+                    "password_hash": password_hash,
+                    "password_updated_at": now,
+                    "token_version": col(IdentityCredential.token_version) + 1,
+                },
+            )
+        )
+
+    async def replace_password_hash(self, pincer_user_id: str, password_hash: str) -> int:
+        """Swap in a re-hash of the same password: sessions stay valid."""
+        stmt = (
+            update(IdentityCredential)
+            .where(col(IdentityCredential.pincer_user_id) == pincer_user_id)
+            .values(password_hash=password_hash)
+        )
+        return int((await self.session.exec(stmt)).rowcount)
+
+    async def set_api_key(self, pincer_user_id: str, *, api_key_hash: str, prefix: str, last4: str, now: str) -> None:
+        key = {
+            "api_key_hash": api_key_hash,
+            "api_key_prefix": prefix,
+            "api_key_last4": last4,
+            "api_key_created_at": now,
+        }
+        await self.session.exec(
+            upsert(
+                dialect_of(self.session),
+                IdentityCredential,
+                {"pincer_user_id": pincer_user_id, "created_at": now, **key},
+                index_elements=["pincer_user_id"],
+                set_=key,
+            )
+        )
+
+    async def move(self, old_id: str, new_id: str) -> None:
+        """Hand `old_id`'s credentials to `new_id`.
+
+        When both have a row this is a merge, and the target keeps its own:
+        whoever signs in as `new_id` today must not find their password
+        replaced by the identity that was folded into them.
+        """
+        if await self.get(new_id) is not None:
+            await self.delete_by_id(old_id)
+            return
+        stmt = (
+            update(IdentityCredential)
+            .where(col(IdentityCredential.pincer_user_id) == old_id)
+            .values(pincer_user_id=new_id)
+        )
+        await self.session.exec(stmt)
+
+    async def delete_by_id(self, pincer_user_id: str) -> int:
+        return await self.delete_where(col(IdentityCredential.pincer_user_id) == pincer_user_id)
+
+    async def delete_unlinked(self) -> int:
+        """Drop the credentials of identities no channel points at any more."""
+        linked = select(col(ChannelIdentity.pincer_user_id))
+        stmt = delete(IdentityCredential).where(col(IdentityCredential.pincer_user_id).notin_(linked))
+        return int((await self.session.exec(stmt)).rowcount)
+
+    async def count_usable(self) -> int:
+        """Identities that can authenticate: a password or an API key."""
+        stmt = (
+            select(func.count())
+            .select_from(IdentityCredential)
+            .where(
+                col(IdentityCredential.password_hash).is_not(None) | col(IdentityCredential.api_key_hash).is_not(None)
+            )
+        )
+        return int((await self.session.exec(stmt)).one())

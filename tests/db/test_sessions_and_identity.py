@@ -9,12 +9,14 @@ from __future__ import annotations
 import pytest
 
 from pincer.db.engine import get_engine
-from pincer.models.identity import ChannelIdentity, IdentityProfile
+from pincer.db.session import session_scope
+from pincer.models.identity import ChannelIdentity, IdentityCredential, IdentityProfile
 from pincer.models.sessions import ChatSession
+from pincer.repositories.identity import IdentityCredentialRepository, IdentityProfileRepository
 from pincer.services.identity import IdentityService, SeedEntry
 from pincer.services.sessions import SessionService
 
-_TABLES = [IdentityProfile.__table__, ChannelIdentity.__table__, ChatSession.__table__]
+_TABLES = [IdentityProfile.__table__, ChannelIdentity.__table__, IdentityCredential.__table__, ChatSession.__table__]
 
 
 @pytest.fixture
@@ -216,3 +218,107 @@ async def test_listing_identities_for_the_dashboard(url):
 
     assert (await service.profile_with_channels("usr_b"))["channels"][0]["channel"] == "signal"
     assert await service.profile_with_channels("nobody") is None
+
+
+# ── credentials ──────────────────────────────────────────────────────
+
+_NOW = "2026-10-10T12:00:00+00:00"
+
+
+async def _set_password(url: str, pincer_user_id: str, password_hash: str) -> None:
+    async with session_scope(url) as session:
+        await IdentityCredentialRepository(session).set_password(pincer_user_id, password_hash, now=_NOW)
+
+
+async def _credential(url: str, pincer_user_id: str) -> IdentityCredential | None:
+    async with session_scope(url) as session:
+        return await IdentityCredentialRepository(session).get(pincer_user_id)
+
+
+async def test_setting_a_password_again_bumps_the_token_version(url):
+    service = IdentityService(url)
+    await service.create_identity("alice", channel="telegram", channel_user_id="12345")
+
+    await _set_password(url, "alice", "hash-1")
+    first = await _credential(url, "alice")
+    assert (first.password_hash, first.token_version) == ("hash-1", 0)
+
+    await _set_password(url, "alice", "hash-2")
+    second = await _credential(url, "alice")
+    assert (second.password_hash, second.token_version) == ("hash-2", 1)
+
+    # A re-hash of the same password must not sign anyone out.
+    async with session_scope(url) as session:
+        await IdentityCredentialRepository(session).replace_password_hash("alice", "hash-3")
+    third = await _credential(url, "alice")
+    assert (third.password_hash, third.token_version) == ("hash-3", 1)
+
+
+async def test_an_api_key_is_found_by_its_hash_and_keeps_the_password(url):
+    service = IdentityService(url)
+    await service.create_identity("alice", channel="telegram", channel_user_id="12345")
+    await _set_password(url, "alice", "hash-1")
+
+    async with session_scope(url) as session:
+        repo = IdentityCredentialRepository(session)
+        await repo.set_api_key("alice", api_key_hash="h1", prefix="pnc_abcd", last4="wxyz", now=_NOW)
+    async with session_scope(url) as session:
+        repo = IdentityCredentialRepository(session)
+        found = await repo.by_api_key_hash("h1")
+        assert (found.pincer_user_id, found.password_hash, found.api_key_last4) == ("alice", "hash-1", "wxyz")
+        assert await repo.by_api_key_hash("h2") is None
+        assert await repo.count_usable() == 1
+
+
+async def test_renaming_moves_the_credentials(url):
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
+    await _set_password(url, "usr_hash", "hash-1")
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert await _credential(url, "usr_hash") is None
+    assert (await _credential(url, "alice")).password_hash == "hash-1"
+
+
+async def test_merging_keeps_the_target_s_credentials(url):
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
+    await service.create_identity("alice", channel="whatsapp", channel_user_id="4930111")
+    await _set_password(url, "usr_hash", "hash-of-the-merged")
+    await _set_password(url, "alice", "hash-of-alice")
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert await _credential(url, "usr_hash") is None
+    assert (await _credential(url, "alice")).password_hash == "hash-of-alice"
+    assert await service.channels_for("alice") == [("telegram", "12345"), ("whatsapp", "4930111")]
+
+
+async def test_prune_deletes_the_credentials_of_a_removed_identity(url):
+    service = IdentityService(url)
+    await service.create_identity("usr_keep", channel="telegram", channel_user_id="12345")
+    await service.create_identity("usr_drop", channel="telegram", channel_user_id="99999")
+    await _set_password(url, "usr_keep", "hash-keep")
+    await _set_password(url, "usr_drop", "hash-drop")
+
+    assert await service.prune([("telegram", "12345")]) == (1, 1)
+
+    assert await _credential(url, "usr_drop") is None
+    assert (await _credential(url, "usr_keep")).password_hash == "hash-keep"
+
+
+async def test_a_profile_made_by_hand_has_no_channel_and_is_found_by_email(url):
+    service = IdentityService(url)
+    assert await service.create_profile("alice", email="Alice@Example.com", display_name="Alice")
+    assert not await service.create_profile("alice", email="other@example.com")
+    assert await service.create_profile("bob", email="shared@example.com")
+    assert await service.create_profile("carol", email="SHARED@example.com")
+
+    assert (await service.profile("alice"))["email"] == "Alice@Example.com"
+    assert await service.channels_for("alice") == []
+    async with session_scope(url) as session:
+        profiles = IdentityProfileRepository(session)
+        assert [row.pincer_user_id for row in await profiles.find_by_email_ci(" alice@example.COM ")] == ["alice"]
+        assert len(await profiles.find_by_email_ci("shared@example.com")) == 2
+        assert await profiles.find_by_email_ci("nobody@example.com") == []
