@@ -63,6 +63,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Names no identity may take: `/api/identity/me` is the caller's own identity.
+RESERVED_IDENTITY_NAMES = frozenset({"me"})
+
 # Channels whose IDs are phone numbers — leading "+" is stripped for storage
 _PHONE_CHANNELS = {ChannelType.WHATSAPP, ChannelType.VOICE, ChannelType.SIGNAL}
 
@@ -594,7 +597,8 @@ class IdentityResolver:
             name@ch1:id1=ch2:id2=ch3:id3   (named canonical ID, N channels)
             ch1:id1=ch2:id2                 (hash-based, backward compat)
 
-        Raises ValueError if no channel:id pairs are found.
+        Raises ValueError if no channel:id pairs are found, or if the name is
+        reserved (see RESERVED_IDENTITY_NAMES).
         """
         entry = entry.strip()
         name: str | None = None
@@ -603,6 +607,8 @@ class IdentityResolver:
         at_pos = entry.find("@")
         if 0 < at_pos < (eq_pos if eq_pos >= 0 else len(entry)):
             raw_name = entry[:at_pos].strip()
+            if raw_name.lower() in RESERVED_IDENTITY_NAMES:
+                raise ValueError(f"Identity name {raw_name!r} is reserved")
             if raw_name:
                 name = raw_name
             entry = entry[at_pos + 1 :]

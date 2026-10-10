@@ -1,6 +1,16 @@
 export interface HealthResponse {
   status: string
   version: string
+  /** False when the agent runs with PINCER_AUTH_DISABLED (local dev). */
+  auth_required?: boolean
+}
+
+export interface TokenPair {
+  access_token: string
+  refresh_token: string
+  token_type: string
+  expires_in: number
+  pincer_user_id: string
 }
 
 export interface ChannelInfo {
@@ -279,6 +289,34 @@ export interface Identity {
   display_name: string
   created_at: string
   channels: IdentityChannel[]
+  email?: string | null
+  timezone?: string | null
+  active_channel?: string | null
+  active_channel_updated_at?: string | null
+}
+
+/** The signed-in identity, plus how this request was authenticated. */
+export interface Me extends Identity {
+  auth_method: "jwt" | "api_key"
+}
+
+/** Never carries the full key — only `ApiKeyCreated` does, once. */
+export interface ApiKeyInfo {
+  exists: boolean
+  masked: string | null
+  created_at: string | null
+}
+
+export interface ApiKeyCreated {
+  api_key: string
+  masked: string
+  created_at: string
+}
+
+/** Single-use, short-lived credential for the listen-in WebSocket URL. */
+export interface ListenTicket {
+  ticket: string
+  expires_in: number
 }
 
 export interface IdentityListResponse {

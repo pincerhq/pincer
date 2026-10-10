@@ -66,6 +66,9 @@ const DoctorPage = lazy(() =>
 const SettingsPage = lazy(() =>
   import("@/pages/Settings").then((m) => ({ default: m.SettingsPage })),
 )
+const AccountPage = lazy(() =>
+  import("@/pages/Account").then((m) => ({ default: m.AccountPage })),
+)
 const IntegrationDetailPage = lazy(() =>
   import("@/pages/IntegrationDetail").then((m) => ({ default: m.IntegrationDetailPage })),
 )
@@ -81,8 +84,12 @@ const queryClient = new QueryClient({
 })
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
-  const isConnected = useAuthStore((s) => s.isConnected)
-  if (!isConnected) return <Navigate to={ROUTES.LOGIN} replace />
+  // Connected means signed in — or an agent that said it needs no sign-in
+  // (`authRequired` false), in which case there are no tokens to check.
+  const allowed = useAuthStore(
+    (s) => s.isConnected && (!s.authRequired || !!s.accessToken),
+  )
+  if (!allowed) return <Navigate to={ROUTES.LOGIN} replace />
   return <>{children}</>
 }
 
@@ -181,6 +188,10 @@ export default function App() {
               <Route
                 path={ROUTES.SETTINGS}
                 element={<PageWrapper><SettingsPage /></PageWrapper>}
+              />
+              <Route
+                path={ROUTES.ACCOUNT}
+                element={<PageWrapper><AccountPage /></PageWrapper>}
               />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>

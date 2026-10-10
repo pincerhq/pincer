@@ -56,6 +56,36 @@ Complete command reference across all sprints (1–13). For the full list of too
 `network_request`, `skill_execute`, `auth_attempt`, `config_change`,
 `budget_alert`, `rate_limit_hit`, `message_received`, `message_sent`, `error`
 
+## Identity & API access
+
+The REST API and the dashboard authenticate identities: a password for the
+dashboard login, an API key for headless consumers such as the web chat
+widget. There are no roles — any identity with a password or a key has full
+API access. See [REST API → Authentication](rest-api.md#authentication).
+
+| Command | Description |
+|---------|-------------|
+| `pincer identity list` | Identities with email, channels, whether a password is set, and the masked API key |
+| `pincer identity create <name> [--email EMAIL] [--display-name NAME]` | Create an identity. Names are letters, digits and underscores; `me` and names starting with `usr_` are reserved |
+| `pincer identity set-password <name> [password]` | Set or reset a password (8–256 characters). Prompts, hidden and confirmed, when the password is omitted — which keeps it out of the shell history. Signs the identity out everywhere |
+| `pincer identity api-key <name> [--force]` | Generate an API key (`pnc_…`) and print it once; afterwards only a masked form is shown. `--force` replaces an existing key, which stops working immediately |
+| `pincer identity revoke <name>` | Remove the identity's password and API key and end its sessions. The identity, its channels and its history stay |
+
+```bash
+pincer identity create alice --email alice@example.com
+pincer identity set-password alice     # dashboard login: "alice" or the email
+pincer identity api-key alice          # for the web chat widget / scripts
+```
+
+A forgotten password is reset with `set-password`. An email signs in for one
+identity only: `create` refuses an email that already belongs to another.
+
+With an [identity map](#identity-map) configured, identities that have no
+channel link are deleted at startup — unless they hold a password or an API
+key, so an identity made only for the dashboard or for a script survives.
+Removing someone from the map therefore does not take their API access away;
+`pincer identity revoke <name>` does.
+
 ## Skills
 
 There is no `pincer skills` CLI command group. Skills are discovered purely from
@@ -211,7 +241,10 @@ complete list. Key variables added in Sprint 5:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PINCER_DASHBOARD_TOKEN` | (empty) | Bearer token for API auth |
+| `PINCER_JWT_SECRET` | (generated) | Signs session tokens (HS256), min 32 chars. Unset = generated once into `<data_dir>/jwt_secret`; set it in production |
+| `PINCER_JWT_ACCESS_TTL_SECONDS` | `1800` | Access token lifetime |
+| `PINCER_JWT_REFRESH_TTL_SECONDS` | `604800` | Refresh token lifetime |
+| `PINCER_AUTH_DISABLED` | `false` | Serve `/api/*` without authentication — local dev/tests only |
 | `PINCER_DASHBOARD_HOST` | `127.0.0.1` | API server bind host |
 | `PINCER_DASHBOARD_PORT` | `8080` | API server port |
 | `PINCER_AUDIT_DISABLED` | `false` | Disable audit logging |
@@ -318,7 +351,9 @@ The API server starts automatically with `pincer run` on the configured
 | `GET /api/costs/by-model?days=7` | Yes | Per-model cost breakdown |
 | `GET /api/costs/by-tool?days=7` | Yes | Per-tool cost breakdown |
 
-Authentication: `Authorization: Bearer <PINCER_DASHBOARD_TOKEN>`
+Authentication: `Authorization: Bearer <access token or API key>` — an access
+token from `POST /api/auth/login` or an identity's API key. See
+[REST API → Authentication](rest-api.md#authentication).
 
 ## Docker
 

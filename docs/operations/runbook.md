@@ -395,8 +395,8 @@ ones are documented in [security-checklist.md](../guides/security-checklist.md).
 
 **If the instance is live and RED, decide explicitly:** roll back
 (`scripts/rollback.sh`) or fix forward. Do not leave it running unresolved —
-several CRITICALs (missing tokens, disabled signature validation) mean the
-surface is unauthenticated right now.
+several CRITICALs (`PINCER_AUTH_DISABLED` set, disabled signature validation)
+mean the surface is unauthenticated right now.
 
 ---
 
@@ -521,6 +521,9 @@ Order matters for the Twilio auth token: it signs both webhooks and WebSocket
 tokens, so rotate it in Twilio Console and `.env.production` **together**, then
 redeploy. Between the two, every webhook 403s.
 
+A forgotten dashboard password is not a rotation: reset it with
+`pincer identity set-password <name>`.
+
 ## Restore drill
 
 Quarterly, on staging, timed:
@@ -536,12 +539,15 @@ Record how long it took. An untimed restore procedure is not a recovery plan.
    inside an instance).
 2. Copy `.env.production.example`, fill secrets, `chmod 600`.
 3. Own Twilio number + regulatory bundle for the country.
-4. `PINCER_ENVIRONMENT=production`, distinct `PINCER_DASHBOARD_TOKEN` and
-   `PINCER_WEB_CHAT_TOKEN`.
+4. `PINCER_ENVIRONMENT=production` and a fresh `PINCER_JWT_SECRET` (never
+   shared between instances).
 5. `scripts/deploy.sh` — the gate blocks a misconfigured launch.
 6. AVV/DPA signed ([avv-annex.md](../guides/avv-annex.md)) **before** the first
    real call.
-7. Verify: `pincer voice ops canary`, then one supervised live call.
+7. Give the customer a sign-in: `pincer identity create <name> --email <email>`,
+   then `pincer identity set-password <name>`; `pincer identity api-key <name>`
+   if they use the web chat widget. Nobody can open the dashboard before this.
+8. Verify: `pincer voice ops canary`, then one supervised live call.
 
 ## Decommissioning
 

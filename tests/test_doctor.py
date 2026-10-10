@@ -31,7 +31,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 ElevenLabs + 4 voice security (Sprint 8) + 2 observability (Sprint 9)
     # + 3 in-call tool execution (Sprint 11) + 2 receptionist (Sprint 12)
     # + 1 live listen-in announce gate (Sprint 15) + 1 schedule action types (issue #217)
-    assert len(report.checks) == 60
+    # + 1 leftover shared API tokens (issue #228)
+    assert len(report.checks) == 61
 
     assert 0 <= report.score <= 100
 
@@ -334,28 +335,34 @@ def test_whatsapp_neonize_version_skipped_when_missing(monkeypatch):
 # ── Regression: #117 — doctor reads .env via settings, not os.environ ────────
 
 
-def test_dashboard_auth_token_pass_from_dotenv_only(tmp_path, monkeypatch):
-    """Root-cause regression for #117.
-
-    PINCER_DASHBOARD_TOKEN set only in .env (not in shell) must make
-    _check_dashboard_auth_token return PASS, not CRITICAL.
-    """
-    from pincer.config import get_settings_relaxed
-    from pincer.config.main import _RelaxedSettings
-
+def test_stale_shared_tokens_are_found_in_dotenv_only(tmp_path, monkeypatch):
+    """Same root cause as #117: a variable set only in .env (not in the shell)
+    must still be seen. The shared tokens were removed in #228; one left in
+    .env protects nothing and the operator should be told."""
     (tmp_path / ".env").write_text("PINCER_DASHBOARD_TOKEN=a-secure-32-char-token-for-test\n")
-    monkeypatch.chdir(tmp_path)
-    # Opt back in to dotenv reading, which conftest turns off for every test.
-    monkeypatch.setitem(_RelaxedSettings.model_config, "env_file", tmp_path / ".env")
     monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
 
-    get_settings_relaxed.cache_clear()
-    try:
-        doc = SecurityDoctor(config_dir=tmp_path, data_dir=tmp_path)
-        result = doc._check_dashboard_auth_token()
-        assert result.status == CheckStatus.PASS
-    finally:
-        get_settings_relaxed.cache_clear()
+    result = SecurityDoctor(config_dir=tmp_path, data_dir=tmp_path)._check_stale_shared_tokens()
+    assert result.status == CheckStatus.WARNING
+    assert "PINCER_DASHBOARD_TOKEN" in result.message
+    assert "PINCER_WEB_CHAT_TOKEN" not in result.message
+    assert "a-secure-32-char-token-for-test" not in result.message
+
+
+def test_stale_shared_tokens_are_found_in_the_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.setenv("PINCER_WEB_CHAT_TOKEN", "leftover")
+    result = SecurityDoctor(config_dir=tmp_path, data_dir=tmp_path)._check_stale_shared_tokens()
+    assert result.status == CheckStatus.WARNING
+    assert "PINCER_WEB_CHAT_TOKEN" in result.message
+
+
+def test_no_stale_shared_tokens_passes(tmp_path, monkeypatch):
+    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
+    result = SecurityDoctor(config_dir=tmp_path, data_dir=tmp_path)._check_stale_shared_tokens()
+    assert result.status == CheckStatus.PASS
 
 
 def test_telegram_access_control_pass_from_dotenv_only(tmp_path, monkeypatch):
@@ -527,24 +534,59 @@ def test_discord_allowlist_skipped():
     assert result.status == CheckStatus.SKIPPED
 
 
-def test_dashboard_auth_token_short_warning():
+def _auth_cfg(tmp_path, *, auth_disabled=False):
     from unittest.mock import MagicMock
 
-    doc = SecurityDoctor()
     cfg = MagicMock()
-    cfg.dashboard_token.get_secret_value.return_value = "tooshort"
-    result = doc._check_dashboard_auth_token(cfg)
+    cfg.auth_disabled = auth_disabled
+    cfg.db_path = tmp_path / "pincer.db"
+    return cfg
+
+
+def test_api_sign_in_warns_on_a_fresh_install(tmp_path):
+    """Nobody can sign in, so the API is closed: safe, hence not CRITICAL —
+    the deploy gate runs before the first identity can be created."""
+    cfg = _auth_cfg(tmp_path)
+    result = SecurityDoctor()._check_dashboard_auth_token(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert "pincer identity set-password" in result.fix_hint
+    assert not cfg.db_path.exists()  # looking must not create the database
+
+
+def test_api_sign_in_warns_when_no_identity_has_credentials(tmp_path):
+    from pincer.db.engine import ensure_schema_current
+
+    cfg = _auth_cfg(tmp_path)
+    ensure_schema_current(cfg.db_path)
+    result = SecurityDoctor()._check_dashboard_auth_token(cfg)
     assert result.status == CheckStatus.WARNING
 
 
-def test_dashboard_auth_token_critical_missing():
-    from unittest.mock import MagicMock
+def test_api_sign_in_pass_when_an_identity_has_credentials(tmp_path):
+    from conftest import seed_identity_with_api_key
 
-    doc = SecurityDoctor()
-    cfg = MagicMock()
-    cfg.dashboard_token.get_secret_value.return_value = ""
-    result = doc._check_dashboard_auth_token(cfg)
-    assert result.status == CheckStatus.CRITICAL
+    cfg = _auth_cfg(tmp_path)
+    seed_identity_with_api_key(cfg.db_path)
+    result = SecurityDoctor()._check_dashboard_auth_token(cfg)
+    assert result.status == CheckStatus.PASS
+    assert "1 identity" in result.message
+
+
+async def test_api_sign_in_check_works_inside_a_running_loop(tmp_path):
+    """`GET /api/doctor` runs the checks from the server's event loop."""
+    import asyncio
+
+    from conftest import seed_identity_with_api_key
+
+    cfg = _auth_cfg(tmp_path)
+    await asyncio.to_thread(seed_identity_with_api_key, cfg.db_path)
+    assert SecurityDoctor()._check_dashboard_auth_token(cfg).status == CheckStatus.PASS
+
+
+def test_api_sign_in_warns_when_auth_is_disabled(tmp_path):
+    result = SecurityDoctor()._check_dashboard_auth_token(_auth_cfg(tmp_path, auth_disabled=True))
+    assert result.status == CheckStatus.WARNING
+    assert "PINCER_AUTH_DISABLED" in result.message
 
 
 # ── Budget checks ─────────────────────────────────────────────────────────────
@@ -1250,8 +1292,8 @@ def _prod_cfg(**overrides):
     cfg.voice_timezone = "Europe/Berlin"
     cfg.timezone = "Europe/Berlin"
     cfg.ngrok_authtoken.get_secret_value.return_value = ""
-    cfg.dashboard_token.get_secret_value.return_value = "a" * 32
-    cfg.web_chat_token.get_secret_value.return_value = "b" * 32
+    cfg.auth_disabled = False
+    cfg.jwt_secret.get_secret_value.return_value = "j" * 48
     cfg.twilio_auth_token.get_secret_value.return_value = "c" * 32
     # Sprint 8 production gate
     cfg.environment = "production"
@@ -1305,16 +1347,23 @@ def test_prod_no_tunnel_passes_when_absent():
     assert result.status == CheckStatus.PASS
 
 
-def test_prod_auth_tokens_missing_is_critical():
-    cfg = _prod_cfg()
-    cfg.dashboard_token.get_secret_value.return_value = ""
-    result = SecurityDoctor(production=True)._check_prod_auth_tokens(cfg)
+def test_prod_auth_disabled_is_critical():
+    result = SecurityDoctor(production=True)._check_prod_auth_tokens(_prod_cfg(auth_disabled=True))
     assert result.status == CheckStatus.CRITICAL
+    assert "PINCER_AUTH_DISABLED" in result.message
 
 
-def test_prod_auth_tokens_short_is_critical():
+def test_prod_missing_jwt_secret_is_a_warning():
     cfg = _prod_cfg()
-    cfg.dashboard_token.get_secret_value.return_value = "short"
+    cfg.jwt_secret.get_secret_value.return_value = ""
+    result = SecurityDoctor(production=True)._check_prod_auth_tokens(cfg)
+    assert result.status == CheckStatus.WARNING
+    assert "PINCER_JWT_SECRET" in result.message
+
+
+def test_prod_short_jwt_secret_is_critical():
+    cfg = _prod_cfg()
+    cfg.jwt_secret.get_secret_value.return_value = "short"
     result = SecurityDoctor(production=True)._check_prod_auth_tokens(cfg)
     assert result.status == CheckStatus.CRITICAL
     assert "too short" in result.message
@@ -1361,22 +1410,6 @@ def test_prod_environment_flag_pass():
 def test_prod_environment_flag_critical_when_not_production():
     result = SecurityDoctor(production=True)._check_prod_environment_flag(_prod_cfg(environment="development"))
     assert result.status == CheckStatus.CRITICAL
-
-
-def test_prod_auth_tokens_critical_without_web_chat_token():
-    cfg = _prod_cfg()
-    cfg.web_chat_token.get_secret_value.return_value = ""
-    result = SecurityDoctor(production=True)._check_prod_auth_tokens(cfg)
-    assert result.status == CheckStatus.CRITICAL
-    assert "PINCER_WEB_CHAT_TOKEN" in result.message
-
-
-def test_prod_auth_tokens_critical_when_tokens_identical():
-    cfg = _prod_cfg()
-    cfg.web_chat_token.get_secret_value.return_value = "a" * 32
-    result = SecurityDoctor(production=True)._check_prod_auth_tokens(cfg)
-    assert result.status == CheckStatus.CRITICAL
-    assert "identical" in result.message
 
 
 def test_prod_cors_origins_pass():

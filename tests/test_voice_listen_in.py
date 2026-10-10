@@ -51,7 +51,6 @@ from pincer.voice.twiml_builder import build_connect_twiml
 from pincer.voice.webhook_auth import WS_MONITOR_PATH, signed_ws_query
 
 TWILIO_TOKEN = "test-twilio-auth-token"
-DASHBOARD_TOKEN = "dash-secret-token"
 MONITOR_PATH = "/api/apps/twilio/monitor"
 LISTEN_PATH = "/api/voice/listen"
 
@@ -89,8 +88,7 @@ def _settings(**overrides: Any) -> SimpleNamespace:
         "voice_ws_auth_required": True,
         "voice_webhook_validate": True,
         "voice_signature_max_age_s": 300,
-        "dashboard_token": SecretStr(""),
-        "web_chat_token": SecretStr(""),
+        "auth_disabled": True,
         "listen_in_enabled": True,
         "listen_in_max_listeners": 2,
         "listen_in_announce": True,
@@ -358,43 +356,110 @@ def _wait_until(pred: Any, timeout: float = 2.0) -> bool:
 
 
 class TestListenerEgress:
-    def test_listen_requires_auth_before_accept(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        s = _settings(dashboard_token=SecretStr(DASHBOARD_TOKEN))
-        client = _make_client(monkeypatch, s)
-        # No token: denied before accept — never a single frame, 401 on the upgrade.
+    def test_listen_requires_auth_before_accept(self, monkeypatch: pytest.MonkeyPatch, authed_app: Any) -> None:
+        client = _make_client(monkeypatch, _settings(auth_disabled=False))
+        # No credential: denied before accept — never a single frame, 401 on the upgrade.
         with pytest.raises(WebSocketDisconnect) as exc, client.websocket_connect(f"{LISTEN_PATH}/CA1"):
             pass  # pragma: no cover
         if isinstance(exc.value, WebSocketDenialResponse):
             assert exc.value.status_code == 401
-        # Wrong token: same.
+        # Wrong credential: same.
         with (
             pytest.raises(WebSocketDisconnect),
             client.websocket_connect(f"{LISTEN_PATH}/CA1", headers={"Authorization": "Bearer nope"}),
         ):
             pass  # pragma: no cover
-        # Right token (header) is accepted — the socket opens (and says "unavailable": no source).
-        with client.websocket_connect(
-            f"{LISTEN_PATH}/CA1", headers={"Authorization": f"Bearer {DASHBOARD_TOKEN}"}
-        ) as ws:
-            assert ws.receive_json()["reason"] == END_UNAVAILABLE
-        # Right token as ?token= (browsers cannot set the header on a WebSocket).
-        with client.websocket_connect(f"{LISTEN_PATH}/CA1?token={DASHBOARD_TOKEN}") as ws:
+        # A session token or an API key in the header is accepted — the socket
+        # opens (and says "unavailable": no source).
+        for headers in (authed_app.jwt_headers, authed_app.api_key_headers):
+            with client.websocket_connect(f"{LISTEN_PATH}/CA1", headers=headers) as ws:
+                assert ws.receive_json()["reason"] == END_UNAVAILABLE
+        # A ticket as ?token= (browsers cannot set the header on a WebSocket).
+        ticket = authed_app.run(lambda: authed_app.auth.issue_ws_ticket("alice", "CA1"))
+        with client.websocket_connect(f"{LISTEN_PATH}/CA1?token={ticket}") as ws:
             assert ws.receive_json()["reason"] == END_UNAVAILABLE
 
-    def test_listen_auth_failures_hit_brute_force_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        s = _settings(dashboard_token=SecretStr(DASHBOARD_TOKEN))
-        client = _make_client(monkeypatch, s)
+    def test_only_a_ticket_for_this_call_is_accepted_in_the_url(
+        self, monkeypatch: pytest.MonkeyPatch, authed_app: Any
+    ) -> None:
+        """URLs end up in access logs, so nothing long-lived may work there:
+        not the session token, not the API key, not another call's ticket."""
+        client = _make_client(monkeypatch, _settings(auth_disabled=False))
+        other_call = authed_app.run(lambda: authed_app.auth.issue_ws_ticket("alice", "CA2"))
+        for value in (authed_app.access_token, authed_app.refresh_token, authed_app.api_key, other_call):
+            with (
+                pytest.raises(WebSocketDisconnect) as exc,
+                client.websocket_connect(f"{LISTEN_PATH}/CA1?token={value}"),
+            ):
+                pass  # pragma: no cover
+            if isinstance(exc.value, WebSocketDenialResponse):
+                assert exc.value.status_code == 401
+
+    def test_a_ticket_dies_with_the_password_it_was_issued_under(
+        self, monkeypatch: pytest.MonkeyPatch, authed_app: Any
+    ) -> None:
+        client = _make_client(monkeypatch, _settings(auth_disabled=False))
+        ticket = authed_app.run(lambda: authed_app.auth.issue_ws_ticket("alice", "CA1"))
+        authed_app.run(lambda: authed_app.auth.set_password("alice", "a brand new password"))
+        # Stale, not forged: refused, but it does not spend the lockout budget.
+        for _ in range(6):
+            with pytest.raises(WebSocketDisconnect), client.websocket_connect(f"{LISTEN_PATH}/CA1?token={ticket}"):
+                pass  # pragma: no cover
+        with client.websocket_connect(f"{LISTEN_PATH}/CA1", headers=authed_app.api_key_headers) as ws:
+            assert ws.receive_json()["reason"] == END_UNAVAILABLE
+
+    def test_listen_auth_failures_hit_brute_force_guard(self, monkeypatch: pytest.MonkeyPatch, authed_app: Any) -> None:
+        client = _make_client(monkeypatch, _settings(auth_disabled=False))
         for _ in range(5):
             with pytest.raises(WebSocketDisconnect), client.websocket_connect(f"{LISTEN_PATH}/CA1?token=bad"):
                 pass  # pragma: no cover
-        # Locked out now: even the right token is refused until the lockout expires.
+        # Locked out now: even a valid ticket is refused until the lockout expires.
+        ticket = authed_app.run(lambda: authed_app.auth.issue_ws_ticket("alice", "CA1"))
         with (
             pytest.raises(WebSocketDisconnect) as exc,
-            client.websocket_connect(f"{LISTEN_PATH}/CA1?token={DASHBOARD_TOKEN}"),
+            client.websocket_connect(f"{LISTEN_PATH}/CA1?token={ticket}"),
         ):
             pass  # pragma: no cover
         if isinstance(exc.value, WebSocketDenialResponse):
             assert exc.value.status_code == 429
+
+    def test_ticket_route_is_for_signed_in_sessions_only(self, authed_app: Any) -> None:
+        from pincer.security.credentials import decode_token
+
+        c = authed_app.client
+        assert c.post(f"{LISTEN_PATH}/CA1/ticket").status_code == 401
+        assert c.post(f"{LISTEN_PATH}/CA1/ticket", headers=authed_app.api_key_headers).status_code == 403
+
+        resp = c.post(f"{LISTEN_PATH}/CA1/ticket", headers=authed_app.jwt_headers)
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
+        body = resp.json()
+        assert body["expires_in"] == 60
+        claims = decode_token("j" * 48, body["ticket"], typ="ws")
+        assert (claims.sub, claims.call) == ("alice", "CA1")
+
+    def test_ticket_route_hands_out_nothing_when_auth_is_disabled(self, client: TestClient) -> None:
+        resp = client.post(f"{LISTEN_PATH}/CA1/ticket")
+        assert resp.status_code == 200
+        assert resp.json() == {"ticket": "", "expires_in": 0}
+
+    def test_audit_names_the_identity_that_listened(
+        self, monkeypatch: pytest.MonkeyPatch, authed_app: Any, _isolate_audit_logger: Any
+    ) -> None:
+        settings = _settings(auth_disabled=False)
+        client = _make_client(monkeypatch, settings)
+        ticket = authed_app.run(lambda: authed_app.auth.issue_ws_ticket("alice", "CA1"))
+        with client.websocket_connect(_monitor_url("CA1", settings)) as src:
+            src.send_text(_start_event("CA1"))
+            assert _wait_until(lambda: get_monitor_hub().source_attached("CA1"))
+            with client.websocket_connect(f"{LISTEN_PATH}/CA1?token={ticket}") as a:
+                a.receive_json()
+            assert _wait_until(
+                lambda: any(e.action.value == "listen_in_session" for e in _isolate_audit_logger.entries)
+            )
+        row = next(e for e in _isolate_audit_logger.entries if e.action.value == "listen_in_session")
+        assert row.user_id == "alice"
+        assert row.metadata["user"] == "alice"
 
     def test_unavailable_without_source(self, client: TestClient) -> None:
         with client.websocket_connect(f"{LISTEN_PATH}/CA_none") as ws:

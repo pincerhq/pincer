@@ -175,8 +175,6 @@ def client(monkeypatch, tmp_path):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
-    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
     get_settings_relaxed.cache_clear()
     app = create_app()
     yield TestClient(app)

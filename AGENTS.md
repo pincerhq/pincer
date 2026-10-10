@@ -68,6 +68,8 @@ Dashboard (React + Vite + TS in `dashboard/`, pnpm 10+): `cd dashboard && pnpm i
 
 **Security** (`src/pincer/security/`) — `doctor.py` powers `pincer doctor`; to add a check, implement a `_check_*` method and register it in `run_all()`. Also `firewall.py`, `audit.py` (structured JSON log of every action), `rate_limiter.py`.
 
+**API auth** — the REST API is default-deny and authenticates identities, not a shared token: `api/server.py`'s middleware resolves the Bearer value as an access JWT or a per-identity API key (`services/auth.py` `AuthService`, primitives in `security/credentials.py`) and leaves the caller on `request.state.identity`; routes read it through `CurrentIdentity` / `InteractiveIdentity` (`api/auth.py`). Credentials live in `pincer_identity_credentials` and signed-in sessions in `pincer_auth_sessions` (refresh tokens are single-use; deleting the row is a logout), both managed with `pincer identity …`. Tests run with `PINCER_AUTH_DISABLED=true` (set in `tests/conftest.py`); a test about auth itself uses the `authed_app` fixture.
+
 **Scheduler** (`src/pincer/scheduler/`) — `cron.py`, `proactive.py` (morning briefings), `triggers.py` (event-driven, e.g. Gmail pub/sub).
 
 ## Conventions

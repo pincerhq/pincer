@@ -19,8 +19,6 @@ def client(monkeypatch, tmp_path):
 
     # Isolate from the developer's .env so no dashboard token is loaded
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
     get_settings_relaxed.cache_clear()
     app = create_app()
     yield TestClient(app)
@@ -52,30 +50,62 @@ def test_doctor_endpoint(client):
     assert isinstance(data["checks"], list)
 
 
-def test_auth_required_with_token(monkeypatch, tmp_path):
+def test_health_reports_whether_auth_is_required(client, authed_app):
+    # The dashboard reads this to skip its login form in dev mode.
+    assert client.get("/api/health").json()["auth_required"] is False
+    assert authed_app.client.get("/api/health").json()["auth_required"] is True
+
+
+def test_api_is_default_deny(authed_app):
+    c = authed_app.client
+
+    # Health is always public
+    assert c.get("/api/health").status_code == 200
+
+    # Protected endpoint without credentials
+    denied = c.get("/api/status")
+    assert denied.status_code == 401
+    assert denied.json() == {"error": "invalid_token", "detail": "Invalid token"}
+    assert denied.headers["www-authenticate"] == "Bearer"
+
+    # A session token and an API key both get in
+    assert c.get("/api/status", headers=authed_app.jwt_headers).status_code == 200
+    assert c.get("/api/status", headers=authed_app.api_key_headers).status_code == 200
+
+    # Wrong credential, wrong scheme, and a refresh token posing as an access token
+    assert c.get("/api/status", headers={"Authorization": "Bearer wrong-token"}).status_code == 401
+    assert c.get("/api/status", headers={"Authorization": f"Basic {authed_app.access_token}"}).status_code == 401
+    assert c.get("/api/status", headers={"Authorization": f"Bearer {authed_app.refresh_token}"}).status_code == 401
+    # Nor is a credential accepted from the query string.
+    assert c.get(f"/api/status?token={authed_app.access_token}").status_code == 401
+
+
+def test_leftover_shared_tokens_open_nothing(monkeypatch, authed_app):
+    """The removed PINCER_DASHBOARD_TOKEN / PINCER_WEB_CHAT_TOKEN are ignored."""
     from pincer.config import get_settings_relaxed
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "test-secret-token-1234")
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
+    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "legacy-shared-token-1234")
+    monkeypatch.setenv("PINCER_WEB_CHAT_TOKEN", "legacy-web-chat-token-1234")
     get_settings_relaxed.cache_clear()
-    try:
-        app = create_app()
-        c = TestClient(app)
+    c = TestClient(create_app())
 
-        # Health is always public
-        assert c.get("/api/health").status_code == 200
+    for legacy in ("legacy-shared-token-1234", "legacy-web-chat-token-1234"):
+        assert c.get("/api/status", headers={"Authorization": f"Bearer {legacy}"}).status_code == 401
+    assert c.get("/api/status", headers=authed_app.jwt_headers).status_code == 200
 
-        # Protected endpoint without token
-        assert c.get("/api/status").status_code == 401
 
-        # With correct token
-        assert c.get("/api/status", headers={"Authorization": "Bearer test-secret-token-1234"}).status_code == 200
+def test_auth_disabled_opens_the_api_but_still_recognises_a_caller(client, authed_app, monkeypatch):
+    from pincer.config import get_settings_relaxed
 
-        # With wrong token
-        assert c.get("/api/status", headers={"Authorization": "Bearer wrong-token"}).status_code == 401
-    finally:
-        get_settings_relaxed.cache_clear()
+    monkeypatch.setenv("PINCER_AUTH_DISABLED", "true")
+    get_settings_relaxed.cache_clear()
+    c = TestClient(create_app())
+
+    assert c.get("/api/status").status_code == 200
+    assert c.get("/api/status", headers={"Authorization": "Bearer garbage"}).status_code == 200
+    # Nobody to be without credentials; somebody with them.
+    assert c.get("/api/identity/me").status_code == 401
+    assert c.get("/api/identity/me", headers=authed_app.jwt_headers).json()["pincer_user_id"] == "alice"
 
 
 def test_costs_today(client):
@@ -132,8 +162,6 @@ def test_status_channels_from_dotenv_only(tmp_path, monkeypatch):
     monkeypatch.delenv("PINCER_SIGNAL_ENABLED", raising=False)
     # microsoft_teams calls load_dotenv() on import, which may populate os.environ
     # with variables from the project .env (including a dashboard token). Remove it.
-    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
 
     get_settings_relaxed.cache_clear()
     try:
@@ -150,11 +178,11 @@ def test_status_channels_from_dotenv_only(tmp_path, monkeypatch):
 
 
 def test_teams_path_bypasses_auth(monkeypatch, tmp_path):
-    """Requests to /api/apps/teams/* skip Bearer auth even when a token is configured."""
+    """Requests to /api/apps/teams/* skip Bearer auth even when auth is required."""
     from pincer.config import get_settings_relaxed
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "secret-token")
+    monkeypatch.setenv("PINCER_AUTH_DISABLED", "false")
     get_settings_relaxed.cache_clear()
     try:
         app = create_app()
@@ -173,7 +201,7 @@ def test_twilio_path_bypasses_auth(monkeypatch, tmp_path):
     from pincer.config import get_settings_relaxed
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "secret-token")
+    monkeypatch.setenv("PINCER_AUTH_DISABLED", "false")
     get_settings_relaxed.cache_clear()
     try:
         app = create_app()
@@ -195,7 +223,7 @@ def test_twilio_path_hands_off_to_signature_auth(monkeypatch, tmp_path):
     from pincer.voice import twiml_server
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "secret-token")
+    monkeypatch.setenv("PINCER_AUTH_DISABLED", "false")
     monkeypatch.setenv("PINCER_VOICE_ENABLED", "true")
     get_settings_relaxed.cache_clear()
 
@@ -338,33 +366,30 @@ def test_print_voice_webhook_urls_skips_when_empty():
 
 
 # -- Regression: CORS preflight must not be swallowed by auth -----------------
-def test_preflight_is_not_blocked_by_auth(monkeypatch, tmp_path):
+def test_preflight_is_not_blocked_by_auth(authed_app):
     """OPTIONS carries no Authorization header; CORS must answer it, not auth.
 
     Guards middleware ordering: add_middleware() inserts at index 0, so the
     last-registered middleware is the outermost. If CORSMiddleware is ever moved
     back above auth_middleware, this returns 401 with no CORS headers.
     """
-    from pincer.config import get_settings_relaxed
+    c = authed_app.client
+    resp = c.options(
+        "/api/status",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert resp.status_code == 200, f"preflight got {resp.status_code}, want 200"
+    assert resp.headers["access-control-allow-origin"] == "http://localhost:3000"
 
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "test-secret-token-1234")
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
-    get_settings_relaxed.cache_clear()
-    try:
-        c = TestClient(create_app())
-        resp = c.options(
-            "/api/status",
-            headers={
-                "Origin": "http://localhost:3000",
-                "Access-Control-Request-Method": "GET",
-            },
-        )
-        assert resp.status_code == 200, f"preflight got {resp.status_code}, want 200"
-        assert resp.headers["access-control-allow-origin"] == "http://localhost:3000"
+    # A refusal carries the CORS headers too, or the browser reports it as an
+    # opaque network error and the dashboard never sees the 401 it refreshes on.
+    denied = c.get("/api/status", headers={"Origin": "http://localhost:3000"})
+    assert denied.status_code == 401
+    assert denied.headers["access-control-allow-origin"] == "http://localhost:3000"
 
-        # And the authenticated GET behind it still works.
-        ok = c.get("/api/status", headers={"Authorization": "Bearer test-secret-token-1234"})
-        assert ok.status_code == 200
-    finally:
-        get_settings_relaxed.cache_clear()
+    # And the authenticated GET behind it still works.
+    ok = c.get("/api/status", headers=authed_app.jwt_headers)
+    assert ok.status_code == 200

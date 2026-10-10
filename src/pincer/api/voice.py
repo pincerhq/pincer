@@ -28,7 +28,6 @@ import contextlib
 import json
 import logging
 import re
-import secrets
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Any
@@ -37,7 +36,9 @@ from fastapi import APIRouter, HTTPException, Query, Request, WebSocket
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from pincer.api.auth import OptionalIdentity, require_interactive
 from pincer.config import get_settings_relaxed
+from pincer.services.auth import WS_TICKET_TTL_SECONDS, AuthServiceDep, UnknownIdentityError
 from pincer.voice.pii_guard import mask_pii
 
 if TYPE_CHECKING:
@@ -331,11 +332,17 @@ async def active_calls() -> list[ActiveCall]:
 #
 # WSS /api/voice/listen/{call_sid}: the dashboard's listen-only feed of the
 # Twilio monitor fork (see `pincer.voice.monitor`). Starlette's HTTP
-# middleware does not run on WebSocket upgrades, so the bearer check is done
-# here, BEFORE accept(): an unauthenticated upgrade is denied with 401
-# (429 while the T8.2 brute-force guard has the IP locked) and never sees a
-# frame. The browser cannot set an Authorization header on a WebSocket, so
-# the token may also arrive as `?token=` — the same secret, same comparison.
+# middleware does not run on WebSocket upgrades, so the caller is
+# authenticated here, BEFORE accept(): an unauthenticated upgrade is denied
+# with 401 (429 while the T8.2 brute-force guard has the IP locked) and never
+# sees a frame.
+#
+# A browser cannot set an Authorization header on a WebSocket, and a URL ends
+# up in every proxy's access log, so neither a session token nor an API key is
+# accepted in the query string. The dashboard first asks
+# POST /api/voice/listen/{call_sid}/ticket for a one-minute ticket bound to
+# this call and passes that as `?token=`. A client that can set headers may
+# send its usual Bearer credential instead.
 #
 # Wire protocol v1 (JSON text frames, server → client only):
 #   {"type":"start","call_sid":…,"tracks":["inbound","outbound"],
@@ -346,7 +353,7 @@ async def active_calls() -> list[ActiveCall]:
 # Nothing the client sends is interpreted — the feed is rx-only by design.
 
 _DASHBOARD_USER = "dashboard"
-_LISTENER_USER = "dashboard"  # the dashboard bearer is a shared secret; no finer identity exists
+_ANONYMOUS_LISTENER = "dashboard"  # PINCER_AUTH_DISABLED: there is nobody to name
 
 
 async def _deny_ws(websocket: WebSocket, status_code: int, body: str) -> None:
@@ -359,22 +366,17 @@ async def _deny_ws(websocket: WebSocket, status_code: int, body: str) -> None:
             await websocket.close(code=1008, reason=body)
 
 
-async def _authorize_listener(websocket: WebSocket) -> str | None:
-    """Bearer check for the listen socket, pre-accept. Returns the audit user
-    label, or None after the upgrade has been denied."""
+async def _authorize_listener(websocket: WebSocket, call_sid: str) -> str | None:
+    """Authenticate the listen socket, pre-accept. Returns the identity to
+    audit the session under, or None after the upgrade has been denied."""
+    from pincer.api.auth import authenticate_connection
     from pincer.api.auth_guard import audit_auth_failure, client_ip
+    from pincer.services.auth import AuthError, auth_service_for
 
-    s = get_settings_relaxed()
-    allowed: set[str] = set()
-    for attr in ("dashboard_token", "web_chat_token"):
-        raw: Any = getattr(s, attr, None)
-        value = str(raw.get_secret_value() or "") if hasattr(raw, "get_secret_value") else str(raw or "")
-        if value:
-            allowed.add(value)
-    if not allowed:
-        # No token configured: allow, exactly like the HTTP middleware
+    if get_settings_relaxed().auth_disabled:
+        # Open, exactly like the HTTP middleware
         # (`pincer doctor --production` reports this state CRITICAL).
-        return _LISTENER_USER
+        return _ANONYMOUS_LISTENER
 
     ip = client_ip(websocket)
     path = websocket.url.path
@@ -387,19 +389,24 @@ async def _authorize_listener(websocket: WebSocket) -> str | None:
             await _deny_ws(websocket, 429, "Too many failed authentication attempts")
             return None
 
-    header = websocket.headers.get("authorization", "")
-    supplied = header[7:].strip() if header.lower().startswith("bearer ") else ""
-    if not supplied:
-        supplied = str(websocket.query_params.get("token", "") or "")
-    if supplied and any(secrets.compare_digest(supplied, candidate) for candidate in allowed):
-        if guard is not None:
-            guard.record_success(ip)
-        return _LISTENER_USER
+    auth = auth_service_for(websocket)
+    ticket = str(websocket.query_params.get("token", "") or "")
+    try:
+        if ticket:
+            identity = await auth.authenticate_ws_ticket(ticket, call_sid)
+        else:
+            identity = await authenticate_connection(websocket, auth)
+    except AuthError as exc:
+        locked_for = 0
+        if exc.counts_as_failure:
+            locked_for = guard.record_failure(ip) if guard is not None else 0
+            await audit_auth_failure(ip, path, exc.code, locked_for=locked_for)
+        await _deny_ws(websocket, 401, "Token expired" if exc.code == "token_expired" else "Invalid token")
+        return None
 
-    locked_for = guard.record_failure(ip) if guard is not None else 0
-    await audit_auth_failure(ip, path, "invalid_token", locked_for=locked_for)
-    await _deny_ws(websocket, 401, "Invalid token")
-    return None
+    if guard is not None:
+        guard.record_success(ip)
+    return identity.pincer_user_id
 
 
 async def _end_and_close(websocket: WebSocket, reason: str, code: int) -> None:
@@ -457,6 +464,37 @@ async def _audit_listen_session(
         record_listen_session(reason=reason, duration_s=duration_s)
 
 
+class ListenTicketOut(BaseModel):
+    ticket: str
+    expires_in: int
+
+
+@router.post("/listen/{call_sid}/ticket", response_model=ListenTicketOut)
+async def create_listen_ticket(
+    call_sid: str,
+    response: Response,
+    identity: OptionalIdentity,
+    auth: AuthServiceDep,
+) -> ListenTicketOut:
+    """A one-minute ticket that opens this call's listen-in WebSocket.
+
+    Only for a signed-in session: an API key is long-lived and often shared,
+    and a ticket minted from one could not be traced to a person.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    if identity is None:
+        if get_settings_relaxed().auth_disabled:
+            # The socket is open in this mode; there is nothing to prove.
+            return ListenTicketOut(ticket="", expires_in=0)
+        raise HTTPException(status_code=401, detail="No authenticated identity")
+    require_interactive(identity)
+    try:
+        ticket = await auth.issue_ws_ticket(identity.pincer_user_id, call_sid)
+    except UnknownIdentityError as exc:
+        raise HTTPException(status_code=401, detail="No authenticated identity") from exc
+    return ListenTicketOut(ticket=ticket, expires_in=WS_TICKET_TTL_SECONDS)
+
+
 @router.websocket("/listen/{call_sid}")
 async def listen_ws(websocket: WebSocket, call_sid: str) -> None:
     """Listen-only live feed of an active call (Sprint 15)."""
@@ -476,7 +514,7 @@ async def listen_ws(websocket: WebSocket, call_sid: str) -> None:
         listen_in_enabled,
     )
 
-    user = await _authorize_listener(websocket)
+    user = await _authorize_listener(websocket, call_sid)
     if user is None:
         return
     ip = client_ip(websocket)

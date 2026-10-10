@@ -34,21 +34,11 @@ UUID = "11111111-1111-4111-8111-111111111111"
 OTHER_UUID = "22222222-2222-4222-8222-222222222222"
 
 
-def _make_client(*, agent=None, token: str = "", web_chat_token: str = "") -> TestClient:
+def _make_client(*, agent=None) -> TestClient:
     from pincer.config import get_settings_relaxed
 
     old_cwd = os.getcwd()
     tmpdir = tempfile.mkdtemp()
-
-    if token:
-        os.environ["PINCER_DASHBOARD_TOKEN"] = token
-    else:
-        os.environ.pop("PINCER_DASHBOARD_TOKEN", None)
-
-    if web_chat_token:
-        os.environ["PINCER_WEB_CHAT_TOKEN"] = web_chat_token
-    else:
-        os.environ.pop("PINCER_WEB_CHAT_TOKEN", None)
 
     os.chdir(tmpdir)
     get_settings_relaxed.cache_clear()

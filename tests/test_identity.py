@@ -768,6 +768,12 @@ class TestNamedCanonicalId:
         with pytest.raises(ValueError, match="at least 1 channel:id pair"):
             IdentityResolver._parse_mapping("justaname@")
 
+    @pytest.mark.parametrize("entry", ["me@telegram:12345", "ME@telegram:12345=whatsapp:491234567890"])
+    async def test_parse_mapping_rejects_the_reserved_name(self, entry):
+        # `/api/identity/me` is the caller's own identity; nobody may be called that.
+        with pytest.raises(ValueError, match="reserved"):
+            IdentityResolver._parse_mapping(entry)
+
     async def test_parse_mapping_three_channels(self):
         name, pairs = IdentityResolver._parse_mapping("john@telegram:johnDoe=whatsapp:491234567890=signal:491234567890")
         assert name == "john"
@@ -972,3 +978,22 @@ class TestIdentityTimezone:
 
     async def test_unknown_user_has_no_timezone(self, resolver):
         assert await resolver.get_timezone("nobody") == ""
+
+
+class TestIdentityCredentialsStayOutOfTheProfile:
+    async def test_profile_carries_no_credential_field(self, resolver):
+        from pincer.db.session import session_scope
+        from pincer.repositories.identity import IdentityCredentialRepository
+
+        uid = await resolver.resolve(ChannelType.TELEGRAM, "12345")
+        store = resolver._store
+        async with session_scope(store._url) as session:
+            credentials = IdentityCredentialRepository(session)
+            await credentials.set_password(uid, "$argon2id$secret-hash", now="2026-10-10T12:00:00+00:00")
+            await credentials.set_api_key(
+                uid, api_key_hash="secret-key-hash", prefix="pnc_abcd", last4="wxyz", now="2026-10-10T12:00:00+00:00"
+            )
+
+        for view in (await store.profile(uid), await store.profile_with_channels(uid), *await store.list_profiles()):
+            assert not any("password" in key or "api_key" in key or "token" in key for key in view)
+            assert "secret" not in repr(view)

@@ -224,7 +224,7 @@ belongs.
 
 ## 6. Privacy and access
 
-- Every `/api/telephony/*` endpoint is behind the dashboard bearer token and is
+- Every `/api/telephony/*` endpoint requires an authenticated identity and is
   **tenant-scoped, failing closed**: a caller restricted to an empty set reads
   nothing, and the `X-Pincer-Tenant` header can only narrow, never widen.
 - Phone numbers are masked **at write time**. The tables never hold a full
@@ -243,7 +243,7 @@ belongs.
 ## 6a. Downloading the data
 
 Everything the dashboard shows can be taken out of it. Two shapes, both behind
-the same bearer token and the same fail-closed tenant scope as every other read.
+the same authentication and the same fail-closed tenant scope as every other read.
 
 **One window** — `GET /api/telephony/export/archive?<filters>` returns a ZIP:
 

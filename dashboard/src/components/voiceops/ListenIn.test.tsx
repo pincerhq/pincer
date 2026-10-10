@@ -10,9 +10,12 @@ vi.mock("@/lib/listenInAudio", () => ({
   ListenInPlayer: { create: (...args: unknown[]) => createPlayer(...args) },
 }))
 
+// `getToken` is mocked only to prove its value never reaches the socket URL.
+const listenTicket = vi.hoisted(() => vi.fn())
 vi.mock("@/api/client", () => ({
   getBaseUrl: () => "http://localhost:8080",
-  getToken: () => "tok",
+  getToken: () => "access-token",
+  pincer: { listenTicket },
 }))
 
 import { ListenIn } from "./ListenIn"
@@ -34,6 +37,9 @@ class FakeWS {
   }
   close() {
     this.closed = true
+  }
+  serverClose(code = 1006) {
+    act(() => this.onclose?.({ code }))
   }
   serverSend(msg: object) {
     act(() => this.onmessage?.({ data: JSON.stringify(msg) }))
@@ -72,6 +78,9 @@ describe("ListenIn", () => {
   beforeEach(() => {
     FakeWS.instances = []
     createPlayer.mockReset()
+    let n = 0
+    listenTicket.mockReset()
+    listenTicket.mockImplementation(async () => ({ ticket: `ticket-${++n}`, expires_in: 60 }))
     vi.stubGlobal("WebSocket", FakeWS)
   })
   afterEach(() => {
@@ -89,7 +98,9 @@ describe("ListenIn", () => {
     await userEvent.click(screen.getByRole("button", { name: /listen/i }))
     expect(createPlayer).toHaveBeenCalledTimes(1)
     await waitFor(() => expect(FakeWS.instances).toHaveLength(1))
-    expect(FakeWS.instances[0].url).toBe("ws://localhost:8080/api/voice/listen/CA1?token=tok")
+    expect(listenTicket).toHaveBeenCalledWith("CA1")
+    expect(FakeWS.instances[0].url).toBe("ws://localhost:8080/api/voice/listen/CA1?token=ticket-1")
+    expect(FakeWS.instances[0].url).not.toContain("access-token")
     expect(screen.getByTestId("listen-panel")).toBeInTheDocument()
     expect(screen.getByText("Connecting…")).toBeInTheDocument()
   })
@@ -138,6 +149,37 @@ describe("ListenIn", () => {
     await waitFor(() => expect(FakeWS.instances).toHaveLength(1))
     FakeWS.instances[0].serverSend({ type: "end", reason: "capacity" })
     expect(screen.getByText("Listener limit reached")).toBeInTheDocument()
+  })
+
+  it("fetches a new ticket for the reconnect", async () => {
+    createPlayer.mockResolvedValue(fakePlayer())
+    render(<ListenIn call={CALL} />)
+    await userEvent.click(screen.getByRole("button", { name: /listen/i }))
+    await waitFor(() => expect(FakeWS.instances).toHaveLength(1))
+    const ws = FakeWS.instances[0]
+    ws.serverSend({ type: "start", call_sid: "CA1", tracks: ["inbound", "outbound"], listener_count: 1 })
+    ws.serverClose(1006)
+    await waitFor(() => expect(FakeWS.instances).toHaveLength(2), { timeout: 3000 })
+    expect(listenTicket).toHaveBeenCalledTimes(2)
+    expect(FakeWS.instances[1].url).toBe("ws://localhost:8080/api/voice/listen/CA1?token=ticket-2")
+  })
+
+  it("auth disabled (empty ticket) → socket URL without a token", async () => {
+    listenTicket.mockResolvedValue({ ticket: "", expires_in: 0 })
+    createPlayer.mockResolvedValue(fakePlayer())
+    render(<ListenIn call={CALL} />)
+    await userEvent.click(screen.getByRole("button", { name: /listen/i }))
+    await waitFor(() => expect(FakeWS.instances).toHaveLength(1))
+    expect(FakeWS.instances[0].url).toBe("ws://localhost:8080/api/voice/listen/CA1")
+  })
+
+  it("failed ticket fetch → the connection-lost error, no socket", async () => {
+    listenTicket.mockRejectedValue(new Error("401"))
+    createPlayer.mockResolvedValue(fakePlayer())
+    render(<ListenIn call={CALL} />)
+    await userEvent.click(screen.getByRole("button", { name: /listen/i }))
+    expect(await screen.findByText("Listen-in connection lost")).toBeInTheDocument()
+    expect(FakeWS.instances).toHaveLength(0)
   })
 
   it("stop closes the session and the player", async () => {

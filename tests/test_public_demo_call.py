@@ -27,8 +27,6 @@ def client(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("PINCER_DEMO_CALL_ENABLED", "true")
-    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
     get_settings_relaxed.cache_clear()
     public_demo.reset_limits()
     app = create_app()
@@ -56,7 +54,6 @@ def test_off_by_default(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
     monkeypatch.delenv("PINCER_DEMO_CALL_ENABLED", raising=False)
-    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
     get_settings_relaxed.cache_clear()
     with TestClient(create_app()) as c:
         assert c.post("/api/public/demo-call", json=GOOD).status_code == 404

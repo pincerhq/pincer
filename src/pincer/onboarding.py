@@ -161,15 +161,24 @@ def _check_compliance(settings: Settings | Any) -> tuple[StepStatus, str]:
 
 
 def _check_api_tokens(settings: Settings | Any) -> tuple[StepStatus, str]:
-    dashboard = _secret(settings, "dashboard_token")
-    web_chat = _secret(settings, "web_chat_token")
-    if not dashboard or not web_chat:
-        return StepStatus.MISSING, "both PINCER_DASHBOARD_TOKEN and PINCER_WEB_CHAT_TOKEN are required"
-    if dashboard == web_chat:
-        return StepStatus.MISSING, "the two tokens must differ"
-    if min(len(dashboard), len(web_chat)) < 16:
-        return StepStatus.MISSING, "token too short — use 32+ chars"
-    return StepStatus.READY, "dashboard + web chat tokens set and distinct"
+    """The API is default-deny: someone must be able to sign in, and the dev
+    switch that opens it must be off."""
+    from pathlib import Path
+
+    from pincer.services.auth import count_identities_with_credentials
+
+    if getattr(settings, "auth_disabled", False) is True:
+        return StepStatus.MISSING, "PINCER_AUTH_DISABLED is set — the API is open"
+    try:
+        count = count_identities_with_credentials(Path(settings.db_path))
+    except Exception as e:
+        return StepStatus.MISSING, f"could not read identity credentials: {(str(e).splitlines() or [''])[0]}"
+    if not count:
+        return (
+            StepStatus.MISSING,
+            "no identity can sign in — run `pincer identity create <name>` and `pincer identity set-password <name>`",
+        )
+    return StepStatus.READY, f"{count} identit{'y' if count == 1 else 'ies'} with a password or API key"
 
 
 def _check_ops(settings: Settings | Any) -> tuple[StepStatus, str]:
@@ -246,10 +255,10 @@ STEPS: tuple[OnboardingStep, ...] = (
     ),
     OnboardingStep(
         key="api_tokens",
-        title="Dashboard and web-chat tokens generated",
+        title="API sign-in set up",
         minutes=2,
         automated=True,
-        detail="Two distinct 32+ char tokens in .env.production",
+        detail="An identity with a password (dashboard) and, for the web chat widget, one with an API key",
         automation_note="",
         check=_check_api_tokens,
     ),

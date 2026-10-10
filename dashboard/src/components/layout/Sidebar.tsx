@@ -11,6 +11,7 @@ import {
   Plug,
   Stethoscope,
   Settings,
+  UserRound,
   PanelLeftClose,
   PanelLeft,
   LogOut,
@@ -20,6 +21,7 @@ import { ROUTES } from "@/lib/constants"
 import { usePreferencesStore } from "@/stores/preferences"
 import { useAuthStore } from "@/stores/auth"
 import { useStatus } from "@/api/hooks/useStatus"
+import { pincer } from "@/api/client"
 
 const navigation = [
   { name: "Dashboard", href: ROUTES.DASHBOARD, icon: LayoutDashboard },
@@ -33,6 +35,7 @@ const navigation = [
   { name: "Integrations", href: ROUTES.INTEGRATIONS, icon: Plug },
   { name: "Security", href: ROUTES.DOCTOR, icon: Stethoscope },
   { name: "Settings", href: ROUTES.SETTINGS, icon: Settings },
+  { name: "Account", href: ROUTES.ACCOUNT, icon: UserRound },
 ]
 
 export function Sidebar() {
@@ -44,7 +47,9 @@ export function Sidebar() {
 
   const isRunning = status?.agent_running ?? false
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // The server first, while the token still exists to authenticate it.
+    await pincer.logout()
     logout()
     navigate(ROUTES.LOGIN)
   }

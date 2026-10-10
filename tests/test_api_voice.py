@@ -25,8 +25,6 @@ def client(monkeypatch, tmp_path):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
-    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
     get_settings_relaxed.cache_clear()
     app = create_app()
     yield TestClient(app)
@@ -168,8 +166,6 @@ def test_a_failing_database_is_an_error_not_an_empty_history(monkeypatch, tmp_pa
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
-    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
     get_settings_relaxed.cache_clear()
     monkeypatch.setattr(f"{service}.{method}", down)
     try:
@@ -335,23 +331,12 @@ def test_schedule_rejects_an_unusable_task(client):
     assert r.status_code == 422
 
 
-def test_voice_api_requires_auth(monkeypatch, tmp_path):
-    from pincer.config import get_settings_relaxed
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "voice-test-token-1234")
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
-    get_settings_relaxed.cache_clear()
-    try:
-        c = TestClient(create_app())
-        for path in ("/api/voice/status", "/api/voice/active", "/api/voice/calls", "/api/voice/contacts"):
-            assert c.get(path).status_code == 401, path
-        assert c.post("/api/voice/calls", json={"target_number": "+15550004444", "purpose": "x"}).status_code == 401
-        headers = {"Authorization": "Bearer voice-test-token-1234"}
-        assert c.get("/api/voice/status", headers=headers).status_code == 200
-    finally:
-        get_settings_relaxed.cache_clear()
+def test_voice_api_requires_auth(authed_app):
+    c = authed_app.client
+    for path in ("/api/voice/status", "/api/voice/active", "/api/voice/calls", "/api/voice/contacts"):
+        assert c.get(path).status_code == 401, path
+    assert c.post("/api/voice/calls", json={"target_number": "+15550004444", "purpose": "x"}).status_code == 401
+    assert c.get("/api/voice/status", headers=authed_app.jwt_headers).status_code == 200
 
 
 class TestVoiceConfig:
@@ -537,17 +522,10 @@ async def test_calls_surface_carries_thread_fields(threads_api):
     assert detail["thread_subject"] == "Termin Dr. Müller"
 
 
-def test_threads_endpoint_requires_auth(monkeypatch, tmp_path):
-    from pincer.config import get_settings_relaxed
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "secret-token")
-    get_settings_relaxed.cache_clear()
-    with TestClient(create_app()) as guarded:
-        assert guarded.get("/api/voice/threads").status_code == 401
-        assert guarded.get("/api/voice/threads", headers={"Authorization": "Bearer secret-token"}).status_code == 200
-    get_settings_relaxed.cache_clear()
+def test_threads_endpoint_requires_auth(authed_app):
+    guarded = authed_app.client
+    assert guarded.get("/api/voice/threads").status_code == 401
+    assert guarded.get("/api/voice/threads", headers=authed_app.jwt_headers).status_code == 200
 
 
 # ── Regression: the API reads a database the writer has not migrated ─

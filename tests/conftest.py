@@ -1,7 +1,9 @@
 """Shared test fixtures."""
 
+import asyncio
 import os
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -14,6 +16,9 @@ os.environ["PINCER_ANTHROPIC_API_KEY"] = "sk-ant-test-key"
 os.environ["PINCER_TELEGRAM_BOT_TOKEN"] = "123456:TEST"
 os.environ["PINCER_DATA_DIR"] = "/tmp/pincer-test"
 os.environ["PINCER_DAILY_BUDGET_USD"] = "100.0"
+# The API is default-deny. Tests that exercise a route rather than its auth run
+# with it switched off; the ones about auth use the `authed_app` fixture.
+os.environ["PINCER_AUTH_DISABLED"] = "true"
 
 from pincer.config import Settings
 from pincer.config.database import DatabaseSettings
@@ -264,6 +269,136 @@ def mock_agent():
     agent._costs = AsyncMock()
     agent._costs.get_today_spend.return_value = 0.42
     return agent
+
+
+# ── API auth ─────────────────────────────────────────────────────────
+
+
+@dataclass
+class AuthedApp:
+    """The API with authentication on, and one identity that can sign in."""
+
+    client: Any  # fastapi.testclient.TestClient
+    db_url: str
+    user_id: str
+    email: str
+    password: str
+    access_token: str
+    refresh_token: str
+    api_key: str
+
+    @property
+    def jwt_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.access_token}"}
+
+    @property
+    def api_key_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.api_key}"}
+
+    @property
+    def auth(self) -> Any:
+        from pincer.services.auth import build_auth_service
+
+        return build_auth_service()
+
+    @property
+    def identities(self) -> Any:
+        from pincer.services.identity import IdentityService
+
+        return IdentityService(self.db_url)
+
+    @staticmethod
+    def run[T](make: Callable[[], Awaitable[T]]) -> T:
+        """Run a service call from a sync test, on a loop of its own.
+
+        The TestClient serves requests on another loop, and engines are per
+        loop, so this one's are disposed before it closes.
+        """
+        from pincer.db.engine import dispose_engines
+
+        async def main() -> T:
+            try:
+                return await make()
+            finally:
+                await dispose_engines()
+
+        return asyncio.run(main())
+
+
+def seed_identity_with_api_key(db_path: Path, name: str = "alice") -> None:
+    """Give the database at `db_path` one identity that can authenticate.
+
+    For the health checks (`pincer doctor`, the pilot preflight), which only
+    ask whether anybody can sign in. An API key rather than a password: no
+    Argon2, and no JWT secret is involved.
+    """
+    from pincer.db.engine import ensure_schema_current, get_database_url
+    from pincer.services.auth import AuthService
+    from pincer.services.identity import IdentityService
+
+    ensure_schema_current(db_path)
+    url = get_database_url(db_path)
+
+    async def seed() -> None:
+        await IdentityService(url).create_profile(name)
+        await AuthService(url, jwt_secret="unused-" + "x" * 32).generate_api_key(name)
+
+    AuthedApp.run(seed)
+
+
+@pytest.fixture
+def authed_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[AuthedApp]:
+    """`create_app()` with real authentication and a seeded identity.
+
+    Yields the client together with a valid access token, refresh token and
+    API key for `alice`, so a test can pick the caller it needs. Every other
+    API test runs with `PINCER_AUTH_DISABLED=true` (set at the top of this
+    file).
+    """
+    from argon2 import PasswordHasher
+    from fastapi.testclient import TestClient
+
+    from pincer.api.server import create_app
+    from pincer.config import get_settings_relaxed
+    from pincer.db.engine import ensure_schema_current, get_database_url
+    from pincer.security import credentials
+
+    # Argon2's real parameters cost ~50 ms and 64 MiB a hash; what is under
+    # test here is who gets in, not how hard the hash is.
+    monkeypatch.setattr(credentials, "_hasher", PasswordHasher(time_cost=1, memory_cost=8, parallelism=1))
+    credentials._dummy_hash.cache_clear()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PINCER_AUTH_DISABLED", "false")
+    monkeypatch.setenv("PINCER_JWT_SECRET", "j" * 48)
+    get_settings_relaxed.cache_clear()
+
+    db_path = tmp_path / "pincer.db"
+    ensure_schema_current(db_path)
+    seeded = AuthedApp(
+        client=None,
+        db_url=get_database_url(db_path),
+        user_id="alice",
+        email="alice@example.com",
+        password="correct horse battery",
+        access_token="",
+        refresh_token="",
+        api_key="",
+    )
+
+    async def seed() -> None:
+        await seeded.identities.create_profile(seeded.user_id, email=seeded.email, display_name="Alice")
+        await seeded.auth.set_password(seeded.user_id, seeded.password)
+        seeded.api_key, _ = await seeded.auth.generate_api_key(seeded.user_id)
+        pair = await seeded.auth.login(seeded.user_id, seeded.password)
+        seeded.access_token, seeded.refresh_token = pair.access_token, pair.refresh_token
+
+    AuthedApp.run(seed)
+    seeded.client = TestClient(create_app())
+    yield seeded
+    get_settings_relaxed.cache_clear()
+    credentials._dummy_hash.cache_clear()
 
 
 # ── SQLModel layer ───────────────────────────────────────────────────

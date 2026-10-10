@@ -356,3 +356,15 @@ def test_no_config_no_env_returns_empty(tmp_path: Path) -> None:
     config, profiles = resolve_identity_map_config("", tmp_path)
     assert config == ""
     assert profiles == {}
+
+
+def test_reserved_person_key_raises(tmp_path: Path) -> None:
+    """`/api/identity/me` is the caller's own identity, so nobody may be keyed `me`."""
+    (tmp_path / "pincer.toml").write_text("""
+[identity.me]
+[[identity.me.channels]]
+channel = "telegram"
+channel_user_id = 1
+""")
+    with pytest.raises(ValueError, match="reserved"):
+        load_identity_config(tmp_path)

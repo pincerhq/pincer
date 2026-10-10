@@ -16,7 +16,12 @@ from fastapi import Depends
 
 from pincer.db.engine import get_database_url
 from pincer.db.session import session_scope
-from pincer.repositories.identity import ChannelIdentityRepository, IdentityProfileRepository
+from pincer.repositories.identity import (
+    AuthSessionRepository,
+    ChannelIdentityRepository,
+    IdentityCredentialRepository,
+    IdentityProfileRepository,
+)
 from pincer.repositories.sessions import SessionRepository
 from pincer.services.base import DatabaseService
 
@@ -126,12 +131,33 @@ class IdentityService(DatabaseService):
             )
             await ChannelIdentityRepository(session).link(channel, channel_user_id, pincer_user_id)
 
+    async def create_profile(
+        self,
+        pincer_user_id: str,
+        *,
+        email: str | None = None,
+        display_name: str | None = None,
+    ) -> bool:
+        """A profile with no channel yet, for an identity made by hand
+        (`pincer identity create`). False when the id is already taken."""
+        async with session_scope(self._url) as session:
+            profiles = IdentityProfileRepository(session)
+            if await profiles.get(pincer_user_id) is not None:
+                return False
+            await profiles.add_if_new({"pincer_user_id": pincer_user_id, "email": email, "display_name": display_name})
+        return True
+
+    async def email_owners(self, email: str) -> list[str]:
+        """Ids of the identities with this email (case-insensitive); at most two."""
+        async with session_scope(self._url) as session:
+            return [row.pincer_user_id for row in await IdentityProfileRepository(session).find_by_email_ci(email)]
+
     async def link_channel(self, pincer_user_id: str, channel: str, channel_user_id: str) -> None:
         async with session_scope(self._url) as session:
             await ChannelIdentityRepository(session).link(channel, channel_user_id, pincer_user_id)
 
     async def rename_identity(self, old_id: str, new_id: str) -> None:
-        """Move an identity to a new id: profile, links and its sessions.
+        """Move an identity to a new id: profile, links, credentials and its sessions.
 
         One transaction — a half-applied rename would leave channel links
         pointing at a profile that no longer exists.
@@ -140,6 +166,15 @@ class IdentityService(DatabaseService):
             profiles = IdentityProfileRepository(session)
             await profiles.copy_to(old_id, new_id)
             await ChannelIdentityRepository(session).reassign(old_id, new_id)
+            # Before the old profile goes: on Postgres its deletion cascades to
+            # the credentials, and SQLite (foreign keys off) would strand them.
+            credentials = IdentityCredentialRepository(session)
+            # Sessions name the old id in their tokens, so they cannot follow.
+            await AuthSessionRepository(session).delete_for_user(old_id)
+            if await profiles.get(new_id) is not None:
+                await credentials.move(old_id, new_id)
+            else:
+                await credentials.delete_by_id(old_id)
             await profiles.delete_by_id(old_id)
 
             sessions = SessionRepository(session)
@@ -170,7 +205,12 @@ class IdentityService(DatabaseService):
 
     async def prune(self, keep: Iterable[tuple[str, str]]) -> tuple[int, int]:
         """Unlink every channel pair outside `keep`, then drop profiles left
-        with no channels. Returns (links removed, profiles removed)."""
+        with no channels. Returns (links removed, profiles removed).
+
+        An identity that holds a password or an API key is kept even with no
+        channel: it was made to sign in, not to chat. Taking its access away
+        is `pincer identity revoke`, not a side effect of editing the map.
+        """
         allowed = set(keep)
         async with session_scope(self._url) as session:
             links = ChannelIdentityRepository(session)
@@ -178,6 +218,10 @@ class IdentityService(DatabaseService):
             for pair in await links.pairs():
                 if pair not in allowed:
                     removed += await links.unlink(*pair)
+            # Children first: SQLite runs with foreign keys off, so nothing
+            # cascades there, and Postgres wants the child rows gone anyway.
+            await IdentityCredentialRepository(session).delete_unlinked_empty()
+            await AuthSessionRepository(session).delete_orphaned()
             orphaned = await IdentityProfileRepository(session).delete_unlinked()
         return removed, orphaned
 

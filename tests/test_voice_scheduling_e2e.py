@@ -520,8 +520,6 @@ class TestScheduleEndpoint:
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
-        monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
-        monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
         get_settings_relaxed.cache_clear()
         app = create_app()
         yield TestClient(app)
@@ -577,22 +575,9 @@ class TestScheduleEndpoint:
         client.app.state.agent = SimpleNamespace(_tools=ToolRegistry())
         assert client.post("/api/voice/schedule", json={"target_number": "+4930123456"}).status_code == 422
 
-    def test_requires_auth(self, monkeypatch, tmp_path):
-        from fastapi.testclient import TestClient
-
-        from pincer.api.server import create_app
-        from pincer.config import get_settings_relaxed
-
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
-        monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "sched-token-1234")
-        get_settings_relaxed.cache_clear()
-        try:
-            c = TestClient(create_app())
-            response = c.post(
-                "/api/voice/schedule",
-                json={"target_number": "+4930123456", "contact_name": "X", "topic": "Y"},
-            )
-            assert response.status_code == 401
-        finally:
-            get_settings_relaxed.cache_clear()
+    def test_requires_auth(self, authed_app):
+        response = authed_app.client.post(
+            "/api/voice/schedule",
+            json={"target_number": "+4930123456", "contact_name": "X", "topic": "Y"},
+        )
+        assert response.status_code == 401

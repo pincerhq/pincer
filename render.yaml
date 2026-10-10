@@ -9,7 +9,10 @@ services:
         sync: false
       - key: PINCER_TELEGRAM_BOT_TOKEN
         sync: false
-      - key: PINCER_DASHBOARD_TOKEN
+      # Signs dashboard session tokens. Sign-in itself is per identity: after the
+      # first deploy run `pincer identity create <name>` and
+      # `pincer identity set-password <name>` in the service shell.
+      - key: PINCER_JWT_SECRET
         generateValue: true
     disk:
       name: pincer-data

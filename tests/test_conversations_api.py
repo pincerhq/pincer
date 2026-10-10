@@ -141,8 +141,6 @@ def _build_client(monkeypatch, tmp_path, backend=None):
     from pincer.config import get_settings_relaxed
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
     get_settings_relaxed.cache_clear()
     app = create_app()
     if backend is not None:
@@ -307,8 +305,6 @@ def test_lifespan_skips_build_when_agent_preinjected(monkeypatch, tmp_path):
     from pincer.config import get_settings_relaxed
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
     get_settings_relaxed.cache_clear()
 
     build_called = {"n": 0}

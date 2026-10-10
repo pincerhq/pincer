@@ -1,4 +1,9 @@
-import { getBaseUrl, getToken } from "@/api/client"
+import {
+  endSessionIfSignInNowRequired,
+  getBaseUrl,
+  getToken,
+  refreshAccessToken,
+} from "@/api/client"
 
 /**
  * Trigger a browser download of an authenticated API response.
@@ -9,10 +14,17 @@ import { getBaseUrl, getToken } from "@/api/client"
  * row cap and says so in the name, which a client-side guess would lose.
  */
 export async function downloadFromApi(path: string, fallbackName: string): Promise<{ rows: number; truncated: boolean }> {
+  const url = `${getBaseUrl()}/${path.replace(/^\//, "")}`
+  const send = (bearer: string | null) =>
+    fetch(url, { headers: bearer ? { Authorization: `Bearer ${bearer}` } : {} })
+
   const token = getToken()
-  const response = await fetch(`${getBaseUrl()}/${path.replace(/^\//, "")}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  })
+  let response = await send(token)
+  if (response.status === 401 && !(await endSessionIfSignInNowRequired(response))) {
+    // Same rule as the API client: one refresh, one retry.
+    const fresh = await refreshAccessToken(token)
+    if (fresh) response = await send(fresh)
+  }
   if (!response.ok) {
     throw new Error(`Export failed (${response.status})`)
   }

@@ -24,8 +24,6 @@ def client(monkeypatch, tmp_path):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
-    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
-    monkeypatch.delenv("PINCER_WEB_CHAT_TOKEN", raising=False)
     get_settings_relaxed.cache_clear()
     yield TestClient(create_app())
     get_settings_relaxed.cache_clear()
@@ -215,20 +213,12 @@ async def test_call_without_a_cost_record_reports_none(client, tmp_path):
     assert call["cost_usd"] is None
 
 
-def test_ops_endpoints_require_auth(monkeypatch, tmp_path):
-    """/api/ops/* is behind the same bearer gate as the rest of /api/*."""
-    from pincer.config import get_settings_relaxed
-
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("PINCER_DASHBOARD_TOKEN", "t" * 40)
-    get_settings_relaxed.cache_clear()
-    try:
-        client = TestClient(create_app())
-        assert client.get("/api/ops/signals").status_code == 401
-        assert client.get("/api/ops/signals", headers={"Authorization": f"Bearer {'t' * 40}"}).status_code == 200
-    finally:
-        get_settings_relaxed.cache_clear()
+def test_ops_endpoints_require_auth(authed_app):
+    """/api/ops/* is behind the same gate as the rest of /api/*."""
+    client = authed_app.client
+    assert client.get("/api/ops/signals").status_code == 401
+    assert client.get("/api/ops/signals", headers=authed_app.jwt_headers).status_code == 200
+    assert client.get("/api/ops/signals", headers=authed_app.api_key_headers).status_code == 200
 
 
 # ── GA gate endpoint (Sprint 10, T10.4) ──────────────────────────────
