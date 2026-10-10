@@ -263,6 +263,60 @@ describe("api client token refresh", () => {
     expect(useAuthStore.getState().isConnected).toBe(true)
     expect(redirect).not.toHaveBeenCalled()
   })
+
+  it("auth disabled, then switched on: the first refusal sends the user to /login", async () => {
+    useAuthStore.getState().setApiUrl(BASE)
+    useAuthStore.getState().connectWithoutAuth("1.0")
+    const redirect = vi.spyOn(authRedirect, "go").mockImplementation(() => {})
+    // The agent now requires sign-in: an auth-layer 401 carries an `error` code.
+    const server = stubServer({ validToken: "nobody-has-this" })
+
+    await expect(pincer.status()).rejects.toBeInstanceOf(HTTPError)
+
+    expect(server.to("/api/status")).toHaveLength(1) // no retry, no pile of 401s
+    expect(server.to("/api/auth/refresh")).toHaveLength(0)
+    const state = useAuthStore.getState()
+    expect(state.isConnected).toBe(false)
+    expect(state.authRequired).toBe(true)
+    expect(redirect).toHaveBeenCalledWith("/login")
+  })
+
+  it("a rejected refresh does not end a session that was replaced meanwhile", async () => {
+    // The password form stores a new pair while a poll's refresh, made with
+    // the token that change just invalidated, is still in the air.
+    useAuthStore.getState().setApiUrl(BASE)
+    useAuthStore.getState().setSession(pair(1))
+    const redirect = vi.spyOn(authRedirect, "go").mockImplementation(() => {})
+    const server = stubServer({
+      validToken: "access-2",
+      refresh: () => {
+        useAuthStore.getState().setSession(pair(2))
+        return json(401, { error: "token_expired", detail: "Token expired" })
+      },
+    })
+
+    await expect(pincer.status()).resolves.toBeTruthy()
+
+    expect(server.to("/api/status").map((call) => call.auth)).toEqual(["Bearer access-1", "Bearer access-2"])
+    expect(useAuthStore.getState().accessToken).toBe("access-2")
+    expect(redirect).not.toHaveBeenCalled()
+  })
+
+  it("logout tells the server, and never throws when it cannot", async () => {
+    useAuthStore.getState().setApiUrl(BASE)
+    useAuthStore.getState().setSession(pair(1))
+    const server = stubServer({ validToken: "access-1", routes: { "/api/auth/logout": () => new Response(null, { status: 204 }) } })
+
+    await pincer.logout()
+
+    const calls = server.to("/api/auth/logout")
+    expect(calls).toHaveLength(1)
+    expect(calls[0].method).toBe("POST")
+    expect(calls[0].auth).toBe("Bearer access-1")
+
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline") }))
+    await expect(pincer.logout()).resolves.toBeUndefined()
+  })
 })
 
 describe("auth store migration", () => {

@@ -21,6 +21,7 @@ import { ROUTES } from "@/lib/constants"
 import { usePreferencesStore } from "@/stores/preferences"
 import { useAuthStore } from "@/stores/auth"
 import { useStatus } from "@/api/hooks/useStatus"
+import { pincer } from "@/api/client"
 
 const navigation = [
   { name: "Dashboard", href: ROUTES.DASHBOARD, icon: LayoutDashboard },
@@ -46,7 +47,9 @@ export function Sidebar() {
 
   const isRunning = status?.agent_running ?? false
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // The server first, while the token still exists to authenticate it.
+    await pincer.logout()
     logout()
     navigate(ROUTES.LOGIN)
   }

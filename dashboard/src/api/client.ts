@@ -46,7 +46,7 @@ import type {
 
 const LOGIN_PATH = "/login"
 const REQUEST_TIMEOUT_MS = 30000
-const AUTH_PATHS = ["/api/auth/login", "/api/auth/refresh"]
+const AUTH_PATHS = ["/api/auth/login", "/api/auth/refresh", "/api/auth/logout"]
 
 function trimUrl(url: string): string {
   return url.trim().replace(/\/$/, "")
@@ -125,8 +125,41 @@ export async function refreshAccessToken(staleToken: string | null): Promise<str
   }
   const result = await refreshInFlight
   if (result === "ok") return getToken()
-  if (result === "rejected") endSession()
+  if (result === "rejected") {
+    // A newer pair may have been stored while the refresh was in the air —
+    // the password form's, whose change is what made the old token stale.
+    // That session is alive; only end the one that was actually rejected.
+    const latest = getToken()
+    if (latest && latest !== staleToken) return latest
+    endSession()
+  }
   return null
+}
+
+/**
+ * True when a 401 is the agent refusing an unauthenticated caller, as opposed
+ * to a route's own answer. Only the auth layer sends an `error` code.
+ */
+export async function demandsSignIn(response: Response): Promise<boolean> {
+  if (response.status !== 401) return false
+  try {
+    const body = (await response.clone().json()) as { error?: unknown }
+    return typeof body.error === "string"
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The agent was entered without signing in, and now asks for credentials:
+ * sign-in was switched on since. Send the user to the login form instead of
+ * letting every poll collect another 401 against this IP's lockout budget.
+ */
+export async function endSessionIfSignInNowRequired(response: Response): Promise<boolean> {
+  if (useAuthStore.getState().authRequired) return false
+  if (!(await demandsSignIn(response))) return false
+  endSession()
+  return true
 }
 
 function bearerOf(request: Request): string | null {
@@ -150,6 +183,7 @@ export function createApiClient() {
         async (request, _options, response) => {
           if (response.status !== 401) return
           if (AUTH_PATHS.some((path) => new URL(request.url).pathname.endsWith(path))) return
+          if (await endSessionIfSignInNowRequired(response)) return
           const token = await refreshAccessToken(bearerOf(request))
           if (!token) return
           // Retried exactly once, outside this client: the bare `ky` has no
@@ -239,6 +273,22 @@ export const pincer = {
         retry: 0,
       })
       .json<TokenPair>(),
+  /** End the session on the server so its tokens are dead, not just
+   *  forgotten here. Best effort: signing out locally must never fail. */
+  logout: async () => {
+    const token = getToken()
+    if (!token) return
+    try {
+      await ky.post(`${getBaseUrl()}/api/auth/logout`, {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 5000,
+        retry: 0,
+        throwHttpErrors: false,
+      })
+    } catch {
+      /* offline or unreachable: the local sign-out still happens */
+    }
+  },
   me: () => api().get("api/identity/me").json<Me>(),
   /** Invalidates every token issued so far — store the returned pair. */
   changePassword: (currentPassword: string, newPassword: string) =>

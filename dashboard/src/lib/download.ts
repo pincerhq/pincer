@@ -1,4 +1,9 @@
-import { getBaseUrl, getToken, refreshAccessToken } from "@/api/client"
+import {
+  endSessionIfSignInNowRequired,
+  getBaseUrl,
+  getToken,
+  refreshAccessToken,
+} from "@/api/client"
 
 /**
  * Trigger a browser download of an authenticated API response.
@@ -15,7 +20,7 @@ export async function downloadFromApi(path: string, fallbackName: string): Promi
 
   const token = getToken()
   let response = await send(token)
-  if (response.status === 401) {
+  if (response.status === 401 && !(await endSessionIfSignInNowRequired(response))) {
     // Same rule as the API client: one refresh, one retry.
     const fresh = await refreshAccessToken(token)
     if (fresh) response = await send(fresh)
