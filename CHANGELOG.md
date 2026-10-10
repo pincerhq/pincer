@@ -20,7 +20,7 @@ silently open.
 > the dashboard until an identity has a password or an API key. Leftover
 > `PINCER_DASHBOARD_TOKEN` / `PINCER_WEB_CHAT_TOKEN` values are ignored.
 >
-> 1. Upgrade. Migration `0021` is applied at startup (or with `pincer db upgrade`).
+> 1. Upgrade. Migrations `0021` and `0022` are applied at startup (or with `pincer db upgrade`).
 > 2. Create a sign-in for each dashboard user:
 >    `pincer identity create alice --email alice@example.com`, then
 >    `pincer identity set-password alice` (prompts for the password).
@@ -47,6 +47,12 @@ silently open.
   hash, are shown in full only when generated, and are replaced only with
   `force`, which stops the old key immediately. Stored in the new table
   `pincer_identity_credentials` (migration `0021`).
+- **Sessions** — each sign-in is a server-side session
+  (`pincer_auth_sessions`, migration `0022`). A refresh token is single-use:
+  refreshing replaces it, and presenting one that was already replaced ends
+  the session (a 30-second grace covers two tabs refreshing at once).
+  `POST /api/auth/logout` ends the caller's session on the server, so its
+  tokens are dead rather than merely forgotten by the browser.
 - **New settings** — `PINCER_JWT_SECRET` (HS256 signing secret, at least 32
   characters or startup is refused; if unset, one is generated once into
   `<data_dir>/jwt_secret`, mode 0600 — set it explicitly with several replicas
@@ -56,6 +62,8 @@ silently open.
   authentication for local development and tests, replacing the old implicit
   "open when no token is set"). `PINCER_AUTH_MAX_FAILURES` /
   `PINCER_AUTH_LOCKOUT_SECONDS` still apply per IP, and now also per account
+  (one budget per identity, whether it is named by id or by email; the
+  per-account lockout is one flat window, it does not double)
   on login.
 - **CLI** — new `pincer identity` group: `list`, `create <name> [--email]
   [--display-name]`, `set-password <name> [password]` (also resets a forgotten
@@ -88,10 +96,12 @@ silently open.
   generate or regenerate the API key (shown once). Refresh tokens are kept in
   the browser's `localStorage`.
 - **Identity map interaction** — when an identity map (`PINCER_IDENTITY_MAP`
-  or `[identity]` in `pincer.toml`) is configured, startup pruning deletes
-  identities that have no channel link, credentials included. An identity
-  created only with `pincer identity create` is therefore removed at the next
-  start in that setup, and removing someone from the map revokes their access.
+  or `[identity]` in `pincer.toml`) is configured, startup pruning still
+  deletes identities that have no channel link — except those that hold a
+  password or an API key, so a dashboard-only or service identity survives
+  restarts. Removing someone from the map therefore does **not** revoke their
+  API access; `pincer identity revoke <name>` does (password, API key and
+  sessions).
 
 ### Added
 

@@ -395,6 +395,7 @@ pincer identity list
 pincer identity create <name> [--email EMAIL] [--display-name NAME]
 pincer identity set-password <name> [password]
 pincer identity api-key <name> [--force]
+pincer identity revoke <name>
 ```
 
 | Command | Description |
@@ -403,6 +404,7 @@ pincer identity api-key <name> [--force]
 | `create` | Create an identity. Names are letters, digits and underscores; `me` and names starting with `usr_` are reserved. `--email` can also be used to sign in |
 | `set-password` | Set or reset a password (8–256 characters). Omit the password to be prompted (hidden, confirmed) — this keeps it out of the shell history. Signs the identity out everywhere |
 | `api-key` | Generate an API key (`pnc_…`). It is printed once; only a masked form (`pnc_Ab3d…wxyz`) is shown afterwards. `--force` replaces an existing key, and the old one stops working immediately |
+| `revoke` | Remove the identity's password and API key and end its sessions. The identity, its channels and its history stay |
 
 **Examples:**
 ```bash
@@ -418,9 +420,9 @@ pincer identity api-key alice
 
 **Identity map:** when an identity map (`PINCER_IDENTITY_MAP` or `[identity]`
 in `pincer.toml`) is configured, identities without a channel link are deleted
-at startup, credentials included. An identity created only with
-`pincer identity create` does not survive the next start in that setup — add
-it to the map. Removing someone from the map revokes their access.
+at startup — unless they hold a password or an API key, so a dashboard-only or
+service identity survives. Removing someone from the map does not revoke their
+API access; use `pincer identity revoke <name>`.
 
 ---
 

@@ -38,6 +38,7 @@ Authorization: Bearer <access token or API key>
 |---|---|---|
 | `POST /api/auth/login` | public | Exchange name or email + password for a token pair |
 | `POST /api/auth/refresh` | public | Exchange a refresh token for a new token pair |
+| `POST /api/auth/logout` | any | End the caller's session |
 | `GET /api/identity/me` | any | The caller's identity |
 | `PUT /api/identity/me/password` | session (JWT) | Change the caller's password |
 | `GET /api/identity/me/api-key` | any | Whether the caller has an API key (masked) |
@@ -76,7 +77,16 @@ cannot be used to sign in.
 { "refresh_token": "eyJ…" }
 ```
 
-Returns a new token pair in the same shape as login.
+Returns a new token pair in the same shape as login. The refresh token is
+single-use: store the new one. Presenting a refresh token that was already
+replaced ends the session (`401 token_expired`), apart from a 30-second grace
+for two tabs refreshing at once.
+
+### `POST /api/auth/logout`
+
+`204`. Ends the session the access token belongs to: its access and refresh
+tokens stop working immediately. Other sessions of the same identity and its
+API key are unaffected (a no-op when called with an API key).
 
 ### `GET /api/identity/me`
 
@@ -118,11 +128,14 @@ Authentication failures return `{"error": "<code>", "detail": "…"}`:
 |---|---|---|
 | `invalid_credentials` | 401 | Login failed — the same response for an unknown user and a wrong password |
 | `invalid_token` | 401 | The Bearer value is not a valid access token or API key |
-| `token_expired` | 401 | The token expired or was issued before a password change; refresh or sign in again. Does not count toward the lockout |
+| `token_expired` | 401 | The token expired, its session was signed out, or it was issued before a password change; refresh or sign in again. Does not count toward the lockout |
 | `locked_out` | 429 | Too many failures; retry after the `Retry-After` header |
 
 Failures are counted per IP, and on login also per account
-(`PINCER_AUTH_MAX_FAILURES`, `PINCER_AUTH_LOCKOUT_SECONDS`).
+(`PINCER_AUTH_MAX_FAILURES`, `PINCER_AUTH_LOCKOUT_SECONDS`). An identity has
+one account budget whether it is named by id or by email. The per-IP lockout
+doubles with each further failure; the per-account one is a flat window, since
+anyone can spend another person's budget.
 
 ### Chat routes and `X-Pincer-User`
 
