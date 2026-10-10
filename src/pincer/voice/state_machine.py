@@ -92,7 +92,8 @@ PHASE_TIMEOUTS: dict[CallPhase, int] = {
     CallPhase.RINGING: 30,
     CallPhase.GREETING: 15,
     CallPhase.INTENT_CAPTURE: 120,
-    CallPhase.FREEFORM: 300,
+    # Same silence budget as INTENT_CAPTURE: outbound conversations live here.
+    CallPhase.FREEFORM: 120,
     CallPhase.VERIFY: 60,
     CallPhase.EXECUTE: 30,
     CallPhase.CONFIRM: 30,

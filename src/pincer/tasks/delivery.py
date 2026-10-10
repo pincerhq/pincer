@@ -28,12 +28,12 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
-from redis.asyncio import Redis
-
 from pincer.channels.base import ChannelType
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from redis.asyncio import Redis
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,10 @@ class RedisDeliveryBackend:
     """
 
     def __init__(self, redis_url: str) -> None:
+        # Imported here so the default in-memory broker works without the
+        # `tasks-redis` extra installed.
+        from redis.asyncio import Redis
+
         self._redis: Redis = Redis.from_url(redis_url)
 
     async def publish(self, envelope: dict[str, Any]) -> None:

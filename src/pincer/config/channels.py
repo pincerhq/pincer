@@ -201,7 +201,7 @@ class ChannelSettings(BaseModel):
         "Also switchable at runtime from the dashboard (PUT /api/voice/config).",
     )
     voice_max_response_tokens: int = Field(
-        default=150,
+        default=220,
         ge=32,
         le=1024,
         description="max_tokens per voice turn — short spoken replies keep latency and streaming granularity tight",

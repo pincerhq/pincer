@@ -879,6 +879,17 @@ class Agent:
 
         yield StreamChunk(StreamEventType.DONE, full_text)
 
+    async def reset_voice_session(self, user_id: str, channel: str = "voice") -> None:
+        """Start a phone call with an empty LLM history.
+
+        The voice session is keyed by the other party's number, so without
+        this every call to the same person replays the previous calls' turns
+        — their purposes included. Cross-call continuity is the thread
+        context block's job (voice/threads.py), not raw history.
+        """
+        session = await self._sessions.get_or_create(user_id, channel)
+        await self._sessions.clear(session)
+
     async def stream_voice_turn(
         self,
         user_id: str,
@@ -898,7 +909,7 @@ class Agent:
           language policy, phase instruction, appointment block);
         - tools filtered to the voice-compatible set (smaller schemas, no
           shell/file tools mid-call);
-        - short outputs: ``voice_max_response_tokens`` (default 150) and an
+        - short outputs: ``voice_max_response_tokens`` (default 220) and an
           optional fast ``voice_turn_model``;
         - no onboarding flow (nobody onboards mid-phone-call).
 
@@ -933,7 +944,7 @@ class Agent:
             tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
         else:
             tool_schemas = filter_voice_tools(self._tools.get_schemas())
-        max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 150) or 150)
+        max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 220) or 220)
 
         # Voice turn model (Sprint 5 T5.4): "" = default provider+model;
         # "claude-..." = default provider, that model; "openai:gpt-5-mini" =

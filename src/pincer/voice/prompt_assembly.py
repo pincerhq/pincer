@@ -13,8 +13,8 @@ prompts for identical input. Block ORDER is part of the contract, not an
 accident of how the tuple was written:
 
 1. persona — who the agent is;
-2. **the binding task** — what this call is FOR, immediately after the
-   persona so it outranks everything that follows;
+2. **the call's reason and goal** — what this call is FOR, immediately
+   after the persona so it is read as the point of the call, not background;
 3. language policy, tool rules, local time — how to behave;
 4. thread context, receptionist rules, appointment slots — situational;
 5. the phase instruction — what to do in this exact turn.
@@ -36,11 +36,11 @@ MAX_INSTRUCTIONS_IN_PROMPT = 4000
 
 
 def build_call_briefing_block(state: CallState, settings: Any, language: str, formality: str) -> str:
-    """The binding task block for an outbound call; '' for inbound or untasked.
+    """The reason-and-goal block for an outbound call; '' for inbound or untasked.
 
     Renders the user's task VERBATIM. We never paraphrase, summarize, or
-    "improve" it: the whole point is that the agent is bound to what the user
-    actually wrote.
+    "improve" it: the agent works towards what the user actually wrote. The
+    block sets the goal, not a script — the conversation itself may wander.
     """
     from pincer.voice.engine import CallDirection
 

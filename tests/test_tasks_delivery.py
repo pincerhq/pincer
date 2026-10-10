@@ -35,7 +35,7 @@ class TestInMemoryDeliveryBackend:
 @pytest.mark.asyncio
 class TestRedisDeliveryBackend:
     async def test_publish_serializes_envelope(self) -> None:
-        with patch("pincer.tasks.delivery.Redis") as mock_redis_cls:
+        with patch("redis.asyncio.Redis") as mock_redis_cls:
             mock_client = AsyncMock()
             mock_redis_cls.from_url.return_value = mock_client
 
@@ -52,7 +52,7 @@ class TestRedisDeliveryBackend:
             yield {"type": "subscribe", "data": 1}
             yield {"type": "message", "data": json.dumps(envelope)}
 
-        with patch("pincer.tasks.delivery.Redis") as mock_redis_cls:
+        with patch("redis.asyncio.Redis") as mock_redis_cls:
             mock_client = AsyncMock()
             mock_redis_cls.from_url.return_value = mock_client
             mock_pubsub = MagicMock()
@@ -76,7 +76,7 @@ class TestRedisDeliveryBackend:
             yield {"type": "message", "data": "not-json"}
             yield {"type": "message", "data": json.dumps(envelope)}
 
-        with patch("pincer.tasks.delivery.Redis") as mock_redis_cls:
+        with patch("redis.asyncio.Redis") as mock_redis_cls:
             mock_client = AsyncMock()
             mock_redis_cls.from_url.return_value = mock_client
             mock_pubsub = MagicMock()
@@ -94,7 +94,7 @@ class TestRedisDeliveryBackend:
             assert received == envelope
 
     async def test_aclose_closes_redis_connection(self) -> None:
-        with patch("pincer.tasks.delivery.Redis") as mock_redis_cls:
+        with patch("redis.asyncio.Redis") as mock_redis_cls:
             mock_client = AsyncMock()
             mock_redis_cls.from_url.return_value = mock_client
 
@@ -108,7 +108,7 @@ def test_create_delivery_backend_selects_by_broker() -> None:
     memory_settings = SimpleNamespace(task_broker="memory", task_broker_url="")
     assert isinstance(create_delivery_backend(memory_settings), InMemoryDeliveryBackend)
 
-    with patch("pincer.tasks.delivery.Redis") as mock_redis_cls:
+    with patch("redis.asyncio.Redis") as mock_redis_cls:
         mock_redis_cls.from_url.return_value = AsyncMock()
         redis_settings = SimpleNamespace(task_broker="redis", task_broker_url="redis://localhost:6379/0")
         assert isinstance(create_delivery_backend(redis_settings), RedisDeliveryBackend)

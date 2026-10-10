@@ -101,7 +101,7 @@ class TestStreamVoiceTurn:
         # extra_system reached the LLM; voice caps applied
         call = provider.calls[0]
         assert "VOICE-MARKER" in call["system"]
-        assert call["max_tokens"] == 150
+        assert call["max_tokens"] == 220
         assert call["model"] is None  # no voice_turn_model configured
 
         # session persisted: user turn + assistant turn
@@ -109,6 +109,21 @@ class TestStreamVoiceTurn:
         roles = [m.role.value for m in session.messages]
         assert roles == ["user", "assistant"]
         assert session.messages[-1].content == "Gerne. Einen Moment bitte."
+
+    async def test_reset_keeps_the_previous_call_out_of_the_next(
+        self, settings, session_manager, cost_tracker, tool_registry
+    ):
+        """Two calls to the same number: the second call's first request carries
+        only its own turn, not the first call's purpose and replies."""
+        settings.voice_turn_model = ""
+        provider = ScriptedProvider([_text_turn("Es geht um die Lieferung."), _text_turn("Es geht um die Rechnung.")])
+        agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
+
+        await _collect(agent, user_id="+4930111222", channel="voice", text="Hallo, erster Anruf")
+        await agent.reset_voice_session("+4930111222")
+        await _collect(agent, user_id="+4930111222", channel="voice", text="Hallo, zweiter Anruf")
+
+        assert [m.content for m in provider.calls[1]["messages"]] == ["Hallo, zweiter Anruf"]
 
     async def test_voice_turn_model_override(self, settings, session_manager, cost_tracker, tool_registry):
         settings.voice_turn_model = "fast-model-x"

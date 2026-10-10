@@ -161,6 +161,27 @@ retried callbacks.
   `tsconfig.app.json`, and the four pre-existing TypeScript parameter properties
   this exposed (in `lib/listenIn*`, rejected by `erasableSyntaxOnly`) are
   rewritten as explicit fields — `pnpm build` succeeds again.
+- **Outbound calls clung to their purpose when the callee changed the subject.**
+  The call brief (`CALL_BRIEF`, en/de/uk) now frames the purpose as the call's
+  reason and goal rather than a binding task: the agent still opens with it, but
+  engages with whatever the callee raises and returns to the goal when there is
+  an opening; a callee who doesn't want to deal with it now gets a follow-up, not
+  insistence. Dropped: "never offer unrelated help", "end politely if the task
+  can't be done", and "anything not covered → check with the owner". The persona
+  loses its "for a specific task" line, and the first in-call tool rule allows
+  read-only lookups that serve the conversation (writes still serve only the
+  owner; the gate enforces that regardless of wording).
+- **Outbound calls spent their whole life in the inbound `INTENT_CAPTURE` phase.**
+  Once the callee speaks an outbound call moves to `FREEFORM`, whose instruction
+  is now conversation-first. `FREEFORM` keeps the same 120 s silence budget, and
+  its timeout line says nothing was heard instead of "we've been on a while".
+  Phase instructions no longer leak internal state names (`VERIFY`/`FREEFORM`).
+- **Repeated calls to the same number replayed earlier calls.** The voice LLM
+  session (`voice:<number>`) is cleared at call start; cross-call memory stays
+  in the thread context block.
+- `voice_max_response_tokens` default raised from 150 to 220 — a conversational
+  German reply needs the room. Removed the unused `voice/outbound_prompts.py` and
+  `VOICE_GREETING_OUTBOUND`.
 
 ### Added
 
