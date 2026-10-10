@@ -41,6 +41,11 @@ pincer
 │   └── setup               # Interactive Slack bot token setup (71 tools)
 ├── whatsapp
 │   └── setup               # Pair WhatsApp via QR code
+├── identity
+│   ├── list                # Identities, emails, channels, credentials
+│   ├── create <name>       # Create an identity
+│   ├── set-password <name> # Set or reset the dashboard/API password
+│   └── api-key <name>      # Generate an API key (printed once)
 ├── audit                   # View audit logs (options, not subcommands)
 ├── mcp
 │   ├── list                # MCP servers + connection status
@@ -297,7 +302,7 @@ Running 25+ security checks...
   🟢 telegram_allowlist: Configured (1 users)
   🟡 discord_allowlist: No guild allowlist
      → Set PINCER_DISCORD_GUILD_ALLOWLIST
-  🟢 dashboard_auth_token: Configured (16+ chars)
+  🟢 dashboard_auth_token: 1 identity can sign in to the API
 
 💰 Budget & Limits
   🟢 budget_limits: Daily budget: $5.00
@@ -375,6 +380,47 @@ Pair WhatsApp via QR code (run once to link your device).
 ```bash
 pincer whatsapp setup
 ```
+
+---
+
+### `pincer identity`
+
+Manage who can sign in to the REST API and the dashboard. An identity signs in
+with a password (dashboard) or an API key (headless consumers such as the web
+chat widget). There are no roles: any identity with a password or a key has
+full API access.
+
+```bash
+pincer identity list
+pincer identity create <name> [--email EMAIL] [--display-name NAME]
+pincer identity set-password <name> [password]
+pincer identity api-key <name> [--force]
+```
+
+| Command | Description |
+|---------|-------------|
+| `list` | Identities with email, channels, whether a password is set, and the masked API key |
+| `create` | Create an identity. Names are letters, digits and underscores; `me` and names starting with `usr_` are reserved. `--email` can also be used to sign in |
+| `set-password` | Set or reset a password (8–256 characters). Omit the password to be prompted (hidden, confirmed) — this keeps it out of the shell history. Signs the identity out everywhere |
+| `api-key` | Generate an API key (`pnc_…`). It is printed once; only a masked form (`pnc_Ab3d…wxyz`) is shown afterwards. `--force` replaces an existing key, and the old one stops working immediately |
+
+**Examples:**
+```bash
+# First sign-in after install
+pincer identity create alice --email alice@example.com
+pincer identity set-password alice
+
+# Key for the web chat widget
+pincer identity api-key alice
+```
+
+`pincer doctor` warns while no identity has a password or a key.
+
+**Identity map:** when an identity map (`PINCER_IDENTITY_MAP` or `[identity]`
+in `pincer.toml`) is configured, identities without a channel link are deleted
+at startup, credentials included. An identity created only with
+`pincer identity create` does not survive the next start in that setup — add
+it to the map. Removing someone from the map revokes their access.
 
 ---
 
@@ -715,7 +761,12 @@ See [Background Tasks](background-tasks.md) for the full architecture.
 ### Security
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PINCER_DASHBOARD_TOKEN` | | API auth token (32+ chars) |
+| `PINCER_JWT_SECRET` | (generated) | Signs session tokens; min 32 chars. Unset = generated once into `<data_dir>/jwt_secret` |
+| `PINCER_JWT_ACCESS_TTL_SECONDS` | `1800` | Access token lifetime |
+| `PINCER_JWT_REFRESH_TTL_SECONDS` | `604800` | Refresh token lifetime |
+| `PINCER_AUTH_DISABLED` | `false` | Serve `/api/*` without authentication (local dev/tests only) |
+| `PINCER_AUTH_MAX_FAILURES` | `10` | Failed attempts per IP (and per account on login) before lockout |
+| `PINCER_AUTH_LOCKOUT_SECONDS` | `300` | Base lockout window; doubles per further failure (max 1h) |
 | `PINCER_DASHBOARD_HOST` | `127.0.0.1` | API bind address |
 | `PINCER_DASHBOARD_PORT` | `8080` | API port |
 | `PINCER_DASHBOARD_URL` | | External URL for CORS |

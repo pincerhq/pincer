@@ -7,6 +7,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+#### BREAKING: per-identity API authentication replaces the shared tokens (#228)
+
+The REST API and the dashboard now authenticate **identities** instead of two
+shared secrets. `PINCER_DASHBOARD_TOKEN` and `PINCER_WEB_CHAT_TOKEN` are
+removed: either one used to open every route, and with neither set the API was
+silently open.
+
+> **Breaking — action required after upgrading.** Nobody can use the API or
+> the dashboard until an identity has a password or an API key. Leftover
+> `PINCER_DASHBOARD_TOKEN` / `PINCER_WEB_CHAT_TOKEN` values are ignored.
+>
+> 1. Upgrade. Migration `0021` is applied at startup (or with `pincer db upgrade`).
+> 2. Create a sign-in for each dashboard user:
+>    `pincer identity create alice --email alice@example.com`, then
+>    `pincer identity set-password alice` (prompts for the password).
+> 3. For the web chat widget and other headless clients, generate an API key
+>    with `pincer identity api-key <name>` (printed once) and send it as
+>    `Authorization: Bearer pnc_…` in place of the old token.
+> 4. In production set `PINCER_JWT_SECRET` (32+ characters:
+>    `python -c 'import secrets; print(secrets.token_urlsafe(48))'`).
+> 5. Remove `PINCER_DASHBOARD_TOKEN` and `PINCER_WEB_CHAT_TOKEN` from the
+>    environment, then run `pincer doctor` — it flags leftovers and warns
+>    while no identity can sign in.
+> 6. If you relied on the API being open with no token (local development,
+>    tests), set `PINCER_AUTH_DISABLED=true`. Never in production.
+
+- **Sign-in** — an identity signs in with its name or email and a password and
+  receives JWTs (`POST /api/auth/login`, `POST /api/auth/refresh`); headless
+  consumers use a per-identity API key. Any identity with a password or a key
+  has full API access — there are no roles. All other `/api/*` routes take
+  `Authorization: Bearer <access token or API key>`. Reference:
+  [`docs/reference/rest-api.md`](docs/reference/rest-api.md#authentication).
+- **Credentials** — passwords are hashed with Argon2id (8–256 characters);
+  changing one invalidates every JWT issued before it (API keys are
+  unaffected). API keys have the form `pnc_…`, are stored only as a SHA-256
+  hash, are shown in full only when generated, and are replaced only with
+  `force`, which stops the old key immediately. Stored in the new table
+  `pincer_identity_credentials` (migration `0021`).
+- **New settings** — `PINCER_JWT_SECRET` (HS256 signing secret, at least 32
+  characters or startup is refused; if unset, one is generated once into
+  `<data_dir>/jwt_secret`, mode 0600 — set it explicitly with several replicas
+  or a non-persistent data dir), `PINCER_JWT_ACCESS_TTL_SECONDS` (default
+  1800), `PINCER_JWT_REFRESH_TTL_SECONDS` (default 604800) and
+  `PINCER_AUTH_DISABLED` (default false; serves `/api/*` without
+  authentication for local development and tests, replacing the old implicit
+  "open when no token is set"). `PINCER_AUTH_MAX_FAILURES` /
+  `PINCER_AUTH_LOCKOUT_SECONDS` still apply per IP, and now also per account
+  on login.
+- **CLI** — new `pincer identity` group: `list`, `create <name> [--email]
+  [--display-name]`, `set-password <name> [password]` (also resets a forgotten
+  password and signs the identity out everywhere) and `api-key <name>
+  [--force]`.
+- **Endpoints** — `GET /api/identity/me`, `PUT /api/identity/me/password`,
+  `GET`/`POST /api/identity/me/api-key` and
+  `POST /api/voice/listen/{call_sid}/ticket`. The password, key-generation and
+  ticket routes need a session (JWT); API-key callers get 403 there. Auth
+  errors are `{"error": "<code>", "detail": "…"}` with `invalid_credentials`,
+  `invalid_token`, `token_expired` (does not count toward the IP lockout) and
+  `locked_out` (429 + `Retry-After`). `GET /api/health` also returns
+  `auth_required`.
+- **Listen-in WebSocket** — `/api/voice/listen/{call_sid}` no longer accepts a
+  shared token in `?token=`. Browsers request a ticket first (valid 60 s,
+  bound to that call) and connect with `?token=<ticket>`; non-browser clients
+  may send the `Authorization` header on the upgrade. Listen sessions are
+  audited under the real identity.
+- **Chat routes** (`/api/chat/*`) — with a session JWT the user is the
+  signed-in identity and `X-Pincer-User` is ignored; with an API key,
+  `X-Pincer-User` stays the visitor-session id and becomes optional (without
+  it the key's own identity is used); with auth disabled it is required as
+  before.
+- **Doctor** — warns when no identity can sign in or when
+  there are leftover shared-token variables, and with
+  `--production` reports `PINCER_AUTH_DISABLED` as CRITICAL and an unset
+  `PINCER_JWT_SECRET` as a warning.
+- **Dashboard** — login is Agent URL + name or email + password; the access
+  token is refreshed silently. New Account page to change the password and to
+  generate or regenerate the API key (shown once). Refresh tokens are kept in
+  the browser's `localStorage`.
+- **Identity map interaction** — when an identity map (`PINCER_IDENTITY_MAP`
+  or `[identity]` in `pincer.toml`) is configured, startup pruning deletes
+  identities that have no channel link, credentials included. An identity
+  created only with `pincer identity create` is therefore removed at the next
+  start in that setup, and removing someone from the map revokes their access.
+
 ### Added
 
 #### Telephony telemetry and the internal Telephony dashboard

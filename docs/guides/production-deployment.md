@@ -34,9 +34,19 @@ Internet ──443──▶ Caddy (TLS, Let's Encrypt, WSS passthrough)
    ```
    The script builds the image tagged with the git SHA, runs
    **`pincer doctor --production`** inside it and *refuses to start on any
-   CRITICAL* (tunnel configured, non-HTTPS webhook URL, missing dashboard
-   token, weakened DACH compliance), then deploys, waits for container
+   CRITICAL* (tunnel configured, non-HTTPS webhook URL, API authentication
+   disabled, weakened DACH compliance), then deploys, waits for container
    health, and verifies both public endpoints.
+
+   Nobody can use the dashboard or the API until an identity can sign in.
+   Create the first one (the password is prompted for, not echoed):
+   ```bash
+   docker compose -f docker-compose.prod.yml exec pincer pincer identity create alice --email alice@example.com
+   docker compose -f docker-compose.prod.yml exec pincer pincer identity set-password alice
+   ```
+   The web chat widget and other headless clients use an API key instead:
+   `pincer identity api-key <name>` prints it once. See
+   [CLI → Identity & API access](../reference/cli.md#identity-api-access).
 5. **Verify WSS** — since Sprint 8 (T8.1) this check is inverted. The relay
    authenticates the upgrade, so an unsigned connect **must be refused with
    403**; a 403 proves *both* that the proxy forwards the WebSocket upgrade
@@ -238,7 +248,9 @@ To rotate: edit the value, `scripts/deploy.sh` (containers get the new env).
 | `PINCER_ELEVENLABS_API_KEY` | ElevenLabs dashboard | issue new, deploy, revoke old |
 | `PINCER_DEEPGRAM_API_KEY` | Deepgram console | same pattern |
 | `PINCER_ANTHROPIC_API_KEY` / OpenAI | provider console | same pattern |
-| `PINCER_DASHBOARD_TOKEN` | `secrets.token_urlsafe(32)` | update dashboard users after deploy |
+| `PINCER_JWT_SECRET` | `secrets.token_urlsafe(48)` | signs session tokens — rotating it signs every dashboard user out; API keys keep working |
+| Dashboard password | `pincer identity set-password <name>`, or the dashboard Account page | signs that identity out everywhere; also how a forgotten password is reset |
+| Identity API key | `pincer identity api-key <name> --force`, or the dashboard Account page | the old key stops working immediately — update the web chat widget / scripts in the same step |
 | Google OAuth | `pincer setup-google` re-run | token cache lives in the data volume |
 | `PINCER_BACKUP_PASSPHRASE` | new value + re-encrypt kept backups | old backups need the old passphrase — store both in the password manager |
 

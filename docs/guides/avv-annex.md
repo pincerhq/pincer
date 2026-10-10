@@ -104,7 +104,7 @@ The purge runs daily at 03:30 in `PINCER_VOICE_TIMEZONE` and writes a
 | `/api/apps/twilio/*` and legacy `/voice/*` HTTP routes | `X-Twilio-Signature` HMAC-SHA1 validated on every request against the Twilio auth token; unsigned or forged requests get 403 and an audit entry |
 | ConversationRelay / Media Streams WebSocket upgrades | Short-lived HMAC token minted into the TwiML URL; verified **before** `accept()`, so an unauthenticated socket never reaches the call |
 | Replay | Timestamped requests older than `PINCER_VOICE_SIGNATURE_MAX_AGE_S` (default 300 s) are rejected even with a valid signature |
-| Dashboard / REST API | Bearer token, plus per-IP exponential lockout after repeated failures; every rejection audit-logged with its IP |
+| Dashboard / REST API | Per-identity sign-in: name or email + password (Argon2id-hashed) issuing short-lived signed session tokens, or a per-identity API key (stored only as a SHA-256 hash). No shared credentials. Exponential lockout per IP and per account after repeated failures; every rejection audit-logged with its IP |
 | CORS | In production, only the configured real origins — no localhost |
 
 ### F.2 Abuse prevention (protects callees, §7 UWG)

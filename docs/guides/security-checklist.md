@@ -65,19 +65,23 @@ an unsigned socket.
 
 | # | Control | Status | Evidence |
 |---|---|---|---|
-| 2.1 | `dashboard_token` and `web_chat_token` both required in production | ✅ | `doctor` → `prod_auth_tokens` CRITICAL if either is empty or <16 chars |
-| 2.2 | The two tokens must differ | ✅ | `test_prod_auth_tokens_critical_when_tokens_identical` |
-| 2.3 | Empty token = allow-all is dev-only and cannot ship | ✅ | 2.1 blocks the deploy; behaviour documented in `api/server.py` |
-| 2.4 | Token comparison is constant-time | ✅ | `secrets.compare_digest` in `auth_middleware` |
-| 2.5 | Per-IP exponential lockout after repeated failures | ✅ | `test_api_auth_guard.py::test_repeated_failures_lock_the_ip_out` |
-| 2.6 | A locked-out IP is refused even with the correct token | ✅ | same test — otherwise the lockout is a slow oracle |
+| 2.1 | Every `/api/*` route requires an authenticated identity (password → JWT, or a per-identity API key); there is no shared token | ✅ | `test_api_auth.py::test_bearer_resolution`; `doctor` → `dashboard_auth_token` warns when no identity can sign in |
+| 2.2 | Unauthenticated mode (`PINCER_AUTH_DISABLED`) is dev-only and cannot ship | ✅ | `doctor --production` → `prod_auth_tokens` CRITICAL; `test_prod_auth_disabled_is_critical` |
+| 2.3 | JWT signing secret is at least 32 chars; a shorter one is refused at startup, an unset one is a production warning | ✅ | `test_prod_short_jwt_secret_is_critical`, `test_prod_missing_jwt_secret_is_a_warning` |
+| 2.4 | Passwords stored as Argon2id hashes; API keys stored as SHA-256 only and shown once | ✅ | `security/credentials.py`; `test_api_key_is_generated_once_and_replaced_only_by_force` |
+| 2.5 | Per-IP exponential lockout after repeated failures; login is also throttled per account | ✅ | `test_api_auth_guard.py::test_repeated_failures_lock_the_ip_out`, `test_api_auth.py::test_login_is_throttled_per_account_across_ips` |
+| 2.6 | A locked-out IP is refused even with a valid credential | ✅ | same test — otherwise the lockout is a slow oracle |
 | 2.7 | Lockout is capped so a shared proxy IP cannot DoS the dashboard | ✅ | `test_lockout_is_capped` (1 h ceiling) |
 | 2.8 | Every 401 audit-logged with its IP | ✅ | `test_failed_auth_is_audit_logged` |
 | 2.9 | `/api/health` never rate-limited (uptime probes) | ✅ | `test_health_endpoint_is_never_rate_limited` |
 | 2.10 | Production CORS carries no localhost origin | ✅ | `test_production_drops_localhost`; `doctor` → `prod_cors_origins` |
 | 2.11 | `POST /api/voice/calls` passes the same budget/abuse gate as chat | ✅ | `test_voice_outbound_gate.py::test_dashboard_api_hits_the_same_gate` |
 | 2.12 | `POST /api/voice/schedule` likewise | ✅ | routes through `make_phone_call`; `doctor` → `voice_do_not_call` asserts the path |
-| 2.13 | **[manual]** Tokens rotated at each pilot handover | ⬜ | Procedure: `docs/guides/production-deployment.md` §Secrets rotation |
+| 2.13 | **[manual]** Passwords and API keys rotated at each pilot handover | ⬜ | Procedure: `docs/guides/production-deployment.md` §Secrets rotation |
+| 2.14 | Login failures are indistinguishable (unknown user vs wrong password) | ✅ | `test_api_auth.py::test_every_login_failure_looks_the_same` |
+| 2.15 | A password change invalidates every session token issued before it | ✅ | `test_a_password_change_invalidates_access_tokens_but_not_the_api_key`, `test_a_password_change_invalidates_the_refresh_token` |
+| 2.16 | Listen-in WebSocket: authenticated before accept; browser ticket is short-lived and bound to one call | ✅ | `test_listen_requires_auth_before_accept`, `test_listen_in_ticket_is_bound_to_its_call` |
+| 2.17 | Leftover shared-token variables are flagged | ✅ | `doctor` → `stale_shared_tokens` WARNING; `test_stale_shared_tokens_are_found_in_the_environment` |
 
 ## T8.3 — Outbound abuse prevention
 

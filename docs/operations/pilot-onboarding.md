@@ -38,7 +38,7 @@ pincer pilot checklist "Zahnarztpraxis Weber" --out pilots/weber-onboarding.md
 |---|---|---|---|
 | Host provisioned + deployed | 20 | ✅ | `scripts/deploy.sh`; the gate blocks a bad config |
 | Twilio number + webhooks | 35 | ❌ | Bundle done beforehand; wiring is manual today |
-| API tokens | 2 | ✅ | Two distinct 32+ char tokens |
+| API sign-in | 2 | ✅ | An identity with a password (dashboard) and, for the web chat widget, one with an API key — `pincer identity` |
 | Google Calendar OAuth | 10 | ❌ | Customer signs in with their business account |
 | ElevenLabs voice | 20 | ❌ | Stock voice, or clone per [custom-voices](../guides/custom-voices.md) — cloning needs the speaker's consent |
 | DACH compliance settings | 3 | ✅ | two-party consent, retention, Europe/Berlin |

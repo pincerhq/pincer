@@ -675,7 +675,7 @@ Twilio call ──<Connect> ConversationRelay / Stream──► conversation eng
      └──────<Start><Stream track="both_tracks">─────► /api/apps/twilio/monitor/{call_sid}  (rx-only)
                                                         │ per-call fan-out hub (voice/monitor.py)
                                                         ▼
-                     browser ◄── WSS /api/voice/listen/{call_sid} (dashboard bearer, listen-only)
+                     browser ◄── WSS /api/voice/listen/{call_sid} (signed-in identity, listen-only)
 ```
 
 - **Audio source is a separate Twilio media fork, not the engine.** With
@@ -695,13 +695,18 @@ Twilio call ──<Connect> ConversationRelay / Stream──► conversation eng
   the next listener gets `{"type":"end","reason":"capacity"}` and close code
   4001 ("listener limit reached" in the UI).
 - **Auth:** the monitor ingress is Twilio-signed like the relay/stream
-  sockets (T8.1 token); the listener socket requires the dashboard bearer on
-  the upgrade (`Authorization: Bearer …` or `?token=` — browsers cannot set
-  the header on a WebSocket) and is denied with 401 **before** accept. Failed
-  attempts count against the T8.2 brute-force guard.
+  sockets (T8.1 token); the listener socket requires an authenticated
+  identity on the upgrade and is denied with 401 **before** accept. Browsers
+  cannot set a header on a WebSocket, so the dashboard first calls
+  `POST /api/voice/listen/{call_sid}/ticket` with its session token and
+  connects with `?token=<ticket>` — the ticket is valid for 60 s and bound to
+  that call. Non-browser clients may send
+  `Authorization: Bearer <access token or API key>` on the upgrade instead.
+  Failed attempts count against the T8.2 brute-force guard.
 - **Audit, no persistence:** every listen session writes one
   `listen_in_session` audit row `{user, call_sid, started_at, ended_at,
-  duration_s, reason, frames, frames_dropped}`. No audio is ever written to
+  duration_s, reason, frames, frames_dropped}`, where `user` is the identity
+  that listened. No audio is ever written to
   disk or the database by this path (tested).
 - **Compliance:** see [DACH compliance — live listen-in](../guides/dach-compliance.md#live-listen-in-monitoring).
   With `PINCER_LISTEN_IN_ANNOUNCE=true` (default) the call opening gains
@@ -711,7 +716,8 @@ Twilio call ──<Connect> ConversationRelay / Stream──► conversation eng
   already announced.
 - **API:** `GET /api/voice/active` rows gain `listen_available` (feature on ∧
   fork attached for that call) and `listener_count`; `GET /api/voice/status`
-  gains `listen_in_enabled`.
+  gains `listen_in_enabled`. `POST /api/voice/listen/{call_sid}/ticket`
+  (session only — an API key gets 403) returns `{"ticket", "expires_in": 60}`.
 - **Dashboard:** Voice Ops → *Active calls* shows a 🎧 Listen button per call
   (disabled with a tooltip when the feature is off or at capacity). The
   player has Caller/Agent level meters, per-track mute, master mute and stop;
