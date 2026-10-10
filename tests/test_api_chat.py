@@ -18,7 +18,7 @@ from pincer.core.agent import AgentResponse, StreamChunk, StreamEventType  # noq
 UUID = "11111111-1111-4111-8111-111111111111"
 
 
-def _make_client(*, token: str = "", web_chat_token: str = "") -> TestClient:
+def _make_client() -> TestClient:
     """Build a TestClient with a mocked agent attached.
 
     TestClient(app) does NOT run the FastAPI lifespan unless used as a
@@ -27,19 +27,9 @@ def _make_client(*, token: str = "", web_chat_token: str = "") -> TestClient:
     """
     from pincer.config import get_settings_relaxed
 
-    # Isolate from the developer's .env so only the tokens we pass here take effect
+    # Isolate from the developer's .env
     old_cwd = os.getcwd()
     tmpdir = tempfile.mkdtemp()
-
-    if token:
-        os.environ["PINCER_DASHBOARD_TOKEN"] = token
-    else:
-        os.environ.pop("PINCER_DASHBOARD_TOKEN", None)
-
-    if web_chat_token:
-        os.environ["PINCER_WEB_CHAT_TOKEN"] = web_chat_token
-    else:
-        os.environ.pop("PINCER_WEB_CHAT_TOKEN", None)
 
     os.chdir(tmpdir)
     get_settings_relaxed.cache_clear()
@@ -50,6 +40,11 @@ def _make_client(*, token: str = "", web_chat_token: str = "") -> TestClient:
         get_settings_relaxed.cache_clear()
         shutil.rmtree(tmpdir, ignore_errors=True)
 
+    app.state.agent = _mock_agent()
+    return TestClient(app)
+
+
+def _mock_agent() -> MagicMock:
     agent = MagicMock()
     agent.handle_message = AsyncMock(return_value=AgentResponse(text="hi back", cost_usd=0.01, model="test-model"))
 
@@ -59,28 +54,78 @@ def _make_client(*, token: str = "", web_chat_token: str = "") -> TestClient:
         yield StreamChunk(StreamEventType.DONE, "hi back")
 
     agent.handle_message_stream = _stream
-    app.state.agent = agent
-    return TestClient(app)
+    return agent
 
 
-def test_chat_message_requires_token():
-    client = _make_client(token="secret")
+def _authed_client(authed_app) -> TestClient:
+    authed_app.client.app.state.agent = _mock_agent()
+    return authed_app.client
+
+
+def _chat_user(client: TestClient) -> str:
+    """Whose conversation the agent was handed."""
+    return client.app.state.agent.handle_message.call_args.args[0]
+
+
+def test_chat_message_requires_credentials(authed_app):
+    client = _authed_client(authed_app)
     r = client.post(
         "/api/chat/message",
         json={"text": "hi"},
         headers={"X-Pincer-User": UUID},
     )
     assert r.status_code == 401
+    client.app.state.agent.handle_message.assert_not_called()
 
 
-def test_chat_stream_requires_token():
-    client = _make_client(token="secret")
+def test_chat_stream_requires_credentials(authed_app):
+    client = _authed_client(authed_app)
     r = client.post(
         "/api/chat/stream",
         json={"text": "hi"},
         headers={"X-Pincer-User": UUID},
     )
     assert r.status_code == 401
+
+
+def test_a_signed_in_session_chats_as_itself_whatever_the_header_says(authed_app):
+    """Naming someone else in X-Pincer-User must not open their conversation."""
+    client = _authed_client(authed_app)
+    r = client.post(
+        "/api/chat/message",
+        json={"text": "hi"},
+        headers={**authed_app.jwt_headers, "X-Pincer-User": UUID},
+    )
+    assert r.status_code == 200
+    assert _chat_user(client) == "alice"
+
+    # ...and needs no header at all.
+    assert client.post("/api/chat/message", json={"text": "hi"}, headers=authed_app.jwt_headers).status_code == 200
+    assert _chat_user(client) == "alice"
+
+
+def test_an_api_key_keeps_the_header_as_the_visitor_session(authed_app):
+    """One key embedded in a widget serves many visitors; each keeps a
+    conversation of their own."""
+    client = _authed_client(authed_app)
+    r = client.post(
+        "/api/chat/message",
+        json={"text": "hi"},
+        headers={**authed_app.api_key_headers, "X-Pincer-User": UUID},
+    )
+    assert r.status_code == 200
+    assert _chat_user(client) == UUID
+
+    # Without the header the key speaks for its own identity.
+    assert client.post("/api/chat/message", json={"text": "hi"}, headers=authed_app.api_key_headers).status_code == 200
+    assert _chat_user(client) == "alice"
+
+    malformed = client.post(
+        "/api/chat/message",
+        json={"text": "hi"},
+        headers={**authed_app.api_key_headers, "X-Pincer-User": "not-a-uuid"},
+    )
+    assert malformed.status_code == 400
 
 
 def test_chat_message_requires_user_header():
@@ -137,16 +182,3 @@ def test_chat_returns_503_without_agent():
         headers={"X-Pincer-User": UUID},
     )
     assert r.status_code == 503
-
-
-def test_chat_message_accepts_web_chat_token():
-    client = _make_client(token="dashtoken", web_chat_token="webtoken")
-    r = client.post(
-        "/api/chat/message",
-        json={"text": "hi"},
-        headers={
-            "X-Pincer-User": UUID,
-            "Authorization": "Bearer webtoken",
-        },
-    )
-    assert r.status_code == 200

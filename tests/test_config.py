@@ -106,13 +106,31 @@ def test_settings_loads_var_from_dotenv_only(tmp_path: Path, monkeypatch: pytest
     A PINCER_* var set only in .env (not exported to shell) must be visible
     through Settings. os.environ.get() would return "" here; Settings must not.
     """
+    secret = "secret-from-dotenv-" + "x" * 32
     env_file = tmp_path / ".env"
-    env_file.write_text("PINCER_DASHBOARD_TOKEN=secret-from-dotenv\nPINCER_ANTHROPIC_API_KEY=sk-test\n")
+    env_file.write_text(f"PINCER_JWT_SECRET={secret}\nPINCER_ANTHROPIC_API_KEY=sk-test\n")
 
-    monkeypatch.delenv("PINCER_DASHBOARD_TOKEN", raising=False)
+    monkeypatch.delenv("PINCER_JWT_SECRET", raising=False)
 
     s = Settings(_env_file=str(env_file))  # type: ignore[call-arg]
-    assert s.dashboard_token.get_secret_value() == "secret-from-dotenv"
+    assert s.jwt_secret.get_secret_value() == secret
+
+
+def test_auth_is_required_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PINCER_AUTH_DISABLED", raising=False)
+    s = Settings()  # type: ignore[call-arg]
+    assert s.auth_disabled is False
+    assert s.jwt_secret.get_secret_value() == ""
+    assert (s.jwt_access_ttl_seconds, s.jwt_refresh_ttl_seconds) == (1800, 604800)
+    # The shared tokens are gone, not merely defaulted.
+    assert not hasattr(s, "dashboard_token")
+    assert not hasattr(s, "web_chat_token")
+
+
+def test_a_short_jwt_secret_is_refused_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_JWT_SECRET", "too-short")
+    with pytest.raises(ValueError, match="at least 32 characters"):
+        Settings()  # type: ignore[call-arg]
 
 
 # ── Domain class imports ──────────────────────────────────────────────────────

@@ -329,6 +329,40 @@ class AuthService(DatabaseService):
             return await IdentityCredentialRepository(session).count_usable()
 
 
+def count_identities_with_credentials(db_path: Path) -> int | None:
+    """How many identities can sign in, for the synchronous health checks
+    (`pincer doctor`, the pilot preflight). None when there is no database yet.
+
+    Those checks also run inside a running loop (`GET /api/doctor`), where
+    `asyncio.run` refuses to start, so the query gets a loop of its own on a
+    worker thread there.
+    """
+    import asyncio
+    import concurrent.futures
+
+    from pincer.db.engine import _database_file, dispose_engines, get_sync_url
+
+    # Opening a SQLite file that isn't there creates it; a fresh install has
+    # no identities, so don't leave an empty database behind.
+    database = _database_file(get_sync_url(db_path))
+    if database is not None and not database.exists():
+        return None
+
+    async def count() -> int:
+        try:
+            async with session_scope(get_database_url(db_path)) as session:
+                return await IdentityCredentialRepository(session).count_usable()
+        finally:
+            await dispose_engines()
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(count())
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(asyncio.run, count()).result()
+
+
 @lru_cache(maxsize=8)
 def _jwt_secret(configured: str, data_dir: Path) -> str:
     return creds.load_or_create_jwt_secret(configured, data_dir)

@@ -2,7 +2,7 @@
 
 All routes are under `/api/`, so they are gated by the existing
 `auth_middleware` in `pincer.api.server`. We do not add a second auth
-check here.
+check here — only decide whose conversation this is (`chat_user`).
 
 The streaming endpoint multiplexes two producers onto a single SSE
 response: agent events (text chunks, tool start/done, final done) and
@@ -20,9 +20,9 @@ import contextlib
 import json
 import logging
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -32,6 +32,7 @@ from pincer.api.approvals import (
     resolve_web_approval,
     set_send_event,
 )
+from pincer.api.auth import OptionalIdentity
 from pincer.core.agent import StreamEventType
 from pincer.exceptions import BudgetExceededError, LLMError
 
@@ -67,6 +68,32 @@ def _require_user(value: str | None) -> str:
     return value
 
 
+def chat_user(
+    identity: OptionalIdentity,
+    x_pincer_user: str | None = Header(default=None, alias="X-Pincer-User"),
+) -> str:
+    """Whose conversation this request belongs to.
+
+    - A signed-in session is that identity, whatever the header says: a
+      person must not be able to read or continue someone else's thread by
+      naming them.
+    - An API key is typically one key embedded in a widget that many
+      visitors use. `X-Pincer-User` is then the visitor's session id, so
+      they do not all share one conversation; without it the key's own
+      identity is used.
+    - With PINCER_AUTH_DISABLED there is no identity and the header is
+      required.
+    """
+    if identity is None:
+        return _require_user(x_pincer_user)
+    if identity.interactive or x_pincer_user is None:
+        return identity.pincer_user_id
+    return _require_user(x_pincer_user)
+
+
+ChatUser = Annotated[str, Depends(chat_user)]
+
+
 def _get_agent(request: Request) -> Agent:
     agent: Agent | None = getattr(request.app.state, "agent", None)
     if agent is None:
@@ -82,9 +109,8 @@ def _sse(event: str, data: dict[str, Any]) -> str:
 async def post_message(
     body: ChatIn,
     request: Request,
-    x_pincer_user: str | None = Header(default=None, alias="X-Pincer-User"),
+    user_id: ChatUser,
 ) -> dict[str, Any]:
-    user_id = _require_user(x_pincer_user)
     agent = _get_agent(request)
     try:
         resp = await agent.handle_message(user_id, _CHANNEL, body.text)
@@ -99,9 +125,8 @@ async def post_message(
 async def post_stream(
     body: ChatIn,
     request: Request,
-    x_pincer_user: str | None = Header(default=None, alias="X-Pincer-User"),
+    user_id: ChatUser,
 ) -> StreamingResponse:
-    user_id = _require_user(x_pincer_user)
     agent = _get_agent(request)
 
     async def gen() -> AsyncIterator[str]:
@@ -163,9 +188,8 @@ async def post_stream(
 @router.post("/approval")
 async def post_approval(
     body: ApprovalIn,
-    x_pincer_user: str | None = Header(default=None, alias="X-Pincer-User"),
+    user_id: ChatUser,
 ) -> dict[str, Any]:
-    user_id = _require_user(x_pincer_user)
     if not resolve_web_approval(body.approval_id, user_id, body.approved):
         raise HTTPException(404, "Unknown, expired, or unauthorized approval")
     return {"ok": True}

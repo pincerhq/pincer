@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import secrets
+import contextlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 
 from pincer.api.audit import router as audit_router
+from pincer.api.auth import auth_error_response, authenticate_connection, bearer_value
 from pincer.api.auth import router as auth_router
 from pincer.api.auth_guard import (
     PUBLIC_PATHS,
@@ -33,6 +34,7 @@ from pincer.api.skills import router as skills_router
 from pincer.api.telephony import router as telephony_router
 from pincer.api.voice import router as voice_api_router
 from pincer.config import get_settings_relaxed
+from pincer.services.auth import AuthError, build_auth_service
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -163,8 +165,14 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
-        _dashboard_token = settings.dashboard_token.get_secret_value()
-        _web_chat_token = settings.web_chat_token.get_secret_value()
+        """Default deny: every `/api/*` route needs an identity unless it is
+        listed as public or authenticates itself.
+
+        The Bearer value is an identity's API key or an access JWT. Whoever it
+        resolves to is left on `request.state.identity` for the routes
+        (`pincer.api.auth.CurrentIdentity`).
+        """
+        request.state.identity = None
         path = request.url.path
         if path in PUBLIC_PATHS:
             return await call_next(request)
@@ -175,32 +183,37 @@ def create_app() -> FastAPI:
             return await call_next(request)
         if not path.startswith("/api/"):
             return await call_next(request)  # dashboard static files
-        if not _dashboard_token and not _web_chat_token:
-            # No token configured: allow (dev/tests). `pincer doctor
-            # --production` reports this state CRITICAL, so it cannot ship.
+
+        if settings.auth_disabled:
+            # PINCER_AUTH_DISABLED (dev/tests): nothing is refused. A caller
+            # who does sign in is still recognised, so the account pages work.
+            # `pincer doctor --production` reports this state CRITICAL.
+            if bearer_value(request):
+                with contextlib.suppress(AuthError):
+                    request.state.identity = await authenticate_connection(request, build_auth_service())
             return await call_next(request)
 
-        # T8.2 brute-force guard: an IP that keeps guessing the shared bearer
-        # token is locked out with exponential backoff before the comparison.
+        # T8.2 brute-force guard: an IP that keeps guessing is locked out with
+        # exponential backoff before anything is compared.
         ip = client_ip(request)
         wait = auth_guard.retry_after(ip)
         if wait:
             await audit_auth_failure(ip, path, "locked_out", locked_for=wait)
-            return JSONResponse(
-                status_code=429,
-                content={"error": "Too many failed authentication attempts"},
-                headers={"Retry-After": str(wait)},
-            )
+            return auth_error_response("locked_out", status_code=429, retry_after=wait)
 
-        auth = request.headers.get("Authorization", "")
-        allowed = {f"Bearer {t}" for t in (_dashboard_token, _web_chat_token) if t}
-        if auth and any(secrets.compare_digest(auth, candidate) for candidate in allowed):
-            auth_guard.record_success(ip)
-            return await call_next(request)
+        try:
+            request.state.identity = await authenticate_connection(request, build_auth_service())
+        except AuthError as exc:
+            # An expired or superseded token is not a guess: when a session
+            # token runs out, every request the dashboard has in flight fails
+            # at once, and counting those would lock its own user out.
+            if exc.counts_as_failure:
+                locked_for = auth_guard.record_failure(ip)
+                await audit_auth_failure(ip, path, exc.code, locked_for=locked_for)
+            return auth_error_response(exc.code)
 
-        locked_for = auth_guard.record_failure(ip)
-        await audit_auth_failure(ip, path, "invalid_token", locked_for=locked_for)
-        return JSONResponse(status_code=401, content={"error": "Invalid token"})
+        auth_guard.record_success(ip)
+        return await call_next(request)
 
     # Registered last on purpose. Starlette's add_middleware() inserts at index 0
     # and the stack is built in reverse, so the last-added middleware is the
@@ -242,8 +255,10 @@ def create_app() -> FastAPI:
         app.include_router(voice_router)  # deprecated /voice/* aliases
 
     @app.get("/api/health")
-    async def health() -> dict[str, str]:
-        return {"status": "ok", "version": "0.8.0"}
+    async def health() -> dict[str, object]:
+        # `auth_required` lets the dashboard skip its login form when the
+        # server runs with PINCER_AUTH_DISABLED.
+        return {"status": "ok", "version": "0.8.0", "auth_required": not settings.auth_disabled}
 
     @app.get("/api/status")
     async def status() -> dict[str, object]:

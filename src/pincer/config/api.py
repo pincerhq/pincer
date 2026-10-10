@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr
+from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, field_validator
 
 
 class APISettings(BaseModel):
     # ── Dashboard ─────────────────────────────────────────
-    dashboard_token: SecretStr = Field(default=SecretStr(""), description="Bearer token for API auth")
     dashboard_host: str = Field(default="127.0.0.1", description="API server bind host")
     dashboard_port: int = Field(default=8080, ge=1, le=65535, description="API server port")
     dashboard_url: str = Field(default="", description="Dashboard CORS origin URL")
     dashboard_dist: str = Field(default="", description="Dashboard dist path override (Docker)")
-    web_chat_token: SecretStr = Field(default=SecretStr(""), description="Bearer token for web chat API auth")
     web_chat_url: str = Field(default="", description="Web chat CORS origin URL")
     cors_extra_origins: str = Field(
         default="",
@@ -65,3 +63,12 @@ class APISettings(BaseModel):
         description="Tool approval mode: auto | manual | allowlist",
     )
     skill_sandbox_disabled: bool = Field(default=False, description="Disable skill sandbox")
+
+    @field_validator("jwt_secret")
+    @classmethod
+    def _jwt_secret_is_long_enough(cls, value: SecretStr) -> SecretStr:
+        # Refused at startup rather than on the first request that needs it.
+        secret = value.get_secret_value()
+        if secret and len(secret) < 32:
+            raise ValueError("PINCER_JWT_SECRET must be at least 32 characters")
+        return value

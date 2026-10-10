@@ -325,6 +325,27 @@ class AuthedApp:
         return asyncio.run(main())
 
 
+def seed_identity_with_api_key(db_path: Path, name: str = "alice") -> None:
+    """Give the database at `db_path` one identity that can authenticate.
+
+    For the health checks (`pincer doctor`, the pilot preflight), which only
+    ask whether anybody can sign in. An API key rather than a password: no
+    Argon2, and no JWT secret is involved.
+    """
+    from pincer.db.engine import ensure_schema_current, get_database_url
+    from pincer.services.auth import AuthService
+    from pincer.services.identity import IdentityService
+
+    ensure_schema_current(db_path)
+    url = get_database_url(db_path)
+
+    async def seed() -> None:
+        await IdentityService(url).create_profile(name)
+        await AuthService(url, jwt_secret="unused-" + "x" * 32).generate_api_key(name)
+
+    AuthedApp.run(seed)
+
+
 @pytest.fixture
 def authed_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[AuthedApp]:
     """`create_app()` with real authentication and a seeded identity.

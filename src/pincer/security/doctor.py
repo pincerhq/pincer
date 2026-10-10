@@ -23,6 +23,11 @@ if TYPE_CHECKING:
     from pincer.config import Settings
 
 
+#: The shared API tokens removed in favour of per-identity auth (issue #228).
+#: Named here only so `pincer doctor` can point out a leftover one.
+_REMOVED_TOKEN_VARS = ("PINCER_DASHBOARD_TOKEN", "PINCER_WEB_CHAT_TOKEN")
+
+
 class CheckStatus(StrEnum):
     PASS = "pass"
     WARNING = "warning"
@@ -123,6 +128,7 @@ class SecurityDoctor:
         report.checks.append(self._check_whatsapp_neonize_version())
         report.checks.append(self._check_discord_allowlist(settings))
         report.checks.append(self._check_dashboard_auth_token(settings))
+        report.checks.append(self._check_stale_shared_tokens())
         # Budget (3 checks)
         report.checks.append(self._check_budget_limits(settings))
         report.checks.append(self._check_rate_limits(settings))
@@ -255,42 +261,44 @@ class SecurityDoctor:
     def _check_prod_auth_tokens(self, cfg: Settings | None = None) -> CheckResult:
         """Every HTTP surface must be authenticated in production."""
         settings = self._cfg(cfg)
-        missing: list[str] = []
-        # T8.2: an empty token means allow-all in the API middleware. Both the
-        # dashboard and the web-chat surface must carry their own strong token
-        # in production — a shared or absent one is a full API bypass.
-        for field_name, env in (
-            ("dashboard_token", "PINCER_DASHBOARD_TOKEN"),
-            ("web_chat_token", "PINCER_WEB_CHAT_TOKEN"),
-        ):
-            try:
-                value = getattr(settings, field_name).get_secret_value()
-            except AttributeError:
-                value = ""
-            if not value:
-                missing.append(env)
-            elif len(value) < 16:
-                missing.append(f"{env} (too short, use 32+ chars)")
-        try:
-            if (
-                settings.dashboard_token.get_secret_value()
-                and settings.dashboard_token.get_secret_value() == settings.web_chat_token.get_secret_value()
-            ):
-                missing.append("PINCER_WEB_CHAT_TOKEN (identical to the dashboard token — issue separate ones)")
-        except AttributeError:
-            pass
-        if missing:
+        # `is True`, not truthiness: the API is default-deny, and only the
+        # explicit dev flag opens it.
+        if getattr(settings, "auth_disabled", False) is True:
             return CheckResult(
                 name="prod_auth_tokens",
                 status=CheckStatus.CRITICAL,
-                message=f"API auth token missing or weak: {', '.join(missing)}",
-                fix_hint="Generate one: python -c 'import secrets; print(secrets.token_urlsafe(32))'",
+                message="API authentication is disabled (PINCER_AUTH_DISABLED=true): every /api route is open",
+                fix_hint="Remove PINCER_AUTH_DISABLED from the production environment",
+                category="production",
+            )
+        try:
+            jwt_secret = str(settings.jwt_secret.get_secret_value() or "")
+        except AttributeError:
+            jwt_secret = ""
+        if not jwt_secret:
+            # Without it the secret is a file under data_dir: fine for one
+            # container on a persistent volume, but a redeploy onto a fresh
+            # disk signs everyone out and two replicas reject each other's
+            # sessions.
+            return CheckResult(
+                name="prod_auth_tokens",
+                status=CheckStatus.WARNING,
+                message="PINCER_JWT_SECRET is not set; sessions are signed with a secret generated into the data dir",
+                fix_hint="Generate one: python -c 'import secrets; print(secrets.token_urlsafe(48))'",
+                category="production",
+            )
+        if len(jwt_secret) < 32:
+            return CheckResult(
+                name="prod_auth_tokens",
+                status=CheckStatus.CRITICAL,
+                message="PINCER_JWT_SECRET is too short (use 32+ chars)",
+                fix_hint="Generate one: python -c 'import secrets; print(secrets.token_urlsafe(48))'",
                 category="production",
             )
         return CheckResult(
             name="prod_auth_tokens",
             status=CheckStatus.PASS,
-            message="Dashboard API token set",
+            message="API authentication enabled, JWT secret set",
             category="production",
         )
 
@@ -1262,28 +1270,75 @@ class SecurityDoctor:
         )
 
     def _check_dashboard_auth_token(self, cfg: Settings | None = None) -> CheckResult:
+        """Somebody must be able to sign in to the API and the dashboard.
+
+        There is no shared token any more: access is an identity with a
+        password or an API key (`pincer identity set-password` / `api-key`).
+        """
+        from pincer.services.auth import count_identities_with_credentials
+
         cfg = self._cfg(cfg)
-        token = cfg.dashboard_token.get_secret_value()
-        if token and len(token) >= 16:
-            return CheckResult(
-                "dashboard_auth_token",
-                CheckStatus.PASS,
-                "Dashboard auth token configured (16+ chars)",
-                category="access",
-            )
-        if token:
+        if getattr(cfg, "auth_disabled", False) is True:
             return CheckResult(
                 "dashboard_auth_token",
                 CheckStatus.WARNING,
-                "Dashboard token too short",
-                fix_hint='python -c "import secrets; print(secrets.token_hex(32))"',
+                "API authentication is disabled (PINCER_AUTH_DISABLED=true)",
+                fix_hint="Local development only. Unset PINCER_AUTH_DISABLED anywhere reachable.",
+                category="access",
+            )
+        try:
+            count = count_identities_with_credentials(Path(cfg.db_path))
+        except Exception as e:
+            # SQLAlchemy appends the full statement after the first line.
+            reason = (str(e).splitlines() or [type(e).__name__])[0]
+            return CheckResult(
+                "dashboard_auth_token",
+                CheckStatus.SKIPPED,
+                f"Could not read identity credentials: {reason}",
+                category="access",
+            )
+        if not count:
+            return CheckResult(
+                "dashboard_auth_token",
+                CheckStatus.CRITICAL,
+                "No identity can sign in: nobody has a password or an API key",
+                fix_hint="pincer identity create <name> && pincer identity set-password <name>",
                 category="access",
             )
         return CheckResult(
             "dashboard_auth_token",
-            CheckStatus.CRITICAL,
-            "No dashboard auth token!",
-            fix_hint="Set PINCER_DASHBOARD_TOKEN",
+            CheckStatus.PASS,
+            f"{count} identit{'y' if count == 1 else 'ies'} can sign in to the API",
+            category="access",
+        )
+
+    def _check_stale_shared_tokens(self) -> CheckResult:
+        """The shared API tokens were removed; a leftover one protects nothing.
+
+        `Settings` ignores unknown variables, so these are looked for where
+        they would be set: the process environment and the project `.env`.
+        """
+        from dotenv import dotenv_values
+
+        stale = {name for name in _REMOVED_TOKEN_VARS if os.environ.get(name)}
+        for env_file in (self.config_dir / ".env", self.config_dir.parent / ".env"):
+            try:
+                if env_file.is_file():
+                    stale |= {name for name in _REMOVED_TOKEN_VARS if dotenv_values(env_file).get(name)}
+            except OSError:
+                continue
+        if stale:
+            return CheckResult(
+                "stale_shared_tokens",
+                CheckStatus.WARNING,
+                f"{', '.join(sorted(stale))} set but no longer used: the API authenticates identities now",
+                fix_hint="Remove it; give callers a password or key with `pincer identity set-password` / `api-key`",
+                category="access",
+            )
+        return CheckResult(
+            "stale_shared_tokens",
+            CheckStatus.PASS,
+            "No leftover shared API tokens",
             category="access",
         )
 

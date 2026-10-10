@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import aiosqlite
 import pytest
+from conftest import seed_identity_with_api_key
 from support import SEED_ID_SQL
 
 from pincer.observability.pilot_review import (
@@ -46,8 +47,8 @@ def settings(tmp_path) -> MagicMock:
     cfg.twilio_auth_token.get_secret_value.return_value = "tok"
     cfg.twilio_phone_number = "+4930123456"
     cfg.voice_webhook_base_url = "https://voice.example.com"
-    cfg.dashboard_token.get_secret_value.return_value = "d" * 32
-    cfg.web_chat_token.get_secret_value.return_value = "w" * 32
+    cfg.auth_disabled = False
+    seed_identity_with_api_key(tmp_path / "pincer.db")
     cfg.elevenlabs_api_key.get_secret_value.return_value = "el"
     cfg.elevenlabs_voice_id_de = "voice-de"
     cfg.elevenlabs_voice_id_en = ""
@@ -127,11 +128,19 @@ def test_preflight_flags_a_tunnel_webhook(settings):
     assert "tunnel" in result.message
 
 
-def test_preflight_flags_identical_api_tokens(settings):
-    settings.web_chat_token.get_secret_value.return_value = "d" * 32
+def test_preflight_flags_an_api_nobody_can_sign_in_to(settings, tmp_path):
+    settings.db_path = str(tmp_path / "fresh-install.db")
     result = next(r for r in preflight(settings) if r.step.key == "api_tokens")
     assert result.status is StepStatus.MISSING
-    assert "differ" in result.message
+    assert "pincer identity set-password" in result.message
+    assert not (tmp_path / "fresh-install.db").exists()  # the check must not create it
+
+
+def test_preflight_flags_disabled_api_auth(settings):
+    settings.auth_disabled = True
+    result = next(r for r in preflight(settings) if r.step.key == "api_tokens")
+    assert result.status is StepStatus.MISSING
+    assert "PINCER_AUTH_DISABLED" in result.message
 
 
 def test_preflight_flags_missing_twilio_config(settings):
