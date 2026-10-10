@@ -38,6 +38,18 @@ class APISettings(BaseModel):
         description="Deployment environment: development | staging | production. "
         "'production' drops the localhost CORS origins and hardens auth (Sprint 8, T8.2).",
     )
+    auth_disabled: bool = Field(
+        default=False,
+        description="Serve /api/* without authentication. Local development and tests only: "
+        "`pincer doctor` reports it CRITICAL in production.",
+    )
+    jwt_secret: SecretStr = Field(
+        default=SecretStr(""),
+        description="HS256 secret for dashboard session tokens (min 32 chars). "
+        "Empty = a secret generated once into <data_dir>/jwt_secret.",
+    )
+    jwt_access_ttl_seconds: int = Field(default=1800, ge=60, description="Access token lifetime")
+    jwt_refresh_ttl_seconds: int = Field(default=604800, ge=300, description="Refresh token lifetime")
     auth_max_failures: int = Field(
         default=10,
         ge=1,
