@@ -64,16 +64,16 @@ async def test_outbound_prompt_contains_the_briefing():
         target_number="+4930123456", target_name="Dr. Müller", purpose=PURPOSE, instructions=INSTRUCTIONS
     )
     system = channel._build_voice_system(state, sm)
-    assert "YOUR TASK FOR THIS CALL (binding):" in system
+    assert "REASON AND GOAL OF THIS CALL:" in system
     assert PURPOSE in system
     assert INSTRUCTIONS in system
     assert "You are calling Dr. Müller on behalf of Jane Doe." in system
     assert "FIRST sentence after the greeting" in system
-    # The task sits directly after the persona and before everything else, so
-    # it outranks the conversation rules instead of reading as background.
-    assert system.index("YOUR TASK FOR THIS CALL") < system.index(en_pack.PHASE_INSTRUCTIONS[sm.phase.value])
-    assert system.index(en_pack.VOICE_SYSTEM_PROMPT) < system.index("YOUR TASK FOR THIS CALL")
-    assert system.index("YOUR TASK FOR THIS CALL") < system.index(en_pack.LANGUAGE_POLICY)
+    # The goal sits directly after the persona and before everything else, so
+    # it reads as the point of the call instead of as background.
+    assert system.index("REASON AND GOAL OF THIS CALL") < system.index(en_pack.PHASE_INSTRUCTIONS[sm.phase.value])
+    assert system.index(en_pack.VOICE_SYSTEM_PROMPT) < system.index("REASON AND GOAL OF THIS CALL")
+    assert system.index("REASON AND GOAL OF THIS CALL") < system.index(en_pack.LANGUAGE_POLICY)
 
 
 async def test_briefing_without_name_uses_number_and_default_owner():
@@ -93,21 +93,43 @@ async def test_briefing_is_localised():
         instructions=INSTRUCTIONS,
     )
     system = channel._build_voice_system(state, sm)
-    assert "IHRE AUFGABE FÜR DIESEN ANRUF (verbindlich):" in system
+    assert "ANLASS UND ZIEL DIESES ANRUFS:" in system
     assert "Sie rufen Praxis Müller im Auftrag von Jane Doe an." in system
     assert "Zusätzliche Anweisungen Ihres Nutzers: " + INSTRUCTIONS in system
-    assert "YOUR TASK FOR THIS CALL" not in system
+    assert "REASON AND GOAL OF THIS CALL" not in system
     assert de_pack.CALL_BRIEF.split("{task}")[0] in system
+
+
+@pytest.mark.parametrize(
+    ("language", "allows", "forbidden"),
+    [
+        ("en", "The conversation comes before the script", ("(binding)", "unrelated help", "end politely")),
+        (
+            "de",
+            "Das Gespräch hat Vorrang vor dem Skript",
+            ("(verbindlich)", "themenfremde", "beenden Sie das Gespräch"),
+        ),
+    ],
+    ids=["en", "de"],
+)
+async def test_outbound_brief_allows_topic_change(language, allows, forbidden):
+    """The purpose is the goal of the call, not a fence: a callee who changes
+    the subject gets an answer, not a deflection back to the task."""
+    channel, state, sm = await _channel_and_state(language=language, target_number="+4930123456", purpose=PURPOSE)
+    brief = channel._call_brief(state, language, "sie")
+    assert allows in brief
+    for phrase in forbidden:
+        assert phrase not in brief, phrase
 
 
 async def test_inbound_call_has_no_briefing():
     channel, state, sm = await _channel_and_state(direction=CallDirection.INBOUND, purpose=PURPOSE)
-    assert "YOUR TASK FOR THIS CALL" not in channel._build_voice_system(state, sm)
+    assert "REASON AND GOAL OF THIS CALL" not in channel._build_voice_system(state, sm)
 
 
 async def test_outbound_without_purpose_has_no_briefing():
     channel, state, sm = await _channel_and_state(target_number="+4930123456")
-    assert "YOUR TASK FOR THIS CALL" not in channel._build_voice_system(state, sm)
+    assert "REASON AND GOAL OF THIS CALL" not in channel._build_voice_system(state, sm)
 
 
 async def test_persona_forbids_capability_talk_in_every_pack():

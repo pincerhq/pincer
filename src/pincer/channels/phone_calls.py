@@ -134,12 +134,23 @@ class VoiceChannel(BaseChannel):
             await self._prepare_thread_context(call_sid, state)
         except Exception:
             logger.exception("Thread context preparation failed [%s]", call_sid)
+        reset_session = getattr(self._stream_agent, "reset_voice_session", None)
+        if reset_session is not None:
+            try:
+                await reset_session(self._session_user_id(state))
+            except Exception:
+                logger.exception("Voice session reset failed [%s]", call_sid)
         # The briefing goes into the call's own transcript, so "what was the
         # agent told to do?" is answerable from the record the user can open,
         # not only from the logs of the process that placed the call.
         from pincer.voice.briefing import briefing_from_state, record_briefing
 
         record_briefing(self._transcripts.get(call_sid), briefing_from_state(state))
+
+    @staticmethod
+    def _session_user_id(state: CallState) -> str:
+        """Who a call's LLM session belongs to — reset at call start, used on every turn."""
+        return state.pincer_user_id or state.caller_number
 
     async def _prepare_thread_context(self, call_sid: str, state: CallState) -> None:
         """Sprint 13 §4.3/§7: resolve this call's thread and freeze its prompt
@@ -521,7 +532,7 @@ class VoiceChannel(BaseChannel):
         )
 
     def _call_brief(self, state: CallState, language: str, formality: str) -> str:
-        """The binding task block (kept as a method for callers that want just
+        """The call's reason-and-goal block (kept as a method for callers that want just
         this part; the assembly itself lives in voice/prompt_assembly.py)."""
         from pincer.voice.prompt_assembly import build_call_briefing_block
 
@@ -722,9 +733,11 @@ class VoiceChannel(BaseChannel):
         transcript = self._transcripts[call_sid]
         transcript.log_utterance(Speaker.CALLER, text, state=str(sm.phase))
 
-        # The greeting phases end the moment the callee speaks
+        # The greeting phases end the moment the callee speaks. An outbound
+        # call is a conversation we started, not a caller's request to capture.
         if sm.phase in (CallPhase.GREETING, CallPhase.OUTBOUND_GREETING):
-            sm.transition(CallPhase.INTENT_CAPTURE, "caller_spoke")
+            target = CallPhase.FREEFORM if sm.phase is CallPhase.OUTBOUND_GREETING else CallPhase.INTENT_CAPTURE
+            sm.transition(target, "caller_spoke")
 
         # Barge-in (Sprint 5): the caller talking over us makes the previous
         # turn obsolete, so it is cancelled here — before ANY path below can
@@ -949,7 +962,7 @@ class VoiceChannel(BaseChannel):
         full_text = ""
         end_requested = False  # [END_CALL] seen in the reply
         spoken_text = ""  # what was actually sent to TTS this turn
-        canonical_id = state.pincer_user_id or state.caller_number
+        canonical_id = self._session_user_id(state)
 
         # Only ConversationRelay buffers partial tokens and needs an explicit
         # last=True closer; per-utterance engines (Media Streams, harness)

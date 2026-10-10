@@ -221,7 +221,7 @@ async def make_phone_call(
     source: Internal — which surface asked for the call (dashboard | chat | api | scheduler)
 
     purpose and instructions are the agent's briefing for the call: purpose is
-    the binding task the agent opens the call with, and it is REQUIRED.
+    the reason and goal the agent opens the call with, and it is REQUIRED.
     """
     from pincer.config import get_settings
 

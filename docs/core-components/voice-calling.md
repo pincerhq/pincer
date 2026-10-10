@@ -335,10 +335,12 @@ Calls end the way a human agent ends them, not by timeout:
   thing") cancels the hangup and the conversation continues.
 - The inbound receptionist line keeps its own deterministic endings.
 
-### Call briefing — the task binds the agent
+### Call briefing — the purpose is the goal, not a script
 
 Every outbound call carries a **briefing**: the task the user typed, verbatim.
-It is not optional and not advisory.
+It is not optional — the agent opens the call with it and works towards it —
+but it is not a fence either: the conversation may wander, and the agent
+follows it.
 
 **Validated at the door.** `make_phone_call`, `POST /api/voice/calls`,
 `POST /api/voice/schedule` and the retry scheduler all run the same
@@ -361,21 +363,37 @@ Twilio says the call is `outbound-api`, **the call is terminated** with
 `failure_code=briefing_lost` and the user gets the standard failure report. An
 unbriefed outbound call is never improvised.
 
-**Binding in the prompt.** `voice/prompt_assembly.py` is the single assembly
+**In the prompt.** `voice/prompt_assembly.py` is the single assembly
 function for live-call system prompts — the chat-tool path and the dashboard
 path go through it, and a test asserts both produce byte-identical prompts for
 identical input. The task renders directly **after the persona and before every
 other rule**, as:
 
 ```
-YOUR TASK FOR THIS CALL (binding):
+REASON AND GOAL OF THIS CALL:
 {the user's text, verbatim}
-Rules:
-- You made this call to accomplish exactly this task. State the reason for
-  your call in your FIRST sentence after the greeting.
-- Never describe your general capabilities. Never offer unrelated help.
+How to run the conversation:
+- State the reason for your call in your FIRST sentence after the greeting
+  and work towards the goal.
+- The conversation comes before the script: if the other party brings up
+  something else, engage with it naturally … return to the goal when there
+  is a natural opening.
+- If they clearly do not want to deal with the matter now, accept that,
+  agree on a next step and say goodbye warmly. Never insist.
 - …
 ```
+
+An earlier version rendered this as a *binding* task ("never offer unrelated
+help", "anything not covered → check with the owner"). That fixed calls that
+ignored their purpose, but over-corrected: a callee who changed the subject
+was deflected straight back to the task. Once the callee speaks, an outbound
+call runs in the `FREEFORM` phase, whose instruction is conversation-first;
+inbound calls still go through `INTENT_CAPTURE`. A user who wants a call kept
+strictly on topic says so in the instructions, which render under the brief.
+
+Each call starts with an empty LLM session, so earlier calls to the same
+number don't replay into this one. Continuity across calls comes from the
+thread context block (below), not raw history.
 
 The persona itself also forbids capability talk ("MUST NOT enumerate
 features…"), so even a degraded call does not turn into a feature tour. The

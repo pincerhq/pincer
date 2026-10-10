@@ -30,7 +30,7 @@ def init() -> None:
         env_lines.append(f"PINCER_ANTHROPIC_API_KEY={key}")
         if provider == "anthropic":
             env_lines.append("PINCER_DEFAULT_PROVIDER=anthropic")
-            env_lines.append("PINCER_DEFAULT_MODEL=claude-sonnet-4-5-20250929")
+            env_lines.append("PINCER_DEFAULT_MODEL=claude-haiku-4-5-20251001")
     if provider in ("openai", "both"):
         key = Prompt.ask("OpenAI API key", password=True)
         env_lines.append(f"PINCER_OPENAI_API_KEY={key}")

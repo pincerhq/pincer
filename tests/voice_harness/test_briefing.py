@@ -67,12 +67,16 @@ class BriefingAgent:
     the assertions below fail — which is the point.
     """
 
-    TASK_HEADINGS = ("YOUR TASK FOR THIS CALL (binding):", "IHRE AUFGABE FÜR DIESEN ANRUF (verbindlich):")
+    TASK_HEADINGS = ("REASON AND GOAL OF THIS CALL:", "ANLASS UND ZIEL DIESES ANRUFS:")
 
     def __init__(self, language: str = "en") -> None:
         self.language = language
         self.calls: list[dict[str, Any]] = []
         self.turn = 0
+        self.resets: list[str] = []
+
+    async def reset_voice_session(self, user_id: str, channel: str = "voice") -> None:
+        self.resets.append(user_id)
 
     def _task(self, extra_system: str) -> str:
         for heading in self.TASK_HEADINGS:
@@ -139,12 +143,46 @@ def _clean():
     status_notify._reset_for_tests()
 
 
-async def _start(task: str, language: str = "en"):
+class ConversationAgent(BriefingAgent):
+    """A brain that follows a topic change only when its prompt allows it.
+
+    Turn 1 states the task; turn 2 is the callee's aside, which it engages
+    with if the prompt carries the conversation-first rule and deflects back
+    to the task otherwise (the behaviour this rule replaced); turn 3 returns
+    to the task. Like BriefingAgent, it proves the plumbing, not the LLM.
+    """
+
+    CONVERSATION_RULES = ("The conversation comes before the script", "Das Gespräch hat Vorrang vor dem Skript")
+
+    def __init__(self, language: str = "en") -> None:
+        super().__init__(language)
+        self.replies: list[str] = []
+
+    async def stream_voice_turn(self, **kwargs: Any):
+        self.calls.append(kwargs)
+        self.turn += 1
+        extra = str(kwargs.get("extra_system") or "")
+        task = self._task(extra)
+        if self.turn == 1:
+            reply = f"Hello, I am calling to ask: {task}"
+        elif self.turn == 2:
+            if any(rule in extra for rule in self.CONVERSATION_RULES):
+                reply = "A marathon, congratulations! How did it go?"
+            else:
+                reply = f"I am only calling about one thing: {task}"
+        else:
+            reply = f"Glad to hear it. Coming back to my question for a moment: {task}"
+        self.replies.append(reply)
+        yield StreamChunk(StreamEventType.TEXT, reply)
+        yield StreamChunk(StreamEventType.DONE, reply)
+
+
+async def _start(task: str, language: str = "en", agent: BriefingAgent | None = None, direction=CallDirection.OUTBOUND):
     settings = _settings()
     engine = FakeVoiceEngine(settings)
     channel = VoiceChannel(settings)
     channel.set_engine(engine)
-    agent = BriefingAgent(language)
+    agent = agent or BriefingAgent(language)
     channel.set_stream_agent(agent)
 
     async def _blocking(incoming):  # pragma: no cover — the streaming path is used
@@ -154,7 +192,7 @@ async def _start(task: str, language: str = "en"):
     state = await engine.on_call_start(
         CALL,
         TARGET,
-        CallDirection.OUTBOUND,
+        direction,
         target_number=TARGET,
         target_name="Praxis Müller",
         purpose=task,
@@ -225,6 +263,48 @@ async def test_no_capability_talk(language):
     # The suppression rule is in the prompt too, not only in the brain.
     persona_rule = "DÜRFEN NICHT Ihre Funktionen" if language == "de" else "MUST NOT enumerate features"
     assert persona_rule in str(agent.calls[0]["extra_system"])
+
+
+async def test_callee_topic_change_is_followed_then_the_task_resumes():
+    """The reported failure: the callee raises something else and the agent
+    drags the call straight back. With the goal-not-fence brief it engages on
+    the aside and comes back to the task on the next turn."""
+    channel, engine, agent, _state = await _start(TASK_EN, agent=ConversationAgent())
+
+    await engine.on_speech_input(CALL, "Hello, this is Müller.")
+    await engine.on_speech_input(CALL, "By the way, I ran the Berlin marathon on Sunday.")
+    await engine.on_speech_input(CALL, "It went well, thanks.")
+
+    assert len(agent.replies) == 3
+    assert "marathon" in agent.replies[1].lower()
+    assert TASK_EN not in agent.replies[1], "the aside was deflected back to the task"
+    assert TASK_EN in agent.replies[2]
+    spoken = " ".join(_spoken(engine))
+    assert spoken.index("marathon") < spoken.rindex(TASK_EN)
+
+
+async def test_outbound_conversation_runs_in_freeform():
+    """An outbound call is a conversation we started: once the callee speaks
+    it is FREEFORM, not the inbound "capture the caller's request" phase."""
+    from pincer.voice.state_machine import CallPhase
+
+    channel, engine, _agent, _state = await _start(TASK_EN)
+    await engine.on_speech_input(CALL, "Hello, this is Müller.")
+    assert channel._state_machines[CALL].phase is CallPhase.FREEFORM
+
+
+async def test_inbound_call_still_captures_intent():
+    from pincer.voice.state_machine import CallPhase
+
+    channel, engine, _agent, _state = await _start("", direction=CallDirection.INBOUND)
+    await engine.on_speech_input(CALL, "Hello, I have a question.")
+    assert channel._state_machines[CALL].phase is CallPhase.INTENT_CAPTURE
+
+
+async def test_each_call_starts_with_a_fresh_llm_session():
+    """Repeated calls to one number must not replay the previous calls' turns."""
+    _channel, _engine, agent, _state = await _start(TASK_EN)
+    assert agent.resets == [TARGET]
 
 
 async def test_missing_briefing_is_visible_in_this_harness():
