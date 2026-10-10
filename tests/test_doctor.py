@@ -543,21 +543,23 @@ def _auth_cfg(tmp_path, *, auth_disabled=False):
     return cfg
 
 
-def test_api_sign_in_critical_on_a_fresh_install(tmp_path):
+def test_api_sign_in_warns_on_a_fresh_install(tmp_path):
+    """Nobody can sign in, so the API is closed: safe, hence not CRITICAL —
+    the deploy gate runs before the first identity can be created."""
     cfg = _auth_cfg(tmp_path)
     result = SecurityDoctor()._check_dashboard_auth_token(cfg)
-    assert result.status == CheckStatus.CRITICAL
+    assert result.status == CheckStatus.WARNING
     assert "pincer identity set-password" in result.fix_hint
     assert not cfg.db_path.exists()  # looking must not create the database
 
 
-def test_api_sign_in_critical_when_no_identity_has_credentials(tmp_path):
+def test_api_sign_in_warns_when_no_identity_has_credentials(tmp_path):
     from pincer.db.engine import ensure_schema_current
 
     cfg = _auth_cfg(tmp_path)
     ensure_schema_current(cfg.db_path)
     result = SecurityDoctor()._check_dashboard_auth_token(cfg)
-    assert result.status == CheckStatus.CRITICAL
+    assert result.status == CheckStatus.WARNING
 
 
 def test_api_sign_in_pass_when_an_identity_has_credentials(tmp_path):

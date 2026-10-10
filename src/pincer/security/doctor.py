@@ -1298,9 +1298,13 @@ class SecurityDoctor:
                 category="access",
             )
         if not count:
+            # A warning, not CRITICAL: with nobody able to sign in the API is
+            # closed, which is safe. It is also what the deploy gate sees —
+            # `scripts/deploy.sh` runs the doctor in a container without the
+            # data volume, before the first identity can exist.
             return CheckResult(
                 "dashboard_auth_token",
-                CheckStatus.CRITICAL,
+                CheckStatus.WARNING,
                 "No identity can sign in: nobody has a password or an API key",
                 fix_hint="pincer identity create <name> && pincer identity set-password <name>",
                 category="access",
