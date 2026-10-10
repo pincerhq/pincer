@@ -5,7 +5,8 @@ import sqlalchemy as sa
 from sqlalchemy import Column, ForeignKey, Index, Integer, Text
 from sqlmodel import Field, SQLModel
 
-from pincer.db.types import IsoText
+from pincer.db.ids import new_id
+from pincer.db.types import IsoText, Real, Uuid7
 
 
 class IdentityProfile(SQLModel, table=True):
@@ -46,7 +47,9 @@ class IdentityCredential(SQLModel, table=True):
 
     Only hashes are kept. `api_key_prefix` and `api_key_last4` are the few
     characters of the key shown in its masked form; `token_version` is bumped
-    on every password change, which invalidates the JWTs issued before it.
+    on every password change, which invalidates the JWTs issued before it. A
+    new row starts it at a random value, not 0, so a token that outlived a
+    deleted row does not match the row that replaces it.
     """
 
     __tablename__ = "pincer_identity_credentials"
@@ -66,6 +69,40 @@ class IdentityCredential(SQLModel, table=True):
     api_key_last4: str | None = Field(default=None, sa_column=Column(Text()))
     api_key_created_at: str | None = Field(default=None, sa_column=Column(IsoText()))
     token_version: int = Field(default=0, sa_column=Column(Integer(), nullable=False, server_default=sa.text("0")))
+    created_at: str | None = Field(
+        default=None, sa_column=Column(IsoText(), server_default=sa.text("CURRENT_TIMESTAMP"))
+    )
+
+
+class AuthSession(SQLModel, table=True):
+    """One signed-in dashboard session: what makes a refresh token single-use
+    and a logout real.
+
+    Access and refresh tokens carry this row's id (`sid`). The row remembers
+    the id of the one refresh token that is currently good; refreshing swaps
+    it, so a copy of an earlier refresh token is worthless — and presenting
+    one ends the session. Deleting the row signs the session out at once.
+
+    `prev_refresh_jti` stays good for a few seconds after a rotation
+    (`rotated_at`): two browser tabs whose access tokens expire together both
+    refresh with the same token, and the slower one is not an attacker.
+    """
+
+    __tablename__ = "pincer_auth_sessions"
+    __table_args__ = (Index("idx_auth_sessions_user", "pincer_user_id"),)
+
+    id: str = Field(default=None, sa_column=Column(Uuid7(), primary_key=True, default=new_id))
+    pincer_user_id: str = Field(
+        sa_column=Column(
+            Text(),
+            ForeignKey("pincer_identity_credentials.pincer_user_id", ondelete="CASCADE"),
+            nullable=False,
+        )
+    )
+    refresh_jti: str = Field(sa_column=Column(Text(), nullable=False))
+    prev_refresh_jti: str | None = Field(default=None, sa_column=Column(Text()))
+    rotated_at: float | None = Field(default=None, sa_column=Column(Real()))
+    expires_at: float = Field(sa_column=Column(Real(), nullable=False))
     created_at: str | None = Field(
         default=None, sa_column=Column(IsoText(), server_default=sa.text("CURRENT_TIMESTAMP"))
     )

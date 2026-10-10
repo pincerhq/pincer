@@ -371,7 +371,7 @@ async def _authorize_listener(websocket: WebSocket, call_sid: str) -> str | None
     audit the session under, or None after the upgrade has been denied."""
     from pincer.api.auth import authenticate_connection
     from pincer.api.auth_guard import audit_auth_failure, client_ip
-    from pincer.services.auth import AuthError, build_auth_service
+    from pincer.services.auth import AuthError, auth_service_for
 
     if get_settings_relaxed().auth_disabled:
         # Open, exactly like the HTTP middleware
@@ -389,7 +389,7 @@ async def _authorize_listener(websocket: WebSocket, call_sid: str) -> str | None
             await _deny_ws(websocket, 429, "Too many failed authentication attempts")
             return None
 
-    auth = build_auth_service()
+    auth = auth_service_for(websocket)
     ticket = str(websocket.query_params.get("token", "") or "")
     try:
         if ticket:

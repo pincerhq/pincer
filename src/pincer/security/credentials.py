@@ -25,6 +25,7 @@ import hashlib
 import logging
 import os
 import secrets
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -81,6 +82,10 @@ class TokenClaims:
     exp: int
     #: The call a listen-in ticket is bound to (`typ == "ws"` only).
     call: str | None = None
+    #: The server-side session an access or refresh token belongs to.
+    sid: str | None = None
+    #: This token's own id; a session remembers its current refresh token's.
+    jti: str | None = None
 
 
 # ── passwords ────────────────────────────────────────────────────────
@@ -168,6 +173,10 @@ def mask_api_key(prefix: str, last4: str) -> str:
 # ── session tokens ───────────────────────────────────────────────────
 
 
+def new_token_id() -> str:
+    return secrets.token_urlsafe(16)
+
+
 def encode_token(
     secret: str,
     *,
@@ -176,6 +185,8 @@ def encode_token(
     ver: int,
     ttl_seconds: int,
     call: str | None = None,
+    sid: str | None = None,
+    jti: str | None = None,
     now: float | None = None,
 ) -> str:
     issued = int(time.time() if now is None else now)
@@ -188,10 +199,12 @@ def encode_token(
         "iss": JWT_ISSUER,
         "aud": JWT_AUDIENCE,
         # Two tokens minted in the same second would otherwise be identical.
-        "jti": secrets.token_urlsafe(8),
+        "jti": jti or new_token_id(),
     }
     if call is not None:
         payload["call"] = call
+    if sid is not None:
+        payload["sid"] = sid
     return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
 
 
@@ -220,9 +233,10 @@ def decode_token(secret: str, token: str, *, typ: TokenType) -> TokenClaims:
         raise TokenInvalidError("invalid token")
     if not isinstance(ver, int) or isinstance(ver, bool):
         raise TokenInvalidError("invalid token")
-    if call is not None and not isinstance(call, str):
+    sid, jti = payload.get("sid"), payload.get("jti")
+    if any(value is not None and not isinstance(value, str) for value in (call, sid, jti)):
         raise TokenInvalidError("invalid token")
-    return TokenClaims(sub=sub, typ=typ, ver=ver, exp=int(payload["exp"]), call=call)
+    return TokenClaims(sub=sub, typ=typ, ver=ver, exp=int(payload["exp"]), call=call, sid=sid, jti=jti)
 
 
 def load_or_create_jwt_secret(configured: str, data_dir: Path) -> str:
@@ -239,22 +253,46 @@ def load_or_create_jwt_secret(configured: str, data_dir: Path) -> str:
         return configured
 
     path = data_dir / JWT_SECRET_FILENAME
-    with contextlib.suppress(FileNotFoundError):
-        stored = path.read_text().strip()
-        if len(stored) >= MIN_JWT_SECRET_LENGTH:
-            return stored
-        logger.warning("JWT secret file %s is too short; regenerating", path)
-        path.unlink()
+    stored = _read_secret(path)
+    if stored:
+        return stored
 
     secret = secrets.token_urlsafe(48)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Written in full to a private temp file first, then linked into place.
+    # The link either creates the name with the whole secret behind it or
+    # fails because another process got there first — so nobody can ever read
+    # a secret file that is still empty, and a second process starting at the
+    # same moment adopts the first one's secret instead of overwriting it.
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{JWT_SECRET_FILENAME}.")
     try:
-        # O_EXCL: a second process starting at the same moment must not
-        # overwrite the secret the first one is already signing with.
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        return path.read_text().strip()
-    with os.fdopen(fd, "w") as handle:
-        handle.write(secret)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(secret)
+        os.chmod(tmp_name, 0o600)
+        if path.exists():
+            # Only reached when the existing file is unusable (see _read_secret).
+            os.replace(tmp_name, path)
+            logger.warning("JWT secret file %s was too short; regenerated", path)
+            return secret
+        try:
+            os.link(tmp_name, path)
+        except FileExistsError:
+            winner = _read_secret(path)
+            if winner:
+                return winner
+            os.replace(tmp_name, path)
+            return secret
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp_name)
     logger.info("Generated a new JWT signing secret at %s", path)
     return secret
+
+
+def _read_secret(path: Path) -> str | None:
+    """The stored secret, or None when there is no usable one."""
+    try:
+        stored = path.read_text().strip()
+    except FileNotFoundError:
+        return None
+    return stored if len(stored) >= MIN_JWT_SECRET_LENGTH else None

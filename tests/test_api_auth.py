@@ -193,7 +193,7 @@ def test_login_is_throttled_per_account_across_ips(tight_budget: None, authed_ap
         resp = _login(authed_app, "alice", "guess", headers={"X-Forwarded-For": f"10.0.0.{attempt}"})
         assert resp.status_code == 401
 
-    locked = _login(authed_app, "Alice ", "guess", headers={"X-Forwarded-For": "10.0.9.9"})
+    locked = _login(authed_app, "alice", "guess", headers={"X-Forwarded-For": "10.0.9.9"})
     assert locked.status_code == 429
     assert locked.json()["error"] == "locked_out"
     assert int(locked.headers["retry-after"]) > 0
@@ -346,3 +346,196 @@ def test_listen_in_ticket_is_bound_to_its_call(authed_app: AuthedApp) -> None:
             await auth.authenticate_ws_ticket(ticket, "CA1")
 
     authed_app.run(check)
+
+
+# ── sessions: single-use refresh tokens, logout, revocation ──────────
+
+LOGOUT = "/api/auth/logout"
+STATUS = "/api/status"
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _refresh(app: AuthedApp, token: str):
+    return app.client.post(REFRESH, json={"refresh_token": token})
+
+
+def test_a_refresh_token_is_spent_by_using_it(authed_app: AuthedApp, monkeypatch) -> None:
+    from pincer.services import auth as auth_service
+
+    monkeypatch.setattr(auth_service, "REFRESH_REUSE_GRACE_SECONDS", -1)  # no grace: strict single use
+
+    first = _refresh(authed_app, authed_app.refresh_token)
+    assert first.status_code == 200
+    rotated = first.json()
+
+    # The copy someone kept is refused — and presenting it ends the session,
+    # so the pair the legitimate client just received dies with it.
+    replay = _refresh(authed_app, authed_app.refresh_token)
+    assert replay.status_code == 401
+    assert replay.json()["error"] == "token_expired"
+    assert _refresh(authed_app, rotated["refresh_token"]).status_code == 401
+    assert authed_app.client.get(STATUS, headers=_bearer(rotated["access_token"])).status_code == 401
+    assert authed_app.client.get(STATUS, headers=authed_app.jwt_headers).status_code == 401
+    # Signing in again is all it takes to recover.
+    assert _login(authed_app, "alice", authed_app.password).status_code == 200
+
+
+def test_two_tabs_refreshing_at_once_both_succeed(authed_app: AuthedApp) -> None:
+    """Both tabs hold the same refresh token when the access token expires.
+    The slower one arrives just after the rotation and must not be treated as
+    a thief."""
+    tab_a = _refresh(authed_app, authed_app.refresh_token)
+    tab_b = _refresh(authed_app, authed_app.refresh_token)
+    assert (tab_a.status_code, tab_b.status_code) == (200, 200)
+    # The last pair written is the one the shared storage ends up holding.
+    assert _refresh(authed_app, tab_b.json()["refresh_token"]).status_code == 200
+
+
+def test_a_chain_of_refreshes_keeps_the_session_alive(authed_app: AuthedApp) -> None:
+    token = authed_app.refresh_token
+    for _ in range(4):
+        resp = _refresh(authed_app, token)
+        assert resp.status_code == 200
+        token = resp.json()["refresh_token"]
+        assert authed_app.client.get(STATUS, headers=_bearer(resp.json()["access_token"])).status_code == 200
+
+
+def test_logout_ends_the_session_on_the_server(authed_app: AuthedApp) -> None:
+    other = _login(authed_app, "alice", authed_app.password).json()  # a second browser
+
+    assert authed_app.client.post(LOGOUT, headers=authed_app.jwt_headers).status_code == 204
+
+    # A copy of either token is useless after logout, not merely forgotten by the client.
+    dead = authed_app.client.get(STATUS, headers=authed_app.jwt_headers)
+    assert dead.status_code == 401
+    assert dead.json()["error"] == "token_expired"
+    assert _refresh(authed_app, authed_app.refresh_token).status_code == 401
+    # The other browser and the API key are untouched.
+    assert authed_app.client.get(STATUS, headers=_bearer(other["access_token"])).status_code == 200
+    assert _refresh(authed_app, other["refresh_token"]).status_code == 200
+    assert authed_app.client.get(STATUS, headers=authed_app.api_key_headers).status_code == 200
+
+
+def test_logout_needs_a_caller_and_is_harmless_for_an_api_key(authed_app: AuthedApp) -> None:
+    assert authed_app.client.post(LOGOUT).status_code == 401
+    assert authed_app.client.post(LOGOUT, headers=authed_app.api_key_headers).status_code == 204
+    assert authed_app.client.get(STATUS, headers=authed_app.api_key_headers).status_code == 200
+    assert authed_app.client.get(STATUS, headers=authed_app.jwt_headers).status_code == 200
+
+
+def test_a_token_without_a_session_is_not_accepted(authed_app: AuthedApp) -> None:
+    """Correctly signed and at the right version, but no server-side session."""
+
+    async def version() -> int:
+        async with session_scope(authed_app.db_url) as session:
+            return (await IdentityCredentialRepository(session).get("alice")).token_version
+
+    ver = authed_app.run(version)
+    for sid in (None, "0198c1b2-0000-7000-8000-000000000000", "not-a-uuid"):
+        token = credentials.encode_token("j" * 48, sub="alice", typ="access", ver=ver, ttl_seconds=60, sid=sid)
+        resp = authed_app.client.get(STATUS, headers=_bearer(token))
+        assert resp.status_code == 401, sid
+        assert resp.json()["error"] == "token_expired"
+
+
+def test_revoked_then_recreated_credentials_do_not_revive_old_tokens(authed_app: AuthedApp) -> None:
+    """Revocation is a version comparison. Credentials made again under the
+    same id must not start at the version the old tokens carry."""
+
+    async def revoke_and_recreate() -> None:
+        assert await authed_app.auth.revoke("alice")
+        assert not await authed_app.auth.revoke("alice")
+        await authed_app.auth.set_password("alice", "a completely new password")
+
+    authed_app.run(revoke_and_recreate)
+
+    assert authed_app.client.get(STATUS, headers=authed_app.jwt_headers).status_code == 401
+    assert _refresh(authed_app, authed_app.refresh_token).status_code == 401
+    assert authed_app.client.get(STATUS, headers=authed_app.api_key_headers).status_code == 401
+    assert _login(authed_app, "alice", authed_app.password).status_code == 401
+    assert _login(authed_app, "alice", "a completely new password").status_code == 200
+
+
+def test_a_password_set_from_the_cli_ends_every_session(authed_app: AuthedApp) -> None:
+    from pincer.repositories.identity import AuthSessionRepository
+
+    _login(authed_app, "alice", authed_app.password)
+    authed_app.run(lambda: authed_app.auth.set_password("alice", "a brand new password"))
+
+    async def sessions() -> int:
+        async with session_scope(authed_app.db_url) as session:
+            return len(await AuthSessionRepository(session).list())
+
+    assert authed_app.run(sessions) == 0
+
+
+# ── one account, one budget ──────────────────────────────────────────
+
+
+def test_name_and_email_share_one_failure_budget(tight_budget: None, authed_app: AuthedApp) -> None:
+    """Otherwise every account has as many budgets as it has identifiers."""
+    for attempt, identifier in enumerate(["alice", "alice@example.com", "ALICE@example.com", "alice"]):
+        resp = _login(authed_app, identifier, "guess", headers={"X-Forwarded-For": f"10.2.0.{attempt}"})
+        assert resp.status_code == 401
+    for identifier in ("alice", "alice@example.com"):
+        locked = _login(authed_app, identifier, authed_app.password, headers={"X-Forwarded-For": "10.2.9.9"})
+        assert locked.status_code == 429, identifier
+
+
+def test_login_failures_also_throttle_the_password_change(tight_budget: None, authed_app: AuthedApp) -> None:
+    for attempt in range(4):
+        _login(authed_app, "alice@example.com", "guess", headers={"X-Forwarded-For": f"10.3.0.{attempt}"})
+    resp = authed_app.client.put(
+        "/api/identity/me/password",
+        json={"current_password": "guess", "new_password": "a brand new password"},
+        headers=authed_app.jwt_headers,
+    )
+    assert resp.status_code == 429
+
+
+def test_an_unknown_name_is_throttled_like_a_real_one(tight_budget: None, authed_app: AuthedApp) -> None:
+    """The lockout must not say which names exist."""
+    for attempt in range(4):
+        resp = _login(authed_app, "Ghost", "guess", headers={"X-Forwarded-For": f"10.4.0.{attempt}"})
+        assert resp.status_code == 401
+    assert _login(authed_app, " ghost", "guess", headers={"X-Forwarded-For": "10.4.9.9"}).status_code == 429
+
+
+def test_the_account_lockout_is_one_flat_window(tight_budget: None, authed_app: AuthedApp) -> None:
+    """Anyone can spend someone else's budget, so one more wrong guess after
+    a lockout must not double it towards an hour."""
+    guard = authed_app.client.app.state.login_guard
+    assert guard.escalate is False
+    for attempt in range(4):
+        _login(authed_app, "alice", "guess", headers={"X-Forwarded-For": f"10.5.0.{attempt}"})
+    first = int(_login(authed_app, "alice", "guess", headers={"X-Forwarded-For": "10.5.9.9"}).headers["retry-after"])
+    assert first <= 61
+
+    # The window passes; the account has a full budget again.
+    for attempts in guard._ips.values():
+        attempts.locked_until = 0.001
+    for attempt in range(3):
+        resp = _login(authed_app, "alice", "guess", headers={"X-Forwarded-For": f"10.6.0.{attempt}"})
+        assert resp.status_code == 401
+    assert _login(authed_app, "alice", authed_app.password, headers={"X-Forwarded-For": "10.6.9.9"}).status_code == 200
+
+
+def test_the_auth_service_is_built_once_per_app(authed_app: AuthedApp, monkeypatch) -> None:
+    from pincer.services import auth as auth_service
+
+    built = 0
+    real = auth_service.build_auth_service
+
+    def counting():
+        nonlocal built
+        built += 1
+        return real()
+
+    monkeypatch.setattr(auth_service, "build_auth_service", counting)
+    for _ in range(3):
+        assert authed_app.client.get(STATUS, headers=authed_app.jwt_headers).status_code == 200
+        assert authed_app.client.get("/api/identity/me/api-key", headers=authed_app.jwt_headers).status_code == 200
+    assert built == 1

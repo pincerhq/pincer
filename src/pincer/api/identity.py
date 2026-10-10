@@ -12,7 +12,13 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, SecretStr, field_serializer
 
 from pincer.api.auth import CurrentIdentity, InteractiveIdentity, TokenPairOut, guards
-from pincer.services.auth import ApiKeyExistsError, AuthServiceDep, InvalidCredentialsError, UnknownIdentityError
+from pincer.services.auth import (
+    ApiKeyExistsError,
+    AuthServiceDep,
+    InvalidCredentialsError,
+    UnknownIdentityError,
+    account_key,
+)
 from pincer.services.identity import IdentityServiceDep
 
 router = APIRouter(prefix="/api/identity", tags=["identity"])
@@ -82,7 +88,7 @@ async def change_my_password(
     # A stolen session must not become a free oracle for the password it
     # does not know: wrong guesses spend the account's login budget.
     _, account_guard = guards(request)
-    account = identity.pincer_user_id.lower()
+    account = account_key(identity.pincer_user_id)
     wait = account_guard.retry_after(account)
     if wait:
         raise HTTPException(

@@ -164,3 +164,58 @@ def test_an_identity_made_by_hand_has_no_channel(tmp_path: Path) -> None:
             await dispose_engines()
 
     assert asyncio.run(channels()) == []
+
+
+def test_create_refuses_an_email_that_already_signs_someone_in() -> None:
+    """Two identities sharing an email could neither of them sign in with it."""
+    assert _run("create", "tamias", "--email", "Tamias@Example.com").exit_code == 0
+    clash = _run("create", "other", "--email", "tamias@example.com")
+    assert clash.exit_code == 1
+    assert "already belongs to 'tamias'" in clash.output
+    assert "other" not in _run("list").output
+
+
+def test_set_password_warns_when_the_email_cannot_sign_in(tmp_path: Path) -> None:
+    import asyncio
+
+    _run("create", "tamias", "--email", "shared@example.com")
+
+    async def add_duplicate() -> None:
+        try:
+            # e.g. seeded from the identity map, which the CLI check never sees
+            await IdentityService(get_database_url(tmp_path / "pincer.db")).create_profile(
+                "other", email="SHARED@example.com"
+            )
+        finally:
+            await dispose_engines()
+
+    asyncio.run(add_duplicate())
+
+    result = _run("set-password", "tamias", "correct horse battery")
+    assert result.exit_code == 0
+    assert "cannot be used to sign in" in result.output
+    assert "Sign in as 'tamias'" in result.output
+
+
+def test_revoke_removes_password_key_and_sessions() -> None:
+    import asyncio
+
+    from pincer.services.auth import InvalidCredentialsError
+
+    _run("create", "tamias")
+    _run("set-password", "tamias", "correct horse battery")
+    _run("api-key", "tamias")
+
+    revoked = _run("revoke", "tamias")
+    assert revoked.exit_code == 0, revoked.output
+    assert "Revoked API access for 'tamias'" in revoked.output
+
+    with pytest.raises(InvalidCredentialsError):
+        asyncio.run(_login("tamias", "correct horse battery"))
+    listed = _run("list").output
+    assert "tamias" in listed  # the identity itself stays
+    assert "pnc_" not in listed
+
+    again = _run("revoke", "tamias")
+    assert again.exit_code == 1
+    assert "no password or API key" in again.output

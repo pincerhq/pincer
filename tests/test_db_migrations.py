@@ -25,6 +25,7 @@ EXPECTED_TABLES = {
     "pincer_identity_profiles",
     "pincer_channel_identities",
     "pincer_identity_credentials",
+    "pincer_auth_sessions",
     "pincer_audit_logs",
     "pincer_schedules",
     "pincer_event_triggers",
@@ -1683,5 +1684,30 @@ def test_0021_round_trips(migration_url, tmp_path):
         assert "pincer_identity_credentials" not in sa.inspect(engine_).get_table_names()
         command.upgrade(cfg, "head")
         assert "pincer_identity_credentials" in sa.inspect(engine_).get_table_names()
+    finally:
+        engine_.dispose()
+
+
+# ── 0022: auth sessions ────────────────────────────────────────────────
+
+
+def test_0022_auth_sessions_belong_to_credentials_and_round_trip(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "head")
+    engine_ = sa.create_engine(migration_url)
+    try:
+        inspector = sa.inspect(engine_)
+        foreign_keys = inspector.get_foreign_keys("pincer_auth_sessions")
+        assert [(fk["referred_table"], fk["options"].get("ondelete")) for fk in foreign_keys] == [
+            ("pincer_identity_credentials", "CASCADE")
+        ]
+        assert "idx_auth_sessions_user" in {index["name"] for index in inspector.get_indexes("pincer_auth_sessions")}
+
+        command.downgrade(cfg, "0021")
+        tables = sa.inspect(engine_).get_table_names()
+        assert "pincer_auth_sessions" not in tables
+        assert "pincer_identity_credentials" in tables
+        command.upgrade(cfg, "head")
+        assert "pincer_auth_sessions" in sa.inspect(engine_).get_table_names()
     finally:
         engine_.dispose()

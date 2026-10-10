@@ -15,16 +15,24 @@ replaced.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends
+from starlette.requests import HTTPConnection  # noqa: TC002 - FastAPI resolves the dependency's annotation
 
 from pincer.db.engine import get_database_url
+from pincer.db.ids import new_id
 from pincer.db.session import session_scope
-from pincer.repositories.identity import IdentityCredentialRepository, IdentityProfileRepository
+from pincer.models.identity import AuthSession
+from pincer.repositories.identity import (
+    AuthSessionRepository,
+    IdentityCredentialRepository,
+    IdentityProfileRepository,
+)
 from pincer.security import credentials as creds
 from pincer.services.base import DatabaseService
 
@@ -37,6 +45,11 @@ logger = logging.getLogger(__name__)
 
 #: A listen-in ticket only has to survive the WebSocket handshake.
 WS_TICKET_TTL_SECONDS = 60
+
+#: How long the refresh token a rotation just replaced is still honoured.
+#: Two tabs whose access tokens expire together both refresh with the same
+#: token; the slower one is not a thief.
+REFRESH_REUSE_GRACE_SECONDS = 30
 
 AuthMethod = Literal["jwt", "api_key"]
 
@@ -86,6 +99,8 @@ class AuthIdentity:
 
     pincer_user_id: str
     method: AuthMethod
+    #: The signed-in session behind an access token; None for an API key.
+    session_id: str | None = None
 
     @property
     def interactive(self) -> bool:
@@ -111,6 +126,11 @@ class ApiKeyInfo:
 class CredentialSummary:
     has_password: bool
     api_key: ApiKeyInfo | None
+
+
+def account_key(pincer_user_id: str) -> str:
+    """The brute-force budget of one identity (see `AuthService.login_account`)."""
+    return f"id:{pincer_user_id}"
 
 
 def _now() -> str:
@@ -142,33 +162,70 @@ class AuthService(DatabaseService):
 
     # ── sessions ─────────────────────────────────────────────────────
 
-    def _pair(self, pincer_user_id: str, token_version: int) -> TokenPair:
-        def mint(typ: creds.TokenType, ttl: int) -> str:
-            return creds.encode_token(self._secret, sub=pincer_user_id, typ=typ, ver=token_version, ttl_seconds=ttl)
+    def _pair(self, pincer_user_id: str, token_version: int, session_id: str, refresh_jti: str) -> TokenPair:
+        def mint(typ: creds.TokenType, ttl: int, jti: str | None = None) -> str:
+            return creds.encode_token(
+                self._secret, sub=pincer_user_id, typ=typ, ver=token_version, ttl_seconds=ttl, sid=session_id, jti=jti
+            )
 
         return TokenPair(
             pincer_user_id=pincer_user_id,
             access_token=mint("access", self._access_ttl),
-            refresh_token=mint("refresh", self._refresh_ttl),
+            refresh_token=mint("refresh", self._refresh_ttl, refresh_jti),
             expires_in=self._access_ttl,
         )
+
+    async def _start_session(self, pincer_user_id: str, token_version: int) -> TokenPair:
+        """Open a server-side session and mint its first token pair."""
+        session_id, refresh_jti, now = new_id(), creds.new_token_id(), time.time()
+        async with session_scope(self._url) as session:
+            sessions = AuthSessionRepository(session)
+            await sessions.delete_expired(pincer_user_id, now=now)
+            await sessions.add(
+                AuthSession(
+                    id=session_id,
+                    pincer_user_id=pincer_user_id,
+                    refresh_jti=refresh_jti,
+                    expires_at=now + self._refresh_ttl,
+                ),
+                refresh=False,
+            )
+        return self._pair(pincer_user_id, token_version, session_id, refresh_jti)
 
     async def _credential(self, pincer_user_id: str) -> IdentityCredential | None:
         async with session_scope(self._url) as session:
             return await IdentityCredentialRepository(session).get(pincer_user_id)
 
-    async def _credential_for_login(self, identifier: str) -> IdentityCredential | None:
-        """The credentials `identifier` names: an exact identity id first, else
+    @staticmethod
+    async def _resolve(session: Any, identifier: str) -> str | None:
+        """The identity `identifier` names: an exact identity id first, else
         an email. An email several identities share names nobody."""
+        profiles = IdentityProfileRepository(session)
+        profile = await profiles.get(identifier)
+        if profile is None and "@" in identifier:
+            matches = await profiles.find_by_email_ci(identifier)
+            profile = matches[0] if len(matches) == 1 else None
+        return None if profile is None else profile.pincer_user_id
+
+    async def login_account(self, identifier: str) -> str:
+        """The key one account's login failures are counted under.
+
+        The identity the identifier resolves to, so a name and an email that
+        mean the same person share one budget. An identifier that names
+        nobody is its own key — and is throttled exactly like a real one, so
+        the lockout does not say which names exist.
+        """
+        identifier = identifier.strip()
         async with session_scope(self._url) as session:
-            profiles = IdentityProfileRepository(session)
-            profile = await profiles.get(identifier)
-            if profile is None and "@" in identifier:
-                matches = await profiles.find_by_email_ci(identifier)
-                profile = matches[0] if len(matches) == 1 else None
-            if profile is None:
+            resolved = await self._resolve(session, identifier)
+        return account_key(resolved) if resolved else f"unknown:{identifier.lower()}"
+
+    async def _credential_for_login(self, identifier: str) -> IdentityCredential | None:
+        async with session_scope(self._url) as session:
+            resolved = await self._resolve(session, identifier)
+            if resolved is None:
                 return None
-            return await IdentityCredentialRepository(session).get(profile.pincer_user_id)
+            return await IdentityCredentialRepository(session).get(resolved)
 
     async def login(self, identifier: str, password: str) -> TokenPair:
         """Exchange a name or email and a password for a token pair.
@@ -193,7 +250,7 @@ class AuthService(DatabaseService):
             upgraded = await creds.hash_password(password)
             async with session_scope(self._url) as session:
                 await IdentityCredentialRepository(session).replace_password_hash(row.pincer_user_id, upgraded)
-        return self._pair(row.pincer_user_id, row.token_version)
+        return await self._start_session(row.pincer_user_id, row.token_version)
 
     async def _current(self, claims: creds.TokenClaims) -> IdentityCredential:
         """The credentials a token was issued under, if it is still current."""
@@ -210,9 +267,45 @@ class AuthService(DatabaseService):
         except creds.TokenError as exc:
             raise InvalidTokenError from exc
 
+    async def _live_session(self, sessions: AuthSessionRepository, claims: creds.TokenClaims) -> AuthSession:
+        """The session a token belongs to, if it has not been signed out."""
+        row = await sessions.get(claims.sid) if claims.sid else None
+        if row is None or row.pincer_user_id != claims.sub or row.expires_at < time.time():
+            raise TokenStaleError
+        return row
+
     async def refresh(self, refresh_token: str) -> TokenPair:
-        row = await self._current(self._decode(refresh_token, "refresh"))
-        return self._pair(row.pincer_user_id, row.token_version)
+        """Exchange a refresh token for a new pair. The token is spent: only
+        the one in the returned pair refreshes this session from now on.
+
+        A refresh token that was already replaced is either a copy someone
+        kept or a race the grace window did not cover. Either way the session
+        is ended, so whoever holds the stolen copy is cut off with it.
+        """
+        claims = self._decode(refresh_token, "refresh")
+        credential = await self._current(claims)
+        now, new_jti = time.time(), creds.new_token_id()
+        reused = False
+        async with session_scope(self._url) as session:
+            sessions = AuthSessionRepository(session)
+            row = await self._live_session(sessions, claims)
+            rotation: dict[str, Any] = {"refresh_jti": new_jti, "expires_at": now + self._refresh_ttl}
+            if claims.jti == row.refresh_jti:
+                rotation |= {"prev_refresh_jti": row.refresh_jti, "rotated_at": now}
+            elif not (
+                claims.jti == row.prev_refresh_jti
+                and row.rotated_at is not None
+                and now - row.rotated_at <= REFRESH_REUSE_GRACE_SECONDS
+            ):
+                reused = True
+            if reused:
+                await sessions.delete_by_id(row.id)
+            else:
+                await sessions.rotate(row.id, rotation)
+        if reused:
+            logger.warning("Refresh token reuse for %s: session %s ended", claims.sub, claims.sid)
+            raise TokenStaleError
+        return self._pair(credential.pincer_user_id, credential.token_version, claims.sid or "", new_jti)
 
     async def authenticate_bearer(self, value: str) -> AuthIdentity:
         """Resolve a Bearer value — an API key or an access token — to its identity."""
@@ -224,8 +317,21 @@ class AuthService(DatabaseService):
             if row is None:
                 raise InvalidTokenError
             return AuthIdentity(row.pincer_user_id, "api_key")
-        row = await self._current(self._decode(value, "access"))
-        return AuthIdentity(row.pincer_user_id, "jwt")
+        claims = self._decode(value, "access")
+        async with session_scope(self._url) as session:
+            credential = await IdentityCredentialRepository(session).get(claims.sub)
+            if credential is None or credential.token_version != claims.ver:
+                raise TokenStaleError
+            live = await self._live_session(AuthSessionRepository(session), claims)
+        return AuthIdentity(credential.pincer_user_id, "jwt", session_id=live.id)
+
+    async def logout(self, identity: AuthIdentity) -> None:
+        """End the session this identity is signed in with. Its access and
+        refresh tokens stop working at once; other sessions are untouched."""
+        if identity.session_id is None:
+            return
+        async with session_scope(self._url) as session:
+            await AuthSessionRepository(session).delete_by_id(identity.session_id)
 
     # ── passwords ────────────────────────────────────────────────────
 
@@ -243,6 +349,14 @@ class AuthService(DatabaseService):
         password_hash = await creds.hash_password(password)
         async with session_scope(self._url) as session:
             await IdentityCredentialRepository(session).set_password(pincer_user_id, password_hash, now=_now())
+            await AuthSessionRepository(session).delete_for_user(pincer_user_id)
+
+    async def revoke(self, pincer_user_id: str) -> bool:
+        """Take away everything an identity signs in with: password, API key
+        and every session. False when it had nothing."""
+        async with session_scope(self._url) as session:
+            await AuthSessionRepository(session).delete_for_user(pincer_user_id)
+            return bool(await IdentityCredentialRepository(session).delete_by_id(pincer_user_id))
 
     async def change_password(self, pincer_user_id: str, current_password: str, new_password: str) -> TokenPair:
         """Change one's own password. Returns the pair that replaces the
@@ -257,7 +371,7 @@ class AuthService(DatabaseService):
             raise InvalidCredentialsError
         await self.set_password(pincer_user_id, new_password)
         fresh = await self._credential(pincer_user_id)
-        return self._pair(pincer_user_id, fresh.token_version if fresh else row.token_version + 1)
+        return await self._start_session(pincer_user_id, fresh.token_version if fresh else row.token_version + 1)
 
     # ── API keys ─────────────────────────────────────────────────────
 
@@ -381,9 +495,22 @@ def build_auth_service() -> AuthService:
     )
 
 
-async def get_auth_service() -> AuthService:
+def auth_service_for(connection: HTTPConnection) -> AuthService:
+    """The app's auth service, built on first use and then kept.
+
+    Building one reads the settings and the signing secret; the middleware
+    needs it on every request, on the same event loop as the voice audio.
+    """
+    state: Any = connection.app.state
+    service: AuthService | None = getattr(state, "auth_service", None)
+    if service is None:
+        service = state.auth_service = build_auth_service()
+    return service
+
+
+async def get_auth_service(connection: HTTPConnection) -> AuthService:
     """FastAPI dependency."""
-    return build_auth_service()
+    return auth_service_for(connection)
 
 
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]

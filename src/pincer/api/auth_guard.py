@@ -70,9 +70,13 @@ class _Attempts:
 class AuthGuard:
     """Per-IP failure budget with exponential lockout."""
 
-    def __init__(self, max_failures: int = 10, lockout_seconds: int = 300) -> None:
+    def __init__(self, max_failures: int = 10, lockout_seconds: int = 300, *, escalate: bool = True) -> None:
         self.max_failures = max(1, max_failures)
         self.lockout_seconds = max(1, lockout_seconds)
+        #: False for a key an attacker can aim at someone else (an account
+        #: name): each lockout is then one flat window with a fresh budget
+        #: after it, instead of doubling towards an hour on a single retry.
+        self.escalate = escalate
         self._ips: dict[str, _Attempts] = {}
 
     def _prune(self, now: float) -> None:
@@ -99,13 +103,15 @@ class AuthGuard:
         """Count a failed authentication. Returns the resulting lockout seconds (0 = none)."""
         now = time.monotonic()
         attempts = self._ips.setdefault(ip, _Attempts())
+        if not self.escalate and 0 < attempts.locked_until <= now:
+            attempts.failures, attempts.locked_until = 0, 0.0
         attempts.failures += 1
         attempts.last_seen = now
         # `max_failures` attempts are free; the lockout starts on the next one.
         over = attempts.failures - self.max_failures - 1
         if over < 0:
             return 0
-        backoff = min(self.lockout_seconds * (2**over), MAX_LOCKOUT_SECONDS)
+        backoff = min(self.lockout_seconds * (2**over if self.escalate else 1), MAX_LOCKOUT_SECONDS)
         attempts.locked_until = now + backoff
         logger.warning(
             "API auth lockout: %s failed %d time(s), locked for %.0fs",

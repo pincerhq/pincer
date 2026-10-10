@@ -10,13 +10,23 @@ import pytest
 
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
-from pincer.models.identity import ChannelIdentity, IdentityCredential, IdentityProfile
+from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityProfile
 from pincer.models.sessions import ChatSession
-from pincer.repositories.identity import IdentityCredentialRepository, IdentityProfileRepository
+from pincer.repositories.identity import (
+    AuthSessionRepository,
+    IdentityCredentialRepository,
+    IdentityProfileRepository,
+)
 from pincer.services.identity import IdentityService, SeedEntry
 from pincer.services.sessions import SessionService
 
-_TABLES = [IdentityProfile.__table__, ChannelIdentity.__table__, IdentityCredential.__table__, ChatSession.__table__]
+_TABLES = [
+    IdentityProfile.__table__,
+    ChannelIdentity.__table__,
+    IdentityCredential.__table__,
+    AuthSession.__table__,
+    ChatSession.__table__,
+]
 
 
 @pytest.fixture
@@ -241,17 +251,38 @@ async def test_setting_a_password_again_bumps_the_token_version(url):
 
     await _set_password(url, "alice", "hash-1")
     first = await _credential(url, "alice")
-    assert (first.password_hash, first.token_version) == ("hash-1", 0)
+    assert first.password_hash == "hash-1"
 
     await _set_password(url, "alice", "hash-2")
     second = await _credential(url, "alice")
-    assert (second.password_hash, second.token_version) == ("hash-2", 1)
+    assert (second.password_hash, second.token_version) == ("hash-2", first.token_version + 1)
 
     # A re-hash of the same password must not sign anyone out.
     async with session_scope(url) as session:
         await IdentityCredentialRepository(session).replace_password_hash("alice", "hash-3")
     third = await _credential(url, "alice")
-    assert (third.password_hash, third.token_version) == ("hash-3", 1)
+    assert (third.password_hash, third.token_version) == ("hash-3", second.token_version)
+
+
+async def test_a_recreated_credentials_row_does_not_resume_the_old_token_version(url):
+    """Tokens are revoked by version. If a deleted row came back at the same
+    version, every token from its first life would be valid again."""
+    service = IdentityService(url)
+    await service.create_identity("alice", channel="telegram", channel_user_id="12345")
+
+    versions = set()
+    for _ in range(5):
+        await _set_password(url, "alice", "hash")
+        versions.add((await _credential(url, "alice")).token_version)
+        async with session_scope(url) as session:
+            await IdentityCredentialRepository(session).delete_by_id("alice")
+    assert len(versions) == 5
+
+    async with session_scope(url) as session:
+        await IdentityCredentialRepository(session).set_api_key(
+            "alice", api_key_hash="h1", prefix="pnc_abcd", last4="wxyz", now=_NOW
+        )
+    assert (await _credential(url, "alice")).token_version not in versions
 
 
 async def test_an_api_key_is_found_by_its_hash_and_keeps_the_password(url):
@@ -295,17 +326,75 @@ async def test_merging_keeps_the_target_s_credentials(url):
     assert await service.channels_for("alice") == [("telegram", "12345"), ("whatsapp", "4930111")]
 
 
-async def test_prune_deletes_the_credentials_of_a_removed_identity(url):
+async def _open_session(url: str, pincer_user_id: str) -> str:
+    async with session_scope(url) as session:
+        row = await AuthSessionRepository(session).add(
+            AuthSession(pincer_user_id=pincer_user_id, refresh_jti="jti", expires_at=4_000_000_000.0)
+        )
+        return row.id
+
+
+async def _session_exists(url: str, session_id: str) -> bool:
+    async with session_scope(url) as session:
+        return await AuthSessionRepository(session).get(session_id) is not None
+
+
+async def test_prune_keeps_an_identity_that_can_sign_in(url):
+    """An identity made for the dashboard or an API key has no channel by
+    design. Pruning it would lock its owner out at every restart."""
     service = IdentityService(url)
     await service.create_identity("usr_keep", channel="telegram", channel_user_id="12345")
-    await service.create_identity("usr_drop", channel="telegram", channel_user_id="99999")
-    await _set_password(url, "usr_keep", "hash-keep")
-    await _set_password(url, "usr_drop", "hash-drop")
+    await service.create_identity("usr_unlisted", channel="telegram", channel_user_id="99999")
+    await service.create_identity("usr_plain", channel="telegram", channel_user_id="55555")
+    await service.create_profile("dashboard_admin")
+    await service.create_profile("widget")
+    await _set_password(url, "usr_unlisted", "hash")
+    await _set_password(url, "dashboard_admin", "hash")
+    async with session_scope(url) as session:
+        await IdentityCredentialRepository(session).set_api_key(
+            "widget", api_key_hash="h1", prefix="pnc_abcd", last4="wxyz", now=_NOW
+        )
+    signed_in = await _open_session(url, "dashboard_admin")
 
-    assert await service.prune([("telegram", "12345")]) == (1, 1)
+    unlisted, channelless = await service.prune([("telegram", "12345")])
 
-    assert await _credential(url, "usr_drop") is None
-    assert (await _credential(url, "usr_keep")).password_hash == "hash-keep"
+    # Only the identity with neither a channel nor a credential goes.
+    assert (unlisted, channelless) == (2, 1)
+    assert await service.profile("usr_plain") is None
+    for kept in ("usr_keep", "usr_unlisted", "dashboard_admin", "widget"):
+        assert await service.profile(kept) is not None, kept
+    assert (await _credential(url, "dashboard_admin")).password_hash == "hash"
+    assert (await _credential(url, "usr_unlisted")).password_hash == "hash"
+    assert await service.channels_for("usr_unlisted") == []  # the channel link itself is gone
+    assert await _session_exists(url, signed_in)
+
+
+async def test_prune_takes_an_identity_whose_credentials_were_revoked(url):
+    service = IdentityService(url)
+    await service.create_identity("usr_keep", channel="telegram", channel_user_id="12345")
+    await service.create_profile("former_admin")
+    await _set_password(url, "former_admin", "hash")
+    session_id = await _open_session(url, "former_admin")
+    assert (await service.prune([("telegram", "12345")]))[1] == 0
+
+    async with session_scope(url) as session:
+        await IdentityCredentialRepository(session).delete_by_id("former_admin")
+
+    assert (await service.prune([("telegram", "12345")]))[1] == 1
+    assert await service.profile("former_admin") is None
+    assert not await _session_exists(url, session_id)  # no cascade on SQLite: swept explicitly
+
+
+async def test_renaming_ends_the_sessions_of_the_old_id(url):
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
+    await _set_password(url, "usr_hash", "hash-1")
+    session_id = await _open_session(url, "usr_hash")
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert not await _session_exists(url, session_id)
+    assert (await _credential(url, "alice")).password_hash == "hash-1"
 
 
 async def test_a_profile_made_by_hand_has_no_channel_and_is_found_by_email(url):

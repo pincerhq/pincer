@@ -97,6 +97,9 @@ async def identity_create(
         raise _fail(f"'{email}' is not an email address.")
 
     identities, _ = await _services()
+    if email is not None and (owners := await identities.email_owners(email)):
+        # Two identities with one email could neither of them sign in with it.
+        raise _fail(f"'{email}' already belongs to '{owners[0]}'. An email can sign in for one identity only.")
     if not await identities.create_profile(name, email=email, display_name=display_name):
         raise _fail(f"Identity '{name}' already exists.")
     console.print(f"[green]Created identity '{name}'.[/green]")
@@ -114,7 +117,7 @@ async def identity_set_password(
     """Set an identity's password. Signs the identity out of every session."""
     from pincer.services.auth import UnknownIdentityError
 
-    _, auth = await _services()
+    identities, auth = await _services()
     if password is None:
         password = typer.prompt("New password", hide_input=True, confirmation_prompt=True)
     try:
@@ -124,6 +127,26 @@ async def identity_set_password(
     except ValueError as e:
         raise _fail(str(e)) from e
     console.print(f"[green]Password set for '{name}'.[/green] Existing sessions were signed out.")
+    profile = await identities.profile(name)
+    email = profile.get("email") if profile else None
+    if email and len(await identities.email_owners(email)) > 1:
+        console.print(
+            f"[yellow]'{email}' is shared with another identity, so it cannot be used to sign in. "
+            f"Sign in as '{name}'.[/yellow]"
+        )
+
+
+@identity_app.command(name="revoke")
+async def identity_revoke(name: Annotated[str, typer.Argument(help="Identity name")]) -> None:
+    """Remove an identity's password and API key and end its sessions.
+
+    The identity itself, its channels and its history stay; it just cannot
+    sign in to the API or the dashboard any more.
+    """
+    _, auth = await _services()
+    if not await auth.revoke(name):
+        raise _fail(f"'{name}' has no password or API key to revoke.")
+    console.print(f"[green]Revoked API access for '{name}'.[/green] Its password, API key and sessions are gone.")
 
 
 @identity_app.command(name="api-key")

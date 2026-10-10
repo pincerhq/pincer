@@ -186,3 +186,49 @@ def test_truncated_secret_file_is_regenerated(tmp_path: Path) -> None:
     secret = creds.load_or_create_jwt_secret("", tmp_path)
     assert len(secret) >= creds.MIN_JWT_SECRET_LENGTH
     assert path.read_text() == secret
+
+
+def test_a_second_process_adopts_the_secret_the_first_one_wrote(tmp_path: Path, monkeypatch) -> None:
+    """Two processes start together with no secret file. The loser of the race
+    must end up with the winner's secret — never an empty one, never its own."""
+    import os
+
+    path = tmp_path / creds.JWT_SECRET_FILENAME
+    real_link = os.link
+
+    def link_after_the_other_process(src, dst, **kwargs):
+        path.write_text("w" * 64)  # the other process got there first
+        return real_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "link", link_after_the_other_process)
+
+    assert creds.load_or_create_jwt_secret("", tmp_path) == "w" * 64
+    assert path.read_text() == "w" * 64
+    assert [p.name for p in tmp_path.iterdir()] == [creds.JWT_SECRET_FILENAME]  # no temp file left behind
+
+
+def test_the_secret_file_never_exists_half_written(tmp_path: Path, monkeypatch) -> None:
+    """The name appears only once the whole secret is behind it."""
+    import os
+
+    path = tmp_path / creds.JWT_SECRET_FILENAME
+    seen: list[str] = []
+    real_link = os.link
+
+    def observing_link(src, dst, **kwargs):
+        assert not path.exists()
+        seen.append(type(path)(src).read_text())
+        return real_link(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "link", observing_link)
+    secret = creds.load_or_create_jwt_secret("", tmp_path)
+    assert seen == [secret]
+    assert len(secret) >= creds.MIN_JWT_SECRET_LENGTH
+
+
+def test_session_claims_round_trip() -> None:
+    token = creds.encode_token(SECRET, sub="alice", typ="refresh", ver=7, ttl_seconds=60, sid="s-1", jti="j-1")
+    claims = creds.decode_token(SECRET, token, typ="refresh")
+    assert (claims.sid, claims.jti) == ("s-1", "j-1")
+    with pytest.raises(creds.TokenInvalidError):
+        creds.decode_token(SECRET, _forge({"sid": 5}), typ="access")

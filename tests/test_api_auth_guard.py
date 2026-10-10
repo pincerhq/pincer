@@ -84,6 +84,28 @@ def test_success_clears_the_failure_history():
     assert guard.record_failure("1.2.3.4") == 0  # budget reset
 
 
+def test_a_non_escalating_guard_locks_for_one_flat_window_then_resets(monkeypatch):
+    """The per-account guard: its key can be aimed at someone else, so a
+    lockout never grows and is followed by a full budget."""
+    import time as time_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(time_module, "monotonic", lambda: clock[0])
+    guard = AuthGuard(max_failures=2, lockout_seconds=60, escalate=False)
+
+    assert [guard.record_failure("alice") for _ in range(3)] == [0, 0, 60]
+    assert guard.retry_after("alice") > 0
+    clock[0] += 61
+    assert guard.retry_after("alice") == 0
+    # A fresh budget, and the same flat window when it is spent again.
+    assert [guard.record_failure("alice") for _ in range(3)] == [0, 0, 60]
+
+    escalating = AuthGuard(max_failures=2, lockout_seconds=60)
+    assert [escalating.record_failure("1.2.3.4") for _ in range(3)] == [0, 0, 60]
+    clock[0] += 61
+    assert escalating.record_failure("1.2.3.4") == 120
+
+
 # ── Brute-force guard (through the API) ──────────────────────────────
 
 

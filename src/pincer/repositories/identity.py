@@ -7,13 +7,14 @@ channel user id) pair pointing at it; at most one credentials row per profile.
 
 from __future__ import annotations
 
+import secrets
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import delete, func, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
-from pincer.models.identity import ChannelIdentity, IdentityCredential, IdentityProfile
+from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityProfile
 from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
@@ -87,9 +88,17 @@ class IdentityProfileRepository(BaseRepository[IdentityProfile, str]):
         return (await self.session.exec(stmt)).all()
 
     async def delete_unlinked(self) -> int:
-        """Drop profiles no channel points at any more."""
+        """Drop profiles no channel points at any more.
+
+        Except the ones that can sign in: an identity made for the dashboard
+        or for an API key has no channel by design, and pruning it would lock
+        its owner out at every restart.
+        """
         linked = select(col(ChannelIdentity.pincer_user_id))
-        stmt = delete(IdentityProfile).where(col(IdentityProfile.pincer_user_id).notin_(linked))
+        stmt = delete(IdentityProfile).where(
+            col(IdentityProfile.pincer_user_id).notin_(linked),
+            col(IdentityProfile.pincer_user_id).notin_(_can_sign_in()),
+        )
         return int((await self.session.exec(stmt)).rowcount)
 
 
@@ -148,6 +157,24 @@ class ChannelIdentityRepository(BaseRepository[ChannelIdentity, tuple[str, str]]
         )
 
 
+def _has_credentials() -> Any:
+    return col(IdentityCredential.password_hash).is_not(None) | col(IdentityCredential.api_key_hash).is_not(None)
+
+
+def _can_sign_in() -> Any:
+    """Ids of the identities that hold a password or an API key."""
+    return select(col(IdentityCredential.pincer_user_id)).where(_has_credentials())
+
+
+def _first_token_version() -> int:
+    """Where a new credentials row starts counting.
+
+    Random rather than 0: a row can be deleted and made again under the same
+    id, and a session token from the first life must not match the second.
+    """
+    return secrets.randbelow(2**30)
+
+
 class IdentityCredentialRepository(BaseRepository[IdentityCredential, str]):
     model = IdentityCredential
 
@@ -165,6 +192,7 @@ class IdentityCredentialRepository(BaseRepository[IdentityCredential, str]):
                     "pincer_user_id": pincer_user_id,
                     "password_hash": password_hash,
                     "password_updated_at": now,
+                    "token_version": _first_token_version(),
                     "created_at": now,
                 },
                 index_elements=["pincer_user_id"],
@@ -196,7 +224,7 @@ class IdentityCredentialRepository(BaseRepository[IdentityCredential, str]):
             upsert(
                 dialect_of(self.session),
                 IdentityCredential,
-                {"pincer_user_id": pincer_user_id, "created_at": now, **key},
+                {"pincer_user_id": pincer_user_id, "token_version": _first_token_version(), "created_at": now, **key},
                 index_elements=["pincer_user_id"],
                 set_=key,
             )
@@ -222,19 +250,43 @@ class IdentityCredentialRepository(BaseRepository[IdentityCredential, str]):
     async def delete_by_id(self, pincer_user_id: str) -> int:
         return await self.delete_where(col(IdentityCredential.pincer_user_id) == pincer_user_id)
 
-    async def delete_unlinked(self) -> int:
-        """Drop the credentials of identities no channel points at any more."""
+    async def delete_unlinked_empty(self) -> int:
+        """Drop the rows of channel-less identities that hold no credential,
+        so the profile sweep that follows can take those identities."""
         linked = select(col(ChannelIdentity.pincer_user_id))
-        stmt = delete(IdentityCredential).where(col(IdentityCredential.pincer_user_id).notin_(linked))
+        stmt = delete(IdentityCredential).where(
+            col(IdentityCredential.pincer_user_id).notin_(linked),
+            col(IdentityCredential.password_hash).is_(None),
+            col(IdentityCredential.api_key_hash).is_(None),
+        )
         return int((await self.session.exec(stmt)).rowcount)
 
     async def count_usable(self) -> int:
         """Identities that can authenticate: a password or an API key."""
-        stmt = (
-            select(func.count())
-            .select_from(IdentityCredential)
-            .where(
-                col(IdentityCredential.password_hash).is_not(None) | col(IdentityCredential.api_key_hash).is_not(None)
-            )
-        )
+        stmt = select(func.count()).select_from(IdentityCredential).where(_has_credentials())
         return int((await self.session.exec(stmt)).one())
+
+
+class AuthSessionRepository(BaseRepository[AuthSession, str]):
+    model = AuthSession
+
+    async def rotate(self, session_id: str, values: dict[str, Any]) -> int:
+        stmt = update(AuthSession).where(col(AuthSession.id) == session_id).values(**values)
+        return int((await self.session.exec(stmt)).rowcount)
+
+    async def delete_by_id(self, session_id: str) -> int:
+        return await self.delete_where(col(AuthSession.id) == session_id)
+
+    async def delete_for_user(self, pincer_user_id: str) -> int:
+        return await self.delete_where(col(AuthSession.pincer_user_id) == pincer_user_id)
+
+    async def delete_expired(self, pincer_user_id: str, *, now: float) -> int:
+        return await self.delete_where(
+            col(AuthSession.pincer_user_id) == pincer_user_id, col(AuthSession.expires_at) < now
+        )
+
+    async def delete_orphaned(self) -> int:
+        """Drop sessions whose credentials row is gone (SQLite has no cascade)."""
+        owners = select(col(IdentityCredential.pincer_user_id))
+        stmt = delete(AuthSession).where(col(AuthSession.pincer_user_id).notin_(owners))
+        return int((await self.session.exec(stmt)).rowcount)

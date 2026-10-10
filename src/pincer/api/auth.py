@@ -6,6 +6,11 @@ shared with the middleware, and a per-account one — the client IP comes from
 an unverified `X-Forwarded-For`, so it alone would let one attacker rotate
 through addresses against a single account.
 
+The per-account guard is a throttle, not a lock: anyone can spend another
+person's budget, so each lockout is one flat window followed by a fresh
+budget (`AuthGuard(escalate=False)`). That caps guessing at `max_failures`
+per window without letting a single request an hour keep someone out.
+
 The rest of this module is what every other router uses: `CurrentIdentity`
 for the caller the middleware resolved, and `require_interactive` for the
 actions an API key must not perform.
@@ -155,9 +160,9 @@ async def login(body: LoginIn, request: Request, auth: AuthServiceDep) -> JSONRe
     """Exchange an identity name or email and a password for a token pair."""
     ip_guard, account_guard = guards(request)
     ip = client_ip(request)
-    # Not the raw identifier: `Alice` and `alice@Example.com ` must not each
-    # get a failure budget of their own.
-    account = body.identifier.strip().lower()
+    # Not the raw identifier: a name and the email of the same identity must
+    # not each get a failure budget of their own.
+    account = await auth.login_account(body.identifier)
 
     wait = max(ip_guard.retry_after(ip), account_guard.retry_after(account))
     if wait:
@@ -194,3 +199,10 @@ async def refresh(body: RefreshIn, request: Request, auth: AuthServiceDep) -> JS
             await audit_auth_failure(ip, request.url.path, exc.code, locked_for=locked_for)
         return auth_error_response(exc.code)
     return JSONResponse(TokenPairOut.of(pair).model_dump(), headers=_NO_STORE)
+
+
+@router.post("/logout", status_code=204)
+async def logout(identity: CurrentIdentity, auth: AuthServiceDep) -> None:
+    """End the caller's session on the server: its access and refresh tokens
+    stop working at once. A no-op for an API key, which has no session."""
+    await auth.logout(identity)

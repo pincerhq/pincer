@@ -34,7 +34,7 @@ from pincer.api.skills import router as skills_router
 from pincer.api.telephony import router as telephony_router
 from pincer.api.voice import router as voice_api_router
 from pincer.config import get_settings_relaxed
-from pincer.services.auth import AuthError, build_auth_service
+from pincer.services.auth import AuthError, auth_service_for
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -161,6 +161,8 @@ def create_app() -> FastAPI:
     app.state.login_guard = AuthGuard(
         max_failures=auth_guard.max_failures,
         lockout_seconds=auth_guard.lockout_seconds,
+        # Flat windows: this key can be aimed at someone else's account.
+        escalate=False,
     )
 
     @app.middleware("http")
@@ -190,7 +192,7 @@ def create_app() -> FastAPI:
             # `pincer doctor --production` reports this state CRITICAL.
             if bearer_value(request):
                 with contextlib.suppress(AuthError):
-                    request.state.identity = await authenticate_connection(request, build_auth_service())
+                    request.state.identity = await authenticate_connection(request, auth_service_for(request))
             return await call_next(request)
 
         # T8.2 brute-force guard: an IP that keeps guessing is locked out with
@@ -202,7 +204,7 @@ def create_app() -> FastAPI:
             return auth_error_response("locked_out", status_code=429, retry_after=wait)
 
         try:
-            request.state.identity = await authenticate_connection(request, build_auth_service())
+            request.state.identity = await authenticate_connection(request, auth_service_for(request))
         except AuthError as exc:
             # An expired or superseded token is not a guess: when a session
             # token runs out, every request the dashboard has in flight fails
