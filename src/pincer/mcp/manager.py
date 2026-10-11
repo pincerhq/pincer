@@ -11,6 +11,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -112,6 +113,9 @@ class MCPClientManager:
             except Exception as e:
                 logger.warning("MCP '%s' failed to connect: %s", srv_config.name, e)
                 await self._audit.log_connect(srv_config.name, success=False, error=str(e))
+                # Kept (unconnected) so the health loop retries it — a server that
+                # was merely slow to come up shouldn't stay missing until restart.
+                self._sessions[srv_config.name] = session
                 results[srv_config.name] = False
                 return
 
@@ -132,6 +136,14 @@ class MCPClientManager:
         async with anyio.create_task_group() as tg:
             for s in enabled_servers:
                 tg.start_soon(_connect_one, s)
+
+        # Every enabled server must be reported; a missing entry means its connect
+        # task ended without a verdict, so treat it as failed rather than stay silent.
+        for s in enabled_servers:
+            if s.name not in results:
+                logger.warning("MCP '%s' did not finish connecting — marking as failed", s.name)
+                await self._audit.log_connect(s.name, success=False, error="connect task ended without a result")
+                results[s.name] = False
 
         # Start background health check loop via persistent task group
         tg_ctx = anyio.create_task_group()
@@ -165,8 +177,10 @@ class MCPClientManager:
     async def get_session(self, server_name: str) -> MCPClientSession:
         """Get a connected session by name. Raises ValueError if not found."""
         session = self._sessions.get(server_name)
-        if not session:
-            raise ValueError(f"MCP server '{server_name}' not connected. Available: {list(self._sessions.keys())}")
+        # Sessions that failed to connect stay registered so they can be retried.
+        if not session or not session.connected:
+            connected = [n for n, s in self._sessions.items() if s.connected]
+            raise ValueError(f"MCP server '{server_name}' not connected. Available: {connected}")
         return session
 
     async def list_servers(self) -> list[dict[str, Any]]:
@@ -244,6 +258,9 @@ class MCPClientManager:
                     self._bridges[name].deregister_tools()
 
                 self._sessions[name] = new_session
+                # Close the replaced connection; it may still hold a transport open.
+                with contextlib.suppress(Exception):
+                    await session.disconnect()
                 bridge = MCPToolBridge(
                     session=new_session,
                     tool_registry=self.tool_registry,

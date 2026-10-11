@@ -11,6 +11,7 @@ Wraps the official mcp.ClientSession with:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from contextlib import AsyncExitStack
@@ -29,13 +30,56 @@ if TYPE_CHECKING:
 logger = logging.getLogger("pincer.mcp")
 
 
+def _raised_from(exc: BaseException) -> BaseException | None:
+    """The error `exc` was raised from, explicitly or while handling it.
+
+    Deliberately ignores `raise ... from None`: httpcore hides the socket error
+    that way, and that error is the one worth reading.
+    """
+    origin = exc.__cause__ or exc.__context__
+    # A cancellation in the chain is plumbing (timeouts, task groups), not a cause.
+    return origin if isinstance(origin, Exception) else None
+
+
+def _leaf_causes(exc: BaseException) -> list[str]:
+    """Describe an exception by its leaf errors, one entry per distinct error.
+
+    anyio task groups (used by the SDK transports) wrap failures in an exception
+    group whose own message is just "unhandled errors in a TaskGroup".
+    """
+    if isinstance(exc, BaseExceptionGroup):
+        return list(dict.fromkeys(d for e in exc.exceptions for d in _leaf_causes(e)))
+    text = str(exc)
+    desc = f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+    # A wrapper such as "All connection attempts failed" says little on its own;
+    # add what it was raised from, skipping layers that only repeat the same text.
+    origin = _raised_from(exc)
+    while origin is not None and str(origin) and str(origin) in text:
+        origin = _raised_from(origin)
+    if origin is not None:
+        desc = f"{desc} (caused by {'; '.join(_leaf_causes(origin))})"
+    return [desc]
+
+
+def _root_causes(exc: BaseException) -> str:
+    return "; ".join(_leaf_causes(exc))
+
+
+class _SetupError(Exception):
+    """Carries a failed connection attempt from the owner task to connect()."""
+
+
 class MCPClientSession:
     """Manages a single MCP server connection with lifecycle control."""
 
     def __init__(self, config: MCPServerConfig) -> None:
         self.config = config
         self._session: Any = None  # mcp.ClientSession
-        self._exit_stack: AsyncExitStack | None = None
+        # The task that entered the transport and session contexts. anyio requires
+        # them to be exited by that same task, so it stays alive for the whole
+        # connection and is the only one that ever closes them.
+        self._owner: asyncio.Task[None] | None = None
+        self._stop_event: asyncio.Event | None = None
         self._tools: list[Any] = []  # list[mcp.types.Tool]
         self._connected = False
         self._connect_attempts = 0
@@ -98,48 +142,109 @@ class MCPClientSession:
         except ImportError as e:
             raise RuntimeError("MCP package not installed. Run: uv pip install 'pincer-agent[mcp]'") from e
 
-        self._exit_stack = AsyncExitStack()
+        await self._stop_owner()  # a previous connection that died on its own
+        ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        stop = asyncio.Event()
+        self._stop_event = stop
+        self._owner = asyncio.create_task(
+            self._run(ready, stop, ClientSession, StdioServerParameters, stdio_client, streamablehttp_client),
+            name=f"mcp-session-{self.name}",
+        )
         try:
-            if self.config.transport == MCPTransport.STDIO:
-                if self.config.sandbox:
-                    # sandbox_streams and ClientSession create persistent task groups —
-                    # enter them outside any fail_after scope to avoid cancel scope ordering errors.
-                    read_stream, write_stream = await self._connect_stdio_sandboxed(self._exit_stack)
-                    # Readiness check is a pure coroutine (sleep + poll), safe to timeout.
-                    with anyio.fail_after(self.config.startup_timeout):
-                        await self._wait_for_sandbox_startup()
-                else:
-                    read_stream, write_stream = await self._connect_stdio(
-                        self._exit_stack, StdioServerParameters, stdio_client
-                    )
-            else:
-                read_stream, write_stream = await self._connect_http(self._exit_stack, streamablehttp_client)
-
-            # Enter ClientSession outside fail_after — it spawns background tasks whose
-            # cancel scope must outlive our timeout scope.
-            self._session = await self._exit_stack.enter_async_context(
-                ClientSession(read_stream, write_stream, logging_callback=self._handle_notification)
-            )
-            # Bound the handshake by startup_timeout, not the per-tool-call timeout —
-            # servers that run one-time interactive auth (e.g. device code flow) on
-            # first launch need a much longer window here without slowing down every
-            # subsequent tool call.
-            with anyio.fail_after(self.config.startup_timeout):
-                init_result = await self._session.initialize()
-                self._instructions = init_result.instructions
-                await self._discover_tools()
-
-            self._connected = True
-            self._connect_attempts = 0
-            logger.info(
-                "MCP '%s' connected — %d tools available",
-                self.name,
-                len(self._tools),
-            )
+            await ready
         except Exception as e:
             self._connect_attempts += 1
             await self._cleanup()
-            raise ConnectionError(f"MCP '{self.name}' connection failed (attempt {self._connect_attempts}): {e}") from e
+            raise ConnectionError(f"MCP '{self.name}' connection failed (attempt {self._connect_attempts}): {e}") from (
+                e.__cause__ or e
+            )
+        except BaseException:
+            # Cancelled from outside (shutdown): close the half-built connection first.
+            await self._cleanup()
+            raise
+
+        self._connect_attempts = 0
+        logger.info(
+            "MCP '%s' connected — %d tools available",
+            self.name,
+            len(self._tools),
+        )
+
+    async def _run(
+        self,
+        ready: asyncio.Future[None],
+        stop: asyncio.Event,
+        client_session_cls: Any,
+        stdio_params_cls: Any,
+        stdio_client: Any,
+        streamablehttp_client: Any,
+    ) -> None:
+        """Owner task: open the connection, report the outcome, hold it until stopped.
+
+        The SDK transports cancel their own task group when I/O fails. That
+        cancellation lands on the task that entered them and is only resolved
+        (and turned into the real error) by unwinding through their __aexit__ in
+        that same task — which is why none of this runs in the caller's task.
+        """
+        setup_error: Exception | None = None
+        error: BaseException | None = None
+        try:
+            async with AsyncExitStack() as stack:
+                try:
+                    if self.config.transport == MCPTransport.STDIO:
+                        if self.config.sandbox:
+                            # sandbox_streams and ClientSession create persistent task groups —
+                            # enter them outside any fail_after scope to avoid cancel scope ordering errors.
+                            read_stream, write_stream = await self._connect_stdio_sandboxed(stack)
+                            # Readiness check is a pure coroutine (sleep + poll), safe to timeout.
+                            with anyio.fail_after(self.config.startup_timeout):
+                                await self._wait_for_sandbox_startup()
+                        else:
+                            read_stream, write_stream = await self._connect_stdio(stack, stdio_params_cls, stdio_client)
+                    else:
+                        read_stream, write_stream = await self._connect_http(stack, streamablehttp_client)
+
+                    # Enter ClientSession outside fail_after — it spawns background tasks whose
+                    # cancel scope must outlive our timeout scope.
+                    self._session = await stack.enter_async_context(
+                        client_session_cls(read_stream, write_stream, logging_callback=self._handle_notification)
+                    )
+                    # Bound the handshake by startup_timeout, not the per-tool-call timeout —
+                    # servers that run one-time interactive auth (e.g. device code flow) on
+                    # first launch need a much longer window here without slowing down every
+                    # subsequent tool call.
+                    with anyio.fail_after(self.config.startup_timeout):
+                        init_result = await self._session.initialize()
+                        self._instructions = init_result.instructions
+                        await self._discover_tools()
+                except Exception as e:
+                    # Remembered so an error raised while closing can't replace it.
+                    setup_error = e
+                    raise
+
+                if not ready.cancelled():
+                    self._connected = True
+                    ready.set_result(None)
+                    await stop.wait()
+        except BaseException as e:  # reported below; nobody awaits this task's result
+            error = e
+
+        if not ready.done():
+            causes = _leaf_causes(setup_error) if setup_error is not None else []
+            if isinstance(error, Exception):
+                causes += [c for c in _leaf_causes(error) if c not in causes]
+            failure = _SetupError("; ".join(causes) or "connection attempt was cancelled by the transport")
+            failure.__cause__ = setup_error or error
+            ready.set_exception(failure)
+        elif not stop.is_set() and not ready.cancelled():
+            # Nobody asked for this: the transport gave up after a successful connect.
+            logger.warning(
+                "MCP '%s' connection lost: %s", self.name, _root_causes(error) if error else "closed by the transport"
+            )
+            if self._owner is asyncio.current_task():
+                self._reset_state()
+        elif isinstance(error, Exception):
+            logger.debug("MCP '%s': error while closing: %s", self.name, _root_causes(error))
 
     async def disconnect(self) -> None:
         """Gracefully close the MCP session."""
@@ -354,14 +459,25 @@ class MCPClientSession:
 
         return base_env
 
-    async def _cleanup(self) -> None:
+    async def _stop_owner(self) -> None:
+        """Have the owner task close the connection, and wait until it has."""
+        owner, self._owner = self._owner, None
+        stop, self._stop_event = self._stop_event, None
+        if owner is None:
+            return
+        if stop is not None:
+            stop.set()
+        if not self._connected:
+            # Still connecting (or no longer healthy): it isn't waiting on `stop`.
+            owner.cancel()
+        # Shielded so a cancelled caller still waits for the transport to close.
+        with anyio.CancelScope(shield=True):
+            await asyncio.wait({owner})
+
+    def _reset_state(self) -> None:
         self._connected = False
         self._session = None
         self._instructions = None
-        if self._exit_stack:
-            with contextlib.suppress(Exception):
-                await self._exit_stack.aclose()
-            self._exit_stack = None
         # Clean up temp dir (non-sandbox path)
         if self._tmpdir:
             with contextlib.suppress(Exception):
@@ -374,3 +490,7 @@ class MCPClientSession:
             with contextlib.suppress(Exception):
                 self._sandbox.stop()
             self._sandbox = None
+
+    async def _cleanup(self) -> None:
+        await self._stop_owner()
+        self._reset_state()
