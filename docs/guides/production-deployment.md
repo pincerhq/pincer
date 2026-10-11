@@ -42,7 +42,6 @@ Internet ──443──▶ Caddy (TLS, Let's Encrypt, WSS passthrough)
    Create the first one (the password is prompted for, not echoed):
    ```bash
    docker compose -f docker-compose.prod.yml exec pincer pincer identity create alice --email alice@example.com
-   docker compose -f docker-compose.prod.yml exec pincer pincer identity set-password alice
    ```
    The web chat widget and other headless clients use an API key instead:
    `pincer identity api-key <name>` prints it once. See

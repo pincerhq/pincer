@@ -43,7 +43,7 @@ pincer
 │   └── setup               # Pair WhatsApp via QR code
 ├── identity
 │   ├── list                # Identities, emails, channels, credentials
-│   ├── create <name>       # Create an identity
+│   ├── create <name>       # Create an identity with a password or an API key
 │   ├── set-password <name> # Set or reset the dashboard/API password
 │   └── api-key <name>      # Generate an API key (printed once)
 ├── audit                   # View audit logs (options, not subcommands)
@@ -392,7 +392,7 @@ full API access.
 
 ```bash
 pincer identity list
-pincer identity create <name> [--email EMAIL] [--display-name NAME]
+pincer identity create <name> [password] [--api-key] [--email EMAIL] [--display-name NAME]
 pincer identity set-password <name> [password]
 pincer identity api-key <name> [--force]
 pincer identity revoke <name>
@@ -401,19 +401,21 @@ pincer identity revoke <name>
 | Command | Description |
 |---------|-------------|
 | `list` | Identities with email, channels, whether a password is set, and the masked API key |
-| `create` | Create an identity. Names are letters, digits and underscores; `me` and names starting with `usr_` are reserved. `--email` can also be used to sign in |
-| `set-password` | Set or reset a password (8–256 characters). Omit the password to be prompted (hidden, confirmed) — this keeps it out of the shell history. Signs the identity out everywhere |
+| `create` | Create an identity together with what it signs in with: a password (omit it to be prompted, hidden and confirmed), or with `--api-key` an API key that is printed once. Names are letters, digits and underscores; `me` and names starting with `usr_` are reserved. `--email` can also be used to sign in |
+| `set-password` | Reset a password, or give one to an identity that has none (8–256 characters). Omit the password to be prompted (hidden, confirmed) — this keeps it out of the shell history. Signs the identity out everywhere |
 | `api-key` | Generate an API key (`pnc_…`). It is printed once; only a masked form (`pnc_Ab3d…wxyz`) is shown afterwards. `--force` replaces an existing key, and the old one stops working immediately |
 | `revoke` | Remove the identity's password and API key and end its sessions. The identity, its channels and its history stay |
 
 **Examples:**
 ```bash
-# First sign-in after install
+# First sign-in after install (prompts for the password)
 pincer identity create alice --email alice@example.com
-pincer identity set-password alice
 
 # Key for the web chat widget
 pincer identity api-key alice
+
+# A key-only identity
+pincer identity create widget --api-key
 ```
 
 `pincer doctor` warns while no identity has a password or a key.

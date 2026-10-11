@@ -66,15 +66,15 @@ API access. See [REST API → Authentication](rest-api.md#authentication).
 | Command | Description |
 |---------|-------------|
 | `pincer identity list` | Identities with email, channels, whether a password is set, and the masked API key |
-| `pincer identity create <name> [--email EMAIL] [--display-name NAME]` | Create an identity. Names are letters, digits and underscores; `me` and names starting with `usr_` are reserved |
-| `pincer identity set-password <name> [password]` | Set or reset a password (8–256 characters). Prompts, hidden and confirmed, when the password is omitted — which keeps it out of the shell history. Signs the identity out everywhere |
+| `pincer identity create <name> [password] [--api-key] [--email EMAIL] [--display-name NAME]` | Create an identity together with what it signs in with: a password (prompted for, hidden and confirmed, when omitted), or with `--api-key` an API key that is printed once. Names are letters, digits and underscores; `me` and names starting with `usr_` are reserved |
+| `pincer identity set-password <name> [password]` | Reset a password, or give one to an identity that has none (8–256 characters). Prompts, hidden and confirmed, when the password is omitted — which keeps it out of the shell history. Signs the identity out everywhere |
 | `pincer identity api-key <name> [--force]` | Generate an API key (`pnc_…`) and print it once; afterwards only a masked form is shown. `--force` replaces an existing key, which stops working immediately |
 | `pincer identity revoke <name>` | Remove the identity's password and API key and end its sessions. The identity, its channels and its history stay |
 
 ```bash
-pincer identity create alice --email alice@example.com
-pincer identity set-password alice     # dashboard login: "alice" or the email
-pincer identity api-key alice          # for the web chat widget / scripts
+pincer identity create alice --email alice@example.com   # prompts for the password; sign in as "alice" or the email
+pincer identity api-key alice                            # for the web chat widget / scripts
+pincer identity create widget --api-key                  # a key-only identity
 ```
 
 A forgotten password is reset with `set-password`. An email signs in for one

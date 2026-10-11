@@ -699,9 +699,10 @@ Twilio call ──<Connect> ConversationRelay / Stream──► conversation eng
   identity on the upgrade and is denied with 401 **before** accept. Browsers
   cannot set a header on a WebSocket, so the dashboard first calls
   `POST /api/voice/listen/{call_sid}/ticket` with its session token and
-  connects with `?token=<ticket>` — the ticket is valid for 60 s and bound to
-  that call. Non-browser clients may send
-  `Authorization: Bearer <access token or API key>` on the upgrade instead.
+  connects with `?token=<ticket>` — the ticket is valid for 60 s, bound to
+  that call, good for one connection, and dead once that session signs out.
+  Non-browser clients may send `Authorization: Bearer <access token>` on the
+  upgrade instead; an API key is refused with 403.
   Failed attempts count against the T8.2 brute-force guard.
 - **Audit, no persistence:** every listen session writes one
   `listen_in_session` audit row `{user, call_sid, started_at, ended_at,

@@ -22,11 +22,13 @@ silently open.
 >
 > 1. Upgrade. Migrations `0021` and `0022` are applied at startup (or with `pincer db upgrade`).
 > 2. Create a sign-in for each dashboard user:
->    `pincer identity create alice --email alice@example.com`, then
->    `pincer identity set-password alice` (prompts for the password).
+>    `pincer identity create alice --email alice@example.com` (prompts for
+>    the password). An identity that already exists gets one with
+>    `pincer identity set-password <name>`.
 > 3. For the web chat widget and other headless clients, generate an API key
->    with `pincer identity api-key <name>` (printed once) and send it as
->    `Authorization: Bearer pnc_…` in place of the old token.
+>    with `pincer identity api-key <name>`, or make a key-only identity with
+>    `pincer identity create <name> --api-key` (printed once either way), and
+>    send it as `Authorization: Bearer pnc_…` in place of the old token.
 > 4. In production set `PINCER_JWT_SECRET` (32+ characters:
 >    `python -c 'import secrets; print(secrets.token_urlsafe(48))'`).
 > 5. Remove `PINCER_DASHBOARD_TOKEN` and `PINCER_WEB_CHAT_TOKEN` from the
@@ -50,7 +52,9 @@ silently open.
 - **Sessions** — each sign-in is a server-side session
   (`pincer_auth_sessions`, migration `0022`). A refresh token is single-use:
   refreshing replaces it, and presenting one that was already replaced ends
-  the session (a 30-second grace covers two tabs refreshing at once).
+  the session. For 30 seconds after a refresh the replaced token is still
+  answered — with the pair's current refresh token, not a further rotation —
+  so two tabs refreshing at once both stay signed in.
   `POST /api/auth/logout` ends the caller's session on the server, so its
   tokens are dead rather than merely forgotten by the browser.
 - **New settings** — `PINCER_JWT_SECRET` (HS256 signing secret, at least 32
@@ -64,11 +68,13 @@ silently open.
   `PINCER_AUTH_LOCKOUT_SECONDS` still apply per IP, and now also per account
   (one budget per identity, whether it is named by id or by email; the
   per-account lockout is one flat window, it does not double)
-  on login.
-- **CLI** — new `pincer identity` group: `list`, `create <name> [--email]
-  [--display-name]`, `set-password <name> [password]` (also resets a forgotten
-  password and signs the identity out everywhere) and `api-key <name>
-  [--force]`.
+  on login. Logins that arrive together share that budget: the ones beyond
+  it get 429 instead of a password check.
+- **CLI** — new `pincer identity` group: `list`, `create <name> [password]
+  [--api-key] [--email] [--display-name]` (creates the identity with its
+  password, prompted for when omitted, or with an API key),
+  `set-password <name> [password]` (resets a forgotten password and signs the
+  identity out everywhere), `api-key <name> [--force]` and `revoke <name>`.
 - **Endpoints** — `GET /api/identity/me`, `PUT /api/identity/me/password`,
   `GET`/`POST /api/identity/me/api-key` and
   `POST /api/voice/listen/{call_sid}/ticket`. The password, key-generation and
@@ -79,9 +85,11 @@ silently open.
   `auth_required`.
 - **Listen-in WebSocket** — `/api/voice/listen/{call_sid}` no longer accepts a
   shared token in `?token=`. Browsers request a ticket first (valid 60 s,
-  bound to that call) and connect with `?token=<ticket>`; non-browser clients
-  may send the `Authorization` header on the upgrade. Listen sessions are
-  audited under the real identity.
+  bound to that call, good for one connection, and dead once the session that
+  requested it signs out) and connect with `?token=<ticket>`; non-browser
+  clients may send a session access token in the `Authorization` header on
+  the upgrade. An API key cannot listen in (403). Listen sessions are audited
+  under the real identity.
 - **Chat routes** (`/api/chat/*`) — with a session JWT the user is the
   signed-in identity and `X-Pincer-User` is ignored; with an API key,
   `X-Pincer-User` stays the visitor-session id and becomes optional (without

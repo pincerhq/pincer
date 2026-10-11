@@ -79,8 +79,10 @@ cannot be used to sign in.
 
 Returns a new token pair in the same shape as login. The refresh token is
 single-use: store the new one. Presenting a refresh token that was already
-replaced ends the session (`401 token_expired`), apart from a 30-second grace
-for two tabs refreshing at once.
+replaced ends the session (`401 token_expired`). The exception is the 30
+seconds after a refresh: the token it replaced is then still answered, with
+the same refresh token the first caller received, so two tabs refreshing at
+once both end up holding the current one.
 
 ### `POST /api/auth/logout`
 
@@ -548,7 +550,8 @@ for the wire protocol).
 
 Browsers cannot set a header on a WebSocket, so they first request a ticket
 with their access token and pass it in the query string. A ticket is valid for
-60 seconds and only for that call:
+60 seconds, only for that call and for one connection, and stops working when
+the session that requested it signs out:
 
 ```javascript
 const res = await fetch(`/api/voice/listen/${callSid}/ticket`, {
@@ -559,5 +562,6 @@ const { ticket } = await res.json(); // { "ticket": "…", "expires_in": 60 }
 const ws = new WebSocket(`wss://api.example.com/api/voice/listen/${callSid}?token=${ticket}`);
 ```
 
-Non-browser clients may instead send `Authorization: Bearer <access token or
-API key>` on the upgrade request.
+Non-browser clients may instead send `Authorization: Bearer <access token>`
+on the upgrade request. An API key is refused with 403: listening in needs a
+signed-in session.

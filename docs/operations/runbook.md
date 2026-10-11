@@ -544,9 +544,9 @@ Record how long it took. An untimed restore procedure is not a recovery plan.
 5. `scripts/deploy.sh` — the gate blocks a misconfigured launch.
 6. AVV/DPA signed ([avv-annex.md](../guides/avv-annex.md)) **before** the first
    real call.
-7. Give the customer a sign-in: `pincer identity create <name> --email <email>`,
-   then `pincer identity set-password <name>`; `pincer identity api-key <name>`
-   if they use the web chat widget. Nobody can open the dashboard before this.
+7. Give the customer a sign-in: `pincer identity create <name> --email <email>`
+   (prompts for the password); `pincer identity api-key <name>` if they use
+   the web chat widget. Nobody can open the dashboard before this.
 8. Verify: `pincer voice ops canary`, then one supervised live call.
 
 ## Decommissioning

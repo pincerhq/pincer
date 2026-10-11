@@ -101,8 +101,9 @@ from the dashboard. What it is and is not:
   call, when, for how long".
 - **Capped and authenticated.** At most `PINCER_LISTEN_IN_MAX_LISTENERS`
   (default 2) listeners per call; the listener socket requires a signed-in
-  identity (a 60-second ticket bound to that call, or the identity's own
-  credential) and is refused before the handshake completes without it. The
+  identity (a 60-second, single-use ticket bound to that call, or the
+  session's access token — not an API key) and is refused before the
+  handshake completes without it. The
   audit row names the identity that listened.
 
 For the DPA / AVV: no new processor is involved (Twilio already carries the
