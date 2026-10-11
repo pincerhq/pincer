@@ -307,6 +307,15 @@ class AuthedApp:
 
         return IdentityService(self.db_url)
 
+    def listen_ticket(self, call_sid: str) -> str:
+        """A listen-in ticket for the seeded session, as the ticket route mints it."""
+        auth = self.auth
+
+        async def issue() -> str:
+            return await auth.issue_ws_ticket(await auth.authenticate_bearer(self.access_token), call_sid)
+
+        return self.run(issue)
+
     @staticmethod
     def run[T](make: Callable[[], Awaitable[T]]) -> T:
         """Run a service call from a sync test, on a loop of its own.

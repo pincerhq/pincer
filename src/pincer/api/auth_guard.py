@@ -65,6 +65,8 @@ class _Attempts:
     failures: int = 0
     locked_until: float = 0.0
     last_seen: float = field(default_factory=time.monotonic)
+    #: Attempts admitted by `reserve` whose outcome is not known yet.
+    in_flight: int = 0
 
 
 class AuthGuard:
@@ -85,7 +87,9 @@ class AuthGuard:
         stale = [
             ip
             for ip, a in self._ips.items()
-            if a.locked_until <= now and now - a.last_seen > self.lockout_seconds + MAX_LOCKOUT_SECONDS
+            if a.in_flight <= 0
+            and a.locked_until <= now
+            and now - a.last_seen > self.lockout_seconds + MAX_LOCKOUT_SECONDS
         ]
         for ip in stale:
             del self._ips[ip]
@@ -98,6 +102,36 @@ class AuthGuard:
         if attempts is None or attempts.locked_until <= now:
             return 0
         return max(1, int(attempts.locked_until - now) + 1)
+
+    def reserve(self, ip: str) -> int:
+        """Claim one attempt before a credential is checked. Returns 0 when
+        the attempt may go ahead (pair it with `release`), else the seconds
+        to wait.
+
+        `retry_after` alone only sees failures that were already recorded, so
+        any number of requests sent together would all pass it and each get a
+        guess. Here the attempts still being verified count against what is
+        left of the budget: no more run at once than could fail before the
+        lockout starts.
+        """
+        wait = self.retry_after(ip)
+        if wait:
+            return wait
+        attempts = self._ips.setdefault(ip, _Attempts())
+        # A flat-window lock that has run out is a fresh budget (see `record_failure`).
+        expired = not self.escalate and attempts.locked_until > 0
+        failures = 0 if expired else attempts.failures
+        if attempts.in_flight >= max(1, self.max_failures + 1 - failures):
+            return 1
+        attempts.in_flight += 1
+        attempts.last_seen = time.monotonic()
+        return 0
+
+    def release(self, ip: str) -> None:
+        """Give back an attempt claimed with `reserve`, once its outcome is known."""
+        attempts = self._ips.get(ip)
+        if attempts is not None and attempts.in_flight > 0:
+            attempts.in_flight -= 1
 
     def record_failure(self, ip: str) -> int:
         """Count a failed authentication. Returns the resulting lockout seconds (0 = none)."""
@@ -123,7 +157,14 @@ class AuthGuard:
 
     def record_success(self, ip: str) -> None:
         """A valid token clears the IP's failure history."""
-        self._ips.pop(ip, None)
+        attempts = self._ips.get(ip)
+        if attempts is None:
+            return
+        if attempts.in_flight > 0:
+            # Other attempts are still being verified; their reservations live here.
+            attempts.failures, attempts.locked_until = 0, 0.0
+            return
+        del self._ips[ip]
 
     def reset(self) -> None:
         self._ips.clear()

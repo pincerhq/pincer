@@ -176,7 +176,8 @@ def _check_api_tokens(settings: Settings | Any) -> tuple[StepStatus, str]:
     if not count:
         return (
             StepStatus.MISSING,
-            "no identity can sign in — run `pincer identity create <name>` and `pincer identity set-password <name>`",
+            "no identity can sign in — run `pincer identity create <name>` "
+            "(or `pincer identity set-password <name>` for one that already exists)",
         )
     return StepStatus.READY, f"{count} identit{'y' if count == 1 else 'ies'} with a password or API key"
 

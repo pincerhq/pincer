@@ -402,6 +402,35 @@ def test_telegram_access_control_critical_no_identity_map(tmp_path):
     assert result.status == CheckStatus.CRITICAL
 
 
+@pytest.mark.parametrize(
+    "check", ["_check_telegram_access_control", "_check_whatsapp_access_control", "_check_signal_access_control"]
+)
+def test_access_control_reports_an_identity_map_that_does_not_load(tmp_path, check):
+    """`pincer run` refuses to start on it; the doctor must say so, not crash."""
+    from unittest.mock import MagicMock
+
+    cfg = MagicMock()
+    cfg.identity_map = "me@telegram:111"
+    cfg.telegram_bot_token.get_secret_value.return_value = "123456:TOKEN"
+    cfg.whatsapp_enabled = True
+    cfg.signal_enabled = True
+
+    result = getattr(SecurityDoctor(config_dir=tmp_path), check)(cfg)
+
+    assert result.status == CheckStatus.CRITICAL
+    assert "identity key 'me' is reserved" in result.message
+
+    # The same for a broken [identity] section, which already raised before.
+    (tmp_path / "pincer.toml").write_text("""
+[identity.me]
+[[identity.me.channels]]
+channel = "telegram"
+channel_user_id = 1
+""")
+    cfg.identity_map = ""
+    assert getattr(SecurityDoctor(config_dir=tmp_path), check)(cfg).status == CheckStatus.CRITICAL
+
+
 def test_telegram_access_control_pass_with_identity_map(tmp_path):
     from unittest.mock import MagicMock
 

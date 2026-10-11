@@ -52,6 +52,15 @@ class SeedEntry:
     backfill: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class NewApiKey:
+    """What is stored of an API key: its hash and the two ends shown masked."""
+
+    key_hash: str
+    prefix: str
+    last4: str
+
+
 def _with_channels(profile: Any, links: Sequence[tuple[str, str, str | None]]) -> dict[str, Any]:
     return {
         "pincer_user_id": profile.pincer_user_id,
@@ -137,14 +146,29 @@ class IdentityService(DatabaseService):
         *,
         email: str | None = None,
         display_name: str | None = None,
+        password_hash: str | None = None,
+        api_key: NewApiKey | None = None,
     ) -> bool:
         """A profile with no channel yet, for an identity made by hand
-        (`pincer identity create`). False when the id is already taken."""
+        (`pincer identity create`). False when the id is already taken.
+
+        The credential goes in with the profile, in one transaction: a
+        channel-less identity that cannot sign in is what `prune` removes at
+        the next start.
+        """
+        now = datetime.now(UTC).isoformat()
         async with session_scope(self._url) as session:
             profiles = IdentityProfileRepository(session)
             if await profiles.get(pincer_user_id) is not None:
                 return False
             await profiles.add_if_new({"pincer_user_id": pincer_user_id, "email": email, "display_name": display_name})
+            credentials = IdentityCredentialRepository(session)
+            if password_hash is not None:
+                await credentials.set_password(pincer_user_id, password_hash, now=now)
+            if api_key is not None:
+                await credentials.set_api_key(
+                    pincer_user_id, api_key_hash=api_key.key_hash, prefix=api_key.prefix, last4=api_key.last4, now=now
+                )
         return True
 
     async def email_owners(self, email: str) -> list[str]:

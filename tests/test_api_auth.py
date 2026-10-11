@@ -23,6 +23,8 @@ if TYPE_CHECKING:
 
 LOGIN = "/api/auth/login"
 REFRESH = "/api/auth/refresh"
+LOGOUT = "/api/auth/logout"
+STATUS = "/api/status"
 
 
 def _login(app: AuthedApp, identifier: str, password: str, **kwargs):
@@ -218,6 +220,34 @@ def test_login_is_throttled_per_ip_across_accounts(tight_budget: None, authed_ap
     assert _login(authed_app, "alice", authed_app.password, headers={"X-Forwarded-For": "10.1.1.2"}).status_code == 200
 
 
+def test_logins_sent_together_get_no_more_guesses_than_sequential_ones(authed_app: AuthedApp) -> None:
+    """Checking the lockout and recording the failure are two steps with a
+    password hash in between; requests that arrive together must not all
+    pass the check before any of them has failed."""
+    import asyncio
+
+    import httpx
+
+    app = authed_app.client.app
+    budget = app.state.login_guard.max_failures
+    assert budget == 10
+
+    async def burst() -> list[int]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            guesses = [client.post(LOGIN, json={"identifier": "alice", "password": f"guess {n}"}) for n in range(60)]
+            return [resp.status_code for resp in await asyncio.gather(*guesses)]
+
+    statuses = authed_app.run(burst)
+
+    assert set(statuses) == {401, 429}
+    assert 1 <= statuses.count(401) <= budget + 1
+    assert statuses.count(429) == 60 - statuses.count(401)
+    # Nothing is left reserved once the burst is over.
+    for guard in (app.state.auth_guard, app.state.login_guard):
+        assert all(attempts.in_flight == 0 for attempts in guard._ips.values())
+
+
 def test_a_successful_login_clears_the_account_s_failures(tight_budget: None, authed_app: AuthedApp) -> None:
     for _ in range(3):
         assert _login(authed_app, "alice", "guess").status_code == 401
@@ -331,27 +361,94 @@ def test_listen_in_ticket_is_bound_to_its_call(authed_app: AuthedApp) -> None:
     auth = authed_app.auth
 
     async def check() -> None:
-        ticket = await auth.issue_ws_ticket("alice", "CA1")
-        assert (await auth.authenticate_ws_ticket(ticket, "CA1")).pincer_user_id == "alice"
+        session = await auth.authenticate_bearer(authed_app.access_token)
+        ticket = await auth.issue_ws_ticket(session, "CA1")
+        # The wrong call is refused without spending the ticket.
         with pytest.raises(InvalidTokenError):
             await auth.authenticate_ws_ticket(ticket, "CA2")
+        listener = await auth.authenticate_ws_ticket(ticket, "CA1")
+        assert (listener.pincer_user_id, listener.interactive, listener.session_id) == (
+            "alice",
+            True,
+            session.session_id,
+        )
         # A ticket is not a session, and a session is not a ticket.
         with pytest.raises(InvalidTokenError):
             await auth.authenticate_bearer(ticket)
         with pytest.raises(InvalidTokenError):
             await auth.authenticate_ws_ticket(authed_app.access_token, "CA1")
 
+        unused = await auth.issue_ws_ticket(session, "CA1")
         await auth.set_password("alice", "a brand new password")
+        with pytest.raises(TokenStaleError):
+            await auth.authenticate_ws_ticket(unused, "CA1")
+
+    authed_app.run(check)
+
+
+def test_a_listen_in_ticket_opens_one_socket(authed_app: AuthedApp) -> None:
+    """The ticket travels in a URL, so it is in an access log by the time it
+    has been used. A second use must not open a second socket."""
+    auth = authed_app.auth
+
+    async def check() -> None:
+        session = await auth.authenticate_bearer(authed_app.access_token)
+        ticket = await auth.issue_ws_ticket(session, "CA1")
+        assert (await auth.authenticate_ws_ticket(ticket, "CA1")).pincer_user_id == "alice"
+        for _ in range(2):
+            with pytest.raises(InvalidTokenError):
+                await auth.authenticate_ws_ticket(ticket, "CA1")
+        # Another ticket for the same call is its own ticket.
+        again = await auth.issue_ws_ticket(session, "CA1")
+        assert (await auth.authenticate_ws_ticket(again, "CA1")).pincer_user_id == "alice"
+
+    authed_app.run(check)
+
+
+def test_spent_listen_in_tickets_are_forgotten_once_they_have_expired(authed_app: AuthedApp, monkeypatch) -> None:
+    import time as time_module
+
+    auth = authed_app.auth
+
+    async def check() -> None:
+        session = await auth.authenticate_bearer(authed_app.access_token)
+        for _ in range(3):
+            await auth.authenticate_ws_ticket(await auth.issue_ws_ticket(session, "CA1"), "CA1")
+        assert len(auth._spent_tickets) == 3
+
+        later = time_module.time() + 120
+        monkeypatch.setattr(time_module, "time", lambda: later)
+        auth._spend_ticket("one-more", int(later) + 60)
+        assert list(auth._spent_tickets) == ["one-more"]
+
+    authed_app.run(check)
+
+
+def test_a_listen_in_ticket_dies_with_the_session_that_asked_for_it(authed_app: AuthedApp) -> None:
+    auth = authed_app.auth
+
+    async def check() -> None:
+        session = await auth.authenticate_bearer(authed_app.access_token)
+        ticket = await auth.issue_ws_ticket(session, "CA1")
+        await auth.logout(session)
+        # Signed out, not forged: refused without spending the lockout budget.
         with pytest.raises(TokenStaleError):
             await auth.authenticate_ws_ticket(ticket, "CA1")
 
     authed_app.run(check)
 
+    # A ticket that names no session at all opens nothing either.
+    async def sessionless() -> None:
+        async with session_scope(authed_app.db_url) as session:
+            ver = (await IdentityCredentialRepository(session).get("alice")).token_version
+        bare = credentials.encode_token("j" * 48, sub="alice", typ="ws", ver=ver, ttl_seconds=60, call="CA1")
+        with pytest.raises(TokenStaleError):
+            await auth.authenticate_ws_ticket(bare, "CA1")
+
+    authed_app.run(sessionless)
+
 
 # ── sessions: single-use refresh tokens, logout, revocation ──────────
-
-LOGOUT = "/api/auth/logout"
-STATUS = "/api/status"
 
 
 def _bearer(token: str) -> dict[str, str]:
@@ -392,6 +489,95 @@ def test_two_tabs_refreshing_at_once_both_succeed(authed_app: AuthedApp) -> None
     assert (tab_a.status_code, tab_b.status_code) == (200, 200)
     # The last pair written is the one the shared storage ends up holding.
     assert _refresh(authed_app, tab_b.json()["refresh_token"]).status_code == 200
+
+
+def test_the_slower_tab_is_handed_the_token_the_faster_one_got(authed_app: AuthedApp) -> None:
+    """Each tab keeps what it was answered with. If the slower tab rotated
+    again, the faster tab's token would be two rotations old the next time it
+    refreshed — outside the grace window, a "theft" that ends the session."""
+    p1 = _refresh(authed_app, authed_app.refresh_token).json()
+    p2 = _refresh(authed_app, authed_app.refresh_token).json()
+
+    def jti(pair: dict) -> str | None:
+        return credentials.decode_token("j" * 48, pair["refresh_token"], typ="refresh").jti
+
+    assert jti(p1) == jti(p2)
+    # Whichever tab refreshes next, and in whichever order, both stay signed in.
+    for pair in (p1, p2, p2, p1):
+        again = _refresh(authed_app, pair["refresh_token"])
+        assert again.status_code == 200
+        assert authed_app.client.get(STATUS, headers=_bearer(again.json()["access_token"])).status_code == 200
+
+
+def test_the_grace_window_does_not_reach_back_two_rotations(authed_app: AuthedApp) -> None:
+    first = _refresh(authed_app, authed_app.refresh_token).json()
+    second = _refresh(authed_app, first["refresh_token"]).json()
+
+    # Two rotations old: a copy someone kept, and the session ends with it.
+    assert _refresh(authed_app, authed_app.refresh_token).status_code == 401
+    assert _refresh(authed_app, second["refresh_token"]).status_code == 401
+
+
+def test_refreshes_that_race_rotate_once_and_all_succeed(authed_app: AuthedApp) -> None:
+    """The swap is a compare-and-set: of the refreshes that read the same
+    current token, one rotates and the rest are handed its result."""
+    import asyncio
+
+    auth = authed_app.auth
+
+    async def race() -> None:
+        pairs = await asyncio.gather(*(auth.refresh(authed_app.refresh_token) for _ in range(5)))
+        jtis = {credentials.decode_token("j" * 48, p.refresh_token, typ="refresh").jti for p in pairs}
+        assert len(jtis) == 1
+        for pair in pairs:
+            assert (await auth.authenticate_bearer(pair.access_token)).pincer_user_id == "alice"
+        assert (await auth.refresh(pairs[-1].refresh_token)).pincer_user_id == "alice"
+
+    authed_app.run(race)
+
+
+def test_a_refresh_that_loses_the_swap_takes_the_grace_path(authed_app: AuthedApp, monkeypatch) -> None:
+    """Forced, since SQLite serialises the race away: the row is rotated by
+    someone else between this refresh's read and its write."""
+    from pincer.repositories.identity import AuthSessionRepository
+
+    auth = authed_app.auth
+    real_rotate = AuthSessionRepository.rotate
+    stolen: list[str] = []
+
+    async def rotate_after_a_rival(self, session_id, presented_jti, values):
+        if not stolen:
+            rival = {**values, "refresh_jti": "the-rival-s-token"}
+            assert await real_rotate(self, session_id, presented_jti, rival) == 1
+            stolen.append(rival["refresh_jti"])
+        return await real_rotate(self, session_id, presented_jti, values)
+
+    monkeypatch.setattr(AuthSessionRepository, "rotate", rotate_after_a_rival)
+
+    async def check() -> None:
+        pair = await auth.refresh(authed_app.refresh_token)
+        assert credentials.decode_token("j" * 48, pair.refresh_token, typ="refresh").jti == "the-rival-s-token"
+        assert (await auth.authenticate_bearer(pair.access_token)).pincer_user_id == "alice"
+
+    authed_app.run(check)
+
+
+def test_a_refresh_that_loses_to_a_logout_is_refused(authed_app: AuthedApp, monkeypatch) -> None:
+    from pincer.repositories.identity import AuthSessionRepository
+
+    auth = authed_app.auth
+
+    async def rotate_after_a_logout(self, session_id, presented_jti, values):
+        await self.delete_by_id(session_id)
+        return 0
+
+    monkeypatch.setattr(AuthSessionRepository, "rotate", rotate_after_a_logout)
+
+    async def check() -> None:
+        with pytest.raises(TokenStaleError):
+            await auth.refresh(authed_app.refresh_token)
+
+    authed_app.run(check)
 
 
 def test_a_chain_of_refreshes_keeps_the_session_alive(authed_app: AuthedApp) -> None:

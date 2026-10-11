@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
 runner = CliRunner()
 
+PASSWORD = "correct horse battery"
+
 
 @pytest.fixture(autouse=True)
 def _scratch_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
@@ -44,40 +46,114 @@ async def _login(name: str, password: str):
         await dispose_engines()
 
 
-def test_create_then_set_password_then_sign_in(tmp_path: Path) -> None:
-    created = _run("create", "tamias", "--email", "tamias@example.com", "--display-name", "Tamias")
+def test_create_with_a_password_then_sign_in(tmp_path: Path) -> None:
+    created = _run("create", "tamias", PASSWORD, "--email", "tamias@example.com", "--display-name", "Tamias")
     assert created.exit_code == 0, created.output
     assert "Created identity 'tamias'" in created.output
-
-    assert _run("set-password", "tamias", "correct horse battery").exit_code == 0
+    assert "set-password" not in created.output  # nothing left to do
 
     import asyncio
 
-    assert asyncio.run(_login("tamias", "correct horse battery")).pincer_user_id == "tamias"
-    assert asyncio.run(_login("tamias@example.com", "correct horse battery")).pincer_user_id == "tamias"
+    assert asyncio.run(_login("tamias", PASSWORD)).pincer_user_id == "tamias"
+    assert asyncio.run(_login("tamias@example.com", PASSWORD)).pincer_user_id == "tamias"
 
 
-def test_set_password_prompts_hidden_and_confirms_when_omitted() -> None:
-    _run("create", "tamias")
+def test_create_prompts_hidden_and_confirms_when_the_password_is_omitted() -> None:
+    mismatch = _run("create", "tamias", input="first password\nsecond password\n")
+    assert mismatch.exit_code != 0
+    assert "tamias" not in _run("list").output
+
+    result = _run("create", "tamias", input=f"{PASSWORD}\n{PASSWORD}\n")
+    assert result.exit_code == 0, result.output
+    assert PASSWORD not in result.output  # hidden input is not echoed
+
+    import asyncio
+
+    assert asyncio.run(_login("tamias", PASSWORD)).pincer_user_id == "tamias"
+
+
+def test_create_with_an_api_key_prints_a_key_that_works() -> None:
+    import asyncio
+
+    created = _run("create", "widget", "--api-key")
+    assert created.exit_code == 0, created.output
+    key = next(line for line in created.output.splitlines() if line.startswith("pnc_"))
+    assert "not shown again" in created.output
+
+    async def who() -> tuple[str, str]:
+        try:
+            identity = await build_auth_service().authenticate_bearer(key)
+            return identity.pincer_user_id, identity.method
+        finally:
+            await dispose_engines()
+
+    assert asyncio.run(who()) == ("widget", "api_key")
+    listed = _run("list").output
+    assert key not in listed
+    assert key[-4:] in listed
+
+
+def test_create_makes_nothing_when_the_credential_is_refused() -> None:
+    """Profile and credential are one step: a profile left behind without
+    one would be an identity that exists until the next restart."""
+    weak = _run("create", "tamias", "short")
+    assert weak.exit_code == 1
+    assert "at least 8 characters" in weak.output
+
+    both = _run("create", "tamias", PASSWORD, "--api-key")
+    assert both.exit_code == 1
+    assert "not both" in both.output
+
+    assert "No identities" in _run("list").output
+
+
+def test_a_created_identity_survives_the_startup_pruning(tmp_path: Path) -> None:
+    """With an identity map, identities without a channel are swept at every
+    start — except the ones that can sign in. `create` must make one of those."""
+    import asyncio
+
+    assert _run("create", "tamias", PASSWORD).exit_code == 0
+    assert _run("create", "widget", "--api-key").exit_code == 0
+
+    async def restart() -> list[str]:
+        try:
+            identities = IdentityService(get_database_url(tmp_path / "pincer.db"))
+            await identities.create_profile("bare")  # what `create` used to leave behind
+            await identities.create_identity("mapped", channel="telegram", channel_user_id="1")
+            await identities.prune({("telegram", "1")})
+            return sorted(row["pincer_user_id"] for row in await identities.list_profiles())
+        finally:
+            await dispose_engines()
+
+    assert asyncio.run(restart()) == ["mapped", "tamias", "widget"]
+    assert asyncio.run(_login("tamias", PASSWORD)).pincer_user_id == "tamias"
+
+
+def test_set_password_resets_and_prompts_hidden_when_omitted() -> None:
+    _run("create", "tamias", PASSWORD)
 
     mismatch = _run("set-password", "tamias", input="first password\nsecond password\n")
     assert mismatch.exit_code != 0
 
-    result = _run("set-password", "tamias", input="correct horse battery\ncorrect horse battery\n")
+    result = _run("set-password", "tamias", input="a brand new password\na brand new password\n")
     assert result.exit_code == 0, result.output
-    assert "correct horse battery" not in result.output  # hidden input is not echoed
+    assert "a brand new password" not in result.output  # hidden input is not echoed
 
     import asyncio
 
-    assert asyncio.run(_login("tamias", "correct horse battery")).pincer_user_id == "tamias"
+    from pincer.services.auth import InvalidCredentialsError
+
+    assert asyncio.run(_login("tamias", "a brand new password")).pincer_user_id == "tamias"
+    with pytest.raises(InvalidCredentialsError):
+        asyncio.run(_login("tamias", PASSWORD))
 
 
 def test_set_password_refuses_an_unknown_identity_and_a_weak_password() -> None:
-    unknown = _run("set-password", "ghost", "correct horse battery")
+    unknown = _run("set-password", "ghost", PASSWORD)
     assert unknown.exit_code == 1
     assert "No identity named 'ghost'" in unknown.output
 
-    _run("create", "tamias")
+    _run("create", "tamias", PASSWORD)
     weak = _run("set-password", "tamias", "short")
     assert weak.exit_code == 1
     assert "at least 8 characters" in weak.output
@@ -100,17 +176,17 @@ def test_create_refuses_names_that_cannot_be_identities(name: str, message: str)
 
 
 def test_create_refuses_a_duplicate_and_a_bad_email() -> None:
-    assert _run("create", "tamias").exit_code == 0
-    duplicate = _run("create", "tamias")
+    assert _run("create", "tamias", PASSWORD).exit_code == 0
+    duplicate = _run("create", "tamias", PASSWORD)
     assert duplicate.exit_code == 1
     assert "already exists" in duplicate.output
 
-    bad_email = _run("create", "other", "--email", "not-an-email")
+    bad_email = _run("create", "other", PASSWORD, "--email", "not-an-email")
     assert bad_email.exit_code == 1
 
 
 def test_api_key_is_printed_once_and_replaced_only_with_force() -> None:
-    _run("create", "widget")
+    _run("create", "widget", PASSWORD)
 
     first = _run("api-key", "widget")
     assert first.exit_code == 0, first.output
@@ -128,7 +204,9 @@ def test_api_key_is_printed_once_and_replaced_only_with_force() -> None:
     replacement = next(line for line in forced.output.splitlines() if line.startswith("pnc_"))
     assert replacement != key
 
-    assert _run("api-key", "ghost").exit_code == 1
+    unknown = _run("api-key", "ghost")
+    assert unknown.exit_code == 1
+    assert "pincer identity create ghost --api-key" in unknown.output
 
 
 def test_list_shows_who_can_sign_in_without_showing_secrets(tmp_path: Path) -> None:
@@ -136,10 +214,8 @@ def test_list_shows_who_can_sign_in_without_showing_secrets(tmp_path: Path) -> N
     assert empty.exit_code == 0
     assert "No identities" in empty.output
 
-    _run("create", "tamias", "--email", "tamias@example.com")
-    _run("create", "widget")
-    _run("set-password", "tamias", "correct horse battery")
-    key_output = _run("api-key", "widget").output
+    _run("create", "tamias", PASSWORD, "--email", "tamias@example.com")
+    key_output = _run("create", "widget", "--api-key").output
     key = next(line for line in key_output.splitlines() if line.startswith("pnc_"))
 
     listed = _run("list")
@@ -155,7 +231,7 @@ def test_list_shows_who_can_sign_in_without_showing_secrets(tmp_path: Path) -> N
 def test_an_identity_made_by_hand_has_no_channel(tmp_path: Path) -> None:
     import asyncio
 
-    _run("create", "tamias")
+    _run("create", "tamias", PASSWORD)
 
     async def channels():
         try:
@@ -168,8 +244,8 @@ def test_an_identity_made_by_hand_has_no_channel(tmp_path: Path) -> None:
 
 def test_create_refuses_an_email_that_already_signs_someone_in() -> None:
     """Two identities sharing an email could neither of them sign in with it."""
-    assert _run("create", "tamias", "--email", "Tamias@Example.com").exit_code == 0
-    clash = _run("create", "other", "--email", "tamias@example.com")
+    assert _run("create", "tamias", PASSWORD, "--email", "Tamias@Example.com").exit_code == 0
+    clash = _run("create", "other", PASSWORD, "--email", "tamias@example.com")
     assert clash.exit_code == 1
     assert "already belongs to 'tamias'" in clash.output
     assert "other" not in _run("list").output
@@ -178,7 +254,7 @@ def test_create_refuses_an_email_that_already_signs_someone_in() -> None:
 def test_set_password_warns_when_the_email_cannot_sign_in(tmp_path: Path) -> None:
     import asyncio
 
-    _run("create", "tamias", "--email", "shared@example.com")
+    _run("create", "tamias", PASSWORD, "--email", "shared@example.com")
 
     async def add_duplicate() -> None:
         try:
@@ -191,7 +267,7 @@ def test_set_password_warns_when_the_email_cannot_sign_in(tmp_path: Path) -> Non
 
     asyncio.run(add_duplicate())
 
-    result = _run("set-password", "tamias", "correct horse battery")
+    result = _run("set-password", "tamias", PASSWORD)
     assert result.exit_code == 0
     assert "cannot be used to sign in" in result.output
     assert "Sign in as 'tamias'" in result.output
@@ -202,8 +278,7 @@ def test_revoke_removes_password_key_and_sessions() -> None:
 
     from pincer.services.auth import InvalidCredentialsError
 
-    _run("create", "tamias")
-    _run("set-password", "tamias", "correct horse battery")
+    _run("create", "tamias", PASSWORD)
     _run("api-key", "tamias")
 
     revoked = _run("revoke", "tamias")
@@ -211,7 +286,7 @@ def test_revoke_removes_password_key_and_sessions() -> None:
     assert "Revoked API access for 'tamias'" in revoked.output
 
     with pytest.raises(InvalidCredentialsError):
-        asyncio.run(_login("tamias", "correct horse battery"))
+        asyncio.run(_login("tamias", PASSWORD))
     listed = _run("list").output
     assert "tamias" in listed  # the identity itself stays
     assert "pnc_" not in listed

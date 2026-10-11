@@ -106,6 +106,87 @@ def test_a_non_escalating_guard_locks_for_one_flat_window_then_resets(monkeypatc
     assert escalating.record_failure("1.2.3.4") == 120
 
 
+def test_reserve_admits_no_more_attempts_at_once_than_the_budget_has_left():
+    """Attempts sent together are all checked before any of them has failed,
+    so the ones still being verified count against the budget."""
+    guard = AuthGuard(max_failures=3, lockout_seconds=60)
+
+    # 3 free failures and the one that triggers the lockout: 4 may run at once.
+    assert [guard.reserve("1.2.3.4") for _ in range(6)] == [0, 0, 0, 0, 1, 1]
+    assert guard.reserve("9.9.9.9") == 0  # per key
+
+    guard.release("1.2.3.4")
+    guard.record_failure("1.2.3.4")
+    # One failure recorded, three still in flight: nothing is free yet.
+    assert guard.reserve("1.2.3.4") == 1
+    for _ in range(3):
+        guard.release("1.2.3.4")
+        guard.record_failure("1.2.3.4")
+    assert guard.reserve("1.2.3.4") > 1  # locked out now, for the real window
+
+
+def test_reserve_keeps_sequential_attempts_as_they_were():
+    guard = AuthGuard(max_failures=3, lockout_seconds=60)
+    for _ in range(4):
+        assert guard.reserve("1.2.3.4") == 0
+        guard.release("1.2.3.4")
+        guard.record_failure("1.2.3.4")
+    assert 0 < guard.reserve("1.2.3.4") <= 61
+
+
+def test_release_and_success_tolerate_what_is_not_there():
+    guard = AuthGuard(max_failures=3, lockout_seconds=60)
+    guard.release("never-seen")
+    guard.record_success("never-seen")
+
+    assert guard.reserve("1.2.3.4") == 0
+    assert guard.reserve("1.2.3.4") == 0
+    guard.release("1.2.3.4")
+    # A success while another attempt is in flight keeps that reservation.
+    guard.record_success("1.2.3.4")
+    assert guard._ips["1.2.3.4"].in_flight == 1
+    guard.release("1.2.3.4")
+    guard.release("1.2.3.4")  # one too many is not a negative budget
+    assert guard._ips["1.2.3.4"].in_flight == 0
+    guard.record_success("1.2.3.4")
+    assert "1.2.3.4" not in guard._ips
+
+
+def test_an_entry_with_an_attempt_in_flight_is_never_pruned(monkeypatch):
+    import time as time_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(time_module, "monotonic", lambda: clock[0])
+    guard = AuthGuard(max_failures=3, lockout_seconds=60)
+    assert guard.reserve("slow") == 0
+    assert guard.reserve("done") == 0
+    guard.release("done")
+
+    clock[0] += 60 + MAX_LOCKOUT_SECONDS + 1
+    guard.retry_after("anyone")
+
+    assert "slow" in guard._ips
+    assert "done" not in guard._ips
+
+
+def test_reserve_after_a_flat_window_has_a_full_budget_and_an_escalating_one_does_not(monkeypatch):
+    import time as time_module
+
+    clock = [1000.0]
+    monkeypatch.setattr(time_module, "monotonic", lambda: clock[0])
+    flat = AuthGuard(max_failures=2, lockout_seconds=60, escalate=False)
+    escalating = AuthGuard(max_failures=2, lockout_seconds=60)
+    for guard in (flat, escalating):
+        assert [guard.record_failure("alice") for _ in range(3)] == [0, 0, 60]
+        assert guard.reserve("alice") > 1
+
+    clock[0] += 61
+    # Flat: the window is over, the account has its whole budget back.
+    assert [flat.reserve("alice") for _ in range(4)] == [0, 0, 0, 1]
+    # Escalating: the history stands, so one attempt at a time.
+    assert [escalating.reserve("alice") for _ in range(2)] == [0, 1]
+
+
 # ── Brute-force guard (through the API) ──────────────────────────────
 
 

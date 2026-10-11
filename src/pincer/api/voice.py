@@ -341,8 +341,10 @@ async def active_calls() -> list[ActiveCall]:
 # up in every proxy's access log, so neither a session token nor an API key is
 # accepted in the query string. The dashboard first asks
 # POST /api/voice/listen/{call_sid}/ticket for a one-minute ticket bound to
-# this call and passes that as `?token=`. A client that can set headers may
-# send its usual Bearer credential instead.
+# this call and passes that as `?token=`; the ticket opens one socket and dies
+# with the session that asked for it. A client that can set headers may send
+# a session access token instead. An API key opens neither: it cannot ask for
+# a ticket, and it is refused on the socket.
 #
 # Wire protocol v1 (JSON text frames, server → client only):
 #   {"type":"start","call_sid":…,"tracks":["inbound","outbound"],
@@ -396,6 +398,10 @@ async def _authorize_listener(websocket: WebSocket, call_sid: str) -> str | None
             identity = await auth.authenticate_ws_ticket(ticket, call_sid)
         else:
             identity = await authenticate_connection(websocket, auth)
+            if not identity.interactive:
+                # A valid credential, so not a guess — just not one that may listen.
+                await _deny_ws(websocket, 403, "Listening in requires a signed-in session, not an API key")
+                return None
     except AuthError as exc:
         locked_for = 0
         if exc.counts_as_failure:
@@ -489,7 +495,7 @@ async def create_listen_ticket(
         raise HTTPException(status_code=401, detail="No authenticated identity")
     require_interactive(identity)
     try:
-        ticket = await auth.issue_ws_ticket(identity.pincer_user_id, call_sid)
+        ticket = await auth.issue_ws_ticket(identity, call_sid)
     except UnknownIdentityError as exc:
         raise HTTPException(status_code=401, detail="No authenticated identity") from exc
     return ListenTicketOut(ticket=ticket, expires_in=WS_TICKET_TTL_SECONDS)

@@ -28,6 +28,8 @@ _TABLES = [
     ChatSession.__table__,
 ]
 
+_NOW = "2026-10-10T12:00:00+00:00"
+
 
 @pytest.fixture
 async def url(db_url: str):
@@ -232,8 +234,6 @@ async def test_listing_identities_for_the_dashboard(url):
 
 # ── credentials ──────────────────────────────────────────────────────
 
-_NOW = "2026-10-10T12:00:00+00:00"
-
 
 async def _set_password(url: str, pincer_user_id: str, password_hash: str) -> None:
     async with session_scope(url) as session:
@@ -411,3 +411,25 @@ async def test_a_profile_made_by_hand_has_no_channel_and_is_found_by_email(url):
         assert [row.pincer_user_id for row in await profiles.find_by_email_ci(" alice@example.COM ")] == ["alice"]
         assert len(await profiles.find_by_email_ci("shared@example.com")) == 2
         assert await profiles.find_by_email_ci("nobody@example.com") == []
+
+
+async def test_rotating_a_session_needs_the_refresh_token_that_is_current(url):
+    """Compare-and-set: of two refreshes holding the same token, the second
+    one's swap matches no row — on either dialect."""
+    service = IdentityService(url)
+    await service.create_identity("alice", channel="telegram", channel_user_id="12345")
+    await _set_password(url, "alice", "hash")
+    async with session_scope(url) as session:
+        row = AuthSession(pincer_user_id="alice", refresh_jti="r0", expires_at=4_000_000_000.0)
+        await AuthSessionRepository(session).add(row, refresh=False)
+        session_id = row.id
+
+    async with session_scope(url) as session:
+        sessions = AuthSessionRepository(session)
+        assert await sessions.rotate(session_id, "r0", {"refresh_jti": "r1", "prev_refresh_jti": "r0"}) == 1
+        assert await sessions.rotate(session_id, "r0", {"refresh_jti": "r2", "prev_refresh_jti": "r0"}) == 0
+        assert await sessions.rotate(session_id, "never-issued", {"refresh_jti": "r3"}) == 0
+
+    async with session_scope(url) as session:
+        stored = await AuthSessionRepository(session).get(session_id)
+        assert (stored.refresh_jti, stored.prev_refresh_jti) == ("r1", "r0")

@@ -164,17 +164,29 @@ async def login(body: LoginIn, request: Request, auth: AuthServiceDep) -> JSONRe
     # not each get a failure budget of their own.
     account = await auth.login_account(body.identifier)
 
-    wait = max(ip_guard.retry_after(ip), account_guard.retry_after(account))
+    # Reserved, not just checked: requests sent together would otherwise all
+    # pass the check before any of them had failed.
+    wait = ip_guard.reserve(ip)
+    if not wait:
+        wait = account_guard.reserve(account)
+        if wait:
+            ip_guard.release(ip)
     if wait:
         await audit_auth_failure(ip, request.url.path, "locked_out", locked_for=wait)
         return auth_error_response("locked_out", status_code=429, retry_after=wait)
 
+    failure: InvalidCredentialsError | None = None
     try:
         pair = await auth.login(body.identifier, body.password.get_secret_value())
     except InvalidCredentialsError as exc:
+        failure = exc
+    finally:
+        ip_guard.release(ip)
+        account_guard.release(account)
+    if failure is not None:
         locked_for = max(ip_guard.record_failure(ip), account_guard.record_failure(account))
-        await audit_auth_failure(ip, request.url.path, exc.code, locked_for=locked_for)
-        return auth_error_response(exc.code)
+        await audit_auth_failure(ip, request.url.path, failure.code, locked_for=locked_for)
+        return auth_error_response(failure.code)
 
     ip_guard.record_success(ip)
     account_guard.record_success(account)

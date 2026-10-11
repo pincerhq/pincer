@@ -81,11 +81,24 @@ async def identity_list() -> None:
 @identity_app.command(name="create")
 async def identity_create(
     name: Annotated[str, typer.Argument(help="Identity name (letters, digits, underscore)")],
+    password: Annotated[
+        str | None,
+        typer.Argument(help="Password. Omit it to be prompted, which keeps it out of the shell history."),
+    ] = None,
     email: Annotated[str | None, typer.Option("--email", help="Email address; can be used to sign in")] = None,
     display_name: Annotated[str | None, typer.Option("--display-name", help="Human-readable name")] = None,
+    api_key: Annotated[
+        bool, typer.Option("--api-key", help="Give it an API key instead of a password, and print the key once")
+    ] = False,
 ) -> None:
-    """Create an identity that has no channel yet."""
+    """Create an identity that signs in with a password, or with --api-key.
+
+    It has no channel yet, and one of the two is what keeps it: an identity
+    with neither a channel nor a credential is removed at the next start.
+    """
     from pincer.core.identity import RESERVED_IDENTITY_NAMES
+    from pincer.security import credentials as creds
+    from pincer.services.identity import NewApiKey
 
     if not _NAME_PATTERN.match(name):
         raise _fail("An identity name may only contain letters, digits and underscores.")
@@ -95,15 +108,44 @@ async def identity_create(
         raise _fail("Names starting with 'usr_' are reserved for auto-generated identities.")
     if email is not None and "@" not in email:
         raise _fail(f"'{email}' is not an email address.")
+    if api_key and password is not None:
+        raise _fail("Give a password or --api-key, not both.")
 
     identities, _ = await _services()
+    if await identities.profile(name) is not None:
+        raise _fail(f"Identity '{name}' already exists.")
     if email is not None and (owners := await identities.email_owners(email)):
         # Two identities with one email could neither of them sign in with it.
         raise _fail(f"'{email}' already belongs to '{owners[0]}'. An email can sign in for one identity only.")
-    if not await identities.create_profile(name, email=email, display_name=display_name):
+
+    new_key: str | None = None
+    password_hash: str | None = None
+    if api_key:
+        new_key = creds.new_api_key()
+    else:
+        if password is None:
+            password = typer.prompt("Password", hide_input=True, confirmation_prompt=True)
+        try:
+            creds.validate_password(password)
+        except ValueError as e:
+            raise _fail(str(e)) from e
+        password_hash = await creds.hash_password(password)
+
+    created = await identities.create_profile(
+        name,
+        email=email,
+        display_name=display_name,
+        password_hash=password_hash,
+        api_key=NewApiKey(creds.hash_api_key(new_key), *creds.api_key_display_parts(new_key)) if new_key else None,
+    )
+    if not created:
         raise _fail(f"Identity '{name}' already exists.")
     console.print(f"[green]Created identity '{name}'.[/green]")
-    console.print(f"[dim]Next: pincer identity set-password {name}[/dim]")
+    if new_key:
+        console.print(f"[green]API key for '{name}':[/green]")
+        # Not through rich: it would wrap a long key and garble a copy-paste.
+        typer.echo(new_key)
+        console.print("[yellow]Store it now — it is not shown again.[/yellow]")
 
 
 @identity_app.command(name="set-password")
@@ -163,7 +205,7 @@ async def identity_api_key(
     try:
         api_key, _info = await auth.generate_api_key(name, force=force)
     except UnknownIdentityError as e:
-        raise _fail(f"No identity named '{name}'. Create it with: pincer identity create {name}") from e
+        raise _fail(f"No identity named '{name}'. Create it with: pincer identity create {name} --api-key") from e
     except ApiKeyExistsError as e:
         existing = await auth.api_key_info(name)
         masked = f" ({existing.masked})" if existing else ""

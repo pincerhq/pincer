@@ -270,9 +270,21 @@ class IdentityCredentialRepository(BaseRepository[IdentityCredential, str]):
 class AuthSessionRepository(BaseRepository[AuthSession, str]):
     model = AuthSession
 
-    async def rotate(self, session_id: str, values: dict[str, Any]) -> int:
-        stmt = update(AuthSession).where(col(AuthSession.id) == session_id).values(**values)
+    async def rotate(self, session_id: str, presented_jti: str, values: dict[str, Any]) -> int:
+        """Swap the session's refresh token, but only while `presented_jti`
+        is still the current one. 0 when another refresh got there first."""
+        stmt = (
+            update(AuthSession)
+            .where(col(AuthSession.id) == session_id, col(AuthSession.refresh_jti) == presented_jti)
+            .values(**values)
+        )
         return int((await self.session.exec(stmt)).rowcount)
+
+    async def reload(self, session_id: str) -> AuthSession | None:
+        """The row as the database has it now, not as this unit of work
+        first read it. None when it is gone."""
+        stmt = select(AuthSession).where(col(AuthSession.id) == session_id).execution_options(populate_existing=True)
+        return (await self.session.exec(stmt)).first()
 
     async def delete_by_id(self, session_id: str) -> int:
         return await self.delete_where(col(AuthSession.id) == session_id)

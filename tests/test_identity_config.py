@@ -279,6 +279,22 @@ channel_user_id = 1
     assert profiles == {}
 
 
+@pytest.mark.parametrize("env_value", ["me@telegram:1=whatsapp:2", "jane@telegram:2, ME @telegram:1"])
+def test_env_var_refuses_a_reserved_name_like_the_toml_section_does(tmp_path: Path, env_value: str) -> None:
+    """`me` is the API's alias for the caller; an identity by that name could
+    never be addressed. The resolver alone would skip the entry silently —
+    and then prune its channels as unlisted."""
+    with pytest.raises(ValueError, match=r"identity key '(me|ME)' is reserved"):
+        resolve_identity_map_config(env_value, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "env_value", ["telegram:1=email:me@example.com", "meme@telegram:1", "jane@email:me@example.com"]
+)
+def test_env_var_only_reserves_the_name_slot(tmp_path: Path, env_value: str) -> None:
+    assert resolve_identity_map_config(env_value, tmp_path) == (env_value, {})
+
+
 def test_no_env_var_stringifies_toml_entries(tmp_path: Path) -> None:
     (tmp_path / "pincer.toml").write_text("""
 [identity.johndoe]

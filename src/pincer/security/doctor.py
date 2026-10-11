@@ -1118,6 +1118,22 @@ class SecurityDoctor:
 
     # ── Access Control ────────────────────────────────────
 
+    def _identity_map(self, cfg: Settings, name: str, category: str) -> str | CheckResult:
+        """The effective identity map, or the finding to report when it does
+        not load — `pincer run` refuses to start on the same error."""
+        from pincer.config.identity import resolve_identity_map_config
+
+        try:
+            return resolve_identity_map_config(cfg.identity_map, self.config_dir)[0]
+        except ValueError as e:
+            return CheckResult(
+                name,
+                CheckStatus.CRITICAL,
+                f"Identity map is invalid: {e}",
+                fix_hint="Fix PINCER_IDENTITY_MAP (or the [identity] TOML section); Pincer will not start with it",
+                category=category,
+            )
+
     def _check_telegram_access_control(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
         if not cfg.telegram_bot_token.get_secret_value():
@@ -1127,9 +1143,9 @@ class SecurityDoctor:
                 "Telegram not configured",
                 category="access",
             )
-        from pincer.config.identity import resolve_identity_map_config
-
-        identity_map_config, _ = resolve_identity_map_config(cfg.identity_map, self.config_dir)
+        identity_map_config = self._identity_map(cfg, "telegram_access_control", "access")
+        if isinstance(identity_map_config, CheckResult):
+            return identity_map_config
         if identity_map_config:
             return CheckResult(
                 "telegram_access_control",
@@ -1157,9 +1173,9 @@ class SecurityDoctor:
                 "WhatsApp not configured",
                 category="access",
             )
-        from pincer.config.identity import resolve_identity_map_config
-
-        identity_map_config, _ = resolve_identity_map_config(cfg.identity_map, self.config_dir)
+        identity_map_config = self._identity_map(cfg, "whatsapp_access_control", "access")
+        if isinstance(identity_map_config, CheckResult):
+            return identity_map_config
         if identity_map_config:
             return CheckResult(
                 "whatsapp_access_control",
@@ -1306,7 +1322,10 @@ class SecurityDoctor:
                 "dashboard_auth_token",
                 CheckStatus.WARNING,
                 "No identity can sign in: nobody has a password or an API key",
-                fix_hint="pincer identity create <name> && pincer identity set-password <name>",
+                fix_hint=(
+                    "pincer identity create <name> "
+                    "(or pincer identity set-password <name> for an identity that already exists)"
+                ),
                 category="access",
             )
         return CheckResult(
@@ -1954,9 +1973,9 @@ class SecurityDoctor:
                 "Signal not enabled",
                 category="signal",
             )
-        from pincer.config.identity import resolve_identity_map_config
-
-        identity_map_config, _ = resolve_identity_map_config(cfg.identity_map, self.config_dir)
+        identity_map_config = self._identity_map(cfg, "signal_access_control", "signal")
+        if isinstance(identity_map_config, CheckResult):
+            return identity_map_config
         if identity_map_config:
             return CheckResult(
                 "signal_access_control",

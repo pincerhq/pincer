@@ -16,6 +16,8 @@ from pincer.core.identity import IdentityResolver
 from pincer.db.engine import to_async_url
 from pincer.services.identity import IdentityService, get_identity_service
 
+ME = "/api/identity/me"
+
 
 @pytest_asyncio.fixture
 async def resolver(tmp_path: Path) -> AsyncIterator[IdentityResolver]:
@@ -149,8 +151,6 @@ class TestIdentityApi:
 
 
 # ── /api/identity/me (issue #228) ────────────────────────────────────
-
-ME = "/api/identity/me"
 
 
 def _bearer(token: str) -> dict[str, str]:

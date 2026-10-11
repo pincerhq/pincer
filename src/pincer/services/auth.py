@@ -159,6 +159,8 @@ class AuthService(DatabaseService):
         self._secret = jwt_secret
         self._access_ttl = access_ttl_seconds
         self._refresh_ttl = refresh_ttl_seconds
+        #: Listen-in tickets already used, by token id, until they expire.
+        self._spent_tickets: dict[str, float] = {}
 
     # ── sessions ─────────────────────────────────────────────────────
 
@@ -267,45 +269,65 @@ class AuthService(DatabaseService):
         except creds.TokenError as exc:
             raise InvalidTokenError from exc
 
-    async def _live_session(self, sessions: AuthSessionRepository, claims: creds.TokenClaims) -> AuthSession:
-        """The session a token belongs to, if it has not been signed out."""
-        row = await sessions.get(claims.sid) if claims.sid else None
+    @staticmethod
+    def _require_live(row: AuthSession | None, claims: creds.TokenClaims) -> AuthSession:
         if row is None or row.pincer_user_id != claims.sub or row.expires_at < time.time():
             raise TokenStaleError
         return row
+
+    async def _live_session(self, sessions: AuthSessionRepository, claims: creds.TokenClaims) -> AuthSession:
+        """The session a token belongs to, if it has not been signed out."""
+        return self._require_live(await sessions.get(claims.sid) if claims.sid else None, claims)
 
     async def refresh(self, refresh_token: str) -> TokenPair:
         """Exchange a refresh token for a new pair. The token is spent: only
         the one in the returned pair refreshes this session from now on.
 
-        A refresh token that was already replaced is either a copy someone
-        kept or a race the grace window did not cover. Either way the session
-        is ended, so whoever holds the stolen copy is cut off with it.
+        The swap is a compare-and-set on the session row, so of several
+        refreshes that arrive together with the same token exactly one
+        rotates. The others — and a second tab that comes a moment later with
+        the token that was just replaced — do not rotate again: they are
+        handed the refresh token the winner got, so every tab ends up holding
+        the one that is current.
+
+        Past that grace window, a refresh token that was already replaced is
+        a copy someone kept. The session is ended, so whoever holds the
+        stolen copy is cut off with it.
         """
         claims = self._decode(refresh_token, "refresh")
         credential = await self._current(claims)
         now, new_jti = time.time(), creds.new_token_id()
-        reused = False
+        current_jti: str | None = None
         async with session_scope(self._url) as session:
             sessions = AuthSessionRepository(session)
             row = await self._live_session(sessions, claims)
-            rotation: dict[str, Any] = {"refresh_jti": new_jti, "expires_at": now + self._refresh_ttl}
-            if claims.jti == row.refresh_jti:
-                rotation |= {"prev_refresh_jti": row.refresh_jti, "rotated_at": now}
-            elif not (
-                claims.jti == row.prev_refresh_jti
-                and row.rotated_at is not None
-                and now - row.rotated_at <= REFRESH_REUSE_GRACE_SECONDS
-            ):
-                reused = True
-            if reused:
-                await sessions.delete_by_id(row.id)
-            else:
-                await sessions.rotate(row.id, rotation)
-        if reused:
+            if claims.jti is not None and claims.jti == row.refresh_jti:
+                rotation = {
+                    "refresh_jti": new_jti,
+                    "prev_refresh_jti": claims.jti,
+                    "rotated_at": now,
+                    "expires_at": now + self._refresh_ttl,
+                }
+                if await sessions.rotate(row.id, claims.jti, rotation):
+                    current_jti = new_jti
+                else:
+                    # Another refresh with this token won the swap; look at
+                    # what it left and take the grace path below.
+                    row = self._require_live(await sessions.reload(row.id), claims)
+            if current_jti is None:
+                if (
+                    claims.jti is not None
+                    and claims.jti == row.prev_refresh_jti
+                    and row.rotated_at is not None
+                    and now - row.rotated_at <= REFRESH_REUSE_GRACE_SECONDS
+                ):
+                    current_jti = row.refresh_jti
+                else:
+                    await sessions.delete_by_id(row.id)
+        if current_jti is None:
             logger.warning("Refresh token reuse for %s: session %s ended", claims.sub, claims.sid)
             raise TokenStaleError
-        return self._pair(credential.pincer_user_id, credential.token_version, claims.sid or "", new_jti)
+        return self._pair(credential.pincer_user_id, credential.token_version, claims.sid or "", current_jti)
 
     async def authenticate_bearer(self, value: str) -> AuthIdentity:
         """Resolve a Bearer value — an API key or an access token — to its identity."""
@@ -400,31 +422,51 @@ class AuthService(DatabaseService):
 
     # ── listen-in tickets ────────────────────────────────────────────
 
-    async def issue_ws_ticket(self, pincer_user_id: str, call_sid: str) -> str:
-        """A one-minute ticket for one call's listen-in WebSocket.
+    async def issue_ws_ticket(self, identity: AuthIdentity, call_sid: str) -> str:
+        """A one-minute, single-use ticket for one call's listen-in WebSocket.
 
         A browser cannot set headers on a WebSocket, and a session token in
         the query string would sit in every proxy's access log for as long as
-        it is valid. This is good for one call and one minute.
+        it is valid. This opens one socket for one call within one minute,
+        and only while the session that asked for it is still signed in.
         """
-        row = await self._credential(pincer_user_id)
+        row = await self._credential(identity.pincer_user_id)
         if row is None:
-            raise UnknownIdentityError(pincer_user_id)
+            raise UnknownIdentityError(identity.pincer_user_id)
         return creds.encode_token(
             self._secret,
-            sub=pincer_user_id,
+            sub=identity.pincer_user_id,
             typ="ws",
             ver=row.token_version,
             ttl_seconds=WS_TICKET_TTL_SECONDS,
             call=call_sid,
+            sid=identity.session_id,
         )
 
     async def authenticate_ws_ticket(self, ticket: str, call_sid: str) -> AuthIdentity:
         claims = self._decode(ticket, "ws")
-        if claims.call != call_sid:
+        if claims.call != call_sid or not claims.jti:
             raise InvalidTokenError
         row = await self._current(claims)
-        return AuthIdentity(row.pincer_user_id, "jwt")
+        async with session_scope(self._url) as session:
+            # Signing out kills the tickets the session still has outstanding.
+            live = await self._live_session(AuthSessionRepository(session), claims)
+        self._spend_ticket(claims.jti, claims.exp)
+        return AuthIdentity(row.pincer_user_id, "jwt", session_id=live.id)
+
+    def _spend_ticket(self, jti: str, exp: int) -> None:
+        """Mark a ticket used. The URL it travelled in is in a proxy log by
+        now, so a second socket on the same ticket is refused.
+
+        In memory: a ticket lives a minute, and this service is the app's one
+        instance (`auth_service_for`).
+        """
+        now = time.time()
+        for spent in [key for key, expires in self._spent_tickets.items() if expires < now]:
+            del self._spent_tickets[spent]
+        if jti in self._spent_tickets:
+            raise InvalidTokenError
+        self._spent_tickets[jti] = exp + 1
 
     # ── health ───────────────────────────────────────────────────────
 

@@ -891,6 +891,38 @@ class TestCleanup:
         r = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
         await r.cleanup()  # must not raise
 
+    @pytest.mark.parametrize("bad_entry", ["me@telegram:999", "jane@telegram:", "not-an-entry"])
+    async def test_cleanup_prunes_nothing_when_an_entry_does_not_parse(self, tmp_path, bad_entry, caplog):
+        """An entry the parser rejects contributes no pairs, so the whitelist
+        has a hole exactly where that person's channels are. Enforcing it
+        would unlink them; one bad entry must stop the whole sweep."""
+        import logging
+
+        db_path = tmp_path / "bad_entry.db"
+        good = IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890")
+        await good.ensure_table()
+        await good.seed_from_config()
+        unlisted = await good.resolve(ChannelType.TELEGRAM, 999)
+
+        async def links() -> int:
+            async with (
+                _rows(good) as db,
+                db.execute("SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = '999'") as cur,
+            ):
+                return (await cur.fetchone())[0]
+
+        r = IdentityResolver(db_path, identity_map_config=f"telegram:12345=whatsapp:491234567890,{bad_entry}")
+        with caplog.at_level(logging.ERROR, logger="pincer.core.identity"):
+            await r.cleanup()
+
+        assert "skipping cleanup" in caplog.text
+        assert await r.resolve(ChannelType.TELEGRAM, 999) == unlisted
+        assert await links() == 1
+
+        # Blank entries (a trailing comma) are not entries at all: the sweep runs.
+        await IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890, ,").cleanup()
+        assert await links() == 0
+
     async def test_cleanup_skips_wipe_when_config_has_no_usable_pairs(self, tmp_path):
         """A config string that's non-empty but parses to zero usable pairs (e.g. an
         empty channel_user_id, as in 'jane@telegram:') must not be treated as an

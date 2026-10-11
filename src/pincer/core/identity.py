@@ -326,19 +326,25 @@ class IdentityResolver:
         deleted with it. Passing ``channels`` allows config IDs to be translated
         to real internal IDs before the whitelist is built.
 
-        When no config is set the method is a no-op (nothing to enforce).
+        When no config is set the method is a no-op (nothing to enforce), and
+        so it is when any entry does not parse: a whitelist with a hole in it
+        must not be enforced.
         """
         if not self._identity_map_config:
             return
 
         allowed: set[tuple[str, str]] = set()
         for raw_entry in self._identity_map_config.split(","):
-            if ":" not in raw_entry:
+            if not raw_entry.strip():
                 continue
             try:
                 _, pairs = self._parse_mapping(raw_entry)
-            except ValueError:
-                continue
+            except ValueError as e:
+                # Its channels are unknown, so the whitelist is incomplete:
+                # pruning against it would delete the very identity the
+                # entry was meant to keep.
+                logger.error("Identity map entry %r is invalid (%s) — skipping cleanup", raw_entry.strip(), e)
+                return
             for ch, cid in pairs:
                 ch_type = ChannelType(ch)
                 norm = self._normalize_id(ch_type, cid)

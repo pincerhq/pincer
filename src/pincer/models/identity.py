@@ -85,7 +85,9 @@ class AuthSession(SQLModel, table=True):
 
     `prev_refresh_jti` stays good for a few seconds after a rotation
     (`rotated_at`): two browser tabs whose access tokens expire together both
-    refresh with the same token, and the slower one is not an attacker.
+    refresh with the same token, and the slower one is not an attacker. It
+    does not rotate again — it is handed the token the faster tab just got,
+    so both hold the current one.
     """
 
     __tablename__ = "pincer_auth_sessions"
