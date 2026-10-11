@@ -12,7 +12,7 @@ dependencies = [
     # packaging is broken (empty `fastmcp/__init__.py`, `FastMCP` unimportable).
     "fastmcp==3.2.4",
     "httpx>=0.28.1",
-    "pydantic>=2.4.1,<2.13",
+    "pydantic>=2.4.1,<2.14",
     "youtube-transcript-api>=0.6.3",
     "tavily-python>=0.5.0",
     "ddgs>=9.0.0",
