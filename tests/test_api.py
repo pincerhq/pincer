@@ -393,3 +393,73 @@ def test_preflight_is_not_blocked_by_auth(authed_app):
     # And the authenticated GET behind it still works.
     ok = c.get("/api/status", headers=authed_app.jwt_headers)
     assert ok.status_code == 200
+
+
+# ── Dashboard static files ───────────────────────────────────────────
+
+
+@pytest.fixture
+def spa(monkeypatch, tmp_path):
+    """The app serving a dashboard build, next to a file that is not part of it."""
+    from pincer.config import get_settings_relaxed
+
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html>app shell</html>")
+    (dist / "favicon.svg").write_text("<svg/>")
+    (dist / "assets" / "app-abc123.js").write_text("console.log('app')")
+    outside = tmp_path / "data" / "private.txt"
+    outside.parent.mkdir()
+    outside.write_text("not part of the build")
+    (dist / "link.txt").symlink_to(outside)
+    (dist / "linked").symlink_to(outside.parent, target_is_directory=True)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PINCER_DASHBOARD_DIST", str(dist))
+    get_settings_relaxed.cache_clear()
+    yield TestClient(create_app()), outside
+    get_settings_relaxed.cache_clear()
+
+
+def test_spa_serves_build_files_with_their_cache_policy(spa):
+    client, _ = spa
+
+    asset = client.get("/assets/app-abc123.js")
+    assert asset.status_code == 200
+    assert asset.text == "console.log('app')"
+    assert asset.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+    favicon = client.get("/favicon.svg")
+    assert favicon.text == "<svg/>"
+    assert favicon.headers["cache-control"] == "no-cache"
+
+
+def test_spa_answers_client_side_routes_with_the_app_shell(spa):
+    client, _ = spa
+    for path in ("/", "/conversations/abc", "/assets/gone-after-a-rebuild.js", "/assets"):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        assert resp.text == "<html>app shell</html>", path
+        assert resp.headers["cache-control"] == "no-cache", path
+
+
+def test_spa_only_serves_files_inside_dist(spa):
+    client, outside = spa
+    absolute = str(outside)  # starts with "/"
+    relative = "data/private.txt"
+    paths = [
+        f"http://testserver/{absolute}",  # //abs/path
+        f"/%2F{absolute.lstrip('/')}",
+        f"/%2e%2e/{relative}",
+        f"/assets/%2e%2e/%2e%2e/{relative}",
+        f"/assets/..%2F..%2F{relative}",
+        "/link.txt",
+        "/linked/private.txt",
+        "/%00",
+    ]
+    for path in paths:
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        assert resp.text == "<html>app shell</html>", path
+        assert "not part of the build" not in resp.text, path
+        assert resp.headers["cache-control"] == "no-cache", path

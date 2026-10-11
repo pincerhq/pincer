@@ -286,11 +286,18 @@ def create_app() -> FastAPI:
 
     dist = _dashboard_dist()
     if dist.is_dir():
+        root = dist.resolve()
 
         @app.get("/{full_path:path}")
         async def _spa(full_path: str) -> FileResponse:
-            candidate = dist / full_path
-            if candidate.is_file():
+            # Only files inside the build are served; anything else is a
+            # client-side route and gets the app shell.
+            try:
+                candidate = (root / full_path).resolve()
+                found = candidate.is_relative_to(root) and candidate.is_file()
+            except (OSError, ValueError):
+                found = False
+            if found:
                 # Vite content-hashes filenames under assets/, so they can be cached
                 # forever; everything else (index.html, favicons) must revalidate or
                 # a stale index.html keeps pointing at asset files a rebuild deleted.
@@ -299,6 +306,6 @@ def create_app() -> FastAPI:
                 else:
                     headers = {"Cache-Control": "no-cache"}
                 return FileResponse(str(candidate), headers=headers)
-            return FileResponse(str(dist / "index.html"), headers={"Cache-Control": "no-cache"})
+            return FileResponse(str(root / "index.html"), headers={"Cache-Control": "no-cache"})
 
     return app
