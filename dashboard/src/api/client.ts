@@ -100,6 +100,16 @@ async function requestRefresh(): Promise<RefreshResult> {
 
 let refreshInFlight: Promise<RefreshResult> | null = null
 
+/** The one refresh in the air, started if there is none. */
+function sharedRefresh(): Promise<RefreshResult> {
+  if (!refreshInFlight) {
+    refreshInFlight = requestRefresh().finally(() => {
+      refreshInFlight = null
+    })
+  }
+  return refreshInFlight
+}
+
 /**
  * Get an access token to retry with after a 401 on `staleToken`.
  *
@@ -118,12 +128,7 @@ export async function refreshAccessToken(staleToken: string | null): Promise<str
   // (e.g. "no current identity" on the account routes) is just an answer.
   if (!useAuthStore.getState().authRequired) return null
 
-  if (!refreshInFlight) {
-    refreshInFlight = requestRefresh().finally(() => {
-      refreshInFlight = null
-    })
-  }
-  const result = await refreshInFlight
+  const result = await sharedRefresh()
   if (result === "ok") return getToken()
   if (result === "rejected") {
     // A newer pair may have been stored while the refresh was in the air —
@@ -278,13 +283,23 @@ export const pincer = {
   logout: async () => {
     const token = getToken()
     if (!token) return
-    try {
-      await ky.post(`${getBaseUrl()}/api/auth/logout`, {
-        headers: { Authorization: `Bearer ${token}` },
+    const post = (accessToken: string) =>
+      ky.post(`${getBaseUrl()}/api/auth/logout`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
         timeout: 5000,
         retry: 0,
         throwHttpErrors: false,
       })
+    try {
+      const response = await post(token)
+      if (response.status !== 401) return
+      // The access token ran out while the tab sat idle, but the refresh
+      // token is still good for days: without a fresh access token the
+      // session would outlive this sign-out. Not `refreshAccessToken` — a
+      // rejected refresh means the session is already dead, which is the goal.
+      if ((await sharedRefresh()) !== "ok") return
+      const fresh = getToken()
+      if (fresh) await post(fresh)
     } catch {
       /* offline or unreachable: the local sign-out still happens */
     }

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import { HTTPError } from "ky"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { format } from "date-fns"
@@ -38,9 +38,35 @@ async function failureMessage(err: unknown, fallback: string): Promise<string> {
   return errorDetail(err, fallback)
 }
 
+function LoadFailure({ error, onRetry }: { error: unknown; onRetry: () => void }) {
+  const fallback = "Could not load your account."
+  const [message, setMessage] = useState(fallback)
+  useEffect(() => {
+    let current = true
+    void failureMessage(error, fallback).then((text) => {
+      if (current) setMessage(text)
+    })
+    return () => {
+      current = false
+    }
+  }, [error])
+
+  return (
+    <div className="space-y-3">
+      <p role="alert" className="text-sm text-[var(--color-muted)]">
+        {message}
+      </p>
+      <Button variant="outline" size="sm" onClick={onRetry}>
+        Retry
+      </Button>
+    </div>
+  )
+}
+
 export function AccountPage() {
   const user = useAuthStore((s) => s.user)
-  const { data: me, isLoading } = useQuery({
+  const authRequired = useAuthStore((s) => s.authRequired)
+  const { data: me, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["me", user],
     queryFn: pincer.me,
     retry: false,
@@ -54,6 +80,15 @@ export function AccountPage() {
             <Skeleton key={i} className="h-32 w-full bg-white/[0.06]" />
           ))}
         </div>
+      </PageContainer>
+    )
+  }
+
+  if (!me && authRequired) {
+    // Signed in, so this is a failed request, not an agent without accounts.
+    return (
+      <PageContainer title="Account">
+        <LoadFailure error={isError ? error : null} onRetry={() => void refetch()} />
       </PageContainer>
     )
   }

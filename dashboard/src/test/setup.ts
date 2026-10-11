@@ -10,9 +10,10 @@ class MockIntersectionObserver {
 }
 vi.stubGlobal("IntersectionObserver", MockIntersectionObserver)
 
-// Node 25 defines its own `localStorage` global, which is undefined without
-// --localstorage-file and shadows jsdom's. Give tests an in-memory one.
-if (typeof globalThis.localStorage === "undefined" || globalThis.localStorage === null) {
+// Node 25 defines its own `localStorage` global, which shadows jsdom's and,
+// without a valid --localstorage-file, is undefined or an object with no
+// working methods. Give tests an in-memory one unless a usable one is there.
+if (typeof globalThis.localStorage?.getItem !== "function") {
   class MemoryStorage implements Storage {
     private items = new Map<string, string>()
     get length() {

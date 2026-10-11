@@ -317,6 +317,28 @@ describe("api client token refresh", () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("offline") }))
     await expect(pincer.logout()).resolves.toBeUndefined()
   })
+
+  it("logout with an expired access token refreshes once and ends the session with the new one", async () => {
+    signIn()
+    const server = stubServer({ validToken: "access-2", refresh: () => json(200, pair(2)) })
+
+    await pincer.logout()
+
+    expect(server.to("/api/auth/refresh")).toHaveLength(1)
+    expect(server.to("/api/auth/logout").map((c) => c.auth)).toEqual(["Bearer access-1", "Bearer access-2"])
+    expect(redirect).not.toHaveBeenCalled()
+  })
+
+  it("logout stops quietly when the refresh token is rejected too", async () => {
+    signIn()
+    const server = stubServer({ validToken: "access-2" })
+
+    await expect(pincer.logout()).resolves.toBeUndefined()
+
+    expect(server.to("/api/auth/refresh")).toHaveLength(1)
+    expect(server.to("/api/auth/logout")).toHaveLength(1)
+    expect(redirect).not.toHaveBeenCalled()
+  })
 })
 
 describe("auth store migration", () => {
