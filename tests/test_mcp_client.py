@@ -207,6 +207,143 @@ def test_root_causes_includes_cause_of_uninformative_wrapper() -> None:
     assert "Connection refused" in text
 
 
+@pytest.mark.parametrize(
+    ("outer_text", "inner_text", "expected"),
+    [
+        ("boom", "boom", "RuntimeError: boom"),
+        ("outer", "inner", "RuntimeError: outer (caused by RuntimeError: inner)"),
+    ],
+)
+def test_root_causes_terminates_on_cyclic_chain(outer_text: str, inner_text: str, expected: str) -> None:
+    outer, inner = RuntimeError(outer_text), RuntimeError(inner_text)
+    outer.__cause__ = inner
+    inner.__cause__ = outer
+
+    assert _root_causes(outer) == expected
+
+
+def test_root_causes_shows_cause_shared_by_group_members() -> None:
+    shared = OSError("Connection refused")
+    first, second = RuntimeError("first"), RuntimeError("second")
+    first.__cause__ = second.__cause__ = shared
+
+    text = _root_causes(ExceptionGroup("unhandled errors in a TaskGroup", [first, second]))
+
+    assert text.count("Connection refused") == 2
+
+
+async def test_connect_fails_when_describing_the_error_raises() -> None:
+    """connect() must get an answer even if building the failure message blows up."""
+    session = MCPClientSession(_make_http_config())
+    transport = FakeTransport(fail_on_open=True)
+
+    describe = patch("pincer.mcp.client._leaf_causes", side_effect=RuntimeError("cannot describe"))
+    with _patch_sdk(transport), describe, pytest.raises(ConnectionError, match="connection failed"):
+        async with asyncio.timeout(2):
+            await session.connect()
+
+    assert session.connected is False
+    assert session._owner is None
+    assert transport.closed is True
+
+
+async def test_connect_and_disconnect_started_together_both_finish() -> None:
+    """disconnect() can cancel the owner before it has run a single step; connect()
+    must not be left waiting for it."""
+    session = MCPClientSession(_make_http_config())
+
+    with _patch_sdk(FakeTransport()):
+        async with asyncio.timeout(2):
+            results = await asyncio.gather(session.connect(), session.disconnect(), return_exceptions=True)
+
+    assert isinstance(results[0], ConnectionError)
+    assert results[1] is None
+    assert session.connected is False
+    assert session._owner is None
+
+
+async def test_disconnect_during_handshake_is_not_a_failed_attempt() -> None:
+    session = MCPClientSession(_make_http_config())
+    transport = FakeTransport(hang=True)
+
+    with _patch_sdk(transport):
+        task = asyncio.create_task(session.connect())
+        while session._session is None:  # until connect() reaches the handshake
+            await asyncio.sleep(0)
+        await session.disconnect()
+        with pytest.raises(ConnectionError, match="cancelled by disconnect"):
+            await task
+
+    assert transport.closed is True
+    assert session.connected is False
+    assert session._owner is None
+    assert session._connect_attempts == 0
+
+
+async def test_disconnect_cancelled_natively_still_closes_and_resets() -> None:
+    """A Task.cancel() on the caller mid-teardown must not leave the session
+    looking connected with its transport half closed."""
+    session = MCPClientSession(_make_http_config())
+    transport = FakeTransport(close_delay=0.05)
+
+    with _patch_sdk(transport):
+        await session.connect()
+    task = asyncio.create_task(session.disconnect())
+    await asyncio.sleep(0.01)  # teardown is under way
+    assert transport.closed is False
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert transport.closed is True
+    assert session.connected is False
+    assert session._owner is None
+
+    replacement = FakeTransport()
+    with _patch_sdk(replacement):
+        await session.connect()
+    assert session.connected is True
+    assert replacement.closed is False
+    await session.disconnect()
+    assert replacement.closed is True
+
+
+async def test_disconnect_after_failed_ping_closes_transport_cleanly() -> None:
+    """A failed health check leaves the owner waiting on `stop`; disconnect() must
+    ask it to stop rather than cancel it."""
+    session = MCPClientSession(_make_http_config())
+    transport = FakeTransport()
+
+    with _patch_sdk(transport):
+        await session.connect()
+    owner = session._owner
+    session._session.send_ping = AsyncMock(side_effect=OSError("ping failed"))
+    assert await session.health_check() is False
+
+    await session.disconnect()
+
+    assert transport.closed is True
+    assert transport.closed_in is owner
+    assert transport.exit_error is None
+
+
+async def test_overlapping_disconnects_both_wait_for_the_transport_to_close() -> None:
+    session = MCPClientSession(_make_http_config())
+    transport = FakeTransport(close_delay=0.05)
+    closed_on_return: list[bool] = []
+
+    async def _disconnect() -> None:
+        await session.disconnect()
+        closed_on_return.append(transport.closed)
+
+    with _patch_sdk(transport):
+        await session.connect()
+    await asyncio.gather(_disconnect(), _disconnect())
+
+    assert closed_on_return == [True, True]
+    assert session._owner is None
+
+
 # ── tool call ────────────────────────────────────────────────────────────────
 
 

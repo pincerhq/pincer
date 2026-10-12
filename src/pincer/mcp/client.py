@@ -41,23 +41,29 @@ def _raised_from(exc: BaseException) -> BaseException | None:
     return origin if isinstance(origin, Exception) else None
 
 
-def _leaf_causes(exc: BaseException) -> list[str]:
+def _leaf_causes(exc: BaseException, seen: frozenset[int] = frozenset()) -> list[str]:
     """Describe an exception by its leaf errors, one entry per distinct error.
 
     anyio task groups (used by the SDK transports) wrap failures in an exception
     group whose own message is just "unhandled errors in a TaskGroup".
+
+    `seen` holds the ids of the exceptions already being described further up, so
+    a chain that loops back on itself ends there. Ancestors only: two members of
+    a group that share a cause both still show it.
     """
+    seen = seen | {id(exc)}
     if isinstance(exc, BaseExceptionGroup):
-        return list(dict.fromkeys(d for e in exc.exceptions for d in _leaf_causes(e)))
+        return list(dict.fromkeys(d for e in exc.exceptions if id(e) not in seen for d in _leaf_causes(e, seen)))
     text = str(exc)
     desc = f"{type(exc).__name__}: {text}" if text else type(exc).__name__
     # A wrapper such as "All connection attempts failed" says little on its own;
     # add what it was raised from, skipping layers that only repeat the same text.
     origin = _raised_from(exc)
-    while origin is not None and str(origin) and str(origin) in text:
+    while origin is not None and id(origin) not in seen and str(origin) and str(origin) in text:
+        seen = seen | {id(origin)}
         origin = _raised_from(origin)
-    if origin is not None:
-        desc = f"{desc} (caused by {'; '.join(_leaf_causes(origin))})"
+    if origin is not None and id(origin) not in seen:
+        desc = f"{desc} (caused by {'; '.join(_leaf_causes(origin, seen))})"
     return [desc]
 
 
@@ -82,6 +88,9 @@ class MCPClientSession:
         self._stop_event: asyncio.Event | None = None
         self._tools: list[Any] = []  # list[mcp.types.Tool]
         self._connected = False
+        # Set once the handshake has succeeded and the owner is waiting on `stop`.
+        # Unlike `_connected`, a failed health check does not clear it.
+        self._handshake_done = False
         self._connect_attempts = 0
         self._tmpdir: str | None = None
         self._sandbox: MCPSandbox | None = None
@@ -142,17 +151,35 @@ class MCPClientSession:
         except ImportError as e:
             raise RuntimeError("MCP package not installed. Run: uv pip install 'pincer-agent[mcp]'") from e
 
-        await self._stop_owner()  # a previous connection that died on its own
+        await self._cleanup()  # a previous connection that died on its own
         ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         stop = asyncio.Event()
         self._stop_event = stop
+        self._handshake_done = False
         self._owner = asyncio.create_task(
             self._run(ready, stop, ClientSession, StdioServerParameters, stdio_client, streamablehttp_client),
             name=f"mcp-session-{self.name}",
         )
+
+        def _owner_done(owner: asyncio.Task[None]) -> None:
+            # The owner resolves `ready` itself, except when it is cancelled before
+            # its first step or fails while reporting; connect() must not hang then.
+            exc = None if owner.cancelled() else owner.exception()
+            if not ready.done():
+                failure = _SetupError(repr(exc) if exc is not None else "connection attempt was cancelled")
+                failure.__cause__ = exc
+                ready.set_exception(failure)
+            elif exc is not None:
+                logger.debug("MCP '%s': owner task failed: %r", self.name, exc)
+
+        self._owner.add_done_callback(_owner_done)
         try:
             await ready
         except Exception as e:
+            if stop.is_set():
+                # disconnect() ran during the handshake: deliberate, not a failed attempt.
+                await self._cleanup()
+                raise ConnectionError(f"MCP '{self.name}' connection attempt was cancelled by disconnect()") from None
             self._connect_attempts += 1
             await self._cleanup()
             raise ConnectionError(f"MCP '{self.name}' connection failed (attempt {self._connect_attempts}): {e}") from (
@@ -224,16 +251,22 @@ class MCPClientSession:
 
                 if not ready.cancelled():
                     self._connected = True
+                    self._handshake_done = True
                     ready.set_result(None)
                     await stop.wait()
         except BaseException as e:  # reported below; nobody awaits this task's result
             error = e
 
         if not ready.done():
-            causes = _leaf_causes(setup_error) if setup_error is not None else []
-            if isinstance(error, Exception):
-                causes += [c for c in _leaf_causes(error) if c not in causes]
-            failure = _SetupError("; ".join(causes) or "connection attempt was cancelled by the transport")
+            try:
+                causes = _leaf_causes(setup_error) if setup_error is not None else []
+                if isinstance(error, Exception):
+                    causes += [c for c in _leaf_causes(error) if c not in causes]
+                message = "; ".join(causes) or "connection attempt was cancelled by the transport"
+            except Exception:
+                # Describing the error must never leave connect() waiting on `ready`.
+                message = repr(setup_error or error)
+            failure = _SetupError(message)
             failure.__cause__ = setup_error or error
             ready.set_exception(failure)
         elif not stop.is_set() and not ready.cancelled():
@@ -459,23 +492,9 @@ class MCPClientSession:
 
         return base_env
 
-    async def _stop_owner(self) -> None:
-        """Have the owner task close the connection, and wait until it has."""
-        owner, self._owner = self._owner, None
-        stop, self._stop_event = self._stop_event, None
-        if owner is None:
-            return
-        if stop is not None:
-            stop.set()
-        if not self._connected:
-            # Still connecting (or no longer healthy): it isn't waiting on `stop`.
-            owner.cancel()
-        # Shielded so a cancelled caller still waits for the transport to close.
-        with anyio.CancelScope(shield=True):
-            await asyncio.wait({owner})
-
     def _reset_state(self) -> None:
         self._connected = False
+        self._handshake_done = False
         self._session = None
         self._instructions = None
         # Clean up temp dir (non-sandbox path)
@@ -492,5 +511,31 @@ class MCPClientSession:
             self._sandbox = None
 
     async def _cleanup(self) -> None:
-        await self._stop_owner()
-        self._reset_state()
+        """Have the owner task close the connection, wait until it has, then reset."""
+        owner = self._owner
+        if owner is None:
+            self._reset_state()
+            return
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if not self._handshake_done:
+            # Still connecting: it isn't waiting on `stop` yet.
+            owner.cancel()
+        # A cancelled caller still waits for the transport to close. The anyio
+        # shield covers scope cancellation, the loop covers a native Task.cancel().
+        cancelled = False
+        with anyio.CancelScope(shield=True):
+            while not owner.done():
+                try:
+                    await asyncio.wait({owner})
+                except asyncio.CancelledError:
+                    cancelled = True
+        # `_owner` is kept until here so overlapping callers wait for the same task.
+        if self._owner is owner:
+            self._owner = None
+            self._stop_event = None
+        if self._owner is None:
+            # Otherwise a newer connection already owns this state.
+            self._reset_state()
+        if cancelled:
+            raise asyncio.CancelledError
