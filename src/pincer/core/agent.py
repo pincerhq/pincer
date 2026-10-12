@@ -1214,7 +1214,7 @@ class Agent:
             memory_block = "\n".join(memory_lines)
             return _with_extra(f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}")
         except Exception:
-            logger.debug("Failed to fetch memories for prompt", exc_info=True)
+            logger.warning("Failed to fetch memories for prompt", exc_info=True)
             return _with_extra(base_prompt)
 
     async def _ingest_onboarding_reply(

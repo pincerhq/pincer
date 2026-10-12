@@ -441,3 +441,29 @@ async def test_execute_tool_genuine_error_still_logs_error_with_traceback(
     error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert len(error_records) == 1
     assert error_records[0].exc_info is not None
+
+
+@pytest.mark.asyncio
+async def test_unavailable_memories_warn_and_still_reply(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
+):
+    """A failing memory backend costs the user their memories, not their reply — and says so at WARNING."""
+    memory = AsyncMock()
+    memory.search_text.side_effect = ConnectionError("memory backend down")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory)
+
+    with caplog.at_level(logging.DEBUG, logger="pincer.core.agent"):
+        result = await agent.handle_message("user1", "test", "Hello!")
+
+    assert "Hello! I'm Pincer." in result.text
+    memory.search_text.assert_awaited()
+    system_prompt = mock_llm.complete.call_args.kwargs["system"]
+    assert "[Relevant memories about this user]" not in system_prompt
+
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and r.getMessage() == "Failed to fetch memories for prompt"
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None
