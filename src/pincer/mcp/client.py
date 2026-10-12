@@ -518,8 +518,9 @@ class MCPClientSession:
         """Have the owner task close the connection, wait until it has, then reset.
 
         A clean close gets `_STOP_GRACE_SECONDS`; after that, or as soon as the
-        caller is cancelled, the owner is cancelled instead. Either way this only
-        returns once the owner task is done.
+        caller is cancelled, the owner is cancelled instead, and cancelled again
+        every `_STOP_GRACE_SECONDS` for as long as it keeps running. Either way
+        this only returns once the owner task is done.
         """
         owner = self._owner
         if owner is None:
@@ -545,13 +546,23 @@ class MCPClientSession:
             # Still connecting, out of grace, or the caller gave up.
             owner.cancel()
         # Still wait for the owner to unwind; contexts must be exited by it. The anyio
-        # shield stops scope cancellation being redelivered on every pass.
+        # shield stops scope cancellation being redelivered on every pass. One cancel
+        # is not always enough: a transport can absorb it and go on closing slowly,
+        # so it is sent again every grace period until the owner is done.
         with anyio.CancelScope(shield=True):
             while not owner.done():
                 try:
-                    await asyncio.wait({owner})
+                    _, pending = await asyncio.wait({owner}, timeout=_STOP_GRACE_SECONDS)
                 except asyncio.CancelledError as e:
                     cancel_exc = cancel_exc or e
+                    owner.cancel()
+                    continue
+                if pending:
+                    logger.warning(
+                        "MCP '%s' still closing %ss after being cancelled — cancelling again",
+                        self.name,
+                        _STOP_GRACE_SECONDS,
+                    )
                     owner.cancel()
         # `_owner` is kept until here so overlapping callers wait for the same task.
         if self._owner is owner:

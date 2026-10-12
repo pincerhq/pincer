@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
@@ -13,6 +14,9 @@ from mcp_fakes import FakeClientSession, FakeTransport
 
 from pincer.mcp.client import MCPClientSession, _root_causes
 from pincer.mcp.config import MCPServerConfig, MCPTransport
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
 
 
 def _make_stdio_config(sandbox: bool = True) -> MCPServerConfig:
@@ -419,6 +423,50 @@ async def test_disconnect_in_cancelled_anyio_scope_is_cut_short(monkeypatch: pyt
         await anyio.sleep(0.05)  # teardown is under way
         assert transport.closed is False
         tg.cancel_scope.cancel()
+
+    assert time.monotonic() - started < 1
+    assert transport.close_interrupted is True
+    assert transport.closed_in is owner
+    assert session.connected is False
+    assert session._owner is None
+
+
+@contextlib.asynccontextmanager
+async def _cancelled_anyio_scope() -> AsyncIterator[None]:
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        yield
+
+
+@contextlib.asynccontextmanager
+async def _expired_asyncio_timeout() -> AsyncIterator[None]:
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0):
+            yield
+
+
+@pytest.mark.parametrize(
+    "already_cancelled",
+    [_cancelled_anyio_scope, _expired_asyncio_timeout],
+    ids=["anyio-scope", "asyncio-timeout"],
+)
+async def test_disconnect_by_already_cancelled_caller_is_still_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    already_cancelled: Callable[[], contextlib.AbstractAsyncContextManager[None]],
+) -> None:
+    """The caller's cancel reaches the owner before the transport starts closing and
+    is absorbed there, so the slow close needs a second cancel to be cut short."""
+    monkeypatch.setattr("pincer.mcp.client._STOP_GRACE_SECONDS", 0.05)
+    session = MCPClientSession(_make_http_config())
+    transport = FakeTransport(close_delay=3)
+
+    with _patch_sdk(transport):
+        await session.connect()
+    owner = session._owner
+
+    started = time.monotonic()
+    async with already_cancelled():
+        await session.disconnect()
 
     assert time.monotonic() - started < 1
     assert transport.close_interrupted is True
