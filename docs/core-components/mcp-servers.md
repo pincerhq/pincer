@@ -268,7 +268,7 @@ COPY pyproject.toml memory_server.py ./
 RUN uv sync --no-cache
 # Pre-download ONNX model at build time so the first request is fast
 ARG DEFAULT_MODEL=BAAI/bge-small-en-v1.5
-ENV FASTEMBED_CACHE_DIR=/app/models
+ENV FASTEMBED_CACHE_PATH=/app/models
 RUN uv run python -c "from fastembed import TextEmbedding; TextEmbedding('${DEFAULT_MODEL}')"
 VOLUME ["/data"]
 ENV MEMORY_DB_PATH=/data/memory.db TRANSPORT=http HOST=0.0.0.0 PORT=8000
@@ -433,7 +433,7 @@ Server-specific variables:
 | `sqlite-vec-memory-mcp` | `MEMORY_DB_PATH` | `~/memory.db` | SQLite database path |
 | `sqlite-vec-memory-mcp` | `EMBED_MODEL` | `BAAI/bge-small-en-v1.5` | fastembed model name |
 | `sqlite-vec-memory-mcp` | `EMBED_DIM` | `384` | Vector dimension (must match model) |
-| `sqlite-vec-memory-mcp` | `FASTEMBED_CACHE_DIR` | `~/.cache/fastembed` | Model cache directory |
+| `sqlite-vec-memory-mcp` | `FASTEMBED_CACHE_PATH` | `$TMPDIR/fastembed_cache` | Model cache directory |
 | `pincer-mcps` (`openweathermap`) | `API_KEY` | — | OpenWeatherMap API key |
 | `pincer-mcps` (`newsapi`) | `API_KEY` | — | NewsAPI.org API key |
 | `pincer-mcps` (`translate`) | `LIBRETRANSLATE_URL` | — | LibreTranslate instance URL |

@@ -9,9 +9,9 @@ services:
       MEMORY_DB_PATH: /app/data/memory.db
       EMBED_MODEL: BAAI/bge-small-en-v1.5
       EMBED_DIM: 384
-      # FASTEMBED_CACHE_DIR is already /app/models inside the image.
+      # FASTEMBED_CACHE_PATH is already /app/models inside the image.
       # Mount model_cache to avoid re-downloading on container restart.
-      FASTEMBED_CACHE_DIR: /app/models
+      FASTEMBED_CACHE_PATH: /app/models
       # Passed through to the server if you later add env-based config
       PYTHONUNBUFFERED: 1
     volumes:

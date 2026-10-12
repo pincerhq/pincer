@@ -20,7 +20,7 @@ RUN uv sync --no-cache --no-dev --all-extras
 # Pre-download the ONNX model into the image so first request isn't slow.
 # Override with --build-arg DEFAULT_MODEL=<other-model> if needed.
 ARG DEFAULT_MODEL=BAAI/bge-small-en-v1.5
-ENV FASTEMBED_CACHE_DIR=/app/models
+ENV FASTEMBED_CACHE_PATH=/app/models
 RUN uv run python -c "from fastembed import TextEmbedding; TextEmbedding('${DEFAULT_MODEL}')"
 
 VOLUME ["/app/data"]

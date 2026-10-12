@@ -8,7 +8,7 @@ Environment variables:
     MEMORY_DB_PATH      Path to the SQLite database file (default: ~/memory.db)
     EMBED_MODEL         fastembed model name (default: BAAI/bge-small-en-v1.5)
     EMBED_DIM           Vector dimension — must match model (default: 384)
-    FASTEMBED_CACHE_DIR Model cache directory (default: ~/.cache/fastembed)
+    FASTEMBED_CACHE_PATH Model cache directory (default: $TMPDIR/fastembed_cache)
     TRANSPORT           stdio | http (default: stdio)
     HOST                HTTP host (default: 127.0.0.1)
     PORT                HTTP port (default: 8000)
