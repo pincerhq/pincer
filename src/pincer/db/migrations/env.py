@@ -23,9 +23,24 @@ if config.config_file_name is not None:
 # and those revisions in step.
 target_metadata = metadata
 
+#: Alembic's default version table, which databases migrated before `0019`
+#: still record their history in — or another Alembic application's, in a
+#: database shared with one.
+_LEGACY_VERSION_TABLE = "alembic_version"
 
-def _bootstrap_version_table(engine: Engine) -> None:
-    """Rename `alembic_version` to `VERSION_TABLE`, once, before Alembic reads it.
+#: Tables that only Pincer creates, under their name before `0019` and after:
+#: `channel_identities` exists from `0001` on and is never renamed until
+#: `0019` prefixes it. Both names are specific to Pincer.
+_PINCER_MARKER_TABLES = frozenset({"channel_identities", "pincer_channel_identities"})
+
+#: Serialises `_bootstrap_version_table` across processes on Postgres ("pincer"
+#: in ASCII). SQLite needs none: `ensure_schema_current` already holds a file
+#: lock around the whole upgrade.
+_BOOTSTRAP_ADVISORY_KEY = 0x70696E636572
+
+
+def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:
+    """Rename Pincer's own `alembic_version` to `VERSION_TABLE`, once, before Alembic reads it.
 
     Alembic decides which table to read the current revision from here, in
     code, not from the database — so this has to run before `context.configure`
@@ -36,18 +51,40 @@ def _bootstrap_version_table(engine: Engine) -> None:
     fresh database has neither table yet, so this is a no-op and Alembic
     creates `VERSION_TABLE` directly.
 
+    Only Pincer's own `alembic_version` is renamed. In a database shared with
+    another Alembic application, that table is the other application's
+    history: taking it would strip that application of its record and feed
+    Pincer a revision that is not its own. It is Pincer's only when every
+    revision it records is one of `revisions` *and* a Pincer table is there —
+    neither alone is enough, since other apps also number their revisions
+    0001, 0002, … as Pincer does. Anything else is left exactly as it is, and
+    Alembic builds `VERSION_TABLE` beside it. Once `VERSION_TABLE` exists,
+    `alembic_version` is never looked at again.
+
     Runs on its own connection, committed and closed before the migration
     connection below is opened: reflecting `get_table_names()` on that
     connection first — even read-only — starts its transaction, and every
     later reflection call a revision makes (`0011`'s rename among them) then
     sees that transaction's original, empty snapshot instead of the tables
     revisions before it just created, silently skipping every one of them.
+
+    On Postgres it reads the catalog only after taking an advisory lock, held
+    until this connection's transaction ends: two Pincer processes starting at
+    once would otherwise both see `alembic_version`, and the second would fail
+    on a table the first had just renamed. Serialised, the second sees
+    `VERSION_TABLE` and does nothing.
     """
     with engine.connect() as bootstrap:
+        if bootstrap.dialect.name == "postgresql":
+            bootstrap.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": _BOOTSTRAP_ADVISORY_KEY})
         existing = set(sa.inspect(bootstrap).get_table_names())
-        if "alembic_version" in existing and VERSION_TABLE not in existing:
-            bootstrap.execute(sa.text(f"ALTER TABLE alembic_version RENAME TO {VERSION_TABLE}"))
-            bootstrap.commit()
+        if VERSION_TABLE in existing or _LEGACY_VERSION_TABLE not in existing:
+            return
+        recorded = set(bootstrap.execute(sa.text(f"SELECT version_num FROM {_LEGACY_VERSION_TABLE}")).scalars())
+        if not (recorded and recorded <= revisions and existing & _PINCER_MARKER_TABLES):
+            return
+        bootstrap.execute(sa.text(f"ALTER TABLE {_LEGACY_VERSION_TABLE} RENAME TO {VERSION_TABLE}"))
+        bootstrap.commit()
 
 
 def _get_url() -> str:
@@ -78,7 +115,7 @@ def run_migrations_online() -> None:
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
 
     try:
-        _bootstrap_version_table(connectable)
+        _bootstrap_version_table(connectable, {script.revision for script in context.script.walk_revisions()})
         with connectable.connect() as connection:
             context.configure(
                 connection=connection,
