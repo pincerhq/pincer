@@ -29,6 +29,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("pincer.mcp")
 
+# How long a connected session gets to close cleanly before its owner task is cancelled.
+_STOP_GRACE_SECONDS = 5.0
+
 
 def _raised_from(exc: BaseException) -> BaseException | None:
     """The error `exc` was raised from, explicitly or while handling it.
@@ -89,7 +92,8 @@ class MCPClientSession:
         self._tools: list[Any] = []  # list[mcp.types.Tool]
         self._connected = False
         # Set once the handshake has succeeded and the owner is waiting on `stop`.
-        # Unlike `_connected`, a failed health check does not clear it.
+        # Unlike `_connected`, a failed health check does not clear it. From then on
+        # disconnect asks the owner to stop and only cancels it after a grace period.
         self._handshake_done = False
         self._connect_attempts = 0
         self._tmpdir: str | None = None
@@ -511,25 +515,44 @@ class MCPClientSession:
             self._sandbox = None
 
     async def _cleanup(self) -> None:
-        """Have the owner task close the connection, wait until it has, then reset."""
+        """Have the owner task close the connection, wait until it has, then reset.
+
+        A clean close gets `_STOP_GRACE_SECONDS`; after that, or as soon as the
+        caller is cancelled, the owner is cancelled instead. Either way this only
+        returns once the owner task is done.
+        """
         owner = self._owner
         if owner is None:
             self._reset_state()
             return
         if self._stop_event is not None:
             self._stop_event.set()
-        if not self._handshake_done:
-            # Still connecting: it isn't waiting on `stop` yet.
+        cancel_exc: asyncio.CancelledError | None = None
+        if self._handshake_done:
+            # Give the clean close a grace period. Not shielded: a cancelled caller
+            # (native or anyio scope) ends it at once.
+            try:
+                await asyncio.wait({owner}, timeout=_STOP_GRACE_SECONDS)
+            except asyncio.CancelledError as e:
+                cancel_exc = e
+            if not owner.done() and cancel_exc is None:
+                logger.warning(
+                    "MCP '%s' did not close within %ss — cancelling",
+                    self.name,
+                    _STOP_GRACE_SECONDS,
+                )
+        if not owner.done():
+            # Still connecting, out of grace, or the caller gave up.
             owner.cancel()
-        # A cancelled caller still waits for the transport to close. The anyio
-        # shield covers scope cancellation, the loop covers a native Task.cancel().
-        cancelled = False
+        # Still wait for the owner to unwind; contexts must be exited by it. The anyio
+        # shield stops scope cancellation being redelivered on every pass.
         with anyio.CancelScope(shield=True):
             while not owner.done():
                 try:
                     await asyncio.wait({owner})
-                except asyncio.CancelledError:
-                    cancelled = True
+                except asyncio.CancelledError as e:
+                    cancel_exc = cancel_exc or e
+                    owner.cancel()
         # `_owner` is kept until here so overlapping callers wait for the same task.
         if self._owner is owner:
             self._owner = None
@@ -537,5 +560,6 @@ class MCPClientSession:
         if self._owner is None:
             # Otherwise a newer connection already owns this state.
             self._reset_state()
-        if cancelled:
-            raise asyncio.CancelledError
+        if cancel_exc is not None:
+            # The caught exception, not a fresh one: anyio matches it to its scope.
+            raise cancel_exc

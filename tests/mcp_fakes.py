@@ -19,7 +19,8 @@ class FakeTransport:
 
     `fail_on_open` fails the first request; `fail()` fails a later one;
     `hang` leaves the handshake unanswered; `close_error` is raised while the
-    transport closes; `close_delay` makes closing take that many seconds.
+    transport closes; `close_delay` makes closing take that many seconds, and
+    `close_interrupted` records that a cancellation cut that wait short.
     """
 
     def __init__(
@@ -33,6 +34,7 @@ class FakeTransport:
         self.hang = hang or fail_on_open
         self.closed = False
         self.closed_in: Any = None  # the task that ran the transport's teardown
+        self.close_interrupted = False
         self.exit_error: BaseException | None = None  # what was thrown into the transport; None on a clean exit
         self._close_delay = close_delay
         self._broken = anyio.Event()
@@ -59,10 +61,15 @@ class FakeTransport:
                     raise
                 tg.cancel_scope.cancel()
         finally:
-            if self._close_delay:
-                await asyncio.sleep(self._close_delay)
-            self.closed = True
-            self.closed_in = asyncio.current_task()
+            try:
+                if self._close_delay:
+                    await asyncio.sleep(self._close_delay)
+            except asyncio.CancelledError:
+                self.close_interrupted = True
+                raise
+            finally:
+                self.closed = True
+                self.closed_in = asyncio.current_task()
             if self._close_error is not None:
                 raise self._close_error
 

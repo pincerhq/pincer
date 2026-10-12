@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import anyio
@@ -281,8 +282,8 @@ async def test_disconnect_during_handshake_is_not_a_failed_attempt() -> None:
 
 
 async def test_disconnect_cancelled_natively_still_closes_and_resets() -> None:
-    """A Task.cancel() on the caller mid-teardown must not leave the session
-    looking connected with its transport half closed."""
+    """A Task.cancel() on the caller mid-teardown cuts the close short, but must not
+    leave the session looking connected with its transport half closed."""
     session = MCPClientSession(_make_http_config())
     transport = FakeTransport(close_delay=0.05)
 
@@ -296,6 +297,7 @@ async def test_disconnect_cancelled_natively_still_closes_and_resets() -> None:
         await task
 
     assert transport.closed is True
+    assert transport.close_interrupted is True
     assert session.connected is False
     assert session._owner is None
 
@@ -341,6 +343,87 @@ async def test_overlapping_disconnects_both_wait_for_the_transport_to_close() ->
     await asyncio.gather(_disconnect(), _disconnect())
 
     assert closed_on_return == [True, True]
+    assert session._owner is None
+
+
+@pytest.mark.parametrize("failed_ping", [False, True], ids=["healthy", "after-failed-ping"])
+async def test_disconnect_cancels_owner_after_grace_period(monkeypatch: pytest.MonkeyPatch, failed_ping: bool) -> None:
+    """A transport that hangs while closing must not hold disconnect() for as long
+    as it likes: after the grace period the owner is cancelled."""
+    monkeypatch.setattr("pincer.mcp.client._STOP_GRACE_SECONDS", 0.05)
+    session = MCPClientSession(_make_http_config())
+    transport = FakeTransport(close_delay=3)
+
+    with _patch_sdk(transport):
+        await session.connect()
+    owner = session._owner
+    if failed_ping:
+        session._session.send_ping = AsyncMock(side_effect=OSError("ping failed"))
+        assert await session.health_check() is False
+
+    started = time.monotonic()
+    await session.disconnect()
+
+    assert time.monotonic() - started < 1
+    assert transport.close_interrupted is True
+    assert transport.closed_in is owner
+    assert session.connected is False
+    assert session._owner is None
+
+
+async def test_disconnect_under_timeout_is_cut_short(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller's own deadline wins over the grace period."""
+    monkeypatch.setattr("pincer.mcp.client._STOP_GRACE_SECONDS", 2.0)
+    session = MCPClientSession(_make_http_config())
+    transport = FakeTransport(close_delay=3)
+
+    with _patch_sdk(transport):
+        await session.connect()
+    owner = session._owner
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.2):
+            await session.disconnect()
+
+    assert time.monotonic() - started < 1
+    assert transport.close_interrupted is True
+    assert transport.closed_in is owner
+    assert session.connected is False
+    assert session._owner is None
+
+    replacement = FakeTransport()
+    with _patch_sdk(replacement):
+        await session.connect()
+    assert session.connected is True
+    assert session._owner is not owner
+    await session.disconnect()
+    assert replacement.closed is True
+    assert replacement.close_interrupted is False
+
+
+async def test_disconnect_in_cancelled_anyio_scope_is_cut_short(monkeypatch: pytest.MonkeyPatch) -> None:
+    """manager.stop() cancels the health loop's task group; a disconnect running
+    inside it must end with the scope rather than wait out the close."""
+    monkeypatch.setattr("pincer.mcp.client._STOP_GRACE_SECONDS", 2.0)
+    session = MCPClientSession(_make_http_config())
+    transport = FakeTransport(close_delay=3)
+
+    with _patch_sdk(transport):
+        await session.connect()
+    owner = session._owner
+
+    started = time.monotonic()
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(session.disconnect)
+        await anyio.sleep(0.05)  # teardown is under way
+        assert transport.closed is False
+        tg.cancel_scope.cancel()
+
+    assert time.monotonic() - started < 1
+    assert transport.close_interrupted is True
+    assert transport.closed_in is owner
+    assert session.connected is False
     assert session._owner is None
 
 
