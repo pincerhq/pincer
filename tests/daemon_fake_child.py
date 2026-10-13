@@ -8,6 +8,9 @@ behaves according to MODE (tests build the command with `argv()`):
 
     ready             mark ready, idle until SIGTERM, shut down briefly, exit 0
     gated             like ready, but marks ready only once DATA_DIR/mark-ready exists
+    slow-start        listens on a port (recorded in the lease) at once, marks ready only after SLOW_START_SECONDS
+    crash-on-start    logs CRASH_STEPS startup lines, then fails with an uncaught exception before ready
+    die-mid-line      writes half a line (no newline) and exits 3 before ready
     raise-on-sigterm  like ready, but SIGTERM ends in an uncaught exception
 """
 
@@ -17,6 +20,7 @@ import contextlib
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -31,6 +35,8 @@ PORT = 8080
 # Long enough that a `stop()` returning right after SIGTERM still finds the process alive.
 SHUTDOWN_SECONDS = 0.5
 CALLER_NUMBER = "+4915112345689"
+CRASH_STEPS = 30
+SLOW_START_SECONDS = 2.0
 
 
 def argv(mode: str, data_dir: Path) -> list[str]:
@@ -59,10 +65,25 @@ def main() -> None:
     log = logging.getLogger("fake_child")
     signal.signal(signal.SIGTERM, _on_sigterm)
 
-    with DaemonLease(data_dir, port=PORT) as lease:
+    port = PORT
+    if mode == "slow-start":
+        # Like the dashboard API, which binds before the channels have started.
+        listener = socket.create_server(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+
+    with DaemonLease(data_dir, port=port) as lease:
         log.info("fake child %d starting in %s", os.getpid(), os.getcwd())
         log.info("marker from the caller's environment: %s", os.environ.get("FAKE_CHILD_MARKER"))
         log.info("inbound call from %s", CALLER_NUMBER)
+        if mode == "die-mid-line":
+            os.write(2, b"fatal: no newline")
+            os._exit(3)
+        if mode == "crash-on-start":
+            for step in range(1, CRASH_STEPS + 1):
+                log.info("startup step %d", step)
+            raise RuntimeError("fake child failed to start")
+        if mode == "slow-start":
+            time.sleep(SLOW_START_SECONDS)
         while mode == "gated" and not (data_dir / "mark-ready").exists():
             time.sleep(0.05)
         print(f"Pincer is running! Channels: {', '.join(CHANNELS)}. Press Ctrl+C to stop.")

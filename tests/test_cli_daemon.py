@@ -92,3 +92,35 @@ def test_daemon_child_runs_the_agent_inside_the_lease(data_dir: Path, monkeypatc
 
     assert result.exit_code == 0, result.output
     assert states == ["starting", "ready"]
+
+
+def _child_mode(monkeypatch: pytest.MonkeyPatch, mode: str, data_dir: Path) -> None:
+    monkeypatch.setattr("pincer.cli.daemon._child_argv", lambda: daemon_fake_child.argv(mode, data_dir))
+
+
+def test_run_detach_shows_the_startup_log_and_the_crash_tail(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _child_mode(monkeypatch, "crash-on-start", data_dir)
+
+    result = runner.invoke(app, ["run", "-d"])
+
+    assert result.exit_code == 1
+    out = result.output
+    assert "INFO:fake_child:startup step 1\n" in out
+    header = f"Pincer exited before it was ready (exit code 1). Last 20 lines of {daemon.log_path(data_dir)}:"
+    assert header in out
+    tail = out[out.index(header) + len(header) :].strip().splitlines()
+    assert tail == daemon.log_path(data_dir).read_text().splitlines()[-20:]
+    assert daemon.read_state(data_dir) is None
+
+
+def test_run_detach_wait_timeout_leaves_the_daemon_starting(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _child_mode(monkeypatch, "slow-start", data_dir)
+
+    result = runner.invoke(app, ["run", "-d", "--wait-timeout", "1"])
+
+    assert result.exit_code == 1
+    assert "Pincer is still starting after 1 s — it keeps running; check 'pincer logs -f'" in result.output
+    state = daemon.read_state(data_dir)
+    assert state is not None
+    assert state.state == "starting"
+    daemon.stop(data_dir)

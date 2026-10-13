@@ -20,6 +20,7 @@ from pincer.cli._attachments import (
     _safe_upload_path,
 )
 from pincer.cli._shared import _create_memory_backend, _port_in_use, _print_voice_webhook_urls, _setup_logging, console
+from pincer.cli.daemon import WAIT_TIMEOUT, start_daemon
 
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
@@ -59,6 +60,9 @@ async def run(
     detach: bool = typer.Option(
         False, "-d", "--detach", help="Start in the background and return once all channels are up."
     ),
+    wait_timeout: float = typer.Option(
+        WAIT_TIMEOUT, "--wait-timeout", help="With -d: seconds to wait for startup (a slow start is never killed)."
+    ),
     daemon_child: bool = typer.Option(False, "--daemon-child", hidden=True),
 ) -> None:
     """Start the Pincer agent, or a single component of it (see COMPONENT)."""
@@ -71,9 +75,7 @@ async def run(
         raise typer.Exit(1) from e
 
     if detach:
-        from pincer.cli.daemon import start_daemon
-
-        start_daemon(settings)
+        start_daemon(settings, wait_timeout)
         return
 
     _setup_logging(settings.log_level.value)

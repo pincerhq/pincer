@@ -25,11 +25,20 @@ def _child_argv() -> list[str]:
     return [sys.executable, "-P", "-m", "pincer", "run", "--daemon-child"]
 
 
-def start_daemon(settings: Settings) -> None:
-    """Start Pincer in the background from the caller's cwd and environment; return once it is up."""
+def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None:
+    """Start Pincer in the background from the caller's cwd and environment; return once it is up.
+
+    Streams the startup log meanwhile. Exits 1 if it crashes first, or if `wait_timeout` passes
+    first — then it is left running.
+    """
+    from rich.markup import escape
+
     from pincer import daemon
 
-    result = daemon.start(settings.data_dir, _child_argv(), Path.cwd(), os.environ, WAIT_TIMEOUT)
+    def show(line: str) -> None:
+        console.print(line, style="dim", soft_wrap=True, markup=False, highlight=False)
+
+    result = daemon.start(settings.data_dir, _child_argv(), Path.cwd(), os.environ, wait_timeout, on_line=show)
     state = result.state
     if result.outcome is daemon.StartOutcome.READY and state is not None:
         channels = ", ".join(state.channels) or "none"
@@ -42,7 +51,18 @@ def start_daemon(settings: Settings) -> None:
     if result.outcome is daemon.StartOutcome.ALREADY_RUNNING and state is not None:
         console.print(f"Pincer is already running (pid {state.pid})", soft_wrap=True, markup=False)
         return
-    console.print(f"[red]Pincer did not start ({result.outcome}).[/red]")
+    if result.outcome is daemon.StartOutcome.TIMED_OUT:
+        console.print(
+            f"[yellow]Pincer is still starting after {wait_timeout:g} s — it keeps running; "
+            "check 'pincer logs -f'[/yellow]",
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+    console.print(
+        f"[red]Pincer exited before it was ready (exit code {result.exit_code}). "
+        f"Last {len(result.last_lines)} lines of {escape(str(daemon.log_path(settings.data_dir)))}:[/red]",
+        soft_wrap=True,
+    )
     for line in result.last_lines:
         console.print(line, soft_wrap=True, markup=False, highlight=False)
     raise typer.Exit(1)

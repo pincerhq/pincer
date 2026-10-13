@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -234,3 +235,62 @@ def test_daemons_on_different_data_dirs_do_not_see_each_other(data_dir: Path, tm
         assert _alive(second.state.pid)
     finally:
         daemon.stop(other_dir)
+
+
+def test_startup_lines_are_relayed_while_start_waits(data_dir: Path) -> None:
+    seen: list[str] = []
+
+    def on_line(line: str) -> None:
+        seen.append(line)
+        # The gated child only marks ready once this exists, so READY proves the line arrived mid-wait.
+        if "marker from the caller's environment" in line:
+            (data_dir / "mark-ready").touch()
+
+    result = _start(data_dir, mode="gated", wait_timeout=10.0, on_line=on_line)
+
+    assert result.outcome is StartOutcome.READY
+    assert any("starting in" in line for line in seen)
+    assert seen[-1] == "Pincer is running! Channels: telegram, signal. Press Ctrl+C to stop."
+    daemon.stop(data_dir)
+
+
+def test_a_crash_before_ready_returns_the_last_lines_and_leaves_no_live_record(data_dir: Path) -> None:
+    seen: list[str] = []
+
+    result = _start(data_dir, mode="crash-on-start", on_line=seen.append)
+
+    assert result.outcome is StartOutcome.CRASHED
+    assert result.exit_code == 1
+    log_lines = daemon.log_path(data_dir).read_text().splitlines()
+    assert result.last_lines == log_lines[-20:]
+    assert result.last_lines[-1] == "RuntimeError: fake child failed to start"
+    assert "INFO:fake_child:startup step 30" in result.last_lines
+    assert "INFO:fake_child:startup step 1" not in result.last_lines
+    # Everything, through the traceback's last line, was relayed while waiting.
+    assert seen == log_lines
+    assert daemon.read_state(data_dir) is None
+
+
+def test_a_slow_start_times_out_without_touching_the_child_even_with_its_port_open(data_dir: Path) -> None:
+    result = _start(data_dir, mode="slow-start", wait_timeout=1.0)
+
+    assert result.outcome is StartOutcome.TIMED_OUT
+    assert result.state is not None
+    assert result.state.state == "starting"
+    # Listening already, yet not ready: the port says nothing about readiness.
+    with socket.create_connection(("127.0.0.1", result.state.port), timeout=1):
+        pass
+    assert _alive(result.state.pid)
+    assert _wait_for_state(data_dir, "ready").pid == result.state.pid
+    daemon.stop(data_dir)
+
+
+def test_a_crash_mid_line_still_relays_the_unterminated_last_line(data_dir: Path) -> None:
+    seen: list[str] = []
+
+    result = _start(data_dir, mode="die-mid-line", on_line=seen.append)
+
+    assert result.outcome is StartOutcome.CRASHED
+    assert result.exit_code == 3
+    assert seen[-1] == "fatal: no newline"
+    assert result.last_lines[-1] == "fatal: no newline"

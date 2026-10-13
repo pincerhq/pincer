@@ -31,7 +31,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
     from pathlib import Path
     from types import TracebackType
 
@@ -81,6 +81,7 @@ class StartResult:
     outcome: StartOutcome
     state: DaemonState | None = None
     last_lines: list[str] = field(default_factory=list)
+    exit_code: int | None = None
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,14 @@ def log_path(data_dir: Path) -> Path:
     return data_dir / "logs" / LOG_FILE
 
 
-def start(data_dir: Path, argv: Sequence[str], cwd: Path, env: Mapping[str, str], wait_timeout: float) -> StartResult:
+def start(
+    data_dir: Path,
+    argv: Sequence[str],
+    cwd: Path,
+    env: Mapping[str, str],
+    wait_timeout: float,
+    on_line: Callable[[str], None] | None = None,
+) -> StartResult:
     """Rotate the log, spawn `argv` as a daemon in its own session, and wait until it marks itself ready.
 
     `argv` must start a process that enters `DaemonLease` on `data_dir`. It runs in `cwd`
@@ -125,16 +133,22 @@ def start(data_dir: Path, argv: Sequence[str], cwd: Path, env: Mapping[str, str]
     finally:
         os.close(log_fd)
 
+    # Readiness comes from the record alone, never from the dashboard port: the API binds
+    # before the channels have started.
     deadline = time.monotonic() + wait_timeout
-    while True:
-        state = read_state(data_dir)
-        if state is not None and state.pid == child.pid and state.state == "ready":
-            return StartResult(StartOutcome.READY, state)
-        if child.poll() is not None:
-            return StartResult(StartOutcome.CRASHED, last_lines=_tail(log, TAIL_LINES))
-        if time.monotonic() >= deadline:
-            return StartResult(StartOutcome.TIMED_OUT, state)
-        time.sleep(POLL_INTERVAL)
+    with _LogLines(log, on_line) as lines:
+        while True:
+            state = read_state(data_dir)
+            lines.relay()
+            if state is not None and state.pid == child.pid and state.state == "ready":
+                return StartResult(StartOutcome.READY, state)
+            exit_code = child.poll()
+            if exit_code is not None:
+                lines.relay(final=True)
+                return StartResult(StartOutcome.CRASHED, last_lines=_tail(log, TAIL_LINES), exit_code=exit_code)
+            if time.monotonic() >= deadline:
+                return StartResult(StartOutcome.TIMED_OUT, state)
+            time.sleep(POLL_INTERVAL)
 
 
 def read_state(data_dir: Path) -> DaemonState | None:
@@ -252,6 +266,33 @@ def _rotate(log: Path) -> None:
             older.rename(log.with_name(f"{log.name}.{n + 1}"))
     if log.exists():
         log.rename(log.with_name(f"{log.name}.1"))
+
+
+class _LogLines:
+    """Reads a growing log from its current start, handing each complete line to `on_line`."""
+
+    def __init__(self, path: Path, on_line: Callable[[str], None] | None) -> None:
+        self._path = path
+        self._on_line = on_line
+        self._pending = b""
+
+    def __enter__(self) -> _LogLines:
+        self._file = self._path.open("rb")
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._file.close()
+
+    def relay(self, final: bool = False) -> None:
+        """Pass on the lines written since the last call; `final` also flushes an unterminated last line."""
+        self._pending += self._file.read()
+        *complete, self._pending = self._pending.split(b"\n")
+        if final and self._pending:
+            complete.append(self._pending)
+            self._pending = b""
+        if self._on_line is not None:
+            for raw in complete:
+                self._on_line(raw.decode(errors="replace").rstrip("\r"))
 
 
 def _tail(path: Path, lines: int) -> list[str]:
