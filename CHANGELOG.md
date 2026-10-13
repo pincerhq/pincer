@@ -269,11 +269,13 @@ retried callbacks.
   config says.** `pincer.toml` and the `sqlite-vec-memory-mcp` image set
   `FASTEMBED__CACHE_DIR` / `FASTEMBED_CACHE_DIR`, which fastembed ignores, so
   the model was kept in `$TMPDIR/fastembed_cache` instead. They now set
-  `FASTEMBED_CACHE_PATH`. **On upgrade, existing installs download the model
-  once more** (about 65 MB) into `${PINCER_DATA_DIR}/fastembed_cache`. A host
-  with no network access has no memory embedding until the model is there:
-  copy the `models--…` directory from the old `$TMPDIR/fastembed_cache` into
-  `${PINCER_DATA_DIR}/fastembed_cache` before starting.
+  `FASTEMBED_CACHE_PATH`. **On upgrade, stdio and host installs (the server
+  started from `pincer.toml`) download the model once more** (about 65 MB)
+  into `${PINCER_DATA_DIR}/fastembed_cache`. A host with no network access has
+  no memory embedding until the model is there: copy the `models--…`
+  directory from the old `$TMPDIR/fastembed_cache` into
+  `${PINCER_DATA_DIR}/fastembed_cache` before starting. The
+  `sqlite-vec-memory-mcp` image needs nothing: the model is built into it.
 
 ### Added
 
