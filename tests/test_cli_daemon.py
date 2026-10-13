@@ -199,3 +199,49 @@ async def test_the_foreground_port_guard_points_to_stop_not_pkill(capsys: pytest
 )
 def test_format_uptime(seconds: int, shown: str) -> None:
     assert format_uptime(seconds) == shown
+
+
+def test_stop_times_out_without_killing_then_force_kills(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _child_mode(monkeypatch, "ignore-sigterm", data_dir)
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    pid = daemon.read_state(data_dir).pid  # type: ignore[union-attr]
+
+    timed_out = daemon_fake_child.within(10.0, lambda: runner.invoke(app, ["stop", "--timeout", "1"]))
+
+    assert timed_out.exit_code == 1
+    assert "Pincer is still shutting down after 1 s — 'pincer stop --force' to kill it" in timed_out.output
+    assert _fake_children(tmp_path) == [str(pid)]
+
+    forced = daemon_fake_child.within(10.0, lambda: runner.invoke(app, ["stop", "--force"]))
+
+    assert forced.exit_code == 0, forced.output
+    assert f"Pincer killed (pid {pid})" in forced.output
+    assert _fake_children(tmp_path) == []
+    _child_mode(monkeypatch, "ready", data_dir)
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+
+
+def test_stop_waits_out_a_slow_shutdown_with_one_progress_line_when_piped(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _child_mode(monkeypatch, "slow-shutdown", data_dir)
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    pid = daemon.read_state(data_dir).pid  # type: ignore[union-attr]
+
+    result = runner.invoke(app, ["stop"])
+
+    assert result.exit_code == 0, result.output
+    # CliRunner's output is not a terminal: no spinner frames, just the two lines.
+    assert result.output.splitlines() == [f"Stopping Pincer (pid {pid})…", f"Pincer stopped (pid {pid})"]
+
+
+def test_stop_with_nothing_running_points_to_a_foreground_instance_on_the_port(data_dir: Path) -> None:
+    port = config.get_settings().dashboard_port
+    with socket.create_server(("127.0.0.1", port)):
+        result = runner.invoke(app, ["stop"])
+
+    assert result.exit_code == 0
+    assert "Pincer is not running" in result.output
+    assert f"A foreground Pincer seems to be running on :{port} — stop it with Ctrl+C in its terminal." in result.output

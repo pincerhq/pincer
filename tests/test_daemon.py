@@ -393,3 +393,70 @@ def test_a_start_during_another_starts_wait_answers_at_once(data_dir: Path) -> N
         first.join()
     assert [r.outcome for r in results] == [StartOutcome.READY]
     daemon.stop(data_dir)
+
+
+def test_stop_waits_out_a_slow_shutdown_within_its_timeout(data_dir: Path) -> None:
+    pid = _start(data_dir, mode="slow-shutdown").state.pid  # type: ignore[union-attr]
+
+    began = time.monotonic()
+    result = daemon.stop(data_dir, timeout=10.0)
+
+    assert result.outcome is StopOutcome.STOPPED
+    assert time.monotonic() - began >= daemon_fake_child.SLOW_SHUTDOWN_SECONDS - 0.2
+    assert not _alive(pid)
+    assert "Shutdown complete" in daemon.log_path(data_dir).read_text()
+
+
+def test_stop_gives_up_after_its_timeout_and_never_kills(data_dir: Path) -> None:
+    pid = _start(data_dir, mode="ignore-sigterm").state.pid  # type: ignore[union-attr]
+
+    began = time.monotonic()
+    result = daemon_fake_child.within(10.0, lambda: daemon.stop(data_dir, timeout=1.0))
+
+    assert result.outcome is StopOutcome.STILL_RUNNING
+    assert result.pid == pid
+    assert 1.0 <= time.monotonic() - began < 3.0
+    time.sleep(0.5)  # a kill sent on the way out would have landed by now
+    assert _alive(pid)
+    assert daemon.read_state(data_dir) is not None
+
+
+def test_force_kills_at_once_and_the_next_start_works(data_dir: Path) -> None:
+    pid = _start(data_dir, mode="ignore-sigterm").state.pid  # type: ignore[union-attr]
+
+    result = daemon_fake_child.within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=True))
+
+    assert result.outcome is StopOutcome.KILLED
+    assert result.pid == pid
+    assert not _alive(pid)
+    assert daemon.read_state(data_dir) is None
+    assert _start(data_dir).outcome is StartOutcome.READY
+    daemon.stop(data_dir)
+
+
+def test_a_second_stop_during_a_slow_shutdown_waits_for_the_same_exit(data_dir: Path) -> None:
+    pid = _start(data_dir, mode="slow-shutdown").state.pid  # type: ignore[union-attr]
+    results: list[daemon.StopResult] = []
+    first = threading.Thread(target=lambda: results.append(daemon.stop(data_dir, timeout=10.0)))
+    first.start()
+    time.sleep(0.5)
+
+    second = daemon.stop(data_dir, timeout=10.0)
+    first.join()
+
+    assert [r.outcome for r in results] == [StopOutcome.STOPPED]
+    assert second.outcome is StopOutcome.STOPPED
+    assert second.pid == pid
+    assert daemon.log_path(data_dir).read_text().count("Shutdown complete") == 1
+
+
+def test_stop_reports_its_wait_as_it_goes(data_dir: Path) -> None:
+    pid = _start(data_dir, mode="slow-shutdown").state.pid  # type: ignore[union-attr]
+    seen: list[tuple[int, float]] = []
+
+    daemon.stop(data_dir, timeout=10.0, on_wait=lambda state, elapsed: seen.append((state.pid, elapsed)))
+
+    assert seen[0][0] == pid
+    assert seen[0][1] < 0.1  # right after signalling, before any wait
+    assert len(seen) > 5
+    assert all(later >= earlier for (_, earlier), (_, later) in zip(seen, seen[1:], strict=False))

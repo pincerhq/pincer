@@ -13,6 +13,10 @@ behaves according to MODE (tests build the command with `argv()`):
     slow-lease        like ready, but waits SLOW_LEASE_SECONDS before taking the lease (Pincer's import time)
     die-mid-line      writes half a line (no newline) and exits 3 before ready
     raise-on-sigterm  like ready, but SIGTERM ends in an uncaught exception
+    slow-shutdown     like ready, but its shutdown takes SLOW_SHUTDOWN_SECONDS
+    ignore-sigterm    like ready, but never reacts to SIGTERM
+
+Like Pincer's own handler, only the first SIGTERM starts the shutdown; later ones are ignored.
 """
 
 from __future__ import annotations
@@ -24,12 +28,17 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import FrameType
+from typing import TYPE_CHECKING
 
 from pincer.cli._shared import _setup_logging
 from pincer.daemon import DaemonLease
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 CHANNELS = ["telegram", "signal"]
 PORT = 8080
@@ -39,6 +48,7 @@ CALLER_NUMBER = "+4915112345689"
 CRASH_STEPS = 30
 SLOW_START_SECONDS = 2.0
 SLOW_LEASE_SECONDS = 1.0
+SLOW_SHUTDOWN_SECONDS = 2.0
 
 
 def argv(mode: str, data_dir: Path) -> list[str]:
@@ -53,11 +63,22 @@ def kill_all_under(directory: Path) -> None:
             os.kill(int(pid), signal.SIGKILL)
 
 
+def within[T](seconds: float, call: Callable[[], T]) -> T:
+    """`call()`, failing (instead of hanging the suite) if it hasn't returned after `seconds`."""
+    box: list[T] = []
+    worker = threading.Thread(target=lambda: box.append(call()), daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert box, f"still blocked after {seconds} s"
+    return box[0]
+
+
 class _Terminated(Exception):
     pass
 
 
 def _on_sigterm(signum: int, frame: FrameType | None) -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     raise _Terminated
 
 
@@ -65,7 +86,7 @@ def main() -> None:
     mode, data_dir = sys.argv[1], Path(sys.argv[2])
     _setup_logging("INFO")
     log = logging.getLogger("fake_child")
-    signal.signal(signal.SIGTERM, _on_sigterm)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN if mode == "ignore-sigterm" else _on_sigterm)
 
     port = PORT
     if mode == "slow-start":
@@ -100,7 +121,7 @@ def main() -> None:
             log.info("fake child %d shutting down", os.getpid())
             if mode == "raise-on-sigterm":
                 raise RuntimeError("fake child failed during shutdown") from None
-            time.sleep(SHUTDOWN_SECONDS)
+            time.sleep(SLOW_SHUTDOWN_SECONDS if mode == "slow-shutdown" else SHUTDOWN_SECONDS)
             print("Shutdown complete")
 
 

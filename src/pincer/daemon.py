@@ -63,6 +63,8 @@ class StartOutcome(StrEnum):
 class StopOutcome(StrEnum):
     NOT_RUNNING = "not_running"
     STOPPED = "stopped"
+    KILLED = "killed"
+    STILL_RUNNING = "still_running"
 
 
 @dataclass(frozen=True)
@@ -187,16 +189,33 @@ def read_state(data_dir: Path) -> DaemonState | None:
         time.sleep(POLL_INTERVAL / 5)
 
 
-def stop(data_dir: Path) -> StopResult:
-    """SIGTERM the daemon (the agent's graceful-shutdown path) and wait until it has exited."""
+def stop(
+    data_dir: Path,
+    timeout: float | None = None,
+    force: bool = False,
+    on_wait: Callable[[DaemonState, float], None] | None = None,
+) -> StopResult:
+    """SIGTERM the daemon (the agent's graceful-shutdown path) and wait until it has exited.
+
+    Gives up after `timeout` seconds with STILL_RUNNING and leaves it running: a call drain
+    must never be cut short behind the operator's back. Only `force` kills (SIGKILL, at once).
+    `on_wait(state, elapsed)` is called right after signalling and then on every poll.
+    """
     state = read_state(data_dir)
     if state is None:
         return StopResult(StopOutcome.NOT_RUNNING)
     with contextlib.suppress(ProcessLookupError):
-        os.kill(state.pid, signal.SIGTERM)
-    while _lease_held(data_dir):
+        os.kill(state.pid, signal.SIGKILL if force else signal.SIGTERM)
+    began = time.monotonic()
+    while True:
+        elapsed = time.monotonic() - began
+        if on_wait is not None:
+            on_wait(state, elapsed)
+        if not _lease_held(data_dir):
+            return StopResult(StopOutcome.KILLED if force else StopOutcome.STOPPED, state.pid)
+        if timeout is not None and elapsed >= timeout:
+            return StopResult(StopOutcome.STILL_RUNNING, state.pid)
         time.sleep(POLL_INTERVAL)
-    return StopResult(StopOutcome.STOPPED, state.pid)
 
 
 class DaemonLease:

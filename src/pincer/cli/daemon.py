@@ -13,10 +13,14 @@ import typer
 from pincer.cli._shared import console
 
 if TYPE_CHECKING:
+    from rich.status import Status
+
     from pincer.config import Settings
     from pincer.daemon import DaemonState
 
 WAIT_TIMEOUT = 60.0
+# Sized to the voice channel's 60 s call drain plus worker and API grace.
+STOP_TIMEOUT = 90.0
 
 
 def format_uptime(seconds: float) -> str:
@@ -106,13 +110,62 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
     raise typer.Exit(1)
 
 
-def stop() -> None:
+class _StopProgress:
+    """One "Stopping Pincer…" line; on a terminal only, a transient spinner with the time waited.
+
+    Piped output gets no spinner frames, so `pincer stop | tee` stays two lines.
+    """
+
+    def __init__(self) -> None:
+        self._announced = False
+        self._status: Status | None = None
+
+    def __call__(self, state: DaemonState, elapsed: float) -> None:
+        if not self._announced:
+            self._announced = True
+            console.print(f"Stopping Pincer (pid {state.pid})…", markup=False, highlight=False)
+            if console.is_terminal:
+                self._status = console.status("Waiting for it to exit")
+                self._status.start()
+        if self._status is not None:
+            self._status.update(f"Waiting for it to exit — {format_uptime(elapsed)}")
+
+    def close(self) -> None:
+        if self._status is not None:
+            self._status.stop()
+
+
+def stop(
+    timeout: float = typer.Option(
+        STOP_TIMEOUT, "--timeout", help="Seconds to wait for the graceful shutdown; Pincer is never killed on its own."
+    ),
+    force: bool = typer.Option(False, "--force", help="Kill Pincer at once (SIGKILL) instead of shutting it down."),
+) -> None:
     """Stop the background Pincer gracefully and wait until it has exited."""
     from pincer import daemon
+    from pincer.cli._shared import _port_in_use
     from pincer.config import get_settings_relaxed
 
-    result = daemon.stop(get_settings_relaxed().data_dir)
+    settings = get_settings_relaxed()
+    progress = _StopProgress()
+    try:
+        result = daemon.stop(settings.data_dir, timeout=timeout, force=force, on_wait=progress)
+    finally:
+        progress.close()
     if result.outcome is daemon.StopOutcome.NOT_RUNNING:
         console.print("Pincer is not running")
+        if _port_in_use(settings.dashboard_host, settings.dashboard_port):
+            console.print(
+                f"[yellow]A foreground Pincer seems to be running on :{settings.dashboard_port} — stop it with "
+                "Ctrl+C in its terminal.[/yellow]",
+                soft_wrap=True,
+            )
         return
-    console.print(f"Pincer stopped (pid {result.pid})")
+    if result.outcome is daemon.StopOutcome.STILL_RUNNING:
+        console.print(
+            f"[yellow]Pincer is still shutting down after {timeout:g} s — 'pincer stop --force' to kill it[/yellow]",
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+    verb = "killed" if result.outcome is daemon.StopOutcome.KILLED else "stopped"
+    console.print(f"Pincer {verb} (pid {result.pid})")
