@@ -28,6 +28,7 @@ from pincer.llm.base import (
     StreamTurnEvent,
     ToolCall,
 )
+from pincer.llm.model_params import anthropic_accepts_sampling
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -78,6 +79,32 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         cached[-1] = {**cached[-1], "cache_control": {"type": "ephemeral"}}
         return cached
 
+    def _build_kwargs(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None,
+        model: str | None,
+        max_tokens: int | None,
+        temperature: float | None,
+        system: str | None,
+    ) -> dict[str, Any]:
+        """Request kwargs shared by complete / stream / stream_turn."""
+        model = model or self._default_model
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens or self._default_max_tokens,
+            "messages": self._convert_messages(messages),
+        }
+        if anthropic_accepts_sampling(model):
+            kwargs["temperature"] = temperature if temperature is not None else self._default_temperature
+        else:
+            logger.debug("Dropping temperature: %s does not accept it", model)
+        if system:
+            kwargs["system"] = system
+        if tools:
+            kwargs["tools"] = self._maybe_cache_tools(tools)
+        return kwargs
+
     async def complete(
         self,
         messages: list[LLMMessage],
@@ -87,17 +114,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         temperature: float | None = None,
         system: str | None = None,
     ) -> LLMResponse:
-        api_messages = self._convert_messages(messages)
-        kwargs: dict[str, Any] = {
-            "model": model or self._default_model,
-            "max_tokens": max_tokens or self._default_max_tokens,
-            "temperature": temperature if temperature is not None else self._default_temperature,
-            "messages": api_messages,
-        }
-        if system:
-            kwargs["system"] = system
-        if tools:
-            kwargs["tools"] = self._maybe_cache_tools(tools)
+        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
 
         try:
             response: Message = await self._call_with_retry(kwargs)
@@ -119,17 +136,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         temperature: float | None = None,
         system: str | None = None,
     ) -> AsyncIterator[str]:
-        api_messages = self._convert_messages(messages)
-        kwargs: dict[str, Any] = {
-            "model": model or self._default_model,
-            "max_tokens": max_tokens or self._default_max_tokens,
-            "temperature": temperature if temperature is not None else self._default_temperature,
-            "messages": api_messages,
-        }
-        if system:
-            kwargs["system"] = system
-        if tools:
-            kwargs["tools"] = self._maybe_cache_tools(tools)
+        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:
@@ -153,17 +160,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         """True single-generation streaming (Sprint 5): text deltas arrive as
         the model writes; the final message (tool calls + usage) comes from the
         same stream — tools are never lost, nothing is generated twice."""
-        api_messages = self._convert_messages(messages)
-        kwargs: dict[str, Any] = {
-            "model": model or self._default_model,
-            "max_tokens": max_tokens or self._default_max_tokens,
-            "temperature": temperature if temperature is not None else self._default_temperature,
-            "messages": api_messages,
-        }
-        if system:
-            kwargs["system"] = system
-        if tools:
-            kwargs["tools"] = self._maybe_cache_tools(tools)
+        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
 
         try:
             async with self._client.messages.stream(**kwargs) as stream:

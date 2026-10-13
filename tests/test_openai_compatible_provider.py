@@ -548,24 +548,47 @@ class TestStreamTurn:
         assert final.tool_calls[0].arguments == {"day": "mon"}
         assert final.stop_reason == "tool_calls"
 
-    async def test_reasoning_model_kwargs_normalized(self):
+    async def _sent_kwargs(self, provider, method, **call_kwargs):
         from unittest.mock import AsyncMock, MagicMock
-
-        provider = self._provider()
 
         async def fake_stream(**kwargs):
             yield self._chunk(content="ok, done here now", finish="stop")
 
+        if method == "complete":
+            create = AsyncMock(return_value=_make_chat_completion())
+        else:
+            create = AsyncMock(side_effect=lambda **kw: fake_stream(**kw))
         provider._client = MagicMock()
-        create = AsyncMock(side_effect=lambda **kw: fake_stream(**kw))
         provider._client.chat.completions.create = create
 
-        _ = [e async for e in provider.stream_turn(messages=[], model="gpt-5-mini", max_tokens=150, temperature=0.5)]
-        kwargs = create.call_args.kwargs
+        if method == "complete":
+            await provider.complete(messages=[], **call_kwargs)
+        else:
+            _ = [e async for e in getattr(provider, method)(messages=[], **call_kwargs)]
+        return create.call_args.kwargs
+
+    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("model", ["gpt-5-mini", "o3-mini", "gpt-6-luna", "gpt-6.1-sol"])
+    async def test_reasoning_model_kwargs_normalized(self, method, model):
+        provider = self._provider()
+        kwargs = await self._sent_kwargs(provider, method, model=model, max_tokens=150, temperature=0.5)
         assert kwargs["max_completion_tokens"] == 150
         assert "max_tokens" not in kwargs
         assert "temperature" not in kwargs  # reasoning models accept only default
 
-        _ = [e async for e in provider.stream_turn(messages=[], model="gpt-4o-mini", max_tokens=150)]
-        kwargs = create.call_args.kwargs
+    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    @pytest.mark.parametrize("model", ["gpt-4o-mini", "grok-3"])
+    async def test_non_reasoning_model_kwargs_untouched(self, method, model):
+        provider = self._provider()
+        kwargs = await self._sent_kwargs(provider, method, model=model, max_tokens=150, temperature=0)
         assert kwargs["max_tokens"] == 150
+        assert "max_completion_tokens" not in kwargs
+        assert kwargs["temperature"] == 0
+
+    async def test_stream_flags_set_by_caller(self):
+        provider = self._provider()
+        assert "stream" not in await self._sent_kwargs(provider, "complete")
+        kwargs = await self._sent_kwargs(provider, "stream")
+        assert kwargs["stream"] is True and "stream_options" not in kwargs
+        kwargs = await self._sent_kwargs(provider, "stream_turn")
+        assert kwargs["stream"] is True and kwargs["stream_options"] == {"include_usage": True}

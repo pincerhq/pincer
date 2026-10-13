@@ -470,3 +470,65 @@ class TestToolPromptCaching:
 
         sent_tools = provider._client.messages.create.call_args.kwargs["tools"]
         assert sent_tools[-1]["cache_control"] == {"type": "ephemeral"}
+
+
+# ── Per-model request params: temperature only where the model accepts it ──
+
+
+class TestTemperatureByModel:
+    REJECTS = "claude-haiku-5-5"
+    ACCEPTS = "claude-haiku-4-5-20251001"
+
+    def _provider(self, settings):
+        from pincer.llm.anthropic_common import AnthropicCompatibleProvider
+
+        with patch(f"{MODULE}.AsyncAnthropic"):
+            provider = AnthropicCompatibleProvider(settings, "anthropic")
+
+        async def _text_stream():
+            yield "ok"
+
+        stream = MagicMock(text_stream=_text_stream())
+        stream.get_final_message = AsyncMock(return_value=_make_message())
+        stream_cm = MagicMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=stream)
+        stream_cm.__aexit__ = AsyncMock(return_value=False)
+
+        provider._client = MagicMock()
+        provider._client.messages.create = AsyncMock(return_value=_make_message())
+        provider._client.messages.stream = MagicMock(return_value=stream_cm)
+        return provider
+
+    async def _sent_kwargs(self, provider, method, **call_kwargs):
+        messages = [LLMMessage(role=MessageRole.USER, content="hi")]
+        if method == "complete":
+            await provider.complete(messages, **call_kwargs)
+            return provider._client.messages.create.call_args.kwargs
+        _ = [e async for e in getattr(provider, method)(messages, **call_kwargs)]
+        return provider._client.messages.stream.call_args.kwargs
+
+    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    async def test_dropped_for_model_that_rejects_it(self, anthropic_settings, method):
+        provider = self._provider(anthropic_settings)
+        kwargs = await self._sent_kwargs(provider, method, model=self.REJECTS, temperature=0, max_tokens=150)
+        assert "temperature" not in kwargs
+        assert kwargs["model"] == self.REJECTS
+        assert kwargs["max_tokens"] == 150
+
+    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    async def test_sent_for_model_that_accepts_it(self, anthropic_settings, method):
+        provider = self._provider(anthropic_settings)
+        kwargs = await self._sent_kwargs(provider, method, model=self.ACCEPTS, temperature=0)
+        assert kwargs["temperature"] == 0  # an explicit 0 is not replaced by the default
+
+    @pytest.mark.parametrize("method", ["complete", "stream", "stream_turn"])
+    async def test_default_model_and_temperature(self, anthropic_settings, method):
+        """No per-call model: the rule applies to the provider's default model."""
+        anthropic_settings.anthropic_model = self.REJECTS
+        provider = self._provider(anthropic_settings)
+        assert "temperature" not in await self._sent_kwargs(provider, method)
+
+        anthropic_settings.anthropic_model = self.ACCEPTS
+        provider = self._provider(anthropic_settings)
+        kwargs = await self._sent_kwargs(provider, method)
+        assert kwargs["temperature"] == anthropic_settings.temperature

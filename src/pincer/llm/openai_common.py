@@ -17,6 +17,7 @@ from openai import AsyncOpenAI
 
 from pincer.exceptions import LLMError, LLMRateLimitError
 from pincer.llm.base import BaseLLMProvider, LLMMessage, LLMResponse, MessageRole, StreamTurnEvent, ToolCall
+from pincer.llm.model_params import openai_is_reasoning_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -190,14 +191,33 @@ class OpenAICompatibleProvider(BaseLLMProvider):
 
     # OpenAI reasoning models reject `max_tokens` (want `max_completion_tokens`)
     # and any non-default temperature.
-    _REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
-
     def _normalize_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         model = str(kwargs.get("model", ""))
-        if model.startswith(self._REASONING_MODEL_PREFIXES):
+        if openai_is_reasoning_model(model):
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
             kwargs.pop("temperature", None)
+            logger.debug("Dropping temperature: %s does not accept it", model)
         return kwargs
+
+    def _build_kwargs(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None,
+        model: str | None,
+        max_tokens: int | None,
+        temperature: float | None,
+        system: str | None,
+    ) -> dict[str, Any]:
+        """Request kwargs shared by complete / stream / stream_turn."""
+        kwargs: dict[str, Any] = {
+            "model": model or self._default_model,
+            "max_tokens": max_tokens or self._default_max_tokens,
+            "temperature": temperature if temperature is not None else self._default_temperature,
+            "messages": convert_messages_to_openai(messages, system),
+        }
+        if tools:
+            kwargs["tools"] = convert_tools_to_openai(tools)
+        return self._normalize_kwargs(kwargs)
 
     async def complete(
         self,
@@ -208,16 +228,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         temperature: float | None = None,
         system: str | None = None,
     ) -> LLMResponse:
-        api_messages = convert_messages_to_openai(messages, system)
-        kwargs: dict[str, Any] = {
-            "model": model or self._default_model,
-            "max_tokens": max_tokens or self._default_max_tokens,
-            "temperature": temperature if temperature is not None else self._default_temperature,
-            "messages": api_messages,
-        }
-        if tools:
-            kwargs["tools"] = convert_tools_to_openai(tools)
-        self._normalize_kwargs(kwargs)
+        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
 
         try:
             response = await self._call_with_retry(kwargs)
@@ -239,17 +250,8 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         temperature: float | None = None,
         system: str | None = None,
     ) -> AsyncIterator[str]:
-        api_messages = convert_messages_to_openai(messages, system)
-        kwargs: dict[str, Any] = {
-            "model": model or self._default_model,
-            "max_tokens": max_tokens or self._default_max_tokens,
-            "temperature": temperature if temperature is not None else self._default_temperature,
-            "messages": api_messages,
-            "stream": True,
-        }
-        if tools:
-            kwargs["tools"] = convert_tools_to_openai(tools)
-        self._normalize_kwargs(kwargs)
+        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        kwargs["stream"] = True
 
         try:
             stream = await self._client.chat.completions.create(**kwargs)
@@ -275,18 +277,9 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         yielded as they arrive; tool-call deltas are assembled across chunks
         and returned with usage in the final event — same contract as the
         Anthropic implementation, so the voice pipeline can run either."""
-        api_messages = convert_messages_to_openai(messages, system)
-        kwargs: dict[str, Any] = {
-            "model": model or self._default_model,
-            "max_tokens": max_tokens or self._default_max_tokens,
-            "temperature": temperature if temperature is not None else self._default_temperature,
-            "messages": api_messages,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-        if tools:
-            kwargs["tools"] = convert_tools_to_openai(tools)
-        self._normalize_kwargs(kwargs)
+        kwargs = self._build_kwargs(messages, tools, model, max_tokens, temperature, system)
+        kwargs["stream"] = True
+        kwargs["stream_options"] = {"include_usage": True}
 
         text_parts: list[str] = []
         tool_accum: dict[int, dict[str, str]] = {}
