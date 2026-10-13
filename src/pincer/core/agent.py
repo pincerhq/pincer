@@ -1222,7 +1222,6 @@ class Agent:
         if self.mcp_manager:
             try:
                 servers = await self.mcp_manager.list_servers()
-                self._mcp_list_outage.succeeded()
                 connected = [s for s in servers if s["connected"]]
                 if connected:
                     max_chars = self._settings.mcp_instructions_max_chars
@@ -1238,6 +1237,7 @@ class Agent:
                     base_prompt += "\n\n[Connected MCP servers — use their prefixed tools when relevant]\n" + "\n".join(
                         server_lines
                     )
+                self._mcp_list_outage.succeeded()
             except Exception:
                 self._mcp_list_outage.failed()
 
@@ -1258,16 +1258,14 @@ class Agent:
 
         try:
             memories = await self._memory.search_text(user_text, user_id=user_id, limit=3)
-            self._memory_outage.succeeded()
-            if not memories:
-                return _with_extra(base_prompt)
-
-            memory_lines = [f"- {m.content}" for m in memories]
-            memory_block = "\n".join(memory_lines)
-            return _with_extra(f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}")
+            memory_block = "\n".join(f"- {m.content}" for m in memories)
         except Exception:
             self._memory_outage.failed()
             return _with_extra(base_prompt)
+        self._memory_outage.succeeded()
+        if not memories:
+            return _with_extra(base_prompt)
+        return _with_extra(f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}")
 
     async def _ingest_onboarding_reply(
         self,

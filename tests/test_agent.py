@@ -523,3 +523,45 @@ async def test_an_unavailable_mcp_server_list_warns_once_per_outage(
     assert _outage_log(
         caplog, "Failed to fetch MCP server list for prompt", "Fetching the MCP server list for prompt recovered"
     ) == [("WARNING", True), ("DEBUG", True), ("INFO", False), ("WARNING", True)]
+
+
+class _Unprintable:
+    @property
+    def content(self) -> str:
+        raise RuntimeError("cannot render")
+
+
+async def test_a_memory_that_fails_to_render_warns_once_and_never_recovers(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
+):
+    """The fetch succeeds, then formatting it fails: that is one outage, not a
+    recovery followed by a new failure on every message."""
+    memory = AsyncMock()
+    memory.search_text.return_value = [_Unprintable()]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory)
+
+    with caplog.at_level(logging.DEBUG, logger="pincer.core.agent"):
+        for _ in range(3):
+            await agent.handle_message("user1", "test", "Hello!")
+
+    assert _outage_log(caplog, "Failed to fetch memories for prompt", "Fetching memories for prompt recovered") == [
+        ("WARNING", True),
+        ("DEBUG", True),
+        ("DEBUG", True),
+    ]
+
+
+async def test_an_mcp_server_list_that_fails_to_render_warns_once_and_never_recovers(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
+):
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    agent.mcp_manager = AsyncMock()
+    agent.mcp_manager.list_servers.return_value = [{"connected": True}]  # no "name": formatting raises
+
+    with caplog.at_level(logging.DEBUG, logger="pincer.core.agent"):
+        for _ in range(3):
+            await agent.handle_message("user1", "test", "Hello!")
+
+    assert _outage_log(
+        caplog, "Failed to fetch MCP server list for prompt", "Fetching the MCP server list for prompt recovered"
+    ) == [("WARNING", True), ("DEBUG", True), ("DEBUG", True)]
