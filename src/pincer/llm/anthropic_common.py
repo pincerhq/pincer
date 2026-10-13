@@ -189,10 +189,17 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
         kwargs: dict[str, Any],
         max_retries: int = 3,
     ) -> Message:
-        """Call API with exponential backoff on rate limits."""
+        """Call API with exponential backoff on rate limits.
+
+        The request is streamed although only the final message is used: the
+        SDK refuses a non-streaming request whose max_tokens could keep it
+        running past its 10-minute timeout (anything above ~21k tokens, less
+        for some models), and a streamed one has no such limit.
+        """
         for attempt in range(max_retries):
             try:
-                result: Message = await self._client.messages.create(**kwargs)
+                async with self._client.messages.stream(**kwargs) as stream:
+                    result: Message = await stream.get_final_message()
                 return result
             except anthropic.RateLimitError as e:
                 retry_after = float(e.response.headers.get("retry-after", "5"))
