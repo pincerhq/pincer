@@ -1679,11 +1679,17 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
     import signal as _sigterm_mod
 
     _main_task = asyncio.current_task()
+
+    def _on_sigterm() -> None:
+        # Only the first SIGTERM cancels. uvicorn records the same SIGTERM and
+        # re-raises it when its server exits, early in the finally below; a
+        # second cancel would abort the shutdown there, before the channels
+        # drain their calls.
+        if _main_task and not _main_task.done() and not _main_task.cancelling():
+            _main_task.cancel()
+
     with contextlib.suppress(NotImplementedError, RuntimeError):  # Windows / nested loops
-        asyncio.get_running_loop().add_signal_handler(
-            _sigterm_mod.SIGTERM,
-            lambda: _main_task.cancel() if _main_task and not _main_task.done() else None,
-        )
+        asyncio.get_running_loop().add_signal_handler(_sigterm_mod.SIGTERM, _on_sigterm)
 
     try:
         while True:
