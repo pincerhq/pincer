@@ -1671,17 +1671,18 @@ def test_another_app_s_version_table_is_left_alone(migration_url, tmp_path):
     assert EXPECTED_TABLES - {"pincer_memories_fts"} <= tables
 
 
-def test_a_pincer_named_table_does_not_make_a_foreign_revision_pincer_s(migration_url, tmp_path):
-    """The other app happens to own a `channel_identities`. Pincer's `0001` then
-    fails on that table, as it always has; what must not happen first is the
-    bootstrap handing Pincer a revision it never had and taking the table."""
-    cfg = _foreign_app_db(migration_url, tmp_path, "f00dfeedcafe", "channel_identities")
+def test_an_unknown_revision_beside_pincer_tables_is_refused(migration_url, tmp_path):
+    """Pincer's own legacy database, at a revision this checkout doesn't have
+    (a fork's, say). Neither renamed nor left for Alembic to replay `0001` over."""
+    cfg = _legacy_pincer_db(migration_url, tmp_path, "0010")
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text(f"UPDATE {LEGACY_VERSION_TABLE} SET version_num = 'f00dfeedcafe'"))
 
-    with pytest.raises(sa.exc.DBAPIError, match="pincer_user_id"):
+    with pytest.raises(RuntimeError, match=r"records revision\(s\) \['f00dfeedcafe'\].*does not have"):
         command.upgrade(cfg, "head")
 
     with _connect(migration_url) as conn:
-        assert _version_rows(conn)["alembic_version"] == ["f00dfeedcafe"]
+        assert _version_rows(conn) == {"alembic_version": ["f00dfeedcafe"]}
 
 
 def test_a_second_start_beside_another_app_s_version_table_leaves_it_alone(migration_url, tmp_path):

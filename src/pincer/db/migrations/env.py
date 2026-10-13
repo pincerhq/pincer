@@ -55,9 +55,22 @@ def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:
     Pincer a revision that is not its own. It is Pincer's only when every
     revision it records is one of `revisions` *and* a Pincer table is there —
     neither alone is enough, since other apps also number their revisions
-    0001, 0002, … as Pincer does. Anything else is left exactly as it is, and
-    Alembic builds `VERSION_TABLE` beside it. Once `VERSION_TABLE` exists,
-    `alembic_version` is never looked at again.
+    0001, 0002, … as Pincer does. With no Pincer table it is left exactly as
+    it is, and Alembic builds `VERSION_TABLE` beside it. Once `VERSION_TABLE`
+    exists, `alembic_version` is never looked at again.
+
+    A Pincer table beside a revision this checkout doesn't know is refused,
+    not guessed at. It is most likely Pincer's own history from a fork, a
+    feature branch or a revision since renamed; leaving it would have Alembic
+    replay every revision from `0001` over a populated schema, which SQLite
+    cannot roll back. It may also be another application's table that happens
+    to sit beside Pincer's, so it is not renamed either: the operator decides.
+
+    One case remains that this cannot tell apart: Pincer tables with no
+    version table of Pincer's at all (an install from before Alembic, or one
+    restored without it) beside another application's `alembic_version` at a
+    revision id Pincer also has. That table is taken as Pincer's. Both
+    conditions together are narrow enough to accept.
 
     Runs on its own connection, committed and closed before the migration
     connection below is opened: reflecting `get_table_names()` on that
@@ -79,8 +92,16 @@ def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:
         if VERSION_TABLE in existing or LEGACY_VERSION_TABLE not in existing:
             return
         recorded = set(bootstrap.execute(sa.text(f"SELECT version_num FROM {LEGACY_VERSION_TABLE}")).scalars())
-        if not (recorded and recorded <= revisions and existing & _PINCER_MARKER_TABLES):
+        if not (recorded and existing & _PINCER_MARKER_TABLES):
             return
+        if not recorded <= revisions:
+            raise RuntimeError(
+                f"{LEGACY_VERSION_TABLE} records revision(s) {sorted(recorded - revisions)}, which this "
+                f"version of Pincer does not have, beside Pincer's own tables. Pincer changes nothing rather "
+                f"than guess. If it is Pincer's history (a fork or feature branch), run the Pincer version "
+                f"that has that revision; if {LEGACY_VERSION_TABLE} belongs to another application, give "
+                f"Pincer its own database or schema."
+            )
         bootstrap.execute(sa.text(f"ALTER TABLE {LEGACY_VERSION_TABLE} RENAME TO {VERSION_TABLE}"))
         bootstrap.commit()
 
