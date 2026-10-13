@@ -17,6 +17,7 @@ from alembic import command
 from alembic.script import ScriptDirectory
 
 from pincer.db import build_config, engine, ensure_schema_current
+from pincer.db.metadata import BOOTSTRAP_ADVISORY_KEY, LEGACY_VERSION_TABLE, VERSION_TABLE
 
 EXPECTED_TABLES = {
     "pincer_conversations",
@@ -1608,13 +1609,9 @@ def test_0018_round_trips_without_losing_the_ids(migration_url, tmp_path):
 
 # ── env.py: renaming only Pincer's own `alembic_version` ──────────────
 
-#: `env.py`'s `_BOOTSTRAP_ADVISORY_KEY`, which a test holds to stand in for a
-#: second Pincer process mid-bootstrap.
-_BOOTSTRAP_ADVISORY_KEY = 0x70696E636572
-
 _CREATE_LEGACY_VERSION_TABLE = (
-    "CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL, "
-    "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+    f"CREATE TABLE {LEGACY_VERSION_TABLE} (version_num VARCHAR(32) NOT NULL, "
+    f"CONSTRAINT {LEGACY_VERSION_TABLE}_pkc PRIMARY KEY (version_num))"
 )
 
 
@@ -1623,7 +1620,7 @@ def _version_rows(conn: sa.Connection) -> dict[str, list[str]]:
     tables = set(sa.inspect(conn).get_table_names())
     return {
         table: list(conn.execute(sa.text(f"SELECT version_num FROM {table}")).scalars())
-        for table in ("alembic_version", "pincer_alembic_version")
+        for table in (LEGACY_VERSION_TABLE, VERSION_TABLE)
         if table in tables
     }
 
@@ -1634,7 +1631,7 @@ def _legacy_pincer_db(url: str, tmp_path: Path, revision: str):
     cfg = _config(url, tmp_path)
     command.upgrade(cfg, revision)
     with _connect(url) as conn:
-        conn.execute(sa.text("ALTER TABLE pincer_alembic_version RENAME TO alembic_version"))
+        conn.execute(sa.text(f"ALTER TABLE {VERSION_TABLE} RENAME TO {LEGACY_VERSION_TABLE}"))
     return cfg
 
 
@@ -1643,7 +1640,7 @@ def _foreign_app_db(url: str, tmp_path: Path, revision: str, table: str):
     at `revision`, beside one table of its own."""
     with _connect(url) as conn:
         conn.execute(sa.text(_CREATE_LEGACY_VERSION_TABLE))
-        conn.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": revision})
+        conn.execute(sa.text(f"INSERT INTO {LEGACY_VERSION_TABLE} (version_num) VALUES (:v)"), {"v": revision})
         conn.execute(sa.text(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY)"))
     return _config(url, tmp_path)
 
@@ -1718,7 +1715,7 @@ def test_a_concurrent_start_waits_for_the_other_rename(migration_url, tmp_path):
     holder = sa.create_engine(migration_url)
     try:
         with holder.connect() as other:
-            other.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": _BOOTSTRAP_ADVISORY_KEY})
+            other.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": BOOTSTRAP_ADVISORY_KEY})
             worker = threading.Thread(target=upgrade)
             worker.start()
             time.sleep(1.0)

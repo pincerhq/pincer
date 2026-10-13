@@ -17,6 +17,15 @@ metadata = SQLModel.metadata
 #: same `pincer_` prefix as every table the migrations manage.
 VERSION_TABLE = "pincer_alembic_version"
 
+#: Alembic's default version table, which databases migrated before `0019`
+#: still record their history in — or another Alembic application's, in a
+#: database shared with one. `env.py` renames only Pincer's own.
+LEGACY_VERSION_TABLE = "alembic_version"
+
+#: The Postgres advisory lock key `env.py` serialises its version-table
+#: bootstrap on ("pincer" in ASCII).
+BOOTSTRAP_ADVISORY_KEY = 0x70696E636572
+
 #: Schema objects the migrations own by hand, with no model behind them.
 #: Autogenerate must neither drop them nor try to create them.
 HAND_WRITTEN_TABLES = frozenset(

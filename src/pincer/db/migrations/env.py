@@ -7,7 +7,15 @@ import sqlalchemy as sa
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from pincer.db.metadata import VERSION_TABLE, compare_type, drop_sqlite_noise, include_object, metadata
+from pincer.db.metadata import (
+    BOOTSTRAP_ADVISORY_KEY,
+    LEGACY_VERSION_TABLE,
+    VERSION_TABLE,
+    compare_type,
+    drop_sqlite_noise,
+    include_object,
+    metadata,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Engine
@@ -23,20 +31,10 @@ if config.config_file_name is not None:
 # and those revisions in step.
 target_metadata = metadata
 
-#: Alembic's default version table, which databases migrated before `0019`
-#: still record their history in — or another Alembic application's, in a
-#: database shared with one.
-_LEGACY_VERSION_TABLE = "alembic_version"
-
 #: Tables that only Pincer creates, under their name before `0019` and after:
 #: `channel_identities` exists from `0001` on and is never renamed until
 #: `0019` prefixes it. Both names are specific to Pincer.
 _PINCER_MARKER_TABLES = frozenset({"channel_identities", "pincer_channel_identities"})
-
-#: Serialises `_bootstrap_version_table` across processes on Postgres ("pincer"
-#: in ASCII). SQLite needs none: `ensure_schema_current` already holds a file
-#: lock around the whole upgrade.
-_BOOTSTRAP_ADVISORY_KEY = 0x70696E636572
 
 
 def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:
@@ -76,14 +74,14 @@ def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:
     """
     with engine.connect() as bootstrap:
         if bootstrap.dialect.name == "postgresql":
-            bootstrap.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": _BOOTSTRAP_ADVISORY_KEY})
+            bootstrap.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": BOOTSTRAP_ADVISORY_KEY})
         existing = set(sa.inspect(bootstrap).get_table_names())
-        if VERSION_TABLE in existing or _LEGACY_VERSION_TABLE not in existing:
+        if VERSION_TABLE in existing or LEGACY_VERSION_TABLE not in existing:
             return
-        recorded = set(bootstrap.execute(sa.text(f"SELECT version_num FROM {_LEGACY_VERSION_TABLE}")).scalars())
+        recorded = set(bootstrap.execute(sa.text(f"SELECT version_num FROM {LEGACY_VERSION_TABLE}")).scalars())
         if not (recorded and recorded <= revisions and existing & _PINCER_MARKER_TABLES):
             return
-        bootstrap.execute(sa.text(f"ALTER TABLE {_LEGACY_VERSION_TABLE} RENAME TO {VERSION_TABLE}"))
+        bootstrap.execute(sa.text(f"ALTER TABLE {LEGACY_VERSION_TABLE} RENAME TO {VERSION_TABLE}"))
         bootstrap.commit()
 
 
