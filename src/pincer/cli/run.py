@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from pincer.config import Settings
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
+    from pincer.daemon import DaemonLease
     from pincer.llm.base import BaseLLMProvider
     from pincer.llm.cost_tracker import CostTracker
     from pincer.llm.router import LLMRouter
@@ -55,6 +56,10 @@ async def run(
             "'tasks': background task worker only (requires PINCER_TASK_BROKER=redis)."
         ),
     ),
+    detach: bool = typer.Option(
+        False, "-d", "--detach", help="Start in the background and return once all channels are up."
+    ),
+    daemon_child: bool = typer.Option(False, "--daemon-child", hidden=True),
 ) -> None:
     """Start the Pincer agent, or a single component of it (see COMPONENT)."""
     from pincer.config import get_settings
@@ -64,6 +69,12 @@ async def run(
     except Exception as e:
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
+
+    if detach:
+        from pincer.cli.daemon import start_daemon
+
+        start_daemon(settings)
+        return
 
     _setup_logging(settings.log_level.value)
 
@@ -105,7 +116,14 @@ async def run(
     console.print(f"   Skills dir: {settings.skills_dir}")
     console.print()
 
-    await _run_agent(settings)
+    if not daemon_child:
+        await _run_agent(settings)
+        return
+    # Spawned by `pincer run -d`: hold the daemon lease for the whole run.
+    from pincer.daemon import DaemonLease
+
+    with DaemonLease(settings.data_dir, port=settings.dashboard_port) as lease:
+        await _run_agent(settings, lease)
 
 
 @dataclass
@@ -763,7 +781,7 @@ async def _ensure_ops_schedules(scheduler: Any, settings: Any) -> None:
             console.print(f"[yellow]Could not schedule {name}: {e}[/yellow]")
 
 
-async def _run_agent(settings: Settings) -> None:
+async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> None:
     # Single-instance guard: a second `pincer run` used to keep running with
     # the API port taken — Telegram polling then fights between instances
     # (TelegramConflictError) and Twilio webhooks land on the other process
@@ -1649,6 +1667,8 @@ async def _run_agent(settings: Settings) -> None:
         f"\n[bold green]{settings.agent_name} is running![/bold green] "
         f"Channels: {', '.join(active)}. Press Ctrl+C to stop.\n"
     )
+    if lease is not None:
+        lease.mark_ready(active)
 
     # T7.2: `docker stop` / a deploy sends SIGTERM. Without a handler Python
     # dies mid-call (no spoken ending, no report). Route it into the same

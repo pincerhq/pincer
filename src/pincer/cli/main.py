@@ -16,6 +16,7 @@ from pincer.cli import (
     chat,
     config,
     cost,
+    daemon,
     db,
     doctor,
     google,
@@ -40,6 +41,7 @@ app = AsyncTyper(
 )
 
 app.command(name="run")(run_cmd.run)
+app.command()(daemon.stop)
 app.command()(config.config)
 app.command()(cost.cost)
 app.command(name="init")(init.init)
