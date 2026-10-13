@@ -4,6 +4,8 @@ import contextlib
 import importlib.util
 import json
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -17,7 +19,7 @@ from alembic import command
 from alembic.script import ScriptDirectory
 
 from pincer.db import build_config, engine, ensure_schema_current
-from pincer.db.metadata import BOOTSTRAP_ADVISORY_KEY, LEGACY_VERSION_TABLE, VERSION_TABLE
+from pincer.db.metadata import LEGACY_VERSION_TABLE, MIGRATION_ADVISORY_KEY, VERSION_TABLE
 
 EXPECTED_TABLES = {
     "pincer_conversations",
@@ -1737,8 +1739,8 @@ def test_a_second_start_beside_another_app_s_version_table_leaves_it_alone(migra
         assert _version_rows(conn) == {"alembic_version": ["0005"], "pincer_alembic_version": [head]}
 
 
-def _wait_for_bootstrap_lock_waiters(conn: sa.Connection, count: int, errors: list[BaseException]) -> None:
-    """Return once `count` sessions are queued on the bootstrap advisory lock in
+def _wait_for_migration_lock_waiters(conn: sa.Connection, count: int, errors: list[BaseException]) -> None:
+    """Return once `count` sessions are queued on the migration advisory lock in
     this database; fail after 30 s, or as soon as an upgrader has failed instead."""
     deadline = time.monotonic() + 30.0
     while True:
@@ -1748,17 +1750,17 @@ def _wait_for_bootstrap_lock_waiters(conn: sa.Connection, count: int, errors: li
                 "AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) "
                 "AND classid::bigint = :high AND objid::bigint = :low"
             ),
-            {"high": BOOTSTRAP_ADVISORY_KEY >> 32, "low": BOOTSTRAP_ADVISORY_KEY & 0xFFFFFFFF},
+            {"high": MIGRATION_ADVISORY_KEY >> 32, "low": MIGRATION_ADVISORY_KEY & 0xFFFFFFFF},
         ).scalar_one()
         if waiting >= count:
             return
         assert not errors, f"an upgrader failed before waiting on the lock: {errors!r}"
-        assert time.monotonic() < deadline, f"{waiting} of {count} upgraders queued on the bootstrap lock after 30 s"
+        assert time.monotonic() < deadline, f"{waiting} of {count} upgraders queued on the migration lock after 30 s"
         time.sleep(0.01)
 
 
 def test_a_concurrent_start_waits_for_the_other_rename(migration_url, tmp_path):
-    """A second process holds the bootstrap lock and renames the table itself
+    """A second process holds the migration lock and renames the table itself
     meanwhile; this one must wait for it, then find the new name and carry on."""
     if not migration_url.startswith("postgresql"):
         pytest.skip("SQLite serialises the whole upgrade behind ensure_schema_current's file lock")
@@ -1774,10 +1776,10 @@ def test_a_concurrent_start_waits_for_the_other_rename(migration_url, tmp_path):
     holder = sa.create_engine(migration_url)
     try:
         with holder.connect() as other:
-            other.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": BOOTSTRAP_ADVISORY_KEY})
+            other.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_ADVISORY_KEY})
             worker = threading.Thread(target=upgrade)
             worker.start()
-            _wait_for_bootstrap_lock_waiters(other, 1, errors)
+            _wait_for_migration_lock_waiters(other, 1, errors)
             other.execute(sa.text("ALTER TABLE alembic_version RENAME TO pincer_alembic_version"))
             other.commit()
         worker.join(timeout=60)
@@ -1788,6 +1790,54 @@ def test_a_concurrent_start_waits_for_the_other_rename(migration_url, tmp_path):
     assert errors == []
     with _connect(migration_url) as conn:
         assert _version_rows(conn) == {"pincer_alembic_version": ["0011"]}
+
+
+_UPGRADE_SCRIPT = """
+import sys
+from pathlib import Path
+
+from alembic import command
+
+from pincer.db import build_config
+
+cfg = build_config(Path(sys.argv[2]) / "unused.db")
+cfg.set_main_option("sqlalchemy.url", sys.argv[1])
+command.upgrade(cfg, "head")
+"""
+
+
+def test_two_concurrent_upgraders_of_a_legacy_database_both_come_up(migration_url, tmp_path):
+    """`pincer` and `pincer-tasks` starting together on a database with `0019`
+    and its version-table rename pending. Both are held at the lock until both
+    are queued, then let go: the second must wait out the first's whole
+    upgrade and find the database at head, not race it through `0019`."""
+    if not migration_url.startswith("postgresql"):
+        pytest.skip("SQLite serialises the whole upgrade behind ensure_schema_current's file lock")
+    cfg = _legacy_pincer_db(migration_url, tmp_path, "0018")
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+
+    holder = sa.create_engine(migration_url)
+    try:
+        with holder.connect() as other:
+            other.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_ADVISORY_KEY})
+            upgraders = [
+                subprocess.Popen(
+                    [sys.executable, "-c", _UPGRADE_SCRIPT, migration_url, str(tmp_path)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                for _ in range(2)
+            ]
+            _wait_for_migration_lock_waiters(other, 2, [])
+            other.commit()
+        outputs = [upgrader.communicate(timeout=120)[0] for upgrader in upgraders]
+    finally:
+        holder.dispose()
+
+    assert [upgrader.returncode for upgrader in upgraders] == [0, 0], "\n\n".join(outputs)
+    with _connect(migration_url) as conn:
+        assert _version_rows(conn) == {"pincer_alembic_version": [head]}
 
 
 # ── 0020: orphaned webhook_retry schedules ─────────────────────────────

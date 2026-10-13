@@ -22,9 +22,9 @@ VERSION_TABLE = "pincer_alembic_version"
 #: database shared with one. `env.py` renames only Pincer's own.
 LEGACY_VERSION_TABLE = "alembic_version"
 
-#: The Postgres advisory lock key `env.py` serialises its version-table
-#: bootstrap on ("pincer" in ASCII).
-BOOTSTRAP_ADVISORY_KEY = 0x70696E636572
+#: The Postgres advisory lock key `env.py` holds for a whole upgrade, its
+#: version-table bootstrap included ("pincer" in ASCII).
+MIGRATION_ADVISORY_KEY = 0x70696E636572
 
 #: Schema objects the migrations own by hand, with no model behind them.
 #: Autogenerate must neither drop them nor try to create them.

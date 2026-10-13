@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from logging.config import fileConfig
 from typing import TYPE_CHECKING
 
@@ -8,8 +9,8 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from pincer.db.metadata import (
-    BOOTSTRAP_ADVISORY_KEY,
     LEGACY_VERSION_TABLE,
+    MIGRATION_ADVISORY_KEY,
     VERSION_TABLE,
     compare_type,
     drop_sqlite_noise,
@@ -18,6 +19,8 @@ from pincer.db.metadata import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from sqlalchemy.engine import Engine
 
 config = context.config
@@ -83,15 +86,11 @@ def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:
     sees that transaction's original, empty snapshot instead of the tables
     revisions before it just created, silently skipping every one of them.
 
-    On Postgres it reads the catalog only after taking an advisory lock, held
-    until this connection's transaction ends: two Pincer processes starting at
-    once would otherwise both see `alembic_version`, and the second would fail
-    on a table the first had just renamed. Serialised, the second sees
-    `VERSION_TABLE` and does nothing.
+    Runs under `_upgrade_lock`, so two Pincer processes starting at once
+    cannot both see `alembic_version`: the second sees `VERSION_TABLE` and
+    does nothing.
     """
     with engine.connect() as bootstrap:
-        if bootstrap.dialect.name == "postgresql":
-            bootstrap.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": BOOTSTRAP_ADVISORY_KEY})
         existing = set(sa.inspect(bootstrap).get_table_names())
         if VERSION_TABLE in existing or LEGACY_VERSION_TABLE not in existing:
             return
@@ -114,6 +113,35 @@ def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:
             )
         bootstrap.execute(sa.text(f"ALTER TABLE {LEGACY_VERSION_TABLE} RENAME TO {VERSION_TABLE}"))
         bootstrap.commit()
+
+
+@contextmanager
+def _upgrade_lock(engine: Engine) -> Iterator[None]:
+    """Hold Pincer's Postgres advisory lock for the whole upgrade, bootstrap included.
+
+    `pincer` and `pincer-tasks` start together against one database. Postgres
+    DDL is transactional, so without this the second upgrader is not left
+    half-applied, but it does fail: both read the same revision, both run the
+    same revision, and the second errors once the first commits. Held across
+    the whole upgrade, the second waits, then finds the database at head and
+    starts cleanly. SQLite gets the same from `ensure_schema_current`'s file
+    lock.
+
+    Session-level, on a connection of its own, committed straight away: it
+    must not hold a transaction open (see `_bootstrap_version_table`), and it
+    is released on unlock or, failing that, when the connection closes.
+    """
+    if engine.dialect.name != "postgresql":
+        yield
+        return
+    with engine.connect() as lock:
+        lock.execute(sa.text("SELECT pg_advisory_lock(:key)"), {"key": MIGRATION_ADVISORY_KEY})
+        lock.commit()
+        try:
+            yield
+        finally:
+            lock.execute(sa.text("SELECT pg_advisory_unlock(:key)"), {"key": MIGRATION_ADVISORY_KEY})
+            lock.commit()
 
 
 def _get_url() -> str:
@@ -144,24 +172,25 @@ def run_migrations_online() -> None:
     connectable = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
 
     try:
-        _bootstrap_version_table(connectable, {script.revision for script in context.script.walk_revisions()})
-        with connectable.connect() as connection:
-            context.configure(
-                connection=connection,
-                target_metadata=target_metadata,
-                include_object=include_object,
-                compare_type=compare_type,
-                process_revision_directives=drop_sqlite_noise,
-                # SQLite reflects defaults as raw text ('0' vs 0, quoting),
-                # so comparing them would only report noise.
-                compare_server_default=False,
-                # SQLite cannot ALTER most things in place; batch mode
-                # rebuilds the table instead.
-                render_as_batch=connection.dialect.name == "sqlite",
-                version_table=VERSION_TABLE,
-            )
-            with context.begin_transaction():
-                context.run_migrations()
+        with _upgrade_lock(connectable):
+            _bootstrap_version_table(connectable, {script.revision for script in context.script.walk_revisions()})
+            with connectable.connect() as connection:
+                context.configure(
+                    connection=connection,
+                    target_metadata=target_metadata,
+                    include_object=include_object,
+                    compare_type=compare_type,
+                    process_revision_directives=drop_sqlite_noise,
+                    # SQLite reflects defaults as raw text ('0' vs 0, quoting),
+                    # so comparing them would only report noise.
+                    compare_server_default=False,
+                    # SQLite cannot ALTER most things in place; batch mode
+                    # rebuilds the table instead.
+                    render_as_batch=connection.dialect.name == "sqlite",
+                    version_table=VERSION_TABLE,
+                )
+                with context.begin_transaction():
+                    context.run_migrations()
     finally:
         connectable.dispose()
 
