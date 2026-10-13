@@ -10,7 +10,7 @@ providers and reports each one.
 These are real, paid API calls: a handful of tokens per model.
 
 Usage:
-    # the models configured in .env (default, summary, and the OpenAI model if set)
+    # the models configured in .env (default, summary, voice turn model, and failover providers)
     uv run python scripts/smoke_llm.py
 
     # specific models, as provider:model
@@ -51,15 +51,55 @@ WEATHER_TOOL = [
 ]
 
 
+def _provider_model(settings: Settings, name: str) -> str:
+    """The model a provider is built with: its own `*_model`, else `default_model`."""
+    if name == "anthropic":
+        own = settings.anthropic_model
+    elif name == "openai":
+        own = settings.openai_model
+    elif name == settings.openai_compatible_provider:
+        own = settings.openai_compatible_model
+    elif name == settings.anthropic_compatible_provider:
+        own = settings.anthropic_compatible_model
+    else:
+        own = ""
+    return own or settings.default_model
+
+
 def default_targets(settings: Settings) -> list[tuple[str, str]]:
     """(provider, model) pairs the app would call with this configuration."""
+    keys = {
+        "anthropic": settings.anthropic_api_key.get_secret_value(),
+        "openai": settings.openai_api_key.get_secret_value(),
+    }
+    known = {*keys, settings.openai_compatible_provider, settings.anthropic_compatible_provider}
     targets: list[tuple[str, str]] = []
-    if settings.anthropic_api_key.get_secret_value():
-        for model in (settings.anthropic_model or settings.default_model, settings.summary_model):
-            if model.startswith("claude") and ("anthropic", model) not in targets:
-                targets.append(("anthropic", model))
-    if settings.openai_api_key.get_secret_value() and settings.openai_model:
-        targets.append(("openai", settings.openai_model))
+
+    def add(provider: str, model: str) -> None:
+        # A well-known provider without a key cannot be built; leave it out
+        # rather than report a setup failure for something the app never calls.
+        if not provider or not model or keys.get(provider, "set") == "":
+            return
+        if (provider, model) not in targets:
+            targets.append((provider, model))
+
+    # The router's pool: the primary, then the failovers.
+    for name in [settings.default_provider, *settings.fallback_providers]:
+        add(name, _provider_model(settings, name))
+    # Built on demand (voice turn model) when they have a key and their own model.
+    if settings.anthropic_model:
+        add("anthropic", settings.anthropic_model)
+    if settings.openai_model:
+        add("openai", settings.openai_model)
+    add(settings.summary_provider or settings.default_provider, settings.summary_model)
+    # "provider:model" names both; a bare model runs on the default provider.
+    turn_provider, sep, turn_model = settings.voice_turn_model.partition(":")
+    if sep:
+        # An unknown provider name falls back to the default provider and model.
+        if turn_provider.strip() in known:
+            add(turn_provider.strip(), turn_model.strip())
+    else:
+        add(settings.default_provider, settings.voice_turn_model.strip())
     return targets
 
 

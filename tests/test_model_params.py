@@ -21,6 +21,9 @@ from pincer.llm.model_params import anthropic_accepts_sampling, openai_is_reason
         "claude-haiku-5-5-20260801",  # dated snapshot
         "us.anthropic.claude-haiku-5-5-v1:0",  # vendor-prefixed
         "claude-nova-6",  # a family released later defaults to omit
+        "anthropic/claude-opus-4.7",  # gateway form: dotted minor
+        "anthropic/claude-sonnet-5.5",
+        "Claude-Opus-4-7",
     ],
 )
 def test_anthropic_rejects_sampling(model):
@@ -39,6 +42,8 @@ def test_anthropic_rejects_sampling(model):
         "claude-opus-4-1-20250805",
         "claude-3-5-sonnet-20241022",
         "claude-3-haiku-20240307",
+        "anthropic/claude-sonnet-4.5",
+        "claude-3.5-sonnet",
         "claude-x",
         "local-model",
         "",
@@ -62,6 +67,11 @@ def test_anthropic_accepts_sampling(model):
         "o1",
         "o3-mini",
         "o4-mini",
+        "ft:gpt-5-mini:org::id",  # fine-tune
+        "ft:o4-mini:org::x",
+        "openai/gpt-5",  # vendor-prefixed
+        "openai/o3",
+        "GPT-5",
     ],
 )
 def test_openai_reasoning_model(model):
@@ -79,6 +89,8 @@ def test_openai_reasoning_model(model):
         "grok-3",
         "llama3.2",
         "gpt-oss:20b",
+        "ft:gpt-4o-mini:org::id",
+        "openai/gpt-4o",
         "omni-moderation-latest",
         "my-model",
         "",
