@@ -7,6 +7,12 @@ and nowhere else. No module issues `CREATE TABLE`/`ALTER TABLE` at runtime;
 first query against it (it is synchronous — async callers wrap it in
 `asyncio.to_thread`).
 
+Two processes upgrading one database at once take turns: on SQLite behind a
+lock file next to the database, on Postgres behind an advisory lock that the
+upgrade holds in a transaction on a second connection, kept open until the
+upgrade finishes — so a pooler or an `idle_in_transaction_session_timeout`
+must allow a transaction that long.
+
 This directory previously held hand-written `.sql` files as the human-readable
 record of voice schema changes that the runtime applied itself via a
 try/except "duplicate column" pattern. Those are now real revisions, and the

@@ -137,21 +137,24 @@ def _upgrade_lock(engine: Engine) -> Iterator[None]:
     starts cleanly. SQLite gets the same from `ensure_schema_current`'s file
     lock.
 
-    Session-level, on a connection of its own, committed straight away: it
-    must not hold a transaction open (see `_bootstrap_version_table`), and it
-    is released on unlock or, failing that, when the connection closes.
+    Transaction-level, on a connection of its own whose transaction stays
+    open for the whole upgrade and is then rolled back, which releases it.
+    Behind a transaction-mode pooler (PgBouncer, managed "pooled" endpoints)
+    that is what keeps the lock on one server connection: a session-level
+    lock would go back to the pool with the server connection at the first
+    commit, still held, and its unlock could land elsewhere. Nothing reflects
+    on this connection, so its open transaction cannot hide new tables from
+    the revisions (see `_bootstrap_version_table`).
     """
     if engine.dialect.name != "postgresql":
         yield
         return
     with engine.connect() as lock:
-        lock.execute(sa.text("SELECT pg_advisory_lock(:key)"), {"key": MIGRATION_ADVISORY_KEY})
-        lock.commit()
+        lock.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_ADVISORY_KEY})
         try:
             yield
         finally:
-            lock.execute(sa.text("SELECT pg_advisory_unlock(:key)"), {"key": MIGRATION_ADVISORY_KEY})
-            lock.commit()
+            lock.rollback()
 
 
 def _get_url() -> str:
