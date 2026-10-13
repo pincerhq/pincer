@@ -265,6 +265,15 @@ retried callbacks.
   `tsconfig.app.json`, and the four pre-existing TypeScript parameter properties
   this exposed (in `lib/listenIn*`, rejected by `erasableSyntaxOnly`) are
   rewritten as explicit fields — `pnpm build` succeeds again.
+- **The `sqlite_vec_memory` embedding model now really is cached where the
+  config says.** `pincer.toml` and the `sqlite-vec-memory-mcp` image set
+  `FASTEMBED__CACHE_DIR` / `FASTEMBED_CACHE_DIR`, which fastembed ignores, so
+  the model was kept in `$TMPDIR/fastembed_cache` instead. They now set
+  `FASTEMBED_CACHE_PATH`. **On upgrade, existing installs download the model
+  once more** (about 65 MB) into `${PINCER_DATA_DIR}/fastembed_cache`. A host
+  with no network access has no memory embedding until the model is there:
+  copy the `models--…` directory from the old `$TMPDIR/fastembed_cache` into
+  `${PINCER_DATA_DIR}/fastembed_cache` before starting.
 
 ### Added
 
