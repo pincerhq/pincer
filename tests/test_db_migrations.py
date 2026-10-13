@@ -1737,6 +1737,26 @@ def test_a_second_start_beside_another_app_s_version_table_leaves_it_alone(migra
         assert _version_rows(conn) == {"alembic_version": ["0005"], "pincer_alembic_version": [head]}
 
 
+def _wait_for_bootstrap_lock_waiters(conn: sa.Connection, count: int, errors: list[BaseException]) -> None:
+    """Return once `count` sessions are queued on the bootstrap advisory lock in
+    this database; fail after 30 s, or as soon as an upgrader has failed instead."""
+    deadline = time.monotonic() + 30.0
+    while True:
+        waiting = conn.execute(
+            sa.text(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted "
+                "AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) "
+                "AND classid::bigint = :high AND objid::bigint = :low"
+            ),
+            {"high": BOOTSTRAP_ADVISORY_KEY >> 32, "low": BOOTSTRAP_ADVISORY_KEY & 0xFFFFFFFF},
+        ).scalar_one()
+        if waiting >= count:
+            return
+        assert not errors, f"an upgrader failed before waiting on the lock: {errors!r}"
+        assert time.monotonic() < deadline, f"{waiting} of {count} upgraders queued on the bootstrap lock after 30 s"
+        time.sleep(0.01)
+
+
 def test_a_concurrent_start_waits_for_the_other_rename(migration_url, tmp_path):
     """A second process holds the bootstrap lock and renames the table itself
     meanwhile; this one must wait for it, then find the new name and carry on."""
@@ -1757,8 +1777,7 @@ def test_a_concurrent_start_waits_for_the_other_rename(migration_url, tmp_path):
             other.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": BOOTSTRAP_ADVISORY_KEY})
             worker = threading.Thread(target=upgrade)
             worker.start()
-            time.sleep(1.0)
-            assert worker.is_alive(), "the bootstrap did not wait for the other process's lock"
+            _wait_for_bootstrap_lock_waiters(other, 1, errors)
             other.execute(sa.text("ALTER TABLE alembic_version RENAME TO pincer_alembic_version"))
             other.commit()
         worker.join(timeout=60)
