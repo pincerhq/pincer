@@ -1014,6 +1014,7 @@ async def _run_agent(settings: Settings) -> None:
             images=incoming.images if incoming.images else None,
             channel_user_id=ch_user_id,
             extra_system=incoming.extra_system,
+            session_key=incoming.session_key,
         )
 
         # Voice responses are SPOKEN — a cost suffix would be read aloud as

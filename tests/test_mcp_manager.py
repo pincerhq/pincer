@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from mcp_fakes import FakeClientSession, FakeTransport
 
 from pincer.mcp.config import MCPConfig, MCPServerConfig, MCPTransport
 from pincer.mcp.manager import MCPClientManager
@@ -88,6 +90,80 @@ async def test_failed_server_does_not_block_startup() -> None:
     # One succeeded, one failed
     assert True in results.values()
     assert False in results.values()
+    await manager.stop()
+
+
+def _http_manager(*names: str) -> MCPClientManager:
+    servers = [
+        MCPServerConfig(name=n, transport=MCPTransport.STREAMABLE_HTTP, url=f"http://{n}.invalid/mcp", max_retries=1)
+        for n in names
+    ]
+    return _make_manager(MCPConfig(servers=servers))
+
+
+def _patch_sdk(transports: dict[str, FakeTransport]) -> contextlib.ExitStack:
+    """Real MCPClientSession objects over fake transports, one per server name."""
+
+    async def _fake_connect_http(self: Any, stack: contextlib.AsyncExitStack, _client: Any) -> Any:
+        return await transports[self.name].connect_http(stack)
+
+    patches = contextlib.ExitStack()
+    patches.enter_context(patch("mcp.ClientSession", FakeClientSession))
+    patches.enter_context(patch("pincer.mcp.client.MCPClientSession._connect_http", _fake_connect_http))
+    return patches
+
+
+async def test_unreachable_server_does_not_take_down_the_others() -> None:
+    """A transport that fails the way the SDK's streamable-HTTP client does
+    (cancelling from its own task group) must only fail its own server."""
+    manager = _http_manager("bad", "good")
+    transports = {"bad": FakeTransport(fail_on_open=True), "good": FakeTransport()}
+
+    with _patch_sdk(transports):
+        # asyncio.timeout, not an anyio scope: start() leaves its health task group open.
+        async with asyncio.timeout(5):
+            results = await manager.start()
+
+    assert results == {"bad": False, "good": True}
+    assert (await manager.get_session("good")).connected is True
+    with pytest.raises(ValueError, match="not connected"):
+        await manager.get_session("bad")
+
+    await manager.stop()
+    assert transports["good"].closed is True
+
+
+async def test_server_that_failed_at_startup_is_retried_by_health_checks() -> None:
+    """A server that was unreachable at boot must come back once it is reachable."""
+    manager = _http_manager("late")
+    transports = {"late": FakeTransport(fail_on_open=True)}
+
+    with _patch_sdk(transports):
+        async with asyncio.timeout(5):
+            results = await manager.start()
+        assert results == {"late": False}
+
+        transports["late"] = FakeTransport()  # the server is up now
+        await manager._run_health_checks()
+
+    assert (await manager.get_session("late")).connected is True
+    assert "late" not in manager._disabled
+    await manager.stop()
+    assert transports["late"].closed is True
+
+
+async def test_reconnect_closes_the_replaced_session() -> None:
+    manager = _http_manager("srv")
+    first = FakeTransport()
+    transports = {"srv": first}
+
+    with _patch_sdk(transports):
+        await manager.start()
+        transports["srv"] = FakeTransport()
+        await manager._reconnect("srv")
+
+    assert first.closed is True
+    assert (await manager.get_session("srv")).connected is True
     await manager.stop()
 
 

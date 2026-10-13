@@ -101,7 +101,7 @@ class TestStreamVoiceTurn:
         # extra_system reached the LLM; voice caps applied
         call = provider.calls[0]
         assert "VOICE-MARKER" in call["system"]
-        assert call["max_tokens"] == 150
+        assert call["max_tokens"] == 220
         assert call["model"] is None  # no voice_turn_model configured
 
         # session persisted: user turn + assistant turn
@@ -109,6 +109,71 @@ class TestStreamVoiceTurn:
         roles = [m.role.value for m in session.messages]
         assert roles == ["user", "assistant"]
         assert session.messages[-1].content == "Gerne. Einen Moment bitte."
+
+    async def test_concurrent_calls_to_one_number_keep_separate_histories(
+        self, settings, session_manager, cost_tracker, tool_registry
+    ):
+        """An inbound call while an outbound one to the same number is live:
+        neither call sees, nor clears, the other's turns."""
+        settings.voice_turn_model = ""
+        provider = ScriptedProvider(
+            [_text_turn("Es geht um die Lieferung."), _text_turn("Praxis Pincer."), _text_turn("Und Dienstag?")]
+        )
+        agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
+        number = "+4930111222"
+
+        await _collect(agent, user_id=number, channel="voice", text="Hallo, Anruf A", session_key="voice:CA_a")
+        await _collect(agent, user_id=number, channel="voice", text="Hallo, Anruf B", session_key="voice:CA_b")
+        await _collect(agent, user_id=number, channel="voice", text="Weiter in A", session_key="voice:CA_a")
+
+        assert [m.content for m in provider.calls[1]["messages"]] == ["Hallo, Anruf B"]
+        assert [m.content for m in provider.calls[2]["messages"]] == [
+            "Hallo, Anruf A",
+            "Es geht um die Lieferung.",
+            "Weiter in A",
+        ]
+
+    async def test_blocking_turn_shares_the_call_session_and_never_onboards(
+        self, settings, session_manager, cost_tracker, tool_registry
+    ):
+        """Guard regeneration goes through handle_message under the resolved
+        identity; the call's session_key keeps it in the call's own history,
+        and the fresh per-call session must not trigger the onboarding question."""
+
+        class BlockingProvider(ScriptedProvider):
+            async def complete(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):
+                self.calls.append({"messages": list(messages)})
+                return LLMResponse(content="Gern auf Deutsch.", model="m", input_tokens=1, output_tokens=1)
+
+        settings.voice_turn_model = ""
+        provider = BlockingProvider([_text_turn("Sure, in English.")])
+        agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
+
+        await _collect(agent, user_id="+4930111222", channel="voice", text="Hallo", session_key="voice:CA_a")
+        result = await agent.handle_message(
+            user_id="voice:+4930111222",  # what IdentityMiddleware resolves an unmapped number to
+            channel="voice",
+            channel_name="voice",
+            text="[Reply in German]",
+            session_key="voice:CA_a",
+        )
+
+        assert [m.content for m in provider.calls[1]["messages"]] == ["Hallo", "Sure, in English.", "[Reply in German]"]
+        assert result.text == "Gern auf Deutsch."  # no onboarding question appended
+
+    async def test_end_voice_session_persists_and_evicts(self, settings, session_manager, cost_tracker, tool_registry):
+        """A key per call must not grow the session cache forever: call end
+        drops the session, with its history kept in the store."""
+        settings.voice_turn_model = ""
+        provider = ScriptedProvider([_text_turn("Gerne.")])
+        agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
+
+        await _collect(agent, user_id="+4930111222", channel="voice", text="Hallo", session_key="voice:CA_a")
+        await agent.end_voice_session("voice:CA_a")
+
+        assert "voice:CA_a" not in session_manager._cache
+        reloaded = await session_manager.get_or_create("+4930111222", "voice", session_key="voice:CA_a")
+        assert [m.content for m in reloaded.messages] == ["Hallo", "Gerne."]
 
     async def test_voice_turn_model_override(self, settings, session_manager, cost_tracker, tool_registry):
         settings.voice_turn_model = "fast-model-x"

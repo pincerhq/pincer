@@ -14,16 +14,19 @@ from pincer.services.base import DatabaseService
 
 
 class SessionService(DatabaseService):
-    async def load(self, session_id: str, *, user_id: str, channel: str) -> dict[str, Any] | None:
+    async def load(
+        self, session_id: str, *, user_id: str, channel: str, legacy_fallback: bool = True
+    ) -> dict[str, Any] | None:
         """The stored session, or the one left under the pre-unified key.
 
         Before cross-channel identities, a session was keyed `channel:user_id`.
         A user whose session predates that keeps it, rather than starting over.
+        An exact key (``legacy_fallback=False``) never inherits another session.
         """
         async with session_scope(self._url) as session:
             repo = SessionRepository(session)
             row = await repo.get(session_id)
-            if row is None:
+            if row is None and legacy_fallback:
                 row = await repo.newest_for(user_id, channel)
             return None if row is None else _as_dict(row)
 

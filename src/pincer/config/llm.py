@@ -74,7 +74,7 @@ class LLMSettings(BaseModel):
         return v
 
     default_model: str = Field(
-        default="claude-sonnet-4-5-20250929",
+        default="claude-haiku-4-5-20251001",
         description="Default model identifier",
     )
     prompt_cache_tools: bool = Field(

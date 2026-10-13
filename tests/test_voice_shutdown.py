@@ -55,11 +55,11 @@ class TestGracefulShutdown:
         goodbye = de_pack.PHASE_TIMEOUT_MESSAGES["error_recovery"]
         assert engine.spoken["CA_shutdown"][-1] == goodbye  # spoken, in German
         assert "CA_shutdown" in engine.ended  # then hung up
-        # INTENT_CAPTURE is not a benign wrap-up phase: this caller really was
-        # cut off mid-conversation, so it stays FAILED.
+        # FREEFORM (an outbound conversation) is not a benign wrap-up phase: this
+        # callee really was cut off mid-conversation, so it stays FAILED.
         assert sm.is_terminal and sm.phase == CallPhase.FAILED
         # The reason carries the interrupted phase, like `timeout_{phase}` does.
-        assert sm.state.transitions[-1].reason == "shutdown_intent_capture"
+        assert sm.state.transitions[-1].reason == "shutdown_freeform"
         agent_lines = [e for e in transcript.entries if e.speaker == Speaker.AGENT and e.state == "shutdown"]
         assert len(agent_lines) == 1 and agent_lines[0].text == goodbye
 

@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pincer.voice import approvals, tool_policy
+from pincer.voice.engine import CallDirection
 from pincer.voice.prompts import get_prompt
 from pincer.voice.safety_gates import ConfirmationStatus, parse_confirmation
 from pincer.voice.state_machine import CallPhase
@@ -572,7 +573,10 @@ class InCallToolGate:
             pending.confirm_action.user_confirmed = False
         self.sm.reject_action()
         if self.sm.phase == CallPhase.VERIFY:
-            self.sm.transition(CallPhase.INTENT_CAPTURE, "verbal_rejected")
+            # Back to the conversation phase this call came from: an outbound
+            # call must not fall into the inbound "what does the caller want" phase.
+            outbound = self.state.direction == CallDirection.OUTBOUND
+            self.sm.transition(CallPhase.FREEFORM if outbound else CallPhase.INTENT_CAPTURE, "verbal_rejected")
         self.pending = None
         why = "declined" if status == ConfirmationStatus.REJECTED else "gave no clear confirmation"
         note = (

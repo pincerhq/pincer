@@ -141,6 +141,13 @@ class VoiceChannel(BaseChannel):
 
         record_briefing(self._transcripts.get(call_sid), briefing_from_state(state))
 
+    @staticmethod
+    def _session_key(state: CallState) -> str:
+        """The call's own LLM session. Keyed by call, not by number: two calls
+        with the same party (an inbound one while an outbound one is live)
+        must never share or clear each other's history."""
+        return f"voice:{state.call_sid}"
+
     async def _prepare_thread_context(self, call_sid: str, state: CallState) -> None:
         """Sprint 13 §4.3/§7: resolve this call's thread and freeze its prompt
         block onto the call state.
@@ -521,7 +528,7 @@ class VoiceChannel(BaseChannel):
         )
 
     def _call_brief(self, state: CallState, language: str, formality: str) -> str:
-        """The binding task block (kept as a method for callers that want just
+        """The call's reason-and-goal block (kept as a method for callers that want just
         this part; the assembly itself lives in voice/prompt_assembly.py)."""
         from pincer.voice.prompt_assembly import build_call_briefing_block
 
@@ -722,9 +729,11 @@ class VoiceChannel(BaseChannel):
         transcript = self._transcripts[call_sid]
         transcript.log_utterance(Speaker.CALLER, text, state=str(sm.phase))
 
-        # The greeting phases end the moment the callee speaks
+        # The greeting phases end the moment the callee speaks. An outbound
+        # call is a conversation we started, not a caller's request to capture.
         if sm.phase in (CallPhase.GREETING, CallPhase.OUTBOUND_GREETING):
-            sm.transition(CallPhase.INTENT_CAPTURE, "caller_spoke")
+            target = CallPhase.FREEFORM if sm.phase is CallPhase.OUTBOUND_GREETING else CallPhase.INTENT_CAPTURE
+            sm.transition(target, "caller_spoke")
 
         # Barge-in (Sprint 5): the caller talking over us makes the previous
         # turn obsolete, so it is cancelled here — before ANY path below can
@@ -827,6 +836,7 @@ class VoiceChannel(BaseChannel):
             text=text,
             channel_type=ChannelType.VOICE,
             extra_system=extra_system,
+            session_key=self._session_key(state),
         )
 
         async def _regenerate(note: str) -> str | None:
@@ -840,6 +850,7 @@ class VoiceChannel(BaseChannel):
                 text=note,
                 channel_type=ChannelType.VOICE,
                 extra_system=extra_system,
+                session_key=self._session_key(state),
             )
             return await self._handler(retry)
 
@@ -1044,6 +1055,7 @@ class VoiceChannel(BaseChannel):
                 extra_system=extra_system,
                 channel_user_id=state.caller_number,
                 timings=agent_timings,
+                session_key=self._session_key(state),
             ):
                 if chunk.type == StreamEventType.TEXT:
                     stamp("llm_first_token_ms")
@@ -1152,6 +1164,7 @@ class VoiceChannel(BaseChannel):
                 text=note,
                 channel_type=ChannelType.VOICE,
                 extra_system=extra_system,
+                session_key=self._session_key(state),
             )
             return await self._handler(retry)
 
@@ -1293,6 +1306,11 @@ class VoiceChannel(BaseChannel):
         if session is not None:
             with contextlib.suppress(Exception):
                 await session.on_call_end()
+        # The call's LLM session is keyed by call, so nothing reuses it once
+        # the call is over — drop it from the session cache.
+        if self._stream_agent is not None:
+            with contextlib.suppress(Exception):
+                await self._stream_agent.end_voice_session(self._session_key(state))
 
         completed = True
         if sm is not None:

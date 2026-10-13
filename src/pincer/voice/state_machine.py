@@ -92,7 +92,8 @@ PHASE_TIMEOUTS: dict[CallPhase, int] = {
     CallPhase.RINGING: 30,
     CallPhase.GREETING: 15,
     CallPhase.INTENT_CAPTURE: 120,
-    CallPhase.FREEFORM: 300,
+    # Same silence budget as INTENT_CAPTURE: outbound conversations live here.
+    CallPhase.FREEFORM: 120,
     CallPhase.VERIFY: 60,
     CallPhase.EXECUTE: 30,
     CallPhase.CONFIRM: 30,
@@ -136,6 +137,7 @@ VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
     CallPhase.VERIFY: {
         CallPhase.EXECUTE,
         CallPhase.INTENT_CAPTURE,
+        CallPhase.FREEFORM,  # outbound: a declined confirmation resumes the conversation
         CallPhase.ERROR_RECOVERY,
         CallPhase.ENDING,
         # Sprint 12: a receptionist read-back the caller declines — or a slot
@@ -157,6 +159,7 @@ VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
     },
     CallPhase.ERROR_RECOVERY: {
         CallPhase.INTENT_CAPTURE,
+        CallPhase.FREEFORM,
         CallPhase.ENDING,
         CallPhase.FAILED,
     },

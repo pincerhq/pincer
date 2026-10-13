@@ -272,6 +272,37 @@ class TestGuardsUnderStreaming:
         assert spoken == ["Entschuldigung, hier ist die korrigierte Antwort auf Deutsch für Sie."]
         await channel.stop()
 
+    async def test_drift_regeneration_stays_in_the_call_session(self):
+        """The regeneration goes through the identity middleware, which resolves
+        a different user id — the call's session_key keeps it in this call."""
+        drifted = text_chunks("Sure, I can help you with that right away. ", "What time works for you today?")
+        channel, engine, agent, state = await _start([drifted])
+        regenerations = []
+
+        async def _capture(incoming):
+            regenerations.append(incoming)
+            return "Entschuldigung, hier ist die korrigierte Antwort auf Deutsch für Sie."
+
+        channel._handler = _capture
+        await engine.on_speech_input("CA_stream", "Können Sie mir helfen?")
+
+        assert agent.calls[0]["session_key"] == "voice:CA_stream"
+        assert [m.session_key for m in regenerations] == ["voice:CA_stream"]
+        await channel.stop()
+
+    async def test_consecutive_calls_to_one_number_get_different_session_keys(self):
+        """Issue #230 P5: the session is per call, so nothing is cleared at call
+        start and the earlier call's persisted history stays intact."""
+        channel, engine, agent, _state = await _start(
+            [text_chunks("Gerne, worum geht es? "), text_chunks("Guten Tag, was kann ich tun? ")], call_sid="CA_one"
+        )
+        await engine.on_speech_input("CA_one", "Hallo, erster Anruf.")
+        await engine.on_call_start("CA_two", "+4930123456", CallDirection.INBOUND, language="de")
+        await engine.on_speech_input("CA_two", "Hallo, zweiter Anruf.")
+
+        assert [c["session_key"] for c in agent.calls] == ["voice:CA_one", "voice:CA_two"]
+        await channel.stop()
+
     async def test_switch_token_in_first_sentence_switches_and_strips(self):
         script = text_chunks("[SWITCH_LANGUAGE:de] Gerne, dann sprechen wir Deutsch. ", "Womit kann ich helfen?")
         channel, engine, agent, state = await _start([script], language="en")

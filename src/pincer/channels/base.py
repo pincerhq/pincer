@@ -50,6 +50,11 @@ class IncomingMessage:
     # session_id; channel is used only for identity and memory tagging.
     session_id: str | None = None
 
+    # Exact session key, independent of the resolved identity. Voice sets one
+    # per call so the streaming turn and the blocking path (guard
+    # regeneration) share one history that no other call can touch.
+    session_key: str | None = None
+
     # Channel-supplied system-prompt addition for this turn (appended to the
     # agent's system prompt). Voice uses it for the live-call rules, the
     # language policy, and the current phase instruction — all in the call

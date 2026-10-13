@@ -24,6 +24,7 @@ def client(monkeypatch, tmp_path):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PINCER_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PINCER_ALERT_DISK_FREE_MIN_PCT", "5")
     get_settings_relaxed.cache_clear()
     yield TestClient(create_app())
     get_settings_relaxed.cache_clear()

@@ -41,7 +41,7 @@ def settings(tmp_path) -> MagicMock:
     cfg.ops_channel = "telegram"
     cfg.ops_alert_email = ""
     cfg.ops_alert_repeat_min = 60
-    cfg.alert_disk_free_min_pct = 10.0
+    cfg.alert_disk_free_min_pct = 5.0
     cfg.voice_max_call_duration = 600
     cfg.alert_stuck_call_grace_s = 60
     return cfg
