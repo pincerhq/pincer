@@ -66,6 +66,10 @@ def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:
     cannot roll back. It may also be another application's table that happens
     to sit beside Pincer's, so it is not renamed either: the operator decides.
 
+    An `alembic_version` Pincer cannot read — another role's table with no
+    grant to Pincer's role, or one without a `version_num` column — is not
+    Pincer's either, and is left alone the same way.
+
     One case remains that this cannot tell apart: Pincer tables with no
     version table of Pincer's at all (an install from before Alembic, or one
     restored without it) beside another application's `alembic_version` at a
@@ -91,7 +95,13 @@ def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:
         existing = set(sa.inspect(bootstrap).get_table_names())
         if VERSION_TABLE in existing or LEGACY_VERSION_TABLE not in existing:
             return
-        recorded = set(bootstrap.execute(sa.text(f"SELECT version_num FROM {LEGACY_VERSION_TABLE}")).scalars())
+        try:
+            recorded = set(bootstrap.execute(sa.text(f"SELECT version_num FROM {LEGACY_VERSION_TABLE}")).scalars())
+        except sa.exc.DBAPIError:
+            # Not readable as Pincer's version table: another role's, with no
+            # grant to Pincer's, or no `version_num` column at all. Not ours.
+            bootstrap.rollback()
+            return
         if not (recorded and existing & _PINCER_MARKER_TABLES):
             return
         if not recorded <= revisions:

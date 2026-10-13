@@ -1685,6 +1685,44 @@ def test_an_unknown_revision_beside_pincer_tables_is_refused(migration_url, tmp_
         assert _version_rows(conn) == {"alembic_version": ["f00dfeedcafe"]}
 
 
+def test_another_app_s_version_table_without_a_version_column_is_left_alone(migration_url, tmp_path):
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text(f"CREATE TABLE {LEGACY_VERSION_TABLE} (id INTEGER PRIMARY KEY, label TEXT)"))
+        conn.execute(sa.text(f"INSERT INTO {LEGACY_VERSION_TABLE} (id, label) VALUES (1, 'theirs')"))
+    cfg = _config(migration_url, tmp_path)
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+
+    command.upgrade(cfg, "head")
+
+    with _connect(migration_url) as conn:
+        assert conn.execute(sa.text(f"SELECT id, label FROM {LEGACY_VERSION_TABLE}")).all() == [(1, "theirs")]
+        assert conn.execute(sa.text(f"SELECT version_num FROM {VERSION_TABLE}")).scalars().all() == [head]
+
+
+def test_another_role_s_unreadable_version_table_is_left_alone(migration_url, tmp_path):
+    """Pincer's role has no grant on the other app's `alembic_version`, though
+    the catalog still lists it: the failed read means "not ours", not a crash."""
+    if not migration_url.startswith("postgresql"):
+        pytest.skip("SQLite has no roles or grants")
+    role = f"pincer_app_{uuid.uuid4().hex[:8]}"
+    _foreign_app_db(migration_url, tmp_path, "0005", "other_app_users")
+    with _connect(migration_url) as conn:
+        conn.execute(sa.text(f"CREATE ROLE {role} LOGIN PASSWORD 'pincer'"))
+        conn.execute(sa.text(f"GRANT ALL ON SCHEMA public TO {role}"))
+    as_role = sa.engine.make_url(migration_url).set(username=role, password="pincer")
+    cfg = _config(as_role.render_as_string(hide_password=False), tmp_path)
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    try:
+        command.upgrade(cfg, "head")
+
+        with _connect(migration_url) as conn:
+            assert _version_rows(conn) == {"alembic_version": ["0005"], "pincer_alembic_version": [head]}
+    finally:
+        with _connect(migration_url) as conn:
+            conn.execute(sa.text(f"DROP OWNED BY {role}"))
+            conn.execute(sa.text(f"DROP ROLE {role}"))
+
+
 def test_a_second_start_beside_another_app_s_version_table_leaves_it_alone(migration_url, tmp_path):
     """Once Pincer's schema is built, the foreign table holds a revision id
     Pincer also has and a Pincer table is present: only `VERSION_TABLE`
