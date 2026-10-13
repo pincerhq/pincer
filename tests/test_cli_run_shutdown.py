@@ -43,8 +43,10 @@ def signal_stub():  # type: ignore[no-untyped-def]
     server.server_close()
 
 
-@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"])
-def test_a_signal_runs_the_whole_graceful_shutdown(tmp_path: Path, signal_stub: str, sig: signal.Signals) -> None:
+def _signal_after_banner(
+    tmp_path: Path, args: list[str], extra_env: dict[str, str], sig: signal.Signals
+) -> tuple[int, str]:
+    """Run `pincer <args>` in a scratch environment until its "is running!" banner, send `sig`, wait for the exit."""
     home, cwd, data = tmp_path / "home", tmp_path / "cwd", tmp_path / "data"
     for path in (home, cwd, data):
         path.mkdir()
@@ -55,18 +57,13 @@ def test_a_signal_runs_the_whole_graceful_shutdown(tmp_path: Path, signal_stub: 
         "HF_HUB_OFFLINE": "1",
         "PINCER_DATA_DIR": str(data),
         "PINCER_ANTHROPIC_API_KEY": "sk-ant-test-dummy",
-        "PINCER_DASHBOARD_HOST": "127.0.0.1",
-        "PINCER_DASHBOARD_PORT": str(_free_port()),
         "PINCER_LOG_LEVEL": "INFO",
-        "PINCER_SIGNAL_ENABLED": "true",
-        "PINCER_SIGNAL_API_URL": signal_stub,
-        "PINCER_SIGNAL_PHONE_NUMBER": "+15550000000",
-        "PINCER_SIGNAL_RECEIVE_MODE": "poll",
+        **extra_env,
     }
     out_path = tmp_path / "pincer.out"
     with out_path.open("wb") as out:
         proc = subprocess.Popen(
-            [sys.executable, "-P", "-m", "pincer", "run"], cwd=cwd, env=env, stdout=out, stderr=subprocess.STDOUT
+            [sys.executable, "-P", "-m", "pincer", *args], cwd=cwd, env=env, stdout=out, stderr=subprocess.STDOUT
         )
     try:
         deadline = time.monotonic() + STARTUP_TIMEOUT
@@ -81,11 +78,57 @@ def test_a_signal_runs_the_whole_graceful_shutdown(tmp_path: Path, signal_stub: 
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+    return exit_code, out_path.read_text(errors="replace")
 
-    output = out_path.read_text(errors="replace")
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"])
+def test_a_signal_runs_the_whole_graceful_shutdown(tmp_path: Path, signal_stub: str, sig: signal.Signals) -> None:
+    exit_code, output = _signal_after_banner(
+        tmp_path,
+        ["run"],
+        {
+            "PINCER_DASHBOARD_HOST": "127.0.0.1",
+            "PINCER_DASHBOARD_PORT": str(_free_port()),
+            "PINCER_SIGNAL_ENABLED": "true",
+            "PINCER_SIGNAL_API_URL": signal_stub,
+            "PINCER_SIGNAL_PHONE_NUMBER": "+15550000000",
+            "PINCER_SIGNAL_RECEIVE_MODE": "poll",
+        },
+        sig,
+    )
+
     assert "Shutting down..." in output
     # The channels are stopped near the end of the `finally`, the banner is its last line.
     assert "SignalChannel stopped" in output, output
     assert "Shutdown complete" in output, output
+    assert "Traceback" not in output, output
+    assert exit_code == 0
+
+
+@pytest.fixture
+def redis_url() -> str:
+    """A Redis for the task worker's broker, if one is configured.
+
+    Opt-in, like `PINCER_TEST_PG_URL`; locally, e.g.
+    `docker run -d --rm --name pincer-tasks-redis-test -p 127.0.0.1:16389:6379 redis:7-alpine` and
+    `PINCER_TEST_REDIS_URL=redis://127.0.0.1:16389/0`.
+    """
+    url = os.environ.get("PINCER_TEST_REDIS_URL")
+    if not url:
+        pytest.skip("PINCER_TEST_REDIS_URL not set")
+    return url
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"])
+def test_a_signal_runs_the_tasks_workers_whole_graceful_shutdown(
+    tmp_path: Path, redis_url: str, sig: signal.Signals
+) -> None:
+    exit_code, output = _signal_after_banner(
+        tmp_path, ["run", "tasks"], {"PINCER_TASK_BROKER": "redis", "PINCER_TASK_BROKER_URL": redis_url}, sig
+    )
+
+    assert "Shutting down..." in output, output
+    # The last line of its `finally`: the repid worker was cancelled and every store closed before it.
+    assert "Tasks worker shutdown complete" in output, output
     assert "Traceback" not in output, output
     assert exit_code == 0

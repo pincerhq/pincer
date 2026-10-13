@@ -783,6 +783,25 @@ async def _ensure_ops_schedules(scheduler: Any, settings: Any) -> None:
             console.print(f"[yellow]Could not schedule {name}: {e}[/yellow]")
 
 
+def _cancel_on_first_sigterm() -> None:
+    """Route SIGTERM into the calling task's graceful path, the way Ctrl+C goes: cancel it, once.
+
+    Only the first SIGTERM cancels. uvicorn records the same SIGTERM and re-raises
+    it when its server exits, early in the agent's `finally`; a second cancel would
+    abort the shutdown there, before the channels drain their calls.
+    """
+    import signal as _signal
+
+    task = asyncio.current_task()
+
+    def _on_sigterm() -> None:
+        if task and not task.done() and not task.cancelling():
+            task.cancel()
+
+    with contextlib.suppress(NotImplementedError, RuntimeError):  # Windows / nested loops
+        asyncio.get_running_loop().add_signal_handler(_signal.SIGTERM, _on_sigterm)
+
+
 async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> None:
     # Single-instance guard: a second `pincer run` used to keep running with
     # the API port taken — Telegram polling then fights between instances
@@ -1676,20 +1695,7 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
     # dies mid-call (no spoken ending, no report). Route it into the same
     # graceful path as Ctrl+C: cancel the main task -> finally block ->
     # channel.stop() drains active calls with a spoken ending.
-    import signal as _sigterm_mod
-
-    _main_task = asyncio.current_task()
-
-    def _on_sigterm() -> None:
-        # Only the first SIGTERM cancels. uvicorn records the same SIGTERM and
-        # re-raises it when its server exits, early in the finally below; a
-        # second cancel would abort the shutdown there, before the channels
-        # drain their calls.
-        if _main_task and not _main_task.done() and not _main_task.cancelling():
-            _main_task.cancel()
-
-    with contextlib.suppress(NotImplementedError, RuntimeError):  # Windows / nested loops
-        asyncio.get_running_loop().add_signal_handler(_sigterm_mod.SIGTERM, _on_sigterm)
+    _cancel_on_first_sigterm()
 
     try:
         while True:
@@ -1805,6 +1811,10 @@ async def _run_tasks_worker(settings: Settings) -> None:
         f"[green]Task worker running (channel={TASK_CHANNEL}, results relayed via {TASK_RESULTS_CHANNEL})[/green]"
     )
     console.print("\n[bold green]Tasks worker is running![/bold green] Press Ctrl+C to stop.\n")
+
+    # `docker stop` on the pincer-tasks container sends SIGTERM; without this the
+    # worker dies on the spot, skipping the finally below.
+    _cancel_on_first_sigterm()
 
     try:
         while True:
