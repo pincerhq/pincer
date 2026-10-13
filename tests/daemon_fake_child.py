@@ -10,6 +10,7 @@ behaves according to MODE (tests build the command with `argv()`):
     gated             like ready, but marks ready only once DATA_DIR/mark-ready exists
     slow-start        listens on a port (recorded in the lease) at once, marks ready only after SLOW_START_SECONDS
     crash-on-start    logs CRASH_STEPS startup lines, then fails with an uncaught exception before ready
+    slow-lease        like ready, but waits SLOW_LEASE_SECONDS before taking the lease (Pincer's import time)
     die-mid-line      writes half a line (no newline) and exits 3 before ready
     raise-on-sigterm  like ready, but SIGTERM ends in an uncaught exception
 """
@@ -37,6 +38,7 @@ SHUTDOWN_SECONDS = 0.5
 CALLER_NUMBER = "+4915112345689"
 CRASH_STEPS = 30
 SLOW_START_SECONDS = 2.0
+SLOW_LEASE_SECONDS = 1.0
 
 
 def argv(mode: str, data_dir: Path) -> list[str]:
@@ -70,6 +72,9 @@ def main() -> None:
         # Like the dashboard API, which binds before the channels have started.
         listener = socket.create_server(("127.0.0.1", 0))
         port = listener.getsockname()[1]
+
+    if mode == "slow-lease":
+        time.sleep(SLOW_LEASE_SECONDS)
 
     with DaemonLease(data_dir, port=port) as lease:
         log.info("fake child %d starting in %s", os.getpid(), os.getcwd())

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -13,8 +14,29 @@ from pincer.cli._shared import console
 
 if TYPE_CHECKING:
     from pincer.config import Settings
+    from pincer.daemon import DaemonState
 
 WAIT_TIMEOUT = 60.0
+
+
+def format_uptime(seconds: float) -> str:
+    """`42s`, `3m 07s`, `5h 02m`, `2d 4h` — the two largest units."""
+    total = max(int(seconds), 0)
+    days, rest = divmod(total, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes, secs = divmod(rest, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {secs:02d}s"
+    return f"{secs}s"
+
+
+def _uptime(state: DaemonState) -> str:
+    started = datetime.fromisoformat(state.started_at)
+    return format_uptime((datetime.now(UTC) - started).total_seconds())
 
 
 def _child_argv() -> list[str]:
@@ -34,9 +56,20 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
     from rich.markup import escape
 
     from pincer import daemon
+    from pincer.cli._shared import _port_in_use
 
     def show(line: str) -> None:
         console.print(line, style="dim", soft_wrap=True, markup=False, highlight=False)
+
+    # A daemon of this data directory holds the port itself; start() reports it as already running.
+    if daemon.read_state(settings.data_dir) is None and _port_in_use(settings.dashboard_host, settings.dashboard_port):
+        console.print(
+            f"[red]A foreground Pincer is running on :{settings.dashboard_port} — stop it with Ctrl+C in its "
+            "terminal.[/red]\n"
+            "[yellow]If something else owns the port, set PINCER_DASHBOARD_PORT.[/yellow]",
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
 
     result = daemon.start(settings.data_dir, _child_argv(), Path.cwd(), os.environ, wait_timeout, on_line=show)
     state = result.state
@@ -49,7 +82,12 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
         )
         return
     if result.outcome is daemon.StartOutcome.ALREADY_RUNNING and state is not None:
-        console.print(f"Pincer is already running (pid {state.pid})", soft_wrap=True, markup=False)
+        console.print(
+            f"Pincer is already running (pid {state.pid}, up {_uptime(state)}). "
+            "Use 'pincer restart' to apply config changes.",
+            soft_wrap=True,
+            markup=False,
+        )
         return
     if result.outcome is daemon.StartOutcome.TIMED_OUT:
         console.print(

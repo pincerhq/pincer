@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import socket
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -11,12 +13,24 @@ import daemon_fake_child
 import pytest
 from typer.testing import CliRunner
 
-from pincer import daemon
+from pincer import config, daemon
 from pincer.cli import app
+from pincer.cli.daemon import format_uptime
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon mode is POSIX-only")
 
 runner = CliRunner()
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _fake_children(tmp_path: Path) -> list[str]:
+    found = subprocess.run(["pgrep", "-f", f"daemon_fake_child.py .* {tmp_path}"], capture_output=True, text=True)
+    return found.stdout.split()
 
 
 @pytest.fixture
@@ -25,7 +39,8 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path.mkdir()
     settings = MagicMock()
     settings.data_dir = path
-    settings.dashboard_port = 8080
+    settings.dashboard_host = "127.0.0.1"
+    settings.dashboard_port = _free_port()
     settings.log_level.value = "WARNING"
     settings.telemetry_dsn = None
     settings.daily_budget_usd = 5.0
@@ -124,3 +139,63 @@ def test_run_detach_wait_timeout_leaves_the_daemon_starting(data_dir: Path, monk
     assert state is not None
     assert state.state == "starting"
     daemon.stop(data_dir)
+
+
+@pytest.mark.parametrize("first_mode", ["ready", "gated"], ids=["ready", "starting"])
+def test_a_second_run_detach_reports_the_running_daemon_and_spawns_nothing(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_mode: str
+) -> None:
+    _child_mode(monkeypatch, first_mode, data_dir)
+    first = runner.invoke(app, ["run", "-d", "--wait-timeout", "1"])
+    state = daemon.read_state(data_dir)
+    assert state is not None, first.output
+    assert state.state == ("ready" if first_mode == "ready" else "starting")
+    _child_mode(monkeypatch, "ready", data_dir)
+
+    # The daemon's own API holds the dashboard port; that must not read as a foreground instance.
+    with socket.create_server(("127.0.0.1", config.get_settings().dashboard_port)):
+        second = runner.invoke(app, ["run", "-d"])
+
+    assert second.exit_code == 0, second.output
+    assert re.search(
+        rf"Pincer is already running \(pid {state.pid}, up \d+s\)\. Use 'pincer restart' to apply config changes\.",
+        second.output,
+    ), second.output
+    assert _fake_children(tmp_path) == [str(state.pid)]
+
+
+def test_run_detach_refuses_while_something_else_holds_the_port(data_dir: Path, tmp_path: Path) -> None:
+    port = config.get_settings().dashboard_port
+    with socket.create_server(("127.0.0.1", port)):
+        result = runner.invoke(app, ["run", "-d"])
+
+    assert result.exit_code == 1
+    assert f"A foreground Pincer is running on :{port} — stop it with Ctrl+C in its terminal" in result.output
+    assert _fake_children(tmp_path) == []
+    assert not daemon.log_path(data_dir).exists()
+
+
+async def test_the_foreground_port_guard_points_to_stop_not_pkill(capsys: pytest.CaptureFixture[str]) -> None:
+    import typer
+
+    from pincer.cli.run import _run_agent
+
+    settings = MagicMock()
+    settings.dashboard_host = "127.0.0.1"
+    with socket.create_server(("127.0.0.1", 0)) as held:
+        settings.dashboard_port = held.getsockname()[1]
+        with pytest.raises(typer.Exit):
+            await _run_agent(settings)
+
+    out = " ".join(capsys.readouterr().out.split())
+    assert "pkill" not in out
+    assert "pincer stop" in out
+    assert "Ctrl+C in its terminal" in out
+
+
+@pytest.mark.parametrize(
+    ("seconds", "shown"),
+    [(0, "0s"), (59, "59s"), (60, "1m 00s"), (3599, "59m 59s"), (3600, "1h 00m"), (86399, "23h 59m"), (90000, "1d 1h")],
+)
+def test_format_uptime(seconds: int, shown: str) -> None:
+    assert format_uptime(seconds) == shown

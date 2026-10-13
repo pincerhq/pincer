@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 
 PID_FILE = "pincer.pid"
 LOCK_FILE = "pincer.lock"
+# Serialises concurrent starts; see start().
+START_LOCK_FILE = "pincer.start.lock"
 LOG_FILE = "pincer.log"
 # Previous sessions kept by start-time rotation: pincer.log.1 (newest) … pincer.log.5.
 LOG_KEEP = 5
@@ -111,7 +113,24 @@ def start(
     log = log_path(data_dir)
     log.parent.mkdir(parents=True, exist_ok=True)
     (data_dir / LOCK_FILE).touch(mode=0o600)
-    # Holding the lock while cleaning up means no daemon can be writing the record or the log.
+    # One start at a time, from the probe until the new child holds the lease. Without it a
+    # second start landing in that window (the child is still importing) would see the lease
+    # free, rotate the first child's fresh log away and spawn a rival.
+    with _StartLock(data_dir / START_LOCK_FILE) as starting:
+        return _start_locked(data_dir, log, argv, cwd, env, wait_timeout, on_line, starting)
+
+
+def _start_locked(
+    data_dir: Path,
+    log: Path,
+    argv: Sequence[str],
+    cwd: Path,
+    env: Mapping[str, str],
+    wait_timeout: float,
+    on_line: Callable[[str], None] | None,
+    starting: _StartLock,
+) -> StartResult:
+    # Holding the lease lock while cleaning up means no daemon can be writing the record or the log.
     with _lock(data_dir) as held:
         if not held:
             return StartResult(StartOutcome.ALREADY_RUNNING, read_state(data_dir))
@@ -140,6 +159,9 @@ def start(
         while True:
             state = read_state(data_dir)
             lines.relay()
+            if state is not None and state.pid == child.pid:
+                # The child holds the lease now; a concurrent start sees it and stands down.
+                starting.release()
             if state is not None and state.pid == child.pid and state.state == "ready":
                 return StartResult(StartOutcome.READY, state)
             exit_code = child.poll()
@@ -266,6 +288,31 @@ def _rotate(log: Path) -> None:
             older.rename(log.with_name(f"{log.name}.{n + 1}"))
     if log.exists():
         log.rename(log.with_name(f"{log.name}.1"))
+
+
+class _StartLock:
+    """A blocking exclusive `flock`, releasable before the `with` block ends (idempotently)."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._fd: int | None = None
+
+    def __enter__(self) -> _StartLock:
+        self._fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(self._fd, fcntl.LOCK_EX)
+        except BaseException:  # e.g. Ctrl+C while queued behind another start
+            self.release()
+            raise
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+    def release(self) -> None:
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
 
 
 class _LogLines:

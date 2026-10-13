@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import asdict, replace
 from datetime import datetime
@@ -61,6 +63,11 @@ def _wait_for_state(data_dir: Path, state: str) -> daemon.DaemonState:
             return current
         time.sleep(0.02)
     raise AssertionError(f"daemon never reached {state!r}")
+
+
+def _fake_children(tmp_path: Path) -> list[int]:
+    found = subprocess.run(["pgrep", "-f", f"daemon_fake_child.py .* {tmp_path}"], capture_output=True, text=True)
+    return [int(pid) for pid in found.stdout.split()]
 
 
 @pytest.fixture
@@ -294,3 +301,95 @@ def test_a_crash_mid_line_still_relays_the_unterminated_last_line(data_dir: Path
     assert result.exit_code == 3
     assert seen[-1] == "fatal: no newline"
     assert result.last_lines[-1] == "fatal: no newline"
+
+
+def test_a_start_while_one_is_running_or_starting_spawns_nothing(data_dir: Path, tmp_path: Path) -> None:
+    starting = _start(data_dir, mode="gated", wait_timeout=0.5)
+    assert starting.outcome is StartOutcome.TIMED_OUT
+
+    second = _start(data_dir)
+
+    assert second.outcome is StartOutcome.ALREADY_RUNNING
+    assert second.state is not None
+    assert second.state.state == "starting"
+    assert len(_fake_children(tmp_path)) == 1
+    # The running daemon's log was not rotated away.
+    assert not daemon.log_path(data_dir).with_name("pincer.log.1").exists()
+
+    (data_dir / "mark-ready").touch()
+    _wait_for_state(data_dir, "ready")
+    third = _start(data_dir)
+
+    assert third.outcome is StartOutcome.ALREADY_RUNNING
+    assert third.state is not None
+    assert third.state.state == "ready"
+    assert len(_fake_children(tmp_path)) == 1
+    daemon.stop(data_dir)
+
+
+def test_a_start_racing_another_before_its_child_takes_the_lease_waits_and_rotates_nothing(
+    data_dir: Path, tmp_path: Path
+) -> None:
+    results: list[daemon.StartResult] = []
+    first = threading.Thread(target=lambda: results.append(_start(data_dir, mode="slow-lease")))
+    first.start()
+    # The first child exists but has not taken the lease yet: the window a second `run -d` can land in.
+    deadline = time.monotonic() + WAIT_TIMEOUT
+    while not _fake_children(tmp_path):
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    assert daemon.read_state(data_dir) is None
+
+    second = _start(data_dir)
+    first.join()
+
+    assert second.outcome is StartOutcome.ALREADY_RUNNING
+    assert [r.outcome for r in results] == [StartOutcome.READY]
+    winner = results[0].state
+    assert winner is not None
+    assert second.state is not None
+    assert second.state.pid == winner.pid
+    assert _fake_children(tmp_path) == [winner.pid]
+    assert f"fake child {winner.pid} starting" in daemon.log_path(data_dir).read_text()
+    assert not daemon.log_path(data_dir).with_name("pincer.log.1").exists()
+    daemon.stop(data_dir)
+
+
+def test_a_daemon_killed_with_sigkill_reads_as_gone_and_the_next_start_succeeds(data_dir: Path) -> None:
+    first = _start(data_dir).state
+    assert first is not None
+    os.kill(first.pid, signal.SIGKILL)
+    while _alive(first.pid):
+        time.sleep(0.02)
+    # Its record is still on disk, naming a dead pid.
+    assert json.loads((data_dir / daemon.PID_FILE).read_text())["pid"] == first.pid
+
+    assert daemon.read_state(data_dir) is None
+    second = _start(data_dir)
+
+    assert second.outcome is StartOutcome.READY
+    assert second.state is not None
+    assert second.state.pid != first.pid
+    daemon.stop(data_dir)
+
+
+def test_a_start_during_another_starts_wait_answers_at_once(data_dir: Path) -> None:
+    results: list[daemon.StartResult] = []
+    first = threading.Thread(target=lambda: results.append(_start(data_dir, mode="gated", wait_timeout=10.0)))
+    first.start()
+    try:
+        starting = _wait_for_state(data_dir, "starting")
+
+        began = time.monotonic()
+        second = _start(data_dir)
+
+        # Answered while the first start is still waiting for its child, not queued behind it.
+        assert time.monotonic() - began < 3.0
+        assert first.is_alive()
+        assert second.outcome is StartOutcome.ALREADY_RUNNING
+        assert second.state == starting
+    finally:
+        (data_dir / "mark-ready").touch()
+        first.join()
+    assert [r.outcome for r in results] == [StartOutcome.READY]
+    daemon.stop(data_dir)

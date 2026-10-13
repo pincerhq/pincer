@@ -794,8 +794,8 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
         console.print(
             f"[bold red]Port {settings.dashboard_host}:{settings.dashboard_port} is already in use — "
             "another Pincer instance appears to be running.[/bold red]\n"
-            "[yellow]Stop it first (e.g. `pkill -f 'pincer run'`) or set PINCER_DASHBOARD_PORT "
-            "if something else owns the port.[/yellow]"
+            "[yellow]Stop a background one with `pincer stop`, a foreground one with Ctrl+C in its terminal, "
+            "or set PINCER_DASHBOARD_PORT if something else owns the port.[/yellow]"
         )
         raise typer.Exit(1)
 
