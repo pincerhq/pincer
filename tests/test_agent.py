@@ -467,3 +467,60 @@ async def test_unavailable_memories_warn_and_still_reply(
     ]
     assert len(warnings) == 1
     assert warnings[0].exc_info is not None
+
+
+def _outage_log(caplog: pytest.LogCaptureFixture, failure: str, recovery: str) -> list[tuple[str, bool]]:
+    """(level, has traceback) of each failure/recovery record, in order."""
+    return [
+        (record.levelname, record.exc_info is not None)
+        for record in caplog.records
+        if record.getMessage() in {failure, recovery}
+    ]
+
+
+async def test_an_unavailable_memory_backend_warns_once_per_outage(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
+):
+    """Once per message would flood the log for the length of an outage."""
+    memory = AsyncMock()
+    memory.search_text.side_effect = [
+        ConnectionError("down"),
+        ConnectionError("still down"),
+        [],
+        ConnectionError("again"),
+    ]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory)
+
+    with caplog.at_level(logging.DEBUG, logger="pincer.core.agent"):
+        for _ in range(4):
+            await agent.handle_message("user1", "test", "Hello!")
+
+    assert memory.search_text.await_count == 4
+    assert _outage_log(caplog, "Failed to fetch memories for prompt", "Fetching memories for prompt recovered") == [
+        ("WARNING", True),
+        ("DEBUG", True),
+        ("INFO", False),
+        ("WARNING", True),
+    ]
+
+
+async def test_an_unavailable_mcp_server_list_warns_once_per_outage(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
+):
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    agent.mcp_manager = AsyncMock()
+    agent.mcp_manager.list_servers.side_effect = [
+        RuntimeError("down"),
+        RuntimeError("still down"),
+        [],
+        RuntimeError("again"),
+    ]
+
+    with caplog.at_level(logging.DEBUG, logger="pincer.core.agent"):
+        for _ in range(4):
+            await agent.handle_message("user1", "test", "Hello!")
+
+    assert agent.mcp_manager.list_servers.await_count == 4
+    assert _outage_log(
+        caplog, "Failed to fetch MCP server list for prompt", "Fetching the MCP server list for prompt recovered"
+    ) == [("WARNING", True), ("DEBUG", True), ("INFO", False), ("WARNING", True)]

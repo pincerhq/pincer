@@ -277,6 +277,32 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
     return clean
 
 
+class _OutageLog:
+    """Logs a dependency that fails on every message once per outage, not once per message.
+
+    The first failure is a WARNING with its traceback; repeats are DEBUG until
+    a call succeeds, which is logged at INFO. Call `failed()` from inside the
+    `except` block, so the traceback is the current exception's.
+    """
+
+    def __init__(self, failure: str, recovery: str) -> None:
+        self._failure = failure
+        self._recovery = recovery
+        self._down = False
+
+    def failed(self) -> None:
+        if self._down:
+            logger.debug(self._failure, exc_info=True)
+            return
+        self._down = True
+        logger.warning(self._failure, exc_info=True)
+
+    def succeeded(self) -> None:
+        if self._down:
+            self._down = False
+            logger.info(self._recovery)
+
+
 class Agent:
     """The core Pincer agent."""
 
@@ -312,6 +338,12 @@ class Agent:
         self._last_active: tuple[str, str] | None = None
         # Injected by cli.py: (user_id, channel_name, question) -> answer
         self._ask_user_callback: Callable[[str, str, str], Awaitable[str]] | None = None
+        self._mcp_list_outage = _OutageLog(
+            "Failed to fetch MCP server list for prompt", "Fetching the MCP server list for prompt recovered"
+        )
+        self._memory_outage = _OutageLog(
+            "Failed to fetch memories for prompt", "Fetching memories for prompt recovered"
+        )
 
     @property
     def tool_registry(self) -> ToolRegistry:
@@ -1172,6 +1204,7 @@ class Agent:
         if self.mcp_manager:
             try:
                 servers = await self.mcp_manager.list_servers()
+                self._mcp_list_outage.succeeded()
                 connected = [s for s in servers if s["connected"]]
                 if connected:
                     max_chars = self._settings.mcp_instructions_max_chars
@@ -1188,7 +1221,7 @@ class Agent:
                         server_lines
                     )
             except Exception:
-                logger.debug("Failed to fetch MCP server list for prompt", exc_info=True)
+                self._mcp_list_outage.failed()
 
         # The model has no clock and will invent today's date if nothing states
         # it (see core/clock.py). Appended on every return path below, and last
@@ -1207,6 +1240,7 @@ class Agent:
 
         try:
             memories = await self._memory.search_text(user_text, user_id=user_id, limit=3)
+            self._memory_outage.succeeded()
             if not memories:
                 return _with_extra(base_prompt)
 
@@ -1214,7 +1248,7 @@ class Agent:
             memory_block = "\n".join(memory_lines)
             return _with_extra(f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}")
         except Exception:
-            logger.warning("Failed to fetch memories for prompt", exc_info=True)
+            self._memory_outage.failed()
             return _with_extra(base_prompt)
 
     async def _ingest_onboarding_reply(
