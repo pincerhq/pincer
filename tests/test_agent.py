@@ -443,7 +443,6 @@ async def test_execute_tool_genuine_error_still_logs_error_with_traceback(
     assert error_records[0].exc_info is not None
 
 
-@pytest.mark.asyncio
 async def test_unavailable_memories_warn_and_still_reply(
     settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog
 ):
