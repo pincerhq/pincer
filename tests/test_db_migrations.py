@@ -1634,6 +1634,14 @@ def _legacy_pincer_db(url: str, tmp_path: Path, revision: str):
     command.upgrade(cfg, revision)
     with _connect(url) as conn:
         conn.execute(sa.text(f"ALTER TABLE {VERSION_TABLE} RENAME TO {LEGACY_VERSION_TABLE}"))
+        if conn.dialect.name == "postgresql":
+            # Its primary key under the name Alembic gave it back then.
+            conn.execute(
+                sa.text(
+                    f"ALTER TABLE {LEGACY_VERSION_TABLE} "
+                    f"RENAME CONSTRAINT {VERSION_TABLE}_pkc TO {LEGACY_VERSION_TABLE}_pkc"
+                )
+            )
     return cfg
 
 
@@ -1687,11 +1695,23 @@ def test_an_unknown_revision_beside_pincer_tables_is_refused(migration_url, tmp_
         assert _version_rows(conn) == {"alembic_version": ["f00dfeedcafe"]}
 
 
+def _pre_alembic_pincer_db(url: str, tmp_path: Path):
+    """Pincer's tables as an install from before Alembic left them: `0001`'s
+    schema (so `channel_identities` is there) and no version table of Pincer's."""
+    cfg = _config(url, tmp_path)
+    command.upgrade(cfg, "0001")
+    with _connect(url) as conn:
+        conn.execute(sa.text(f"DROP TABLE {VERSION_TABLE}"))
+    return cfg
+
+
 def test_another_app_s_version_table_without_a_version_column_is_left_alone(migration_url, tmp_path):
+    """Beside Pincer's tables, so the bootstrap gets as far as looking at it:
+    no `version_num` column, so not Alembic's history of Pincer."""
+    cfg = _pre_alembic_pincer_db(migration_url, tmp_path)
     with _connect(migration_url) as conn:
         conn.execute(sa.text(f"CREATE TABLE {LEGACY_VERSION_TABLE} (id INTEGER PRIMARY KEY, label TEXT)"))
         conn.execute(sa.text(f"INSERT INTO {LEGACY_VERSION_TABLE} (id, label) VALUES (1, 'theirs')"))
-    cfg = _config(migration_url, tmp_path)
     head = ScriptDirectory.from_config(cfg).get_current_head()
 
     command.upgrade(cfg, "head")
@@ -1702,19 +1722,21 @@ def test_another_app_s_version_table_without_a_version_column_is_left_alone(migr
 
 
 def test_another_role_s_unreadable_version_table_is_left_alone(migration_url, tmp_path):
-    """Pincer's role has no grant on the other app's `alembic_version`, though
-    the catalog still lists it: the failed read means "not ours", not a crash."""
+    """Beside Pincer's tables, so the bootstrap reads it: Pincer's role has no
+    grant on the other app's `alembic_version`, though the catalog still lists
+    it, and the permission error means "not ours", not a crash."""
     if not migration_url.startswith("postgresql"):
         pytest.skip("SQLite has no roles or grants")
     role = f"pincer_app_{uuid.uuid4().hex[:8]}"
-    _foreign_app_db(migration_url, tmp_path, "0005", "other_app_users")
     with _connect(migration_url) as conn:
         conn.execute(sa.text(f"CREATE ROLE {role} LOGIN PASSWORD 'pincer'"))
         conn.execute(sa.text(f"GRANT ALL ON SCHEMA public TO {role}"))
     as_role = sa.engine.make_url(migration_url).set(username=role, password="pincer")
-    cfg = _config(as_role.render_as_string(hide_password=False), tmp_path)
-    head = ScriptDirectory.from_config(cfg).get_current_head()
     try:
+        cfg = _pre_alembic_pincer_db(as_role.render_as_string(hide_password=False), tmp_path)
+        _foreign_app_db(migration_url, tmp_path, "0005", "other_app_users")
+        head = ScriptDirectory.from_config(cfg).get_current_head()
+
         command.upgrade(cfg, "head")
 
         with _connect(migration_url) as conn:
@@ -1723,6 +1745,32 @@ def test_another_role_s_unreadable_version_table_is_left_alone(migration_url, tm
         with _connect(migration_url) as conn:
             conn.execute(sa.text(f"DROP OWNED BY {role}"))
             conn.execute(sa.text(f"DROP ROLE {role}"))
+
+
+def test_a_failed_read_of_pincer_s_own_version_table_fails_the_upgrade(migration_url, tmp_path, monkeypatch):
+    """A lock timeout on Pincer's own legacy `alembic_version` says nothing
+    about whose table it is. Taking it as "not ours" would have Alembic replay
+    every revision over Pincer's schema; the upgrade must fail instead, before
+    `pincer_alembic_version` exists."""
+    if not migration_url.startswith("postgresql"):
+        pytest.skip("needs a lock on one table; SQLite's locks cover the whole file, catalog included")
+    cfg = _legacy_pincer_db(migration_url, tmp_path, "0010")
+    # libpq reads it on connect: every connection opened from here on gives up
+    # on a lock after 200 ms instead of waiting.
+    monkeypatch.setenv("PGOPTIONS", "-c lock_timeout=200")
+
+    holder = sa.create_engine(migration_url)
+    try:
+        with holder.connect() as other:
+            other.execute(sa.text(f"LOCK TABLE {LEGACY_VERSION_TABLE} IN ACCESS EXCLUSIVE MODE"))
+            with pytest.raises(sa.exc.OperationalError, match="lock timeout"):
+                command.upgrade(cfg, "head")
+            other.rollback()
+    finally:
+        holder.dispose()
+
+    with _connect(migration_url) as conn:
+        assert _version_rows(conn) == {"alembic_version": ["0010"]}
 
 
 def test_a_second_start_beside_another_app_s_version_table_leaves_it_alone(migration_url, tmp_path):

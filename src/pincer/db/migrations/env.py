@@ -69,9 +69,12 @@ def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:
     cannot roll back. It may also be another application's table that happens
     to sit beside Pincer's, so it is not renamed either: the operator decides.
 
-    An `alembic_version` Pincer cannot read — another role's table with no
-    grant to Pincer's role, or one without a `version_num` column — is not
-    Pincer's either, and is left alone the same way.
+    With no Pincer table, `alembic_version` is never read at all. Beside
+    Pincer's tables, one without a `version_num` column, or one Postgres
+    denies Pincer's role, is another application's and is left alone the same
+    way. Any other failure to read it propagates: a timeout or a dropped
+    connection says nothing about whose table it is, and taking it as "not
+    ours" would replay every revision over Pincer's schema.
 
     One case remains that this cannot tell apart: Pincer tables with no
     version table of Pincer's at all (an install from before Alembic, or one
@@ -91,17 +94,24 @@ def _bootstrap_version_table(engine: Engine, revisions: set[str]) -> None:
     does nothing.
     """
     with engine.connect() as bootstrap:
-        existing = set(sa.inspect(bootstrap).get_table_names())
+        inspector = sa.inspect(bootstrap)
+        existing = set(inspector.get_table_names())
         if VERSION_TABLE in existing or LEGACY_VERSION_TABLE not in existing:
+            return
+        # No Pincer table: not ours whatever it records, so it is never read.
+        if not existing & _PINCER_MARKER_TABLES:
+            return
+        if "version_num" not in {column["name"] for column in inspector.get_columns(LEGACY_VERSION_TABLE)}:
             return
         try:
             recorded = set(bootstrap.execute(sa.text(f"SELECT version_num FROM {LEGACY_VERSION_TABLE}")).scalars())
-        except sa.exc.DBAPIError:
-            # Not readable as Pincer's version table: another role's, with no
-            # grant to Pincer's, or no `version_num` column at all. Not ours.
+        except sa.exc.ProgrammingError:
+            # Postgres: permission denied, so another role's table. Anything
+            # else (a lock or statement timeout, a dropped connection) says
+            # nothing about whose table it is, and propagates.
             bootstrap.rollback()
             return
-        if not (recorded and existing & _PINCER_MARKER_TABLES):
+        if not recorded:
             return
         if not recorded <= revisions:
             raise RuntimeError(
