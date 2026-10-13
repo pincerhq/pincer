@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from logging.config import fileConfig
 from typing import TYPE_CHECKING
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from sqlalchemy.engine import Engine
+
+logger = logging.getLogger("pincer.db.migrations")
 
 config = context.config
 
@@ -145,16 +148,29 @@ def _upgrade_lock(engine: Engine) -> Iterator[None]:
     commit, still held, and its unlock could land elsewhere. Nothing reflects
     on this connection, so its open transaction cannot hide new tables from
     the revisions (see `_bootstrap_version_table`).
+
+    A starter that has to wait says so once, so a start held up by another
+    process's long migration is not silent. Ending the transaction cannot fail
+    the upgrade: if the connection died while it sat idle (a firewall, an
+    `idle_session_timeout`), the server released the lock with it, and the
+    migration it guarded has already committed.
     """
     if engine.dialect.name != "postgresql":
         yield
         return
     with engine.connect() as lock:
-        lock.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_ADVISORY_KEY})
+        if not lock.execute(
+            sa.text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": MIGRATION_ADVISORY_KEY}
+        ).scalar():
+            logger.info("Waiting for another Pincer process to finish migrating the database")
+            lock.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_ADVISORY_KEY})
         try:
             yield
         finally:
-            lock.rollback()
+            try:
+                lock.rollback()
+            except sa.exc.DBAPIError:
+                logger.warning("Could not end the migration lock's transaction; its connection is gone", exc_info=True)
 
 
 def _get_url() -> str:

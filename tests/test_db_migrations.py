@@ -3,6 +3,7 @@
 import contextlib
 import importlib.util
 import json
+import logging
 import sqlite3
 import subprocess
 import sys
@@ -1655,15 +1656,18 @@ def _foreign_app_db(url: str, tmp_path: Path, revision: str, table: str):
     return _config(url, tmp_path)
 
 
-def test_pincer_s_own_legacy_version_table_is_renamed_with_its_revision(migration_url, tmp_path):
+def test_pincer_s_own_legacy_version_table_is_renamed_with_its_revision(migration_url, tmp_path, caplog):
     """Upgrading to 0011 runs only 0011: the 0010 Alembic finds is the one the
     legacy table recorded, now under the new name."""
     cfg = _legacy_pincer_db(migration_url, tmp_path, "0010")
 
-    command.upgrade(cfg, "0011")
+    with caplog.at_level(logging.INFO, logger="pincer.db.migrations"):
+        command.upgrade(cfg, "0011")
 
     with _connect(migration_url) as conn:
         assert _version_rows(conn) == {"pincer_alembic_version": ["0011"]}
+    # Nobody else was migrating, so there was nothing to wait for or say.
+    assert _waiting_lines(caplog) == []
 
 
 def test_another_app_s_version_table_is_left_alone(migration_url, tmp_path):
@@ -1807,7 +1811,11 @@ def _wait_for_migration_lock_waiters(conn: sa.Connection, count: int, errors: li
         time.sleep(0.01)
 
 
-def test_a_concurrent_start_waits_for_the_other_rename(migration_url, tmp_path):
+def _waiting_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.levelname for r in caplog.records if r.getMessage().startswith("Waiting for another Pincer process")]
+
+
+def test_a_concurrent_start_waits_for_the_other_rename(migration_url, tmp_path, caplog):
     """A second process holds the migration lock and renames the table itself
     meanwhile; this one must wait for it, then find the new name and carry on."""
     if not migration_url.startswith("postgresql"):
@@ -1826,11 +1834,12 @@ def test_a_concurrent_start_waits_for_the_other_rename(migration_url, tmp_path):
         with holder.connect() as other:
             other.execute(sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": MIGRATION_ADVISORY_KEY})
             worker = threading.Thread(target=upgrade)
-            worker.start()
-            _wait_for_migration_lock_waiters(other, 1, errors)
-            other.execute(sa.text("ALTER TABLE alembic_version RENAME TO pincer_alembic_version"))
-            other.commit()
-        worker.join(timeout=60)
+            with caplog.at_level(logging.INFO, logger="pincer.db.migrations"):
+                worker.start()
+                _wait_for_migration_lock_waiters(other, 1, errors)
+                other.execute(sa.text("ALTER TABLE alembic_version RENAME TO pincer_alembic_version"))
+                other.commit()
+                worker.join(timeout=60)
     finally:
         holder.dispose()
 
@@ -1838,6 +1847,67 @@ def test_a_concurrent_start_waits_for_the_other_rename(migration_url, tmp_path):
     assert errors == []
     with _connect(migration_url) as conn:
         assert _version_rows(conn) == {"pincer_alembic_version": ["0011"]}
+    assert _waiting_lines(caplog) == ["INFO"]
+
+
+def test_a_lost_lock_connection_does_not_fail_a_committed_upgrade(migration_url, tmp_path, caplog):
+    """The lock's connection dies while it sits idle mid-migration (a firewall,
+    `idle_session_timeout`). The server released the lock with it; the
+    migration still commits, and ending the lock's transaction must not then
+    fail the upgrade."""
+    if not migration_url.startswith("postgresql"):
+        pytest.skip("SQLite takes no advisory lock")
+    cfg = _legacy_pincer_db(migration_url, tmp_path, "0018")
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    errors: list[BaseException] = []
+
+    def upgrade() -> None:
+        try:
+            command.upgrade(cfg, "head")
+        except BaseException as exc:  # surfaced on the test thread below
+            errors.append(exc)
+
+    in_this_database = "database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+    holder = sa.create_engine(migration_url)
+    try:
+        with holder.connect() as other:
+            # Holds 0019 up at its first rename, with the lock already taken.
+            other.execute(sa.text("LOCK TABLE audit_logs IN ACCESS EXCLUSIVE MODE"))
+            worker = threading.Thread(target=upgrade)
+            with caplog.at_level(logging.WARNING, logger="pincer.db.migrations"):
+                worker.start()
+                deadline = time.monotonic() + 30.0
+                while not other.execute(
+                    sa.text(
+                        "SELECT count(*) FROM pg_locks WHERE locktype = 'relation' AND NOT granted "
+                        f"AND {in_this_database}"
+                    )
+                ).scalar_one():
+                    assert not errors, errors
+                    assert time.monotonic() < deadline, "the migration never reached the locked table"
+                    time.sleep(0.01)
+                terminated = (
+                    other.execute(
+                        sa.text(
+                            "SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND granted "
+                            f"AND {in_this_database} AND classid::bigint = :high AND objid::bigint = :low"
+                        ),
+                        {"high": MIGRATION_ADVISORY_KEY >> 32, "low": MIGRATION_ADVISORY_KEY & 0xFFFFFFFF},
+                    )
+                    .scalars()
+                    .all()
+                )
+                assert terminated == [True]
+                other.rollback()
+                worker.join(timeout=60)
+    finally:
+        holder.dispose()
+
+    assert not worker.is_alive()
+    assert errors == []
+    with _connect(migration_url) as conn:
+        assert _version_rows(conn) == {"pincer_alembic_version": [head]}
+    assert [r.levelname for r in caplog.records if r.name == "pincer.db.migrations"] == ["WARNING"]
 
 
 _UPGRADE_SCRIPT = """
