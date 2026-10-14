@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from rich.status import Status
 
     from pincer.config import Settings
-    from pincer.daemon import DaemonState, DaemonWithoutRecord
+    from pincer.daemon import DaemonState, DaemonWithUnreadableRecord, LiveDaemon
 
 WAIT_TIMEOUT = 60.0
 # Sized to the voice channel's 60 s call drain plus worker and API grace.
@@ -118,7 +118,7 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
         return
     if result.outcome is daemon.StartOutcome.ALREADY_RUNNING:
         if not isinstance(state, daemon.DaemonState):
-            refuse_while_shutting_down(settings)
+            refuse_unless_a_known_daemon(settings, state)
         console.print(
             f"Pincer is already running (pid {state.pid}, up {_uptime(state)}). "
             "Use 'pincer restart' to apply config changes.",
@@ -143,15 +143,25 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
     raise typer.Exit(1)
 
 
-def refuse_while_shutting_down(settings: Settings) -> NoReturn:
-    """Exit 1: a daemon holds the lease but has no readable record, so it is (all but) gone."""
-    console.print(
-        f"Pincer is still shutting down (data dir {settings.data_dir}) — try again in a moment.",
-        soft_wrap=True,
-        markup=False,
-        highlight=False,
-    )
+def refuse_unless_a_known_daemon(settings: Settings, state: LiveDaemon | None) -> NoReturn:
+    """Exit 1 for a lease holder this command can't act on: one with no record (it is all but gone),
+    or one whose record this version can't read (it may run for a long time; say whose it is)."""
+    from pincer.daemon import DaemonWithUnreadableRecord
+
+    if isinstance(state, DaemonWithUnreadableRecord):
+        message = unreadable_record_message(settings.data_dir, state)
+    else:
+        message = f"Pincer is still shutting down (data dir {settings.data_dir}) — try again in a moment."
+    console.print(message, soft_wrap=True, markup=False, highlight=False)
     raise typer.Exit(1)
+
+
+def unreadable_record_message(data_dir: Path, state: DaemonWithUnreadableRecord) -> str:
+    pid = state.pid if state.pid is not None else "unknown"
+    return (
+        f"A Pincer daemon (pid {pid}) holds data dir {data_dir}, but its record can't be read by this version"
+        " — use the version that started it."
+    )
 
 
 def attach_daemon(settings: Settings, state: DaemonState) -> None:
@@ -256,17 +266,26 @@ class _StopProgress:
     Piped output gets no spinner frames, so `pincer stop | tee` stays two lines.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, data_dir: Path) -> None:
+        self._data_dir = data_dir
         self._announced = False
         self._status: Status | None = None
 
-    def __call__(self, state: DaemonState | DaemonWithoutRecord, elapsed: float) -> None:
-        from pincer.daemon import DaemonState
+    def __call__(self, state: LiveDaemon, elapsed: float) -> None:
+        from pincer.daemon import DaemonState, DaemonWithUnreadableRecord
 
         if not self._announced:
             self._announced = True
             if isinstance(state, DaemonState):
                 console.print(f"Stopping Pincer (pid {state.pid})…", markup=False, highlight=False)
+            elif isinstance(state, DaemonWithUnreadableRecord):
+                message = unreadable_record_message(self._data_dir, state)
+                console.print(
+                    f"{message} Not signalling it; waiting for it to exit…",
+                    soft_wrap=True,
+                    markup=False,
+                    highlight=False,
+                )
             else:
                 console.print(
                     "Pincer is already shutting down — waiting for it to exit…", markup=False, highlight=False
@@ -348,7 +367,7 @@ def _stop_daemon(
 
     from pincer import daemon
 
-    progress = _StopProgress()
+    progress = _StopProgress(settings.data_dir)
     try:
         result = daemon.stop(settings.data_dir, timeout=timeout, force=force, on_wait=progress)
     except PermissionError:
@@ -443,9 +462,12 @@ def status() -> None:
     if state is None:
         console.print("Pincer is not running")
         return
-    if not isinstance(state, daemon.DaemonState):
+    if isinstance(state, daemon.DaemonWithUnreadableRecord):
+        console.print(unreadable_record_message(data_dir, state), soft_wrap=True, markup=False, highlight=False)
+        return
+    if isinstance(state, daemon.DaemonWithoutRecord):
         console.print(
-            f"Pincer is shutting down (data dir {data_dir}) — its lock is held, but its record is gone or unreadable",
+            f"Pincer is shutting down (data dir {data_dir}) — its lock is held, but its record is gone",
             soft_wrap=True,
             markup=False,
             highlight=False,

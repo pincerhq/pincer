@@ -787,7 +787,7 @@ def test_a_record_this_version_cant_read_is_never_signalled(data_dir: Path) -> N
     pid = _start(data_dir).state.pid  # type: ignore[union-attr]
     (data_dir / daemon.PID_FILE).write_text('{"pid": "not a number", "phase": "?"}')
 
-    assert isinstance(daemon.read_state(data_dir), daemon.DaemonWithoutRecord)
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=None)
     result = within(10.0, lambda: daemon.stop(data_dir, timeout=1.0))
 
     assert result.outcome is StopOutcome.STILL_RUNNING
@@ -845,7 +845,7 @@ def test_a_record_naming_no_single_process_is_unreadable_and_never_signalled(
     assert isinstance(state, daemon.DaemonState)
     (data_dir / daemon.PID_FILE).write_text(json.dumps(asdict(replace(state, pid=bad_pid))))
 
-    assert isinstance(daemon.read_state(data_dir), daemon.DaemonWithoutRecord)
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=None)
     for force in (False, True):
         result = within(10.0, lambda force=force: daemon.stop(data_dir, timeout=0.5, force=force))
         assert result.outcome is StopOutcome.STILL_RUNNING
@@ -944,4 +944,21 @@ def test_a_record_with_a_malformed_field_is_unreadable(data_dir: Path, field: st
     (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, field: value}))
 
     assert not isinstance(daemon.read_state(data_dir), daemon.DaemonState)
+    os.kill(pid, signal.SIGTERM)
+
+
+def test_a_record_from_a_newer_version_reads_as_unreadable_with_its_pid(data_dir: Path) -> None:
+    pid = _start(data_dir).state.pid  # type: ignore[union-attr]
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "state": "draining"}))
+
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=pid)
+    os.kill(pid, signal.SIGTERM)
+
+
+def test_a_record_that_is_not_json_reads_as_unreadable_not_as_missing(data_dir: Path) -> None:
+    pid = _start(data_dir).state.pid  # type: ignore[union-attr]
+    (data_dir / daemon.PID_FILE).write_text("{garbled")
+
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=None)
     os.kill(pid, signal.SIGTERM)

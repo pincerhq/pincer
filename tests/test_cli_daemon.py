@@ -53,6 +53,10 @@ NO_LOGS = "No logs yet — start with 'pincer run -d'"
 WINDOWS_MESSAGE = "Daemon mode isn't supported on Windows — use a service manager."
 CONTAINER_MESSAGE = "Pincer is running inside a container — use 'docker compose up -d' to run it in the background."
 SHUTTING_DOWN = "Pincer is still shutting down (data dir {}) — try again in a moment."
+UNREADABLE = (
+    "A Pincer daemon (pid {pid}) holds data dir {data_dir}, but its record can't be read by this version"
+    " — use the version that started it."
+)
 # `pincer run`, in a process whose attach gives up on a stop after {} seconds instead of 90.
 PATCHED_STOP_TIMEOUT_RUN = (
     "import pincer.cli.daemon as d; d.STOP_TIMEOUT = {}; from pincer.cli import app; app(['run'], prog_name='pincer')"
@@ -1300,10 +1304,7 @@ def test_status_while_a_daemon_lingers_says_it_is_shutting_down(
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0, result.output
-    assert (
-        f"Pincer is shutting down (data dir {data_dir}) — its lock is held, but its record is gone or unreadable"
-        in result.output
-    )
+    assert f"Pincer is shutting down (data dir {data_dir}) — its lock is held, but its record is gone" in result.output
     assert "not running" not in result.output
 
 
@@ -1370,3 +1371,67 @@ def test_status_of_a_record_with_a_malformed_start_time_says_so_without_a_traceb
     assert result.exit_code == 0, result.output
     assert result.exception is None
     assert "Pincer is running" not in result.output
+
+
+def _from_a_newer_version(data_dir: Path) -> int:
+    """A running daemon whose record names a phase this version doesn't know; its pid."""
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "state": "draining"}))
+    return int(record["pid"])
+
+
+def test_run_detach_beside_a_daemon_with_a_record_it_cant_read_says_so(data_dir: Path, tmp_path: Path) -> None:
+    pid = _from_a_newer_version(data_dir)
+
+    result = runner.invoke(app, ["run", "-d"])
+
+    assert result.exit_code == 1, result.output
+    assert UNREADABLE.format(pid=pid, data_dir=data_dir) in result.output
+    assert "shutting down" not in result.output
+    assert daemon_fake_child.children_under(tmp_path) == [pid]
+
+
+def test_status_of_a_daemon_with_a_record_it_cant_read_says_so(data_dir: Path) -> None:
+    pid = _from_a_newer_version(data_dir)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert UNREADABLE.format(pid=pid, data_dir=data_dir) in result.output
+    assert "shutting down" not in result.output
+
+
+def test_stop_never_signals_a_daemon_whose_record_it_cant_read(data_dir: Path, tmp_path: Path) -> None:
+    pid = _from_a_newer_version(data_dir)
+
+    result = within(10.0, lambda: runner.invoke(app, ["stop", "--timeout", "0.5"]))
+
+    assert result.exit_code == 1, result.output
+    assert UNREADABLE.format(pid=pid, data_dir=data_dir) in result.output
+    assert "shutting down" not in result.output
+    assert daemon_fake_child.children_under(tmp_path) == [pid]
+
+
+def test_plain_run_beside_a_daemon_with_a_record_it_cant_read_says_so(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid = _from_a_newer_version(data_dir)
+    ran = _record_foreground_runs(monkeypatch)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 1, result.output
+    assert UNREADABLE.format(pid=pid, data_dir=data_dir) in result.output
+    assert ran == []
+
+
+def test_restart_beside_a_daemon_with_a_record_it_cant_read_starts_nothing(data_dir: Path, tmp_path: Path) -> None:
+    pid = _from_a_newer_version(data_dir)
+
+    result = within(10.0, lambda: runner.invoke(app, ["restart", "--timeout", "0.5"]))
+
+    assert result.exit_code == 1, result.output
+    assert UNREADABLE.format(pid=pid, data_dir=data_dir) in result.output
+    assert "Not starting a new one." in result.output
+    assert daemon_fake_child.children_under(tmp_path) == [pid]

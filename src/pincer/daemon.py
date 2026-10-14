@@ -31,7 +31,7 @@ import time
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeGuard
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
@@ -112,9 +112,22 @@ class DaemonWithoutRecord:
 
 
 @dataclass(frozen=True)
+class DaemonWithUnreadableRecord:
+    """A daemon holds the lease and has a record, but not one this version can read (a newer
+    version's phase, a malformed field). Never signalled; `pid` is shown only, when the record
+    names one that could be a process."""
+
+    pid: int | None
+
+
+# What read_state says of a data dir whose lease is held.
+type LiveDaemon = DaemonState | DaemonWithoutRecord | DaemonWithUnreadableRecord
+
+
+@dataclass(frozen=True)
 class StartResult:
     outcome: StartOutcome
-    state: DaemonState | DaemonWithoutRecord | None = None
+    state: LiveDaemon | None = None
     last_lines: list[str] = field(default_factory=list)
     exit_code: int | None = None
 
@@ -221,9 +234,10 @@ def _start_locked(
             time.sleep(POLL_INTERVAL)
 
 
-def read_state(data_dir: Path) -> DaemonState | DaemonWithoutRecord | None:
-    """The live daemon's record; DaemonWithoutRecord if one holds the lease but no record can be read;
-    None when no daemon holds the lease (a leftover record is ignored)."""
+def read_state(data_dir: Path) -> LiveDaemon | None:
+    """The live daemon's record; DaemonWithUnreadableRecord if one holds the lease and has a record
+    this version can't read; DaemonWithoutRecord if one holds the lease and has none (it is
+    exiting); None when no daemon holds the lease (a leftover record is ignored)."""
     with _probe(data_dir) as free:
         if free:
             return None
@@ -240,31 +254,40 @@ def read_state(data_dir: Path) -> DaemonState | DaemonWithoutRecord | None:
         time.sleep(POLL_INTERVAL / 5)
 
 
-def _read_record(path: Path) -> DaemonState | None:
-    """The record at `path`, or None if it is missing or can't be read. Fields a later version
-    added are ignored, so an upgrade doesn't turn a running daemon into an unreadable one.
+def _read_record(path: Path) -> DaemonState | DaemonWithUnreadableRecord | None:
+    """The record at `path`; DaemonWithUnreadableRecord if it can't be read; None if there is none.
+    Fields a later version added are ignored, so an upgrade doesn't turn a running daemon into an
+    unreadable one. (The lease replaces the record whole, so there is no half-written one to see.)
 
     Every field must have its type, and `started_at` must be an ISO time, or the record counts as
     unreadable: what status and stop show or compute from it can't then fail half way. A pid that
     names no single process is unreadable too: `os.kill(0, …)` would signal the caller's own
     process group, and `os.kill(-1, …)` every process the user may signal."""
     try:
-        record = json.loads(path.read_text())
+        text = path.read_text()
+    except FileNotFoundError:
+        return None
+    try:
+        record = json.loads(text)
+    except ValueError:
+        return DaemonWithUnreadableRecord(pid=None)
+    try:
         known = {field.name for field in fields(DaemonState)}
         state = DaemonState(**{key: value for key, value in record.items() if key in known})
         if not _is_int(state.pid) or state.pid <= 0 or not _is_int(state.port):
-            return None
+            raise ValueError("pid or port")
         if not all(isinstance(text, str) for text in (state.started_at, state.cwd, state.version)):
-            return None
+            raise ValueError("started_at, cwd or version")
         if not isinstance(state.channels, list) or not all(isinstance(name, str) for name in state.channels):
-            return None
+            raise ValueError("channels")
         datetime.fromisoformat(state.started_at)
         return replace(state, state=DaemonPhase(state.state))
-    except (FileNotFoundError, ValueError, TypeError, AttributeError):
-        return None
+    except (ValueError, TypeError, AttributeError):
+        pid = record.get("pid") if isinstance(record, dict) else None
+        return DaemonWithUnreadableRecord(pid=pid if _is_int(pid) and pid > 0 else None)
 
 
-def _is_int(value: object) -> bool:
+def _is_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
@@ -303,7 +326,7 @@ def stop(
     data_dir: Path,
     timeout: float | None = None,
     force: bool = False,
-    on_wait: Callable[[DaemonState | DaemonWithoutRecord, float], None] | None = None,
+    on_wait: Callable[[LiveDaemon, float], None] | None = None,
 ) -> StopResult:
     """SIGTERM the daemon (the agent's graceful-shutdown path) and wait until it has exited.
 
@@ -313,8 +336,8 @@ def stop(
     port or file. A plain stop signals the daemon alone; its own shutdown stops those children.
     `on_wait(state, elapsed)` is called right after signalling and then on every poll.
 
-    A daemon without a readable record is never signalled, `force` or not (its pid is unknown);
-    stop only waits for it, and reports no pid. Nor is the record's pid signalled unless, right
+    A daemon without a readable record is never signalled, `force` or not (its pid is unknown or
+    can't be trusted); stop only waits for it, and reports no pid. Nor is the record's pid signalled unless, right
     before, the lease is still held and that pid's process started no later than the daemon took
     the lease: a process that reused the pid of a daemon since gone started after it.
     """
