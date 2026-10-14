@@ -1,4 +1,7 @@
-"""`pincer run -d` / `stop` / `logs` / `status` — format what the daemon lifecycle module (`pincer.daemon`) returns."""
+"""`pincer run -d` / `stop` / `restart` / `logs` / `status`.
+
+They format what the daemon lifecycle module (`pincer.daemon`) returns.
+"""
 
 from __future__ import annotations
 
@@ -147,11 +150,42 @@ def stop(
     force: bool = typer.Option(False, "--force", help="Kill Pincer at once (SIGKILL) instead of shutting it down."),
 ) -> None:
     """Stop the background Pincer gracefully and wait until it has exited."""
-    from pincer import daemon
-    from pincer.cli._shared import _port_in_use
     from pincer.config import get_settings_relaxed
 
-    settings = get_settings_relaxed()
+    if not _stop_daemon(get_settings_relaxed(), timeout, force, foreground_hint=True):
+        raise typer.Exit(1)
+
+
+def restart(
+    timeout: float = typer.Option(
+        STOP_TIMEOUT, "--timeout", help="Seconds to wait for the old Pincer's graceful shutdown; never killed."
+    ),
+    wait_timeout: float = typer.Option(
+        WAIT_TIMEOUT, "--wait-timeout", help="Seconds to wait for the new one to start (a slow start is never killed)."
+    ),
+) -> None:
+    """Stop the background Pincer, then start a new one from here (to apply .env / pincer.toml changes)."""
+    from pincer.config import get_settings
+
+    # The new config is checked before anything is stopped: a broken .env must not take
+    # down the daemon that is working.
+    try:
+        settings = get_settings()
+    except Exception as e:
+        console.print(f"[red]Configuration error:[/red] {e}")
+        raise typer.Exit(1) from e
+
+    if not _stop_daemon(settings, timeout, force=False, foreground_hint=False):
+        console.print("Not starting a new one.")
+        raise typer.Exit(1)
+    start_daemon(settings, wait_timeout)
+
+
+def _stop_daemon(settings: Settings, timeout: float, force: bool, *, foreground_hint: bool) -> bool:
+    """Stop the daemon of `settings.data_dir`, printing as `pincer stop` does; False if it is still running."""
+    from pincer import daemon
+    from pincer.cli._shared import _port_in_use
+
     progress = _StopProgress()
     try:
         result = daemon.stop(settings.data_dir, timeout=timeout, force=force, on_wait=progress)
@@ -159,10 +193,13 @@ def stop(
         running = daemon.read_state(settings.data_dir)
         pid = running.pid if running is not None else "?"
         console.print(f"[red]Not allowed to signal Pincer (pid {pid}) — it runs as another user.[/red]")
-        raise typer.Exit(1) from None
+        return False
     finally:
         progress.close()
     if result.outcome is daemon.StopOutcome.NOT_RUNNING:
+        if not foreground_hint:
+            console.print("Pincer is not running — starting it")
+            return True
         console.print("Pincer is not running")
         if _port_in_use(settings.dashboard_host, settings.dashboard_port):
             console.print(
@@ -170,15 +207,16 @@ def stop(
                 "Ctrl+C in its terminal.[/yellow]",
                 soft_wrap=True,
             )
-        return
+        return True
     if result.outcome is daemon.StopOutcome.STILL_RUNNING:
         console.print(
             f"[yellow]Pincer is still shutting down after {timeout:g} s — 'pincer stop --force' to kill it[/yellow]",
             soft_wrap=True,
         )
-        raise typer.Exit(1)
+        return False
     verb = "killed" if result.outcome is daemon.StopOutcome.KILLED else "stopped"
     console.print(f"Pincer {verb} (pid {result.pid})")
+    return True
 
 
 def logs(

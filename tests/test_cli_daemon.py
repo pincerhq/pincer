@@ -585,3 +585,107 @@ def test_status_shows_the_daemons_cwd_not_the_callers(
 
     assert line.endswith(f", cwd {started_in.resolve()}"), line
     daemon.stop(data_dir)
+
+
+# ── restart ───────────────────────────────────────────────────────────────
+
+
+def _pid_in(output: str, pattern: str) -> int:
+    match = re.search(pattern, output)
+    assert match, output
+    return int(match.group(1))
+
+
+def test_restart_replaces_a_running_daemon(data_dir: Path, tmp_path: Path) -> None:
+    old = _pid_in(runner.invoke(app, ["run", "-d"]).output, r"Pincer started \(pid (\d+)\)")
+
+    result = runner.invoke(app, ["restart"])
+
+    assert result.exit_code == 0, result.output
+    assert f"Pincer stopped (pid {old})" in result.output
+    new = _pid_in(result.output, r"Pincer started \(pid (\d+)\) — channels: telegram, signal")
+    assert new != old
+    assert result.output.index("Pincer stopped") < result.output.index("Pincer started")
+    state = daemon.read_state(data_dir)
+    assert state is not None
+    assert (state.pid, state.state) == (new, "ready")
+    assert _fake_children(tmp_path) == [str(new)]
+
+
+def test_restart_with_nothing_running_just_starts(data_dir: Path) -> None:
+    result = runner.invoke(app, ["restart"])
+
+    assert result.exit_code == 0, result.output
+    assert "Pincer is not running — starting it" in result.output
+    pid = _pid_in(result.output, r"Pincer started \(pid (\d+)\)")
+    assert daemon.read_state(data_dir).pid == pid  # type: ignore[union-attr]
+
+
+def test_restart_starts_nothing_while_the_old_daemon_will_not_exit(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _child_mode(monkeypatch, "ignore-sigterm", data_dir)
+    old = _pid_in(runner.invoke(app, ["run", "-d"]).output, r"Pincer started \(pid (\d+)\)")
+    _child_mode(monkeypatch, "ready", data_dir)
+
+    result = daemon_fake_child.within(10.0, lambda: runner.invoke(app, ["restart", "--timeout", "1"]))
+
+    assert result.exit_code == 1
+    assert "Pincer is still shutting down after 1 s — 'pincer stop --force' to kill it" in result.output
+    assert "Not starting a new one." in result.output
+    assert "Pincer started" not in result.output
+    assert _fake_children(tmp_path) == [str(old)]
+    assert daemon.read_state(data_dir).pid == old  # type: ignore[union-attr]
+
+
+def test_restart_starts_the_new_daemon_from_the_callers_cwd(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_cwd, caller_cwd = tmp_path / "first", tmp_path / "caller"
+    first_cwd.mkdir()
+    caller_cwd.mkdir()
+    monkeypatch.chdir(first_cwd)
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    monkeypatch.chdir(caller_cwd)
+
+    result = runner.invoke(app, ["restart"])
+
+    assert result.exit_code == 0, result.output
+    assert daemon.read_state(data_dir).cwd == str(caller_cwd.resolve())  # type: ignore[union-attr]
+
+
+def test_a_crash_while_restart_starts_is_shown_as_run_detach_shows_it(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _pid_in(runner.invoke(app, ["run", "-d"]).output, r"Pincer started \(pid (\d+)\)")
+    _child_mode(monkeypatch, "crash-on-start", data_dir)
+
+    result = runner.invoke(app, ["restart"])
+
+    assert result.exit_code == 1
+    assert f"Pincer stopped (pid {old})" in result.output
+    assert "INFO:fake_child:startup step 1\n" in result.output
+    header = f"Pincer exited before it was ready (exit code 1). Last 20 lines of {daemon.log_path(data_dir)}:"
+    assert header in result.output
+    tail = result.output[result.output.index(header) + len(header) :].strip().splitlines()
+    assert tail == daemon.log_path(data_dir).read_text().splitlines()[-20:]
+    assert daemon.read_state(data_dir) is None
+    assert _fake_children(tmp_path) == []
+
+
+def test_restart_with_a_broken_config_leaves_the_running_daemon_alone(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _pid_in(runner.invoke(app, ["run", "-d"]).output, r"Pincer started \(pid (\d+)\)")
+
+    def broken() -> None:
+        raise ValueError("PINCER_DEFAULT_PROVIDER: no such provider")
+
+    monkeypatch.setattr("pincer.config.get_settings", broken)
+
+    result = runner.invoke(app, ["restart"])
+
+    assert result.exit_code == 1
+    assert "Configuration error: PINCER_DEFAULT_PROVIDER: no such provider" in result.output
+    assert "Stopping" not in result.output
+    assert _fake_children(tmp_path) == [str(old)]
