@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 import pytest
+from terminal_command import pincer_command
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 
@@ -62,9 +63,7 @@ def _signal_after_banner(
     }
     out_path = tmp_path / "pincer.out"
     with out_path.open("wb") as out:
-        proc = subprocess.Popen(
-            [sys.executable, "-P", "-m", "pincer", *args], cwd=cwd, env=env, stdout=out, stderr=subprocess.STDOUT
-        )
+        proc = subprocess.Popen(pincer_command(*args), cwd=cwd, env=env, stdout=out, stderr=subprocess.STDOUT)
     try:
         deadline = time.monotonic() + STARTUP_TIMEOUT
         while "is running!" not in out_path.read_text(errors="replace"):
