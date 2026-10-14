@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import io
 import json
 import os
 import signal
@@ -24,7 +25,7 @@ from pincer import daemon
 from pincer.daemon import StartOutcome, StopOutcome
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Buffer, Iterator
 
 WAIT_TIMEOUT = 20.0
 # Stands in for `pincer run -d`: starts a daemon from its own cwd/environment, prints its PID and exits.
@@ -573,18 +574,49 @@ def test_follow_from_the_last_n_lines(data_dir: Path, content: bytes, lines: int
     assert b"".join(daemon.follow(data_dir, lines, until_exit=False)) == expected
 
 
-def test_follow_finds_the_tail_of_a_huge_log_without_reading_all_of_it(data_dir: Path) -> None:
-    # 1 GiB, sparse so it costs no disk: reading it all takes ~1 s, finding the tail well under a millisecond.
-    with _write_log(data_dir, b"").open("r+b") as log:
-        log.truncate(1 << 30)
-        log.seek(1 << 30)
+def test_follow_finds_the_tail_of_a_huge_log_without_reading_all_of_it(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 64 MiB (sparse where the filesystem can), of which only the last lines are text.
+    log_file = _write_log(data_dir, b"")
+    with log_file.open("r+b") as log:
+        log.truncate(64 << 20)
+        log.seek(64 << 20)
         log.write(_numbered(1, 200))
+    read: list[int] = []
 
-    began = time.monotonic()
+    class _Counting(io.FileIO):
+        """Counts every byte taken from the file, whichever way the buffered reader asks for it."""
+
+        def readinto(self, buffer: Buffer) -> int | None:
+            got = super().readinto(buffer)
+            read.append(got or 0)
+            return got
+
+        def readall(self) -> bytes:
+            got = super().readall()
+            read.append(len(got))
+            return got
+
+        def read(self, size: int = -1) -> bytes | None:
+            got = super().read(size)
+            read.append(len(got or b""))
+            return got
+
+    real_open = Path.open
+
+    def counting_open(path: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+        if path == log_file and mode == "rb":
+            return io.BufferedReader(_Counting(path, "rb"))
+        return real_open(path, mode, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(Path, "open", counting_open)
+
     tail = b"".join(daemon.follow(data_dir, 5, until_exit=False))
 
     assert tail == _numbered(196, 200)
-    assert time.monotonic() - began < 0.05
+    # The tail is found reading backward from the end, not by reading the file through.
+    assert 0 < sum(read) < 2 * daemon.READ_BLOCK
 
 
 def test_follow_gives_the_last_lines_then_live_ones_and_ends_after_the_shutdown_traceback(data_dir: Path) -> None:
