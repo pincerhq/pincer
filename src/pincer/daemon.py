@@ -270,7 +270,7 @@ def _read_record(path: Path) -> DaemonState | DaemonWithUnreadableRecord | None:
     Fields a later version added are ignored, so an upgrade doesn't turn a running daemon into an
     unreadable one. (The lease replaces the record whole, so there is no half-written one to see.)
 
-    Every field must have its type, and `started_at` must be an ISO time, or the record counts as
+    Every field must have its type, and `started_at` an ISO time with a time zone, or the record counts as
     unreadable: what status and stop show or compute from it can't then fail half way. A pid that
     names no single process is unreadable too: `os.kill(0, …)` would signal the caller's own
     process group, and `os.kill(-1, …)` every process the user may signal."""
@@ -293,7 +293,8 @@ def _read_record(path: Path) -> DaemonState | DaemonWithUnreadableRecord | None:
             raise ValueError("started_at, cwd or version")
         if not isinstance(state.channels, list) or not all(isinstance(name, str) for name in state.channels):
             raise ValueError("channels")
-        datetime.fromisoformat(state.started_at)
+        if datetime.fromisoformat(state.started_at).tzinfo is None:  # uptime needs an absolute time
+            raise ValueError("started_at")
         return replace(state, state=DaemonPhase(state.state))
     except (ValueError, TypeError, AttributeError):
         pid = record.get("pid") if isinstance(record, dict) else None

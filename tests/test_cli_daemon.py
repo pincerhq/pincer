@@ -1538,3 +1538,15 @@ def test_stop_names_a_recorded_pid_that_isnt_pincer_and_never_announces_stopping
     finally:
         bystander.kill()
         bystander.wait()
+
+
+def test_status_of_a_record_with_a_naive_start_time_says_so_without_a_traceback(data_dir: Path) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "started_at": "2026-10-14T10:00:00"}))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert result.exception is None
+    assert UNREADABLE.format(pid=record["pid"], data_dir=data_dir) in result.output

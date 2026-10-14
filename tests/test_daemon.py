@@ -971,3 +971,12 @@ def test_a_record_that_is_not_utf8_reads_as_unreadable(data_dir: Path) -> None:
 
     assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=None)
     os.kill(pid, signal.SIGTERM)
+
+
+def test_a_record_whose_start_time_has_no_time_zone_is_unreadable(data_dir: Path) -> None:
+    pid = _start(data_dir).state.pid  # type: ignore[union-attr]
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "started_at": "2026-10-14T10:00:00"}))
+
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=pid)
+    os.kill(pid, signal.SIGTERM)
