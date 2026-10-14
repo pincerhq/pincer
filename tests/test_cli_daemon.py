@@ -1143,7 +1143,10 @@ def test_status_while_a_daemon_lingers_says_it_is_shutting_down(
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0, result.output
-    assert f"Pincer is shutting down (data dir {data_dir}) — its record is gone, its lock not yet" in result.output
+    assert (
+        f"Pincer is shutting down (data dir {data_dir}) — its lock is held, but its record is gone or unreadable"
+        in result.output
+    )
     assert "not running" not in result.output
 
 

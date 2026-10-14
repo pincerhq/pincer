@@ -426,7 +426,7 @@ def status() -> None:
         return
     if not isinstance(state, daemon.DaemonState):
         console.print(
-            f"Pincer is shutting down (data dir {data_dir}) — its record is gone, its lock not yet",
+            f"Pincer is shutting down (data dir {data_dir}) — its lock is held, but its record is gone or unreadable",
             soft_wrap=True,
             markup=False,
             highlight=False,
