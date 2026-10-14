@@ -260,6 +260,12 @@ def follow(data_dir: Path, from_lines: int | None, until_exit: bool) -> Generato
             time.sleep(POLL_INTERVAL)
 
 
+def decode_lines(chunk: bytes) -> list[str]:
+    """A chunk of whole log lines (as `follow` yields them) as text lines, for display: no line
+    endings, and bytes that aren't UTF-8 replaced."""
+    return [raw.decode(errors="replace").rstrip("\r") for raw in chunk.removesuffix(b"\n").split(b"\n")]
+
+
 def stop(
     data_dir: Path,
     timeout: float | None = None,
@@ -454,8 +460,8 @@ class _LogLines:
         """Pass on the lines written since the last call, decoded, to `on_line`."""
         for chunk in self.read(final):
             if on_line is not None:
-                for raw in chunk.removesuffix(b"\n").split(b"\n"):
-                    on_line(raw.decode(errors="replace").rstrip("\r"))
+                for line in decode_lines(chunk):
+                    on_line(line)
 
 
 def _tail_offset(file: BinaryIO, size: int, lines: int) -> int:

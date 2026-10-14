@@ -15,9 +15,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
 import typer
-from rich.console import Console
 
-from pincer.cli._shared import console
+from pincer.cli._shared import console, err_console
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -34,9 +33,6 @@ STOP_TIMEOUT = 90.0
 DOCKERENV = Path("/.dockerenv")
 # How often an attached `pincer run` looks up from waiting, so a Ctrl+C lands at once.
 POLL_INTERVAL = 0.1
-
-# `pincer logs` keeps stdout for the log's own bytes; what it says itself goes here.
-notes = Console(stderr=True)
 
 
 def format_uptime(seconds: float) -> str:
@@ -165,9 +161,9 @@ def attach_daemon(settings: Settings, state: DaemonState) -> None:
     second one only detaches. A hangup only ends this process: the daemon has a session of its own.
     """
     # asyncio's runner turns a Ctrl+C into a cancel that this blocking wait would never see. Take
-    # Ctrl+C over before anything is shown, so one pressed the moment attaching starts still stops it.
+    # Ctrl+C over before anything is relay, so one pressed the moment attaching starts still stops it.
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
-    shown: _LogRelay | None = None
+    relay: _LogRelay | None = None
     try:
         try:
             console.print(
@@ -175,21 +171,21 @@ def attach_daemon(settings: Settings, state: DaemonState) -> None:
                 markup=False,
                 highlight=False,
             )
-            shown = _LogRelay(settings)
-            shown.wait()
+            relay = _LogRelay(settings)
+            relay.wait()
         except KeyboardInterrupt:
-            if shown is None:
-                shown = _LogRelay(settings)
+            if relay is None:
+                relay = _LogRelay(settings)
             try:
-                stopped = _stop_daemon(settings, STOP_TIMEOUT, force=False, before_report=shown.wait)
+                stopped = _stop_daemon(settings, STOP_TIMEOUT, force=False, before_report=relay.wait)
                 if stopped is None:
                     # Still shutting down (the --force hint is out) or not ours to signal: keep
                     # showing its log; a second Ctrl+C still only detaches.
-                    shown.wait()
+                    relay.wait()
                     console.print(f"Pincer has exited (pid {state.pid})", markup=False, highlight=False)
                     return
             except KeyboardInterrupt:
-                shown.detach()
+                relay.detach()
                 console.print(
                     f"Detached — Pincer (pid {state.pid}) keeps shutting down in the background",
                     markup=False,
@@ -220,15 +216,15 @@ class _LogRelay:
         self._thread.start()
 
     def _relay(self) -> None:
+        from pincer.daemon import decode_lines
+
         with contextlib.closing(self._chunks):
             for chunk in self._chunks:
                 with self._printing:
                     if self._detached:
                         return
-                    for raw in chunk.removesuffix(b"\n").split(b"\n"):
-                        console.print(
-                            raw.decode(errors="replace").rstrip("\r"), soft_wrap=True, markup=False, highlight=False
-                        )
+                    for line in decode_lines(chunk):
+                        console.print(line, soft_wrap=True, markup=False, highlight=False)
 
     def wait(self) -> None:
         """Until the daemon has exited and its last lines are shown; Ctrl+C interrupts it."""
@@ -400,10 +396,10 @@ def logs(
 
     data_dir = get_settings_relaxed().data_dir
     if not daemon.log_path(data_dir).exists():
-        notes.print("No logs yet — start with 'pincer run -d'", soft_wrap=True, markup=False, highlight=False)
+        err_console.print("No logs yet — start with 'pincer run -d'", soft_wrap=True, markup=False, highlight=False)
         return
     if daemon.read_state(data_dir) is None:
-        notes.print(
+        err_console.print(
             "Pincer is not running — showing the last session's log", style="dim", soft_wrap=True, highlight=False
         )
     from_lines = tail if tail is not None else (daemon.FOLLOW_LINES if follow else None)

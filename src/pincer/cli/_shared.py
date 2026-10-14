@@ -12,6 +12,8 @@ if TYPE_CHECKING:
     from pincer.config import Settings
 
 console = Console()
+# For what a command says about itself when stdout carries data (`pincer logs` writes the log there).
+err_console = Console(stderr=True)
 
 
 def _setup_logging(level: str) -> None:
