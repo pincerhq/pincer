@@ -739,3 +739,68 @@ def test_a_status_loop_running_throughout_does_not_keep_a_daemon_from_its_lease(
 
     assert result.outcome is StartOutcome.READY, result
     daemon.stop(data_dir)
+
+
+# ── a daemon past its lease, or with a record this version can't read (review #2) ──
+
+
+def _lingering(data_dir: Path) -> int:
+    """A daemon that has left its lease (record gone) but not yet exited (lock still held); its pid."""
+    pid = _start(data_dir, mode="linger").state.pid  # type: ignore[union-attr]
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + WAIT_TIMEOUT
+    while (data_dir / daemon.PID_FILE).exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    assert _alive(pid)
+    return pid
+
+
+def test_a_daemon_past_its_lease_reads_as_running_without_a_record(data_dir: Path) -> None:
+    _lingering(data_dir)
+
+    assert isinstance(daemon.read_state(data_dir), daemon.DaemonWithoutRecord)
+
+
+def test_a_start_while_a_daemon_lingers_spawns_nothing_and_says_so(data_dir: Path, tmp_path: Path) -> None:
+    pid = _lingering(data_dir)
+
+    result = _start(data_dir)
+
+    assert result.outcome is StartOutcome.ALREADY_RUNNING
+    assert isinstance(result.state, daemon.DaemonWithoutRecord)
+    assert _fake_children(tmp_path) == [pid]
+
+
+def test_stop_while_a_daemon_lingers_waits_for_it_without_signalling(data_dir: Path) -> None:
+    pid = _lingering(data_dir)
+
+    result = daemon_fake_child.within(15.0, lambda: daemon.stop(data_dir, timeout=10.0))
+
+    assert result.outcome is StopOutcome.STOPPED
+    assert result.pid is None
+    assert not _alive(pid)
+    assert "left the lease" in daemon.log_path(data_dir).read_text()
+
+
+def test_a_record_this_version_cant_read_is_never_signalled(data_dir: Path) -> None:
+    pid = _start(data_dir).state.pid  # type: ignore[union-attr]
+    (data_dir / daemon.PID_FILE).write_text('{"pid": "not a number", "phase": "?"}')
+
+    assert isinstance(daemon.read_state(data_dir), daemon.DaemonWithoutRecord)
+    result = daemon_fake_child.within(10.0, lambda: daemon.stop(data_dir, timeout=1.0))
+
+    assert result.outcome is StopOutcome.STILL_RUNNING
+    assert result.pid is None
+    assert _alive(pid)
+    os.kill(pid, signal.SIGTERM)
+
+
+def test_a_newer_record_with_extra_fields_still_reads(data_dir: Path) -> None:
+    state = _start(data_dir).state
+    assert state is not None
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "added_in_a_later_version": True}))
+
+    assert daemon.read_state(data_dir) == state
+    daemon.stop(data_dir)

@@ -27,7 +27,7 @@ import os
 import signal
 import subprocess  # nosec B404 - re-spawns our own CLI with a fixed argv, no shell
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -98,9 +98,19 @@ class DaemonState:
 
 
 @dataclass(frozen=True)
+class DaemonWithoutRecord:
+    """A daemon holds the lease, but there is no record this version can read.
+
+    Either it has left its lease and is exiting (the lease removes the record first, the kernel
+    drops the lock last), or it wrote a record this version can't parse. Its pid is unknown, so
+    nothing may signal it; it can only be waited for.
+    """
+
+
+@dataclass(frozen=True)
 class StartResult:
     outcome: StartOutcome
-    state: DaemonState | None = None
+    state: DaemonState | DaemonWithoutRecord | None = None
     last_lines: list[str] = field(default_factory=list)
     exit_code: int | None = None
 
@@ -180,10 +190,11 @@ def _start_locked(
         while True:
             state = read_state(data_dir)
             lines.relay(on_line)
-            if state is not None and state.pid == child.pid:
+            ours = isinstance(state, DaemonState) and state.pid == child.pid
+            if ours:
                 # The child holds the lease now; a concurrent start sees it and stands down.
                 starting.release()
-            if state is not None and state.pid == child.pid and state.state is DaemonPhase.READY:
+            if ours and isinstance(state, DaemonState) and state.state is DaemonPhase.READY:
                 return StartResult(StartOutcome.READY, state)
             exit_code = child.poll()
             if exit_code is not None:
@@ -194,19 +205,34 @@ def _start_locked(
             time.sleep(POLL_INTERVAL)
 
 
-def read_state(data_dir: Path) -> DaemonState | None:
-    """The live daemon's record, or None when no daemon holds the lease (a leftover record is ignored)."""
+def read_state(data_dir: Path) -> DaemonState | DaemonWithoutRecord | None:
+    """The live daemon's record; DaemonWithoutRecord if one holds the lease but no record can be read;
+    None when no daemon holds the lease (a leftover record is ignored)."""
     with _probe(data_dir) as free:
         if free:
             return None
     deadline = time.monotonic() + RECORD_GRACE
     while True:
-        with contextlib.suppress(FileNotFoundError, ValueError, TypeError, KeyError):
-            record = json.loads((data_dir / PID_FILE).read_text())
-            return DaemonState(**{**record, "state": DaemonPhase(record["state"])})
+        record = _read_record(data_dir / PID_FILE)
+        if record is not None:
+            return record
         if time.monotonic() >= deadline:
-            return None
+            return DaemonWithoutRecord()
         time.sleep(POLL_INTERVAL / 5)
+
+
+def _read_record(path: Path) -> DaemonState | None:
+    """The record at `path`, or None if it is missing or can't be read. Fields a later version
+    added are ignored, so an upgrade doesn't turn a running daemon into an unreadable one."""
+    try:
+        record = json.loads(path.read_text())
+        known = {field.name for field in fields(DaemonState)}
+        state = DaemonState(**{key: value for key, value in record.items() if key in known})
+        if not isinstance(state.pid, int) or isinstance(state.pid, bool):
+            return None
+        return replace(state, state=DaemonPhase(state.state))
+    except (FileNotFoundError, ValueError, TypeError, AttributeError):
+        return None
 
 
 def follow(data_dir: Path, from_lines: int | None, until_exit: bool) -> Generator[bytes]:
@@ -238,7 +264,7 @@ def stop(
     data_dir: Path,
     timeout: float | None = None,
     force: bool = False,
-    on_wait: Callable[[DaemonState, float], None] | None = None,
+    on_wait: Callable[[DaemonState | DaemonWithoutRecord, float], None] | None = None,
 ) -> StopResult:
     """SIGTERM the daemon (the agent's graceful-shutdown path) and wait until it has exited.
 
@@ -247,24 +273,30 @@ def stop(
     the daemon's whole process group, so no MCP server or skill it spawned outlives it holding a
     port or file. A plain stop signals the daemon alone; its own shutdown stops those children.
     `on_wait(state, elapsed)` is called right after signalling and then on every poll.
+
+    A daemon without a readable record is never signalled, `force` or not (its pid is unknown);
+    stop only waits for it, and reports no pid.
     """
     state = read_state(data_dir)
     if state is None:
         return StopResult(StopOutcome.NOT_RUNNING)
-    with contextlib.suppress(ProcessLookupError):
-        if force:
-            _kill_group(state.pid)
-        else:
-            os.kill(state.pid, signal.SIGTERM)
+    pid = state.pid if isinstance(state, DaemonState) else None
+    if pid is not None:
+        with contextlib.suppress(ProcessLookupError):
+            if force:
+                _kill_group(pid)
+            else:
+                os.kill(pid, signal.SIGTERM)
     began = time.monotonic()
     while True:
         elapsed = time.monotonic() - began
         if on_wait is not None:
             on_wait(state, elapsed)
         if not _lease_held(data_dir):
-            return StopResult(StopOutcome.KILLED if force else StopOutcome.STOPPED, state.pid)
+            killed = force and pid is not None
+            return StopResult(StopOutcome.KILLED if killed else StopOutcome.STOPPED, pid)
         if timeout is not None and elapsed >= timeout:
-            return StopResult(StopOutcome.STILL_RUNNING, state.pid)
+            return StopResult(StopOutcome.STILL_RUNNING, pid)
         time.sleep(POLL_INTERVAL)
 
 

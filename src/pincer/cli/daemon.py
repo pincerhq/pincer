@@ -12,7 +12,7 @@ import sys
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NoReturn
 
 import typer
 from rich.console import Console
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from rich.status import Status
 
     from pincer.config import Settings
-    from pincer.daemon import DaemonState
+    from pincer.daemon import DaemonState, DaemonWithoutRecord
 
 WAIT_TIMEOUT = 60.0
 # Sized to the voice channel's 60 s call drain plus worker and API grace.
@@ -112,7 +112,7 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
 
     result = daemon.start(settings.data_dir, _child_argv(), Path.cwd(), os.environ, wait_timeout, on_line=show)
     state = result.state
-    if result.outcome is daemon.StartOutcome.READY and state is not None:
+    if result.outcome is daemon.StartOutcome.READY and isinstance(state, daemon.DaemonState):
         channels = ", ".join(state.channels) or "none"
         console.print(
             f"Pincer started (pid {state.pid}) — channels: {channels}  'pincer logs -f' to follow",
@@ -120,7 +120,9 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
             markup=False,
         )
         return
-    if result.outcome is daemon.StartOutcome.ALREADY_RUNNING and state is not None:
+    if result.outcome is daemon.StartOutcome.ALREADY_RUNNING:
+        if not isinstance(state, daemon.DaemonState):
+            refuse_while_shutting_down(settings)
         console.print(
             f"Pincer is already running (pid {state.pid}, up {_uptime(state)}). "
             "Use 'pincer restart' to apply config changes.",
@@ -142,6 +144,17 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
     )
     for line in result.last_lines:
         console.print(line, soft_wrap=True, markup=False, highlight=False)
+    raise typer.Exit(1)
+
+
+def refuse_while_shutting_down(settings: Settings) -> NoReturn:
+    """Exit 1: a daemon holds the lease but has no readable record, so it is (all but) gone."""
+    console.print(
+        f"Pincer is still shutting down (data dir {settings.data_dir}) — try again in a moment.",
+        soft_wrap=True,
+        markup=False,
+        highlight=False,
+    )
     raise typer.Exit(1)
 
 
@@ -228,10 +241,17 @@ class _StopProgress:
         self._announced = False
         self._status: Status | None = None
 
-    def __call__(self, state: DaemonState, elapsed: float) -> None:
+    def __call__(self, state: DaemonState | DaemonWithoutRecord, elapsed: float) -> None:
+        from pincer.daemon import DaemonState
+
         if not self._announced:
             self._announced = True
-            console.print(f"Stopping Pincer (pid {state.pid})…", markup=False, highlight=False)
+            if isinstance(state, DaemonState):
+                console.print(f"Stopping Pincer (pid {state.pid})…", markup=False, highlight=False)
+            else:
+                console.print(
+                    "Pincer is already shutting down — waiting for it to exit…", markup=False, highlight=False
+                )
             if console.is_terminal:
                 self._status = console.status("Waiting for it to exit")
                 self._status.start()
@@ -297,6 +317,8 @@ def _stop_daemon(
 
     `before_report` runs once the wait is over, before the outcome is printed.
     """
+    from rich.markup import escape
+
     from pincer import daemon
     from pincer.cli._shared import _port_in_use
 
@@ -305,7 +327,7 @@ def _stop_daemon(
         result = daemon.stop(settings.data_dir, timeout=timeout, force=force, on_wait=progress)
     except PermissionError:
         running = daemon.read_state(settings.data_dir)
-        pid = running.pid if running is not None else "?"
+        pid = running.pid if isinstance(running, daemon.DaemonState) else "?"
         console.print(f"[red]Not allowed to signal Pincer (pid {pid}) — it runs as another user.[/red]")
         return False
     finally:
@@ -324,12 +346,22 @@ def _stop_daemon(
                 soft_wrap=True,
             )
         return True
+    if result.outcome is daemon.StopOutcome.STILL_RUNNING and result.pid is None:
+        console.print(
+            f"[yellow]Pincer still holds data dir {escape(str(settings.data_dir))} after {timeout:g} s, but its record "
+            "can't be read — not signalling a process this version can't identify.[/yellow]",
+            soft_wrap=True,
+        )
+        return False
     if result.outcome is daemon.StopOutcome.STILL_RUNNING:
         console.print(
             f"[yellow]Pincer is still shutting down after {timeout:g} s — 'pincer stop --force' to kill it[/yellow]",
             soft_wrap=True,
         )
         return False
+    if result.pid is None:
+        console.print("Pincer has exited")
+        return True
     verb = "killed" if result.outcome is daemon.StopOutcome.KILLED else "stopped"
     console.print(f"Pincer {verb} (pid {result.pid})")
     return True
@@ -377,9 +409,18 @@ def status() -> None:
     from pincer import daemon
     from pincer.config import get_settings_relaxed
 
-    state = daemon.read_state(get_settings_relaxed().data_dir)
+    data_dir = get_settings_relaxed().data_dir
+    state = daemon.read_state(data_dir)
     if state is None:
         console.print("Pincer is not running")
+        return
+    if not isinstance(state, daemon.DaemonState):
+        console.print(
+            f"Pincer is shutting down (data dir {data_dir}) — its record is gone, its lock not yet",
+            soft_wrap=True,
+            markup=False,
+            highlight=False,
+        )
         return
     ready = state.state is daemon.DaemonPhase.READY
     word = "running" if ready else "starting"

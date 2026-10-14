@@ -1101,3 +1101,94 @@ def test_inside_a_container_the_read_and_stop_commands_still_answer(
 
     assert result.exit_code == 0, result.output
     assert CONTAINER_MESSAGE not in result.output
+
+
+# ── a daemon past its lease (review #2) ────────────────────────────────────
+
+SHUTTING_DOWN = "Pincer is still shutting down (data dir {}) — try again in a moment."
+
+
+def _lingering(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> int:
+    """Through the CLI: a daemon that has left its lease but not yet exited; its pid."""
+    _child_mode(monkeypatch, "linger", data_dir)
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    pid = daemon.read_state(data_dir).pid  # type: ignore[union-attr]
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 20
+    while (data_dir / daemon.PID_FILE).exists():
+        assert time.monotonic() < deadline
+        time.sleep(0.02)
+    _child_mode(monkeypatch, "ready", data_dir)
+    return pid
+
+
+def test_run_detach_while_a_daemon_lingers_says_it_is_shutting_down(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid = _lingering(data_dir, monkeypatch)
+
+    result = runner.invoke(app, ["run", "-d"])
+
+    assert result.exit_code == 1, result.output
+    assert SHUTTING_DOWN.format(data_dir) in result.output
+    assert "exited before it was ready" not in result.output
+    assert _fake_children(tmp_path) == [str(pid)]
+
+
+def test_status_while_a_daemon_lingers_says_it_is_shutting_down(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _lingering(data_dir, monkeypatch)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert f"Pincer is shutting down (data dir {data_dir}) — its record is gone, its lock not yet" in result.output
+    assert "not running" not in result.output
+
+
+def test_stop_while_a_daemon_lingers_waits_for_it_to_exit(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _lingering(data_dir, monkeypatch)
+
+    result = runner.invoke(app, ["stop"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        "Pincer is already shutting down — waiting for it to exit…",
+        "Pincer has exited",
+    ]
+    assert _fake_children(tmp_path) == []
+
+
+def test_restart_while_a_daemon_lingers_waits_then_starts(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _lingering(data_dir, monkeypatch)
+
+    result = runner.invoke(app, ["restart"])
+
+    assert result.exit_code == 0, result.output
+    assert "Pincer has exited" in result.output
+    new = _pid_in(result.output, r"Pincer started \(pid (\d+)\)")
+    assert new != old
+    assert _fake_children(tmp_path) == [str(new)]
+
+
+def test_plain_run_while_a_daemon_lingers_says_it_is_shutting_down(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran: list[object] = []
+
+    async def _run_agent(settings, lease=None):  # type: ignore[no-untyped-def]
+        ran.append(settings)
+
+    _lingering(data_dir, monkeypatch)
+    monkeypatch.setattr("pincer.cli.run._run_agent", _run_agent)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 1, result.output
+    assert SHUTTING_DOWN.format(data_dir) in result.output
+    assert ran == []
