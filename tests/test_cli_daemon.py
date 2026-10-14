@@ -931,6 +931,9 @@ def test_attach_takes_ctrl_c_over_before_it_shows_anything(monkeypatch: pytest.M
 
     class _Relay:
         def __init__(self, settings: object) -> None:
+            pass
+
+        def start(self) -> None:
             seen.append(("relay starts", signal.getsignal(signal.SIGINT)))
 
         def wait(self) -> None:
@@ -952,6 +955,50 @@ def test_attach_takes_ctrl_c_over_before_it_shows_anything(monkeypatch: pytest.M
     assert seen
     assert [what for what, handler in seen if handler is not signal.default_int_handler] == []
     assert after is asyncio_runner_handler
+
+
+@pytest.mark.parametrize("ctrl_c", ["printing the attach line", "right after the relay thread started"])
+def test_a_ctrl_c_while_attach_starts_up_never_starts_a_second_relay(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ctrl_c: str
+) -> None:
+    """In-process: the Ctrl+C is raised where it would land, and every relay thread started is counted."""
+    from rich.console import Console
+
+    from pincer.cli import daemon as cli_daemon
+
+    relays: list[threading.Thread] = []
+    real_thread = threading.Thread
+
+    class _Thread(real_thread):
+        def start(self) -> None:
+            # Read before starting: a thread drops its target once it has run.
+            is_relay = getattr(getattr(self, "_target", None), "__name__", "") == "_relay"
+            super().start()
+            if is_relay:
+                relays.append(self)
+                if ctrl_c == "right after the relay thread started" and len(relays) == 1:
+                    raise KeyboardInterrupt
+
+    class _Output(io.StringIO):
+        def write(self, text: str) -> int:
+            if ctrl_c == "printing the attach line" and "attaching" in text:
+                raise KeyboardInterrupt
+            return super().write(text)
+
+    def stop_daemon(settings: object, timeout: float, force: bool, before_report: Callable[[], None]) -> bool:
+        before_report()
+        return True
+
+    monkeypatch.setattr(threading, "Thread", _Thread)
+    monkeypatch.setattr(cli_daemon, "console", Console(file=_Output()))
+    monkeypatch.setattr(cli_daemon, "_stop_daemon", stop_daemon)
+    settings = MagicMock()
+    settings.data_dir = tmp_path  # no log: a relay ends at once
+    state = daemon.DaemonState(4182, "2026-10-14T00:00:00+00:00", "/", 8080, "0.8.0", daemon.DaemonPhase.READY)
+
+    cli_daemon.attach_daemon(settings, state)
+
+    assert len(relays) == 1
 
 
 def test_a_hangup_while_attached_leaves_the_daemon_running(

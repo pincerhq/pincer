@@ -161,9 +161,9 @@ def attach_daemon(settings: Settings, state: DaemonState) -> None:
     second one only detaches. A hangup only ends this process: the daemon has a session of its own.
     """
     # asyncio's runner turns a Ctrl+C into a cancel that this blocking wait would never see. Take
-    # Ctrl+C over before anything is relay, so one pressed the moment attaching starts still stops it.
+    # Ctrl+C over before anything is shown, so one pressed the moment attaching starts still stops it.
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
-    relay: _LogRelay | None = None
+    relay = _LogRelay(settings)
     try:
         try:
             console.print(
@@ -171,11 +171,10 @@ def attach_daemon(settings: Settings, state: DaemonState) -> None:
                 markup=False,
                 highlight=False,
             )
-            relay = _LogRelay(settings)
+            relay.start()
             relay.wait()
         except KeyboardInterrupt:
-            if relay is None:
-                relay = _LogRelay(settings)
+            relay.start()  # if the Ctrl+C came before it did; never a second one
             try:
                 stopped = _stop_daemon(settings, STOP_TIMEOUT, force=False, before_report=relay.wait)
                 if stopped is None:
@@ -211,8 +210,20 @@ class _LogRelay:
 
         self._chunks = daemon.follow(settings.data_dir, daemon.FOLLOW_LINES, until_exit=True)
         self._detached = False
+        self._start_tried = False
         self._printing = threading.Lock()
         self._thread = threading.Thread(target=self._relay, daemon=True)
+
+    def start(self) -> None:
+        """Start relaying, at most once.
+
+        Only the first call starts the thread, even if a Ctrl+C interrupted it partway. In the
+        instant between marking the start and starting the thread, a Ctrl+C means no relay at all,
+        never two printing the same lines.
+        """
+        if self._start_tried:
+            return
+        self._start_tried = True
         self._thread.start()
 
     def _relay(self) -> None:
