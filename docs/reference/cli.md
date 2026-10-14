@@ -14,7 +14,12 @@ Complete command reference across all sprints (1–13). For the full list of too
 | Command | Description | Sprint |
 |---------|-------------|--------|
 | `pincer init` | Interactive setup wizard (provider, keys, channels, .env) | 4 |
-| `pincer run` | Start agent (all configured channels + API server) | 1 |
+| `pincer run` | Start agent (all configured channels + API server). If a background Pincer is running, attach to it instead ([Background mode](#background-mode-daemon)) | 1 |
+| `pincer run -d` | Start agent in the background; returns once all channels are up (`--wait-timeout`, default 60 s) | — |
+| `pincer logs` | Print the background agent's log, raw (`-n/--tail N`, `-f/--follow`) | — |
+| `pincer status` | Show whether the background agent is running or starting, with its pid, uptime, port, channels, version and working directory | — |
+| `pincer stop` | Stop the background agent gracefully and wait for it to exit (`--timeout`, default 90 s; `--force` kills) | — |
+| `pincer restart` | Stop the background agent, then start a new one from the current directory and environment | — |
 | `pincer run tasks` | Standalone background-task worker only — no channels/API/MCP export (requires `PINCER_TASK_BROKER=redis`) | 14 |
 | `pincer chat` | CLI chat interface (no messaging app needed) | 4 |
 | `pincer config` | Show current configuration (masked secrets) | 1 |
@@ -26,6 +31,107 @@ Complete command reference across all sprints (1–13). For the full list of too
 | `pincer signal status` | Check Signal API health and registered accounts | 7.5 |
 | `pincer signal test <recipient>` | Send a test message via Signal | 7.5 |
 | `pincer slack setup` | Interactive Slack bot token setup (71 tools) | 11 |
+
+## Background mode (daemon)
+
+`pincer run -d` runs Pincer in the background, without `nohup` or Docker. Everything below is
+scoped to the data directory (`PINCER_DATA_DIR`, default `~/.pincer`). Two Pincers with different
+data directories don't see each other, and a `pincer run tasks` worker is never touched.
+
+```console
+$ pincer run -d
+…startup log…
+Pincer started (pid 4182) — channels: signal  'pincer logs -f' to follow
+
+$ pincer status
+Pincer is running (pid 4182, up 3m 07s) — port 8080, channels: signal, version 0.8.0, cwd /home/me/pincer
+
+$ pincer stop
+Stopping Pincer (pid 4182)…
+Pincer stopped (pid 4182)
+```
+
+**`pincer run -d`**
+- Starts Pincer in a session of its own, so it keeps running after the terminal closes or the SSH
+  session ends.
+- It runs in your current directory with your environment, so it loads the same `.env` a
+  foreground `pincer run` from there would.
+- It shows the startup log as it streams and returns once every channel has started.
+- If Pincer exits before that, you get `Pincer exited before it was ready (exit code N). Last 20
+  lines of …` followed by those lines, and exit code 1.
+- If `--wait-timeout` (default 60 s) passes first, you get `Pincer is still starting after 60 s — it
+  keeps running; check 'pincer logs -f'` and exit code 1. Pincer is left starting, not killed.
+- If it is already running, you get `Pincer is already running (pid 4182, up 1s). Use 'pincer
+  restart' to apply config changes.` and exit code 0.
+
+**`pincer logs`** prints the log raw, with no colours, so `pincer logs | grep ERROR` works.
+
+| Command | Prints |
+|---------|--------|
+| `pincer logs` | The whole current log |
+| `pincer logs -n 100` / `--tail 100` | The last 100 lines |
+| `pincer logs -f` | The last 50 lines, then new lines as they are written. It ends by itself once Pincer has exited, after its last lines. Ctrl+C only stops following. |
+| `pincer logs -f -n 0` | Only new lines |
+
+- The log is `<data_dir>/logs/pincer.log`. It holds everything the process prints: log records, the
+  startup banner and crash tracebacks. Phone numbers are masked, as they are on the terminal.
+- Each `run -d` rotates the previous log to `pincer.log.1`, and keeps five previous sessions
+  (`.1` newest … `.5` oldest). There is no rotation while Pincer runs.
+- When Pincer isn't running, `logs` still prints the last session's log, with `Pincer is not
+  running — showing the last session's log` on stderr. With no log at all it says `No logs yet —
+  start with 'pincer run -d'`. Both exit 0.
+
+**`pincer stop`**
+- Sends SIGTERM, the same graceful shutdown as Ctrl+C or `docker stop`: active calls drain with
+  their spoken ending.
+- It waits until the process has exited, up to `--timeout`. The 90 s default is sized to the voice
+  channel's 60 s call drain, plus time for the worker and the API to stop.
+- It never kills on its own. On timeout it prints `Pincer is still shutting down after 90 s —
+  'pincer stop --force' to kill it` and exits 1.
+- `pincer stop --force` kills the daemon at once, together with its process group (the MCP servers
+  and skills it started), and prints `Pincer killed (pid 4182)`.
+- With nothing running it prints `Pincer is not running` and exits 0, so it's safe in scripts. If a
+  foreground Pincer holds the port, it also tells you to stop that one with Ctrl+C in its terminal.
+
+**`pincer restart`**
+- Runs `stop` with the same `--timeout`, then `run -d` with the same `--wait-timeout`.
+- The new Pincer uses the directory and environment you run `restart` from, so this is how you
+  apply `.env` and `pincer.toml` changes.
+- With nothing running it just starts one (`Pincer is not running — starting it`).
+- If the old one hasn't exited within the timeout, it exits 1 without starting a new one, so two
+  never overlap.
+- There is no `restart --force`. If the old one hangs, run `pincer stop --force`, then
+  `pincer run -d`.
+
+**`pincer run` while a background Pincer is up** attaches to it instead of starting a second
+instance:
+
+```console
+$ pincer run
+Pincer is already running in the background (pid 4182) — attaching
+…the last 50 log lines, then new ones…
+^C
+Stopping Pincer (pid 4182)…
+…the shutdown log…
+Shutdown complete
+Pincer stopped (pid 4182)
+```
+
+- The first Ctrl+C stops Pincer gracefully, as `pincer stop` does, and keeps showing the log until
+  it has exited.
+- A second Ctrl+C during that shutdown only detaches: `Detached — Pincer (pid 4182) keeps shutting
+  down in the background`.
+- Closing the terminal only detaches too. Pincer has a session of its own and never receives the
+  hangup.
+- If Pincer is stopped elsewhere, the attached `run` ends with `Pincer has exited (pid 4182)`.
+
+**Where it isn't available**
+
+| Situation | Message (exit code 1) |
+|-----------|-----------------------|
+| Windows (`run -d`, `logs`, `status`, `stop`, `restart`) | `Daemon mode isn't supported on Windows — use a service manager.` |
+| Inside a container (`run -d`, `restart`) | `Pincer is running inside a container — use 'docker compose up -d' to run it in the background.` |
+| `pincer run tasks -d` | `Daemon mode applies to the full agent only — run 'pincer run tasks' in the foreground.` |
 
 ## Cost & Budget
 

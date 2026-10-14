@@ -118,7 +118,7 @@ You need three things: **Python 3.14+**, **an LLM API key** (Anthropic or OpenAI
 ```bash
 pip install pincer-agent
 pincer init                  # 5-min interactive wizard
-pincer run                   # done — message your bot on Telegram
+pincer run                   # done — message your bot on Telegram (or `pincer run -d` for the background)
 ```
 
 ### Option 2: Docker
@@ -534,7 +534,12 @@ Pincer doesn't just respond — it reaches out.
 
 ```bash
 pincer init                        # interactive setup wizard
-pincer run                         # start agent (all configured channels)
+pincer run                         # start agent (all configured channels); attaches if one runs in the background
+pincer run -d                      # start in the background; returns once all channels are up
+pincer logs [-f] [-n N]            # background agent's log (<data_dir>/logs/pincer.log)
+pincer status                      # running / starting / not running, with pid, uptime, port, channels
+pincer stop [--force]              # graceful stop; waits up to 90 s for calls to drain, never kills unless --force
+pincer restart                     # stop, then start again from here (apply .env / pincer.toml changes)
 pincer run tasks                   # standalone background-task worker (requires PINCER_TASK_BROKER=redis)
 pincer chat                        # CLI chat for testing
 pincer doctor                      # security + config audit (40+ checks)

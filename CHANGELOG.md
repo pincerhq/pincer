@@ -113,6 +113,40 @@ silently open.
 
 ### Added
 
+#### Daemon mode: `pincer run -d`, `logs`, `status`, `stop`, `restart`
+
+Pincer can run in the background without `nohup` or Docker, scoped to its data
+directory. See [CLI Reference → Background mode](docs/reference/cli.md#background-mode-daemon).
+
+- **`pincer run -d`** starts Pincer in its own session (it outlives the terminal),
+  from the caller's working directory and environment, so it loads the same `.env`.
+  It shows the startup log and returns once every channel is up:
+  `Pincer started (pid 4182) — channels: telegram, signal  'pincer logs -f' to follow`.
+  A crash before that prints the last 20 log lines and exits 1. A start slower than
+  `--wait-timeout` (default 60 s) exits 1 and leaves Pincer starting. A second
+  `run -d` reports the running one and exits 0. While a foreground Pincer holds the
+  port, `run -d` refuses.
+- **`pincer logs`** prints `<data_dir>/logs/pincer.log` raw, so it pipes cleanly.
+  `-n/--tail N` limits it to the last N lines. `-f` follows from the last 50 and
+  ends by itself once Pincer has exited. Each start rotates the previous log to
+  `pincer.log.1` and keeps 5 previous sessions. When Pincer isn't running, `logs`
+  shows the last session's log.
+- **`pincer status`** prints one line: running, starting or not running, with
+  the pid, uptime, port, channels, version and the directory the daemon was started
+  from.
+- **`pincer stop`** shuts Pincer down the same graceful way as Ctrl+C (calls drain
+  with their spoken ending). It waits up to `--timeout` (default 90 s, sized to the
+  60 s call drain) and never kills on its own. `--force` kills it.
+- **`pincer restart`** stops it with the same rules, then starts a new one from
+  the current directory and environment. It doesn't start a new one while the old
+  one is still shutting down. It has no `--force`.
+- **Plain `pincer run` while a daemon is up attaches** to it: it follows the log
+  instead of starting a second instance. Ctrl+C stops the daemon gracefully. A
+  second Ctrl+C, or closing the terminal, only detaches.
+- Not supported on Windows (use a service manager) or inside a container (use
+  `docker compose up -d`). `pincer run tasks -d` is refused, because the task worker
+  runs in the foreground.
+
 #### Telephony telemetry and the internal Telephony dashboard
 
 Correlated events, spans and latency metrics across the whole call lifecycle,
@@ -252,6 +286,14 @@ retried callbacks.
 
 ### Fixed
 
+- **SIGTERM (`docker stop`, `pincer stop`) now finishes the graceful shutdown.**
+  uvicorn re-raised the signal when the API server exited. That cancelled the
+  shutdown at the trigger manager, so channels never drained their calls.
+- **`pincer run tasks` shuts down gracefully on SIGTERM**, the same way as on
+  Ctrl+C. Before, it was killed at once.
+- The "port already in use" error no longer suggests `pkill -f 'pincer run'`,
+  which also killed task workers. It points to `pincer stop` or the foreground
+  terminal instead.
 - **Turn telemetry and per-call rows could be written out of order.** Background
   call-row writes are now chained per call, so a late "answered" write can no
   longer resurrect a stale status on a call that has already ended, and a turn's
