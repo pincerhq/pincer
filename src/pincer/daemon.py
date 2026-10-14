@@ -24,6 +24,7 @@ import contextlib
 import fcntl
 import json
 import os
+import shutil
 import signal
 import subprocess  # nosec B404 - re-spawns our own CLI with a fixed argv, no shell
 import time
@@ -302,12 +303,19 @@ def stop(
     `on_wait(state, elapsed)` is called right after signalling and then on every poll.
 
     A daemon without a readable record is never signalled, `force` or not (its pid is unknown);
-    stop only waits for it, and reports no pid.
+    stop only waits for it, and reports no pid. Nor is the record's pid signalled unless, right
+    before, the lease is still held and that pid's process started no later than the daemon took
+    the lease: a process that reused the pid of a daemon since gone started after it.
     """
     state = read_state(data_dir)
     if state is None:
         return StopResult(StopOutcome.NOT_RUNNING)
     pid = state.pid if isinstance(state, DaemonState) else None
+    if pid is not None and isinstance(state, DaemonState):
+        if not _lease_held(data_dir):  # it exited on its own since the record was read
+            return StopResult(StopOutcome.STOPPED, pid)
+        if not _started_by(pid, state.started_at):
+            pid = None
     if pid is not None:
         with contextlib.suppress(ProcessLookupError):
             if force:
@@ -325,6 +333,40 @@ def stop(
         if timeout is not None and elapsed >= timeout:
             return StopResult(StopOutcome.STILL_RUNNING, pid)
         time.sleep(POLL_INTERVAL)
+
+
+def _started_by(pid: int, started_at: str) -> bool:
+    """True when process `pid` started no later than `started_at` (the second the daemon took its
+    lease), so it can be that daemon and not a later process that reused its pid. False when its
+    start time can't be read (it is gone, or `ps` is missing)."""
+    began = _process_start(pid)
+    if began is None:
+        return False
+    try:
+        lease_taken = datetime.fromisoformat(started_at).timestamp()
+    except ValueError:
+        return False
+    # Both are whole seconds: `ps` prints them so, and the lease writes them so.
+    return int(began) <= int(lease_taken)
+
+
+def _process_start(pid: int) -> float | None:
+    """When process `pid` started (epoch seconds), as `ps -o lstart=` reports it; None if it can't tell."""
+    ps = shutil.which("ps")
+    if ps is None:
+        return None
+    try:
+        shown = subprocess.run(  # nosec B603 - a fixed command on an int pid, no shell
+            [ps, "-o", "lstart=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            # English month names for strptime; the same local time zone as mktime below.
+            env={**os.environ, "LC_ALL": "C"},
+        ).stdout.strip()
+        return time.mktime(time.strptime(shown, "%a %b %d %H:%M:%S %Y"))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 def _kill_group(pid: int) -> None:

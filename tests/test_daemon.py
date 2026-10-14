@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -896,3 +896,29 @@ def test_a_start_that_stops_waiting_early_still_keeps_out_a_rival_until_its_chil
     assert f"fake child {child} starting" in daemon.log_path(data_dir).read_text()
     assert not daemon.log_path(data_dir).with_name("pincer.log.1").exists()
     daemon.stop(data_dir)
+
+
+@pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
+def test_stop_never_signals_a_pid_that_started_after_the_daemon_took_its_lease(
+    data_dir: Path, tmp_path: Path, force: bool
+) -> None:
+    # The record names a process that started after the lease was taken: a pid reused once the
+    # daemon it named had gone. While another daemon still holds the lease, stop must leave it be.
+    state = _start(data_dir, mode="ignore-sigterm").state
+    assert isinstance(state, daemon.DaemonState)
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        earlier = (datetime.fromisoformat(state.started_at) - timedelta(minutes=5)).isoformat()
+        record = replace(state, pid=bystander.pid, started_at=earlier)
+        (data_dir / daemon.PID_FILE).write_text(json.dumps(asdict(record)))
+
+        result = within(10.0, lambda: daemon.stop(data_dir, timeout=0.5, force=force))
+
+        assert result.outcome is StopOutcome.STILL_RUNNING
+        assert result.pid is None
+        time.sleep(0.2)  # a signal sent on the way would have landed by now
+        assert bystander.poll() is None
+        assert alive(state.pid)
+    finally:
+        bystander.kill()
+        bystander.wait()
