@@ -8,40 +8,18 @@ is part of what is being tested here).
 
 from __future__ import annotations
 
-import http.server
-import os
 import signal
-import socket
 import subprocess
 import sys
-import threading
-import time
 from pathlib import Path
 
 import pytest
-from terminal_command import pincer_command
+from daemon_support import free_port, pincer_command, scratch_env, signal_channel_env, wait_for_output
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 
 STARTUP_TIMEOUT = 90.0
 SHUTDOWN_TIMEOUT = 60.0
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-@pytest.fixture
-def signal_stub():  # type: ignore[no-untyped-def]
-    """Answers the Signal channel's health check and polls (with 404s, which it only warns about)."""
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{server.server_address[1]}"
-    server.shutdown()
-    server.server_close()
 
 
 def _signal_after_banner(
@@ -51,25 +29,12 @@ def _signal_after_banner(
     home, cwd, data = tmp_path / "home", tmp_path / "cwd", tmp_path / "data"
     for path in (home, cwd, data):
         path.mkdir()
-    env = {
-        "HOME": str(home),
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "PYTHONUNBUFFERED": "1",
-        "HF_HUB_OFFLINE": "1",
-        "PINCER_DATA_DIR": str(data),
-        "PINCER_ANTHROPIC_API_KEY": "sk-ant-test-dummy",
-        "PINCER_LOG_LEVEL": "INFO",
-        **extra_env,
-    }
+    env = scratch_env(home, data, PYTHONUNBUFFERED="1", **extra_env)
     out_path = tmp_path / "pincer.out"
     with out_path.open("wb") as out:
         proc = subprocess.Popen(pincer_command(*args), cwd=cwd, env=env, stdout=out, stderr=subprocess.STDOUT)
     try:
-        deadline = time.monotonic() + STARTUP_TIMEOUT
-        while "is running!" not in out_path.read_text(errors="replace"):
-            assert proc.poll() is None, out_path.read_text(errors="replace")
-            assert time.monotonic() < deadline, "pincer never started:\n" + out_path.read_text(errors="replace")
-            time.sleep(0.2)
+        wait_for_output(proc, out_path, "is running!", STARTUP_TIMEOUT, "pincer")
 
         proc.send_signal(sig)
         exit_code = proc.wait(timeout=SHUTDOWN_TIMEOUT)
@@ -87,11 +52,8 @@ def test_a_signal_runs_the_whole_graceful_shutdown(tmp_path: Path, signal_stub: 
         ["run"],
         {
             "PINCER_DASHBOARD_HOST": "127.0.0.1",
-            "PINCER_DASHBOARD_PORT": str(_free_port()),
-            "PINCER_SIGNAL_ENABLED": "true",
-            "PINCER_SIGNAL_API_URL": signal_stub,
-            "PINCER_SIGNAL_PHONE_NUMBER": "+15550000000",
-            "PINCER_SIGNAL_RECEIVE_MODE": "poll",
+            "PINCER_DASHBOARD_PORT": str(free_port()),
+            **signal_channel_env(signal_stub),
         },
         sig,
     )
@@ -102,20 +64,6 @@ def test_a_signal_runs_the_whole_graceful_shutdown(tmp_path: Path, signal_stub: 
     assert "Shutdown complete" in output, output
     assert "Traceback" not in output, output
     assert exit_code == 0
-
-
-@pytest.fixture
-def redis_url() -> str:
-    """A Redis for the task worker's broker, if one is configured.
-
-    Opt-in, like `PINCER_TEST_PG_URL`; locally, e.g.
-    `docker run -d --rm --name pincer-tasks-redis-test -p 127.0.0.1:16389:6379 redis:7-alpine` and
-    `PINCER_TEST_REDIS_URL=redis://127.0.0.1:16389/0`.
-    """
-    url = os.environ.get("PINCER_TEST_REDIS_URL")
-    if not url:
-        pytest.skip("PINCER_TEST_REDIS_URL not set")
-    return url
 
 
 @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"])

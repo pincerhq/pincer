@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 import daemon_fake_child
 import pytest
+from daemon_support import RAW_LOG, alive, append_log, numbered, within, write_log
 
 from pincer import daemon
 from pincer.daemon import StartOutcome, StopOutcome
@@ -48,21 +49,6 @@ def _start(data_dir: Path, mode: str = "ready", **kwargs: object) -> daemon.Star
     return daemon.start(data_dir, daemon_fake_child.argv(mode, data_dir), **options)  # type: ignore[arg-type]
 
 
-def _alive(pid: int) -> bool:
-    """True while `pid` runs. Reaps it first when it is our own child, so a zombie reads as dead."""
-    try:
-        reaped, _ = os.waitpid(pid, os.WNOHANG)
-        if reaped == pid:
-            return False
-    except ChildProcessError:
-        pass
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
 def _wait_for_state(data_dir: Path, state: str) -> daemon.DaemonState:
     deadline = time.monotonic() + WAIT_TIMEOUT
     while time.monotonic() < deadline:
@@ -71,11 +57,6 @@ def _wait_for_state(data_dir: Path, state: str) -> daemon.DaemonState:
             return current
         time.sleep(0.02)
     raise AssertionError(f"daemon never reached {state!r}")
-
-
-def _fake_children(tmp_path: Path) -> list[int]:
-    found = subprocess.run(["pgrep", "-f", f"daemon_fake_child.py .* {tmp_path}"], capture_output=True, text=True)
-    return [int(pid) for pid in found.stdout.split()]
 
 
 @pytest.fixture
@@ -98,7 +79,7 @@ def test_start_returns_ready_child_and_stop_stops_it(data_dir: Path) -> None:
     assert result.outcome is StartOutcome.READY
     assert result.state is not None
     assert result.state.channels == ["telegram", "signal"]
-    assert _alive(result.state.pid)
+    assert alive(result.state.pid)
     # Already in the log while the daemon runs, not only once its output is flushed at exit.
     assert "Pincer is running! Channels: telegram, signal." in daemon.log_path(data_dir).read_text()
 
@@ -139,7 +120,7 @@ def test_stop_returns_only_after_the_daemon_has_exited(data_dir: Path) -> None:
 
     daemon.stop(data_dir)
 
-    assert not _alive(pid)
+    assert not alive(pid)
     # It went through the child's graceful path, not a kill.
     assert "Shutdown complete" in daemon.log_path(data_dir).read_text()
 
@@ -179,7 +160,7 @@ def test_daemon_outlives_its_launcher_in_a_session_of_its_own(data_dir: Path) ->
     state = daemon.read_state(data_dir)
     assert state is not None
     assert state.pid == pid
-    assert _alive(pid)
+    assert alive(pid)
     assert os.getsid(pid) == pid
     assert os.getsid(pid) != os.getsid(0)
 
@@ -246,8 +227,8 @@ def test_daemons_on_different_data_dirs_do_not_see_each_other(data_dir: Path, tm
         assert second.state.pid != first
 
         daemon.stop(data_dir)
-        assert not _alive(first)
-        assert _alive(second.state.pid)
+        assert not alive(first)
+        assert alive(second.state.pid)
     finally:
         daemon.stop(other_dir)
 
@@ -295,7 +276,7 @@ def test_a_slow_start_times_out_without_touching_the_child_even_with_its_port_op
     # Listening already, yet not ready: the port says nothing about readiness.
     with socket.create_connection(("127.0.0.1", result.state.port), timeout=1):
         pass
-    assert _alive(result.state.pid)
+    assert alive(result.state.pid)
     assert _wait_for_state(data_dir, "ready").pid == result.state.pid
     daemon.stop(data_dir)
 
@@ -320,7 +301,7 @@ def test_a_start_while_one_is_running_or_starting_spawns_nothing(data_dir: Path,
     assert second.outcome is StartOutcome.ALREADY_RUNNING
     assert second.state is not None
     assert second.state.state == "starting"
-    assert len(_fake_children(tmp_path)) == 1
+    assert len(daemon_fake_child.children_under(tmp_path)) == 1
     # The running daemon's log was not rotated away.
     assert not daemon.log_path(data_dir).with_name("pincer.log.1").exists()
 
@@ -331,7 +312,7 @@ def test_a_start_while_one_is_running_or_starting_spawns_nothing(data_dir: Path,
     assert third.outcome is StartOutcome.ALREADY_RUNNING
     assert third.state is not None
     assert third.state.state == "ready"
-    assert len(_fake_children(tmp_path)) == 1
+    assert len(daemon_fake_child.children_under(tmp_path)) == 1
     daemon.stop(data_dir)
 
 
@@ -343,7 +324,7 @@ def test_a_start_racing_another_before_its_child_takes_the_lease_waits_and_rotat
     first.start()
     # The first child exists but has not taken the lease yet: the window a second `run -d` can land in.
     deadline = time.monotonic() + WAIT_TIMEOUT
-    while not _fake_children(tmp_path):
+    while not daemon_fake_child.children_under(tmp_path):
         assert time.monotonic() < deadline
         time.sleep(0.02)
     assert daemon.read_state(data_dir) is None
@@ -357,7 +338,7 @@ def test_a_start_racing_another_before_its_child_takes_the_lease_waits_and_rotat
     assert winner is not None
     assert second.state is not None
     assert second.state.pid == winner.pid
-    assert _fake_children(tmp_path) == [winner.pid]
+    assert daemon_fake_child.children_under(tmp_path) == [winner.pid]
     assert f"fake child {winner.pid} starting" in daemon.log_path(data_dir).read_text()
     assert not daemon.log_path(data_dir).with_name("pincer.log.1").exists()
     daemon.stop(data_dir)
@@ -367,7 +348,7 @@ def test_a_daemon_killed_with_sigkill_reads_as_gone_and_the_next_start_succeeds(
     first = _start(data_dir).state
     assert first is not None
     os.kill(first.pid, signal.SIGKILL)
-    while _alive(first.pid):
+    while alive(first.pid):
         time.sleep(0.02)
     # Its record is still on disk, naming a dead pid.
     assert json.loads((data_dir / daemon.PID_FILE).read_text())["pid"] == first.pid
@@ -411,7 +392,7 @@ def test_stop_waits_out_a_slow_shutdown_within_its_timeout(data_dir: Path) -> No
 
     assert result.outcome is StopOutcome.STOPPED
     assert time.monotonic() - began >= daemon_fake_child.SLOW_SHUTDOWN_SECONDS - 0.2
-    assert not _alive(pid)
+    assert not alive(pid)
     assert "Shutdown complete" in daemon.log_path(data_dir).read_text()
 
 
@@ -419,24 +400,24 @@ def test_stop_gives_up_after_its_timeout_and_never_kills(data_dir: Path) -> None
     pid = _start(data_dir, mode="ignore-sigterm").state.pid  # type: ignore[union-attr]
 
     began = time.monotonic()
-    result = daemon_fake_child.within(10.0, lambda: daemon.stop(data_dir, timeout=1.0))
+    result = within(10.0, lambda: daemon.stop(data_dir, timeout=1.0))
 
     assert result.outcome is StopOutcome.STILL_RUNNING
     assert result.pid == pid
     assert 1.0 <= time.monotonic() - began < 3.0
     time.sleep(0.5)  # a kill sent on the way out would have landed by now
-    assert _alive(pid)
+    assert alive(pid)
     assert daemon.read_state(data_dir) is not None
 
 
 def test_force_kills_at_once_and_the_next_start_works(data_dir: Path) -> None:
     pid = _start(data_dir, mode="ignore-sigterm").state.pid  # type: ignore[union-attr]
 
-    result = daemon_fake_child.within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=True))
+    result = within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=True))
 
     assert result.outcome is StopOutcome.KILLED
     assert result.pid == pid
-    assert not _alive(pid)
+    assert not alive(pid)
     assert daemon.read_state(data_dir) is None
     assert _start(data_dir).outcome is StartOutcome.READY
     daemon.stop(data_dir)
@@ -475,15 +456,15 @@ def test_force_kills_the_whole_process_group(data_dir: Path) -> None:
     grandchild = int((data_dir / "grandchild.pid").read_text())
     assert os.getpgid(grandchild) == pid
 
-    result = daemon_fake_child.within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=True))
+    result = within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=True))
 
     assert result.outcome is StopOutcome.KILLED
-    assert not _alive(pid)
+    assert not alive(pid)
     # Reparented once the daemon died; give init a moment to reap it.
     deadline = time.monotonic() + 3.0
-    while _alive(grandchild) and time.monotonic() < deadline:
+    while alive(grandchild) and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert not _alive(grandchild)
+    assert not alive(grandchild)
 
 
 def test_force_kills_only_the_daemon_when_it_does_not_lead_its_group(data_dir: Path) -> None:
@@ -493,7 +474,7 @@ def test_force_kills_only_the_daemon_when_it_does_not_lead_its_group(data_dir: P
         _wait_for_state(data_dir, "ready")
         assert os.getpgid(child.pid) == os.getpgid(0) != child.pid
 
-        result = daemon_fake_child.within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=True))
+        result = within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=True))
 
         assert result.outcome is StopOutcome.KILLED
         assert child.wait(timeout=5) == -signal.SIGKILL
@@ -501,26 +482,6 @@ def test_force_kills_only_the_daemon_when_it_does_not_lead_its_group(data_dir: P
         if child.poll() is None:
             child.kill()
             child.wait()
-
-
-# Rich markup, a CRLF line, a byte that isn't UTF-8 and no final newline: whatever a decode or a console would change.
-RAW_LOG = b"plain line\n[bold]markup[/bold] kept\r\nbad byte \xff here\nno newline at the end"
-
-
-def _write_log(data_dir: Path, content: bytes) -> Path:
-    log = daemon.log_path(data_dir)
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_bytes(content)
-    return log
-
-
-def _append_log(data_dir: Path, content: bytes) -> None:
-    with daemon.log_path(data_dir).open("ab") as log:
-        log.write(content)
-
-
-def _numbered(first: int, last: int) -> bytes:
-    return b"".join(f"numbered {n}\n".encode() for n in range(first, last + 1))
 
 
 class _Follower:
@@ -546,7 +507,7 @@ class _Follower:
 
 
 def test_follow_without_until_exit_gives_the_whole_file_byte_for_byte(data_dir: Path) -> None:
-    _write_log(data_dir, RAW_LOG)
+    write_log(data_dir, RAW_LOG)
 
     assert b"".join(daemon.follow(data_dir, None, until_exit=False)) == RAW_LOG
 
@@ -554,9 +515,9 @@ def test_follow_without_until_exit_gives_the_whole_file_byte_for_byte(data_dir: 
 @pytest.mark.parametrize(
     ("content", "lines", "expected"),
     [
-        (_numbered(1, 150), 100, _numbered(51, 150)),
-        (_numbered(1, 150), 500, _numbered(1, 150)),
-        (_numbered(1, 150), 0, b""),
+        (numbered(1, 150), 100, numbered(51, 150)),
+        (numbered(1, 150), 500, numbered(1, 150)),
+        (numbered(1, 150), 0, b""),
         (b"a\nb\n", 1, b"b\n"),
         (b"a\nb\nc", 2, b"b\nc"),
         # Lines longer than the backward read's block.
@@ -569,7 +530,7 @@ def test_follow_without_until_exit_gives_the_whole_file_byte_for_byte(data_dir: 
     ids=["last-100-of-150", "more-than-there-are", "zero", "trailing-newline", "unterminated-last", "long-lines"],
 )
 def test_follow_from_the_last_n_lines(data_dir: Path, content: bytes, lines: int, expected: bytes) -> None:
-    _write_log(data_dir, content)
+    write_log(data_dir, content)
 
     assert b"".join(daemon.follow(data_dir, lines, until_exit=False)) == expected
 
@@ -578,11 +539,11 @@ def test_follow_finds_the_tail_of_a_huge_log_without_reading_all_of_it(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # 64 MiB (sparse where the filesystem can), of which only the last lines are text.
-    log_file = _write_log(data_dir, b"")
+    log_file = write_log(data_dir, b"")
     with log_file.open("r+b") as log:
         log.truncate(64 << 20)
         log.seek(64 << 20)
-        log.write(_numbered(1, 200))
+        log.write(numbered(1, 200))
     read: list[int] = []
 
     class _Counting(io.FileIO):
@@ -614,20 +575,20 @@ def test_follow_finds_the_tail_of_a_huge_log_without_reading_all_of_it(
 
     tail = b"".join(daemon.follow(data_dir, 5, until_exit=False))
 
-    assert tail == _numbered(196, 200)
+    assert tail == numbered(196, 200)
     # The tail is found reading backward from the end, not by reading the file through.
     assert 0 < sum(read) < 2 * daemon.READ_BLOCK
 
 
 def test_follow_gives_the_last_lines_then_live_ones_and_ends_after_the_shutdown_traceback(data_dir: Path) -> None:
     _start(data_dir, mode="raise-on-sigterm")
-    _append_log(data_dir, _numbered(1, 80))
+    append_log(data_dir, numbered(1, 80))
 
     follower = _Follower(daemon.follow(data_dir, daemon.FOLLOW_LINES, until_exit=True))
     follower.wait_for(b"numbered 80\n")
-    assert follower.data == _numbered(31, 80)
+    assert follower.data == numbered(31, 80)
 
-    _append_log(data_dir, b"live 1\n")
+    append_log(data_dir, b"live 1\n")
     follower.wait_for(b"live 1\n")
     assert not follower.done.is_set()
 
@@ -639,7 +600,7 @@ def test_follow_gives_the_last_lines_then_live_ones_and_ends_after_the_shutdown_
 
 
 def test_follow_reads_once_more_after_seeing_the_daemon_gone(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _write_log(data_dir, b"first\n")
+    write_log(data_dir, b"first\n")
     probes: list[bool] = []
     real_lease_held = daemon._lease_held
 
@@ -648,13 +609,13 @@ def test_follow_reads_once_more_after_seeing_the_daemon_gone(data_dir: Path, mon
             return real_lease_held(path)
         # The daemon writes its last line and exits between two polls.
         if probes:
-            _append_log(data_dir, b"final line\n")
+            append_log(data_dir, b"final line\n")
         probes.append(not probes)
         return probes[-1]
 
     monkeypatch.setattr(daemon, "_lease_held", lease_held)
 
-    followed = daemon_fake_child.within(5.0, lambda: b"".join(daemon.follow(data_dir, None, until_exit=True)))
+    followed = within(5.0, lambda: b"".join(daemon.follow(data_dir, None, until_exit=True)))
 
     assert followed == b"first\nfinal line\n"
 
@@ -669,7 +630,7 @@ def test_follow_ends_when_a_restart_rotates_its_log_inside_one_poll(data_dir: Pa
     second = _start(data_dir).state
     assert second is not None
 
-    seen += daemon_fake_child.within(5.0, lambda: b"".join(following))
+    seen += within(5.0, lambda: b"".join(following))
 
     assert f"fake child {first.pid} starting".encode() in seen
     assert seen.endswith(b"Shutdown complete\n")
@@ -680,13 +641,11 @@ def test_follow_ends_when_a_restart_rotates_its_log_inside_one_poll(data_dir: Pa
 def test_follow_with_no_daemon_running_gives_the_tail_and_ends(data_dir: Path) -> None:
     _start(data_dir)
     daemon.stop(data_dir)
-    _append_log(data_dir, _numbered(1, 80))
+    append_log(data_dir, numbered(1, 80))
 
-    followed = daemon_fake_child.within(
-        2.0, lambda: b"".join(daemon.follow(data_dir, daemon.FOLLOW_LINES, until_exit=True))
-    )
+    followed = within(2.0, lambda: b"".join(daemon.follow(data_dir, daemon.FOLLOW_LINES, until_exit=True)))
 
-    assert followed == _numbered(31, 80)
+    assert followed == numbered(31, 80)
 
 
 # ── probes never pass for a daemon (review #1) ─────────────────────────────
@@ -784,7 +743,7 @@ def _lingering(data_dir: Path) -> int:
     while (data_dir / daemon.PID_FILE).exists():
         assert time.monotonic() < deadline
         time.sleep(0.02)
-    assert _alive(pid)
+    assert alive(pid)
     return pid
 
 
@@ -801,17 +760,17 @@ def test_a_start_while_a_daemon_lingers_spawns_nothing_and_says_so(data_dir: Pat
 
     assert result.outcome is StartOutcome.ALREADY_RUNNING
     assert isinstance(result.state, daemon.DaemonWithoutRecord)
-    assert _fake_children(tmp_path) == [pid]
+    assert daemon_fake_child.children_under(tmp_path) == [pid]
 
 
 def test_stop_while_a_daemon_lingers_waits_for_it_without_signalling(data_dir: Path) -> None:
     pid = _lingering(data_dir)
 
-    result = daemon_fake_child.within(15.0, lambda: daemon.stop(data_dir, timeout=10.0))
+    result = within(15.0, lambda: daemon.stop(data_dir, timeout=10.0))
 
     assert result.outcome is StopOutcome.STOPPED
     assert result.pid is None
-    assert not _alive(pid)
+    assert not alive(pid)
     assert "left the lease" in daemon.log_path(data_dir).read_text()
 
 
@@ -820,11 +779,11 @@ def test_a_record_this_version_cant_read_is_never_signalled(data_dir: Path) -> N
     (data_dir / daemon.PID_FILE).write_text('{"pid": "not a number", "phase": "?"}')
 
     assert isinstance(daemon.read_state(data_dir), daemon.DaemonWithoutRecord)
-    result = daemon_fake_child.within(10.0, lambda: daemon.stop(data_dir, timeout=1.0))
+    result = within(10.0, lambda: daemon.stop(data_dir, timeout=1.0))
 
     assert result.outcome is StopOutcome.STILL_RUNNING
     assert result.pid is None
-    assert _alive(pid)
+    assert alive(pid)
     os.kill(pid, signal.SIGTERM)
 
 

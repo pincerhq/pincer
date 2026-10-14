@@ -33,17 +33,12 @@ import signal
 import socket
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from types import FrameType
-from typing import TYPE_CHECKING
 
 from pincer.cli._shared import _setup_logging
 from pincer.daemon import DaemonLease
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 CHANNELS = ["telegram", "signal"]
 PORT = 8080
@@ -64,24 +59,20 @@ def argv(mode: str, data_dir: Path) -> list[str]:
     return [sys.executable, __file__, mode, str(data_dir)]
 
 
+def children_under(directory: Path) -> list[int]:
+    """The pids of the fake children whose DATA_DIR lies under `directory`, found by their command line."""
+    return _pgrep(f"{Path(__file__).name} .* {directory}")
+
+
 def kill_all_under(directory: Path) -> None:
     """SIGKILL every fake child (and grandchild) under `directory` — test cleanup that doesn't trust the lease."""
-    pids: list[str] = []
-    for pattern in (f"{Path(__file__).name} .* {directory}", f"{GRANDCHILD_MARK} {directory}"):
-        pids += subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split()
-    for pid in pids:
+    for pid in [*children_under(directory), *_pgrep(f"{GRANDCHILD_MARK} {directory}")]:
         with contextlib.suppress(ProcessLookupError):
-            os.kill(int(pid), signal.SIGKILL)
+            os.kill(pid, signal.SIGKILL)
 
 
-def within[T](seconds: float, call: Callable[[], T]) -> T:
-    """`call()`, failing (instead of hanging the suite) if it hasn't returned after `seconds`."""
-    box: list[T] = []
-    worker = threading.Thread(target=lambda: box.append(call()), daemon=True)
-    worker.start()
-    worker.join(seconds)
-    assert box, f"still blocked after {seconds} s"
-    return box[0]
+def _pgrep(pattern: str) -> list[int]:
+    return [int(pid) for pid in subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split()]
 
 
 class _Terminated(Exception):

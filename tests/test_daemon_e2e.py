@@ -10,7 +10,6 @@ stub, since an agent with no channel never starts. The tasks-worker case also ne
 from __future__ import annotations
 
 import contextlib
-import http.server
 import json
 import os
 import re
@@ -18,13 +17,12 @@ import signal
 import socket
 import subprocess
 import sys
-import threading
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from daemon_support import alive, free_port, scratch_env, signal_channel_env, wait_for_output
 
 from pincer import __version__, daemon
 
@@ -39,12 +37,6 @@ pytestmark = [
 # Generous: a cold start loads models and runs migrations.
 WAIT_TIMEOUT = 90
 COMMAND_TIMEOUT = WAIT_TIMEOUT + 30
-
-
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
 
 
 @dataclass
@@ -72,36 +64,18 @@ class _Scratch:
 
 
 @pytest.fixture
-def signal_stub() -> Iterator[str]:
-    """Answers the Signal channel's health check and polls (with 404s, which it only warns about)."""
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    yield f"http://127.0.0.1:{server.server_address[1]}"
-    server.shutdown()
-    server.server_close()
-
-
-@pytest.fixture
 def scratch(tmp_path: Path, signal_stub: str) -> Iterator[_Scratch]:
     home, cwd, data = tmp_path / "home", tmp_path / "cwd", tmp_path / "data"
     for path in (home, cwd, data):
         path.mkdir()
-    port = _free_port()
-    env = {
-        "HOME": str(home),
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "HF_HUB_OFFLINE": "1",
-        "PINCER_DATA_DIR": str(data),
-        "PINCER_ANTHROPIC_API_KEY": "sk-ant-test-dummy",
-        "PINCER_LOG_LEVEL": "INFO",
-        "PINCER_DASHBOARD_HOST": "127.0.0.1",
-        "PINCER_DASHBOARD_PORT": str(port),
-        "PINCER_SIGNAL_ENABLED": "true",
-        "PINCER_SIGNAL_API_URL": signal_stub,
-        "PINCER_SIGNAL_PHONE_NUMBER": "+15550000000",
-        "PINCER_SIGNAL_RECEIVE_MODE": "poll",
-    }
+    port = free_port()
+    env = scratch_env(
+        home,
+        data,
+        PINCER_DASHBOARD_HOST="127.0.0.1",
+        PINCER_DASHBOARD_PORT=str(port),
+        **signal_channel_env(signal_stub),
+    )
     yield (scratch := _Scratch(cwd, data, port, env))
     # A failed test must not leave Pincer running: kill what it started, by the pids it saw, plus
     # whatever daemon still holds this data dir's lease (a `run -d` that timed out printed no pid).
@@ -121,14 +95,6 @@ def _start(scratch: _Scratch) -> int:
     assert started.returncode == 0, started.stdout + started.stderr
     assert match, started.stdout
     return int(match.group(1))
-
-
-def _gone(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    return False
 
 
 def test_run_detach_status_logs_and_stop_against_real_pincer(scratch: _Scratch) -> None:
@@ -159,7 +125,7 @@ def test_run_detach_status_logs_and_stop_against_real_pincer(scratch: _Scratch) 
     stopped = scratch.pincer("stop")
     assert stopped.returncode == 0, stopped.stdout + stopped.stderr
     assert stopped.stdout.splitlines() == [f"Stopping Pincer (pid {pid})…", f"Pincer stopped (pid {pid})"]
-    assert _gone(pid)
+    assert not alive(pid)
     with socket.create_server(("127.0.0.1", scratch.port)):  # the port is free again
         pass
     log = scratch.log()
@@ -167,15 +133,6 @@ def test_run_detach_status_logs_and_stop_against_real_pincer(scratch: _Scratch) 
     assert "Shutdown complete" in log
     assert "Traceback" not in log
     assert scratch.pincer("status").stdout == "Pincer is not running\n"
-
-
-@pytest.fixture
-def redis_url() -> str:
-    """A Redis for the task worker's broker, if one is configured (see tests/test_cli_run_shutdown.py)."""
-    url = os.environ.get("PINCER_TEST_REDIS_URL")
-    if not url:
-        pytest.skip("PINCER_TEST_REDIS_URL not set")
-    return url
 
 
 def test_a_tasks_worker_outlives_pincer_stop(scratch: _Scratch, redis_url: str, tmp_path: Path) -> None:
@@ -193,11 +150,7 @@ def test_a_tasks_worker_outlives_pincer_stop(scratch: _Scratch, redis_url: str, 
         )
     scratch.pids.append(worker.pid)
     try:
-        deadline = time.monotonic() + WAIT_TIMEOUT
-        while "Tasks worker is running!" not in out_path.read_text(errors="replace"):
-            assert worker.poll() is None, out_path.read_text(errors="replace")
-            assert time.monotonic() < deadline, "the worker never started:\n" + out_path.read_text(errors="replace")
-            time.sleep(0.2)
+        wait_for_output(worker, out_path, "Tasks worker is running!", WAIT_TIMEOUT, "the worker")
         _start(scratch)
 
         stopped = scratch.pincer("stop")

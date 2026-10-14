@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 
 import daemon_fake_child
 import pytest
-from terminal_command import pincer_command
+from daemon_support import RAW_LOG, alive, append_log, free_port, numbered, pincer_command, within, write_log
 from typer.testing import CliRunner, Result
 
 from pincer import config, daemon
@@ -43,17 +43,6 @@ PATCHED_STOP_TIMEOUT_RUN = (
 )
 
 
-def _free_port() -> int:
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return int(s.getsockname()[1])
-
-
-def _fake_children(tmp_path: Path) -> list[str]:
-    found = subprocess.run(["pgrep", "-f", f"daemon_fake_child.py .* {tmp_path}"], capture_output=True, text=True)
-    return found.stdout.split()
-
-
 @pytest.fixture
 def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path = tmp_path / "data"
@@ -61,7 +50,7 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     settings = MagicMock()
     settings.data_dir = path
     settings.dashboard_host = "127.0.0.1"
-    settings.dashboard_port = _free_port()
+    settings.dashboard_port = free_port()
     settings.log_level.value = "WARNING"
     settings.telemetry_dsn = None
     settings.daily_budget_usd = 5.0
@@ -124,7 +113,7 @@ def test_daemon_child_runs_the_agent_inside_the_lease(data_dir: Path, monkeypatc
 
     monkeypatch.setattr("pincer.cli.run._run_agent", _run_agent)
 
-    result = daemon_fake_child.within(10.0, lambda: runner.invoke(app, ["run", "--daemon-child"]))
+    result = within(10.0, lambda: runner.invoke(app, ["run", "--daemon-child"]))
 
     assert result.exit_code == 0, result.output
     assert states == ["starting", "ready"]
@@ -182,7 +171,7 @@ def test_a_second_run_detach_reports_the_running_daemon_and_spawns_nothing(
         rf"Pincer is already running \(pid {state.pid}, up \d+s\)\. Use 'pincer restart' to apply config changes\.",
         second.output,
     ), second.output
-    assert _fake_children(tmp_path) == [str(state.pid)]
+    assert daemon_fake_child.children_under(tmp_path) == [state.pid]
 
 
 def test_run_detach_refuses_while_something_else_holds_the_port(data_dir: Path, tmp_path: Path) -> None:
@@ -192,7 +181,7 @@ def test_run_detach_refuses_while_something_else_holds_the_port(data_dir: Path, 
 
     assert result.exit_code == 1
     assert f"A foreground Pincer is running on :{port} — stop it with Ctrl+C in its terminal" in result.output
-    assert _fake_children(tmp_path) == []
+    assert daemon_fake_child.children_under(tmp_path) == []
     assert not daemon.log_path(data_dir).exists()
 
 
@@ -229,17 +218,17 @@ def test_stop_times_out_without_killing_then_force_kills(
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     pid = daemon.read_state(data_dir).pid  # type: ignore[union-attr]
 
-    timed_out = daemon_fake_child.within(10.0, lambda: runner.invoke(app, ["stop", "--timeout", "1"]))
+    timed_out = within(10.0, lambda: runner.invoke(app, ["stop", "--timeout", "1"]))
 
     assert timed_out.exit_code == 1
     assert "Pincer is still shutting down after 1 s — 'pincer stop --force' to kill it" in timed_out.output
-    assert _fake_children(tmp_path) == [str(pid)]
+    assert daemon_fake_child.children_under(tmp_path) == [pid]
 
-    forced = daemon_fake_child.within(10.0, lambda: runner.invoke(app, ["stop", "--force"]))
+    forced = within(10.0, lambda: runner.invoke(app, ["stop", "--force"]))
 
     assert forced.exit_code == 0, forced.output
     assert f"Pincer killed (pid {pid})" in forced.output
-    assert _fake_children(tmp_path) == []
+    assert daemon_fake_child.children_under(tmp_path) == []
     _child_mode(monkeypatch, "ready", data_dir)
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
 
@@ -284,25 +273,8 @@ def test_stop_reports_a_daemon_it_may_not_signal(data_dir: Path, monkeypatch: py
     assert daemon.read_state(data_dir) is not None
 
 
-# Rich markup, a CRLF line, a byte that isn't UTF-8 and no final newline: whatever a decode or a console would change.
-RAW_LOG = b"plain line\n[bold]markup[/bold] kept\r\nbad byte \xff here\nno newline at the end"
 NOT_RUNNING_NOTE = "Pincer is not running — showing the last session's log"
 NO_LOGS = "No logs yet — start with 'pincer run -d'"
-
-
-def _write_log(data_dir: Path, content: bytes) -> None:
-    log = daemon.log_path(data_dir)
-    log.parent.mkdir(parents=True, exist_ok=True)
-    log.write_bytes(content)
-
-
-def _append_log(data_dir: Path, content: bytes) -> None:
-    with daemon.log_path(data_dir).open("ab") as log:
-        log.write(content)
-
-
-def _numbered(first: int, last: int) -> bytes:
-    return b"".join(f"numbered {n}\n".encode() for n in range(first, last + 1))
 
 
 @pytest.fixture
@@ -333,7 +305,7 @@ def pincer_logs(data_dir: Path, tmp_path: Path) -> Iterator[Spawn]:
 
 
 def test_logs_prints_the_whole_file_raw(data_dir: Path) -> None:
-    _write_log(data_dir, RAW_LOG)
+    write_log(data_dir, RAW_LOG)
 
     result = runner.invoke(app, ["logs"])
 
@@ -343,12 +315,12 @@ def test_logs_prints_the_whole_file_raw(data_dir: Path) -> None:
 
 @pytest.mark.parametrize("flag", ["-n", "--tail"])
 def test_logs_tail_prints_exactly_the_last_lines(data_dir: Path, flag: str) -> None:
-    _write_log(data_dir, _numbered(1, 150))
+    write_log(data_dir, numbered(1, 150))
 
     result = runner.invoke(app, ["logs", flag, "100"])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout_bytes == _numbered(51, 150)
+    assert result.stdout_bytes == numbered(51, 150)
 
 
 def test_logs_of_a_stopped_daemon_prints_its_last_session_under_a_note(data_dir: Path) -> None:
@@ -368,12 +340,12 @@ def test_logs_of_a_stopped_daemon_prints_its_last_session_under_a_note(data_dir:
 def test_logs_follow_with_no_daemon_running_prints_the_tail_and_exits(data_dir: Path) -> None:
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     assert runner.invoke(app, ["stop"]).exit_code == 0
-    _append_log(data_dir, _numbered(1, 80))
+    append_log(data_dir, numbered(1, 80))
 
-    result = daemon_fake_child.within(10.0, lambda: runner.invoke(app, ["logs", "-f"]))
+    result = within(10.0, lambda: runner.invoke(app, ["logs", "-f"]))
 
     assert result.exit_code == 0, result.output
-    assert result.stdout_bytes == _numbered(31, 80)
+    assert result.stdout_bytes == numbered(31, 80)
     assert NOT_RUNNING_NOTE in result.stderr
 
 
@@ -401,14 +373,14 @@ def test_logs_follow_prints_the_last_50_then_live_lines_and_exits_when_the_daemo
     data_dir: Path, pincer_logs: Spawn
 ) -> None:
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
-    _append_log(data_dir, _numbered(1, 80))
+    append_log(data_dir, numbered(1, 80))
     process = pincer_logs("-f")
     assert process.stdout is not None
 
-    shown = b"".join(daemon_fake_child.within(20.0, process.stdout.readline) for _ in range(50))
-    assert shown == _numbered(31, 80)
-    _append_log(data_dir, b"live 1\n")
-    assert daemon_fake_child.within(10.0, process.stdout.readline) == b"live 1\n"
+    shown = b"".join(within(20.0, process.stdout.readline) for _ in range(50))
+    assert shown == numbered(31, 80)
+    append_log(data_dir, b"live 1\n")
+    assert within(10.0, process.stdout.readline) == b"live 1\n"
     assert process.poll() is None
 
     daemon.stop(data_dir)
@@ -429,7 +401,7 @@ def test_logs_follow_from_zero_lines_prints_only_new_ones(data_dir: Path, pincer
     # Until it has opened the log, anything written is history to it; keep writing until a line comes out.
     deadline = time.monotonic() + 20.0
     for n in itertools.count():
-        _append_log(data_dir, f"live {n}\n".encode())
+        append_log(data_dir, f"live {n}\n".encode())
         with contextlib.suppress(queue.Empty):
             first = lines.get(timeout=0.3)
             break
@@ -446,7 +418,7 @@ def test_ctrl_c_in_logs_follow_only_detaches(data_dir: Path, pincer_logs: Spawn)
     assert state is not None
     process = pincer_logs("-f")
     assert process.stdout is not None
-    daemon_fake_child.within(20.0, process.stdout.readline)
+    within(20.0, process.stdout.readline)
 
     os.killpg(process.pid, signal.SIGINT)
 
@@ -459,7 +431,7 @@ def test_ctrl_c_in_logs_follow_only_detaches(data_dir: Path, pincer_logs: Spawn)
 
 
 def test_logs_writes_the_file_bytes_even_when_colour_is_forced(data_dir: Path, pincer_logs: Spawn) -> None:
-    _write_log(data_dir, RAW_LOG)
+    write_log(data_dir, RAW_LOG)
     process = pincer_logs(FORCE_COLOR="1", TERM="xterm-256color")
 
     out, err = process.communicate(timeout=20)
@@ -472,13 +444,13 @@ def test_logs_writes_the_file_bytes_even_when_colour_is_forced(data_dir: Path, p
 def test_logs_into_a_pipe_closed_early_exits_quietly(data_dir: Path, pincer_logs: Spawn, args: list[str]) -> None:
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     # Far more than a pipe buffers, so a plain `logs` is still writing when the reader goes.
-    _append_log(data_dir, _numbered(1, 20000))
+    append_log(data_dir, numbered(1, 20000))
     process = pincer_logs(*args)
     assert process.stdout is not None and process.stderr is not None
-    daemon_fake_child.within(20.0, process.stdout.readline)
+    within(20.0, process.stdout.readline)
 
     process.stdout.close()  # `| head -1`
-    _append_log(data_dir, b"written after the reader left\n")
+    append_log(data_dir, b"written after the reader left\n")
 
     assert process.wait(timeout=10) == 0, process.stderr.read()
     # No traceback, and no "Exception ignored … BrokenPipeError" from the interpreter's exit-time flush.
@@ -487,7 +459,7 @@ def test_logs_into_a_pipe_closed_early_exits_quietly(data_dir: Path, pincer_logs
 
 
 def test_the_not_running_note_reaches_a_terminal_while_stdout_is_piped(data_dir: Path, pincer_logs: Spawn) -> None:
-    _write_log(data_dir, RAW_LOG)
+    write_log(data_dir, RAW_LOG)
     terminal, stderr = pty.openpty()
     shown: list[bytes] = []
 
@@ -615,7 +587,7 @@ def test_restart_replaces_a_running_daemon(data_dir: Path, tmp_path: Path) -> No
     state = daemon.read_state(data_dir)
     assert state is not None
     assert (state.pid, state.state) == (new, "ready")
-    assert _fake_children(tmp_path) == [str(new)]
+    assert daemon_fake_child.children_under(tmp_path) == [new]
 
 
 def test_restart_with_nothing_running_just_starts(data_dir: Path) -> None:
@@ -634,13 +606,13 @@ def test_restart_starts_nothing_while_the_old_daemon_will_not_exit(
     old = _pid_in(runner.invoke(app, ["run", "-d"]).output, r"Pincer started \(pid (\d+)\)")
     _child_mode(monkeypatch, "ready", data_dir)
 
-    result = daemon_fake_child.within(10.0, lambda: runner.invoke(app, ["restart", "--timeout", "1"]))
+    result = within(10.0, lambda: runner.invoke(app, ["restart", "--timeout", "1"]))
 
     assert result.exit_code == 1
     assert "Pincer is still shutting down after 1 s — 'pincer stop --force' to kill it" in result.output
     assert "Not starting a new one." in result.output
     assert "Pincer started" not in result.output
-    assert _fake_children(tmp_path) == [str(old)]
+    assert daemon_fake_child.children_under(tmp_path) == [old]
     assert daemon.read_state(data_dir).pid == old  # type: ignore[union-attr]
 
 
@@ -676,7 +648,7 @@ def test_a_crash_while_restart_starts_is_shown_as_run_detach_shows_it(
     tail = result.output[result.output.index(header) + len(header) :].strip().splitlines()
     assert tail == daemon.log_path(data_dir).read_text().splitlines()[-20:]
     assert daemon.read_state(data_dir) is None
-    assert _fake_children(tmp_path) == []
+    assert daemon_fake_child.children_under(tmp_path) == []
 
 
 def test_restart_with_a_broken_config_leaves_the_running_daemon_alone(
@@ -694,26 +666,11 @@ def test_restart_with_a_broken_config_leaves_the_running_daemon_alone(
     assert result.exit_code == 1
     assert "Configuration error: PINCER_DEFAULT_PROVIDER: no such provider" in result.output
     assert "Stopping" not in result.output
-    assert _fake_children(tmp_path) == [str(old)]
+    assert daemon_fake_child.children_under(tmp_path) == [old]
 
 
 def _attach_line(pid: int) -> str:
     return f"Pincer is already running in the background (pid {pid}) — attaching"
-
-
-def _alive(pid: int) -> bool:
-    """True while `pid` runs. Reaps it first when it is our own child, so a zombie reads as dead."""
-    try:
-        reaped, _ = os.waitpid(pid, os.WNOHANG)
-        if reaped == pid:
-            return False
-    except ChildProcessError:
-        pass
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
 
 
 class _Attached:
@@ -773,7 +730,7 @@ def pincer_run(data_dir: Path, tmp_path: Path) -> Iterator[Callable[..., _Attach
                 **os.environ,
                 "PINCER_DATA_DIR": str(data_dir),
                 "PINCER_SKILLS_DIR": str(tmp_path / "skills"),
-                "PINCER_DASHBOARD_PORT": str(_free_port()),
+                "PINCER_DASHBOARD_PORT": str(free_port()),
                 "PINCER_ANTHROPIC_API_KEY": "sk-ant-test",
             },
             stdout=subprocess.PIPE,
@@ -796,7 +753,7 @@ def test_run_attaches_to_a_ready_daemon_and_follows_its_log(
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     state = daemon.read_state(data_dir)
     assert state is not None
-    _append_log(data_dir, _numbered(1, 80))
+    append_log(data_dir, numbered(1, 80))
 
     attached = pincer_run()
     attached.wait_for("numbered 80")
@@ -804,10 +761,10 @@ def test_run_attaches_to_a_ready_daemon_and_follows_its_log(
     # Before anything a foreground start prints: no banner, no logging set up, no second instance.
     assert attached.lines[0] == _attach_line(state.pid)
     assert attached.lines[1:51] == [f"numbered {n}" for n in range(31, 81)]
-    _append_log(data_dir, b"live 1\n")
+    append_log(data_dir, b"live 1\n")
     attached.wait_for("live 1")
     assert not any("starting..." in line for line in attached.lines)
-    assert _fake_children(tmp_path) == [str(state.pid)]
+    assert daemon_fake_child.children_under(tmp_path) == [state.pid]
 
 
 def test_run_attaches_to_a_starting_daemon_and_shows_it_come_up(
@@ -842,7 +799,7 @@ def test_ctrl_c_while_attached_stops_the_daemon_and_shows_its_shutdown(
     assert returncode == 0, err
     assert err == b""
     # It returned only once the daemon had exited, after showing the whole graceful shutdown.
-    assert not _alive(pid)
+    assert not alive(pid)
     lines = attached.lines
     stopping = lines.index(f"Stopping Pincer (pid {pid})…")
     shutting_down = attached.wait_for(f"fake child {pid} shutting down")
@@ -888,7 +845,7 @@ def test_a_second_ctrl_c_during_the_shutdown_only_detaches(
         assert returncode == 0, err
         assert err == b""
         assert attached.lines[-1] == f"Detached — Pincer (pid {pid}) keeps shutting down in the background"
-        assert _alive(pid)
+        assert alive(pid)
         assert daemon.read_state(data_dir) is not None
     finally:
         os.kill(pid, signal.SIGCONT)
@@ -914,7 +871,7 @@ def test_ctrl_c_the_moment_attach_starts_still_stops_the_daemon(
     assert returncode == 0, err
     assert err == b""
     assert attached.lines[-1] == f"Pincer stopped (pid {pid})"
-    assert not _alive(pid)
+    assert not alive(pid)
 
 
 def test_an_attached_stop_that_times_out_says_so_at_once_and_keeps_following(
@@ -930,13 +887,13 @@ def test_an_attached_stop_that_times_out_says_so_at_once_and_keeps_following(
 
     hint = attached.wait_for("Pincer is still shutting down after 1 s — 'pincer stop --force' to kill it", 10.0)
     assert attached.process.poll() is None
-    _append_log(data_dir, b"still here\n")
+    append_log(data_dir, b"still here\n")
     assert attached.wait_for("still here") > hint
     attached.send(signal.SIGINT)
     returncode, err = attached.finish(5.0)
     assert returncode == 0, err
     assert attached.lines[-1] == f"Detached — Pincer (pid {pid}) keeps shutting down in the background"
-    assert _alive(pid)
+    assert alive(pid)
 
 
 def test_attach_takes_ctrl_c_over_before_it_shows_anything(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1055,7 +1012,7 @@ def test_run_tasks_never_attaches_to_the_agent_daemon(data_dir: Path, monkeypatc
     monkeypatch.setattr("pincer.cli.run._run_tasks_worker", _run_tasks_worker)
 
     # Attaching would follow the daemon until it exits; give up instead of hanging the suite.
-    result = daemon_fake_child.within(10.0, lambda: runner.invoke(app, ["run", "tasks"]))
+    result = within(10.0, lambda: runner.invoke(app, ["run", "tasks"]))
 
     assert result.exit_code == 0, result.output
     assert workers == [config.get_settings()]
@@ -1067,7 +1024,7 @@ def test_a_daemon_child_never_attaches_to_a_running_daemon(data_dir: Path, monke
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     seen = _record_foreground_runs(monkeypatch)
 
-    result = daemon_fake_child.within(10.0, lambda: runner.invoke(app, ["run", "--daemon-child"]))
+    result = within(10.0, lambda: runner.invoke(app, ["run", "--daemon-child"]))
 
     # As before: the lease is taken, so this child gives up instead of running a second agent.
     assert isinstance(result.exception, daemon.DaemonLeaseTaken)
@@ -1101,7 +1058,7 @@ def test_every_daemon_command_refuses_on_windows(
     assert result.exit_code == 1, result.output
     assert WINDOWS_MESSAGE in result.output
     assert "Traceback" not in result.output
-    assert _fake_children(tmp_path) == []
+    assert daemon_fake_child.children_under(tmp_path) == []
     assert list(data_dir.iterdir()) == []
 
 
@@ -1142,7 +1099,7 @@ def test_run_detach_refuses_inside_a_container(
 
     assert result.exit_code == 1, result.output
     assert CONTAINER_MESSAGE in result.output
-    assert _fake_children(tmp_path) == []
+    assert daemon_fake_child.children_under(tmp_path) == []
     assert list(data_dir.iterdir()) == []
 
 
@@ -1163,7 +1120,7 @@ def test_restart_inside_a_container_refuses_before_stopping_anything(
     assert result.exit_code == 1, result.output
     assert CONTAINER_MESSAGE in result.output
     assert "Stopping" not in result.output
-    assert _fake_children(tmp_path) == [str(pid)]
+    assert daemon_fake_child.children_under(tmp_path) == [pid]
 
 
 def test_run_tasks_detach_is_refused_and_starts_no_worker(
@@ -1181,7 +1138,7 @@ def test_run_tasks_detach_is_refused_and_starts_no_worker(
     assert result.exit_code == 1, result.output
     assert "Daemon mode applies to the full agent only — run 'pincer run tasks' in the foreground." in result.output
     assert started == []
-    assert _fake_children(tmp_path) == []
+    assert daemon_fake_child.children_under(tmp_path) == []
     assert list(data_dir.iterdir()) == []
 
 
@@ -1226,7 +1183,7 @@ def test_run_detach_while_a_daemon_lingers_says_it_is_shutting_down(
     assert result.exit_code == 1, result.output
     assert SHUTTING_DOWN.format(data_dir) in result.output
     assert "exited before it was ready" not in result.output
-    assert _fake_children(tmp_path) == [str(pid)]
+    assert daemon_fake_child.children_under(tmp_path) == [pid]
 
 
 def test_status_while_a_daemon_lingers_says_it_is_shutting_down(
@@ -1256,7 +1213,7 @@ def test_stop_while_a_daemon_lingers_waits_for_it_to_exit(
         "Pincer is already shutting down — waiting for it to exit…",
         "Pincer has exited",
     ]
-    assert _fake_children(tmp_path) == []
+    assert daemon_fake_child.children_under(tmp_path) == []
 
 
 def test_restart_while_a_daemon_lingers_waits_then_starts(
@@ -1270,7 +1227,7 @@ def test_restart_while_a_daemon_lingers_waits_then_starts(
     assert "Pincer has exited" in result.output
     new = _pid_in(result.output, r"Pincer started \(pid (\d+)\)")
     assert new != old
-    assert _fake_children(tmp_path) == [str(new)]
+    assert daemon_fake_child.children_under(tmp_path) == [new]
 
 
 def test_plain_run_while_a_daemon_lingers_says_it_is_shutting_down(

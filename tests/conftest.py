@@ -526,3 +526,34 @@ async def migrated_url(migration_url: str, tmp_path: Path):
     await asyncio.to_thread(command.upgrade, config, "head")
     yield to_async_url(migration_url)
     await dispose_engines()
+
+
+# ── Real Pincer processes (daemon, `pincer run`) ─────────────────────
+
+
+@pytest.fixture
+def signal_stub() -> Iterator[str]:
+    """Answers the Signal channel's health check and polls (with 404s, which it only warns about)."""
+    import http.server
+    import threading
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture
+def redis_url() -> str:
+    """A Redis for the task worker's broker, if one is configured.
+
+    Opt-in, like `PINCER_TEST_PG_URL`; locally, e.g.
+    `docker run -d --rm --name pincer-tasks-redis-test -p 127.0.0.1:16389:6379 redis:7-alpine` and
+    `PINCER_TEST_REDIS_URL=redis://127.0.0.1:16389/0`.
+    """
+    url = os.environ.get("PINCER_TEST_REDIS_URL")
+    if not url:
+        pytest.skip("PINCER_TEST_REDIS_URL not set")
+    return url
