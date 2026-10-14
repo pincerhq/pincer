@@ -224,6 +224,24 @@ disable_error_code = [
     "attr-defined",
 ]
 
+[[tool.mypy.overrides]]
+# Checked strictly, unlike the rest of pincer.cli: it handles the daemon record's unions and enum.
+module = ["pincer.cli.daemon"]
+enable_error_code = [
+    "type-arg",
+    "no-any-return",
+    "union-attr",
+    "override",
+    "assignment",
+    "no-untyped-def",
+    "no-untyped-call",
+    "index",
+    "arg-type",
+    "operator",
+    "return-value",
+    "attr-defined",
+]
+
 [tool.bandit]
 exclude_dirs = ["tests", "dashboard"]
 skips = ["B101", "B104", "B310", "B608"]
