@@ -99,3 +99,15 @@ def test_a_stopped_daemon_leaves_no_record_behind(tmp_path: Path, signal_stub: s
     assert "Shutdown complete" in output, output
     assert exit_code == 0
     assert not (tmp_path / "data" / daemon.PID_FILE).exists()
+
+
+def test_the_embedded_api_server_leaves_sigterm_and_sigint_to_the_agent() -> None:
+    import uvicorn
+
+    from pincer.cli.run import _embedded_api_server
+
+    server = _embedded_api_server(uvicorn.Config(app=lambda *_: None, port=free_port()))
+    before = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
+
+    with server.capture_signals():
+        assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)) == before

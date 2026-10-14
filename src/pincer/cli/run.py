@@ -24,6 +24,8 @@ from pincer.cli._shared import _create_memory_backend, _port_in_use, _print_voic
 from pincer.cli.daemon import WAIT_TIMEOUT, attach_daemon, refuse_unless_a_known_daemon, start_daemon
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from pincer.channels.base import BaseChannel, IncomingMessage
     from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
     from pincer.config import Settings
@@ -806,9 +808,10 @@ async def _ensure_ops_schedules(scheduler: Any, settings: Any) -> None:
 def _cancel_on_first_sigterm() -> None:
     """Route SIGTERM into the calling task's graceful path, the way Ctrl+C goes: cancel it, once.
 
-    Only the first SIGTERM cancels. uvicorn records the same SIGTERM and re-raises
-    it when its server exits, early in the agent's `finally`; a second cancel would
-    abort the shutdown there, before the channels drain their calls.
+    Only the first SIGTERM cancels; one sent again during the shutdown (a repeated `pincer stop`,
+    an impatient supervisor) is ignored, as the `finally` ignores a second Ctrl+C. Cancelling
+    again would abort the shutdown midway, before the channels drain their calls. `--force` is
+    the way to cut it short.
     """
     import signal as _signal
 
@@ -820,6 +823,23 @@ def _cancel_on_first_sigterm() -> None:
 
     with contextlib.suppress(NotImplementedError, RuntimeError):  # Windows / nested loops
         asyncio.get_running_loop().add_signal_handler(_signal.SIGTERM, _on_sigterm)
+
+
+def _embedded_api_server(config: Any) -> Any:
+    """A uvicorn server for the dashboard API that leaves SIGTERM and SIGINT to the agent.
+
+    A stock `uvicorn.Server` installs its own handlers while it serves and re-raises whatever
+    it caught when it exits — early in the agent's shutdown, where a second SIGTERM would cancel
+    the shutdown itself. The agent cancels the server through `should_exit` instead.
+    """
+    import uvicorn
+
+    class _Server(uvicorn.Server):
+        @contextlib.contextmanager
+        def capture_signals(self) -> Iterator[None]:
+            yield
+
+    return _Server(config)
 
 
 async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> None:
@@ -1681,7 +1701,7 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
                 port=settings.dashboard_port,
                 log_level="warning",
             )
-            api_server = uvicorn.Server(api_config)
+            api_server = _embedded_api_server(api_config)
             api_task = asyncio.create_task(api_server.serve())
             console.print(
                 f"[green]API server started on http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
