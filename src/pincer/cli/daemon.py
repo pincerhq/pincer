@@ -381,8 +381,9 @@ def status() -> None:
     if state is None:
         console.print("Pincer is not running")
         return
-    word = "running" if state.state == "ready" else "starting"
-    channels = f"channels: {', '.join(state.channels) or 'none'}, " if state.state == "ready" else ""
+    ready = state.state is daemon.DaemonPhase.READY
+    word = "running" if ready else "starting"
+    channels = f"channels: {', '.join(state.channels) or 'none'}, " if ready else ""
     console.print(
         f"Pincer is {word} (pid {state.pid}, up {_uptime(state)}) — port {state.port}, {channels}"
         f"version {state.version}, cwd {state.cwd}",

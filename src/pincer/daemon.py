@@ -65,6 +65,13 @@ class StartOutcome(StrEnum):
     TIMED_OUT = "timed_out"
 
 
+class DaemonPhase(StrEnum):
+    """Where a live daemon is, as its record says: before or after its "is running!" banner."""
+
+    STARTING = "starting"
+    READY = "ready"
+
+
 class StopOutcome(StrEnum):
     NOT_RUNNING = "not_running"
     STOPPED = "stopped"
@@ -81,7 +88,7 @@ class DaemonState:
     cwd: str
     port: int
     version: str
-    state: str  # "starting" | "ready"
+    state: DaemonPhase
     channels: list[str] = field(default_factory=list)
 
 
@@ -170,7 +177,7 @@ def _start_locked(
             if state is not None and state.pid == child.pid:
                 # The child holds the lease now; a concurrent start sees it and stands down.
                 starting.release()
-            if state is not None and state.pid == child.pid and state.state == "ready":
+            if state is not None and state.pid == child.pid and state.state is DaemonPhase.READY:
                 return StartResult(StartOutcome.READY, state)
             exit_code = child.poll()
             if exit_code is not None:
@@ -188,8 +195,9 @@ def read_state(data_dir: Path) -> DaemonState | None:
             return None
     deadline = time.monotonic() + RECORD_GRACE
     while True:
-        with contextlib.suppress(FileNotFoundError, ValueError, TypeError):
-            return DaemonState(**json.loads((data_dir / PID_FILE).read_text()))
+        with contextlib.suppress(FileNotFoundError, ValueError, TypeError, KeyError):
+            record = json.loads((data_dir / PID_FILE).read_text())
+            return DaemonState(**{**record, "state": DaemonPhase(record["state"])})
         if time.monotonic() >= deadline:
             return None
         time.sleep(POLL_INTERVAL / 5)
@@ -290,7 +298,7 @@ class DaemonLease:
         # whatever it spawns (MCP servers, sandboxed skills).
         self._fd = fd
         self._started_at = datetime.now(UTC).isoformat(timespec="seconds")
-        self._write("starting", [])
+        self._write(DaemonPhase.STARTING, [])
         return self
 
     def __exit__(
@@ -299,9 +307,9 @@ class DaemonLease:
         (self._data_dir / PID_FILE).unlink(missing_ok=True)
 
     def mark_ready(self, channels: Sequence[str]) -> None:
-        self._write("ready", list(channels))
+        self._write(DaemonPhase.READY, list(channels))
 
-    def _write(self, state: str, channels: list[str]) -> None:
+    def _write(self, state: DaemonPhase, channels: list[str]) -> None:
         from pincer import __version__
 
         record = DaemonState(
