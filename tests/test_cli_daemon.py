@@ -36,6 +36,15 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon mode is 
 
 runner = CliRunner()
 
+# A job a shell starts in the background inherits SIGINT ignored (and under nohup SIGHUP too), and
+# Python then never turns a Ctrl+C into KeyboardInterrupt. A command typed in a terminal starts with
+# both at their defaults: the `pincer` processes these tests drive are started that way, whatever ran pytest.
+AS_TYPED_IN_A_TERMINAL = (
+    "import os, signal, sys; "
+    "signal.signal(signal.SIGINT, signal.SIG_DFL); signal.signal(signal.SIGHUP, signal.SIG_DFL); "
+    "os.execv(sys.executable, [sys.executable, *sys.argv[1:]])"
+)
+
 
 def _free_port() -> int:
     with socket.socket() as s:
@@ -299,6 +308,11 @@ def _numbered(first: int, last: int) -> bytes:
     return b"".join(f"numbered {n}\n".encode() for n in range(first, last + 1))
 
 
+def _pincer_command(*args: str) -> list[str]:
+    """`python -P -m pincer ARGS…`, started as if typed in a terminal (same pid, after an exec)."""
+    return [sys.executable, "-c", AS_TYPED_IN_A_TERMINAL, "-P", "-m", "pincer", *args]
+
+
 @pytest.fixture
 def pincer_logs(data_dir: Path, tmp_path: Path) -> Iterator[Spawn]:
     """Runs a real `pincer logs …` process on this test's data_dir, from a scratch cwd (no `.env` there)."""
@@ -308,7 +322,7 @@ def pincer_logs(data_dir: Path, tmp_path: Path) -> Iterator[Spawn]:
 
     def spawn(*args: str, stderr: int = subprocess.PIPE, **env: str) -> subprocess.Popen[bytes]:
         process = subprocess.Popen(
-            [sys.executable, "-P", "-m", "pincer", "logs", *args],
+            _pincer_command("logs", *args),
             cwd=cwd,
             env={**os.environ, "PINCER_DATA_DIR": str(data_dir), **env},
             stdout=subprocess.PIPE,
@@ -754,7 +768,7 @@ def pincer_run(data_dir: Path, tmp_path: Path) -> Iterator[Callable[[], _Attache
 
     def spawn() -> _Attached:
         process = subprocess.Popen(
-            [sys.executable, "-P", "-m", "pincer", "run"],
+            _pincer_command("run"),
             cwd=cwd,
             # Should it start an agent after all, it stays inside this test.
             env={
