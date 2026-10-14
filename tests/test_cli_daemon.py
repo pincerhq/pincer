@@ -979,3 +979,124 @@ def test_a_daemon_child_never_attaches_to_a_running_daemon(data_dir: Path, monke
     assert seen == []
     assert "attaching" not in result.output
     daemon.stop(data_dir)
+
+
+# ── platform guards ───────────────────────────────────────────────────────
+
+WINDOWS_MESSAGE = "Daemon mode isn't supported on Windows — use a service manager."
+CONTAINER_MESSAGE = "Pincer is running inside a container — use 'docker compose up -d' to run it in the background."
+
+
+@pytest.fixture
+def windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """As on Windows: the platform says so and `fcntl`, which the lifecycle module needs, can't be imported."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "fcntl", None)
+    monkeypatch.delitem(sys.modules, "pincer.daemon", raising=False)
+
+
+@pytest.mark.parametrize(
+    "args", [["run", "-d"], ["logs"], ["logs", "-f"], ["stop"], ["status"], ["restart"]], ids=" ".join
+)
+def test_every_daemon_command_refuses_on_windows(
+    data_dir: Path, tmp_path: Path, windows: None, args: list[str]
+) -> None:
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 1, result.output
+    assert WINDOWS_MESSAGE in result.output
+    assert "Traceback" not in result.output
+    assert _fake_children(tmp_path) == []
+    assert list(data_dir.iterdir()) == []
+
+
+def test_plain_run_on_windows_runs_in_the_foreground_without_looking_for_a_daemon(
+    data_dir: Path, windows: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ran: list[object] = []
+
+    async def _run_agent(settings, lease=None):  # type: ignore[no-untyped-def]
+        ran.append(settings)
+
+    monkeypatch.setattr("pincer.cli.run._run_agent", _run_agent)
+
+    result = runner.invoke(app, ["run"])
+
+    assert result.exit_code == 0, result.output
+    assert len(ran) == 1
+
+
+@pytest.fixture
+def dockerenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Where the container check looks for Docker's marker file, pointed at a scratch path (absent until made)."""
+    marker = tmp_path / "dockerenv"
+    monkeypatch.setattr("pincer.cli.daemon.DOCKERENV", marker)
+    return marker
+
+
+@pytest.mark.parametrize("how", ["dockerenv", "pid 1"])
+def test_run_detach_refuses_inside_a_container(
+    data_dir: Path, tmp_path: Path, dockerenv: Path, monkeypatch: pytest.MonkeyPatch, how: str
+) -> None:
+    if how == "dockerenv":
+        dockerenv.touch()
+    else:
+        monkeypatch.setattr("pincer.cli.daemon.os.getpid", lambda: 1)
+
+    result = runner.invoke(app, ["run", "-d"])
+
+    assert result.exit_code == 1, result.output
+    assert CONTAINER_MESSAGE in result.output
+    assert _fake_children(tmp_path) == []
+    assert list(data_dir.iterdir()) == []
+
+
+def test_outside_a_container_run_detach_still_starts(data_dir: Path, dockerenv: Path) -> None:
+    assert not dockerenv.exists()
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+
+
+def test_restart_inside_a_container_refuses_before_stopping_anything(
+    data_dir: Path, tmp_path: Path, dockerenv: Path
+) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    pid = daemon.read_state(data_dir).pid  # type: ignore[union-attr]
+    dockerenv.touch()
+
+    result = runner.invoke(app, ["restart"])
+
+    assert result.exit_code == 1, result.output
+    assert CONTAINER_MESSAGE in result.output
+    assert "Stopping" not in result.output
+    assert _fake_children(tmp_path) == [str(pid)]
+
+
+def test_run_tasks_detach_is_refused_and_starts_no_worker(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started: list[object] = []
+
+    async def _worker(settings):  # type: ignore[no-untyped-def]
+        started.append(settings)
+
+    monkeypatch.setattr("pincer.cli.run._run_tasks_worker", _worker)
+
+    result = runner.invoke(app, ["run", "tasks", "-d"])
+
+    assert result.exit_code == 1, result.output
+    assert "Daemon mode applies to the full agent only — run 'pincer run tasks' in the foreground." in result.output
+    assert started == []
+    assert _fake_children(tmp_path) == []
+    assert list(data_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("args", [["status"], ["stop"], ["logs"]], ids=" ".join)
+def test_inside_a_container_the_read_and_stop_commands_still_answer(
+    data_dir: Path, dockerenv: Path, args: list[str]
+) -> None:
+    dockerenv.touch()
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == 0, result.output
+    assert CONTAINER_MESSAGE not in result.output

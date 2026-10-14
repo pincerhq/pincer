@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import sys
 import uuid
 from dataclasses import dataclass
 from enum import StrEnum
@@ -75,12 +76,19 @@ async def run(
         raise typer.Exit(1) from e
 
     if detach:
+        if component is not None:
+            console.print(
+                "[red]Daemon mode applies to the full agent only — run 'pincer run tasks' in the foreground.[/red]",
+                soft_wrap=True,
+            )
+            raise typer.Exit(1)
         start_daemon(settings, wait_timeout)
         return
 
     # A daemon of this data directory is up: follow it instead of starting a second agent. Not
-    # for a task worker (it runs alongside the agent) and never for the daemon itself.
-    if component is None and not daemon_child:
+    # for a task worker (it runs alongside the agent), never for the daemon itself, and not on
+    # Windows, where no daemon can exist (and the lifecycle module's `fcntl` doesn't).
+    if component is None and not daemon_child and sys.platform != "win32":
         from pincer.daemon import read_state
 
         running = read_state(settings.data_dir)

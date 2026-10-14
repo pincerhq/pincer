@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 WAIT_TIMEOUT = 60.0
 # Sized to the voice channel's 60 s call drain plus worker and API grace.
 STOP_TIMEOUT = 90.0
+# Docker writes this into every container it starts.
+DOCKERENV = Path("/.dockerenv")
 # How often an attached `pincer run` looks up from waiting, so a Ctrl+C lands at once.
 POLL_INTERVAL = 0.1
 
@@ -57,6 +59,24 @@ def _uptime(state: DaemonState) -> str:
     return format_uptime((datetime.now(UTC) - started).total_seconds())
 
 
+def refuse_unsupported(*, starting: bool) -> None:
+    """Exit 1 where daemon mode can't work: on Windows (no `fork`/`flock` semantics), and, for a
+    start, inside a container, where the container's main process is what should stay up.
+
+    Called before anything is imported from or done by the lifecycle module, so nothing is
+    spawned, signalled or written in a refused case.
+    """
+    if sys.platform == "win32":
+        console.print("[red]Daemon mode isn't supported on Windows — use a service manager.[/red]")
+        raise typer.Exit(1)
+    if starting and (os.getpid() == 1 or DOCKERENV.exists()):
+        console.print(
+            "[red]Pincer is running inside a container — use 'docker compose up -d' to run it in the background.[/red]",
+            soft_wrap=True,
+        )
+        raise typer.Exit(1)
+
+
 def _child_argv() -> list[str]:
     """The daemonized child: this interpreter running `pincer run --daemon-child`.
 
@@ -71,6 +91,7 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
     Streams the startup log meanwhile. Exits 1 if it crashes first, or if `wait_timeout` passes
     first — then it is left running.
     """
+    refuse_unsupported(starting=True)
     from rich.markup import escape
 
     from pincer import daemon
@@ -231,6 +252,8 @@ def stop(
     """Stop the background Pincer gracefully and wait until it has exited."""
     from pincer.config import get_settings_relaxed
 
+    refuse_unsupported(starting=False)
+
     if not _stop_daemon(get_settings_relaxed(), timeout, force, foreground_hint=True):
         raise typer.Exit(1)
 
@@ -245,6 +268,8 @@ def restart(
 ) -> None:
     """Stop the background Pincer, then start a new one from here (to apply .env / pincer.toml changes)."""
     from pincer.config import get_settings
+
+    refuse_unsupported(starting=True)
 
     # The new config is checked before anything is stopped: a broken .env must not take
     # down the daemon that is working.
@@ -317,6 +342,7 @@ def logs(
     ),
 ) -> None:
     """Print the background Pincer's log, raw (the last session's, if it isn't running)."""
+    refuse_unsupported(starting=False)
     from pincer import daemon
     from pincer.config import get_settings_relaxed
 
@@ -347,6 +373,7 @@ def logs(
 
 def status() -> None:
     """Show whether the background Pincer is running or starting, and what it runs with."""
+    refuse_unsupported(starting=False)
     from pincer import daemon
     from pincer.config import get_settings_relaxed
 
