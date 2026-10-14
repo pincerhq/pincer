@@ -174,3 +174,69 @@ def test_a_signal_during_startup_shuts_down_what_has_started(
     assert "Shutdown complete" in output, output
     assert "Traceback" not in output, output
     assert exit_code == 0
+
+
+class _Exited(Exception):
+    def __init__(self, code: int) -> None:
+        self.code = code
+
+
+class _Part:
+    """Stands in for one thing the agent started; records its stop, and can fail it."""
+
+    def __init__(self, name: str, stopped: list[str], fail: bool = False) -> None:
+        self.name, self._stopped, self._fail = name, stopped, fail
+
+    async def stop(self) -> None:
+        self._stopped.append(self.name)
+        if self._fail:
+            raise RuntimeError(f"{self.name} broke")
+
+
+@pytest.mark.parametrize("failing", [None, "triggers"], ids=["clean", "a step fails"])
+async def test_shutdown_runs_every_step_and_exits_1_only_when_one_failed(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
+    failing: str | None,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from pincer.cli import run as run_module
+
+    stopped: list[str] = []
+
+    def exit_(code: int) -> None:
+        raise _Exited(code)
+
+    monkeypatch.setattr(run_module.os, "_exit", exit_)
+    started = run_module._Started(
+        core=SimpleNamespace(  # type: ignore[arg-type]
+            mcp_manager=None,
+            llm=AsyncMock(),
+            session_mgr=AsyncMock(),
+            cost_tracker=AsyncMock(),
+            memory_store=None,
+            audit_logger=None,
+        ),
+        triggers=_Part("triggers", stopped, fail=failing == "triggers"),
+        dispatcher=_Part("dispatcher", stopped),
+        result_relay=_Part("result_relay", stopped),
+        router=SimpleNamespace(channels={"signal": _Part("signal", stopped)}),
+    )
+    sigint = signal.getsignal(signal.SIGINT)
+    try:
+        with pytest.raises(_Exited) as exited:
+            await run_module._shut_down_agent(started, None)
+    finally:
+        signal.signal(signal.SIGINT, sigint)
+
+    # Every later step still ran, the channels' drain included.
+    assert stopped == ["triggers", "dispatcher", "result_relay", "signal"]
+    assert "Shutdown complete" in capsys.readouterr().out
+    if failing is None:
+        assert exited.value.code == 0
+    else:
+        assert exited.value.code == 1
+        assert f"Shutdown step failed: {failing}" in caplog.text

@@ -24,7 +24,7 @@ from pincer.cli._shared import _create_memory_backend, _port_in_use, _print_voic
 from pincer.cli.daemon import WAIT_TIMEOUT, attach_daemon, refuse_unless_a_known_daemon, start_daemon
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator
 
     from pincer.channels.base import BaseChannel, IncomingMessage
     from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
@@ -1790,67 +1790,95 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _
 
 
 async def _shut_down_agent(started: _Started, lease: DaemonLease | None) -> NoReturn:
-    """Stop whatever `started` holds, in order, then end the process (see the end)."""
+    """Stop whatever `started` holds, in order, then end the process.
+
+    Each step runs even when an earlier one failed (a failure is logged with the step's name):
+    the channels' call drain must not be skipped because, say, a trigger loop failed to stop.
+    The process exits 1 if any step failed, 0 otherwise. (`pincer stop` doesn't read the code;
+    it waits for the lease. The code is for whoever ran the process: a supervisor, a shell.)
+    """
     import signal as _signal
 
     _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
-    if started.tunnel is not None:
-        await started.tunnel.stop()
-    if started.api_server:
+    failed: list[str] = []
+
+    async def step(name: str, action: Callable[[], Awaitable[object]]) -> None:
+        try:
+            await action()
+        except Exception:
+            logger.exception("Shutdown step failed: %s", name)
+            failed.append(name)
+
+    async def stop_api() -> None:
         started.api_server.should_exit = True
         if started.api_task:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(started.api_task, timeout=3.0)
+
+    async def stop_task_worker(worker: asyncio.Task[Any]) -> None:
+        worker.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await worker
+
+    async def close_browser() -> None:
+        try:
+            from pincer.tools.builtin.browser import close_browser
+        except ImportError:
+            return
+        await close_browser()
+
+    if started.tunnel is not None:
+        await step("tunnel", started.tunnel.stop)
+    if started.api_server:
+        await step("API server", stop_api)
     core = started.core
     if core is not None and core.mcp_manager:
-        await core.mcp_manager.stop()
+        await step("MCP clients", core.mcp_manager.stop)
     if started.mcp_server:
-        await started.mcp_server.stop()
+        await step("MCP server", started.mcp_server.stop)
     if started.triggers is not None:
-        await started.triggers.stop()
+        await step("triggers", started.triggers.stop)
     if started.dispatcher is not None:
-        await started.dispatcher.stop()
+        await step("schedule dispatcher", started.dispatcher.stop)
     if started.result_relay is not None:
-        await started.result_relay.stop()
+        await step("result relay", started.result_relay.stop)
     # repid's own worker logs CRITICAL + a full traceback on CancelledError
     # (by design — see repid/_worker.py, it re-raises after logging). That's
     # expected noise here since this cancel() is our own intentional shutdown,
     # not an unexpected failure — silence it for this one call.
     logging.getLogger("repid").setLevel(logging.CRITICAL + 1)
     if started.task_worker is not None:
-        started.task_worker.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await started.task_worker
+        task_worker = started.task_worker
+        await step("task worker", lambda: stop_task_worker(task_worker))
     if started.task_connection is not None:
-        await started.task_connection.__aexit__(None, None, None)
+        task_connection = started.task_connection
+        await step("task broker connection", lambda: task_connection.__aexit__(None, None, None))
     if started.proactive is not None:
-        await started.proactive.close()
+        await step("proactive agent", started.proactive.close)
     with contextlib.suppress(Exception):
         from pincer.voice.telemetry import runtime as telephony_telemetry
 
         await telephony_telemetry.shutdown()
     if started.router is not None:
         for ch in started.router.channels.values():
-            await ch.stop()
-    try:
-        from pincer.tools.builtin.browser import close_browser
-
-        await close_browser()
-    except ImportError:
-        pass
+            await step(f"channel {ch.name}", ch.stop)
+    await step("browser", close_browser)
     if core is not None:
-        await core.llm.close()
-        await core.session_mgr.close()
-        await core.cost_tracker.close()
+        await step("LLM client", core.llm.close)
+        await step("sessions", core.session_mgr.close)
+        await step("cost tracker", core.cost_tracker.close)
         if core.memory_store:
-            await core.memory_store.close()
+            await step("memory store", core.memory_store.close)
         if core.audit_logger:
-            await core.audit_logger.shutdown()
+            await step("audit log", core.audit_logger.shutdown)
     # Last: every store above has finished with the shared engines.
     from pincer.db.engine import dispose_engines
 
-    await dispose_engines()
-    console.print("[green]Shutdown complete[/green]")
+    await step("database engines", dispose_engines)
+    if failed:
+        console.print(f"[yellow]Shutdown complete, with errors in: {', '.join(failed)}[/yellow]")
+    else:
+        console.print("[green]Shutdown complete[/green]")
     # Cancel any lingering asyncio tasks (e.g. in-flight LLM calls from
     # channel update handlers) before exiting so the process doesn't hang.
     _pending = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
@@ -1859,7 +1887,7 @@ async def _shut_down_agent(started: _Started, lease: DaemonLease | None) -> NoRe
     # os._exit never leaves the daemon child's `with DaemonLease`; its lock goes with the process.
     if lease is not None:
         lease.remove_record()
-    os._exit(0)
+    os._exit(1 if failed else 0)
 
 
 async def _run_tasks_worker(settings: Settings) -> None:
