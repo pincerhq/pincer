@@ -193,7 +193,9 @@ class _Part:
             raise RuntimeError(f"{self.name} broke")
 
 
-@pytest.mark.parametrize("failing", [None, "triggers"], ids=["clean", "a step fails"])
+@pytest.mark.parametrize(
+    "failing", [None, "triggers", "telephony telemetry"], ids=["clean", "a step fails", "telemetry fails"]
+)
 async def test_shutdown_runs_every_step_and_exits_1_only_when_one_failed(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -211,6 +213,12 @@ async def test_shutdown_runs_every_step_and_exits_1_only_when_one_failed(
         raise _Exited(code)
 
     monkeypatch.setattr(run_module.os, "_exit", exit_)
+    if failing == "telephony telemetry":
+
+        async def telemetry_breaks() -> None:
+            raise RuntimeError("exporter flush failed")
+
+        monkeypatch.setattr("pincer.voice.telemetry.runtime.shutdown", telemetry_breaks)
     started = run_module._Started(
         core=SimpleNamespace(  # type: ignore[arg-type]
             mcp_manager=None,

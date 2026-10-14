@@ -1855,10 +1855,12 @@ async def _shut_down_agent(started: _Started, lease: DaemonLease | None) -> NoRe
         await step("task broker connection", lambda: task_connection.__aexit__(None, None, None))
     if started.proactive is not None:
         await step("proactive agent", started.proactive.close)
-    with contextlib.suppress(Exception):
+    try:
         from pincer.voice.telemetry import runtime as telephony_telemetry
-
-        await telephony_telemetry.shutdown()
+    except ImportError:  # the voice extra isn't installed: nothing was started
+        pass
+    else:
+        await step("telephony telemetry", telephony_telemetry.shutdown)
     if started.router is not None:
         for ch in started.router.channels.values():
             await step(f"channel {ch.name}", ch.stop)
