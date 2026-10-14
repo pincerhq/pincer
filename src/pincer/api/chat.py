@@ -55,6 +55,10 @@ _DONE_SENTINEL = object()
 
 class ChatIn(BaseModel):
     text: str = Field(min_length=1, max_length=20_000)
+    # One web chat of the caller's ("New chat", a call summary), as its own
+    # model context. Scoped under the chat user, so whatever value is sent it
+    # never reaches anyone else's conversation.
+    conversation_id: str | None = Field(default=None, pattern=_UUID_RE.pattern)
 
 
 class ApprovalIn(BaseModel):
@@ -94,6 +98,11 @@ def chat_user(
 ChatUser = Annotated[str, Depends(chat_user)]
 
 
+def _session_key(user_id: str, conversation_id: str | None) -> str | None:
+    """The conversation's session, or None for the user's main web session."""
+    return f"{_CHANNEL}:{user_id}:{conversation_id}" if conversation_id else None
+
+
 def _get_agent(request: Request) -> Agent:
     agent: Agent | None = getattr(request.app.state, "agent", None)
     if agent is None:
@@ -113,7 +122,9 @@ async def post_message(
 ) -> dict[str, Any]:
     agent = _get_agent(request)
     try:
-        resp = await agent.handle_message(user_id, _CHANNEL, body.text)
+        resp = await agent.handle_message(
+            user_id, _CHANNEL, body.text, session_key=_session_key(user_id, body.conversation_id)
+        )
     except BudgetExceededError as e:
         raise HTTPException(402, str(e)) from e
     except LLMError as e:
@@ -140,7 +151,9 @@ async def post_stream(
 
         async def driver() -> None:
             try:
-                async for chunk in agent.handle_message_stream(user_id, _CHANNEL, body.text):
+                async for chunk in agent.handle_message_stream(
+                    user_id, _CHANNEL, body.text, session_key=_session_key(user_id, body.conversation_id)
+                ):
                     if chunk.type == StreamEventType.TEXT:
                         await queue.put(("chunk", {"delta": chunk.content}))
                     elif chunk.type == StreamEventType.TOOL_START:
