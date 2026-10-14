@@ -13,6 +13,7 @@ import time
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import daemon_fake_child
 import pytest
@@ -20,11 +21,15 @@ import pytest
 from pincer import daemon
 from pincer.daemon import StartOutcome, StopOutcome
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
 WAIT_TIMEOUT = 20.0
 # Stands in for `pincer run -d`: starts a daemon from its own cwd/environment, prints its PID and exits.
 LAUNCHER = """
 import os, sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 from pincer import daemon
 
 result = daemon.start(Path(sys.argv[1]), sys.argv[2:], Path.cwd(), dict(os.environ), 20.0)
@@ -493,3 +498,158 @@ def test_force_kills_only_the_daemon_when_it_does_not_lead_its_group(data_dir: P
         if child.poll() is None:
             child.kill()
             child.wait()
+
+
+# Rich markup, a CRLF line, a byte that isn't UTF-8 and no final newline: whatever a decode or a console would change.
+RAW_LOG = b"plain line\n[bold]markup[/bold] kept\r\nbad byte \xff here\nno newline at the end"
+
+
+def _write_log(data_dir: Path, content: bytes) -> Path:
+    log = daemon.log_path(data_dir)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_bytes(content)
+    return log
+
+
+def _append_log(data_dir: Path, content: bytes) -> None:
+    with daemon.log_path(data_dir).open("ab") as log:
+        log.write(content)
+
+
+def _numbered(first: int, last: int) -> bytes:
+    return b"".join(f"numbered {n}\n".encode() for n in range(first, last + 1))
+
+
+class _Follower:
+    """Drains a `follow()` iterator on a thread, so a test can append to the log and stop the daemon meanwhile."""
+
+    def __init__(self, chunks: Iterator[bytes]) -> None:
+        self.data = b""
+        self.done = threading.Event()
+        threading.Thread(target=self._drain, args=(chunks,), daemon=True).start()
+
+    def _drain(self, chunks: Iterator[bytes]) -> None:
+        try:
+            for chunk in chunks:
+                self.data += chunk
+        finally:
+            self.done.set()
+
+    def wait_for(self, needle: bytes, seconds: float = 10.0) -> None:
+        deadline = time.monotonic() + seconds
+        while needle not in self.data:
+            assert time.monotonic() < deadline, f"{needle!r} never followed; got {self.data[-300:]!r}"
+            time.sleep(0.02)
+
+
+def test_follow_without_until_exit_gives_the_whole_file_byte_for_byte(data_dir: Path) -> None:
+    _write_log(data_dir, RAW_LOG)
+
+    assert b"".join(daemon.follow(data_dir, None, until_exit=False)) == RAW_LOG
+
+
+@pytest.mark.parametrize(
+    ("content", "lines", "expected"),
+    [
+        (_numbered(1, 150), 100, _numbered(51, 150)),
+        (_numbered(1, 150), 500, _numbered(1, 150)),
+        (_numbered(1, 150), 0, b""),
+        (b"a\nb\n", 1, b"b\n"),
+        (b"a\nb\nc", 2, b"b\nc"),
+        # Lines longer than the backward read's block.
+        (
+            b"x" * 200_000 + b"\n" + b"y" * 200_000 + b"\n" + b"z" * 200_000 + b"\n",
+            2,
+            b"y" * 200_000 + b"\n" + b"z" * 200_000 + b"\n",
+        ),
+    ],
+    ids=["last-100-of-150", "more-than-there-are", "zero", "trailing-newline", "unterminated-last", "long-lines"],
+)
+def test_follow_from_the_last_n_lines(data_dir: Path, content: bytes, lines: int, expected: bytes) -> None:
+    _write_log(data_dir, content)
+
+    assert b"".join(daemon.follow(data_dir, lines, until_exit=False)) == expected
+
+
+def test_follow_finds_the_tail_of_a_huge_log_without_reading_all_of_it(data_dir: Path) -> None:
+    # 1 GiB, sparse so it costs no disk: reading it all takes ~1 s, finding the tail well under a millisecond.
+    with _write_log(data_dir, b"").open("r+b") as log:
+        log.truncate(1 << 30)
+        log.seek(1 << 30)
+        log.write(_numbered(1, 200))
+
+    began = time.monotonic()
+    tail = b"".join(daemon.follow(data_dir, 5, until_exit=False))
+
+    assert tail == _numbered(196, 200)
+    assert time.monotonic() - began < 0.05
+
+
+def test_follow_gives_the_last_lines_then_live_ones_and_ends_after_the_shutdown_traceback(data_dir: Path) -> None:
+    _start(data_dir, mode="raise-on-sigterm")
+    _append_log(data_dir, _numbered(1, 80))
+
+    follower = _Follower(daemon.follow(data_dir, daemon.FOLLOW_LINES, until_exit=True))
+    follower.wait_for(b"numbered 80\n")
+    assert follower.data == _numbered(31, 80)
+
+    _append_log(data_dir, b"live 1\n")
+    follower.wait_for(b"live 1\n")
+    assert not follower.done.is_set()
+
+    daemon.stop(data_dir)
+
+    assert follower.done.wait(10.0), "follow() kept going after the daemon exited"
+    assert b"shutting down" in follower.data
+    assert follower.data.endswith(b"RuntimeError: fake child failed during shutdown\n")
+
+
+def test_follow_reads_once_more_after_seeing_the_daemon_gone(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_log(data_dir, b"first\n")
+    probes: list[bool] = []
+    real_lease_held = daemon._lease_held
+
+    def lease_held(path: Path) -> bool:
+        if path != data_dir:  # a follower some failed test left behind
+            return real_lease_held(path)
+        # The daemon writes its last line and exits between two polls.
+        if probes:
+            _append_log(data_dir, b"final line\n")
+        probes.append(not probes)
+        return probes[-1]
+
+    monkeypatch.setattr(daemon, "_lease_held", lease_held)
+
+    followed = daemon_fake_child.within(5.0, lambda: b"".join(daemon.follow(data_dir, None, until_exit=True)))
+
+    assert followed == b"first\nfinal line\n"
+
+
+def test_follow_ends_when_a_restart_rotates_its_log_inside_one_poll(data_dir: Path) -> None:
+    first = _start(data_dir).state
+    assert first is not None
+    following = daemon.follow(data_dir, daemon.FOLLOW_LINES, until_exit=True)
+    seen = next(following)
+    # The follower isn't polling while the old daemon exits and a new one takes the lease and rotates the log.
+    daemon.stop(data_dir)
+    second = _start(data_dir).state
+    assert second is not None
+
+    seen += daemon_fake_child.within(5.0, lambda: b"".join(following))
+
+    assert f"fake child {first.pid} starting".encode() in seen
+    assert seen.endswith(b"Shutdown complete\n")
+    assert f"fake child {second.pid}".encode() not in seen
+    daemon.stop(data_dir)
+
+
+def test_follow_with_no_daemon_running_gives_the_tail_and_ends(data_dir: Path) -> None:
+    _start(data_dir)
+    daemon.stop(data_dir)
+    _append_log(data_dir, _numbered(1, 80))
+
+    followed = daemon_fake_child.within(
+        2.0, lambda: b"".join(daemon.follow(data_dir, daemon.FOLLOW_LINES, until_exit=True))
+    )
+
+    assert followed == _numbered(31, 80)

@@ -1,7 +1,8 @@
-"""`pincer run -d` / `pincer stop` — format what the daemon lifecycle module (`pincer.daemon`) returns."""
+"""`pincer run -d` / `stop` / `logs` — format what the daemon lifecycle module (`pincer.daemon`) returns."""
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import typer
+from rich.console import Console
 
 from pincer.cli._shared import console
 
@@ -21,6 +23,9 @@ if TYPE_CHECKING:
 WAIT_TIMEOUT = 60.0
 # Sized to the voice channel's 60 s call drain plus worker and API grace.
 STOP_TIMEOUT = 90.0
+
+# `pincer logs` keeps stdout for the log's own bytes; what it says itself goes here.
+notes = Console(stderr=True)
 
 
 def format_uptime(seconds: float) -> str:
@@ -174,3 +179,38 @@ def stop(
         raise typer.Exit(1)
     verb = "killed" if result.outcome is daemon.StopOutcome.KILLED else "stopped"
     console.print(f"Pincer {verb} (pid {result.pid})")
+
+
+def logs(
+    tail: int | None = typer.Option(None, "-n", "--tail", min=0, help="Only the last N lines (-f starts 50 back)."),
+    follow: bool = typer.Option(
+        False, "-f", "--follow", help="Keep printing new lines until Pincer exits; Ctrl+C only stops following."
+    ),
+) -> None:
+    """Print the background Pincer's log, raw (the last session's, if it isn't running)."""
+    from pincer import daemon
+    from pincer.config import get_settings_relaxed
+
+    data_dir = get_settings_relaxed().data_dir
+    if not daemon.log_path(data_dir).exists():
+        notes.print("No logs yet — start with 'pincer run -d'", soft_wrap=True, markup=False, highlight=False)
+        return
+    if daemon.read_state(data_dir) is None:
+        notes.print(
+            "Pincer is not running — showing the last session's log", style="dim", soft_wrap=True, highlight=False
+        )
+    from_lines = tail if tail is not None else (daemon.FOLLOW_LINES if follow else None)
+
+    out = sys.stdout.buffer
+    try:
+        with contextlib.closing(daemon.follow(data_dir, from_lines, until_exit=follow)) as chunks:
+            for chunk in chunks:
+                out.write(chunk)
+                out.flush()
+    except KeyboardInterrupt:  # Ctrl+C only stops following; the daemon has a session of its own
+        return
+    except BrokenPipeError:  # `pincer logs | head`
+        # Python's advice for SIGPIPE: point stdout at /dev/null, or the flush at exit fails again.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)

@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import contextlib
+import itertools
+import os
+import pty
+import queue
 import re
+import signal
 import socket
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import daemon_fake_child
@@ -16,6 +25,11 @@ from typer.testing import CliRunner
 from pincer import config, daemon
 from pincer.cli import app
 from pincer.cli.daemon import format_uptime
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator
+
+    Spawn = Callable[..., subprocess.Popen[bytes]]
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon mode is POSIX-only")
 
@@ -261,3 +275,231 @@ def test_stop_reports_a_daemon_it_may_not_signal(data_dir: Path, monkeypatch: py
     assert "Not allowed to signal Pincer (pid " in result.output
     assert "Traceback" not in result.output
     assert daemon.read_state(data_dir) is not None
+
+
+# Rich markup, a CRLF line, a byte that isn't UTF-8 and no final newline: whatever a decode or a console would change.
+RAW_LOG = b"plain line\n[bold]markup[/bold] kept\r\nbad byte \xff here\nno newline at the end"
+NOT_RUNNING_NOTE = "Pincer is not running — showing the last session's log"
+NO_LOGS = "No logs yet — start with 'pincer run -d'"
+
+
+def _write_log(data_dir: Path, content: bytes) -> None:
+    log = daemon.log_path(data_dir)
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_bytes(content)
+
+
+def _append_log(data_dir: Path, content: bytes) -> None:
+    with daemon.log_path(data_dir).open("ab") as log:
+        log.write(content)
+
+
+def _numbered(first: int, last: int) -> bytes:
+    return b"".join(f"numbered {n}\n".encode() for n in range(first, last + 1))
+
+
+@pytest.fixture
+def pincer_logs(data_dir: Path, tmp_path: Path) -> Iterator[Spawn]:
+    """Runs a real `pincer logs …` process on this test's data_dir, from a scratch cwd (no `.env` there)."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    started: list[subprocess.Popen[bytes]] = []
+
+    def spawn(*args: str, stderr: int = subprocess.PIPE, **env: str) -> subprocess.Popen[bytes]:
+        process = subprocess.Popen(
+            [sys.executable, "-P", "-m", "pincer", "logs", *args],
+            cwd=cwd,
+            env={**os.environ, "PINCER_DATA_DIR": str(data_dir), **env},
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            # Its own process group, like a command in a terminal: Ctrl+C goes to it, not to the daemon.
+            start_new_session=True,
+        )
+        started.append(process)
+        return process
+
+    yield spawn
+    for process in started:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+
+def test_logs_prints_the_whole_file_raw(data_dir: Path) -> None:
+    _write_log(data_dir, RAW_LOG)
+
+    result = runner.invoke(app, ["logs"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout_bytes == RAW_LOG
+
+
+@pytest.mark.parametrize("flag", ["-n", "--tail"])
+def test_logs_tail_prints_exactly_the_last_lines(data_dir: Path, flag: str) -> None:
+    _write_log(data_dir, _numbered(1, 150))
+
+    result = runner.invoke(app, ["logs", flag, "100"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout_bytes == _numbered(51, 150)
+
+
+def test_logs_of_a_stopped_daemon_prints_its_last_session_under_a_note(data_dir: Path) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    assert runner.invoke(app, ["stop"]).exit_code == 0
+
+    result = runner.invoke(app, ["logs"])
+
+    assert result.exit_code == 0, result.output
+    assert b"Shutdown complete" in result.stdout_bytes
+    assert result.stdout_bytes == daemon.log_path(data_dir).read_bytes()
+    assert NOT_RUNNING_NOTE in result.stderr
+    # stderr isn't a terminal here: the note comes without styling.
+    assert "\x1b[" not in result.stderr
+
+
+def test_logs_follow_with_no_daemon_running_prints_the_tail_and_exits(data_dir: Path) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    assert runner.invoke(app, ["stop"]).exit_code == 0
+    _append_log(data_dir, _numbered(1, 80))
+
+    result = daemon_fake_child.within(10.0, lambda: runner.invoke(app, ["logs", "-f"]))
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout_bytes == _numbered(31, 80)
+    assert NOT_RUNNING_NOTE in result.stderr
+
+
+def test_logs_of_a_running_daemon_has_no_note(data_dir: Path) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+
+    result = runner.invoke(app, ["logs"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout_bytes == daemon.log_path(data_dir).read_bytes()
+    assert result.stderr == ""
+    daemon.stop(data_dir)
+
+
+@pytest.mark.parametrize("args", [[], ["-f"], ["-n", "5"]], ids=["plain", "follow", "tail"])
+def test_logs_with_no_log_file_says_how_to_get_one(data_dir: Path, args: list[str]) -> None:
+    result = runner.invoke(app, ["logs", *args])
+
+    assert result.exit_code == 0, result.output
+    assert NO_LOGS in result.stderr
+    assert result.stdout_bytes == b""
+
+
+def test_logs_follow_prints_the_last_50_then_live_lines_and_exits_when_the_daemon_stops(
+    data_dir: Path, pincer_logs: Spawn
+) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    _append_log(data_dir, _numbered(1, 80))
+    process = pincer_logs("-f")
+    assert process.stdout is not None
+
+    shown = b"".join(daemon_fake_child.within(20.0, process.stdout.readline) for _ in range(50))
+    assert shown == _numbered(31, 80)
+    _append_log(data_dir, b"live 1\n")
+    assert daemon_fake_child.within(10.0, process.stdout.readline) == b"live 1\n"
+    assert process.poll() is None
+
+    daemon.stop(data_dir)
+
+    out, err = process.communicate(timeout=10)
+    assert process.returncode == 0, err
+    assert out.endswith(b"Shutdown complete\n")
+    assert err == b""
+
+
+def test_logs_follow_from_zero_lines_prints_only_new_ones(data_dir: Path, pincer_logs: Spawn) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    process = pincer_logs("-f", "-n", "0")
+    assert process.stdout is not None
+    lines: queue.Queue[bytes] = queue.Queue()
+    threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True).start()  # type: ignore[union-attr]
+
+    # Until it has opened the log, anything written is history to it; keep writing until a line comes out.
+    deadline = time.monotonic() + 20.0
+    for n in itertools.count():
+        _append_log(data_dir, f"live {n}\n".encode())
+        with contextlib.suppress(queue.Empty):
+            first = lines.get(timeout=0.3)
+            break
+        assert time.monotonic() < deadline, "nothing followed"
+
+    assert re.fullmatch(rb"live \d+\n", first), first
+    daemon.stop(data_dir)
+    assert process.wait(timeout=10) == 0
+
+
+def test_ctrl_c_in_logs_follow_only_detaches(data_dir: Path, pincer_logs: Spawn) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    state = daemon.read_state(data_dir)
+    assert state is not None
+    process = pincer_logs("-f")
+    assert process.stdout is not None
+    daemon_fake_child.within(20.0, process.stdout.readline)
+
+    os.killpg(process.pid, signal.SIGINT)
+
+    _, err = process.communicate(timeout=5)
+    assert process.returncode == 0, err
+    assert b"Traceback" not in err
+    assert daemon.read_state(data_dir) == state
+    os.kill(state.pid, 0)
+    daemon.stop(data_dir)
+
+
+def test_logs_writes_the_file_bytes_even_when_colour_is_forced(data_dir: Path, pincer_logs: Spawn) -> None:
+    _write_log(data_dir, RAW_LOG)
+    process = pincer_logs(FORCE_COLOR="1", TERM="xterm-256color")
+
+    out, err = process.communicate(timeout=20)
+
+    assert process.returncode == 0, err
+    assert out == RAW_LOG
+
+
+@pytest.mark.parametrize("args", [[], ["-f"]], ids=["plain", "follow"])
+def test_logs_into_a_pipe_closed_early_exits_quietly(data_dir: Path, pincer_logs: Spawn, args: list[str]) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    # Far more than a pipe buffers, so a plain `logs` is still writing when the reader goes.
+    _append_log(data_dir, _numbered(1, 20000))
+    process = pincer_logs(*args)
+    assert process.stdout is not None and process.stderr is not None
+    daemon_fake_child.within(20.0, process.stdout.readline)
+
+    process.stdout.close()  # `| head -1`
+    _append_log(data_dir, b"written after the reader left\n")
+
+    assert process.wait(timeout=10) == 0, process.stderr.read()
+    # No traceback, and no "Exception ignored … BrokenPipeError" from the interpreter's exit-time flush.
+    assert process.stderr.read() == b""
+    daemon.stop(data_dir)
+
+
+def test_the_not_running_note_reaches_a_terminal_while_stdout_is_piped(data_dir: Path, pincer_logs: Spawn) -> None:
+    _write_log(data_dir, RAW_LOG)
+    terminal, stderr = pty.openpty()
+    shown: list[bytes] = []
+
+    def read_terminal() -> None:
+        # Read while the process runs: macOS drops what is buffered once the last writer closes.
+        with contextlib.suppress(OSError):  # EIO once the process has closed its end
+            while chunk := os.read(terminal, 4096):
+                shown.append(chunk)
+
+    reader = threading.Thread(target=read_terminal, daemon=True)
+    reader.start()
+    try:
+        process = pincer_logs(stderr=stderr)
+        os.close(stderr)
+        out, _ = process.communicate(timeout=20)
+        reader.join(5.0)
+    finally:
+        os.close(terminal)
+
+    assert process.returncode == 0
+    assert out == RAW_LOG
+    assert NOT_RUNNING_NOTE.encode() in b"".join(shown)

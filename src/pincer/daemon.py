@@ -31,9 +31,10 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
     from pathlib import Path
     from types import TracebackType
+    from typing import BinaryIO
 
 PID_FILE = "pincer.pid"
 LOCK_FILE = "pincer.lock"
@@ -43,6 +44,10 @@ LOG_FILE = "pincer.log"
 # Previous sessions kept by start-time rotation: pincer.log.1 (newest) … pincer.log.5.
 LOG_KEEP = 5
 TAIL_LINES = 20
+# Where `pincer logs -f` (and attaching) starts: this many lines back.
+FOLLOW_LINES = 50
+# Logs are read in blocks of this size, backward to find a tail and forward to follow.
+READ_BLOCK = 64 * 1024
 POLL_INTERVAL = 0.1
 # The lease writes the record right after taking the lock; a probe that wins that
 # race waits this long for the record to appear.
@@ -157,10 +162,11 @@ def _start_locked(
     # Readiness comes from the record alone, never from the dashboard port: the API binds
     # before the channels have started.
     deadline = time.monotonic() + wait_timeout
-    with _LogLines(log, on_line) as lines:
+    with log.open("rb") as log_file:
+        lines = _LogLines(log_file)
         while True:
             state = read_state(data_dir)
-            lines.relay()
+            lines.relay(on_line)
             if state is not None and state.pid == child.pid:
                 # The child holds the lease now; a concurrent start sees it and stands down.
                 starting.release()
@@ -168,7 +174,7 @@ def _start_locked(
                 return StartResult(StartOutcome.READY, state)
             exit_code = child.poll()
             if exit_code is not None:
-                lines.relay(final=True)
+                lines.relay(on_line, final=True)
                 return StartResult(StartOutcome.CRASHED, last_lines=_tail(log, TAIL_LINES), exit_code=exit_code)
             if time.monotonic() >= deadline:
                 return StartResult(StartOutcome.TIMED_OUT, state)
@@ -187,6 +193,31 @@ def read_state(data_dir: Path) -> DaemonState | None:
         if time.monotonic() >= deadline:
             return None
         time.sleep(POLL_INTERVAL / 5)
+
+
+def follow(data_dir: Path, from_lines: int | None, until_exit: bool) -> Generator[bytes]:
+    """The daemon log from its last `from_lines` lines (all of it for None), raw, in chunks of whole lines.
+
+    With `until_exit` it then follows what the daemon writes until the daemon has exited, or until a
+    new start has rotated the log away (the session being followed is over either way). An
+    unterminated last line comes out only once nothing more can follow. A missing log yields nothing.
+    """
+    path = log_path(data_dir)
+    try:
+        log = path.open("rb")
+    except FileNotFoundError:
+        return
+    with log:
+        size = os.fstat(log.fileno()).st_size
+        lines = _LogLines(log, start_at=0 if from_lines is None else _tail_offset(log, size, from_lines))
+        while True:
+            # Look before reading: the lock is released only as the process exits, so once it is
+            # free every line the daemon wrote is already in the file, and this read gets them all.
+            ended = not until_exit or not _lease_held(data_dir) or _rotated(path, log)
+            yield from lines.read(final=ended)
+            if ended:
+                return
+            time.sleep(POLL_INTERVAL)
 
 
 def stop(
@@ -348,30 +379,60 @@ class _StartLock:
 
 
 class _LogLines:
-    """Reads a growing log from its current start, handing each complete line to `on_line`."""
+    """Reads a growing log onwards from `start_at`, in whole lines."""
 
-    def __init__(self, path: Path, on_line: Callable[[str], None] | None) -> None:
-        self._path = path
-        self._on_line = on_line
+    def __init__(self, file: BinaryIO, start_at: int = 0) -> None:
+        self._file = file
+        self._file.seek(start_at)
         self._pending = b""
 
-    def __enter__(self) -> _LogLines:
-        self._file = self._path.open("rb")
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self._file.close()
-
-    def relay(self, final: bool = False) -> None:
-        """Pass on the lines written since the last call; `final` also flushes an unterminated last line."""
-        self._pending += self._file.read()
-        *complete, self._pending = self._pending.split(b"\n")
+    def read(self, final: bool = False) -> Iterator[bytes]:
+        """The lines written since the last call, raw, a block at a time; `final` adds an unterminated last line."""
+        while block := self._file.read(READ_BLOCK):
+            complete, newline, self._pending = (self._pending + block).rpartition(b"\n")
+            if newline:
+                yield complete + newline
         if final and self._pending:
-            complete.append(self._pending)
+            yield self._pending
             self._pending = b""
-        if self._on_line is not None:
-            for raw in complete:
-                self._on_line(raw.decode(errors="replace").rstrip("\r"))
+
+    def relay(self, on_line: Callable[[str], None] | None, final: bool = False) -> None:
+        """Pass on the lines written since the last call, decoded, to `on_line`."""
+        for chunk in self.read(final):
+            if on_line is not None:
+                for raw in chunk.removesuffix(b"\n").split(b"\n"):
+                    on_line(raw.decode(errors="replace").rstrip("\r"))
+
+
+def _tail_offset(file: BinaryIO, size: int, lines: int) -> int:
+    """Where the last `lines` lines of `file` begin, found reading backward from its end a block at a time."""
+    if lines == 0:
+        return size
+    end = size
+    if size:
+        file.seek(size - 1)
+        if file.read(1) == b"\n":
+            end -= 1  # a newline ending the file closes the last line rather than starting another
+    newlines = 0
+    while end > 0:
+        begin = max(end - READ_BLOCK, 0)
+        file.seek(begin)
+        block = file.read(end - begin)
+        at = len(block)
+        while (at := block.rfind(b"\n", 0, at)) != -1:
+            newlines += 1
+            if newlines == lines:
+                return begin + at + 1
+        end = begin
+    return 0
+
+
+def _rotated(path: Path, file: BinaryIO) -> bool:
+    """True once `path` no longer names the file `file` has open (a start rotated it away)."""
+    try:
+        return os.stat(path).st_ino != os.fstat(file.fileno()).st_ino
+    except FileNotFoundError:
+        return True
 
 
 def _tail(path: Path, lines: int) -> list[str]:
