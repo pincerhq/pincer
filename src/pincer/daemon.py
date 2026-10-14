@@ -216,6 +216,9 @@ def read_state(data_dir: Path) -> DaemonState | DaemonWithoutRecord | None:
         record = _read_record(data_dir / PID_FILE)
         if record is not None:
             return record
+        # The usual way to be here is a daemon past its lease, exiting: once it has, nothing runs.
+        if not _lease_held(data_dir):
+            return None
         if time.monotonic() >= deadline:
             return DaemonWithoutRecord()
         time.sleep(POLL_INTERVAL / 5)

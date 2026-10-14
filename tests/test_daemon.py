@@ -853,3 +853,22 @@ def test_a_record_naming_no_single_process_is_unreadable_and_never_signalled(
     assert attempted == []
     assert alive(state.pid)
     real_kill(state.pid, signal.SIGTERM)
+
+
+def test_a_daemon_that_exits_during_the_record_grace_reads_as_gone_at_once(data_dir: Path) -> None:
+    # A lease holder with no record, as at the end of DaemonLease.__exit__, letting go of the lock
+    # (exiting) well inside the grace read_state gives a missing record.
+    (data_dir / daemon.LOCK_FILE).touch()
+    fd = os.open(data_dir / daemon.LOCK_FILE, os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    exits = threading.Timer(0.2, os.close, (fd,))
+    exits.start()
+    try:
+        began = time.monotonic()
+        state = daemon.read_state(data_dir)
+        took = time.monotonic() - began
+    finally:
+        exits.join()
+
+    assert state is None
+    assert took < daemon.RECORD_GRACE / 2
