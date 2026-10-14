@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import itertools
 import json
 import os
@@ -36,6 +37,10 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon mode is POSIX-only")
 
 runner = CliRunner()
+# `pincer run`, in a process whose attach gives up on a stop after {} seconds instead of 90.
+PATCHED_STOP_TIMEOUT_RUN = (
+    "import pincer.cli.daemon as d; d.STOP_TIMEOUT = {}; from pincer.cli import app; app(['run'], prog_name='pincer')"
+)
 
 
 def _free_port() -> int:
@@ -747,15 +752,21 @@ class _Attached:
 
 
 @pytest.fixture
-def pincer_run(data_dir: Path, tmp_path: Path) -> Iterator[Callable[[], _Attached]]:
+def pincer_run(data_dir: Path, tmp_path: Path) -> Iterator[Callable[..., _Attached]]:
     """Starts a real `pincer run` on this test's data_dir, from a scratch cwd (no `.env` there)."""
     cwd = tmp_path / "run-cwd"
     cwd.mkdir()
     started: list[subprocess.Popen[bytes]] = []
 
-    def spawn() -> _Attached:
+    def spawn(stop_timeout: float | None = None) -> _Attached:
+        # A shorter stop timeout is patched into this one process, not configured: there is no knob for it.
+        command = (
+            pincer_command("run")
+            if stop_timeout is None
+            else [*pincer_command()[:3], "-P", "-c", PATCHED_STOP_TIMEOUT_RUN.format(stop_timeout)]
+        )
         process = subprocess.Popen(
-            pincer_command("run"),
+            command,
             cwd=cwd,
             # Should it start an agent after all, it stays inside this test.
             env={
@@ -780,7 +791,7 @@ def pincer_run(data_dir: Path, tmp_path: Path) -> Iterator[Callable[[], _Attache
 
 
 def test_run_attaches_to_a_ready_daemon_and_follows_its_log(
-    data_dir: Path, tmp_path: Path, pincer_run: Callable[[], _Attached]
+    data_dir: Path, tmp_path: Path, pincer_run: Callable[..., _Attached]
 ) -> None:
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     state = daemon.read_state(data_dir)
@@ -800,7 +811,7 @@ def test_run_attaches_to_a_ready_daemon_and_follows_its_log(
 
 
 def test_run_attaches_to_a_starting_daemon_and_shows_it_come_up(
-    data_dir: Path, monkeypatch: pytest.MonkeyPatch, pincer_run: Callable[[], _Attached]
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, pincer_run: Callable[..., _Attached]
 ) -> None:
     _child_mode(monkeypatch, "gated", data_dir)
     assert runner.invoke(app, ["run", "-d", "--wait-timeout", "0.5"]).exit_code == 1
@@ -817,13 +828,13 @@ def test_run_attaches_to_a_starting_daemon_and_shows_it_come_up(
 
 
 def test_ctrl_c_while_attached_stops_the_daemon_and_shows_its_shutdown(
-    data_dir: Path, monkeypatch: pytest.MonkeyPatch, pincer_run: Callable[[], _Attached]
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, pincer_run: Callable[..., _Attached]
 ) -> None:
     _child_mode(monkeypatch, "slow-shutdown", data_dir)
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     pid = daemon.read_state(data_dir).pid  # type: ignore[union-attr]
     attached = pincer_run()
-    attached.wait_for("starting in")
+    attached.wait_for(_attach_line(pid))  # printed once Ctrl+C is ours to handle
 
     attached.send(signal.SIGINT)
 
@@ -841,13 +852,13 @@ def test_ctrl_c_while_attached_stops_the_daemon_and_shows_its_shutdown(
 
 
 def test_ctrl_c_while_attached_shows_the_last_lines_before_saying_stopped(
-    data_dir: Path, monkeypatch: pytest.MonkeyPatch, pincer_run: Callable[[], _Attached]
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, pincer_run: Callable[..., _Attached]
 ) -> None:
     _child_mode(monkeypatch, "noisy-shutdown", data_dir)
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     pid = daemon.read_state(data_dir).pid  # type: ignore[union-attr]
     attached = pincer_run()
-    attached.wait_for("starting in")
+    attached.wait_for(_attach_line(pid))  # printed once Ctrl+C is ours to handle
 
     attached.send(signal.SIGINT)
 
@@ -858,13 +869,13 @@ def test_ctrl_c_while_attached_shows_the_last_lines_before_saying_stopped(
 
 
 def test_a_second_ctrl_c_during_the_shutdown_only_detaches(
-    data_dir: Path, monkeypatch: pytest.MonkeyPatch, pincer_run: Callable[[], _Attached]
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, pincer_run: Callable[..., _Attached]
 ) -> None:
     _child_mode(monkeypatch, "slow-shutdown", data_dir)
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     pid = daemon.read_state(data_dir).pid  # type: ignore[union-attr]
     attached = pincer_run()
-    attached.wait_for("starting in")
+    attached.wait_for(_attach_line(pid))  # printed once Ctrl+C is ours to handle
     attached.send(signal.SIGINT)
     attached.wait_for(f"Stopping Pincer (pid {pid})…")
     # Frozen mid-shutdown: it can't finish before the second Ctrl+C, however slow this machine is.
@@ -889,7 +900,90 @@ def test_a_second_ctrl_c_during_the_shutdown_only_detaches(
     assert "Shutdown complete" in daemon.log_path(data_dir).read_text()
 
 
-def test_a_hangup_while_attached_leaves_the_daemon_running(data_dir: Path, pincer_run: Callable[[], _Attached]) -> None:
+def test_ctrl_c_the_moment_attach_starts_still_stops_the_daemon(
+    data_dir: Path, pincer_run: Callable[..., _Attached]
+) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    pid = daemon.read_state(data_dir).pid  # type: ignore[union-attr]
+    attached = pincer_run()
+    attached.wait_for(_attach_line(pid))
+
+    attached.send(signal.SIGINT)
+
+    returncode, err = attached.finish(20.0)
+    assert returncode == 0, err
+    assert err == b""
+    assert attached.lines[-1] == f"Pincer stopped (pid {pid})"
+    assert not _alive(pid)
+
+
+def test_an_attached_stop_that_times_out_says_so_at_once_and_keeps_following(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, pincer_run: Callable[..., _Attached]
+) -> None:
+    _child_mode(monkeypatch, "ignore-sigterm", data_dir)
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    pid = daemon.read_state(data_dir).pid  # type: ignore[union-attr]
+    attached = pincer_run(stop_timeout=1.0)
+    attached.wait_for(_attach_line(pid))
+
+    attached.send(signal.SIGINT)
+
+    hint = attached.wait_for("Pincer is still shutting down after 1 s — 'pincer stop --force' to kill it", 10.0)
+    assert attached.process.poll() is None
+    _append_log(data_dir, b"still here\n")
+    assert attached.wait_for("still here") > hint
+    attached.send(signal.SIGINT)
+    returncode, err = attached.finish(5.0)
+    assert returncode == 0, err
+    assert attached.lines[-1] == f"Detached — Pincer (pid {pid}) keeps shutting down in the background"
+    assert _alive(pid)
+
+
+def test_attach_takes_ctrl_c_over_before_it_shows_anything(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Whatever the operator sees first, a Ctrl+C from then on is attach's to handle, not asyncio's.
+
+    Stands in for asyncio's runner with a handler of its own, and notes which handler is in place at
+    every write and when the log relay starts (no daemon needed: the relay is replaced too).
+    """
+    from rich.console import Console
+
+    from pincer.cli import daemon as cli_daemon
+
+    seen: list[tuple[str, object]] = []
+
+    class _Noting(io.StringIO):
+        def write(self, text: str) -> int:
+            seen.append((text, signal.getsignal(signal.SIGINT)))
+            return super().write(text)
+
+    class _Relay:
+        def __init__(self, settings: object) -> None:
+            seen.append(("relay starts", signal.getsignal(signal.SIGINT)))
+
+        def wait(self) -> None:
+            pass  # the daemon has exited
+
+    def asyncio_runner_handler(signum: int, frame: object) -> None:
+        pass
+
+    monkeypatch.setattr(cli_daemon, "console", Console(file=_Noting()))
+    monkeypatch.setattr(cli_daemon, "_LogRelay", _Relay)
+    state = daemon.DaemonState(4182, "2026-10-14T00:00:00+00:00", "/", 8080, "0.8.0", daemon.DaemonPhase.READY)
+    previous = signal.signal(signal.SIGINT, asyncio_runner_handler)
+    try:
+        cli_daemon.attach_daemon(MagicMock(), state)
+        after = signal.getsignal(signal.SIGINT)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+    assert seen
+    assert [what for what, handler in seen if handler is not signal.default_int_handler] == []
+    assert after is asyncio_runner_handler
+
+
+def test_a_hangup_while_attached_leaves_the_daemon_running(
+    data_dir: Path, pincer_run: Callable[..., _Attached]
+) -> None:
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     state = daemon.read_state(data_dir)
     assert state is not None
@@ -906,7 +1000,7 @@ def test_a_hangup_while_attached_leaves_the_daemon_running(data_dir: Path, pince
 
 
 def test_attached_run_ends_when_the_daemon_is_stopped_elsewhere(
-    data_dir: Path, pincer_run: Callable[[], _Attached]
+    data_dir: Path, pincer_run: Callable[..., _Attached]
 ) -> None:
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     pid = daemon.read_state(data_dir).pid  # type: ignore[union-attr]

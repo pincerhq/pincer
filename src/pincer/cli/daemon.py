@@ -164,18 +164,30 @@ def attach_daemon(settings: Settings, state: DaemonState) -> None:
     The first Ctrl+C stops it gracefully, still showing its log until it has exited; a
     second one only detaches. A hangup only ends this process: the daemon has a session of its own.
     """
-    console.print(
-        f"Pincer is already running in the background (pid {state.pid}) — attaching", markup=False, highlight=False
-    )
-    shown = _LogRelay(settings)
-    # asyncio's runner turns a Ctrl+C into a cancel that this blocking wait would never see.
+    # asyncio's runner turns a Ctrl+C into a cancel that this blocking wait would never see. Take
+    # Ctrl+C over before anything is shown, so one pressed the moment attaching starts still stops it.
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    shown: _LogRelay | None = None
     try:
         try:
+            console.print(
+                f"Pincer is already running in the background (pid {state.pid}) — attaching",
+                markup=False,
+                highlight=False,
+            )
+            shown = _LogRelay(settings)
             shown.wait()
         except KeyboardInterrupt:
+            if shown is None:
+                shown = _LogRelay(settings)
             try:
                 stopped = _stop_daemon(settings, STOP_TIMEOUT, force=False, before_report=shown.wait)
+                if stopped is None:
+                    # Still shutting down (the --force hint is out) or not ours to signal: keep
+                    # showing its log; a second Ctrl+C still only detaches.
+                    shown.wait()
+                    console.print(f"Pincer has exited (pid {state.pid})", markup=False, highlight=False)
+                    return
             except KeyboardInterrupt:
                 shown.detach()
                 console.print(
@@ -184,8 +196,6 @@ def attach_daemon(settings: Settings, state: DaemonState) -> None:
                     highlight=False,
                 )
                 return
-            if stopped is None:
-                raise typer.Exit(1) from None
             if not stopped:
                 _report_not_running(settings)
             return
@@ -322,8 +332,8 @@ def _stop_daemon(
     """Stop the daemon of `settings.data_dir`, printing its progress and outcome as `pincer stop` does.
 
     True once it has exited; False if none was running (the caller says so, in its own words);
-    None if it is still running or couldn't be signalled. `before_report` runs once the wait
-    is over, before the outcome is printed.
+    None if it is still running or couldn't be signalled. `before_report` runs once it has
+    exited (or none was running), before that is printed; never while it is still running.
     """
     from rich.markup import escape
 
@@ -339,7 +349,7 @@ def _stop_daemon(
         return None
     finally:
         progress.close()
-    if before_report is not None:
+    if before_report is not None and result.outcome is not daemon.StopOutcome.STILL_RUNNING:
         before_report()
     if result.outcome is daemon.StopOutcome.NOT_RUNNING:
         return False
