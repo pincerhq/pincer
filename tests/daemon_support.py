@@ -13,10 +13,15 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pincer
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from subprocess import Popen
 
+# The source tree under test. A spawned interpreter would otherwise import pincer from wherever the
+# venv's editable install points, which need not be the tree pytest is running (a git worktree, say).
+SRC_DIR = Path(pincer.__file__).resolve().parents[1]
 # A job a shell starts in the background inherits SIGINT ignored (and under nohup SIGHUP too), and
 # Python then never turns a Ctrl+C into KeyboardInterrupt. A command typed in a terminal starts with
 # both at their defaults: `pincer_command()` starts its process that way, whatever ran pytest.
@@ -34,10 +39,21 @@ def pincer_command(*args: str) -> list[str]:
     return [sys.executable, "-c", AS_TYPED_IN_A_TERMINAL, "-P", "-m", "pincer", *args]
 
 
+def with_tree_on_path(env: dict[str, str]) -> dict[str, str]:
+    """`env`, with the source tree under test first on PYTHONPATH."""
+    rest = env.get("PYTHONPATH")
+    return {**env, "PYTHONPATH": f"{SRC_DIR}{os.pathsep}{rest}" if rest else str(SRC_DIR)}
+
+
+def child_env() -> dict[str, str]:
+    """This process's environment, for a child that must import the tree under test."""
+    return with_tree_on_path(dict(os.environ))
+
+
 def scratch_env(home: Path, data: Path, **extra: str) -> dict[str, str]:
     """An environment built from nothing for a real Pincer: no developer shell variables, no `.env`
-    (HOME is scratch), a dummy API key and offline model loading."""
-    return {
+    (HOME is scratch), a dummy API key, offline model loading, and the tree under test importable."""
+    env = {
         "HOME": str(home),
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HF_HUB_OFFLINE": "1",
@@ -46,6 +62,7 @@ def scratch_env(home: Path, data: Path, **extra: str) -> dict[str, str]:
         "PINCER_LOG_LEVEL": "INFO",
         **extra,
     }
+    return with_tree_on_path(env)
 
 
 def signal_channel_env(stub_url: str) -> dict[str, str]:

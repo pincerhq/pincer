@@ -22,7 +22,18 @@ from unittest.mock import MagicMock
 
 import daemon_fake_child
 import pytest
-from daemon_support import RAW_LOG, alive, append_log, free_port, numbered, pincer_command, within, write_log
+from daemon_support import (
+    RAW_LOG,
+    SRC_DIR,
+    alive,
+    append_log,
+    child_env,
+    free_port,
+    numbered,
+    pincer_command,
+    within,
+    write_log,
+)
 from typer.testing import CliRunner, Result
 
 import pincer
@@ -58,6 +69,8 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
     monkeypatch.setattr("pincer.cli.daemon._child_argv", lambda: daemon_fake_child.argv("ready", path))
+    # Everything a test starts (`run -d`'s daemon, `pincer logs`, `pincer run`) inherits this environment.
+    monkeypatch.setenv("PYTHONPATH", child_env()["PYTHONPATH"])
     yield path
     daemon_fake_child.kill_all_under(tmp_path)
 
@@ -1250,3 +1263,9 @@ def test_plain_run_while_a_daemon_lingers_says_it_is_shutting_down(
     assert result.exit_code == 1, result.output
     assert SHUTTING_DOWN.format(data_dir) in result.output
     assert ran == []
+
+
+def test_run_detach_starts_a_daemon_that_imports_the_tree_under_test(data_dir: Path) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+
+    assert f"imports pincer from {SRC_DIR / 'pincer' / '__init__.py'}" in daemon.log_path(data_dir).read_text()

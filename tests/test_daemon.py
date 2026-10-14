@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import daemon_fake_child
 import pytest
-from daemon_support import RAW_LOG, alive, append_log, numbered, within, write_log
+from daemon_support import RAW_LOG, SRC_DIR, alive, append_log, child_env, numbered, within, write_log
 
 from pincer import daemon
 from pincer.daemon import StartOutcome, StopOutcome
@@ -44,7 +44,7 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon mode is 
 
 
 def _start(data_dir: Path, mode: str = "ready", **kwargs: object) -> daemon.StartResult:
-    options: dict[str, object] = {"cwd": data_dir, "env": dict(os.environ), "wait_timeout": WAIT_TIMEOUT}
+    options: dict[str, object] = {"cwd": data_dir, "env": child_env(), "wait_timeout": WAIT_TIMEOUT}
     options.update(kwargs)
     return daemon.start(data_dir, daemon_fake_child.argv(mode, data_dir), **options)  # type: ignore[arg-type]
 
@@ -93,7 +93,7 @@ def test_start_returns_ready_child_and_stop_stops_it(data_dir: Path) -> None:
 def test_record_goes_starting_then_ready_and_the_lock_survives_the_rewrite(data_dir: Path) -> None:
     from pincer import __version__
 
-    child = subprocess.Popen(daemon_fake_child.argv("gated", data_dir), cwd=data_dir)
+    child = subprocess.Popen(daemon_fake_child.argv("gated", data_dir), cwd=data_dir, env=child_env())
     try:
         starting = _wait_for_state(data_dir, "starting")
         assert set(asdict(starting)) == {"pid", "started_at", "cwd", "port", "version", "state", "channels"}
@@ -149,6 +149,7 @@ def test_stop_never_signals_the_pid_of_a_leftover_record(data_dir: Path) -> None
 def test_daemon_outlives_its_launcher_in_a_session_of_its_own(data_dir: Path) -> None:
     launcher = subprocess.run(
         [sys.executable, "-c", LAUNCHER, str(data_dir), *daemon_fake_child.argv("ready", data_dir)],
+        env=child_env(),
         capture_output=True,
         text=True,
         timeout=WAIT_TIMEOUT,
@@ -472,6 +473,7 @@ def test_force_kills_only_the_daemon_when_it_does_not_lead_its_group(data_dir: P
     # to kill a group the daemon doesn't lead, the leader (not pytest's own group) would go too.
     leader = subprocess.Popen(
         ["sh", "-c", '"$@" & wait; sleep 30', "sh", *daemon_fake_child.argv("ignore-sigterm", data_dir)],
+        env=child_env(),
         start_new_session=True,
     )
     try:
@@ -811,3 +813,10 @@ def test_within_reraises_what_the_call_raised() -> None:
 
     with pytest.raises(LookupError, match="from the worker"):
         within(5.0, fail)
+
+
+def test_a_spawned_daemon_imports_the_tree_under_test(data_dir: Path) -> None:
+    _start(data_dir)
+
+    assert f"imports pincer from {SRC_DIR / 'pincer' / '__init__.py'}" in daemon.log_path(data_dir).read_text()
+    daemon.stop(data_dir)

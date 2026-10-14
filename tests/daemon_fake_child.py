@@ -37,6 +37,7 @@ import time
 from pathlib import Path
 from types import FrameType
 
+import pincer
 from pincer.cli._shared import _setup_logging
 from pincer.daemon import DaemonLease
 
@@ -101,6 +102,7 @@ def main() -> None:
 
     with DaemonLease(data_dir, port=port) as lease:
         log.info("fake child %d starting in %s", os.getpid(), os.getcwd())
+        log.info("fake child %d imports pincer from %s", os.getpid(), Path(pincer.__file__).resolve())
         log.info("marker from the caller's environment: %s", os.environ.get("FAKE_CHILD_MARKER"))
         log.info("inbound call from %s", CALLER_NUMBER)
         if mode == "die-mid-line":
