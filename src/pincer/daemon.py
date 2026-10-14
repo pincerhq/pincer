@@ -136,6 +136,17 @@ class StartResult:
 class StopResult:
     outcome: StopOutcome
     pid: int | None = None
+    # The record's pid when it turned out not to be the daemon's (it started after the lease):
+    # left alone, and reported, while stop waited for the real daemon.
+    not_the_daemon: int | None = None
+
+
+@dataclass(frozen=True)
+class PidNotTheDaemon:
+    """What `stop` waits on when the recorded pid isn't the lease holder's: `pid` started after
+    the lease was taken, so it reused the number of a daemon since gone."""
+
+    pid: int
 
 
 def log_path(data_dir: Path) -> Path:
@@ -326,7 +337,7 @@ def stop(
     data_dir: Path,
     timeout: float | None = None,
     force: bool = False,
-    on_wait: Callable[[LiveDaemon, float], None] | None = None,
+    on_wait: Callable[[LiveDaemon | PidNotTheDaemon, float], None] | None = None,
 ) -> StopResult:
     """SIGTERM the daemon (the agent's graceful-shutdown path) and wait until it has exited.
 
@@ -345,11 +356,13 @@ def stop(
     if state is None:
         return StopResult(StopOutcome.NOT_RUNNING)
     pid = state.pid if isinstance(state, DaemonState) else None
+    waiting_on: LiveDaemon | PidNotTheDaemon = state
     if pid is not None and isinstance(state, DaemonState):
         if not _lease_held(data_dir):  # it exited on its own since the record was read
             return StopResult(StopOutcome.STOPPED, pid)
         if not _started_by(pid, state.started_at):
-            pid = None
+            waiting_on, pid = PidNotTheDaemon(pid), None
+    not_the_daemon = waiting_on.pid if isinstance(waiting_on, PidNotTheDaemon) else None
     if pid is not None:
         with contextlib.suppress(ProcessLookupError):
             if force:
@@ -360,12 +373,12 @@ def stop(
     while True:
         elapsed = time.monotonic() - began
         if on_wait is not None:
-            on_wait(state, elapsed)
+            on_wait(waiting_on, elapsed)
         if not _lease_held(data_dir):
             killed = force and pid is not None
-            return StopResult(StopOutcome.KILLED if killed else StopOutcome.STOPPED, pid)
+            return StopResult(StopOutcome.KILLED if killed else StopOutcome.STOPPED, pid, not_the_daemon)
         if timeout is not None and elapsed >= timeout:
-            return StopResult(StopOutcome.STILL_RUNNING, pid)
+            return StopResult(StopOutcome.STILL_RUNNING, pid, not_the_daemon)
         time.sleep(POLL_INTERVAL)
 
 

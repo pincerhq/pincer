@@ -1480,3 +1480,31 @@ def test_ctrl_c_while_run_detach_waits_stops_waiting_at_once_and_leaves_the_daem
         if process.poll() is None:
             process.kill()
         process.wait()
+
+
+def test_stop_names_a_recorded_pid_that_isnt_pincer_and_never_announces_stopping_it(
+    data_dir: Path, tmp_path: Path
+) -> None:
+    from datetime import datetime, timedelta
+
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        earlier = (datetime.fromisoformat(record["started_at"]) - timedelta(minutes=5)).isoformat()
+        (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "pid": bystander.pid, "started_at": earlier}))
+
+        result = within(10.0, lambda: runner.invoke(app, ["stop", "--timeout", "0.5"]))
+
+        assert result.exit_code == 1, result.output
+        assert result.output.splitlines() == [
+            f"The recorded pid {bystander.pid} didn't start Pincer (it started after the lease) — not signalling it; "
+            "waiting for Pincer to exit…",
+            f"Pincer still holds data dir {data_dir} after 0.5 s; its recorded pid {bystander.pid} isn't it — "
+            "not signalling anything.",
+        ]
+        assert bystander.poll() is None
+        assert daemon_fake_child.children_under(tmp_path) == [record["pid"]]
+    finally:
+        bystander.kill()
+        bystander.wait()

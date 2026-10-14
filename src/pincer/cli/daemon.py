@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from rich.status import Status
 
     from pincer.config import Settings
-    from pincer.daemon import DaemonState, DaemonWithUnreadableRecord, LiveDaemon
+    from pincer.daemon import DaemonState, DaemonWithUnreadableRecord, LiveDaemon, PidNotTheDaemon
 
 WAIT_TIMEOUT = 60.0
 # Sized to the voice channel's 60 s call drain plus worker and API grace.
@@ -286,12 +286,20 @@ class _StopProgress:
         self._announced = False
         self._status: Status | None = None
 
-    def __call__(self, state: LiveDaemon, elapsed: float) -> None:
-        from pincer.daemon import DaemonState, DaemonWithUnreadableRecord
+    def __call__(self, state: LiveDaemon | PidNotTheDaemon, elapsed: float) -> None:
+        from pincer.daemon import DaemonState, DaemonWithUnreadableRecord, PidNotTheDaemon
 
         if not self._announced:
             self._announced = True
-            if isinstance(state, DaemonState):
+            if isinstance(state, PidNotTheDaemon):
+                console.print(
+                    f"The recorded pid {state.pid} didn't start Pincer (it started after the lease) — "
+                    "not signalling it; waiting for Pincer to exit…",
+                    soft_wrap=True,
+                    markup=False,
+                    highlight=False,
+                )
+            elif isinstance(state, DaemonState):
                 console.print(f"Stopping Pincer (pid {state.pid})…", markup=False, highlight=False)
             elif isinstance(state, DaemonWithUnreadableRecord):
                 message = unreadable_record_message(self._data_dir, state)
@@ -396,6 +404,13 @@ def _stop_daemon(
         before_report()
     if result.outcome is daemon.StopOutcome.NOT_RUNNING:
         return False
+    if result.outcome is daemon.StopOutcome.STILL_RUNNING and result.not_the_daemon is not None:
+        console.print(
+            f"[yellow]Pincer still holds data dir {escape(str(settings.data_dir))} after {timeout:g} s; its recorded "
+            f"pid {result.not_the_daemon} isn't it — not signalling anything.[/yellow]",
+            soft_wrap=True,
+        )
+        return None
     if result.outcome is daemon.StopOutcome.STILL_RUNNING and result.pid is None:
         console.print(
             f"[yellow]Pincer still holds data dir {escape(str(settings.data_dir))} after {timeout:g} s, but its record "

@@ -916,6 +916,7 @@ def test_stop_never_signals_a_pid_that_started_after_the_daemon_took_its_lease(
 
         assert result.outcome is StopOutcome.STILL_RUNNING
         assert result.pid is None
+        assert result.not_the_daemon == bystander.pid
         time.sleep(0.2)  # a signal sent on the way would have landed by now
         assert bystander.poll() is None
         assert alive(state.pid)
