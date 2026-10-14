@@ -57,6 +57,9 @@ RECORD_GRACE = 1.0
 # A starting daemon keeps reaching for the lease this long while shared probes hold it.
 LEASE_GRACE = 2.0
 LEASE_RETRY = 0.01
+# Tells a spawned daemon which inherited fd holds the start lock, so it can let go of it the
+# moment it holds the lease (see start()).
+START_LOCK_FD_ENV = "PINCER_DAEMON_START_LOCK_FD"
 
 
 class DaemonLeaseTaken(RuntimeError):
@@ -144,9 +147,17 @@ def start(
     (data_dir / LOCK_FILE).touch(mode=0o600)
     # One start at a time, from the probe until the new child holds the lease. Without it a
     # second start landing in that window (the child is still importing) would see the lease
-    # free, rotate the first child's fresh log away and spawn a rival.
-    with _StartLock(data_dir / START_LOCK_FILE) as starting:
+    # free, rotate the first child's fresh log away and spawn a rival. The child inherits the
+    # lock too and lets go of it once it holds the lease, so it stays held even when this
+    # start stops waiting first (a timeout, Ctrl+C) — and goes when the child dies.
+    starting = _StartLock(data_dir / START_LOCK_FILE)
+    if not starting.acquire(wait_timeout):
+        # Another start's child hasn't reached the lease within our wait.
+        return StartResult(StartOutcome.TIMED_OUT, read_state(data_dir))
+    try:
         return _start_locked(data_dir, log, argv, cwd, env, wait_timeout, on_line, starting)
+    finally:
+        starting.release()
 
 
 def _start_locked(
@@ -167,17 +178,21 @@ def _start_locked(
         (data_dir / PID_FILE).unlink(missing_ok=True)
         _rotate(log)
 
+    start_fd = starting.fd
+    if start_fd is None:  # start() only gets here holding it
+        raise RuntimeError("the start lock isn't held")
     log_fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
         child = subprocess.Popen(  # nosec B603 - argv is built by the caller, never from user input
             list(argv),
             cwd=cwd,
             # A block-buffered stdout would hold the banner back from the log.
-            env={**env, "PYTHONUNBUFFERED": "1"},
+            env={**env, "PYTHONUNBUFFERED": "1", START_LOCK_FD_ENV: str(start_fd)},
             stdin=subprocess.DEVNULL,
             stdout=log_fd,
             stderr=log_fd,
             start_new_session=True,
+            pass_fds=(start_fd,),
         )
     finally:
         os.close(log_fd)
@@ -192,7 +207,7 @@ def _start_locked(
             lines.relay(on_line)
             ours = isinstance(state, DaemonState) and state.pid == child.pid
             if ours:
-                # The child holds the lease now; a concurrent start sees it and stands down.
+                # The child holds the lease (and has let go of its copy of the start lock).
                 starting.release()
             if ours and isinstance(state, DaemonState) and state.state is DaemonPhase.READY:
                 return StartResult(StartOutcome.READY, state)
@@ -355,6 +370,7 @@ class DaemonLease:
         # os.open fds are non-inheritable, so the lock dies with this process, not with
         # whatever it spawns (MCP servers, sandboxed skills).
         self._fd = fd
+        _let_go_of_the_start_lock()
         self._started_at = datetime.now(UTC).isoformat(timespec="seconds")
         self._write(DaemonPhase.STARTING, [])
         return self
@@ -382,6 +398,15 @@ class DaemonLease:
         tmp = self._data_dir / f"{PID_FILE}.tmp"
         tmp.write_text(json.dumps(asdict(record)))
         os.replace(tmp, self._data_dir / PID_FILE)
+
+
+def _let_go_of_the_start_lock() -> None:
+    """Close the start lock `start()` handed this process, if it did: holding the lease, it is
+    no longer needed to keep a rival start out."""
+    inherited = os.environ.pop(START_LOCK_FD_ENV, None)
+    if inherited is not None:
+        with contextlib.suppress(ValueError, OSError):
+            os.close(int(inherited))
 
 
 @contextlib.contextmanager
@@ -420,28 +445,36 @@ def _rotate(log: Path) -> None:
 
 
 class _StartLock:
-    """A blocking exclusive `flock`, releasable before the `with` block ends (idempotently)."""
+    """An exclusive `flock` on the start lock file, waited for up to a deadline, and releasable early."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
-        self._fd: int | None = None
+        self.fd: int | None = None
 
-    def __enter__(self) -> _StartLock:
-        self._fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o600)
+    def acquire(self, timeout: float) -> bool:
+        """Wait up to `timeout` seconds (at least one try) for the lock; False if another start still has it."""
+        fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o600)
+        deadline = time.monotonic() + timeout
         try:
-            fcntl.flock(self._fd, fcntl.LOCK_EX)
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        os.close(fd)
+                        return False
+                    time.sleep(POLL_INTERVAL / 5)
         except BaseException:  # e.g. Ctrl+C while queued behind another start
-            self.release()
+            os.close(fd)
             raise
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.release()
+        self.fd = fd
+        return True
 
     def release(self) -> None:
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
 
 
 class _LogLines:

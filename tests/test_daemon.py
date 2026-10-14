@@ -872,3 +872,27 @@ def test_a_daemon_that_exits_during_the_record_grace_reads_as_gone_at_once(data_
 
     assert state is None
     assert took < daemon.RECORD_GRACE / 2
+
+
+# ── PR #242 review ─────────────────────────────────────────────────────────
+
+
+def test_a_start_that_stops_waiting_early_still_keeps_out_a_rival_until_its_child_holds_the_lease(
+    data_dir: Path, tmp_path: Path
+) -> None:
+    # The first start gives up at once (as with --wait-timeout 0, or Ctrl+C) while its child is
+    # still importing; a second start must not see the lease free, rotate that child's log away
+    # and spawn a rival.
+    first = _start(data_dir, mode="slow-lease", wait_timeout=0.0)
+    assert first.outcome is StartOutcome.TIMED_OUT
+    [child] = daemon_fake_child.children_under(tmp_path)
+
+    second = _start(data_dir)
+
+    assert second.outcome is StartOutcome.ALREADY_RUNNING, second
+    assert isinstance(second.state, daemon.DaemonState)
+    assert second.state.pid == child
+    assert daemon_fake_child.children_under(tmp_path) == [child]
+    assert f"fake child {child} starting" in daemon.log_path(data_dir).read_text()
+    assert not daemon.log_path(data_dir).with_name("pincer.log.1").exists()
+    daemon.stop(data_dir)
