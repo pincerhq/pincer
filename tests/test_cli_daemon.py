@@ -245,3 +245,19 @@ def test_stop_with_nothing_running_points_to_a_foreground_instance_on_the_port(d
     assert result.exit_code == 0
     assert "Pincer is not running" in result.output
     assert f"A foreground Pincer seems to be running on :{port} — stop it with Ctrl+C in its terminal." in result.output
+
+
+def test_stop_reports_a_daemon_it_may_not_signal(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+
+    def refuse(pid: int, sig: int) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("os.kill", refuse)
+        result = runner.invoke(app, ["stop"])
+
+    assert result.exit_code == 1
+    assert "Not allowed to signal Pincer (pid " in result.output
+    assert "Traceback" not in result.output
+    assert daemon.read_state(data_dir) is not None

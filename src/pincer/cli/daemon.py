@@ -150,6 +150,11 @@ def stop(
     progress = _StopProgress()
     try:
         result = daemon.stop(settings.data_dir, timeout=timeout, force=force, on_wait=progress)
+    except PermissionError:
+        running = daemon.read_state(settings.data_dir)
+        pid = running.pid if running is not None else "?"
+        console.print(f"[red]Not allowed to signal Pincer (pid {pid}) — it runs as another user.[/red]")
+        raise typer.Exit(1) from None
     finally:
         progress.close()
     if result.outcome is daemon.StopOutcome.NOT_RUNNING:

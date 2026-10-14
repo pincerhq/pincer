@@ -15,6 +15,8 @@ behaves according to MODE (tests build the command with `argv()`):
     raise-on-sigterm  like ready, but SIGTERM ends in an uncaught exception
     slow-shutdown     like ready, but its shutdown takes SLOW_SHUTDOWN_SECONDS
     ignore-sigterm    like ready, but never reacts to SIGTERM
+    grandchild        like ignore-sigterm, plus a long-lived child process in its process group, whose pid
+                      it writes to DATA_DIR/grandchild.pid (an MCP server or sandboxed skill stands in for it)
 
 Like Pincer's own handler, only the first SIGTERM starts the shutdown; later ones are ignored.
 """
@@ -49,6 +51,7 @@ CRASH_STEPS = 30
 SLOW_START_SECONDS = 2.0
 SLOW_LEASE_SECONDS = 1.0
 SLOW_SHUTDOWN_SECONDS = 2.0
+GRANDCHILD_MARK = "fake-grandchild"
 
 
 def argv(mode: str, data_dir: Path) -> list[str]:
@@ -56,9 +59,11 @@ def argv(mode: str, data_dir: Path) -> list[str]:
 
 
 def kill_all_under(directory: Path) -> None:
-    """SIGKILL every fake child whose DATA_DIR lies under `directory` — test cleanup that doesn't trust the lease."""
-    found = subprocess.run(["pgrep", "-f", f"{Path(__file__).name} .* {directory}"], capture_output=True, text=True)
-    for pid in found.stdout.split():
+    """SIGKILL every fake child (and grandchild) under `directory` — test cleanup that doesn't trust the lease."""
+    pids: list[str] = []
+    for pattern in (f"{Path(__file__).name} .* {directory}", f"{GRANDCHILD_MARK} {directory}"):
+        pids += subprocess.run(["pgrep", "-f", pattern], capture_output=True, text=True).stdout.split()
+    for pid in pids:
         with contextlib.suppress(ProcessLookupError):
             os.kill(int(pid), signal.SIGKILL)
 
@@ -86,7 +91,7 @@ def main() -> None:
     mode, data_dir = sys.argv[1], Path(sys.argv[2])
     _setup_logging("INFO")
     log = logging.getLogger("fake_child")
-    signal.signal(signal.SIGTERM, signal.SIG_IGN if mode == "ignore-sigterm" else _on_sigterm)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN if mode in ("ignore-sigterm", "grandchild") else _on_sigterm)
 
     port = PORT
     if mode == "slow-start":
@@ -112,6 +117,12 @@ def main() -> None:
             time.sleep(SLOW_START_SECONDS)
         while mode == "gated" and not (data_dir / "mark-ready").exists():
             time.sleep(0.05)
+        if mode == "grandchild":
+            grandchild = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(600)", GRANDCHILD_MARK, str(data_dir)],
+                stdin=subprocess.DEVNULL,
+            )
+            (data_dir / "grandchild.pid").write_text(str(grandchild.pid))
         print(f"Pincer is running! Channels: {', '.join(CHANNELS)}. Press Ctrl+C to stop.")
         lease.mark_ready(CHANNELS)
         try:

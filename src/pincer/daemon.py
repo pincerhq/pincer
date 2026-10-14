@@ -198,14 +198,19 @@ def stop(
     """SIGTERM the daemon (the agent's graceful-shutdown path) and wait until it has exited.
 
     Gives up after `timeout` seconds with STILL_RUNNING and leaves it running: a call drain
-    must never be cut short behind the operator's back. Only `force` kills (SIGKILL, at once).
+    must never be cut short behind the operator's back. Only `force` kills: SIGKILL, at once, to
+    the daemon's whole process group, so no MCP server or skill it spawned outlives it holding a
+    port or file. A plain stop signals the daemon alone; its own shutdown stops those children.
     `on_wait(state, elapsed)` is called right after signalling and then on every poll.
     """
     state = read_state(data_dir)
     if state is None:
         return StopResult(StopOutcome.NOT_RUNNING)
     with contextlib.suppress(ProcessLookupError):
-        os.kill(state.pid, signal.SIGKILL if force else signal.SIGTERM)
+        if force:
+            _kill_group(state.pid)
+        else:
+            os.kill(state.pid, signal.SIGTERM)
     began = time.monotonic()
     while True:
         elapsed = time.monotonic() - began
@@ -216,6 +221,14 @@ def stop(
         if timeout is not None and elapsed >= timeout:
             return StopResult(StopOutcome.STILL_RUNNING, state.pid)
         time.sleep(POLL_INTERVAL)
+
+
+def _kill_group(pid: int) -> None:
+    """SIGKILL the process group `pid` leads (a daemon leads its own session), or `pid` alone if it doesn't."""
+    if os.getpgid(pid) == pid:
+        os.killpg(pid, signal.SIGKILL)
+    else:  # not started by start(), e.g. a hand-run `pincer run --daemon-child`
+        os.kill(pid, signal.SIGKILL)
 
 
 class DaemonLease:

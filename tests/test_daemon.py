@@ -460,3 +460,36 @@ def test_stop_reports_its_wait_as_it_goes(data_dir: Path) -> None:
     assert seen[0][1] < 0.1  # right after signalling, before any wait
     assert len(seen) > 5
     assert all(later >= earlier for (_, earlier), (_, later) in zip(seen, seen[1:], strict=False))
+
+
+def test_force_kills_the_whole_process_group(data_dir: Path) -> None:
+    pid = _start(data_dir, mode="grandchild").state.pid  # type: ignore[union-attr]
+    grandchild = int((data_dir / "grandchild.pid").read_text())
+    assert os.getpgid(grandchild) == pid
+
+    result = daemon_fake_child.within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=True))
+
+    assert result.outcome is StopOutcome.KILLED
+    assert not _alive(pid)
+    # Reparented once the daemon died; give init a moment to reap it.
+    deadline = time.monotonic() + 3.0
+    while _alive(grandchild) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _alive(grandchild)
+
+
+def test_force_kills_only_the_daemon_when_it_does_not_lead_its_group(data_dir: Path) -> None:
+    # Started by hand, not by start(): it shares this test process's group, which must survive.
+    child = subprocess.Popen(daemon_fake_child.argv("ignore-sigterm", data_dir))
+    try:
+        _wait_for_state(data_dir, "ready")
+        assert os.getpgid(child.pid) == os.getpgid(0) != child.pid
+
+        result = daemon_fake_child.within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=True))
+
+        assert result.outcome is StopOutcome.KILLED
+        assert child.wait(timeout=5) == -signal.SIGKILL
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
