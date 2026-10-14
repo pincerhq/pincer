@@ -175,9 +175,7 @@ def attach_daemon(settings: Settings, state: DaemonState) -> None:
             shown.wait()
         except KeyboardInterrupt:
             try:
-                stopped = _stop_daemon(
-                    settings, STOP_TIMEOUT, force=False, foreground_hint=True, before_report=shown.wait
-                )
+                stopped = _stop_daemon(settings, STOP_TIMEOUT, force=False, before_report=shown.wait)
             except KeyboardInterrupt:
                 shown.detach()
                 console.print(
@@ -186,8 +184,10 @@ def attach_daemon(settings: Settings, state: DaemonState) -> None:
                     highlight=False,
                 )
                 return
-            if not stopped:
+            if stopped is None:
                 raise typer.Exit(1) from None
+            if not stopped:
+                _report_not_running(settings)
             return
         console.print(f"Pincer has exited (pid {state.pid})", markup=False, highlight=False)
     finally:
@@ -274,8 +274,12 @@ def stop(
 
     refuse_unsupported(starting=False)
 
-    if not _stop_daemon(get_settings_relaxed(), timeout, force, foreground_hint=True):
+    settings = get_settings_relaxed()
+    stopped = _stop_daemon(settings, timeout, force)
+    if stopped is None:
         raise typer.Exit(1)
+    if not stopped:
+        _report_not_running(settings)
 
 
 def restart(
@@ -299,9 +303,12 @@ def restart(
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
 
-    if not _stop_daemon(settings, timeout, force=False, foreground_hint=False):
+    stopped = _stop_daemon(settings, timeout, force=False)
+    if stopped is None:
         console.print("Not starting a new one.")
         raise typer.Exit(1)
+    if not stopped:
+        console.print("Pincer is not running — starting it")
     start_daemon(settings, wait_timeout)
 
 
@@ -310,17 +317,17 @@ def _stop_daemon(
     timeout: float,
     force: bool,
     *,
-    foreground_hint: bool,
     before_report: Callable[[], None] | None = None,
-) -> bool:
-    """Stop the daemon of `settings.data_dir`, printing as `pincer stop` does; False if it is still running.
+) -> bool | None:
+    """Stop the daemon of `settings.data_dir`, printing its progress and outcome as `pincer stop` does.
 
-    `before_report` runs once the wait is over, before the outcome is printed.
+    True once it has exited; False if none was running (the caller says so, in its own words);
+    None if it is still running or couldn't be signalled. `before_report` runs once the wait
+    is over, before the outcome is printed.
     """
     from rich.markup import escape
 
     from pincer import daemon
-    from pincer.cli._shared import _port_in_use
 
     progress = _StopProgress()
     try:
@@ -329,42 +336,45 @@ def _stop_daemon(
         running = daemon.read_state(settings.data_dir)
         pid = running.pid if isinstance(running, daemon.DaemonState) else "?"
         console.print(f"[red]Not allowed to signal Pincer (pid {pid}) — it runs as another user.[/red]")
-        return False
+        return None
     finally:
         progress.close()
     if before_report is not None:
         before_report()
     if result.outcome is daemon.StopOutcome.NOT_RUNNING:
-        if not foreground_hint:
-            console.print("Pincer is not running — starting it")
-            return True
-        console.print("Pincer is not running")
-        if _port_in_use(settings.dashboard_host, settings.dashboard_port):
-            console.print(
-                f"[yellow]A foreground Pincer seems to be running on :{settings.dashboard_port} — stop it with "
-                "Ctrl+C in its terminal.[/yellow]",
-                soft_wrap=True,
-            )
-        return True
+        return False
     if result.outcome is daemon.StopOutcome.STILL_RUNNING and result.pid is None:
         console.print(
             f"[yellow]Pincer still holds data dir {escape(str(settings.data_dir))} after {timeout:g} s, but its record "
             "can't be read — not signalling a process this version can't identify.[/yellow]",
             soft_wrap=True,
         )
-        return False
+        return None
     if result.outcome is daemon.StopOutcome.STILL_RUNNING:
         console.print(
             f"[yellow]Pincer is still shutting down after {timeout:g} s — 'pincer stop --force' to kill it[/yellow]",
             soft_wrap=True,
         )
-        return False
+        return None
     if result.pid is None:
         console.print("Pincer has exited")
         return True
     verb = "killed" if result.outcome is daemon.StopOutcome.KILLED else "stopped"
     console.print(f"Pincer {verb} (pid {result.pid})")
     return True
+
+
+def _report_not_running(settings: Settings) -> None:
+    """Say Pincer is not running, and who has the dashboard port if something does."""
+    from pincer.cli._shared import _port_in_use
+
+    console.print("Pincer is not running")
+    if _port_in_use(settings.dashboard_host, settings.dashboard_port):
+        console.print(
+            f"[yellow]A foreground Pincer seems to be running on :{settings.dashboard_port} — stop it with "
+            "Ctrl+C in its terminal.[/yellow]",
+            soft_wrap=True,
+        )
 
 
 def logs(
