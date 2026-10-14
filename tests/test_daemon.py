@@ -795,3 +795,11 @@ def test_a_newer_record_with_extra_fields_still_reads(data_dir: Path) -> None:
 
     assert daemon.read_state(data_dir) == state
     daemon.stop(data_dir)
+
+
+def test_within_reraises_what_the_call_raised() -> None:
+    def fail() -> None:
+        raise LookupError("from the worker")
+
+    with pytest.raises(LookupError, match="from the worker"):
+        within(5.0, fail)

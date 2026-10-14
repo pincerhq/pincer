@@ -89,11 +89,24 @@ def alive(pid: int) -> bool:
 
 
 def within[T](seconds: float, call: Callable[[], T]) -> T:
-    """`call()`, failing (instead of hanging the suite) if it hasn't returned after `seconds`."""
+    """`call()`, failing (instead of hanging the suite) if it hasn't returned after `seconds`.
+
+    What `call()` raises is raised here, so a failure inside it reads as itself, not as a hang.
+    """
     box: list[T] = []
-    worker = threading.Thread(target=lambda: box.append(call()), daemon=True)
+    raised: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            box.append(call())
+        except BaseException as exc:  # handed back to the test's thread below
+            raised.append(exc)
+
+    worker = threading.Thread(target=run, daemon=True)
     worker.start()
     worker.join(seconds)
+    if raised:
+        raise raised[0]
     assert box, f"still blocked after {seconds} s"
     return box[0]
 
