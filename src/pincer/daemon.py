@@ -258,7 +258,7 @@ def read_state(data_dir: Path) -> LiveDaemon | None:
         if record is not None:
             return record
         # The usual way to be here is a daemon past its lease, exiting: once it has, nothing runs.
-        if not _lease_held(data_dir):
+        if not daemon_running(data_dir):
             return None
         if time.monotonic() >= deadline:
             return DaemonWithoutRecord()
@@ -320,7 +320,7 @@ def follow(data_dir: Path, from_lines: int | None, until_exit: bool) -> Generato
         while True:
             # Look before reading: the lock is released only as the process exits, so once it is
             # free every line the daemon wrote is already in the file, and this read gets them all.
-            ended = not until_exit or not _lease_held(data_dir) or _rotated(path, log)
+            ended = not until_exit or not daemon_running(data_dir) or _rotated(path, log)
             yield from lines.read(final=ended)
             if ended:
                 return
@@ -358,7 +358,7 @@ def stop(
     pid = state.pid if isinstance(state, DaemonState) else None
     waiting_on: LiveDaemon | PidNotTheDaemon = state
     if pid is not None and isinstance(state, DaemonState):
-        if not _lease_held(data_dir):  # it exited on its own since the record was read
+        if not daemon_running(data_dir):  # it exited on its own since the record was read
             return StopResult(StopOutcome.STOPPED, pid)
         if not _started_by(pid, state.started_at):
             waiting_on, pid = PidNotTheDaemon(pid), None
@@ -374,7 +374,7 @@ def stop(
         elapsed = time.monotonic() - began
         if on_wait is not None:
             on_wait(waiting_on, elapsed)
-        if not _lease_held(data_dir):
+        if not daemon_running(data_dir):
             killed = force and pid is not None
             return StopResult(StopOutcome.KILLED if killed else StopOutcome.STOPPED, pid, not_the_daemon)
         if timeout is not None and elapsed >= timeout:
@@ -522,7 +522,10 @@ def _probe(data_dir: Path) -> Iterator[bool]:
         os.close(fd)
 
 
-def _lease_held(data_dir: Path) -> bool:
+def daemon_running(data_dir: Path) -> bool:
+    """Whether a daemon of `data_dir` is alive (it holds the lease). One lock probe, no record read:
+    for callers that need only running or not, which `read_state` answers more slowly when a
+    daemon holds the lease without a record yet (it waits up to RECORD_GRACE for one)."""
     with _probe(data_dir) as free:
         return not free
 

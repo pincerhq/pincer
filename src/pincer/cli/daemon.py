@@ -97,7 +97,7 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
         console.print(line, style="dim", soft_wrap=True, markup=False, highlight=False)
 
     # A daemon of this data directory holds the port itself; start() reports it as already running.
-    if daemon.read_state(settings.data_dir) is None and _port_in_use(settings.dashboard_host, settings.dashboard_port):
+    if not daemon.daemon_running(settings.data_dir) and _port_in_use(settings.dashboard_host, settings.dashboard_port):
         console.print(
             f"[red]A foreground Pincer is running on :{settings.dashboard_port} — stop it with Ctrl+C in its "
             "terminal.[/red]\n"
@@ -460,7 +460,7 @@ def logs(
     if not daemon.log_path(data_dir).exists():
         err_console.print("No logs yet — start with 'pincer run -d'", soft_wrap=True, markup=False, highlight=False)
         return
-    if daemon.read_state(data_dir) is None:
+    if not daemon.daemon_running(data_dir):
         err_console.print(
             "Pincer is not running — showing the last session's log", style="dim", soft_wrap=True, highlight=False
         )

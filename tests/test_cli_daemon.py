@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import itertools
 import json
@@ -385,6 +386,35 @@ def test_logs_of_a_running_daemon_has_no_note(data_dir: Path) -> None:
     assert result.stdout_bytes == daemon.log_path(data_dir).read_bytes()
     assert result.stderr == ""
     daemon.stop(data_dir)
+
+
+def test_logs_of_a_daemon_without_a_record_takes_it_as_running_without_waiting_for_one(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`logs` only needs to know whether the daemon is alive: it must not wait for a record."""
+    write_log(data_dir, RAW_LOG)
+    reads: list[Path] = []
+    real_read_record = daemon._read_record
+
+    def read_record(path: Path) -> object:
+        reads.append(path)
+        return real_read_record(path)
+
+    monkeypatch.setattr(daemon, "_read_record", read_record)
+    monkeypatch.setattr(daemon, "RECORD_GRACE", 30.0)  # waiting for a record would outlast `within`
+    # This process holds the lease, as a daemon past writing (or before reading) its record would.
+    lease = os.open(data_dir / daemon.LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        result = within(5.0, lambda: runner.invoke(app, ["logs"]))
+    finally:
+        os.close(lease)
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout_bytes == RAW_LOG
+    assert NOT_RUNNING_NOTE not in result.stderr  # alive: no "last session" note
+    assert reads == []
 
 
 @pytest.mark.parametrize("args", [[], ["-f"], ["-n", "5"]], ids=["plain", "follow", "tail"])

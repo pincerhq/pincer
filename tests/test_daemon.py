@@ -611,18 +611,18 @@ def test_follow_gives_the_last_lines_then_live_ones_and_ends_after_the_shutdown_
 def test_follow_reads_once_more_after_seeing_the_daemon_gone(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     write_log(data_dir, b"first\n")
     probes: list[bool] = []
-    real_lease_held = daemon._lease_held
+    real_daemon_running = daemon.daemon_running
 
     def lease_held(path: Path) -> bool:
         if path != data_dir:  # a follower some failed test left behind
-            return real_lease_held(path)
+            return real_daemon_running(path)
         # The daemon writes its last line and exits between two polls.
         if probes:
             append_log(data_dir, b"final line\n")
         probes.append(not probes)
         return probes[-1]
 
-    monkeypatch.setattr(daemon, "_lease_held", lease_held)
+    monkeypatch.setattr(daemon, "daemon_running", lease_held)
 
     followed = within(5.0, lambda: b"".join(daemon.follow(data_dir, None, until_exit=True)))
 
