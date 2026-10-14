@@ -1,4 +1,4 @@
-"""`pincer run -d` / `stop` / `restart` / `logs` / `status`.
+"""`pincer run -d` / `stop` / `restart` / `logs` / `status`, and `pincer run` attaching to a running daemon.
 
 They format what the daemon lifecycle module (`pincer.daemon`) returns.
 """
@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import contextlib
 import os
+import signal
 import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -18,6 +20,8 @@ from rich.console import Console
 from pincer.cli._shared import console
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rich.status import Status
 
     from pincer.config import Settings
@@ -26,6 +30,8 @@ if TYPE_CHECKING:
 WAIT_TIMEOUT = 60.0
 # Sized to the voice channel's 60 s call drain plus worker and API grace.
 STOP_TIMEOUT = 90.0
+# How often an attached `pincer run` looks up from waiting, so a Ctrl+C lands at once.
+POLL_INTERVAL = 0.1
 
 # `pincer logs` keeps stdout for the log's own bytes; what it says itself goes here.
 notes = Console(stderr=True)
@@ -118,6 +124,79 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
     raise typer.Exit(1)
 
 
+def attach_daemon(settings: Settings, state: DaemonState) -> None:
+    """Show the running daemon's log as if it ran in this terminal (what `pincer run` does when one is up).
+
+    The first Ctrl+C stops it gracefully, still showing its log until it has exited; a
+    second one only detaches. A hangup only ends this process: the daemon has a session of its own.
+    """
+    console.print(
+        f"Pincer is already running in the background (pid {state.pid}) — attaching", markup=False, highlight=False
+    )
+    shown = _LogRelay(settings)
+    # asyncio's runner turns a Ctrl+C into a cancel that this blocking wait would never see.
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        try:
+            shown.wait()
+        except KeyboardInterrupt:
+            try:
+                stopped = _stop_daemon(
+                    settings, STOP_TIMEOUT, force=False, foreground_hint=True, before_report=shown.wait
+                )
+            except KeyboardInterrupt:
+                shown.detach()
+                console.print(
+                    f"Detached — Pincer (pid {state.pid}) keeps shutting down in the background",
+                    markup=False,
+                    highlight=False,
+                )
+                return
+            if not stopped:
+                raise typer.Exit(1) from None
+            return
+        console.print(f"Pincer has exited (pid {state.pid})", markup=False, highlight=False)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+class _LogRelay:
+    """Prints the daemon log from 50 lines back until the daemon exits, on a thread of its own.
+
+    The main thread stays free for Ctrl+C, and for the stop routine the first one starts.
+    """
+
+    def __init__(self, settings: Settings) -> None:
+        from pincer import daemon
+
+        self._chunks = daemon.follow(settings.data_dir, daemon.FOLLOW_LINES, until_exit=True)
+        self._detached = False
+        self._printing = threading.Lock()
+        self._thread = threading.Thread(target=self._relay, daemon=True)
+        self._thread.start()
+
+    def _relay(self) -> None:
+        with contextlib.closing(self._chunks):
+            for chunk in self._chunks:
+                with self._printing:
+                    if self._detached:
+                        return
+                    for raw in chunk.removesuffix(b"\n").split(b"\n"):
+                        console.print(
+                            raw.decode(errors="replace").rstrip("\r"), soft_wrap=True, markup=False, highlight=False
+                        )
+
+    def wait(self) -> None:
+        """Until the daemon has exited and its last lines are shown; Ctrl+C interrupts it."""
+        while self._thread.is_alive():
+            self._thread.join(POLL_INTERVAL)
+
+    def detach(self) -> None:
+        """Print nothing more, so no line is half-written when this process exits."""
+        with self._printing:
+            self._detached = True
+
+
 class _StopProgress:
     """One "Stopping Pincer…" line; on a terminal only, a transient spinner with the time waited.
 
@@ -181,8 +260,18 @@ def restart(
     start_daemon(settings, wait_timeout)
 
 
-def _stop_daemon(settings: Settings, timeout: float, force: bool, *, foreground_hint: bool) -> bool:
-    """Stop the daemon of `settings.data_dir`, printing as `pincer stop` does; False if it is still running."""
+def _stop_daemon(
+    settings: Settings,
+    timeout: float,
+    force: bool,
+    *,
+    foreground_hint: bool,
+    before_report: Callable[[], None] | None = None,
+) -> bool:
+    """Stop the daemon of `settings.data_dir`, printing as `pincer stop` does; False if it is still running.
+
+    `before_report` runs once the wait is over, before the outcome is printed.
+    """
     from pincer import daemon
     from pincer.cli._shared import _port_in_use
 
@@ -196,6 +285,8 @@ def _stop_daemon(settings: Settings, timeout: float, force: bool, *, foreground_
         return False
     finally:
         progress.close()
+    if before_report is not None:
+        before_report()
     if result.outcome is daemon.StopOutcome.NOT_RUNNING:
         if not foreground_hint:
             console.print("Pincer is not running — starting it")

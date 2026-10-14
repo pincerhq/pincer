@@ -20,7 +20,7 @@ from pincer.cli._attachments import (
     _safe_upload_path,
 )
 from pincer.cli._shared import _create_memory_backend, _port_in_use, _print_voice_webhook_urls, _setup_logging, console
-from pincer.cli.daemon import WAIT_TIMEOUT, start_daemon
+from pincer.cli.daemon import WAIT_TIMEOUT, attach_daemon, start_daemon
 
 if TYPE_CHECKING:
     from pincer.channels.base import BaseChannel, IncomingMessage
@@ -77,6 +77,16 @@ async def run(
     if detach:
         start_daemon(settings, wait_timeout)
         return
+
+    # A daemon of this data directory is up: follow it instead of starting a second agent. Not
+    # for a task worker (it runs alongside the agent) and never for the daemon itself.
+    if component is None and not daemon_child:
+        from pincer.daemon import read_state
+
+        running = read_state(settings.data_dir)
+        if running is not None:
+            attach_daemon(settings, running)
+            return
 
     _setup_logging(settings.log_level.value)
 

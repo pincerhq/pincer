@@ -15,6 +15,7 @@ behaves according to MODE (tests build the command with `argv()`):
     raise-on-sigterm  like ready, but SIGTERM ends in an uncaught exception
     slow-shutdown     like ready, but its shutdown takes SLOW_SHUTDOWN_SECONDS
     ignore-sigterm    like ready, but never reacts to SIGTERM
+    noisy-shutdown    like ready, but on SIGTERM prints NOISY_SHUTDOWN_LINES lines as fast as it can and exits
     grandchild        like ignore-sigterm, plus a long-lived child process in its process group, whose pid
                       it writes to DATA_DIR/grandchild.pid (an MCP server or sandboxed skill stands in for it)
 
@@ -51,6 +52,8 @@ CRASH_STEPS = 30
 SLOW_START_SECONDS = 2.0
 SLOW_LEASE_SECONDS = 1.0
 SLOW_SHUTDOWN_SECONDS = 2.0
+# Enough that showing them takes longer than a poll: the daemon is gone while they are still being shown.
+NOISY_SHUTDOWN_LINES = 5000
 GRANDCHILD_MARK = "fake-grandchild"
 
 
@@ -132,6 +135,9 @@ def main() -> None:
             log.info("fake child %d shutting down", os.getpid())
             if mode == "raise-on-sigterm":
                 raise RuntimeError("fake child failed during shutdown") from None
+            if mode == "noisy-shutdown":
+                print("\n".join(f"shutdown step {n}" for n in range(1, NOISY_SHUTDOWN_LINES + 1)))
+                return
             time.sleep(SLOW_SHUTDOWN_SECONDS if mode == "slow-shutdown" else SHUTDOWN_SECONDS)
             print("Shutdown complete")
 
