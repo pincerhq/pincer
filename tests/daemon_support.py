@@ -5,8 +5,10 @@ Fixtures built on these (`signal_stub`, `redis_url`) live in conftest.py.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -16,7 +18,7 @@ from typing import TYPE_CHECKING
 import pincer
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
     from subprocess import Popen
 
 # The source tree under test. A spawned interpreter would otherwise import pincer from wherever the
@@ -146,3 +148,30 @@ def append_log(data_dir: Path, content: bytes) -> None:
 
 def numbered(first: int, last: int) -> bytes:
     return b"".join(f"numbered {n}\n".encode() for n in range(first, last + 1))
+
+
+@contextlib.contextmanager
+def lease_held_elsewhere(lock_file: Path, seconds: float = 60.0) -> Iterator[subprocess.Popen[str]]:
+    """Another process holds `lock_file` as a daemon's lease does (a POSIX `lockf`), for up to
+    `seconds` or until the block ends. Never this one: a process's own POSIX lock is invisible to
+    it, and closing any descriptor of the file would drop it."""
+    lock_file.touch()
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys, time; fd = os.open(sys.argv[1], os.O_RDWR); "
+            "fcntl.lockf(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(float(sys.argv[2]))",
+            str(lock_file),
+            str(seconds),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout is not None
+        holder.stdout.readline()
+        yield holder
+    finally:
+        holder.kill()
+        holder.wait()

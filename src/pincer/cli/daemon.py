@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from rich.status import Status
 
     from pincer.config import Settings
-    from pincer.daemon import DaemonState, DaemonWithUnreadableRecord, LiveDaemon, PidNotTheDaemon, StartInProgress
+    from pincer.daemon import DaemonState, DaemonWithUnreadableRecord, LiveDaemon, StartInProgress
 
 WAIT_TIMEOUT = 60.0
 # Sized to the voice channel's 60 s call drain plus worker and API grace.
@@ -180,7 +180,9 @@ def refuse_unless_a_known_daemon(settings: Settings, state: LiveDaemon | None) -
     if isinstance(state, DaemonWithUnreadableRecord):
         message = unreadable_record_message(settings.data_dir, state)
     else:
-        message = f"Pincer is still shutting down (data dir {settings.data_dir}) — try again in a moment."
+        message = (
+            f"Pincer {_pid_part(state)}is still shutting down (data dir {settings.data_dir}) — try again in a moment."
+        )
     console.print(message, soft_wrap=True, markup=False, highlight=False)
     raise typer.Exit(1)
 
@@ -195,11 +197,17 @@ def start_in_progress_message(start: StartInProgress) -> str:
     )
 
 
+def _pid_part(state: LiveDaemon | None) -> str:
+    """`(pid N) ` for a lease holder the kernel names, else nothing."""
+    pid = getattr(state, "pid", None)
+    return f"(pid {pid}) " if pid else ""
+
+
 def unreadable_record_message(data_dir: Path, state: DaemonWithUnreadableRecord) -> str:
     pid = state.pid if state.pid is not None else "unknown"
     return (
         f"A Pincer daemon (pid {pid}) holds data dir {data_dir}, but its record can't be read by this version"
-        " — use the version that started it."
+        " — 'pincer stop' can still stop it."
     )
 
 
@@ -310,33 +318,23 @@ class _StopProgress:
         self._announced = False
         self._status: Status | None = None
 
-    def __call__(self, state: LiveDaemon | PidNotTheDaemon, elapsed: float) -> None:
-        from pincer.daemon import DaemonState, DaemonWithUnreadableRecord, PidNotTheDaemon
+    def __call__(self, state: LiveDaemon, elapsed: float) -> None:
+        from pincer.daemon import DaemonState, DaemonWithUnreadableRecord
 
         if not self._announced:
             self._announced = True
-            if isinstance(state, PidNotTheDaemon):
-                console.print(
-                    f"The recorded pid {state.pid} didn't start Pincer (it started after the lease) — "
-                    "not signalling it; waiting for Pincer to exit…",
-                    soft_wrap=True,
-                    markup=False,
-                    highlight=False,
+            if isinstance(state, DaemonState):
+                line = f"Stopping Pincer (pid {state.pid})…"
+            elif state.pid is None:  # held, but the kernel names no process: only waited for
+                line = (
+                    f"Pincer holds data dir {self._data_dir}, but the kernel names no process holding it"
+                    " — not signalling; waiting for it to exit…"
                 )
-            elif isinstance(state, DaemonState):
-                console.print(f"Stopping Pincer (pid {state.pid})…", markup=False, highlight=False)
             elif isinstance(state, DaemonWithUnreadableRecord):
-                message = unreadable_record_message(self._data_dir, state)
-                console.print(
-                    f"{message} Not signalling it; waiting for it to exit…",
-                    soft_wrap=True,
-                    markup=False,
-                    highlight=False,
-                )
+                line = f"Stopping Pincer (pid {state.pid} — its record can't be read by this version)…"
             else:
-                console.print(
-                    "Pincer is already shutting down — waiting for it to exit…", markup=False, highlight=False
-                )
+                line = f"Stopping Pincer (pid {state.pid} — it has left its lease and is shutting down)…"
+            console.print(line, soft_wrap=True, markup=False, highlight=False)
             if console.is_terminal:
                 self._status = console.status("Waiting for it to exit")
                 self._status.start()
@@ -430,17 +428,10 @@ def _stop_daemon(
         before_report()
     if result.outcome is daemon.StopOutcome.NOT_RUNNING:
         return False
-    if result.outcome is daemon.StopOutcome.STILL_RUNNING and result.not_the_daemon is not None:
-        console.print(
-            f"[yellow]Pincer still holds data dir {escape(str(settings.data_dir))} after {timeout:g} s; its recorded "
-            f"pid {result.not_the_daemon} isn't it — not signalling anything.[/yellow]",
-            soft_wrap=True,
-        )
-        return None
     if result.outcome is daemon.StopOutcome.STILL_RUNNING and result.pid is None:
         console.print(
-            f"[yellow]Pincer still holds data dir {escape(str(settings.data_dir))} after {timeout:g} s, but its record "
-            "can't be read — not signalling a process this version can't identify.[/yellow]",
+            f"[yellow]Pincer still holds data dir {escape(str(settings.data_dir))} after {timeout:g} s, and the "
+            "kernel names no process holding it — not signalling anything.[/yellow]",
             soft_wrap=True,
         )
         return None
@@ -529,7 +520,8 @@ def status() -> None:
         return
     if isinstance(state, daemon.DaemonWithoutRecord):
         console.print(
-            f"Pincer is shutting down (data dir {data_dir}) — its lock is held, but its record is gone",
+            f"Pincer {_pid_part(state)}is shutting down (data dir {data_dir})"
+            " — its lock is held, but its record is gone",
             soft_wrap=True,
             markup=False,
             highlight=False,

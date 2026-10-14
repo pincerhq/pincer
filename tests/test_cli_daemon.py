@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import io
 import itertools
 import json
@@ -30,6 +29,7 @@ from daemon_support import (
     append_log,
     child_env,
     free_port,
+    lease_held_elsewhere,
     numbered,
     pincer_command,
     within,
@@ -53,11 +53,11 @@ NOT_RUNNING_NOTE = "Pincer is not running — showing the last session's log"
 NO_LOGS = "No logs yet — start with 'pincer run -d'"
 WINDOWS_MESSAGE = "Daemon mode isn't supported on Windows — use a service manager."
 CONTAINER_MESSAGE = "Pincer is running inside a container — use 'docker compose up -d' to run it in the background."
-SHUTTING_DOWN = "Pincer is still shutting down (data dir {}) — try again in a moment."
+SHUTTING_DOWN = "Pincer (pid {pid}) is still shutting down (data dir {data_dir}) — try again in a moment."
 START_IN_PROGRESS = "A start of Pincer is in progress (pid {pid}) and hasn't taken its lease yet"
 UNREADABLE = (
     "A Pincer daemon (pid {pid}) holds data dir {data_dir}, but its record can't be read by this version"
-    " — use the version that started it."
+    " — 'pincer stop' can still stop it."
 )
 # `pincer run -d --wait-timeout 30`, in a process whose daemon is the fake child given as the argv (a JSON list).
 PATCHED_CHILD_RUN_DETACH = (
@@ -403,14 +403,9 @@ def test_logs_of_a_daemon_without_a_record_takes_it_as_running_without_waiting_f
 
     monkeypatch.setattr(daemon, "_read_record", read_record)
     monkeypatch.setattr(daemon, "RECORD_GRACE", 30.0)  # waiting for a record would outlast `within`
-    # This process holds the lease, as a daemon past writing (or before reading) its record would.
-    lease = os.open(data_dir / daemon.LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
-    try:
-        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
+    # Another process holds the lease, as a daemon past writing (or before reading) its record would.
+    with lease_held_elsewhere(data_dir / daemon.LOCK_FILE):
         result = within(5.0, lambda: runner.invoke(app, ["logs"]))
-    finally:
-        os.close(lease)
 
     assert result.exit_code == 0, result.output
     assert result.stdout_bytes == RAW_LOG
@@ -1327,7 +1322,7 @@ def test_run_detach_while_a_daemon_lingers_says_it_is_shutting_down(
     result = runner.invoke(app, ["run", "-d"])
 
     assert result.exit_code == 1, result.output
-    assert SHUTTING_DOWN.format(data_dir) in result.output
+    assert SHUTTING_DOWN.format(pid=pid, data_dir=data_dir) in result.output
     assert "exited before it was ready" not in result.output
     assert daemon_fake_child.children_under(tmp_path) == [pid]
 
@@ -1335,26 +1330,29 @@ def test_run_detach_while_a_daemon_lingers_says_it_is_shutting_down(
 def test_status_while_a_daemon_lingers_says_it_is_shutting_down(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _lingering(data_dir, monkeypatch)
+    pid = _lingering(data_dir, monkeypatch)
 
     result = runner.invoke(app, ["status"])
 
     assert result.exit_code == 0, result.output
-    assert f"Pincer is shutting down (data dir {data_dir}) — its lock is held, but its record is gone" in result.output
+    assert (
+        f"Pincer (pid {pid}) is shutting down (data dir {data_dir}) — its lock is held, but its record is gone"
+        in result.output
+    )
     assert "not running" not in result.output
 
 
-def test_stop_while_a_daemon_lingers_waits_for_it_to_exit(
+def test_stop_while_a_daemon_lingers_stops_it_by_the_pid_the_kernel_names(
     data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _lingering(data_dir, monkeypatch)
+    pid = _lingering(data_dir, monkeypatch)
 
     result = runner.invoke(app, ["stop"])
 
     assert result.exit_code == 0, result.output
     assert result.output.splitlines() == [
-        "Pincer is already shutting down — waiting for it to exit…",
-        "Pincer has exited",
+        f"Stopping Pincer (pid {pid} — it has left its lease and is shutting down)…",
+        f"Pincer stopped (pid {pid})",
     ]
     assert daemon_fake_child.children_under(tmp_path) == []
 
@@ -1367,7 +1365,7 @@ def test_restart_while_a_daemon_lingers_waits_then_starts(
     result = runner.invoke(app, ["restart"])
 
     assert result.exit_code == 0, result.output
-    assert "Pincer has exited" in result.output
+    assert f"Pincer stopped (pid {old})" in result.output
     new = _pid_in(result.output, r"Pincer started \(pid (\d+)\)")
     assert new != old
     assert daemon_fake_child.children_under(tmp_path) == [new]
@@ -1381,13 +1379,13 @@ def test_plain_run_while_a_daemon_lingers_says_it_is_shutting_down(
     async def _run_agent(settings, lease=None):  # type: ignore[no-untyped-def]
         ran.append(settings)
 
-    _lingering(data_dir, monkeypatch)
+    pid = _lingering(data_dir, monkeypatch)
     monkeypatch.setattr("pincer.cli.run._run_agent", _run_agent)
 
     result = runner.invoke(app, ["run"])
 
     assert result.exit_code == 1, result.output
-    assert SHUTTING_DOWN.format(data_dir) in result.output
+    assert SHUTTING_DOWN.format(pid=pid, data_dir=data_dir) in result.output
     assert ran == []
 
 
@@ -1438,15 +1436,19 @@ def test_status_of_a_daemon_with_a_record_it_cant_read_says_so(data_dir: Path) -
     assert "shutting down" not in result.output
 
 
-def test_stop_never_signals_a_daemon_whose_record_it_cant_read(data_dir: Path, tmp_path: Path) -> None:
+def test_stop_stops_a_daemon_whose_record_it_cant_read_by_the_pid_the_kernel_names(
+    data_dir: Path, tmp_path: Path
+) -> None:
     pid = _from_a_newer_version(data_dir)
 
-    result = within(10.0, lambda: runner.invoke(app, ["stop", "--timeout", "0.5"]))
+    result = within(10.0, lambda: runner.invoke(app, ["stop"]))
 
-    assert result.exit_code == 1, result.output
-    assert UNREADABLE.format(pid=pid, data_dir=data_dir) in result.output
-    assert "shutting down" not in result.output
-    assert daemon_fake_child.children_under(tmp_path) == [pid]
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        f"Stopping Pincer (pid {pid} — its record can't be read by this version)…",
+        f"Pincer stopped (pid {pid})",
+    ]
+    assert daemon_fake_child.children_under(tmp_path) == []
 
 
 def test_plain_run_beside_a_daemon_with_a_record_it_cant_read_says_so(
@@ -1462,15 +1464,15 @@ def test_plain_run_beside_a_daemon_with_a_record_it_cant_read_says_so(
     assert ran == []
 
 
-def test_restart_beside_a_daemon_with_a_record_it_cant_read_starts_nothing(data_dir: Path, tmp_path: Path) -> None:
-    pid = _from_a_newer_version(data_dir)
+def test_restart_replaces_a_daemon_whose_record_it_cant_read(data_dir: Path, tmp_path: Path) -> None:
+    old = _from_a_newer_version(data_dir)
 
-    result = within(10.0, lambda: runner.invoke(app, ["restart", "--timeout", "0.5"]))
+    result = runner.invoke(app, ["restart"])  # in this thread: run -d's wait takes Ctrl+C over
 
-    assert result.exit_code == 1, result.output
-    assert UNREADABLE.format(pid=pid, data_dir=data_dir) in result.output
-    assert "Not starting a new one." in result.output
-    assert daemon_fake_child.children_under(tmp_path) == [pid]
+    assert result.exit_code == 0, result.output
+    assert f"Pincer stopped (pid {old})" in result.output
+    new = _pid_in(result.output, r"Pincer started \(pid (\d+)\)")
+    assert daemon_fake_child.children_under(tmp_path) == [new]
 
 
 def test_ctrl_c_while_run_detach_waits_stops_waiting_at_once_and_leaves_the_daemon_starting(
@@ -1513,29 +1515,24 @@ def test_ctrl_c_while_run_detach_waits_stops_waiting_at_once_and_leaves_the_daem
         process.wait()
 
 
-def test_stop_names_a_recorded_pid_that_isnt_pincer_and_never_announces_stopping_it(
-    data_dir: Path, tmp_path: Path
-) -> None:
-    from datetime import datetime, timedelta
-
+def test_stop_signals_the_daemon_whatever_pid_its_record_names(data_dir: Path, tmp_path: Path) -> None:
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    daemon_pid = record["pid"]
     bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     try:
-        earlier = (datetime.fromisoformat(record["started_at"]) - timedelta(minutes=5)).isoformat()
-        (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "pid": bystander.pid, "started_at": earlier}))
+        (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "pid": bystander.pid}))
 
-        result = within(10.0, lambda: runner.invoke(app, ["stop", "--timeout", "0.5"]))
+        result = within(10.0, lambda: runner.invoke(app, ["stop"]))
 
-        assert result.exit_code == 1, result.output
+        assert result.exit_code == 0, result.output
         assert result.output.splitlines() == [
-            f"The recorded pid {bystander.pid} didn't start Pincer (it started after the lease) — not signalling it; "
-            "waiting for Pincer to exit…",
-            f"Pincer still holds data dir {data_dir} after 0.5 s; its recorded pid {bystander.pid} isn't it — "
-            "not signalling anything.",
+            f"Stopping Pincer (pid {daemon_pid})…",
+            f"Pincer stopped (pid {daemon_pid})",
         ]
+        assert daemon_fake_child.children_under(tmp_path) == []
+        time.sleep(0.2)
         assert bystander.poll() is None
-        assert daemon_fake_child.children_under(tmp_path) == [record["pid"]]
     finally:
         bystander.kill()
         bystander.wait()
