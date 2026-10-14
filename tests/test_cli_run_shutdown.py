@@ -196,7 +196,7 @@ class _Part:
 @pytest.mark.parametrize(
     "failing", [None, "triggers", "telephony telemetry"], ids=["clean", "a step fails", "telemetry fails"]
 )
-async def test_shutdown_runs_every_step_and_exits_1_only_when_one_failed(
+async def test_shutdown_stops_what_started_last_first_and_exits_1_only_when_a_step_failed(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
@@ -213,35 +213,42 @@ async def test_shutdown_runs_every_step_and_exits_1_only_when_one_failed(
         raise _Exited(code)
 
     monkeypatch.setattr(run_module.os, "_exit", exit_)
+
+    async def dispose_engines() -> None:
+        stopped.append("database engines")
+
+    monkeypatch.setattr("pincer.db.engine.dispose_engines", dispose_engines)
     if failing == "telephony telemetry":
 
         async def telemetry_breaks() -> None:
             raise RuntimeError("exporter flush failed")
 
         monkeypatch.setattr("pincer.voice.telemetry.runtime.shutdown", telemetry_breaks)
-    started = run_module._Started(
-        core=SimpleNamespace(  # type: ignore[arg-type]
-            mcp_manager=None,
-            llm=AsyncMock(),
-            session_mgr=AsyncMock(),
-            cost_tracker=AsyncMock(),
-            memory_store=None,
-            audit_logger=None,
-        ),
-        triggers=_Part("triggers", stopped, fail=failing == "triggers"),
-        dispatcher=_Part("dispatcher", stopped),
-        result_relay=_Part("result_relay", stopped),
-        router=SimpleNamespace(channels={"signal": _Part("signal", stopped)}),
+    core = SimpleNamespace(
+        mcp_manager=_Part("MCP clients", stopped),
+        llm=AsyncMock(),
+        session_mgr=AsyncMock(),
+        cost_tracker=AsyncMock(),
+        memory_store=None,
+        audit_logger=None,
     )
+    # Registered in the order the agent starts them.
+    shutdown = run_module._Shutdown()
+    run_module._stop_core_on_shutdown(shutdown, core)  # type: ignore[arg-type]
+    run_module._stop_channels_on_shutdown(shutdown, SimpleNamespace(channels={"signal": _Part("signal", stopped)}))
+    for name in ("triggers", "dispatcher", "result_relay"):
+        shutdown.on_stop(name, _Part(name, stopped, fail=failing == name).stop)
     sigint = signal.getsignal(signal.SIGINT)
     try:
         with pytest.raises(_Exited) as exited:
-            await run_module._shut_down_agent(started, None)
+            await run_module._shut_down_agent(shutdown, None)
     finally:
         signal.signal(signal.SIGINT, sigint)
 
-    # Every later step still ran, the channels' drain included.
-    assert stopped == ["triggers", "dispatcher", "result_relay", "signal"]
+    # Last started first: the channels drain before the MCP clients (their tools) go, the shared
+    # database engines go last, and every step ran.
+    assert stopped == ["result_relay", "dispatcher", "triggers", "signal", "MCP clients", "database engines"]
+    core.llm.close.assert_awaited_once()
     assert "Shutdown complete" in capsys.readouterr().out
     if failing is None:
         assert exited.value.code == 0

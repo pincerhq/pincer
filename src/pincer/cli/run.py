@@ -872,12 +872,12 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
     # drains active calls with a spoken ending. Installed before startup, so a stop
     # while channels are still connecting shuts down whatever has started.
     _cancel_on_first_sigterm()
-    started = _Started()
+    shutdown = _Shutdown()
     try:
-        serving = await _start_agent(settings, lease, started)
+        serving = await _start_agent(settings, lease, shutdown)
     except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[yellow]Shutting down...[/yellow]")
-        await _shut_down_agent(started, lease)
+        await _shut_down_agent(shutdown, lease)
     if not serving:
         return
     try:
@@ -886,33 +886,86 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
     except (KeyboardInterrupt, asyncio.CancelledError):
         console.print("\n[yellow]Shutting down...[/yellow]")
     finally:
-        await _shut_down_agent(started, lease)
+        await _shut_down_agent(shutdown, lease)
 
 
-@dataclass
-class _Started:
-    """What the agent's startup has brought up so far. Shutdown stops exactly these, so a stop
-    during startup takes the same graceful path as one after it."""
+class _Shutdown:
+    """The agent's stop actions, registered as each part comes up and run in reverse.
 
-    core: CoreComponents | None = None
-    mcp_server: Any = None
-    router: Any = None
-    proactive: Any = None
-    triggers: Any = None
-    task_connection: Any = None
-    task_worker: asyncio.Task[Any] | None = None
-    dispatcher: Any = None
-    result_relay: Any = None
-    api_server: Any = None
-    api_task: asyncio.Task[Any] | None = None
-    tunnel: Any = None
+    Shutdown so stops exactly what started, last started first. Each action runs even when an
+    earlier one failed; a failure is logged with the action's name and kept in `failed`.
+    """
+
+    def __init__(self) -> None:
+        self._stack = contextlib.AsyncExitStack()
+        self.failed: list[str] = []
+
+    def on_stop(self, name: str, action: Callable[[], Awaitable[object]]) -> None:
+        self._stack.push_async_callback(self.run_step, name, action)
+
+    async def run_step(self, name: str, action: Callable[[], Awaitable[object]]) -> None:
+        try:
+            await action()
+        except Exception:
+            logger.exception("Shutdown step failed: %s", name)
+            self.failed.append(name)
+
+    async def run(self) -> None:
+        await self._stack.aclose()
 
 
-async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _Started) -> bool:
-    """Bring the agent up, recording each part in `started` as it comes up; False if there is
-    nothing to serve (no channel configured)."""
+def _stop_core_on_shutdown(shutdown: _Shutdown, core: CoreComponents) -> None:
+    """Register what `_build_core` started, plus the process-wide pieces, to stop last of all.
+
+    Registered before anything else, so it all runs after the channels have drained their calls:
+    the MCP clients (tools a draining call may still use), the browser, telephony telemetry (to
+    flush the calls just ended), the stores, and the database engines everything shares.
+    """
+    from pincer.db.engine import dispose_engines
+
+    shutdown.on_stop("database engines", dispose_engines)
+    if core.audit_logger:
+        shutdown.on_stop("audit log", core.audit_logger.shutdown)
+    if core.memory_store:
+        shutdown.on_stop("memory store", core.memory_store.close)
+    shutdown.on_stop("cost tracker", core.cost_tracker.close)
+    shutdown.on_stop("sessions", core.session_mgr.close)
+    shutdown.on_stop("LLM client", core.llm.close)
+    try:
+        from pincer.voice.telemetry import runtime as telephony_telemetry
+    except ImportError:  # the voice extra isn't installed: nothing was started
+        pass
+    else:
+        shutdown.on_stop("telephony telemetry", telephony_telemetry.shutdown)
+
+    async def close_browser_if_installed() -> None:
+        try:
+            from pincer.tools.builtin import browser
+        except ImportError:
+            return
+        await browser.close_browser()
+
+    shutdown.on_stop("browser", close_browser_if_installed)
+    if core.mcp_manager:
+        shutdown.on_stop("MCP clients", core.mcp_manager.stop)
+
+
+def _stop_channels_on_shutdown(shutdown: _Shutdown, router: Any) -> None:
+    """Register stopping every channel the router holds by then, each its own step: the channels
+    drain their calls (a spoken ending, a report)."""
+
+    async def stop_channels() -> None:
+        for channel in router.channels.values():
+            await shutdown.run_step(f"channel {channel.name}", channel.stop)
+
+    shutdown.on_stop("channels", stop_channels)
+
+
+async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: _Shutdown) -> bool:
+    """Bring the agent up, registering each part's stop with `shutdown` as soon as it is up; False
+    if there is nothing to serve (no channel configured)."""
     core = await _build_core(settings)
-    started.core = core
+    _stop_core_on_shutdown(shutdown, core)
     session_mgr, cost_tracker, audit_logger, rate_limiter = (
         core.session_mgr,
         core.cost_tracker,
@@ -1199,7 +1252,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _
     from pincer.channels.router import ChannelRouter
 
     router = ChannelRouter(identity)
-    started.router = router
+    _stop_channels_on_shutdown(shutdown, router)
 
     # Start channels
     from pincer.channels.base import ChannelType
@@ -1588,7 +1641,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _
 
     proactive = ProactiveAgent(settings.db_path, agent=agent)
     await proactive.ensure_table()
-    started.proactive = proactive
+    shutdown.on_stop("proactive agent", proactive.close)
 
     scheduler = CronScheduler(settings.db_path)
     await scheduler.ensure_table()
@@ -1654,7 +1707,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _
     # Sprint 3: Event triggers
     triggers = EventTriggerManager(settings.db_path, deliverer)
     await triggers.start()
-    started.triggers = triggers
+    shutdown.on_stop("triggers", triggers.stop)
 
     # Sprint 6: Background task execution (repid) — actors run scheduled and
     # on-request work durably/retryably; the dispatcher below keeps the SQLite
@@ -1667,7 +1720,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _
     register_default_server()
     task_connection = task_app.servers.default.connection()
     await task_connection.__aenter__()
-    started.task_connection = task_connection
+    shutdown.on_stop("task broker connection", lambda: task_connection.__aexit__(None, None, None))
     task_worker = asyncio.create_task(
         # register_signals=[] — repid defaults to installing its own SIGINT/SIGTERM
         # handlers via loop.add_signal_handler(), which replaces Python's default
@@ -1677,14 +1730,14 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _
         task_app.run_worker(graceful_shutdown_time=10.0, register_signals=[]),
         name="pincer-task-worker",
     )
-    started.task_worker = task_worker
+    shutdown.on_stop("task worker", lambda: _cancel_task_worker(task_worker))
     dispatcher = ScheduleDispatcher(scheduler, task_app, interval=settings.task_poll_interval)
     await dispatcher.start()
-    started.dispatcher = dispatcher
+    shutdown.on_stop("schedule dispatcher", dispatcher.stop)
 
     result_relay = ResultRelay(delivery_backend, router)
     await result_relay.start()
-    started.result_relay = result_relay
+    shutdown.on_stop("result relay", result_relay.stop)
 
     console.print(f"[green]Task worker started (broker={settings.task_broker})[/green]")
 
@@ -1727,7 +1780,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _
             )
             agent.mcp_server = mcp_server
             await mcp_server.start()
-            started.mcp_server = mcp_server
+            shutdown.on_stop("MCP server", mcp_server.stop)
             console.print(
                 f"[green]MCP server started at {mcp_server.endpoint} ({mcp_server.exposed_tool_count} tool(s))[/green]"
             )
@@ -1765,7 +1818,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _
             )
             api_server = _embedded_api_server(api_config)
             api_task = asyncio.create_task(api_server.serve())
-            started.api_server, started.api_task = api_server, api_task
+            shutdown.on_stop("API server", lambda: _stop_api_server(api_server, api_task))
             console.print(
                 f"[green]API server started on http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
             )
@@ -1777,8 +1830,8 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _
                     domain=settings.ngrok_domain,
                     target_port=settings.dashboard_port,
                 )
-                started.tunnel = tunnel
                 public_url = await tunnel.start()
+                shutdown.on_stop("tunnel", tunnel.stop)
                 if public_url:
                     console.print(f"[green]Ngrok tunnel: {public_url}[/green]")
         except Exception as e:
@@ -1797,96 +1850,35 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _
     return True
 
 
-async def _shut_down_agent(started: _Started, lease: DaemonLease | None) -> NoReturn:
-    """Stop whatever `started` holds, in order, then end the process.
-
-    Each step runs even when an earlier one failed (a failure is logged with the step's name):
-    the channels' call drain must not be skipped because, say, a trigger loop failed to stop.
-    The process exits 1 if any step failed, 0 otherwise. (`pincer stop` doesn't read the code;
-    it waits for the lease. The code is for whoever ran the process: a supervisor, a shell.)
-    """
-    import signal as _signal
-
-    _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
-    failed: list[str] = []
-
-    async def step(name: str, action: Callable[[], Awaitable[object]]) -> None:
-        try:
-            await action()
-        except Exception:
-            logger.exception("Shutdown step failed: %s", name)
-            failed.append(name)
-
-    async def stop_api() -> None:
-        started.api_server.should_exit = True
-        if started.api_task:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(started.api_task, timeout=3.0)
-
-    async def stop_task_worker(worker: asyncio.Task[Any]) -> None:
-        worker.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await worker
-
-    async def close_browser_if_installed() -> None:
-        try:
-            from pincer.tools.builtin import browser
-        except ImportError:
-            return
-        await browser.close_browser()
-
-    if started.tunnel is not None:
-        await step("tunnel", started.tunnel.stop)
-    if started.api_server:
-        await step("API server", stop_api)
-    core = started.core
-    if core is not None and core.mcp_manager:
-        await step("MCP clients", core.mcp_manager.stop)
-    if started.mcp_server:
-        await step("MCP server", started.mcp_server.stop)
-    if started.triggers is not None:
-        await step("triggers", started.triggers.stop)
-    if started.dispatcher is not None:
-        await step("schedule dispatcher", started.dispatcher.stop)
-    if started.result_relay is not None:
-        await step("result relay", started.result_relay.stop)
+async def _cancel_task_worker(task_worker: asyncio.Task[Any]) -> None:
     # repid's own worker logs CRITICAL + a full traceback on CancelledError
     # (by design — see repid/_worker.py, it re-raises after logging). That's
     # expected noise here since this cancel() is our own intentional shutdown,
     # not an unexpected failure — silence it for this one call.
     logging.getLogger("repid").setLevel(logging.CRITICAL + 1)
-    if started.task_worker is not None:
-        task_worker = started.task_worker
-        await step("task worker", lambda: stop_task_worker(task_worker))
-    if started.task_connection is not None:
-        task_connection = started.task_connection
-        await step("task broker connection", lambda: task_connection.__aexit__(None, None, None))
-    if started.proactive is not None:
-        await step("proactive agent", started.proactive.close)
-    try:
-        from pincer.voice.telemetry import runtime as telephony_telemetry
-    except ImportError:  # the voice extra isn't installed: nothing was started
-        pass
-    else:
-        await step("telephony telemetry", telephony_telemetry.shutdown)
-    if started.router is not None:
-        for ch in started.router.channels.values():
-            await step(f"channel {ch.name}", ch.stop)
-    await step("browser", close_browser_if_installed)
-    if core is not None:
-        await step("LLM client", core.llm.close)
-        await step("sessions", core.session_mgr.close)
-        await step("cost tracker", core.cost_tracker.close)
-        if core.memory_store:
-            await step("memory store", core.memory_store.close)
-        if core.audit_logger:
-            await step("audit log", core.audit_logger.shutdown)
-    # Last: every store above has finished with the shared engines.
-    from pincer.db.engine import dispose_engines
+    task_worker.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task_worker
 
-    await step("database engines", dispose_engines)
-    if failed:
-        console.print(f"[yellow]Shutdown complete, with errors in: {', '.join(failed)}[/yellow]")
+
+async def _stop_api_server(api_server: Any, api_task: asyncio.Task[Any]) -> None:
+    api_server.should_exit = True
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(api_task, timeout=3.0)
+
+
+async def _shut_down_agent(shutdown: _Shutdown, lease: DaemonLease | None) -> NoReturn:
+    """Run every registered stop action (last started first), then end the process.
+
+    The process exits 1 if any action failed, 0 otherwise. (`pincer stop` doesn't read the code;
+    it waits for the lease. The code is for whoever ran the process: a supervisor, a shell.)
+    """
+    import signal as _signal
+
+    _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+    await shutdown.run()
+    if shutdown.failed:
+        console.print(f"[yellow]Shutdown complete, with errors in: {', '.join(shutdown.failed)}[/yellow]")
     else:
         console.print("[green]Shutdown complete[/green]")
     # Cancel any lingering asyncio tasks (e.g. in-flight LLM calls from
@@ -1897,7 +1889,7 @@ async def _shut_down_agent(started: _Started, lease: DaemonLease | None) -> NoRe
     # os._exit never leaves the daemon child's `with DaemonLease`; its lock goes with the process.
     if lease is not None:
         lease.remove_record()
-    os._exit(1 if failed else 0)
+    os._exit(1 if shutdown.failed else 0)
 
 
 async def _run_tasks_worker(settings: Settings) -> None:
