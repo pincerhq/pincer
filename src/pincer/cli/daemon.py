@@ -106,7 +106,22 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
         )
         raise typer.Exit(1)
 
-    result = daemon.start(settings.data_dir, _child_argv(), Path.cwd(), os.environ, wait_timeout, on_line=show)
+    # asyncio's runner turns a Ctrl+C into a cancel that this blocking wait would never see; take
+    # it over, so a Ctrl+C stops the waiting at once (never the daemon: it has a session of its own).
+    previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+    try:
+        result = daemon.start(settings.data_dir, _child_argv(), Path.cwd(), os.environ, wait_timeout, on_line=show)
+    except KeyboardInterrupt:
+        console.print(
+            "Stopped waiting. A Pincer that had begun starting keeps going in the background — "
+            "'pincer status' to check.",
+            soft_wrap=True,
+            markup=False,
+            highlight=False,
+        )
+        raise typer.Exit(130) from None
+    finally:
+        signal.signal(signal.SIGINT, previous)
     state = result.state
     if result.outcome is daemon.StartOutcome.READY and isinstance(state, daemon.DaemonState):
         channels = ", ".join(state.channels) or "none"

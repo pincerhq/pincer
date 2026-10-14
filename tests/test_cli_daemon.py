@@ -57,6 +57,11 @@ UNREADABLE = (
     "A Pincer daemon (pid {pid}) holds data dir {data_dir}, but its record can't be read by this version"
     " — use the version that started it."
 )
+# `pincer run -d --wait-timeout 30`, in a process whose daemon is the fake child given as the argv (a JSON list).
+PATCHED_CHILD_RUN_DETACH = (
+    "import json, sys; import pincer.cli.daemon as d; d._child_argv = lambda: json.loads(sys.argv[1]); "
+    "from pincer.cli import app; app(['run', '-d', '--wait-timeout', '30'], prog_name='pincer')"
+)
 # `pincer run`, in a process whose attach gives up on a stop after {} seconds instead of 90.
 PATCHED_STOP_TIMEOUT_RUN = (
     "import pincer.cli.daemon as d; d.STOP_TIMEOUT = {}; from pincer.cli import app; app(['run'], prog_name='pincer')"
@@ -1435,3 +1440,43 @@ def test_restart_beside_a_daemon_with_a_record_it_cant_read_starts_nothing(data_
     assert UNREADABLE.format(pid=pid, data_dir=data_dir) in result.output
     assert "Not starting a new one." in result.output
     assert daemon_fake_child.children_under(tmp_path) == [pid]
+
+
+def test_ctrl_c_while_run_detach_waits_stops_waiting_at_once_and_leaves_the_daemon_starting(
+    data_dir: Path, tmp_path: Path
+) -> None:
+    cwd = tmp_path / "detach-cwd"
+    cwd.mkdir()
+    fake = json.dumps(daemon_fake_child.argv("gated", data_dir))  # never ready on its own
+    process = subprocess.Popen(
+        [*pincer_command()[:3], "-P", "-c", PATCHED_CHILD_RUN_DETACH, fake],
+        cwd=cwd,
+        env={
+            **os.environ,
+            "PINCER_DATA_DIR": str(data_dir),
+            "PINCER_DASHBOARD_PORT": str(free_port()),
+            "PINCER_ANTHROPIC_API_KEY": "sk-ant-test",
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,  # like a command typed in a terminal: Ctrl+C goes to its group only
+    )
+    try:
+        detaching = _Attached(process)
+        detaching.wait_for("marker from the caller's environment")  # the daemon is up, starting
+        [child] = daemon_fake_child.children_under(tmp_path)
+
+        detaching.send(signal.SIGINT)
+        returncode, err = detaching.finish(seconds=5)
+
+        assert returncode == 130, err
+        out = "\n".join(detaching.lines)
+        assert "Stopped waiting" in out
+        assert "Pincer started" not in out
+        assert b"Traceback" not in err
+        assert daemon_fake_child.children_under(tmp_path) == [child]
+        assert getattr(daemon.read_state(data_dir), "state", None) == "starting"
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
