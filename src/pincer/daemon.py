@@ -223,12 +223,15 @@ def read_state(data_dir: Path) -> DaemonState | DaemonWithoutRecord | None:
 
 def _read_record(path: Path) -> DaemonState | None:
     """The record at `path`, or None if it is missing or can't be read. Fields a later version
-    added are ignored, so an upgrade doesn't turn a running daemon into an unreadable one."""
+    added are ignored, so an upgrade doesn't turn a running daemon into an unreadable one.
+
+    A pid that names no single process counts as unreadable: `os.kill(0, …)` would signal the
+    caller's own process group, and `os.kill(-1, …)` every process the user may signal."""
     try:
         record = json.loads(path.read_text())
         known = {field.name for field in fields(DaemonState)}
         state = DaemonState(**{key: value for key, value in record.items() if key in known})
-        if not isinstance(state.pid, int) or isinstance(state.pid, bool):
+        if not isinstance(state.pid, int) or isinstance(state.pid, bool) or state.pid <= 0:
             return None
         return replace(state, state=DaemonPhase(state.state))
     except (FileNotFoundError, ValueError, TypeError, AttributeError):

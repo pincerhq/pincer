@@ -26,7 +26,7 @@ from pincer import daemon
 from pincer.daemon import StartOutcome, StopOutcome
 
 if TYPE_CHECKING:
-    from collections.abc import Buffer, Iterator
+    from collections.abc import Buffer, Callable, Iterator
 
 WAIT_TIMEOUT = 20.0
 # Stands in for `pincer run -d`: starts a daemon from its own cwd/environment, prints its PID and exits.
@@ -819,3 +819,37 @@ def test_a_spawned_daemon_imports_the_tree_under_test(data_dir: Path) -> None:
 
     assert f"imports pincer from {SRC_DIR / 'pincer' / '__init__.py'}" in daemon.log_path(data_dir).read_text()
     daemon.stop(data_dir)
+
+
+@pytest.mark.parametrize("bad_pid", [0, -1], ids=["pid 0", "pid -1"])
+def test_a_record_naming_no_single_process_is_unreadable_and_never_signalled(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch, bad_pid: int
+) -> None:
+    # os.kill(0, …) signals the caller's own group and os.kill(-1, …) everything the user may
+    # signal; should either be attempted, record it and refuse instead of sending it.
+    attempted: list[tuple[str, int, int]] = []
+    real_kill, real_killpg = os.kill, os.killpg
+
+    def guarded(name: str, real: Callable[[int, int], None]) -> Callable[[int, int], None]:
+        def call(pid: int, sig: int) -> None:
+            if pid <= 0:
+                attempted.append((name, pid, sig))
+                raise PermissionError(f"refused {name}({pid}, {sig}) in a test")
+            real(pid, sig)
+
+        return call
+
+    monkeypatch.setattr(os, "kill", guarded("kill", real_kill))
+    monkeypatch.setattr(os, "killpg", guarded("killpg", real_killpg))
+    state = _start(data_dir).state
+    assert isinstance(state, daemon.DaemonState)
+    (data_dir / daemon.PID_FILE).write_text(json.dumps(asdict(replace(state, pid=bad_pid))))
+
+    assert isinstance(daemon.read_state(data_dir), daemon.DaemonWithoutRecord)
+    for force in (False, True):
+        result = within(10.0, lambda force=force: daemon.stop(data_dir, timeout=0.5, force=force))
+        assert result.outcome is StopOutcome.STILL_RUNNING
+        assert result.pid is None
+    assert attempted == []
+    assert alive(state.pid)
+    real_kill(state.pid, signal.SIGTERM)
