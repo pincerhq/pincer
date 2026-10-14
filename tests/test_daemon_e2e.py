@@ -80,7 +80,7 @@ def scratch(tmp_path: Path, signal_stub: str) -> Iterator[_Scratch]:
     # A failed test must not leave Pincer running: kill what it started, by the pids it saw, plus
     # whatever daemon still holds this data dir's lease (a `run -d` that timed out printed no pid).
     running = daemon.read_state(data)
-    for pid in [*scratch.pids, *([running.pid] if running is not None else [])]:
+    for pid in [*scratch.pids, *([running.pid] if isinstance(running, daemon.DaemonState) else [])]:
         with contextlib.suppress(ProcessLookupError):
             os.killpg(pid, signal.SIGKILL)
 

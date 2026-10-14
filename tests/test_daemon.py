@@ -52,7 +52,7 @@ def _wait_for_state(data_dir: Path, state: str) -> daemon.DaemonState:
     deadline = time.monotonic() + WAIT_TIMEOUT
     while time.monotonic() < deadline:
         current = daemon.read_state(data_dir)
-        if current is not None and current.state == state:
+        if isinstance(current, daemon.DaemonState) and current.state == state:
             return current
         time.sleep(0.02)
     raise AssertionError(f"daemon never reached {state!r}")
