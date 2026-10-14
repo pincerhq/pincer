@@ -160,10 +160,12 @@ def attach_daemon(settings: Settings, state: DaemonState) -> None:
     The first Ctrl+C stops it gracefully, still showing its log until it has exited; a
     second one only detaches. A hangup only ends this process: the daemon has a session of its own.
     """
+    # Built first, while Ctrl+C is still asyncio's: building prints and starts nothing, and a Ctrl+C
+    # outside the try below would escape with the handler swapped.
+    relay = _LogRelay(settings)
     # asyncio's runner turns a Ctrl+C into a cancel that this blocking wait would never see. Take
     # Ctrl+C over before anything is shown, so one pressed the moment attaching starts still stops it.
     previous = signal.signal(signal.SIGINT, signal.default_int_handler)
-    relay = _LogRelay(settings)
     try:
         try:
             console.print(

@@ -44,6 +44,8 @@ from pincer.cli.daemon import format_uptime
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    from pincer.config import Settings
+
     Spawn = Callable[..., subprocess.Popen[bytes]]
 
 NOT_RUNNING_NOTE = "Pincer is not running — showing the last session's log"
@@ -999,6 +1001,49 @@ def test_a_ctrl_c_while_attach_starts_up_never_starts_a_second_relay(
     cli_daemon.attach_daemon(settings, state)
 
     assert len(relays) == 1
+
+
+def test_a_ctrl_c_while_the_relay_is_built_goes_where_it_went_before_attach(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The relay is built before attach takes Ctrl+C over, so a Ctrl+C then is still asyncio's, and
+    attach neither leaks it as an exception nor leaves its own handler behind.
+
+    `raise_signal` runs the handler in place before it returns, so the Ctrl+C lands exactly inside
+    the constructor.
+    """
+    from rich.console import Console
+
+    from pincer.cli import daemon as cli_daemon
+
+    caught: list[int] = []
+
+    class _Relay(cli_daemon._LogRelay):
+        def __init__(self, settings: Settings) -> None:
+            signal.raise_signal(signal.SIGINT)
+            super().__init__(settings)
+
+    def asyncio_runner_handler(signum: int, frame: object) -> None:
+        caught.append(signum)
+
+    monkeypatch.setattr(cli_daemon, "console", Console(file=io.StringIO()))
+    monkeypatch.setattr(cli_daemon, "_LogRelay", _Relay)
+    settings = MagicMock()
+    settings.data_dir = tmp_path  # no log: the relay ends at once
+    state = daemon.DaemonState(4182, "2026-10-14T00:00:00+00:00", "/", 8080, "0.8.0", daemon.DaemonPhase.READY)
+    leaked: KeyboardInterrupt | None = None
+    previous = signal.signal(signal.SIGINT, asyncio_runner_handler)
+    try:
+        cli_daemon.attach_daemon(settings, state)
+    except KeyboardInterrupt as interrupt:  # reported below, rather than aborting the whole test run
+        leaked = interrupt
+    finally:
+        after = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGINT, previous)
+
+    assert leaked is None
+    assert after is asyncio_runner_handler
+    assert caught == [signal.SIGINT]
 
 
 def test_a_hangup_while_attached_leaves_the_daemon_running(
