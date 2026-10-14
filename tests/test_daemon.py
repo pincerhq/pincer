@@ -33,7 +33,6 @@ WAIT_TIMEOUT = 20.0
 LAUNCHER = """
 import os, sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 from pincer import daemon
 
 result = daemon.start(Path(sys.argv[1]), sys.argv[2:], Path.cwd(), dict(os.environ), 20.0)

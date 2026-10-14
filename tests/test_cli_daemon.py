@@ -61,6 +61,10 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon mode is 
 runner = CliRunner()
 
 
+def _child_mode(monkeypatch: pytest.MonkeyPatch, mode: str, data_dir: Path) -> None:
+    monkeypatch.setattr("pincer.cli.daemon._child_argv", lambda: daemon_fake_child.argv(mode, data_dir))
+
+
 @pytest.fixture
 def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     path = tmp_path / "data"
@@ -74,7 +78,7 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     settings.daily_budget_usd = 5.0
     monkeypatch.setattr("pincer.config.get_settings", lambda: settings)
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: settings)
-    monkeypatch.setattr("pincer.cli.daemon._child_argv", lambda: daemon_fake_child.argv("ready", path))
+    _child_mode(monkeypatch, "ready", path)
     # Everything a test starts (`run -d`'s daemon, `pincer logs`, `pincer run`) inherits this environment.
     monkeypatch.setenv("PYTHONPATH", child_env()["PYTHONPATH"])
     yield path
@@ -137,10 +141,6 @@ def test_daemon_child_runs_the_agent_inside_the_lease(data_dir: Path, monkeypatc
 
     assert result.exit_code == 0, result.output
     assert states == ["starting", "ready"]
-
-
-def _child_mode(monkeypatch: pytest.MonkeyPatch, mode: str, data_dir: Path) -> None:
-    monkeypatch.setattr("pincer.cli.daemon._child_argv", lambda: daemon_fake_child.argv(mode, data_dir))
 
 
 def test_run_detach_shows_the_startup_log_and_the_crash_tail(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
