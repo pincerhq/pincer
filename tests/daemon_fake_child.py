@@ -11,6 +11,7 @@ behaves according to MODE (tests build the command with `argv()`):
     slow-start        listens on a port (recorded in the lease) at once, marks ready only after SLOW_START_SECONDS
     crash-on-start    logs CRASH_STEPS startup lines, then fails with an uncaught exception before ready
     slow-lease        like ready, but waits SLOW_LEASE_SECONDS before taking the lease (Pincer's import time)
+    never-lease       hangs before taking the lease (setup stuck on the network, say), holding the start lock
     die-mid-line      writes half a line (no newline) and exits 3 before ready
     raise-on-sigterm  like ready, but SIGTERM ends in an uncaught exception
     slow-shutdown     like ready, but its shutdown takes SLOW_SHUTDOWN_SECONDS
@@ -99,6 +100,8 @@ def main() -> None:
 
     if mode == "slow-lease":
         time.sleep(SLOW_LEASE_SECONDS)
+    while mode == "never-lease":
+        time.sleep(1)
 
     with DaemonLease(data_dir, port=port) as lease:
         log.info("fake child %d starting in %s", os.getpid(), os.getcwd())

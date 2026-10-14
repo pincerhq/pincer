@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from rich.status import Status
 
     from pincer.config import Settings
-    from pincer.daemon import DaemonState, DaemonWithUnreadableRecord, LiveDaemon, PidNotTheDaemon
+    from pincer.daemon import DaemonState, DaemonWithUnreadableRecord, LiveDaemon, PidNotTheDaemon, StartInProgress
 
 WAIT_TIMEOUT = 60.0
 # Sized to the voice channel's 60 s call drain plus worker and API grace.
@@ -141,6 +141,10 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
             markup=False,
         )
         return
+    if result.outcome is daemon.StartOutcome.STARTING_ELSEWHERE:
+        message = start_in_progress_message(daemon.StartInProgress(result.starting_pid))
+        console.print(f"{message} — not starting a second one.", soft_wrap=True, markup=False, highlight=False)
+        raise typer.Exit(1)
     if result.outcome is daemon.StartOutcome.TIMED_OUT:
         console.print(
             f"[yellow]Pincer is still starting after {wait_timeout:g} s — it keeps running; "
@@ -158,6 +162,16 @@ def start_daemon(settings: Settings, wait_timeout: float = WAIT_TIMEOUT) -> None
     raise typer.Exit(1)
 
 
+def refuse_a_start_in_progress(data_dir: Path) -> None:
+    """Exit 1 if a start holds the start lock: no daemon to act on yet, and none to start beside it."""
+    from pincer import daemon
+
+    start = daemon.start_in_progress(data_dir)
+    if start is not None:
+        console.print(start_in_progress_message(start), soft_wrap=True, markup=False, highlight=False)
+        raise typer.Exit(1)
+
+
 def refuse_unless_a_known_daemon(settings: Settings, state: LiveDaemon | None) -> NoReturn:
     """Exit 1 for a lease holder this command can't act on: one with no record (it is all but gone),
     or one whose record this version can't read (it may run for a long time; say whose it is)."""
@@ -169,6 +183,16 @@ def refuse_unless_a_known_daemon(settings: Settings, state: LiveDaemon | None) -
         message = f"Pincer is still shutting down (data dir {settings.data_dir}) — try again in a moment."
     console.print(message, soft_wrap=True, markup=False, highlight=False)
     raise typer.Exit(1)
+
+
+def start_in_progress_message(start: StartInProgress) -> str:
+    """For a start whose child hasn't taken the lease; with how to end it, should it be stuck."""
+    if start.pid is None:
+        return "A start of Pincer is in progress (pid unknown) and hasn't taken its lease yet; try again in a moment"
+    return (
+        f"A start of Pincer is in progress (pid {start.pid}) and hasn't taken its lease yet; try again in a moment, "
+        f"or end it with 'kill {start.pid}' if it's stuck"
+    )
 
 
 def unreadable_record_message(data_dir: Path, state: DaemonWithUnreadableRecord) -> str:
@@ -340,6 +364,7 @@ def stop(
     if stopped is None:
         raise typer.Exit(1)
     if not stopped:
+        refuse_a_start_in_progress(settings.data_dir)
         _report_not_running(settings)
 
 
@@ -369,6 +394,7 @@ def restart(
         console.print("Not starting a new one.")
         raise typer.Exit(1)
     if not stopped:
+        refuse_a_start_in_progress(settings.data_dir)
         console.print("Pincer is not running — starting it")
     start_daemon(settings, wait_timeout)
 
@@ -490,7 +516,13 @@ def status() -> None:
     data_dir = get_settings_relaxed().data_dir
     state = daemon.read_state(data_dir)
     if state is None:
-        console.print("Pincer is not running")
+        start = daemon.start_in_progress(data_dir)
+        console.print(
+            start_in_progress_message(start) if start is not None else "Pincer is not running",
+            soft_wrap=True,
+            markup=False,
+            highlight=False,
+        )
         return
     if isinstance(state, daemon.DaemonWithUnreadableRecord):
         console.print(unreadable_record_message(data_dir, state), soft_wrap=True, markup=False, highlight=False)

@@ -72,6 +72,7 @@ class StartOutcome(StrEnum):
     ALREADY_RUNNING = "already_running"
     CRASHED = "crashed"
     TIMED_OUT = "timed_out"
+    STARTING_ELSEWHERE = "starting_elsewhere"
 
 
 class DaemonPhase(StrEnum):
@@ -130,6 +131,15 @@ class StartResult:
     state: LiveDaemon | None = None
     last_lines: list[str] = field(default_factory=list)
     exit_code: int | None = None
+    # STARTING_ELSEWHERE: the child of the start in progress, when that start has recorded it.
+    starting_pid: int | None = None
+
+
+@dataclass(frozen=True)
+class StartInProgress:
+    """A start holds the start lock, its child not yet in the lease (`pid`, once the start has spawned it)."""
+
+    pid: int | None
 
 
 @dataclass(frozen=True)
@@ -177,8 +187,9 @@ def start(
     # start stops waiting first (a timeout, Ctrl+C) — and goes when the child dies.
     starting = _StartLock(data_dir / START_LOCK_FILE)
     if not starting.acquire(wait_timeout):
-        # Another start's child hasn't reached the lease within our wait.
-        return StartResult(StartOutcome.TIMED_OUT, read_state(data_dir))
+        # Another start's child hasn't reached the lease within our wait: spawn nothing, name it.
+        elsewhere = start_in_progress(data_dir)
+        return StartResult(StartOutcome.STARTING_ELSEWHERE, starting_pid=elsewhere.pid if elsewhere else None)
     try:
         return _start_locked(data_dir, log, argv, cwd, env, wait_timeout, on_line, starting)
     finally:
@@ -221,6 +232,8 @@ def _start_locked(
         )
     finally:
         os.close(log_fd)
+    # Name the child in the start lock file, for whoever finds the lock held (status, a later start).
+    os.pwrite(start_fd, str(child.pid).encode(), 0)
 
     # Readiness comes from the record alone, never from the dashboard port: the API binds
     # before the channels have started.
@@ -243,6 +256,25 @@ def _start_locked(
             if time.monotonic() >= deadline:
                 return StartResult(StartOutcome.TIMED_OUT, state)
             time.sleep(POLL_INTERVAL)
+
+
+def start_in_progress(data_dir: Path) -> StartInProgress | None:
+    """The start holding the start lock, if one does: its child hasn't taken the lease yet (it may
+    be stuck before it). None when no start is in progress."""
+    path = data_dir / START_LOCK_FILE
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            recorded = os.pread(fd, 32, 0).decode(errors="replace").strip()
+            return StartInProgress(pid=int(recorded) if recorded.isdigit() and int(recorded) > 0 else None)
+        return None
+    finally:
+        os.close(fd)
 
 
 def read_state(data_dir: Path) -> LiveDaemon | None:
@@ -565,6 +597,7 @@ class _StartLock:
                         os.close(fd)
                         return False
                     time.sleep(POLL_INTERVAL / 5)
+            os.ftruncate(fd, 0)  # no previous start's child pid
         except BaseException:  # e.g. Ctrl+C while queued behind another start
             os.close(fd)
             raise

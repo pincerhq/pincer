@@ -54,6 +54,7 @@ NO_LOGS = "No logs yet — start with 'pincer run -d'"
 WINDOWS_MESSAGE = "Daemon mode isn't supported on Windows — use a service manager."
 CONTAINER_MESSAGE = "Pincer is running inside a container — use 'docker compose up -d' to run it in the background."
 SHUTTING_DOWN = "Pincer is still shutting down (data dir {}) — try again in a moment."
+START_IN_PROGRESS = "A start of Pincer is in progress (pid {pid}) and hasn't taken its lease yet"
 UNREADABLE = (
     "A Pincer daemon (pid {pid}) holds data dir {data_dir}, but its record can't be read by this version"
     " — use the version that started it."
@@ -1550,3 +1551,49 @@ def test_status_of_a_record_with_a_naive_start_time_says_so_without_a_traceback(
     assert result.exit_code == 0, result.output
     assert result.exception is None
     assert UNREADABLE.format(pid=record["pid"], data_dir=data_dir) in result.output
+
+
+def _a_start_stuck_before_its_lease(data_dir: Path, tmp_path: Path) -> int:
+    result = daemon.start(
+        data_dir, daemon_fake_child.argv("never-lease", data_dir), data_dir, dict(os.environ), wait_timeout=0.0
+    )
+    assert result.outcome is daemon.StartOutcome.TIMED_OUT
+    [stuck] = daemon_fake_child.children_under(tmp_path)
+    return stuck
+
+
+def test_run_detach_behind_a_stuck_start_names_it_and_spawns_nothing(data_dir: Path, tmp_path: Path) -> None:
+    stuck = _a_start_stuck_before_its_lease(data_dir, tmp_path)
+
+    result = runner.invoke(app, ["run", "-d", "--wait-timeout", "0.5"])
+
+    assert result.exit_code == 1, result.output
+    assert START_IN_PROGRESS.format(pid=stuck) in result.output
+    assert "keeps running" not in result.output
+    assert daemon_fake_child.children_under(tmp_path) == [stuck]
+
+
+@pytest.mark.parametrize(("args", "code"), [(["status"], 0), (["stop"], 1)], ids=["status", "stop"])
+def test_status_and_stop_report_a_start_in_progress(data_dir: Path, tmp_path: Path, args: list[str], code: int) -> None:
+    stuck = _a_start_stuck_before_its_lease(data_dir, tmp_path)
+
+    result = runner.invoke(app, args)
+
+    assert result.exit_code == code, result.output
+    assert START_IN_PROGRESS.format(pid=stuck) in result.output
+    assert "not running" not in result.output
+
+
+@pytest.mark.parametrize("args", [["restart"], ["run"]], ids=["restart", "plain run"])
+def test_restart_and_plain_run_refuse_beside_a_start_in_progress(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> None:
+    stuck = _a_start_stuck_before_its_lease(data_dir, tmp_path)
+    ran = _record_foreground_runs(monkeypatch)
+
+    result = within(10.0, lambda: runner.invoke(app, args))
+
+    assert result.exit_code == 1, result.output
+    assert START_IN_PROGRESS.format(pid=stuck) in result.output
+    assert ran == []
+    assert daemon_fake_child.children_under(tmp_path) == [stuck]

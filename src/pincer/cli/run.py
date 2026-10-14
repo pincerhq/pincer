@@ -21,7 +21,13 @@ from pincer.cli._attachments import (
     _safe_upload_path,
 )
 from pincer.cli._shared import _create_memory_backend, _port_in_use, _print_voice_webhook_urls, _setup_logging, console
-from pincer.cli.daemon import WAIT_TIMEOUT, attach_daemon, refuse_unless_a_known_daemon, start_daemon
+from pincer.cli.daemon import (
+    WAIT_TIMEOUT,
+    attach_daemon,
+    refuse_a_start_in_progress,
+    refuse_unless_a_known_daemon,
+    start_daemon,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -96,6 +102,8 @@ async def run(
         running = read_state(settings.data_dir)
         if running is not None and not isinstance(running, DaemonState):
             refuse_unless_a_known_daemon(settings, running)
+        if running is None:
+            refuse_a_start_in_progress(settings.data_dir)
         if running is not None:
             attach_daemon(settings, running)
             return

@@ -980,3 +980,27 @@ def test_a_record_whose_start_time_has_no_time_zone_is_unreadable(data_dir: Path
 
     assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=pid)
     os.kill(pid, signal.SIGTERM)
+
+
+def test_a_start_behind_one_stuck_before_its_lease_says_another_start_is_in_progress(
+    data_dir: Path, tmp_path: Path
+) -> None:
+    first = _start(data_dir, mode="never-lease", wait_timeout=0.0)
+    assert first.outcome is StartOutcome.TIMED_OUT
+    [stuck] = daemon_fake_child.children_under(tmp_path)
+
+    second = _start(data_dir, wait_timeout=0.5)
+
+    assert second.outcome is StartOutcome.STARTING_ELSEWHERE
+    assert second.starting_pid == stuck
+    assert daemon_fake_child.children_under(tmp_path) == [stuck]
+    assert daemon.read_state(data_dir) is None
+    assert daemon.start_in_progress(data_dir) == daemon.StartInProgress(pid=stuck)
+
+
+def test_no_start_in_progress_once_the_daemon_holds_its_lease(data_dir: Path) -> None:
+    assert daemon.start_in_progress(data_dir) is None
+    _start(data_dir)
+
+    assert daemon.start_in_progress(data_dir) is None
+    daemon.stop(data_dir)
