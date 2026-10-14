@@ -1,4 +1,4 @@
-"""`pincer run -d` / `stop` / `logs` — format what the daemon lifecycle module (`pincer.daemon`) returns."""
+"""`pincer run -d` / `stop` / `logs` / `status` — format what the daemon lifecycle module (`pincer.daemon`) returns."""
 
 from __future__ import annotations
 
@@ -214,3 +214,23 @@ def logs(
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, sys.stdout.fileno())
         os.close(devnull)
+
+
+def status() -> None:
+    """Show whether the background Pincer is running or starting, and what it runs with."""
+    from pincer import daemon
+    from pincer.config import get_settings_relaxed
+
+    state = daemon.read_state(get_settings_relaxed().data_dir)
+    if state is None:
+        console.print("Pincer is not running")
+        return
+    word = "running" if state.state == "ready" else "starting"
+    channels = f"channels: {', '.join(state.channels) or 'none'}, " if state.state == "ready" else ""
+    console.print(
+        f"Pincer is {word} (pid {state.pid}, up {_uptime(state)}) — port {state.port}, {channels}"
+        f"version {state.version}, cwd {state.cwd}",
+        soft_wrap=True,
+        markup=False,
+        highlight=False,
+    )

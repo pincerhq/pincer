@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import json
 import os
 import pty
 import queue
@@ -20,7 +21,7 @@ from unittest.mock import MagicMock
 
 import daemon_fake_child
 import pytest
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 from pincer import config, daemon
 from pincer.cli import app
@@ -503,3 +504,84 @@ def test_the_not_running_note_reaches_a_terminal_while_stdout_is_piped(data_dir:
     assert process.returncode == 0
     assert out == RAW_LOG
     assert NOT_RUNNING_NOTE.encode() in b"".join(shown)
+
+
+def _status_line(result: Result) -> str:
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert len(lines) == 1, result.output
+    return lines[0]
+
+
+def test_status_of_a_ready_daemon_shows_running_with_every_field(data_dir: Path) -> None:
+    from pincer import __version__
+
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    state = daemon.read_state(data_dir)
+    assert state is not None
+
+    line = _status_line(runner.invoke(app, ["status"]))
+
+    assert re.fullmatch(
+        rf"Pincer is running \(pid {state.pid}, up \d+s\) — port 8080, channels: telegram, signal, "
+        rf"version {re.escape(__version__)}, cwd {re.escape(state.cwd)}",
+        line,
+    ), line
+    daemon.stop(data_dir)
+
+
+def test_status_of_a_starting_daemon_shows_starting_without_channels(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pincer import __version__
+
+    _child_mode(monkeypatch, "gated", data_dir)
+    assert runner.invoke(app, ["run", "-d", "--wait-timeout", "0.5"]).exit_code == 1
+    state = daemon.read_state(data_dir)
+    assert state is not None
+    assert state.state == "starting"
+
+    line = _status_line(runner.invoke(app, ["status"]))
+
+    assert re.fullmatch(
+        rf"Pincer is starting \(pid {state.pid}, up \d+s\) — port 8080, "
+        rf"version {re.escape(__version__)}, cwd {re.escape(state.cwd)}",
+        line,
+    ), line
+    daemon.stop(data_dir)
+
+
+def test_status_with_no_daemon_shows_not_running(data_dir: Path) -> None:
+    assert _status_line(runner.invoke(app, ["status"])) == "Pincer is not running"
+
+
+def test_status_after_the_daemon_was_killed_with_sigkill_shows_not_running(data_dir: Path) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    state = daemon.read_state(data_dir)
+    assert state is not None
+    os.kill(state.pid, signal.SIGKILL)
+    deadline = time.monotonic() + 10.0
+    while daemon.read_state(data_dir) is not None:
+        assert time.monotonic() < deadline, "the lease outlived the killed daemon"
+        time.sleep(0.02)
+    # Its record is still on disk, naming the dead pid.
+    assert json.loads((data_dir / daemon.PID_FILE).read_text())["pid"] == state.pid
+
+    assert _status_line(runner.invoke(app, ["status"])) == "Pincer is not running"
+
+
+def test_status_shows_the_daemons_cwd_not_the_callers(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started_in = tmp_path / "started-here"
+    called_from = tmp_path / "called-from-here"
+    started_in.mkdir()
+    called_from.mkdir()
+    monkeypatch.chdir(started_in)
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    monkeypatch.chdir(called_from)
+
+    line = _status_line(runner.invoke(app, ["status"]))
+
+    assert line.endswith(f", cwd {started_in.resolve()}"), line
+    daemon.stop(data_dir)

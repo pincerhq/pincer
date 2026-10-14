@@ -43,6 +43,7 @@ app = AsyncTyper(
 app.command(name="run")(run_cmd.run)
 app.command()(daemon.stop)
 app.command()(daemon.logs)
+app.command()(daemon.status)
 app.command()(config.config)
 app.command()(cost.cost)
 app.command(name="init")(init.init)
