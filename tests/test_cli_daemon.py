@@ -25,6 +25,7 @@ import pytest
 from daemon_support import RAW_LOG, alive, append_log, free_port, numbered, pincer_command, within, write_log
 from typer.testing import CliRunner, Result
 
+import pincer
 from pincer import config, daemon
 from pincer.cli import app
 from pincer.cli.daemon import format_uptime
@@ -1044,7 +1045,10 @@ def windows(monkeypatch: pytest.MonkeyPatch) -> None:
     """As on Windows: the platform says so and `fcntl`, which the lifecycle module needs, can't be imported."""
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setitem(sys.modules, "fcntl", None)
+    # Both, so a stray `from pincer import daemon` really imports it again (and fails): that form
+    # reads the package attribute first and would never look at sys.modules.
     monkeypatch.delitem(sys.modules, "pincer.daemon", raising=False)
+    monkeypatch.delattr(pincer, "daemon", raising=False)
 
 
 @pytest.mark.parametrize(
