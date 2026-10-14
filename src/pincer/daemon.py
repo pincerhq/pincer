@@ -5,7 +5,9 @@ session with its stdout/stderr appended to `<data_dir>/logs/pincer.log`. The chi
 `DaemonLease` for its whole life: an exclusive `flock` on `<data_dir>/pincer.lock` plus a
 JSON record in `<data_dir>/pincer.pid`.
 
-"A daemon is running" means "a probe cannot take the lock". Only the kernel drops the
+The lease is the only exclusive lock ever taken on that file. Everything else (status, stop, a
+start's cleanup, its readiness poll) probes it shared, so probes never conflict with each other
+and fail exactly when a daemon holds it: "a daemon is running" means "a shared probe fails". Only the kernel drops the
 lock, as the process exits (`kill -9` included), so a released lock means the process is
 gone and a record left behind by a dead daemon is recognisable as stale: its PID is never
 trusted. The lock sits on a sibling file rather than on
@@ -52,6 +54,9 @@ POLL_INTERVAL = 0.1
 # The lease writes the record right after taking the lock; a probe that wins that
 # race waits this long for the record to appear.
 RECORD_GRACE = 1.0
+# A starting daemon keeps reaching for the lease this long while shared probes hold it.
+LEASE_GRACE = 2.0
+LEASE_RETRY = 0.01
 
 
 class DaemonLeaseTaken(RuntimeError):
@@ -144,9 +149,10 @@ def _start_locked(
     on_line: Callable[[str], None] | None,
     starting: _StartLock,
 ) -> StartResult:
-    # Holding the lease lock while cleaning up means no daemon can be writing the record or the log.
-    with _lock(data_dir) as held:
-        if not held:
+    # Holding the lock shared while cleaning up means no daemon holds the lease, and none can
+    # take it (a lease waits) until the stale record and the old log are out of the way.
+    with _probe(data_dir) as free:
+        if not free:
             return StartResult(StartOutcome.ALREADY_RUNNING, read_state(data_dir))
         (data_dir / PID_FILE).unlink(missing_ok=True)
         _rotate(log)
@@ -190,8 +196,8 @@ def _start_locked(
 
 def read_state(data_dir: Path) -> DaemonState | None:
     """The live daemon's record, or None when no daemon holds the lease (a leftover record is ignored)."""
-    with _lock(data_dir) as held:
-        if held:
+    with _probe(data_dir) as free:
+        if free:
             return None
     deadline = time.monotonic() + RECORD_GRACE
     while True:
@@ -289,11 +295,19 @@ class DaemonLease:
     def __enter__(self) -> DaemonLease:
         self._data_dir.mkdir(parents=True, exist_ok=True)
         fd = os.open(self._data_dir / LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(fd)
-            raise DaemonLeaseTaken(f"another Pincer daemon holds {self._data_dir / LOCK_FILE}") from None
+        # A shared probe (`pincer status`, a start's poll) holds the lock for a moment at a time; only
+        # a lock still taken after LEASE_GRACE belongs to another daemon. Non-blocking tries, not a
+        # blocking flock: that could wait on a live daemon for ever.
+        deadline = time.monotonic() + LEASE_GRACE
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    raise DaemonLeaseTaken(f"another Pincer daemon holds {self._data_dir / LOCK_FILE}") from None
+                time.sleep(LEASE_RETRY)
         # os.open fds are non-inheritable, so the lock dies with this process, not with
         # whatever it spawns (MCP servers, sandboxed skills).
         self._fd = fd
@@ -327,8 +341,8 @@ class DaemonLease:
 
 
 @contextlib.contextmanager
-def _lock(data_dir: Path) -> Iterator[bool]:
-    """Try the lease lock without blocking; yields True (and holds it) when no daemon has it."""
+def _probe(data_dir: Path) -> Iterator[bool]:
+    """Try the lock file shared, without blocking; yields True (holding it) when no daemon holds the lease."""
     lock_file = data_dir / LOCK_FILE
     if not lock_file.exists():
         yield True
@@ -336,7 +350,7 @@ def _lock(data_dir: Path) -> Iterator[bool]:
     fd = os.open(lock_file, os.O_RDWR)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
             yield False
         else:
@@ -346,7 +360,7 @@ def _lock(data_dir: Path) -> Iterator[bool]:
 
 
 def _lease_held(data_dir: Path) -> bool:
-    with _lock(data_dir) as free:
+    with _probe(data_dir) as free:
         return not free
 
 

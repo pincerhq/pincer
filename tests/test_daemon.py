@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import signal
@@ -653,3 +655,87 @@ def test_follow_with_no_daemon_running_gives_the_tail_and_ends(data_dir: Path) -
     )
 
     assert followed == _numbered(31, 80)
+
+
+# ── probes never pass for a daemon (review #1) ─────────────────────────────
+
+
+@contextlib.contextmanager
+def _probe_in_progress(data_dir: Path, seconds: float | None = None) -> Iterator[None]:
+    """Hold the lock file shared, as another `pincer status` (or start's own poll) does mid-probe.
+
+    With `seconds`, a thread lets go after that long, so what runs inside overlaps the probe's end.
+    """
+    (data_dir / daemon.LOCK_FILE).touch()
+    fd = os.open(data_dir / daemon.LOCK_FILE, os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    timer = threading.Timer(seconds, os.close, (fd,)) if seconds is not None else None
+    if timer is not None:
+        timer.start()
+    try:
+        yield
+    finally:
+        if timer is not None:
+            timer.join()
+        else:
+            os.close(fd)
+
+
+def _leftover_record(data_dir: Path, pid: int) -> None:
+    """A dead daemon's record, naming `pid`."""
+    (data_dir / daemon.LOCK_FILE).touch()
+    record = daemon.DaemonState(pid, "2026-10-13T00:00:00+00:00", "/", 8080, "0.8.0", daemon.DaemonPhase.READY)
+    (data_dir / daemon.PID_FILE).write_text(json.dumps(asdict(record)))
+
+
+def test_a_probe_in_progress_never_makes_a_leftover_record_look_alive(data_dir: Path) -> None:
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _leftover_record(data_dir, bystander.pid)
+        with _probe_in_progress(data_dir):
+            assert daemon.read_state(data_dir) is None
+            assert daemon.stop(data_dir, timeout=1.0).outcome is StopOutcome.NOT_RUNNING
+        time.sleep(0.2)  # a SIGTERM sent on the way would have landed by now
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+def test_a_start_overlapping_a_probe_cleans_up_and_its_daemon_takes_the_lease(data_dir: Path) -> None:
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _leftover_record(data_dir, bystander.pid)
+        # Held through the start's cleanup and past the moment the child reaches for the lease.
+        with _probe_in_progress(data_dir, seconds=1.5):
+            result = _start(data_dir)
+
+        assert result.outcome is StartOutcome.READY, result
+        assert result.state is not None
+        assert result.state.pid != bystander.pid
+        assert bystander.poll() is None
+        daemon.stop(data_dir)
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+def test_a_status_loop_running_throughout_does_not_keep_a_daemon_from_its_lease(data_dir: Path) -> None:
+    done = threading.Event()
+
+    def poll() -> None:
+        while not done.is_set():
+            daemon.read_state(data_dir)
+
+    pollers = [threading.Thread(target=poll) for _ in range(3)]
+    for poller in pollers:
+        poller.start()
+    try:
+        result = _start(data_dir)
+    finally:
+        done.set()
+        for poller in pollers:
+            poller.join()
+
+    assert result.outcome is StartOutcome.READY, result
+    daemon.stop(data_dir)
