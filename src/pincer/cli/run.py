@@ -10,7 +10,7 @@ import sys
 import uuid
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import typer
 
@@ -858,7 +858,53 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
         )
         raise typer.Exit(1)
 
+    # T7.2: `docker stop` / a deploy sends SIGTERM. Without a handler Python
+    # dies mid-call (no spoken ending, no report). Route it into the same
+    # graceful path as Ctrl+C: cancel the main task -> shutdown -> channel.stop()
+    # drains active calls with a spoken ending. Installed before startup, so a stop
+    # while channels are still connecting shuts down whatever has started.
+    _cancel_on_first_sigterm()
+    started = _Started()
+    try:
+        serving = await _start_agent(settings, lease, started)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        console.print("\n[yellow]Shutting down...[/yellow]")
+        await _shut_down_agent(started, lease)
+    if not serving:
+        return
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        console.print("\n[yellow]Shutting down...[/yellow]")
+    finally:
+        await _shut_down_agent(started, lease)
+
+
+@dataclass
+class _Started:
+    """What the agent's startup has brought up so far. Shutdown stops exactly these, so a stop
+    during startup takes the same graceful path as one after it."""
+
+    core: CoreComponents | None = None
+    mcp_server: Any = None
+    router: Any = None
+    proactive: Any = None
+    triggers: Any = None
+    task_connection: Any = None
+    task_worker: asyncio.Task[Any] | None = None
+    dispatcher: Any = None
+    result_relay: Any = None
+    api_server: Any = None
+    api_task: asyncio.Task[Any] | None = None
+    tunnel: Any = None
+
+
+async def _start_agent(settings: Settings, lease: DaemonLease | None, started: _Started) -> bool:
+    """Bring the agent up, recording each part in `started` as it comes up; False if there is
+    nothing to serve (no channel configured)."""
     core = await _build_core(settings)
+    started.core = core
     session_mgr, cost_tracker, audit_logger, rate_limiter = (
         core.session_mgr,
         core.cost_tracker,
@@ -1145,6 +1191,7 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
     from pincer.channels.router import ChannelRouter
 
     router = ChannelRouter(identity)
+    started.router = router
 
     # Start channels
     from pincer.channels.base import ChannelType
@@ -1514,7 +1561,7 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
 
     if not router.channels:
         console.print("[yellow]No channels configured. Set PINCER_TELEGRAM_BOT_TOKEN.[/yellow]")
-        return
+        return False
 
     # normalize identity map in through router
     await router.rebuild_identity_map()
@@ -1533,6 +1580,7 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
 
     proactive = ProactiveAgent(settings.db_path, agent=agent)
     await proactive.ensure_table()
+    started.proactive = proactive
 
     scheduler = CronScheduler(settings.db_path)
     await scheduler.ensure_table()
@@ -1598,6 +1646,7 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
     # Sprint 3: Event triggers
     triggers = EventTriggerManager(settings.db_path, deliverer)
     await triggers.start()
+    started.triggers = triggers
 
     # Sprint 6: Background task execution (repid) — actors run scheduled and
     # on-request work durably/retryably; the dispatcher below keeps the SQLite
@@ -1610,6 +1659,7 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
     register_default_server()
     task_connection = task_app.servers.default.connection()
     await task_connection.__aenter__()
+    started.task_connection = task_connection
     task_worker = asyncio.create_task(
         # register_signals=[] — repid defaults to installing its own SIGINT/SIGTERM
         # handlers via loop.add_signal_handler(), which replaces Python's default
@@ -1619,11 +1669,14 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
         task_app.run_worker(graceful_shutdown_time=10.0, register_signals=[]),
         name="pincer-task-worker",
     )
+    started.task_worker = task_worker
     dispatcher = ScheduleDispatcher(scheduler, task_app, interval=settings.task_poll_interval)
     await dispatcher.start()
+    started.dispatcher = dispatcher
 
     result_relay = ResultRelay(delivery_backend, router)
     await result_relay.start()
+    started.result_relay = result_relay
 
     console.print(f"[green]Task worker started (broker={settings.task_broker})[/green]")
 
@@ -1666,6 +1719,7 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
             )
             agent.mcp_server = mcp_server
             await mcp_server.start()
+            started.mcp_server = mcp_server
             console.print(
                 f"[green]MCP server started at {mcp_server.endpoint} ({mcp_server.exposed_tool_count} tool(s))[/green]"
             )
@@ -1703,6 +1757,7 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
             )
             api_server = _embedded_api_server(api_config)
             api_task = asyncio.create_task(api_server.serve())
+            started.api_server, started.api_task = api_server, api_task
             console.print(
                 f"[green]API server started on http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
             )
@@ -1714,6 +1769,7 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
                     domain=settings.ngrok_domain,
                     target_port=settings.dashboard_port,
                 )
+                started.tunnel = tunnel
                 public_url = await tunnel.start()
                 if public_url:
                     console.print(f"[green]Ngrok tunnel: {public_url}[/green]")
@@ -1730,79 +1786,80 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
     )
     if lease is not None:
         lease.mark_ready(active)
+    return True
 
-    # T7.2: `docker stop` / a deploy sends SIGTERM. Without a handler Python
-    # dies mid-call (no spoken ending, no report). Route it into the same
-    # graceful path as Ctrl+C: cancel the main task -> finally block ->
-    # channel.stop() drains active calls with a spoken ending.
-    _cancel_on_first_sigterm()
 
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        console.print("\n[yellow]Shutting down...[/yellow]")
-    finally:
-        import signal as _signal
+async def _shut_down_agent(started: _Started, lease: DaemonLease | None) -> NoReturn:
+    """Stop whatever `started` holds, in order, then end the process (see the end)."""
+    import signal as _signal
 
-        _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
-        if tunnel is not None:
-            await tunnel.stop()
-        if api_server:
-            api_server.should_exit = True
-            if api_task:
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(api_task, timeout=3.0)
-        if mcp_manager:
-            await mcp_manager.stop()
-        if mcp_server:
-            await mcp_server.stop()
-        await triggers.stop()
-        await dispatcher.stop()
-        await result_relay.stop()
-        # repid's own worker logs CRITICAL + a full traceback on CancelledError
-        # (by design — see repid/_worker.py, it re-raises after logging). That's
-        # expected noise here since this cancel() is our own intentional shutdown,
-        # not an unexpected failure — silence it for this one call.
-        logging.getLogger("repid").setLevel(logging.CRITICAL + 1)
-        task_worker.cancel()
+    _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+    if started.tunnel is not None:
+        await started.tunnel.stop()
+    if started.api_server:
+        started.api_server.should_exit = True
+        if started.api_task:
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(started.api_task, timeout=3.0)
+    core = started.core
+    if core is not None and core.mcp_manager:
+        await core.mcp_manager.stop()
+    if started.mcp_server:
+        await started.mcp_server.stop()
+    if started.triggers is not None:
+        await started.triggers.stop()
+    if started.dispatcher is not None:
+        await started.dispatcher.stop()
+    if started.result_relay is not None:
+        await started.result_relay.stop()
+    # repid's own worker logs CRITICAL + a full traceback on CancelledError
+    # (by design — see repid/_worker.py, it re-raises after logging). That's
+    # expected noise here since this cancel() is our own intentional shutdown,
+    # not an unexpected failure — silence it for this one call.
+    logging.getLogger("repid").setLevel(logging.CRITICAL + 1)
+    if started.task_worker is not None:
+        started.task_worker.cancel()
         with contextlib.suppress(asyncio.CancelledError):
-            await task_worker
-        await task_connection.__aexit__(None, None, None)
-        await proactive.close()
-        with contextlib.suppress(Exception):
-            from pincer.voice.telemetry import runtime as telephony_telemetry
+            await started.task_worker
+    if started.task_connection is not None:
+        await started.task_connection.__aexit__(None, None, None)
+    if started.proactive is not None:
+        await started.proactive.close()
+    with contextlib.suppress(Exception):
+        from pincer.voice.telemetry import runtime as telephony_telemetry
 
-            await telephony_telemetry.shutdown()
-        for ch in router.channels.values():
+        await telephony_telemetry.shutdown()
+    if started.router is not None:
+        for ch in started.router.channels.values():
             await ch.stop()
-        try:
-            from pincer.tools.builtin.browser import close_browser
+    try:
+        from pincer.tools.builtin.browser import close_browser
 
-            await close_browser()
-        except ImportError:
-            pass
-        await llm.close()
-        await session_mgr.close()
-        await cost_tracker.close()
-        if memory_store:
-            await memory_store.close()
-        if audit_logger:
-            await audit_logger.shutdown()
-        # Last: every store above has finished with the shared engines.
-        from pincer.db.engine import dispose_engines
+        await close_browser()
+    except ImportError:
+        pass
+    if core is not None:
+        await core.llm.close()
+        await core.session_mgr.close()
+        await core.cost_tracker.close()
+        if core.memory_store:
+            await core.memory_store.close()
+        if core.audit_logger:
+            await core.audit_logger.shutdown()
+    # Last: every store above has finished with the shared engines.
+    from pincer.db.engine import dispose_engines
 
-        await dispose_engines()
-        console.print("[green]Shutdown complete[/green]")
-        # Cancel any lingering asyncio tasks (e.g. in-flight LLM calls from
-        # channel update handlers) before exiting so the process doesn't hang.
-        _pending = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
-        for _t in _pending:
-            _t.cancel()
-        # os._exit never leaves the daemon child's `with DaemonLease`; its lock goes with the process.
-        if lease is not None:
-            lease.remove_record()
-        os._exit(0)
+    await dispose_engines()
+    console.print("[green]Shutdown complete[/green]")
+    # Cancel any lingering asyncio tasks (e.g. in-flight LLM calls from
+    # channel update handlers) before exiting so the process doesn't hang.
+    _pending = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
+    for _t in _pending:
+        _t.cancel()
+    # os._exit never leaves the daemon child's `with DaemonLease`; its lock goes with the process.
+    if lease is not None:
+        lease.remove_record()
+    os._exit(0)
 
 
 async def _run_tasks_worker(settings: Settings) -> None:

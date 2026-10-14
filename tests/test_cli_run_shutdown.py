@@ -11,6 +11,8 @@ from __future__ import annotations
 import signal
 import subprocess
 import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -111,3 +113,64 @@ def test_the_embedded_api_server_leaves_sigterm_and_sigint_to_the_agent() -> Non
 
     with server.capture_signals():
         assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)) == before
+
+
+@pytest.fixture
+def slow_signal_stub() -> Iterator[str]:
+    """A Signal stub whose health check never answers in time: the agent stays in its startup."""
+    import http.server
+    import threading
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            time.sleep(60)  # a daemon thread; dropped with the server
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT], ids=["SIGTERM", "SIGINT"])
+def test_a_signal_during_startup_shuts_down_what_has_started(
+    tmp_path: Path, slow_signal_stub: str, sig: signal.Signals
+) -> None:
+    home, cwd, data = tmp_path / "home", tmp_path / "cwd", tmp_path / "data"
+    for path in (home, cwd, data):
+        path.mkdir()
+    env = scratch_env(
+        home,
+        data,
+        PYTHONUNBUFFERED="1",
+        PINCER_DASHBOARD_HOST="127.0.0.1",
+        PINCER_DASHBOARD_PORT=str(free_port()),
+        **signal_channel_env(slow_signal_stub),
+    )
+    out_path = tmp_path / "pincer.out"
+    with out_path.open("wb") as out:
+        proc = subprocess.Popen(pincer_command("run"), cwd=cwd, env=env, stdout=out, stderr=subprocess.STDOUT)
+    try:
+        # Discord's line comes right before the Signal channel, which then waits on the health check.
+        wait_for_output(proc, out_path, "Discord skipped", STARTUP_TIMEOUT, "pincer")
+        time.sleep(0.5)
+        assert "is running!" not in out_path.read_text(errors="replace")
+
+        proc.send_signal(sig)
+        exit_code = proc.wait(timeout=SHUTDOWN_TIMEOUT)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+
+    output = out_path.read_text(errors="replace")
+    assert "is running!" not in output
+    assert "Shutting down..." in output, output
+    assert "Shutdown complete" in output, output
+    assert "Traceback" not in output, output
+    assert exit_code == 0
