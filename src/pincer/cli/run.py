@@ -1820,12 +1820,12 @@ async def _shut_down_agent(started: _Started, lease: DaemonLease | None) -> NoRe
         with contextlib.suppress(asyncio.CancelledError):
             await worker
 
-    async def close_browser() -> None:
+    async def close_browser_if_installed() -> None:
         try:
-            from pincer.tools.builtin.browser import close_browser
+            from pincer.tools.builtin import browser
         except ImportError:
             return
-        await close_browser()
+        await browser.close_browser()
 
     if started.tunnel is not None:
         await step("tunnel", started.tunnel.stop)
@@ -1864,7 +1864,7 @@ async def _shut_down_agent(started: _Started, lease: DaemonLease | None) -> NoRe
     if started.router is not None:
         for ch in started.router.channels.values():
             await step(f"channel {ch.name}", ch.stop)
-    await step("browser", close_browser)
+    await step("browser", close_browser_if_installed)
     if core is not None:
         await step("LLM client", core.llm.close)
         await step("sessions", core.session_mgr.close)
