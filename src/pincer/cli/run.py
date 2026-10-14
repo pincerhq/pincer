@@ -1779,6 +1779,9 @@ async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> No
         _pending = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
         for _t in _pending:
             _t.cancel()
+        # os._exit never leaves the daemon child's `with DaemonLease`; its lock goes with the process.
+        if lease is not None:
+            lease.remove_record()
         os._exit(0)
 
 

@@ -16,6 +16,8 @@ from pathlib import Path
 import pytest
 from daemon_support import free_port, pincer_command, scratch_env, signal_channel_env, wait_for_output
 
+from pincer import daemon
+
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 
 STARTUP_TIMEOUT = 90.0
@@ -79,3 +81,21 @@ def test_a_signal_runs_the_tasks_workers_whole_graceful_shutdown(
     assert "Tasks worker shutdown complete" in output, output
     assert "Traceback" not in output, output
     assert exit_code == 0
+
+
+def test_a_stopped_daemon_leaves_no_record_behind(tmp_path: Path, signal_stub: str) -> None:
+    # `pincer run --daemon-child` is what `run -d` starts: the agent inside the lease.
+    exit_code, output = _signal_after_banner(
+        tmp_path,
+        ["run", "--daemon-child"],
+        {
+            "PINCER_DASHBOARD_HOST": "127.0.0.1",
+            "PINCER_DASHBOARD_PORT": str(free_port()),
+            **signal_channel_env(signal_stub),
+        },
+        signal.SIGTERM,
+    )
+
+    assert "Shutdown complete" in output, output
+    assert exit_code == 0
+    assert not (tmp_path / "data" / daemon.PID_FILE).exists()

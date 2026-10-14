@@ -454,6 +454,11 @@ class DaemonLease:
     def __exit__(
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
+        self.remove_record()
+
+    def remove_record(self) -> None:
+        """Take the record away, keeping the lock: for a daemon about to end with `os._exit`, which
+        never leaves the `with` block, so that it leaves no record behind."""
         (self._data_dir / PID_FILE).unlink(missing_ok=True)
 
     def mark_ready(self, channels: Sequence[str]) -> None:
