@@ -922,3 +922,26 @@ def test_stop_never_signals_a_pid_that_started_after_the_daemon_took_its_lease(
     finally:
         bystander.kill()
         bystander.wait()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("started_at", "yesterday"),
+        ("started_at", 1760000000),
+        ("port", "8080"),
+        ("port", True),
+        ("channels", "telegram"),
+        ("channels", [1, 2]),
+        ("cwd", 3),
+        ("version", None),
+        ("state", "booting"),
+    ],
+)
+def test_a_record_with_a_malformed_field_is_unreadable(data_dir: Path, field: str, value: object) -> None:
+    pid = _start(data_dir).state.pid  # type: ignore[union-attr]
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, field: value}))
+
+    assert not isinstance(daemon.read_state(data_dir), daemon.DaemonState)
+    os.kill(pid, signal.SIGTERM)

@@ -244,17 +244,28 @@ def _read_record(path: Path) -> DaemonState | None:
     """The record at `path`, or None if it is missing or can't be read. Fields a later version
     added are ignored, so an upgrade doesn't turn a running daemon into an unreadable one.
 
-    A pid that names no single process counts as unreadable: `os.kill(0, …)` would signal the
-    caller's own process group, and `os.kill(-1, …)` every process the user may signal."""
+    Every field must have its type, and `started_at` must be an ISO time, or the record counts as
+    unreadable: what status and stop show or compute from it can't then fail half way. A pid that
+    names no single process is unreadable too: `os.kill(0, …)` would signal the caller's own
+    process group, and `os.kill(-1, …)` every process the user may signal."""
     try:
         record = json.loads(path.read_text())
         known = {field.name for field in fields(DaemonState)}
         state = DaemonState(**{key: value for key, value in record.items() if key in known})
-        if not isinstance(state.pid, int) or isinstance(state.pid, bool) or state.pid <= 0:
+        if not _is_int(state.pid) or state.pid <= 0 or not _is_int(state.port):
             return None
+        if not all(isinstance(text, str) for text in (state.started_at, state.cwd, state.version)):
+            return None
+        if not isinstance(state.channels, list) or not all(isinstance(name, str) for name in state.channels):
+            return None
+        datetime.fromisoformat(state.started_at)
         return replace(state, state=DaemonPhase(state.state))
     except (FileNotFoundError, ValueError, TypeError, AttributeError):
         return None
+
+
+def _is_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def follow(data_dir: Path, from_lines: int | None, until_exit: bool) -> Generator[bytes]:

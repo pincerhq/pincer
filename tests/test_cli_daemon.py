@@ -1358,3 +1358,15 @@ def test_run_detach_starts_a_daemon_that_imports_the_tree_under_test(data_dir: P
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
 
     assert f"imports pincer from {SRC_DIR / 'pincer' / '__init__.py'}" in daemon.log_path(data_dir).read_text()
+
+
+def test_status_of_a_record_with_a_malformed_start_time_says_so_without_a_traceback(data_dir: Path) -> None:
+    assert runner.invoke(app, ["run", "-d"]).exit_code == 0
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "started_at": "yesterday"}))
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    assert result.exception is None
+    assert "Pincer is running" not in result.output
