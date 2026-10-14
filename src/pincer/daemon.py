@@ -278,6 +278,8 @@ def _read_record(path: Path) -> DaemonState | DaemonWithUnreadableRecord | None:
         text = path.read_text()
     except FileNotFoundError:
         return None
+    except UnicodeDecodeError:  # not UTF-8: corrupted, or a partial copy
+        return DaemonWithUnreadableRecord(pid=None)
     try:
         record = json.loads(text)
     except ValueError:

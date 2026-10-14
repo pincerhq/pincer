@@ -963,3 +963,11 @@ def test_a_record_that_is_not_json_reads_as_unreadable_not_as_missing(data_dir: 
 
     assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=None)
     os.kill(pid, signal.SIGTERM)
+
+
+def test_a_record_that_is_not_utf8_reads_as_unreadable(data_dir: Path) -> None:
+    pid = _start(data_dir).state.pid  # type: ignore[union-attr]
+    (data_dir / daemon.PID_FILE).write_bytes(b'{"pid": 1, \xff}')
+
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=None)
+    os.kill(pid, signal.SIGTERM)
