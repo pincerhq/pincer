@@ -468,20 +468,28 @@ def test_force_kills_the_whole_process_group(data_dir: Path) -> None:
 
 
 def test_force_kills_only_the_daemon_when_it_does_not_lead_its_group(data_dir: Path) -> None:
-    # Started by hand, not by start(): it shares this test process's group, which must survive.
-    child = subprocess.Popen(daemon_fake_child.argv("ignore-sigterm", data_dir))
+    # Started by hand, not by start(), under a throwaway group leader that outlives it: were --force
+    # to kill a group the daemon doesn't lead, the leader (not pytest's own group) would go too.
+    leader = subprocess.Popen(
+        ["sh", "-c", '"$@" & wait; sleep 30', "sh", *daemon_fake_child.argv("ignore-sigterm", data_dir)],
+        start_new_session=True,
+    )
     try:
-        _wait_for_state(data_dir, "ready")
-        assert os.getpgid(child.pid) == os.getpgid(0) != child.pid
+        pid = _wait_for_state(data_dir, "ready").pid
+        assert os.getpgid(pid) == leader.pid != pid
 
         result = within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=True))
 
         assert result.outcome is StopOutcome.KILLED
-        assert child.wait(timeout=5) == -signal.SIGKILL
+        deadline = time.monotonic() + 3.0  # the leader, not pytest, reaps it
+        while alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not alive(pid)
+        assert leader.poll() is None
     finally:
-        if child.poll() is None:
-            child.kill()
-            child.wait()
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(leader.pid, signal.SIGKILL)
+        leader.wait()
 
 
 class _Follower:
