@@ -46,13 +46,19 @@ if TYPE_CHECKING:
 
     Spawn = Callable[..., subprocess.Popen[bytes]]
 
-pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon mode is POSIX-only")
-
-runner = CliRunner()
+NOT_RUNNING_NOTE = "Pincer is not running — showing the last session's log"
+NO_LOGS = "No logs yet — start with 'pincer run -d'"
+WINDOWS_MESSAGE = "Daemon mode isn't supported on Windows — use a service manager."
+CONTAINER_MESSAGE = "Pincer is running inside a container — use 'docker compose up -d' to run it in the background."
+SHUTTING_DOWN = "Pincer is still shutting down (data dir {}) — try again in a moment."
 # `pincer run`, in a process whose attach gives up on a stop after {} seconds instead of 90.
 PATCHED_STOP_TIMEOUT_RUN = (
     "import pincer.cli.daemon as d; d.STOP_TIMEOUT = {}; from pincer.cli import app; app(['run'], prog_name='pincer')"
 )
+
+pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="daemon mode is POSIX-only")
+
+runner = CliRunner()
 
 
 @pytest.fixture
@@ -285,10 +291,6 @@ def test_stop_reports_a_daemon_it_may_not_signal(data_dir: Path, monkeypatch: py
     assert "Not allowed to signal Pincer (pid " in result.output
     assert "Traceback" not in result.output
     assert daemon.read_state(data_dir) is not None
-
-
-NOT_RUNNING_NOTE = "Pincer is not running — showing the last session's log"
-NO_LOGS = "No logs yet — start with 'pincer run -d'"
 
 
 @pytest.fixture
@@ -1049,9 +1051,6 @@ def test_a_daemon_child_never_attaches_to_a_running_daemon(data_dir: Path, monke
 
 # ── platform guards ───────────────────────────────────────────────────────
 
-WINDOWS_MESSAGE = "Daemon mode isn't supported on Windows — use a service manager."
-CONTAINER_MESSAGE = "Pincer is running inside a container — use 'docker compose up -d' to run it in the background."
-
 
 @pytest.fixture
 def windows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1172,8 +1171,6 @@ def test_inside_a_container_the_read_and_stop_commands_still_answer(
 
 
 # ── a daemon past its lease (review #2) ────────────────────────────────────
-
-SHUTTING_DOWN = "Pincer is still shutting down (data dir {}) — try again in a moment."
 
 
 def _lingering(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> int:
