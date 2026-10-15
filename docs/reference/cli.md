@@ -94,8 +94,8 @@ Pincer stopped (pid 4182)
   is the one that wrote the record: on Linux and macOS, by the exact start time the kernel keeps
   for it. If the record can't be read or is gone, or the pid now belongs to another process, it
   signals nothing (`--force` included): it says why, waits, and points to
-  `lsof <data dir>/pincer.lock` to find the process holding the lock. On other platforms it
-  signals the record's pid while the lock is held.
+  `lsof <data dir>/pincer.lock` to find the process holding the lock. On other platforms, or
+  when Pincer couldn't read its own start time, it signals the record's pid while the lock is held.
 - With nothing running it prints `Pincer is not running` and exits 0, so it's safe in scripts. If a
   foreground Pincer holds the port, it also tells you to stop that one with Ctrl+C in its terminal.
 

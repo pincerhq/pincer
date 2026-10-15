@@ -18,8 +18,9 @@ same reason.
 A held lock doesn't say which process holds it. The record names the daemon's pid and the exact
 time the kernel says it started (its start token); `stop` signals that pid only while the lease is
 held and the process with that pid has that token, so a process that reused the pid of a daemon
-since gone is never signalled. On a platform without start tokens (anything but Linux and macOS)
-the record's pid is signalled on the lease alone.
+since gone is never signalled. On a platform without start tokens (anything but Linux and macOS),
+or by a daemon that couldn't read its own (its record says so), the record's pid is signalled on
+the lease alone.
 
 No Typer or Rich here — the CLI commands only format what these functions return.
 """
@@ -73,6 +74,9 @@ CTL_KERN, KERN_PROC, KERN_PROC_PID = 1, 14, 1
 KINFO_PROC_SIZE = 648
 # What _start_token returns: clock ticks on Linux, `seconds.microseconds` on macOS.
 START_TOKEN_SHAPE = re.compile(r"\d+(\.\d{6})?")
+# A daemon's start token when it couldn't read one (a platform without them, no readable /proc): its
+# record's pid is then signalled on the lease alone. Never the same as a record without the field.
+NO_START_TOKEN = "none"
 # A start waits at least this long for the start lock, however short its own wait: someone asking
 # whether a start is in progress holds it for an instant.
 START_LOCK_GRACE = 0.2
@@ -118,7 +122,8 @@ class DaemonState:
     version: str
     state: DaemonPhase
     channels: list[str] = field(default_factory=list)
-    # When the kernel says the daemon's process started (see _start_token); None on a platform without.
+    # When the kernel says the daemon's process started (see _start_token); NO_START_TOKEN if the daemon
+    # couldn't read its own; None in a record from before start tokens.
     start_token: str | None = None
 
 
@@ -166,7 +171,8 @@ class Identity(StrEnum):
 
     # The process with that pid has the start token the daemon recorded: signalled.
     VERIFIED = "verified"
-    # This platform has no start tokens: signalled on the lease alone (see the module docstring).
+    # No start token to check (a platform without them, or a daemon that couldn't read its own):
+    # signalled on the lease alone (see the module docstring).
     UNCHECKED = "unchecked"
     # The pid now names another process (the record's daemon is gone): never signalled.
     NOT_PINCER = "not_pincer"
@@ -382,8 +388,12 @@ def _read_record(path: Path) -> DaemonState | DaemonWithUnreadableRecord | None:
         pid, token = record.get("pid"), record.get("start_token")
         return DaemonWithUnreadableRecord(
             pid=pid if _is_int(pid) and pid > 0 else None,
-            start_token=token if isinstance(token, str) and START_TOKEN_SHAPE.fullmatch(token) else None,
+            start_token=token if token == NO_START_TOKEN or _is_start_token(token) else None,
         )
+
+
+def _is_start_token(value: object) -> TypeGuard[str]:
+    return isinstance(value, str) and START_TOKEN_SHAPE.fullmatch(value) is not None
 
 
 def _is_int(value: object) -> TypeGuard[int]:
@@ -472,7 +482,7 @@ def identify(state: LiveDaemon) -> Identity:
     this version can't read is checked the same way, by the pid and start token it still names."""
     if isinstance(state, DaemonWithoutRecord) or state.pid is None:
         return Identity.UNKNOWN
-    if not _has_start_tokens():
+    if not _has_start_tokens() or state.start_token == NO_START_TOKEN:
         return Identity.UNCHECKED
     if state.start_token is None:
         return Identity.UNKNOWN
@@ -578,9 +588,9 @@ class DaemonLease:
         _let_go_of_the_start_lock()
         self._started_at = datetime.now(UTC).isoformat(timespec="seconds")
         try:
-            self._start_token = _start_token(os.getpid())
-        except OSError:  # unreadable here: stop then waits for this daemon rather than signal it
-            self._start_token = None
+            self._start_token = _start_token(os.getpid()) or NO_START_TOKEN
+        except OSError:  # unreadable here (no /proc, say): stop signals by the record alone, as without tokens
+            self._start_token = NO_START_TOKEN
         self._write(DaemonPhase.STARTING, [])
         return self
 

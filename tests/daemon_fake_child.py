@@ -19,6 +19,7 @@ behaves according to MODE (tests build the command with `argv()`):
     linger            like ready, but after leaving the lease (its record gone, its lock still held) it
                       takes LINGER_SECONDS to exit, as an interpreter tearing down does
     noisy-shutdown    like ready, but on SIGTERM prints NOISY_SHUTDOWN_LINES lines as fast as it can and exits
+    no-self-token     like ready, but reading its own start token fails (as without a readable /proc)
     grandchild        like ignore-sigterm, plus a long-lived child process in its process group, whose pid
                       it writes to DATA_DIR/grandchild.pid (an MCP server or sandboxed skill stands in for it)
 
@@ -39,6 +40,7 @@ from pathlib import Path
 from types import FrameType
 
 import pincer
+from pincer import daemon
 from pincer.cli._shared import _setup_logging
 from pincer.daemon import DaemonLease
 
@@ -98,6 +100,12 @@ def main() -> None:
         listener = socket.create_server(("127.0.0.1", 0))
         port = listener.getsockname()[1]
 
+    if mode == "no-self-token":
+
+        def unreadable(pid: int) -> str:
+            raise PermissionError(f"/proc/{pid}/stat")
+
+        daemon._start_token = unreadable  # type: ignore[assignment]
     if mode == "slow-lease":
         time.sleep(SLOW_LEASE_SECONDS)
     while mode == "never-lease":

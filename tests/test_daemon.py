@@ -864,6 +864,36 @@ def test_stop_never_signals_a_pid_in_a_record_it_cant_read_that_now_names_anothe
         bystander.wait()
 
 
+@pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
+def test_a_daemon_that_cant_read_its_own_start_token_is_stopped_by_its_record_pid(data_dir: Path, force: bool) -> None:
+    # As where the platform has no start tokens: its record says so, and stop signals the pid it names.
+    state = _start(data_dir, mode="no-self-token").state
+    assert isinstance(state, daemon.DaemonState)
+    recorded = json.loads((data_dir / daemon.PID_FILE).read_text())["start_token"]
+
+    result = within(15.0, lambda: daemon.stop(data_dir, timeout=10.0, force=force))
+
+    outcome = StopOutcome.KILLED if force else StopOutcome.STOPPED
+    assert result == daemon.StopResult(outcome, state.pid, daemon.Identity.UNCHECKED)
+    assert not alive(state.pid)
+    assert recorded == daemon.NO_START_TOKEN
+
+
+def test_a_record_without_the_start_token_field_is_never_taken_for_one_that_has_none(data_dir: Path) -> None:
+    # A record from a build before start tokens: nothing says this daemon couldn't read its own.
+    state = _start(data_dir).state
+    assert isinstance(state, daemon.DaemonState)
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    del record["start_token"]
+    (data_dir / daemon.PID_FILE).write_text(json.dumps(record))
+
+    result = within(10.0, lambda: daemon.stop(data_dir, timeout=0.5, force=True))
+
+    assert result == daemon.StopResult(StopOutcome.STILL_RUNNING, state.pid, daemon.Identity.UNKNOWN)
+    assert alive(state.pid)
+    os.kill(state.pid, signal.SIGTERM)
+
+
 def test_a_newer_record_with_extra_fields_still_reads(data_dir: Path) -> None:
     state = _start(data_dir).state
     assert state is not None
@@ -1302,7 +1332,7 @@ def test_without_start_tokens_the_lease_works_and_stop_signals_the_record_pid(
         assert daemon.start_in_progress(other) is None
         recorded = daemon.read_state(other)
         assert isinstance(recorded, daemon.DaemonState)
-        assert recorded.start_token is None
+        assert recorded.start_token == daemon.NO_START_TOKEN
     assert lease._fd is not None
     os.close(lease._fd)
     idle = tmp_path / "idle"
