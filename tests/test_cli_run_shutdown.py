@@ -27,12 +27,14 @@ SHUTDOWN_TIMEOUT = 60.0
 
 
 def _signal_after_banner(
-    tmp_path: Path, args: list[str], extra_env: dict[str, str], sig: signal.Signals
+    tmp_path: Path, args: list[str], extra_env: dict[str, str], sig: signal.Signals, pincer_toml: str = ""
 ) -> tuple[int, str]:
     """Run `pincer <args>` in a scratch environment until its "is running!" banner, send `sig`, wait for the exit."""
     home, cwd, data = tmp_path / "home", tmp_path / "cwd", tmp_path / "data"
     for path in (home, cwd, data):
         path.mkdir()
+    if pincer_toml:
+        (cwd / "pincer.toml").write_text(pincer_toml)
     env = scratch_env(home, data, PYTHONUNBUFFERED="1", **extra_env)
     out_path = tmp_path / "pincer.out"
     with out_path.open("wb") as out:
@@ -235,9 +237,11 @@ async def test_shutdown_stops_what_started_last_first_and_exits_1_only_when_a_st
     # Registered in the order the agent starts them.
     shutdown = run_module._Shutdown()
     run_module._stop_core_on_shutdown(shutdown, core)  # type: ignore[arg-type]
+    arm_mcp_server = run_module._reserve_stop(shutdown, "MCP server")
     run_module._stop_channels_on_shutdown(shutdown, SimpleNamespace(channels={"signal": _Part("signal", stopped)}))
     for name in ("triggers", "dispatcher", "result_relay"):
         shutdown.on_stop(name, _Part(name, stopped, fail=failing == name).stop)
+    arm_mcp_server(_Part("MCP server", stopped).stop)  # it starts after the relay
     sigint = signal.getsignal(signal.SIGINT)
     try:
         with pytest.raises(_Exited) as exited:
@@ -247,7 +251,15 @@ async def test_shutdown_stops_what_started_last_first_and_exits_1_only_when_a_st
 
     # Last started first: the channels drain before the MCP clients (their tools) go, the shared
     # database engines go last, and every step ran.
-    assert stopped == ["result_relay", "dispatcher", "triggers", "signal", "MCP clients", "database engines"]
+    assert stopped == [
+        "result_relay",
+        "dispatcher",
+        "triggers",
+        "signal",
+        "MCP server",
+        "MCP clients",
+        "database engines",
+    ]
     core.llm.close.assert_awaited_once()
     assert "Shutdown complete" in capsys.readouterr().out
     if failing is None:
@@ -255,3 +267,22 @@ async def test_shutdown_stops_what_started_last_first_and_exits_1_only_when_a_st
     else:
         assert exited.value.code == 1
         assert f"Shutdown step failed: {failing}" in caplog.text
+
+
+def test_the_channels_drain_before_the_mcp_server_stops(tmp_path: Path, signal_stub: str) -> None:
+    # A call drained at shutdown may still use tools the MCP server exposes.
+    exit_code, output = _signal_after_banner(
+        tmp_path,
+        ["run"],
+        {
+            "PINCER_DASHBOARD_HOST": "127.0.0.1",
+            "PINCER_DASHBOARD_PORT": str(free_port()),
+            **signal_channel_env(signal_stub),
+        },
+        signal.SIGTERM,
+        pincer_toml=f"[mcp.server]\nenabled = true\nport = {free_port()}\n",
+    )
+
+    assert exit_code == 0, output
+    assert "MCP server stopped" in output, output
+    assert output.index("SignalChannel stopped") < output.index("MCP server stopped"), output

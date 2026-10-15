@@ -950,6 +950,19 @@ def _stop_core_on_shutdown(shutdown: _Shutdown, core: CoreComponents) -> None:
         shutdown.on_stop("MCP clients", core.mcp_manager.stop)
 
 
+def _reserve_stop(shutdown: _Shutdown, name: str) -> Callable[[Callable[[], Awaitable[object]]], None]:
+    """Register now, at this place in the order, the stop of something that starts later; returns
+    how to arm it once it has started. Unarmed, it does nothing."""
+    armed: list[Callable[[], Awaitable[object]]] = []
+
+    async def stop() -> None:
+        for action in armed:
+            await action()
+
+    shutdown.on_stop(name, stop)
+    return armed.append
+
+
 def _stop_channels_on_shutdown(shutdown: _Shutdown, router: Any) -> None:
     """Register stopping every channel the router holds by then, each its own step: the channels
     drain their calls (a spoken ending, a report)."""
@@ -1252,6 +1265,9 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
     from pincer.channels.router import ChannelRouter
 
     router = ChannelRouter(identity)
+    # The MCP server starts later, but must stop after the channels have drained their calls (a
+    # draining call may use the tools it exposes): reserve its place before theirs.
+    arm_mcp_server_stop = _reserve_stop(shutdown, "MCP server")
     _stop_channels_on_shutdown(shutdown, router)
 
     # Start channels
@@ -1780,7 +1796,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
             )
             agent.mcp_server = mcp_server
             await mcp_server.start()
-            shutdown.on_stop("MCP server", mcp_server.stop)
+            arm_mcp_server_stop(mcp_server.stop)
             console.print(
                 f"[green]MCP server started at {mcp_server.endpoint} ({mcp_server.exposed_tool_count} tool(s))[/green]"
             )
