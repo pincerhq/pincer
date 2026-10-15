@@ -70,6 +70,9 @@ FLOCK_LAYOUTS = {
 # The lease holder's pid when the kernel reports the lock held but names no process (pid <= 0):
 # e.g. on macOS, a `flock` on the file from an older build. Held; never signalled.
 UNKNOWN_HOLDER = 0
+# A start waits at least this long for the start lock, however short its own wait: someone asking
+# whether a start is in progress holds it for an instant.
+START_LOCK_GRACE = 0.2
 # Tells a spawned daemon which inherited fd holds the start lock, so it can let go of it the
 # moment it holds the lease (see start()).
 START_LOCK_FD_ENV = "PINCER_DAEMON_START_LOCK_FD"
@@ -268,7 +271,8 @@ def start_in_progress(data_dir: Path) -> StartInProgress | None:
         return None
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Shared: askers never collide with each other, only with a start holding it.
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
         except BlockingIOError:
             recorded = os.pread(fd, 32, 0).decode(errors="replace").strip()
             return StartInProgress(pid=int(recorded) if recorded.isdigit() and int(recorded) > 0 else None)
@@ -567,9 +571,10 @@ class _StartLock:
         self.fd: int | None = None
 
     def acquire(self, timeout: float) -> bool:
-        """Wait up to `timeout` seconds (at least one try) for the lock; False if another start still has it."""
+        """Wait up to `timeout` seconds (at least START_LOCK_GRACE) for the lock; False if another
+        start still has it."""
         fd = os.open(self._path, os.O_CREAT | os.O_RDWR, 0o600)
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + max(timeout, START_LOCK_GRACE)
         try:
             while True:
                 try:

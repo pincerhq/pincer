@@ -947,6 +947,71 @@ def test_no_start_in_progress_once_the_daemon_holds_its_lease(data_dir: Path) ->
     daemon.stop(data_dir)
 
 
+# Asks `start_in_progress` over and over, as `pincer status` in a loop would, until its stdin
+# closes; then prints how often it asked and how often it was told a start is in progress.
+INSPECTOR = """
+import sys, threading
+from pathlib import Path
+from pincer import daemon
+
+closed = threading.Event()
+threading.Thread(target=lambda: (sys.stdin.read(), closed.set()), daemon=True).start()
+asked = seen = 0
+print("asking", flush=True)
+while not closed.is_set():
+    asked += 1
+    seen += daemon.start_in_progress(Path(sys.argv[1])) is not None
+print(asked, seen, flush=True)
+"""
+
+
+@contextlib.contextmanager
+def _inspecting(data_dir: Path) -> Iterator[list[int]]:
+    """Another process asking whether a start is in progress, over and over, while the block runs;
+    yields [times asked, times told one is] once the block ends."""
+    inspector = subprocess.Popen(
+        [sys.executable, "-c", INSPECTOR, str(data_dir)],
+        env=child_env(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    counts: list[int] = []
+    try:
+        assert inspector.stdout is not None and inspector.stdin is not None
+        assert inspector.stdout.readline() == "asking\n"
+        yield counts
+        inspector.stdin.close()
+        counts.extend(int(n) for n in inspector.stdout.readline().split())
+    finally:
+        inspector.kill()
+        inspector.wait()
+
+
+def test_asking_whether_a_start_is_in_progress_never_makes_a_start_say_one_is(data_dir: Path) -> None:
+    pid = _start(data_dir).state.pid  # type: ignore[union-attr]
+
+    with _inspecting(data_dir) as counts:
+        outcomes = [_start(data_dir, wait_timeout=0.0).outcome for _ in range(3000)]
+
+    asked, _ = counts
+    assert asked > 3000  # it really was asking all along
+    assert set(outcomes) == {StartOutcome.ALREADY_RUNNING}, outcomes.count(StartOutcome.STARTING_ELSEWHERE)
+    assert daemon.read_state(data_dir).pid == pid  # type: ignore[union-attr]
+    daemon.stop(data_dir)
+
+
+def test_two_askers_never_see_a_start_in_progress_that_isnt(data_dir: Path) -> None:
+    (data_dir / daemon.START_LOCK_FILE).touch()
+
+    with _inspecting(data_dir) as counts:
+        ours = [daemon.start_in_progress(data_dir) for _ in range(20000)]
+
+    asked, theirs = counts
+    assert asked > 200
+    assert (ours.count(None), theirs) == (len(ours), 0)
+
+
 @pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
 def test_stop_stops_the_daemon_where_ps_is_missing(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch, force: bool
