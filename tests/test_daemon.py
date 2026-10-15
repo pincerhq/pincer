@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import json
 import os
 import shutil
 import signal
 import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -29,6 +29,7 @@ from daemon_support import (
     child_env,
     lease_held_elsewhere,
     numbered,
+    stop_within,
     within,
     write_log,
 )
@@ -93,10 +94,9 @@ def test_start_returns_ready_child_and_stop_stops_it(data_dir: Path) -> None:
     # Already in the log while the daemon runs, not only once its output is flushed at exit.
     assert "Pincer is running! Channels: telegram, signal." in daemon.log_path(data_dir).read_text()
 
-    stopped = daemon.stop(data_dir)
+    stopped = stop_within(data_dir)
 
-    assert stopped.outcome is StopOutcome.STOPPED
-    assert stopped.pid == result.state.pid
+    assert stopped == daemon.StopResult(StopOutcome.STOPPED, result.state.pid, daemon.Identity.VERIFIED)
     assert daemon.read_state(data_dir) is None
 
 
@@ -106,8 +106,19 @@ def test_record_goes_starting_then_ready_and_the_lock_survives_the_rewrite(data_
     child = subprocess.Popen(daemon_fake_child.argv("gated", data_dir), cwd=data_dir, env=child_env())
     try:
         starting = _wait_for_state(data_dir, "starting")
-        assert set(asdict(starting)) == {"pid", "started_at", "cwd", "port", "version", "state", "channels"}
+        assert set(asdict(starting)) == {
+            "pid",
+            "started_at",
+            "cwd",
+            "port",
+            "version",
+            "state",
+            "channels",
+            "start_token",
+        }
         assert starting.pid == child.pid
+        assert starting.start_token == daemon._start_token(child.pid)
+        assert starting.start_token is not None  # this platform has them
         assert starting.cwd == str(data_dir.resolve())
         assert starting.port == 8080
         assert starting.version == __version__
@@ -128,7 +139,7 @@ def test_record_goes_starting_then_ready_and_the_lock_survives_the_rewrite(data_
 def test_stop_returns_only_after_the_daemon_has_exited(data_dir: Path) -> None:
     pid = _start(data_dir).state.pid  # type: ignore[union-attr]
 
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
     assert not alive(pid)
     # It went through the child's graceful path, not a kill.
@@ -136,7 +147,7 @@ def test_stop_returns_only_after_the_daemon_has_exited(data_dir: Path) -> None:
 
 
 def test_stop_with_nothing_running_reports_not_running(data_dir: Path) -> None:
-    assert daemon.stop(data_dir).outcome is StopOutcome.NOT_RUNNING
+    assert stop_within(data_dir).outcome is StopOutcome.NOT_RUNNING
 
 
 def test_stop_never_signals_the_pid_of_a_leftover_record(data_dir: Path) -> None:
@@ -147,7 +158,7 @@ def test_stop_never_signals_the_pid_of_a_leftover_record(data_dir: Path) -> None
         record = daemon.DaemonState(bystander.pid, "2026-10-13T00:00:00+00:00", "/", 8080, "0.8.0", "ready", [])
         (data_dir / daemon.PID_FILE).write_text(json.dumps(asdict(record)))
 
-        result = daemon.stop(data_dir)
+        result = stop_within(data_dir)
 
         assert result.outcome is StopOutcome.NOT_RUNNING
         assert bystander.poll() is None
@@ -175,7 +186,7 @@ def test_daemon_outlives_its_launcher_in_a_session_of_its_own(data_dir: Path) ->
     assert os.getsid(pid) == pid
     assert os.getsid(pid) != os.getsid(0)
 
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_daemon_runs_in_the_given_cwd_with_the_given_environment(data_dir: Path, tmp_path: Path) -> None:
@@ -189,12 +200,12 @@ def test_daemon_runs_in_the_given_cwd_with_the_given_environment(data_dir: Path,
     assert result.state is not None
     assert result.state.cwd == str(caller_cwd.resolve())
     assert "marker from the caller's environment: from-the-caller" in daemon.log_path(data_dir).read_text()
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_log_captures_logging_banner_and_traceback_with_numbers_masked(data_dir: Path) -> None:
     _start(data_dir, mode="raise-on-sigterm")
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
     log = daemon.log_path(data_dir).read_text()
     assert "INFO:fake_child:inbound call from +49…89" in log
@@ -208,7 +219,7 @@ def test_each_start_rotates_the_log_keeping_five_previous_sessions(data_dir: Pat
     pids = []
     for _ in range(7):
         pids.append(_start(data_dir).state.pid)  # type: ignore[union-attr]
-        daemon.stop(data_dir)
+        stop_within(data_dir)
 
     logs = data_dir / "logs"
     assert sorted(p.name for p in logs.iterdir()) == [
@@ -237,7 +248,7 @@ def test_daemons_on_different_data_dirs_do_not_see_each_other(data_dir: Path, tm
         assert second.state is not None
         assert second.state.pid != first
 
-        daemon.stop(data_dir)
+        stop_within(data_dir)
         assert not alive(first)
         assert alive(second.state.pid)
     finally:
@@ -258,7 +269,7 @@ def test_startup_lines_are_relayed_while_start_waits(data_dir: Path) -> None:
     assert result.outcome is StartOutcome.READY
     assert any("starting in" in line for line in seen)
     assert seen[-1] == "Pincer is running! Channels: telegram, signal. Press Ctrl+C to stop."
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_a_crash_before_ready_returns_the_last_lines_and_leaves_no_live_record(data_dir: Path) -> None:
@@ -289,7 +300,7 @@ def test_a_slow_start_times_out_without_touching_the_child_even_with_its_port_op
         pass
     assert alive(result.state.pid)
     assert _wait_for_state(data_dir, "ready").pid == result.state.pid
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_a_crash_mid_line_still_relays_the_unterminated_last_line(data_dir: Path) -> None:
@@ -324,7 +335,7 @@ def test_a_start_while_one_is_running_or_starting_spawns_nothing(data_dir: Path,
     assert third.state is not None
     assert third.state.state == "ready"
     assert len(daemon_fake_child.children_under(tmp_path)) == 1
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_a_start_racing_another_before_its_child_takes_the_lease_waits_and_rotates_nothing(
@@ -352,7 +363,7 @@ def test_a_start_racing_another_before_its_child_takes_the_lease_waits_and_rotat
     assert daemon_fake_child.children_under(tmp_path) == [winner.pid]
     assert f"fake child {winner.pid} starting" in daemon.log_path(data_dir).read_text()
     assert not daemon.log_path(data_dir).with_name("pincer.log.1").exists()
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_a_daemon_killed_with_sigkill_reads_as_gone_and_the_next_start_succeeds(data_dir: Path) -> None:
@@ -370,7 +381,7 @@ def test_a_daemon_killed_with_sigkill_reads_as_gone_and_the_next_start_succeeds(
     assert second.outcome is StartOutcome.READY
     assert second.state is not None
     assert second.state.pid != first.pid
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_a_start_during_another_starts_wait_answers_at_once(data_dir: Path) -> None:
@@ -392,7 +403,7 @@ def test_a_start_during_another_starts_wait_answers_at_once(data_dir: Path) -> N
         (data_dir / "mark-ready").touch()
         first.join()
     assert [r.outcome for r in results] == [StartOutcome.READY]
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_stop_waits_out_a_slow_shutdown_within_its_timeout(data_dir: Path) -> None:
@@ -431,7 +442,7 @@ def test_force_kills_at_once_and_the_next_start_works(data_dir: Path) -> None:
     assert not alive(pid)
     assert daemon.read_state(data_dir) is None
     assert _start(data_dir).outcome is StartOutcome.READY
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_a_second_stop_during_a_slow_shutdown_waits_for_the_same_exit(data_dir: Path) -> None:
@@ -612,7 +623,7 @@ def test_follow_gives_the_last_lines_then_live_ones_and_ends_after_the_shutdown_
     follower.wait_for(b"live 1\n")
     assert not follower.done.is_set()
 
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
     assert follower.done.wait(10.0), "follow() kept going after the daemon exited"
     assert b"shutting down" in follower.data
@@ -646,7 +657,7 @@ def test_follow_ends_when_a_restart_rotates_its_log_inside_one_poll(data_dir: Pa
     following = daemon.follow(data_dir, daemon.FOLLOW_LINES, until_exit=True)
     seen = next(following)
     # The follower isn't polling while the old daemon exits and a new one takes the lease and rotates the log.
-    daemon.stop(data_dir)
+    stop_within(data_dir)
     second = _start(data_dir).state
     assert second is not None
 
@@ -655,12 +666,12 @@ def test_follow_ends_when_a_restart_rotates_its_log_inside_one_poll(data_dir: Pa
     assert f"fake child {first.pid} starting".encode() in seen
     assert seen.endswith(b"Shutdown complete\n")
     assert f"fake child {second.pid}".encode() not in seen
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_follow_with_no_daemon_running_gives_the_tail_and_ends(data_dir: Path) -> None:
     _start(data_dir)
-    daemon.stop(data_dir)
+    stop_within(data_dir)
     append_log(data_dir, numbered(1, 80))
 
     followed = within(2.0, lambda: b"".join(daemon.follow(data_dir, daemon.FOLLOW_LINES, until_exit=True)))
@@ -669,6 +680,66 @@ def test_follow_with_no_daemon_running_gives_the_tail_and_ends(data_dir: Path) -
 
 
 # ── probes never pass for a daemon (review #1) ─────────────────────────────
+
+
+@contextlib.contextmanager
+def _probe_in_progress(data_dir: Path, seconds: float | None = None) -> Iterator[None]:
+    """Hold the lock file shared, as another `pincer status` (or start's own poll) does mid-probe.
+
+    With `seconds`, a thread lets go after that long, so what runs inside overlaps the probe's end.
+    """
+    (data_dir / daemon.LOCK_FILE).touch()
+    fd = os.open(data_dir / daemon.LOCK_FILE, os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    timer = threading.Timer(seconds, os.close, (fd,)) if seconds is not None else None
+    if timer is not None:
+        timer.start()
+    try:
+        yield
+    finally:
+        if timer is not None:
+            timer.join()
+        else:
+            os.close(fd)
+
+
+def _leftover_record(data_dir: Path, pid: int) -> None:
+    """A dead daemon's record, naming `pid`."""
+    (data_dir / daemon.LOCK_FILE).touch()
+    record = daemon.DaemonState(pid, "2026-10-13T00:00:00+00:00", "/", 8080, "0.8.0", daemon.DaemonPhase.READY)
+    (data_dir / daemon.PID_FILE).write_text(json.dumps(asdict(record)))
+
+
+def test_a_probe_in_progress_never_makes_a_leftover_record_look_alive(data_dir: Path) -> None:
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _leftover_record(data_dir, bystander.pid)
+        with _probe_in_progress(data_dir):
+            assert daemon.read_state(data_dir) is None
+            assert daemon.stop(data_dir, timeout=1.0).outcome is StopOutcome.NOT_RUNNING
+        time.sleep(0.2)  # a SIGTERM sent on the way would have landed by now
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
+def test_a_start_overlapping_a_probe_cleans_up_and_its_daemon_takes_the_lease(data_dir: Path) -> None:
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        _leftover_record(data_dir, bystander.pid)
+        # Held through the start's cleanup and past the moment the child reaches for the lease.
+        with _probe_in_progress(data_dir, seconds=1.5):
+            result = _start(data_dir)
+
+        assert result.outcome is StartOutcome.READY, result
+        assert result.state is not None
+        assert result.state.pid != bystander.pid
+        assert bystander.poll() is None
+        stop_within(data_dir)
+    finally:
+        bystander.kill()
+        bystander.wait()
 
 
 def test_a_status_loop_running_throughout_does_not_keep_a_daemon_from_its_lease(data_dir: Path) -> None:
@@ -689,7 +760,7 @@ def test_a_status_loop_running_throughout_does_not_keep_a_daemon_from_its_lease(
             poller.join()
 
     assert result.outcome is StartOutcome.READY, result
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 # ── a daemon past its lease, or with a record this version can't read (review #2) ──
@@ -723,28 +794,34 @@ def test_a_start_while_a_daemon_lingers_spawns_nothing_and_says_so(data_dir: Pat
     assert daemon_fake_child.children_under(tmp_path) == [pid]
 
 
-def test_stop_while_a_daemon_lingers_stops_it_by_the_pid_the_kernel_names(data_dir: Path) -> None:
+@pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
+def test_stop_never_signals_a_daemon_without_a_record_and_waits_for_it(data_dir: Path, force: bool) -> None:
+    # No record, no start token: nothing says which process holds the lease.
     pid = _lingering(data_dir)
-    assert daemon.read_state(data_dir) == daemon.DaemonWithoutRecord(pid=pid)
+    assert daemon.read_state(data_dir) == daemon.DaemonWithoutRecord()
 
-    result = within(15.0, lambda: daemon.stop(data_dir, timeout=10.0))
+    held = within(10.0, lambda: daemon.stop(data_dir, timeout=0.5, force=force))
+    assert held == daemon.StopResult(StopOutcome.STILL_RUNNING, None, daemon.Identity.UNKNOWN)
+    assert alive(pid)  # not even --force killed it
+    gone = within(15.0, lambda: daemon.stop(data_dir, timeout=10.0, force=force))
 
-    assert result.outcome is StopOutcome.STOPPED
-    assert result.pid == pid
+    assert gone == daemon.StopResult(StopOutcome.STOPPED, None, daemon.Identity.UNKNOWN)
     assert not alive(pid)
     assert "left the lease" in daemon.log_path(data_dir).read_text()
 
 
-def test_a_record_this_version_cant_read_still_lets_stop_reach_the_daemon(data_dir: Path) -> None:
+@pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
+def test_stop_never_signals_a_daemon_whose_record_it_cant_read(data_dir: Path, force: bool) -> None:
     pid = _start(data_dir).state.pid  # type: ignore[union-attr]
-    (data_dir / daemon.PID_FILE).write_text('{"pid": "not a number", "phase": "?"}')
-
+    (data_dir / daemon.PID_FILE).write_text(json.dumps({"pid": pid, "phase": "?"}))
     assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=pid)
-    result = within(10.0, lambda: daemon.stop(data_dir, timeout=5.0))
 
-    assert result.outcome is StopOutcome.STOPPED
-    assert result.pid == pid
-    assert not alive(pid)
+    result = within(10.0, lambda: daemon.stop(data_dir, timeout=0.5, force=force))
+
+    assert result == daemon.StopResult(StopOutcome.STILL_RUNNING, pid, daemon.Identity.UNKNOWN)
+    assert alive(pid)
+    assert "shutting down" not in daemon.log_path(data_dir).read_text()  # never got a SIGTERM
+    os.kill(pid, signal.SIGTERM)
 
 
 def test_a_newer_record_with_extra_fields_still_reads(data_dir: Path) -> None:
@@ -754,7 +831,7 @@ def test_a_newer_record_with_extra_fields_still_reads(data_dir: Path) -> None:
     (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "added_in_a_later_version": True}))
 
     assert daemon.read_state(data_dir) == state
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_within_reraises_what_the_call_raised() -> None:
@@ -769,12 +846,12 @@ def test_a_spawned_daemon_imports_the_tree_under_test(data_dir: Path) -> None:
     _start(data_dir)
 
     assert f"imports pincer from {SRC_DIR / 'pincer' / '__init__.py'}" in daemon.log_path(data_dir).read_text()
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 @pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
 @pytest.mark.parametrize("bad_pid", [0, -1], ids=["pid 0", "pid -1"])
-def test_a_record_naming_no_single_process_is_unreadable_and_its_pid_never_signalled(
+def test_a_record_naming_no_single_process_is_unreadable_and_nothing_is_signalled(
     data_dir: Path, monkeypatch: pytest.MonkeyPatch, bad_pid: int, force: bool
 ) -> None:
     # os.kill(0, …) signals the caller's own group and os.kill(-1, …) everything the user may
@@ -797,14 +874,16 @@ def test_a_record_naming_no_single_process_is_unreadable_and_its_pid_never_signa
     assert isinstance(state, daemon.DaemonState)
     (data_dir / daemon.PID_FILE).write_text(json.dumps(asdict(replace(state, pid=bad_pid))))
 
-    # The record names nothing usable; the kernel still names the daemon, and only it is signalled.
-    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=state.pid)
-    result = within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=force))
+    # The record names nothing usable: nothing is signalled, only waited for.
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=None)
+    result = within(10.0, lambda: daemon.stop(data_dir, timeout=0.5, force=force))
 
-    assert result.outcome is (StopOutcome.KILLED if force else StopOutcome.STOPPED)
-    assert result.pid == state.pid
+    assert result == daemon.StopResult(StopOutcome.STILL_RUNNING, None, daemon.Identity.UNKNOWN)
     assert attempted == []
-    assert not alive(state.pid)
+    assert alive(state.pid)
+    assert "shutting down" not in daemon.log_path(data_dir).read_text()  # never got a SIGTERM
+    monkeypatch.undo()
+    os.kill(state.pid, signal.SIGTERM)
 
 
 def test_a_daemon_that_exits_during_the_record_grace_reads_as_gone_at_once(data_dir: Path) -> None:
@@ -840,30 +919,45 @@ def test_a_start_that_stops_waiting_early_still_keeps_out_a_rival_until_its_chil
     assert daemon_fake_child.children_under(tmp_path) == [child]
     assert f"fake child {child} starting" in daemon.log_path(data_dir).read_text()
     assert not daemon.log_path(data_dir).with_name("pincer.log.1").exists()
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 @pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
-def test_stop_signals_the_lease_holder_never_the_pid_a_record_names(data_dir: Path, force: bool) -> None:
-    # A record naming some other, live process (a pid reused after the daemon it named had gone;
-    # a hand-edited file): who gets signalled is the kernel's answer, not the record's.
+def test_stop_never_signals_a_pid_now_naming_another_process(data_dir: Path, force: bool) -> None:
+    # The record names a live process that isn't the daemon (its pid reused after the daemon that
+    # recorded it had gone; a hand-edited file): its start token gives it away.
     state = _start(data_dir).state
     assert isinstance(state, daemon.DaemonState)
     bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
     try:
         (data_dir / daemon.PID_FILE).write_text(json.dumps(asdict(replace(state, pid=bystander.pid))))
-        assert daemon.read_state(data_dir) == state
+        assert daemon.read_state(data_dir) == replace(state, pid=bystander.pid)
 
-        result = within(10.0, lambda: daemon.stop(data_dir, timeout=5.0, force=force))
+        result = within(10.0, lambda: daemon.stop(data_dir, timeout=0.5, force=force))
 
-        assert result.outcome is (StopOutcome.KILLED if force else StopOutcome.STOPPED)
-        assert result.pid == state.pid
-        assert not alive(state.pid)
+        assert result == daemon.StopResult(StopOutcome.STILL_RUNNING, bystander.pid, daemon.Identity.NOT_PINCER)
         time.sleep(0.2)  # a signal sent to it would have landed by now
         assert bystander.poll() is None
+        assert alive(state.pid)
+        assert "shutting down" not in daemon.log_path(data_dir).read_text()  # never got a SIGTERM
     finally:
         bystander.kill()
         bystander.wait()
+        os.kill(state.pid, signal.SIGTERM)
+
+
+@pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
+def test_stop_never_signals_a_daemon_whose_record_has_no_start_token(data_dir: Path, force: bool) -> None:
+    state = _start(data_dir).state
+    assert isinstance(state, daemon.DaemonState)
+    (data_dir / daemon.PID_FILE).write_text(json.dumps(asdict(replace(state, start_token=None))))
+
+    result = within(10.0, lambda: daemon.stop(data_dir, timeout=0.5, force=force))
+
+    assert result == daemon.StopResult(StopOutcome.STILL_RUNNING, state.pid, daemon.Identity.UNKNOWN)
+    assert alive(state.pid)
+    assert "shutting down" not in daemon.log_path(data_dir).read_text()  # never got a SIGTERM
+    os.kill(state.pid, signal.SIGTERM)
 
 
 @pytest.mark.parametrize(
@@ -902,7 +996,7 @@ def test_a_record_that_is_not_json_reads_as_unreadable_not_as_missing(data_dir: 
     pid = _start(data_dir).state.pid  # type: ignore[union-attr]
     (data_dir / daemon.PID_FILE).write_text("{garbled")
 
-    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=pid)
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=None)
     os.kill(pid, signal.SIGTERM)
 
 
@@ -910,7 +1004,7 @@ def test_a_record_that_is_not_utf8_reads_as_unreadable(data_dir: Path) -> None:
     pid = _start(data_dir).state.pid  # type: ignore[union-attr]
     (data_dir / daemon.PID_FILE).write_bytes(b'{"pid": 1, \xff}')
 
-    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=pid)
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=None)
     os.kill(pid, signal.SIGTERM)
 
 
@@ -944,7 +1038,7 @@ def test_no_start_in_progress_once_the_daemon_holds_its_lease(data_dir: Path) ->
     _start(data_dir)
 
     assert daemon.start_in_progress(data_dir) is None
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 # Asks `start_in_progress` over and over, as `pincer status` in a loop would, until its stdin
@@ -998,7 +1092,7 @@ def test_asking_whether_a_start_is_in_progress_never_makes_a_start_say_one_is(da
     assert asked > 3000  # it really was asking all along
     assert set(outcomes) == {StartOutcome.ALREADY_RUNNING}, outcomes.count(StartOutcome.STARTING_ELSEWHERE)
     assert daemon.read_state(data_dir).pid == pid  # type: ignore[union-attr]
-    daemon.stop(data_dir)
+    stop_within(data_dir)
 
 
 def test_two_askers_never_see_a_start_in_progress_that_isnt(data_dir: Path) -> None:
@@ -1028,68 +1122,151 @@ def test_stop_stops_the_daemon_where_ps_is_missing(
     assert not alive(pid)
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="only macOS reports a flock to F_GETLK (and names no holder)")
-def test_a_lease_held_by_an_unnamed_holder_reads_as_held_and_is_never_signalled(data_dir: Path) -> None:
-    # As an older build's daemon (a flock lease) looks to this one on macOS.
-    (data_dir / daemon.LOCK_FILE).touch()
-    holder = subprocess.Popen(
-        [
-            sys.executable,
-            "-c",
-            "import fcntl, os, sys, time; fd = os.open(sys.argv[1], os.O_RDWR); fcntl.flock(fd, fcntl.LOCK_EX); "
-            "print('held', flush=True); time.sleep(30)",
-            str(data_dir / daemon.LOCK_FILE),
-        ],
-        stdout=subprocess.PIPE,
-        text=True,
-    )
-    try:
-        assert holder.stdout is not None
-        holder.stdout.readline()
+# From a process of its own: whether a daemon of the data dir is running, and whether a second
+# daemon could take the lease.
+OUTSIDE = """
+import sys
+from pathlib import Path
+from pincer import daemon
 
-        assert daemon.read_state(data_dir) == daemon.DaemonWithoutRecord(pid=None)
-        result = within(10.0, lambda: daemon.stop(data_dir, timeout=0.5, force=True))
-
-        assert result.outcome is StopOutcome.STILL_RUNNING
-        assert result.pid is None
-        assert holder.poll() is None
-    finally:
-        holder.kill()
-        holder.wait()
+data_dir = Path(sys.argv[1])
+print(daemon.daemon_running(data_dir))
+try:
+    daemon.DaemonLease(data_dir, port=8080).__enter__()
+except daemon.DaemonLeaseTaken:
+    print("lease taken")
+else:
+    print("took the lease")
+"""
 
 
-def test_probes_in_the_process_holding_the_lease_never_drop_it(data_dir: Path) -> None:
-    # A POSIX lock goes when its holder closes any descriptor of the file: probes in the holding
-    # process must not open it. (This lease stays held until pytest exits; its data dir is scratch.)
+def test_the_lease_survives_its_process_opening_and_closing_the_lock_file(data_dir: Path) -> None:
+    # The daemon runs tools that may open any file, the lock file included (a Drive upload, a file
+    # read): closing it again must not let go of the lease. Nor may the daemon's own probes.
     lease = daemon.DaemonLease(data_dir, port=8080)
     lease.__enter__()
-    assert daemon.daemon_running(data_dir)
-    assert isinstance(daemon.read_state(data_dir), daemon.DaemonState)
-    assert daemon.stop(data_dir, timeout=0.2).outcome is StopOutcome.STILL_RUNNING  # never signals itself
+    try:
+        assert daemon.daemon_running(data_dir)
+        assert isinstance(daemon.read_state(data_dir), daemon.DaemonState)
+        assert daemon.stop(data_dir, timeout=0.2).outcome is StopOutcome.STILL_RUNNING  # never signals itself
+        with (data_dir / daemon.LOCK_FILE).open("rb") as tool_reading_it:
+            tool_reading_it.read()
 
-    # Seen from another process, this one still holds it.
-    seen = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "import sys; from pathlib import Path; from pincer import daemon; print(daemon._holder(Path(sys.argv[1])))",
-            str(data_dir),
-        ],
-        env=child_env(),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert int(seen.stdout) == os.getpid()
+        seen = subprocess.run(
+            [sys.executable, "-c", OUTSIDE, str(data_dir)], env=child_env(), capture_output=True, text=True, check=True
+        )
+
+        assert seen.stdout.splitlines() == ["True", "lease taken"]
+    finally:
+        lease.__exit__(None, None, None)
+        assert lease._fd is not None
+        os.close(lease._fd)
 
 
-def test_a_probe_refuses_an_answer_its_layout_cant_read(data_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import fcntl as fcntl_module
+# Tries, from a process of its own, to take the lock a daemon's lease takes, without waiting.
+TAKE_THE_LEASE_LOCK = (
+    "import fcntl, os, sys; fd = os.open(sys.argv[1], os.O_RDWR)\n"
+    "try:\n    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n    print('busy')\n"
+    "else:\n    print('taken')"
+)
 
-    fmt, names = daemon._flock_layout()
-    nonsense = struct.pack(fmt, *(99 if name == "l_type" else 0 for name in names))
-    monkeypatch.setattr(fcntl_module, "fcntl", lambda fd, cmd, arg: nonsense)
-    (data_dir / daemon.LOCK_FILE).touch()
 
-    with pytest.raises(RuntimeError, match="this layout can't read"):
-        daemon.daemon_running(data_dir)
+def test_no_daemon_can_take_the_lease_while_a_start_clears_the_last_ones_record_and_log(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One that did (a hand-run `pincer run --daemon-child`) would lose its fresh record and log.
+    attempts: list[str] = []
+    real_rotate = daemon._rotate
+
+    def rotate(log: Path) -> None:
+        tried = subprocess.run(
+            [sys.executable, "-c", TAKE_THE_LEASE_LOCK, str(data_dir / daemon.LOCK_FILE)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        attempts.append(tried.stdout.strip())
+        real_rotate(log)
+
+    monkeypatch.setattr(daemon, "_rotate", rotate)
+
+    assert _start(data_dir).outcome is StartOutcome.READY
+    assert attempts == ["busy"]
+    stop_within(data_dir)
+
+
+# ── start tokens (PR #242 review round 3) ──────────────────────────────────
+
+
+def _started_at(token: str) -> float:
+    """A start token as epoch seconds."""
+    if sys.platform == "darwin":
+        return float(token)
+    with open("/proc/stat") as stat:
+        boot = next(int(line.split()[1]) for line in stat if line.startswith("btime "))
+    return boot + int(token) / os.sysconf("SC_CLK_TCK")
+
+
+@pytest.mark.parametrize("name", ["python", "a) b (c"], ids=["plain", "parens and spaces in its name"])
+def test_a_start_token_is_when_the_kernel_says_the_process_started(tmp_path: Path, name: str) -> None:
+    # A command name can hold anything; /proc/<pid>/stat puts it in parentheses before the start time.
+    program = tmp_path / name
+    program.symlink_to(sys.executable)
+    before = time.time()
+    process = subprocess.Popen([program, "-c", "import time; time.sleep(30)"])
+    after = time.time()
+    try:
+        token = daemon._start_token(process.pid)
+        assert token is not None
+        assert daemon._start_token(process.pid) == token  # it never changes
+
+        assert before - 1 <= _started_at(token) <= after + 1, (before, token, after)
+        if shutil.which("ps"):  # what `ps` shows, to the second
+            shown = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(process.pid)],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "LC_ALL": "C"},
+                check=True,
+            ).stdout.strip()
+            assert int(_started_at(token)) == int(time.mktime(time.strptime(shown, "%a %b %d %H:%M:%S %Y")))
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_a_pid_no_process_has_has_no_start_token() -> None:
+    process = subprocess.Popen([sys.executable, "-c", ""])
+    process.wait()
+
+    with pytest.raises(ProcessLookupError):
+        daemon._start_token(process.pid)
+
+
+def test_without_start_tokens_the_lease_works_and_stop_signals_the_record_pid(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # FreeBSD, say: nothing about the lock file may fail there, and stop works as it did before tokens.
+    state = _start(data_dir).state
+    assert isinstance(state, daemon.DaemonState)
+    monkeypatch.setattr(sys, "platform", "freebsd14")
+    assert daemon._start_token(state.pid) is None
+
+    result = within(10.0, lambda: daemon.stop(data_dir, timeout=5.0))
+
+    assert result == daemon.StopResult(StopOutcome.STOPPED, state.pid, daemon.Identity.UNCHECKED)
+    assert not alive(state.pid)
+    other = tmp_path / "foreground"
+    with daemon.DaemonLease(other, port=8080) as lease:
+        assert daemon.daemon_running(other)
+        assert daemon.start_in_progress(other) is None
+        recorded = daemon.read_state(other)
+        assert isinstance(recorded, daemon.DaemonState)
+        assert recorded.start_token is None
+    assert lease._fd is not None
+    os.close(lease._fd)
+    idle = tmp_path / "idle"
+    idle.mkdir()
+    (idle / daemon.LOCK_FILE).touch()
+    assert not daemon.daemon_running(idle)
+    assert daemon.read_state(idle) is None

@@ -2,21 +2,24 @@
 
 `pincer run -d` calls `start()`, which re-spawns `pincer run --daemon-child` in a new
 session with its stdout/stderr appended to `<data_dir>/logs/pincer.log`. The child holds a
-`DaemonLease` for its whole life: a POSIX record lock (`lockf`) on `<data_dir>/pincer.lock` plus
-a JSON record in `<data_dir>/pincer.pid`.
+`DaemonLease` for its whole life: an exclusive `flock` on `<data_dir>/pincer.lock` plus a
+JSON record in `<data_dir>/pincer.pid`.
 
-"A daemon is running" means "the kernel reports a holder of that lock" (`F_GETLK`). Probes hold
-nothing, so they never collide with the lease or with each other, and the kernel names the holding
-process: that pid, never the record's, is the one `stop` signals. The record only describes the
-daemon (phase, channels, port, cwd). The kernel drops the lock as the holder exits (`kill -9`
-included), so a record left behind by a dead daemon is recognisable as stale.
+The lease is the only exclusive lock ever taken on that file. Everything else (status, stop, a
+start's cleanup, its readiness poll) probes it shared, so probes never conflict with each other
+and fail exactly when a daemon holds it: "a daemon is running" means "a shared probe fails". Only
+the kernel drops the lock, as the process exits (`kill -9` included); closing some other
+descriptor of the file, as a tool the agent runs might, never does. A record left behind by a dead
+daemon is so recognisable as stale. The lock sits on a sibling file rather than on the record
+because the record is rewritten by rename, which replaces its inode: a lock on the old inode would
+no longer be seen by a probe opening the path. The lock file is never replaced or deleted for the
+same reason.
 
-POSIX locks have one sharp edge: the holder loses the lock when it closes *any* descriptor of the
-locked file. So this module is the only code that opens `pincer.lock`, and in the process holding
-the lease every probe answers from memory and never opens the file. The lock sits on a sibling
-file rather than on the record because the record is rewritten by rename, which replaces its
-inode. The lock file is never replaced or deleted for the same reason. (The start lock, a separate
-file, stays a `flock`: it must pass to the child across exec, which POSIX locks never do.)
+A held lock doesn't say which process holds it. The record names the daemon's pid and the exact
+time the kernel says it started (its start token); `stop` signals that pid only while the lease is
+held and the process with that pid has that token, so a process that reused the pid of a daemon
+since gone is never signalled. On a platform without start tokens (anything but Linux and macOS)
+the record's pid is signalled on the lease alone.
 
 No Typer or Rich here — the CLI commands only format what these functions return.
 """
@@ -24,7 +27,6 @@ No Typer or Rich here — the CLI commands only format what these functions retu
 from __future__ import annotations
 
 import contextlib
-import errno
 import fcntl
 import json
 import os
@@ -60,16 +62,14 @@ POLL_INTERVAL = 0.1
 # The lease writes the record right after taking the lock; a probe that wins that
 # race waits this long for the record to appear.
 RECORD_GRACE = 1.0
-# `struct flock` as F_GETLK fills it in: the field order differs by platform. Verified on macOS
-# arm64 (24 bytes) and Linux aarch64 (32 bytes; x86_64 has the same layout and is covered by CI).
-# A platform not listed here can't run a daemon: probing it raises rather than guess.
-FLOCK_LAYOUTS = {
-    "darwin": ("@qqihh", ("l_start", "l_len", "l_pid", "l_type", "l_whence")),
-    "linux": ("@hhqqi4x", ("l_type", "l_whence", "l_start", "l_len", "l_pid")),
-}
-# The lease holder's pid when the kernel reports the lock held but names no process (pid <= 0):
-# e.g. on macOS, a `flock` on the file from an older build. Held; never signalled.
-UNKNOWN_HOLDER = 0
+# A starting daemon keeps reaching for the lease this long while shared probes hold it.
+LEASE_GRACE = 2.0
+LEASE_RETRY = 0.01
+# macOS `sysctl` names for one process's `struct kinfo_proc`, and that struct's size (64-bit). Its
+# first member, `struct extern_proc`, opens with `p_starttime`, a `struct timeval`: verified against
+# `ps -o lstart` by test_a_start_token_is_when_the_kernel_says_the_process_started.
+CTL_KERN, KERN_PROC, KERN_PROC_PID = 1, 14, 1
+KINFO_PROC_SIZE = 648
 # A start waits at least this long for the start lock, however short its own wait: someone asking
 # whether a start is in progress holds it for an instant.
 START_LOCK_GRACE = 0.2
@@ -115,22 +115,22 @@ class DaemonState:
     version: str
     state: DaemonPhase
     channels: list[str] = field(default_factory=list)
+    # When the kernel says the daemon's process started (see _start_token); None on a platform without.
+    start_token: str | None = None
 
 
 @dataclass(frozen=True)
 class DaemonWithoutRecord:
     """A daemon holds the lease but has no record: it has left its lease and is exiting (the lease
-    removes the record first, the kernel drops the lock last). `pid` is the holder the kernel
-    reports, None if it names none."""
+    removes the record first, the kernel drops the lock last). Its pid is unknown."""
 
-    pid: int | None = None
+    pid: None = None
 
 
 @dataclass(frozen=True)
 class DaemonWithUnreadableRecord:
     """A daemon holds the lease and has a record, but not one this version can read (a newer
-    version's phase, a malformed field). `pid` is the holder the kernel reports, None if it names
-    none: never the record's."""
+    version's phase, a malformed field). `pid` is what the record names, if anything: unverified."""
 
     pid: int | None
 
@@ -156,10 +156,48 @@ class StartInProgress:
     pid: int | None
 
 
+class Identity(StrEnum):
+    """Whether `stop` could tell that the pid its record names is the daemon's, right before signalling."""
+
+    # The process with that pid has the start token the daemon recorded: signalled.
+    VERIFIED = "verified"
+    # This platform has no start tokens: signalled on the lease alone (see the module docstring).
+    UNCHECKED = "unchecked"
+    # The pid now names another process (the record's daemon is gone): never signalled.
+    NOT_PINCER = "not_pincer"
+    # No process has that pid any more: nothing to signal.
+    GONE = "gone"
+    # No readable record, or one without a start token: nothing to check a pid against, so never signalled.
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class StopTarget:
+    """The daemon `stop` found holding the lease, and whether it could tell its process."""
+
+    state: LiveDaemon
+    identity: Identity
+
+    @property
+    def pid(self) -> int | None:
+        """The pid the record names (unverified unless `signalled`)."""
+        return self.state.pid
+
+    @property
+    def signalled(self) -> bool:
+        return self.identity in (Identity.VERIFIED, Identity.UNCHECKED)
+
+
 @dataclass(frozen=True)
 class StopResult:
     outcome: StopOutcome
+    # The pid the record names; whether it was signalled is `identity`'s to say.
     pid: int | None = None
+    identity: Identity | None = None
+
+    @property
+    def signalled(self) -> bool:
+        return self.identity in (Identity.VERIFIED, Identity.UNCHECKED)
 
 
 def log_path(data_dir: Path) -> Path:
@@ -209,13 +247,13 @@ def _start_locked(
     on_line: Callable[[str], None] | None,
     starting: _StartLock,
 ) -> StartResult:
-    # No lease is taken here (a probe holds nothing, and the lease must only ever be the
-    # daemon's: `stop` signals whoever holds it). A start's child takes it only once spawned
-    # below, and the start lock keeps other starts out meanwhile.
-    if daemon_running(data_dir):
-        return StartResult(StartOutcome.ALREADY_RUNNING, read_state(data_dir))
-    (data_dir / PID_FILE).unlink(missing_ok=True)
-    _rotate(log)
+    # Holding the lock shared while cleaning up means no daemon holds the lease, and none can
+    # take it (a lease waits) until the stale record and the old log are out of the way.
+    with _probe(data_dir) as free:
+        if not free:
+            return StartResult(StartOutcome.ALREADY_RUNNING, read_state(data_dir))
+        (data_dir / PID_FILE).unlink(missing_ok=True)
+        _rotate(log)
 
     start_fd = starting.fd
     if start_fd is None:  # start() only gets here holding it
@@ -282,27 +320,21 @@ def start_in_progress(data_dir: Path) -> StartInProgress | None:
 
 
 def read_state(data_dir: Path) -> LiveDaemon | None:
-    """The live daemon, its pid always the lease holder's as the kernel reports it (None if it
-    names none): DaemonState from its record; DaemonWithUnreadableRecord if the record can't be
-    read by this version; DaemonWithoutRecord if there is none (it is exiting). None when no
-    daemon holds the lease (a leftover record is ignored)."""
-    holder = _holder(data_dir)
-    if holder is None:
+    """The live daemon's record; DaemonWithUnreadableRecord if one holds the lease and has a record
+    this version can't read; DaemonWithoutRecord if one holds the lease and has none (it is
+    exiting); None when no daemon holds the lease (a leftover record is ignored)."""
+    if not daemon_running(data_dir):
         return None
-    pid = holder if holder > 0 else None
     deadline = time.monotonic() + RECORD_GRACE
     while True:
         record = _read_record(data_dir / PID_FILE)
-        if isinstance(record, DaemonState):
-            # A record naming some other pid doesn't name the daemon: the kernel does.
-            return record if pid is None else replace(record, pid=pid)
-        if isinstance(record, DaemonWithUnreadableRecord):
-            return DaemonWithUnreadableRecord(pid=pid)
+        if record is not None:
+            return record
         # The usual way to be here is a daemon past its lease, exiting: once it has, nothing runs.
         if not daemon_running(data_dir):
             return None
         if time.monotonic() >= deadline:
-            return DaemonWithoutRecord(pid=pid)
+            return DaemonWithoutRecord()
         time.sleep(POLL_INTERVAL / 5)
 
 
@@ -334,6 +366,8 @@ def _read_record(path: Path) -> DaemonState | DaemonWithUnreadableRecord | None:
             raise ValueError("started_at, cwd or version")
         if not isinstance(state.channels, list) or not all(isinstance(name, str) for name in state.channels):
             raise ValueError("channels")
+        if state.start_token is not None and not isinstance(state.start_token, str):
+            raise ValueError("start_token")
         if datetime.fromisoformat(state.started_at).tzinfo is None:  # uptime needs an absolute time
             raise ValueError("started_at")
         return replace(state, state=DaemonPhase(state.state))
@@ -381,7 +415,7 @@ def stop(
     data_dir: Path,
     timeout: float | None = None,
     force: bool = False,
-    on_wait: Callable[[LiveDaemon, float], None] | None = None,
+    on_wait: Callable[[StopTarget, float], None] | None = None,
 ) -> StopResult:
     """SIGTERM the daemon (the agent's graceful-shutdown path) and wait until it has exited.
 
@@ -389,21 +423,22 @@ def stop(
     must never be cut short behind the operator's back. Only `force` kills: SIGKILL, at once, to
     the daemon's whole process group, so no MCP server or skill it spawned outlives it holding a
     port or file. A plain stop signals the daemon alone; its own shutdown stops those children.
-    `on_wait(state, elapsed)` is called right after signalling and then on every poll.
+    `on_wait(target, elapsed)` is called right after signalling and then on every poll.
 
-    The pid signalled is the lease holder's, asked of the kernel right before signalling, whatever
-    the record says or whether there is one. A holder the kernel can't name is never signalled,
-    only waited for. (What's left: the holder exiting and its pid being reused in the moment
-    between that question and the signal.)
+    The record's pid is signalled only if, right before, the lease is still held and the process
+    with that pid has the start token the daemon recorded (see Identity); otherwise stop only waits
+    for the lease to go. (What's left: the daemon exiting and its pid being reused in the instant
+    between that check and the signal; and, where there are no start tokens, at any time while a
+    lease is held by some other process than the one the record names.)
     """
     state = read_state(data_dir)
     if state is None:
         return StopResult(StopOutcome.NOT_RUNNING)
-    holder = _holder(data_dir)
-    if holder is None:  # it exited on its own since
-        return StopResult(StopOutcome.STOPPED, state.pid)
-    pid = holder if holder > 0 and holder != os.getpid() else None
-    if pid is not None:
+    if not daemon_running(data_dir):  # it exited on its own since the record was read
+        return StopResult(StopOutcome.STOPPED, state.pid, Identity.GONE)
+    target = StopTarget(state, _identify(state))
+    pid = target.pid
+    if target.signalled and pid is not None and pid != os.getpid():
         with contextlib.suppress(ProcessLookupError):
             if force:
                 _kill_group(pid)
@@ -413,13 +448,76 @@ def stop(
     while True:
         elapsed = time.monotonic() - began
         if on_wait is not None:
-            on_wait(state, elapsed)
+            on_wait(target, elapsed)
         if not daemon_running(data_dir):
-            killed = force and pid is not None
-            return StopResult(StopOutcome.KILLED if killed else StopOutcome.STOPPED, pid)
+            killed = force and target.signalled
+            return StopResult(StopOutcome.KILLED if killed else StopOutcome.STOPPED, pid, target.identity)
         if timeout is not None and elapsed >= timeout:
-            return StopResult(StopOutcome.STILL_RUNNING, pid)
+            return StopResult(StopOutcome.STILL_RUNNING, pid, target.identity)
         time.sleep(POLL_INTERVAL)
+
+
+def _identify(state: LiveDaemon) -> Identity:
+    """Whether the process the record names is the daemon that wrote it (see Identity)."""
+    if not isinstance(state, DaemonState):
+        return Identity.UNKNOWN
+    if not _has_start_tokens():
+        return Identity.UNCHECKED
+    if state.start_token is None:
+        return Identity.UNKNOWN
+    try:
+        token = _start_token(state.pid)
+    except ProcessLookupError:
+        return Identity.GONE
+    except OSError:
+        return Identity.UNKNOWN
+    return Identity.VERIFIED if token == state.start_token else Identity.NOT_PINCER
+
+
+def _has_start_tokens() -> bool:
+    return sys.platform.startswith("linux") or sys.platform == "darwin"
+
+
+def _start_token(pid: int) -> str | None:
+    """When process `pid` started, exactly as the kernel keeps it: equal tokens, same process (a pid
+    reused later has a later one). None on a platform without (see _has_start_tokens). Raises
+    ProcessLookupError if no process has `pid`, another OSError if it can't be read."""
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as file:
+                stat = file.read()
+        except FileNotFoundError:
+            raise ProcessLookupError(pid) from None
+        # Field 22, starttime (clock ticks after boot). Fields 3 on follow the command name, which
+        # is in parentheses and may itself hold spaces and parentheses: split after the last one.
+        after_name = stat.rpartition(b")")[2].split()
+        if len(after_name) < 20:
+            raise OSError(f"/proc/{pid}/stat is cut short")
+        return after_name[19].decode()
+    if sys.platform == "darwin":
+        sec, usec = _darwin_start_time(pid)
+        return f"{sec}.{usec:06d}"
+    return None
+
+
+def _darwin_start_time(pid: int) -> tuple[int, int]:
+    """`kp_proc.p_starttime` of process `pid`, from `sysctl` (see KINFO_PROC_SIZE)."""
+    import ctypes
+    import ctypes.util
+
+    libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+    mib = (ctypes.c_int * 4)(CTL_KERN, KERN_PROC, KERN_PROC_PID, pid)
+    buffer = ctypes.create_string_buffer(KINFO_PROC_SIZE)
+    size = ctypes.c_size_t(KINFO_PROC_SIZE)
+    if libc.sysctl(mib, 4, buffer, ctypes.byref(size), None, 0) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code))
+    if size.value == 0:  # the kernel's answer for a pid no process has
+        raise ProcessLookupError(pid)
+    if size.value != KINFO_PROC_SIZE:
+        raise OSError(f"sysctl returned {size.value} bytes for pid {pid}, not a struct kinfo_proc")
+    sec, usec = struct.unpack_from("@qi", buffer.raw)
+    return sec, usec
 
 
 def _kill_group(pid: int) -> None:
@@ -445,27 +543,33 @@ class DaemonLease:
         self._port = port
         self._fd: int | None = None
         self._started_at = ""
+        self._start_token: str | None = None
 
     def __enter__(self) -> DaemonLease:
         self._data_dir.mkdir(parents=True, exist_ok=True)
-        lock_file = (self._data_dir / LOCK_FILE).resolve()
-        if lock_file in _HELD_LEASES:
-            raise DaemonLeaseTaken(f"this process already holds {lock_file}")
-        fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o600)
-        # Probes hold nothing, so this fails only when another process holds the lease.
-        try:
-            fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as e:
-            os.close(fd)
-            if e.errno in (errno.EACCES, errno.EAGAIN):
-                raise DaemonLeaseTaken(f"another Pincer daemon holds {lock_file}") from None
-            raise
-        # Kept open for the process's life, and never closed: a POSIX lock goes when its holder
-        # closes any descriptor of the file. Not inherited by children (MCP servers, skills).
+        fd = os.open(self._data_dir / LOCK_FILE, os.O_CREAT | os.O_RDWR, 0o600)
+        # A shared probe (`pincer status`, a start's poll) holds the lock for a moment at a time; only
+        # a lock still taken after LEASE_GRACE belongs to another daemon. Non-blocking tries, not a
+        # blocking flock: that could wait on a live daemon for ever.
+        deadline = time.monotonic() + LEASE_GRACE
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    raise DaemonLeaseTaken(f"another Pincer daemon holds {self._data_dir / LOCK_FILE}") from None
+                time.sleep(LEASE_RETRY)
+        # os.open fds are non-inheritable, so the lock dies with this process, not with
+        # whatever it spawns (MCP servers, sandboxed skills).
         self._fd = fd
-        _HELD_LEASES[lock_file] = fd
         _let_go_of_the_start_lock()
         self._started_at = datetime.now(UTC).isoformat(timespec="seconds")
+        try:
+            self._start_token = _start_token(os.getpid())
+        except OSError:  # unreadable here: stop then waits for this daemon rather than signal it
+            self._start_token = None
         self._write(DaemonPhase.STARTING, [])
         return self
 
@@ -493,6 +597,7 @@ class DaemonLease:
             version=__version__,
             state=state,
             channels=channels,
+            start_token=self._start_token,
         )
         tmp = self._data_dir / f"{PID_FILE}.tmp"
         tmp.write_text(json.dumps(asdict(record)))
@@ -508,48 +613,31 @@ def _let_go_of_the_start_lock() -> None:
             os.close(int(inherited))
 
 
-def daemon_running(data_dir: Path) -> bool:
-    """Whether a daemon of `data_dir` is alive (something holds the lease). One kernel query, no
-    record read: for callers that need only running or not, which `read_state` answers more
-    slowly when a daemon holds the lease without a record yet (it waits up to RECORD_GRACE)."""
-    return _holder(data_dir) is not None
-
-
-# Leases this process holds: resolved lock file → its descriptor. Probes for those answer from
-# here and never open the file, whose closing would drop the lease (see the module docstring).
-_HELD_LEASES: dict[Path, int] = {}
-
-
-def _holder(data_dir: Path) -> int | None:
-    """The pid holding `data_dir`'s lease, as the kernel reports it; UNKNOWN_HOLDER if it is held
-    but the kernel names no process; None if nothing holds it. Holds nothing itself."""
-    lock_file = (data_dir / LOCK_FILE).resolve()
-    if lock_file in _HELD_LEASES:
-        return os.getpid()
+@contextlib.contextmanager
+def _probe(data_dir: Path) -> Iterator[bool]:
+    """Try the lock file shared, without blocking; yields True (holding it) when no daemon holds the lease."""
+    lock_file = data_dir / LOCK_FILE
+    if not lock_file.exists():
+        yield True
+        return
+    fd = os.open(lock_file, os.O_RDWR)
     try:
-        fd = os.open(lock_file, os.O_RDONLY)
-    except FileNotFoundError:
-        return None
-    try:
-        fmt, names = _flock_layout()
-        wanted = dict.fromkeys(names, 0) | {"l_type": fcntl.F_WRLCK, "l_whence": os.SEEK_SET}
-        raw = fcntl.fcntl(fd, fcntl.F_GETLK, struct.pack(fmt, *(wanted[name] for name in names)))
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+        else:
+            yield True
     finally:
         os.close(fd)
-    got = dict(zip(names, struct.unpack(fmt, raw), strict=True))
-    if got["l_type"] == fcntl.F_UNLCK:
-        return None
-    # The lease locks the whole file; anything else means this layout misreads the platform's.
-    if got["l_type"] != fcntl.F_WRLCK or (got["l_whence"], got["l_start"], got["l_len"]) != (os.SEEK_SET, 0, 0):
-        raise RuntimeError(f"F_GETLK on {lock_file} returned {got}, which this layout can't read")
-    return got["l_pid"] if got["l_pid"] > 0 else UNKNOWN_HOLDER
 
 
-def _flock_layout() -> tuple[str, tuple[str, ...]]:
-    platform = "linux" if sys.platform.startswith("linux") else sys.platform
-    if platform not in FLOCK_LAYOUTS:
-        raise RuntimeError(f"daemon mode doesn't know struct flock's layout on {sys.platform}")
-    return FLOCK_LAYOUTS[platform]
+def daemon_running(data_dir: Path) -> bool:
+    """Whether a daemon of `data_dir` is alive (it holds the lease). One lock probe, no record read:
+    for callers that need only running or not, which `read_state` answers more slowly when a
+    daemon holds the lease without a record yet (it waits up to RECORD_GRACE for one)."""
+    with _probe(data_dir) as free:
+        return not free
 
 
 def _rotate(log: Path) -> None:

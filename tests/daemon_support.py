@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from subprocess import Popen
 
+    from pincer.daemon import StopResult
+
 # The source tree under test. A spawned interpreter would otherwise import pincer from wherever the
 # venv's editable install points, which need not be the tree pytest is running (a git worktree, say).
 SRC_DIR = Path(pincer.__file__).resolve().parents[1]
@@ -130,6 +132,14 @@ def within[T](seconds: float, call: Callable[[], T]) -> T:
     return box[0]
 
 
+def stop_within(data_dir: Path, seconds: float = 20.0) -> StopResult:
+    """`daemon.stop(data_dir)`, bounded: a daemon it doesn't stop fails the test (STILL_RUNNING, or
+    `within`'s assertion) instead of hanging the suite."""
+    from pincer import daemon
+
+    return within(seconds + 5.0, lambda: daemon.stop(data_dir, timeout=seconds))
+
+
 def write_log(data_dir: Path, content: bytes) -> Path:
     from pincer import daemon
 
@@ -152,16 +162,15 @@ def numbered(first: int, last: int) -> bytes:
 
 @contextlib.contextmanager
 def lease_held_elsewhere(lock_file: Path, seconds: float = 60.0) -> Iterator[subprocess.Popen[str]]:
-    """Another process holds `lock_file` as a daemon's lease does (a POSIX `lockf`), for up to
-    `seconds` or until the block ends. Never this one: a process's own POSIX lock is invisible to
-    it, and closing any descriptor of the file would drop it."""
+    """Another process holds `lock_file` as a daemon's lease does (an exclusive `flock`), for up to
+    `seconds` or until the block ends."""
     lock_file.touch()
     holder = subprocess.Popen(
         [
             sys.executable,
             "-c",
             "import fcntl, os, sys, time; fd = os.open(sys.argv[1], os.O_RDWR); "
-            "fcntl.lockf(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(float(sys.argv[2]))",
+            "fcntl.flock(fd, fcntl.LOCK_EX); print('held', flush=True); time.sleep(float(sys.argv[2]))",
             str(lock_file),
             str(seconds),
         ],

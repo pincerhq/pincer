@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from rich.status import Status
 
     from pincer.config import Settings
-    from pincer.daemon import DaemonState, DaemonWithUnreadableRecord, LiveDaemon, StartInProgress
+    from pincer.daemon import DaemonState, DaemonWithUnreadableRecord, LiveDaemon, StartInProgress, StopTarget
 
 WAIT_TIMEOUT = 60.0
 # Sized to the voice channel's 60 s call drain plus worker and API grace.
@@ -198,17 +198,44 @@ def start_in_progress_message(start: StartInProgress) -> str:
 
 
 def _pid_part(state: LiveDaemon | None) -> str:
-    """`(pid N) ` for a lease holder the kernel names, else nothing."""
+    """`(pid N) ` for a lease holder whose record names its pid, else nothing."""
     pid = getattr(state, "pid", None)
     return f"(pid {pid}) " if pid else ""
 
 
 def unreadable_record_message(data_dir: Path, state: DaemonWithUnreadableRecord) -> str:
-    pid = state.pid if state.pid is not None else "unknown"
     return (
-        f"A Pincer daemon (pid {pid}) holds data dir {data_dir}, but its record can't be read by this version"
-        " — 'pincer stop' can still stop it."
+        f"A Pincer daemon holds data dir {data_dir}, but {_unidentified(state)} and 'pincer stop' won't "
+        f"signal it — {_lsof_hint(data_dir)}."
     )
+
+
+def _unidentified(state: LiveDaemon) -> str:
+    """Why `stop` can't tell which process a daemon's is, for one it has no start token of."""
+    from pincer.daemon import DaemonState, DaemonWithUnreadableRecord
+
+    if isinstance(state, DaemonWithUnreadableRecord):
+        names = f" (it names pid {state.pid})" if state.pid is not None else ""
+        return f"its record can't be read by this version{names}, so its process can't be identified"
+    if isinstance(state, DaemonState):
+        return f"its record (pid {state.pid}) has no start token, so its process can't be identified"
+    return "it has no record (it may be shutting down), so its process can't be identified"
+
+
+def _not_signalled_because(target: StopTarget) -> str:
+    from pincer.daemon import Identity
+
+    if target.identity is Identity.NOT_PINCER:
+        return f"the pid its record names ({target.pid}) now belongs to another process, not Pincer"
+    if target.identity is Identity.GONE:
+        return f"the process its record names (pid {target.pid}) has exited"
+    return _unidentified(target.state)
+
+
+def _lsof_hint(data_dir: Path) -> str:
+    from pincer.daemon import LOCK_FILE
+
+    return f"'lsof {data_dir / LOCK_FILE}' shows which process holds its lock"
 
 
 def attach_daemon(settings: Settings, state: DaemonState) -> None:
@@ -318,22 +345,16 @@ class _StopProgress:
         self._announced = False
         self._status: Status | None = None
 
-    def __call__(self, state: LiveDaemon, elapsed: float) -> None:
-        from pincer.daemon import DaemonState, DaemonWithUnreadableRecord
-
+    def __call__(self, target: StopTarget, elapsed: float) -> None:
         if not self._announced:
             self._announced = True
-            if isinstance(state, DaemonState):
-                line = f"Stopping Pincer (pid {state.pid})…"
-            elif state.pid is None:  # held, but the kernel names no process: only waited for
+            if target.signalled:
+                line = f"Stopping Pincer (pid {target.pid})…"
+            else:  # only waited for
                 line = (
-                    f"Pincer holds data dir {self._data_dir}, but the kernel names no process holding it"
-                    " — not signalling; waiting for it to exit…"
+                    f"Pincer holds data dir {self._data_dir}, but {_not_signalled_because(target)} — not "
+                    f"signalling anything; waiting for it to exit ({_lsof_hint(self._data_dir)})…"
                 )
-            elif isinstance(state, DaemonWithUnreadableRecord):
-                line = f"Stopping Pincer (pid {state.pid} — its record can't be read by this version)…"
-            else:
-                line = f"Stopping Pincer (pid {state.pid} — it has left its lease and is shutting down)…"
             console.print(line, soft_wrap=True, markup=False, highlight=False)
             if console.is_terminal:
                 self._status = console.status("Waiting for it to exit")
@@ -428,10 +449,10 @@ def _stop_daemon(
         before_report()
     if result.outcome is daemon.StopOutcome.NOT_RUNNING:
         return False
-    if result.outcome is daemon.StopOutcome.STILL_RUNNING and result.pid is None:
+    if result.outcome is daemon.StopOutcome.STILL_RUNNING and not result.signalled:
         console.print(
-            f"[yellow]Pincer still holds data dir {escape(str(settings.data_dir))} after {timeout:g} s, and the "
-            "kernel names no process holding it — not signalling anything.[/yellow]",
+            f"[yellow]Pincer still holds data dir {escape(str(settings.data_dir))} after {timeout:g} s; nothing "
+            f"was signalled — {escape(_lsof_hint(settings.data_dir))}.[/yellow]",
             soft_wrap=True,
         )
         return None
@@ -441,7 +462,7 @@ def _stop_daemon(
             soft_wrap=True,
         )
         return None
-    if result.pid is None:
+    if not result.signalled:
         console.print("Pincer has exited")
         return True
     verb = "killed" if result.outcome is daemon.StopOutcome.KILLED else "stopped"

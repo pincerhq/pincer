@@ -90,6 +90,12 @@ Pincer stopped (pid 4182)
   'pincer stop --force' to kill it` and exits 1.
 - `pincer stop --force` kills the daemon at once, together with its process group (the MCP servers
   and skills it started), and prints `Pincer killed (pid 4182)`.
+- It signals the pid in Pincer's record only once it has checked that the process with that pid
+  is the one that wrote the record: on Linux and macOS, by the exact start time the kernel keeps
+  for it. If the record can't be read or is gone, or the pid now belongs to another process, it
+  signals nothing (`--force` included): it says why, waits, and points to
+  `lsof <data dir>/pincer.lock` to find the process holding the lock. On other platforms it
+  signals the record's pid while the lock is held.
 - With nothing running it prints `Pincer is not running` and exits 0, so it's safe in scripts. If a
   foreground Pincer holds the port, it also tells you to stop that one with Ctrl+C in its terminal.
 
