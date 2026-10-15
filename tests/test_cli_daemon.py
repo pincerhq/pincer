@@ -71,6 +71,11 @@ NOT_SIGNALLED = (
     "Pincer holds data dir {data_dir}, but {why} — not signalling anything; waiting for it to exit"
     " ('lsof {data_dir}/pincer.lock' shows which process holds its lock)…"
 )
+# What `pincer stop` says, at once, of a live daemon it can't tell the process of.
+NOT_SIGNALLED_AT_ONCE = (
+    "Pincer holds data dir {data_dir}, but {why} — not signalling anything; 'lsof {data_dir}/pincer.lock' shows"
+    " which process holds its lock."
+)
 STILL_HELD = (
     "Pincer still holds data dir {data_dir} after {timeout} s; nothing was signalled — 'lsof {data_dir}/pincer.lock'"
     " shows which process holds its lock."
@@ -1368,6 +1373,22 @@ def test_stop_while_a_daemon_lingers_waits_for_it_without_signalling(
     assert daemon_fake_child.children_under(tmp_path) == []
 
 
+def test_stop_while_a_daemon_lingers_gives_up_after_its_timeout(
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid = _lingering(data_dir, monkeypatch)
+
+    result = within(10.0, lambda: runner.invoke(app, ["stop", "--timeout", "0.5"]))
+
+    assert result.exit_code == 1, result.output
+    why = "it has no record (it may be shutting down), so its process can't be identified"
+    assert result.output.splitlines() == [
+        NOT_SIGNALLED.format(data_dir=data_dir, why=why),
+        STILL_HELD.format(data_dir=data_dir, timeout=0.5),
+    ]
+    assert daemon_fake_child.children_under(tmp_path) == [pid]
+
+
 def test_restart_while_a_daemon_lingers_waits_then_starts(
     data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1473,14 +1494,13 @@ def test_stop_never_signals_a_daemon_whose_record_it_cant_read_and_names_no_star
     pid = _from_a_newer_version(data_dir, start_token=False)
     assert UNREADABLE_UNIDENTIFIED.format(pid=pid, data_dir=data_dir) in runner.invoke(app, ["status"]).output
 
-    result = within(10.0, lambda: runner.invoke(app, ["stop", "--timeout", "0.5", *force]))
+    began = time.monotonic()
+    result = within(10.0, lambda: runner.invoke(app, ["stop", *force]))  # the default 90 s timeout
 
+    assert time.monotonic() - began < 2.0
     assert result.exit_code == 1, result.output
     why = f"its record can't be read by this version (it names pid {pid}), so its process can't be identified"
-    assert result.output.splitlines() == [
-        NOT_SIGNALLED.format(data_dir=data_dir, why=why),
-        STILL_HELD.format(data_dir=data_dir, timeout=0.5),
-    ]
+    assert result.output.splitlines() == [NOT_SIGNALLED_AT_ONCE.format(data_dir=data_dir, why=why)]
     assert daemon_fake_child.children_under(tmp_path) == [pid]
 
 
@@ -1513,7 +1533,7 @@ def test_restart_leaves_a_daemon_whose_record_it_cant_read_and_names_no_start_to
 ) -> None:
     old = _from_a_newer_version(data_dir, start_token=False)
 
-    result = within(10.0, lambda: runner.invoke(app, ["restart", "--timeout", "0.5"]))
+    result = within(10.0, lambda: runner.invoke(app, ["restart"]))
 
     assert result.exit_code == 1, result.output
     assert result.output.splitlines()[-1] == "Not starting a new one."
@@ -1571,14 +1591,13 @@ def test_stop_never_signals_a_pid_its_record_names_that_now_belongs_to_another_p
     try:
         (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "pid": bystander.pid}))
 
-        result = within(10.0, lambda: runner.invoke(app, ["stop", "--timeout", "0.5", *force]))
+        began = time.monotonic()
+        result = within(10.0, lambda: runner.invoke(app, ["stop", *force]))  # the default 90 s timeout
 
+        assert time.monotonic() - began < 2.0
         assert result.exit_code == 1, result.output
         why = f"the pid its record names ({bystander.pid}) now belongs to another process, not Pincer"
-        assert result.output.splitlines() == [
-            NOT_SIGNALLED.format(data_dir=data_dir, why=why),
-            STILL_HELD.format(data_dir=data_dir, timeout=0.5),
-        ]
+        assert result.output.splitlines() == [NOT_SIGNALLED_AT_ONCE.format(data_dir=data_dir, why=why)]
         assert daemon_fake_child.children_under(tmp_path) == [daemon_pid]
         time.sleep(0.2)
         assert bystander.poll() is None

@@ -198,6 +198,12 @@ class StopTarget:
     def signalled(self) -> bool:
         return self.identity in (Identity.VERIFIED, Identity.UNCHECKED)
 
+    @property
+    def waited_for(self) -> bool:
+        """Whether `stop` waits for it to exit: once signalled, or when it is already exiting (it has
+        left its lease). Anything else would hold the lease just as long after any wait."""
+        return self.signalled or isinstance(self.state, DaemonWithoutRecord)
+
 
 @dataclass(frozen=True)
 class StopResult:
@@ -444,6 +450,8 @@ def stop(
     the daemon's whole process group, so no MCP server or skill it spawned outlives it holding a
     port or file. A plain stop signals the daemon alone; its own shutdown stops those children.
     `on_wait(target, elapsed)` is called right after signalling and then on every poll.
+    A daemon it signals nothing to and that isn't already exiting (see StopTarget.waited_for) gets
+    STILL_RUNNING at once (or STOPPED, had it exited meanwhile): no wait would change that.
 
     The record's pid is signalled only if, right before, the lease is still held and the process
     with that pid has the start token the daemon recorded (see Identity); otherwise stop only waits
@@ -464,6 +472,11 @@ def stop(
                 _kill_group(pid)
             else:
                 os.kill(pid, signal.SIGTERM)
+    if not target.waited_for:
+        if on_wait is not None:
+            on_wait(target, 0.0)
+        outcome = StopOutcome.STILL_RUNNING if daemon_running(data_dir) else StopOutcome.STOPPED
+        return StopResult(outcome, pid, target.identity)
     began = time.monotonic()
     while True:
         elapsed = time.monotonic() - began

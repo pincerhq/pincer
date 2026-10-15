@@ -894,6 +894,35 @@ def test_a_record_without_the_start_token_field_is_never_taken_for_one_that_has_
     os.kill(state.pid, signal.SIGTERM)
 
 
+@pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
+@pytest.mark.parametrize("record", ["another process's pid", "no start token"])
+def test_stop_answers_at_once_when_it_signals_nothing_to_a_live_daemon(
+    data_dir: Path, force: bool, record: str
+) -> None:
+    # With the CLI's own 90 s timeout: waiting would only end in the same answer, 90 s later.
+    state = _start(data_dir).state
+    assert isinstance(state, daemon.DaemonState)
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        named = (
+            replace(state, pid=bystander.pid) if record == "another process's pid" else replace(state, start_token=None)
+        )
+        (data_dir / daemon.PID_FILE).write_text(json.dumps(asdict(named)))
+        began = time.monotonic()
+
+        result = within(5.0, lambda: daemon.stop(data_dir, timeout=90.0, force=force))
+
+        assert time.monotonic() - began < 2.0
+        assert result.outcome is StopOutcome.STILL_RUNNING
+        assert not result.signalled
+        assert alive(state.pid)
+        assert bystander.poll() is None
+    finally:
+        bystander.kill()
+        bystander.wait()
+        os.kill(state.pid, signal.SIGTERM)
+
+
 def test_a_newer_record_with_extra_fields_still_reads(data_dir: Path) -> None:
     state = _start(data_dir).state
     assert state is not None

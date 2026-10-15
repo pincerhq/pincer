@@ -354,25 +354,31 @@ class _StopProgress:
 
     def __init__(self, data_dir: Path) -> None:
         self._data_dir = data_dir
-        self._announced = False
         self._status: Status | None = None
+        # What stop found, once it has said.
+        self.target: StopTarget | None = None
 
     def __call__(self, target: StopTarget, elapsed: float) -> None:
         from pincer.daemon import DaemonWithUnreadableRecord
 
-        if not self._announced:
-            self._announced = True
+        if self.target is None:
+            self.target = target
             if target.signalled and isinstance(target.state, DaemonWithUnreadableRecord):
                 line = f"Stopping Pincer (pid {target.pid} — its record can't be read by this version)…"
             elif target.signalled:
                 line = f"Stopping Pincer (pid {target.pid})…"
-            else:  # only waited for
+            elif target.waited_for:  # already exiting
                 line = (
                     f"Pincer holds data dir {self._data_dir}, but {_not_signalled_because(target)} — not "
                     f"signalling anything; waiting for it to exit ({_lsof_hint(self._data_dir)})…"
                 )
+            else:  # the whole answer: stop returns at once
+                line = (
+                    f"Pincer holds data dir {self._data_dir}, but {_not_signalled_because(target)} — not "
+                    f"signalling anything; {_lsof_hint(self._data_dir)}."
+                )
             console.print(line, soft_wrap=True, markup=False, highlight=False)
-            if console.is_terminal:
+            if console.is_terminal and target.waited_for:
                 self._status = console.status("Waiting for it to exit")
                 self._status.start()
         if self._status is not None:
@@ -466,6 +472,8 @@ def _stop_daemon(
     if result.outcome is daemon.StopOutcome.NOT_RUNNING:
         return False
     if result.outcome is daemon.StopOutcome.STILL_RUNNING and not result.signalled:
+        if progress.target is not None and not progress.target.waited_for:
+            return None  # its one line said it all
         console.print(
             f"[yellow]Pincer still holds data dir {escape(str(settings.data_dir))} after {timeout:g} s; nothing "
             f"was signalled — {escape(_lsof_hint(settings.data_dir))}.[/yellow]",
