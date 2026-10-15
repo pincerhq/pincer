@@ -57,6 +57,11 @@ CONTAINER_MESSAGE = "Pincer is running inside a container — use 'docker compos
 SHUTTING_DOWN = "Pincer is still shutting down (data dir {data_dir}) — try again in a moment."
 START_IN_PROGRESS = "A start of Pincer is in progress (pid {pid}) and hasn't taken its lease yet"
 UNREADABLE = (
+    "A Pincer daemon (pid {pid}) holds data dir {data_dir}, but its record can't be read by this version"
+    " — 'pincer stop' can still stop it."
+)
+# The same, when the record doesn't still name a start token to check the pid against.
+UNREADABLE_UNIDENTIFIED = (
     "A Pincer daemon holds data dir {data_dir}, but its record can't be read by this version (it names pid {pid}),"
     " so its process can't be identified and 'pincer stop' won't signal it — 'lsof {data_dir}/pincer.lock' shows"
     " which process holds its lock."
@@ -1413,10 +1418,13 @@ def test_status_of_a_record_with_a_malformed_start_time_says_so_without_a_traceb
     assert "Pincer is running" not in result.output
 
 
-def _from_a_newer_version(data_dir: Path) -> int:
-    """A running daemon whose record names a phase this version doesn't know; its pid."""
+def _from_a_newer_version(data_dir: Path, *, start_token: bool = True) -> int:
+    """A running daemon whose record names a phase this version doesn't know (and, unless
+    `start_token` is False, its start token, so stop can still tell its process); its pid."""
     assert runner.invoke(app, ["run", "-d"]).exit_code == 0
     record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    if not start_token:
+        del record["start_token"]
     (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "state": "draining"}))
     return int(record["pid"])
 
@@ -1443,10 +1451,27 @@ def test_status_of_a_daemon_with_a_record_it_cant_read_says_so(data_dir: Path) -
 
 
 @pytest.mark.parametrize("force", [[], ["--force"]], ids=["stop", "force"])
-def test_stop_never_signals_a_daemon_whose_record_it_cant_read(
+def test_stop_stops_a_daemon_whose_record_it_cant_read_by_the_pid_and_token_it_still_names(
     data_dir: Path, tmp_path: Path, force: list[str]
 ) -> None:
     pid = _from_a_newer_version(data_dir)
+
+    result = within(15.0, lambda: runner.invoke(app, ["stop", "--timeout", "10", *force]))
+
+    assert result.exit_code == 0, result.output
+    assert result.output.splitlines() == [
+        f"Stopping Pincer (pid {pid} — its record can't be read by this version)…",
+        f"Pincer {'killed' if force else 'stopped'} (pid {pid})",
+    ]
+    assert daemon_fake_child.children_under(tmp_path) == []
+
+
+@pytest.mark.parametrize("force", [[], ["--force"]], ids=["stop", "force"])
+def test_stop_never_signals_a_daemon_whose_record_it_cant_read_and_names_no_start_token(
+    data_dir: Path, tmp_path: Path, force: list[str]
+) -> None:
+    pid = _from_a_newer_version(data_dir, start_token=False)
+    assert UNREADABLE_UNIDENTIFIED.format(pid=pid, data_dir=data_dir) in runner.invoke(app, ["status"]).output
 
     result = within(10.0, lambda: runner.invoke(app, ["stop", "--timeout", "0.5", *force]))
 
@@ -1472,8 +1497,21 @@ def test_plain_run_beside_a_daemon_with_a_record_it_cant_read_says_so(
     assert ran == []
 
 
-def test_restart_leaves_a_daemon_whose_record_it_cant_read_alone(data_dir: Path, tmp_path: Path) -> None:
+def test_restart_replaces_a_daemon_whose_record_it_cant_read(data_dir: Path, tmp_path: Path) -> None:
     old = _from_a_newer_version(data_dir)
+
+    result = runner.invoke(app, ["restart", "--timeout", "10"])  # in this thread: run -d's wait takes Ctrl+C over
+
+    assert result.exit_code == 0, result.output
+    assert f"Pincer stopped (pid {old})" in result.output
+    new = _pid_in(result.output, r"Pincer started \(pid (\d+)\)")
+    assert daemon_fake_child.children_under(tmp_path) == [new]
+
+
+def test_restart_leaves_a_daemon_whose_record_it_cant_read_and_names_no_start_token_alone(
+    data_dir: Path, tmp_path: Path
+) -> None:
+    old = _from_a_newer_version(data_dir, start_token=False)
 
     result = within(10.0, lambda: runner.invoke(app, ["restart", "--timeout", "0.5"]))
 

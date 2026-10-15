@@ -204,6 +204,18 @@ def _pid_part(state: LiveDaemon | None) -> str:
 
 
 def unreadable_record_message(data_dir: Path, state: DaemonWithUnreadableRecord) -> str:
+    from pincer.daemon import Identity, StopTarget, identify
+
+    target = StopTarget(state, identify(state))
+    if target.signalled:
+        return (
+            f"A Pincer daemon (pid {state.pid}) holds data dir {data_dir}, but its record can't be read by this "
+            "version — 'pincer stop' can still stop it."
+        )
+    if target.identity is not Identity.UNKNOWN:
+        return (
+            f"A Pincer daemon holds data dir {data_dir}, but {_not_signalled_because(target)} — {_lsof_hint(data_dir)}."
+        )
     return (
         f"A Pincer daemon holds data dir {data_dir}, but {_unidentified(state)} and 'pincer stop' won't "
         f"signal it — {_lsof_hint(data_dir)}."
@@ -346,9 +358,13 @@ class _StopProgress:
         self._status: Status | None = None
 
     def __call__(self, target: StopTarget, elapsed: float) -> None:
+        from pincer.daemon import DaemonWithUnreadableRecord
+
         if not self._announced:
             self._announced = True
-            if target.signalled:
+            if target.signalled and isinstance(target.state, DaemonWithUnreadableRecord):
+                line = f"Stopping Pincer (pid {target.pid} — its record can't be read by this version)…"
+            elif target.signalled:
                 line = f"Stopping Pincer (pid {target.pid})…"
             else:  # only waited for
                 line = (

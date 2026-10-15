@@ -30,6 +30,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import signal
 import struct
 import subprocess  # nosec B404 - re-spawns our own CLI with a fixed argv, no shell
@@ -70,6 +71,8 @@ LEASE_RETRY = 0.01
 # `ps -o lstart` by test_a_start_token_is_when_the_kernel_says_the_process_started.
 CTL_KERN, KERN_PROC, KERN_PROC_PID = 1, 14, 1
 KINFO_PROC_SIZE = 648
+# What _start_token returns: clock ticks on Linux, `seconds.microseconds` on macOS.
+START_TOKEN_SHAPE = re.compile(r"\d+(\.\d{6})?")
 # A start waits at least this long for the start lock, however short its own wait: someone asking
 # whether a start is in progress holds it for an instant.
 START_LOCK_GRACE = 0.2
@@ -130,9 +133,11 @@ class DaemonWithoutRecord:
 @dataclass(frozen=True)
 class DaemonWithUnreadableRecord:
     """A daemon holds the lease and has a record, but not one this version can read (a newer
-    version's phase, a malformed field). `pid` is what the record names, if anything: unverified."""
+    version's phase, a malformed field). `pid` and `start_token` are what the record names, where
+    they still parse: unverified until `stop` checks them as it does a readable record's."""
 
     pid: int | None
+    start_token: str | None = None
 
 
 # What read_state says of a data dir whose lease is held.
@@ -372,8 +377,13 @@ def _read_record(path: Path) -> DaemonState | DaemonWithUnreadableRecord | None:
             raise ValueError("started_at")
         return replace(state, state=DaemonPhase(state.state))
     except (ValueError, TypeError, AttributeError):
-        pid = record.get("pid") if isinstance(record, dict) else None
-        return DaemonWithUnreadableRecord(pid=pid if _is_int(pid) and pid > 0 else None)
+        if not isinstance(record, dict):
+            return DaemonWithUnreadableRecord(pid=None)
+        pid, token = record.get("pid"), record.get("start_token")
+        return DaemonWithUnreadableRecord(
+            pid=pid if _is_int(pid) and pid > 0 else None,
+            start_token=token if isinstance(token, str) and START_TOKEN_SHAPE.fullmatch(token) else None,
+        )
 
 
 def _is_int(value: object) -> TypeGuard[int]:
@@ -436,7 +446,7 @@ def stop(
         return StopResult(StopOutcome.NOT_RUNNING)
     if not daemon_running(data_dir):  # it exited on its own since the record was read
         return StopResult(StopOutcome.STOPPED, state.pid, Identity.GONE)
-    target = StopTarget(state, _identify(state))
+    target = StopTarget(state, identify(state))
     pid = target.pid
     if target.signalled and pid is not None and pid != os.getpid():
         with contextlib.suppress(ProcessLookupError):
@@ -457,9 +467,10 @@ def stop(
         time.sleep(POLL_INTERVAL)
 
 
-def _identify(state: LiveDaemon) -> Identity:
-    """Whether the process the record names is the daemon that wrote it (see Identity)."""
-    if not isinstance(state, DaemonState):
+def identify(state: LiveDaemon) -> Identity:
+    """Whether the process the record names is the daemon that wrote it (see Identity). A record
+    this version can't read is checked the same way, by the pid and start token it still names."""
+    if isinstance(state, DaemonWithoutRecord) or state.pid is None:
         return Identity.UNKNOWN
     if not _has_start_tokens():
         return Identity.UNCHECKED

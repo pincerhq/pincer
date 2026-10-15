@@ -824,6 +824,46 @@ def test_stop_never_signals_a_daemon_whose_record_it_cant_read(data_dir: Path, f
     os.kill(pid, signal.SIGTERM)
 
 
+@pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
+def test_stop_stops_a_daemon_whose_record_it_cant_read_when_its_pid_and_token_still_check_out(
+    data_dir: Path, force: bool
+) -> None:
+    # A newer version's phase, say: the rest of the record still says exactly which process it is.
+    state = _start(data_dir).state
+    assert isinstance(state, daemon.DaemonState)
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "state": "draining"}))
+    assert isinstance(daemon.read_state(data_dir), daemon.DaemonWithUnreadableRecord)
+
+    result = within(15.0, lambda: daemon.stop(data_dir, timeout=10.0, force=force))
+
+    outcome = StopOutcome.KILLED if force else StopOutcome.STOPPED
+    assert result == daemon.StopResult(outcome, state.pid, daemon.Identity.VERIFIED)
+    assert not alive(state.pid)
+
+
+@pytest.mark.parametrize("force", [False, True], ids=["stop", "force"])
+def test_stop_never_signals_a_pid_in_a_record_it_cant_read_that_now_names_another_process(
+    data_dir: Path, force: bool
+) -> None:
+    state = _start(data_dir).state
+    assert isinstance(state, daemon.DaemonState)
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    bystander = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "pid": bystander.pid, "state": "draining"}))
+
+        result = within(10.0, lambda: daemon.stop(data_dir, timeout=0.5, force=force))
+
+        assert result == daemon.StopResult(StopOutcome.STILL_RUNNING, bystander.pid, daemon.Identity.NOT_PINCER)
+        time.sleep(0.2)  # a signal sent to it would have landed by now
+        assert bystander.poll() is None
+        assert alive(state.pid)
+    finally:
+        bystander.kill()
+        bystander.wait()
+
+
 def test_a_newer_record_with_extra_fields_still_reads(data_dir: Path) -> None:
     state = _start(data_dir).state
     assert state is not None
@@ -875,7 +915,7 @@ def test_a_record_naming_no_single_process_is_unreadable_and_nothing_is_signalle
     (data_dir / daemon.PID_FILE).write_text(json.dumps(asdict(replace(state, pid=bad_pid))))
 
     # The record names nothing usable: nothing is signalled, only waited for.
-    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=None)
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(None, state.start_token)
     result = within(10.0, lambda: daemon.stop(data_dir, timeout=0.5, force=force))
 
     assert result == daemon.StopResult(StopOutcome.STILL_RUNNING, None, daemon.Identity.UNKNOWN)
@@ -983,12 +1023,12 @@ def test_a_record_with_a_malformed_field_is_unreadable(data_dir: Path, field: st
     os.kill(pid, signal.SIGTERM)
 
 
-def test_a_record_from_a_newer_version_reads_as_unreadable_with_its_pid(data_dir: Path) -> None:
+def test_a_record_from_a_newer_version_reads_as_unreadable_with_its_pid_and_start_token(data_dir: Path) -> None:
     pid = _start(data_dir).state.pid  # type: ignore[union-attr]
     record = json.loads((data_dir / daemon.PID_FILE).read_text())
     (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "state": "draining"}))
 
-    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=pid)
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid, record["start_token"])
     os.kill(pid, signal.SIGTERM)
 
 
@@ -1013,7 +1053,7 @@ def test_a_record_whose_start_time_has_no_time_zone_is_unreadable(data_dir: Path
     record = json.loads((data_dir / daemon.PID_FILE).read_text())
     (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "started_at": "2026-10-14T10:00:00"}))
 
-    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid=pid)
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid, record["start_token"])
     os.kill(pid, signal.SIGTERM)
 
 
@@ -1270,3 +1310,14 @@ def test_without_start_tokens_the_lease_works_and_stop_signals_the_record_pid(
     (idle / daemon.LOCK_FILE).touch()
     assert not daemon.daemon_running(idle)
     assert daemon.read_state(idle) is None
+
+
+@pytest.mark.parametrize("token", [7, "", "soon", "123.45", "-1"], ids=repr)
+def test_a_start_token_that_isnt_one_is_dropped_from_a_record_it_cant_read(data_dir: Path, token: object) -> None:
+    pid = _start(data_dir).state.pid  # type: ignore[union-attr]
+    record = json.loads((data_dir / daemon.PID_FILE).read_text())
+    (data_dir / daemon.PID_FILE).write_text(json.dumps({**record, "state": "draining", "start_token": token}))
+
+    assert daemon.read_state(data_dir) == daemon.DaemonWithUnreadableRecord(pid, None)
+    assert daemon.identify(daemon.DaemonWithUnreadableRecord(pid, None)) is daemon.Identity.UNKNOWN
+    os.kill(pid, signal.SIGTERM)
