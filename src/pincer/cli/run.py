@@ -931,12 +931,16 @@ def _stop_core_on_shutdown(shutdown: _Shutdown, core: CoreComponents) -> None:
     shutdown.on_stop("cost tracker", core.cost_tracker.close)
     shutdown.on_stop("sessions", core.session_mgr.close)
     shutdown.on_stop("LLM client", core.llm.close)
-    try:
-        from pincer.voice.telemetry import runtime as telephony_telemetry
-    except ImportError:  # the voice extra isn't installed: nothing was started
-        pass
-    else:
-        shutdown.on_stop("telephony telemetry", telephony_telemetry.shutdown)
+
+    async def shut_down_telephony_telemetry() -> None:
+        # Imported here, so any import failure but a missing voice extra is the step's to report.
+        try:
+            from pincer.voice.telemetry import runtime as telephony_telemetry
+        except ImportError:  # the voice extra isn't installed: nothing was started
+            return
+        await telephony_telemetry.shutdown()
+
+    shutdown.on_stop("telephony telemetry", shut_down_telephony_telemetry)
 
     async def close_browser_if_installed() -> None:
         try:

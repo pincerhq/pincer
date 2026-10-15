@@ -14,6 +14,7 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from daemon_support import free_port, pincer_command, scratch_env, signal_channel_env, wait_for_output
@@ -196,7 +197,9 @@ class _Part:
 
 
 @pytest.mark.parametrize(
-    "failing", [None, "triggers", "telephony telemetry"], ids=["clean", "a step fails", "telemetry fails"]
+    "failing",
+    [None, "triggers", "telephony telemetry", "telemetry import"],
+    ids=["clean", "a step fails", "telemetry fails", "telemetry import fails"],
 )
 async def test_shutdown_stops_what_started_last_first_and_exits_1_only_when_a_step_failed(
     monkeypatch: pytest.MonkeyPatch,
@@ -226,6 +229,18 @@ async def test_shutdown_stops_what_started_last_first_and_exits_1_only_when_a_st
             raise RuntimeError("exporter flush failed")
 
         monkeypatch.setattr("pincer.voice.telemetry.runtime.shutdown", telemetry_breaks)
+    if failing == "telemetry import":
+        import builtins
+
+        real_import = builtins.__import__
+
+        def import_(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name.startswith("pincer.voice.telemetry"):
+                raise RuntimeError("a broken optional dependency")
+            return real_import(name, *args, **kwargs)
+
+        # Anything but ImportError: registering must not abort startup, and the step counts it.
+        monkeypatch.setattr(builtins, "__import__", import_)
     core = SimpleNamespace(
         mcp_manager=_Part("MCP clients", stopped),
         llm=AsyncMock(),
@@ -266,7 +281,8 @@ async def test_shutdown_stops_what_started_last_first_and_exits_1_only_when_a_st
         assert exited.value.code == 0
     else:
         assert exited.value.code == 1
-        assert f"Shutdown step failed: {failing}" in caplog.text
+        step = "telephony telemetry" if failing == "telemetry import" else failing
+        assert f"Shutdown step failed: {step}" in caplog.text
 
 
 def test_the_channels_drain_before_the_mcp_server_stops(tmp_path: Path, signal_stub: str) -> None:
