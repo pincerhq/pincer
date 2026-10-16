@@ -46,8 +46,8 @@ class CallsService(DatabaseService):
                 if membership is not None:
                     await members.backfill_call_facts(
                         call_sid,
-                        call_started_at=str(values.get("started_at") or ""),
-                        direction=str(values.get("direction") or ""),
+                        call_started_at=values.get("started_at"),
+                        direction=values.get("direction"),
                     )
 
     async def set_fields(self, call_sid: str, values: dict[str, Any]) -> int:

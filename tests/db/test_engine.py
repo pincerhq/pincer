@@ -153,6 +153,29 @@ async def test_a_sslmode_url_opens_an_engine_that_reaches_the_socket():
     await dispose_engines()
 
 
+@pytest.mark.parametrize("query", ["", "?application_name=pincer-test"])
+async def test_postgres_sessions_run_in_utc_whatever_the_server_default(postgres_scratch_url, query):
+    """The timestamp columns have no zone, so a `CURRENT_TIMESTAMP` default is
+    stored in the session's zone; `IsoText` reads every value back as UTC."""
+    import sqlalchemy as sa
+
+    admin = sa.create_engine(postgres_scratch_url, isolation_level="AUTOCOMMIT")
+    database = sa.engine.make_url(postgres_scratch_url).database
+    with admin.connect() as conn:
+        conn.execute(sa.text(f"ALTER DATABASE \"{database}\" SET timezone TO 'Europe/Berlin'"))
+    try:
+        engine = get_engine(to_async_url(postgres_scratch_url + query))
+        async with engine.connect() as conn:
+            assert (await conn.execute(text("SHOW timezone"))).scalar() == "UTC"
+            if query:
+                assert (await conn.execute(text("SHOW application_name"))).scalar() == "pincer-test"
+        await dispose_engines()
+    finally:
+        with admin.connect() as conn:
+            conn.execute(sa.text(f'ALTER DATABASE "{database}" RESET timezone'))
+        admin.dispose()
+
+
 def test_the_migration_lock_sits_next_to_the_database_the_url_names(monkeypatch, tmp_path: Path):
     """Two processes whose settings differ but whose override names one file must share a lock."""
     shared = tmp_path / "shared" / "pincer.db"

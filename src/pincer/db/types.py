@@ -26,6 +26,10 @@ class IsoText(TypeDecorator[str]):
     stored as UTC and read back with `+00:00`, which is the form the app writes
     (`datetime.now(UTC).isoformat()`). A string without an offset is taken to
     already be UTC, as SQLite's `CURRENT_TIMESTAMP` is.
+
+    An empty (or blank) string is the app's "no timestamp" sentinel; it binds
+    as NULL on both dialects, as `Uuid7` does for its own sentinel, so the
+    same write reads back the same everywhere.
     """
 
     impl = Text
@@ -37,7 +41,9 @@ class IsoText(TypeDecorator[str]):
         return dialect.type_descriptor(Text())
 
     def process_bind_param(self, value: str | None, dialect: Dialect) -> Any:
-        if value is None or dialect.name != "postgresql":
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        if dialect.name != "postgresql":
             return value
         parsed = datetime.fromisoformat(value)
         if parsed.tzinfo is not None:

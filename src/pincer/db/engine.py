@@ -276,6 +276,11 @@ def _create_engine(url: str) -> AsyncEngine:
         return engine
     # A pooled Postgres connection can be dropped server-side while idle.
     target, connect_args = _asyncpg_connect_args(url)
+    # The timestamp columns are `TIMESTAMP` without a zone, and their
+    # `CURRENT_TIMESTAMP` defaults are converted to the session's zone on
+    # store: pinned to UTC, which is what `IsoText` reads them back as.
+    # asyncpg merges this with any `server_settings` the DSN carries.
+    connect_args["server_settings"] = {"timezone": "UTC"}
     return create_async_engine(target, pool_pre_ping=True, connect_args=connect_args)
 
 

@@ -103,6 +103,105 @@ async def test_the_thread_columns_are_re_derived_from_the_membership(url):
     assert (member.call_started_at, member.direction) == (EARLIER, "outbound")
 
 
+async def test_a_call_attached_before_its_row_exists_is_backfilled_on_save(url):
+    """An outbound call is attached right after dialling, before its
+    `voice_calls` row (and so its start time) exists."""
+    threads = ThreadsService(url)
+    async with session_scope(url) as session:
+        session.add(
+            CallThread(
+                thread_id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
+            )
+        )
+    await threads.attach(
+        {
+            "call_sid": "CA1",
+            "thread_id": seeded_id("th_1"),
+            "attach_kind": "origin",
+            "attached_at": EARLIER,
+            "call_started_at": "",
+            "direction": "",
+        },
+        touched_at=LATER,
+    )
+    async with session_scope(url) as session:
+        member = await ThreadMemberRepository(session).for_call("CA1")
+    assert member is not None
+    assert member.call_started_at is None
+
+    calls = CallsService(url)
+    await calls.save_call(
+        {"call_sid": "CA1", "direction": "outbound", "started_at": LATER}, thread_columns_from_members=True
+    )
+    async with session_scope(url) as session:
+        member = await ThreadMemberRepository(session).for_call("CA1")
+    assert (member.call_started_at, member.direction) == (LATER, "outbound")
+
+
+async def test_a_backfill_leaves_the_facts_it_was_not_given(url):
+    """`save` is a partial upsert, so a save may not carry every fact; the
+    backfill must not blank the ones it was not given."""
+    async with session_scope(url) as session:
+        session.add(
+            CallThread(
+                thread_id=seeded_id("th_1"), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
+            )
+        )
+        await session.flush()
+        members = ThreadMemberRepository(session)
+        await members.attach(
+            {
+                "call_sid": "CA1",
+                "thread_id": seeded_id("th_1"),
+                "attach_kind": "origin",
+                "attached_at": EARLIER,
+                "call_started_at": EARLIER,
+                "direction": "outbound",
+            }
+        )
+        assert await members.backfill_call_facts("CA1", call_started_at=None, direction="") == 0
+        await members.backfill_call_facts("CA1", direction="inbound")
+
+    async with session_scope(url) as session:
+        member = await ThreadMemberRepository(session).for_call("CA1")
+    assert (member.call_started_at, member.direction) == (EARLIER, "inbound")
+
+
+async def test_a_re_attach_fills_in_the_call_facts_but_never_blanks_them(url):
+    async with session_scope(url) as session:
+        for label in ("th_1", "th_2"):
+            session.add(
+                CallThread(
+                    thread_id=seeded_id(label), subject="s", origin="user_task", created_at=EARLIER, updated_at=EARLIER
+                )
+            )
+
+    async def attach(thread: str, started_at: str | None, direction: str) -> CallThreadMember:
+        async with session_scope(url) as session:
+            members = ThreadMemberRepository(session)
+            await members.attach(
+                {
+                    "call_sid": "CA1",
+                    "thread_id": seeded_id(thread),
+                    "attach_kind": "manual",
+                    "attached_at": LATER,
+                    "call_started_at": started_at,
+                    "direction": direction,
+                }
+            )
+            return await members.for_call("CA1")
+
+    # First attached before the call had a row: nothing known yet.
+    first = await attach("th_1", None, "")
+    assert (first.call_started_at, first.direction) == (None, "")
+    # A re-attach once the call row exists fills the facts in ...
+    second = await attach("th_2", EARLIER, "outbound")
+    assert (second.thread_id, second.call_started_at, second.direction) == (seeded_id("th_2"), EARLIER, "outbound")
+    # ... and one that knows nothing keeps them.
+    third = await attach("th_1", None, "")
+    assert (third.thread_id, third.call_started_at, third.direction) == (seeded_id("th_1"), EARLIER, "outbound")
+
+
 async def test_a_call_with_no_thread_gets_empty_thread_columns(url):
     calls = CallsService(url)
     await calls.save_call(
