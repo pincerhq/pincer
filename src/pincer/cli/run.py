@@ -229,11 +229,12 @@ async def _build_core(settings: Settings) -> CoreComponents:
     if settings.memory_enabled:
         memory_store = _create_memory_backend(settings)
         await memory_store.initialize()
+        summary_llm, summary_model = llm_router.get_summarizer()
         summarizer = Summarizer(
-            llm=llm_router.get_summarizer(),
+            llm=summary_llm,
             memory_store=memory_store,
             session_manager=session_mgr,
-            summary_model=settings.summary_model,
+            summary_model=summary_model,
             threshold=settings.summary_threshold,
         )
         console.print("[green]Memory system enabled[/green]")

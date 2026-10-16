@@ -37,7 +37,7 @@ class Summarizer:
         llm: BaseLLMProvider,
         memory_store: BaseMemoryBackend,
         session_manager: SessionManager,
-        summary_model: str = "claude-haiku-4-5-20251001",
+        summary_model: str | None = None,
         threshold: int = 20,
     ) -> None:
         self._llm = llm

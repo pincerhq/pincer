@@ -82,3 +82,20 @@ def test_no_keys_gives_nothing(default_targets):
         openai_compatible_base_url="http://localhost:11434/v1",
     )
     assert default_targets(settings) == []
+
+
+def test_openai_primary_ignores_claude_summary_default(default_targets):
+    settings = _settings(default_provider="openai", default_model="gpt-5-mini", openai_api_key="sk-test")
+    assert settings.summary_model.startswith("claude")
+    assert default_targets(settings) == [("openai", "gpt-5-mini")]
+
+
+def test_summary_model_provider_prefix(default_targets):
+    settings = _settings(
+        default_provider="openai",
+        default_model="gpt-5-mini",
+        openai_api_key="sk-test",
+        anthropic_api_key="sk-test",
+        summary_model="anthropic:claude-haiku-4-5",
+    )
+    assert default_targets(settings) == [("openai", "gpt-5-mini"), ("anthropic", "claude-haiku-4-5")]

@@ -30,6 +30,7 @@ from pincer.config import Settings
 from pincer.llm.anthropic_common import AnthropicCompatibleProvider
 from pincer.llm.base import LLMMessage, MessageRole
 from pincer.llm.openai_common import OpenAICompatibleProvider
+from pincer.llm.router import is_openai_wire, summary_target
 
 if TYPE_CHECKING:
     from pincer.llm.base import BaseLLMProvider
@@ -91,7 +92,11 @@ def default_targets(settings: Settings) -> list[tuple[str, str]]:
         add("anthropic", settings.anthropic_model)
     if settings.openai_model:
         add("openai", settings.openai_model)
-    add(settings.summary_provider or settings.default_provider, settings.summary_model)
+    # Same resolution as LLMRouter.get_summarizer().
+    summary_provider, summary_model = summary_target(settings)
+    if summary_model.startswith("claude") and is_openai_wire(settings, summary_provider):
+        summary_model = ""
+    add(summary_provider, summary_model or _provider_model(settings, summary_provider))
     # "provider:model" names both; a bare model runs on the default provider.
     turn_provider, sep, turn_model = settings.voice_turn_model.partition(":")
     if sep:

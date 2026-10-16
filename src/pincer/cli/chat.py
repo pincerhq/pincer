@@ -71,11 +71,12 @@ async def _chat_loop() -> None:
             await memory_store.close()
             memory_store = None
         else:
+            summary_llm, summary_model = llm_router.get_summarizer()
             summarizer = Summarizer(
-                llm=llm_router.get_summarizer(),
+                llm=summary_llm,
                 memory_store=memory_store,
                 session_manager=session_mgr,
-                summary_model=settings.summary_model,
+                summary_model=summary_model,
                 threshold=settings.summary_threshold,
             )
 

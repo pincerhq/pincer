@@ -46,7 +46,11 @@ class ToolSettings(BaseModel):
     )
     summary_model: str = Field(
         default="claude-haiku-4-5-20251001",
-        description="Cheap model for conversation summarization",
+        description=(
+            "Cheap model for conversation summarization. 'provider:model' (e.g. 'anthropic:claude-haiku-4-5') "
+            "also picks the provider, overriding summary_provider. A claude-* id on an OpenAI-wire provider "
+            "is ignored in favour of that provider's own model"
+        ),
     )
     summary_threshold: int = Field(default=20, ge=5, description="Summarize conversation after N messages")
 

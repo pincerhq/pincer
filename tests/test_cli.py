@@ -233,7 +233,7 @@ async def test_chat_loop_degrades_mcp_memory_backend(
     monkeypatch.setattr("pincer.cli.chat._create_memory_backend", lambda _s: fake_memory)
     mock_router = MagicMock()
     mock_router.get_llm.return_value = mock_llm
-    mock_router.get_summarizer.return_value = mock_llm
+    mock_router.get_summarizer.return_value = (mock_llm, "test-model")
 
     monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=mock_session))
     monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=mock_cost))
@@ -292,7 +292,7 @@ async def test_chat_loop_creates_summarizer_for_non_mcp_memory(
     monkeypatch.setattr("pincer.cli.chat._create_memory_backend", lambda _s: fake_memory)
     mock_router = MagicMock()
     mock_router.get_llm.return_value = mock_llm
-    mock_router.get_summarizer.return_value = mock_llm
+    mock_router.get_summarizer.return_value = (mock_llm, "test-model")
 
     monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=AsyncMock()))
     monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=AsyncMock()))
