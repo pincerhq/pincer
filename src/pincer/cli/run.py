@@ -507,12 +507,18 @@ async def _build_core(settings: Settings) -> CoreComponents:
             )
 
     # Skills: SKILL.md-based discovery, coexists unconditionally with MCP.
+    from pincer.exceptions import SkillLoadError
     from pincer.services.skills import get_skill_service
     from pincer.tools.builtin.skills_tools import make_skills_tools
 
     # The process-wide service: the dashboard API served from this process reads
-    # the same index.
-    skill_service = get_skill_service(settings)
+    # the same index. A remote skills root that can't be used refuses to start
+    # (shared by `pincer run` and `pincer run tasks`), naming what to configure.
+    try:
+        skill_service = get_skill_service(settings, require_usable_root=True)
+    except SkillLoadError as e:
+        console.print(f"[red]Skills: {e}[/red]", soft_wrap=True)
+        raise typer.Exit(1) from e
     skill_index = skill_service.ensure_current()
 
     skill_tools = make_skills_tools(skill_service, sandbox_disabled=settings.skill_sandbox_disabled)

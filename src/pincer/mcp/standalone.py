@@ -184,12 +184,16 @@ class StandaloneMCPShell:
         server_cfg = getattr(self._config, "server", None)
         expose_tools: list[str] = getattr(server_cfg, "expose_tools", list(_STANDALONE_SAFE_TOOL_NAMES))
 
+        from pincer.exceptions import SkillLoadError
+
         try:
             from pincer.tools.registry import ToolRegistry
 
             temp_registry = ToolRegistry()
             # Attempt to load built-in tools
             _load_builtin_tools_into(temp_registry)
+        except SkillLoadError:
+            raise  # an unusable remote skills root must stop the server from starting
         except Exception as e:
             logger.debug("Could not load built-in tools for standalone mode: %s", e)
             return
@@ -237,19 +241,24 @@ def _load_builtin_tools_into(registry: Any) -> None:
     Load standalone-safe built-in tools into *registry*.
 
     Only tools that work without a full agent context are loaded.
-    This is a best-effort operation; missing tools are silently skipped.
+    This is a best-effort operation; missing tools are silently skipped. The one
+    exception: a remote skills root that can't be used raises SkillLoadError, so
+    the server refuses to start rather than serving without the configured skills.
 
     Web search is no longer a builtin — standalone mode picks it up via the
     ordinary MCP-client path (a ``websearch`` entry in ``[[mcp.servers]]``)
     like any other external tool, not through this shortcut.
     """
+    from pincer.config import get_settings_relaxed
+    from pincer.services.skills import get_skill_service
+
+    settings = get_settings_relaxed()
+    # Not best-effort: a remote skills root that can't be used refuses to start
+    # (SkillLoadError, naming the storage settings to configure).
+    service = get_skill_service(settings, require_usable_root=True)
     try:
-        from pincer.config import get_settings_relaxed
-        from pincer.services.skills import get_skill_service
         from pincer.tools.builtin.skills_tools import make_skills_tools
 
-        settings = get_settings_relaxed()
-        service = get_skill_service(settings)
         service.ensure_current()
         skill_tools = make_skills_tools(service, sandbox_disabled=settings.skill_sandbox_disabled)
         registry.register(

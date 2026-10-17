@@ -131,8 +131,12 @@ mounting a directory. Install the new `remote-skills` extra
   script-only edits take effect on the next run.
 - Credentials: optional `PINCER_STORAGE_S3_*`, `PINCER_STORAGE_AZURE_*` and
   `PINCER_STORAGE_GCS_*` settings; unset ones fall back to each SDK's default chain.
-- An unreachable bucket or missing extra logs an error and leaves only the bundled
-  skills, instead of failing startup.
+- A remote `skills_dir` must be usable at startup. `pincer run`, `pincer run tasks`,
+  `pincer mcp serve` and `pincer skills rebuild` exit 1 if the extra is missing,
+  the storage client can't be built, or listing the root fails (credentials,
+  bucket, endpoint). The error names the `PINCER_STORAGE_*` settings to
+  configure. SDK default credentials count as configured. A bucket that becomes
+  unreachable after startup only logs a warning on rescan.
 - New `pincer skills rebuild [--keep-cache]`: clears cached remote files, rescans
   and announces the change through a generation stamp in `skills_cache_dir`. A
   running `pincer run` reloads without a restart: a background watcher checks the

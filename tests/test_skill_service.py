@@ -447,3 +447,45 @@ def test_invalidate_without_a_cache_dir_marks_this_process_stale(user: SkillPath
     service.invalidate()
 
     assert _names(service.ensure_current()) == ["alpha", "beta"]
+
+
+# ── startup: require_usable_root ─────────────────────────────────────────────
+
+
+def _remote_settings(tmp_path: Path) -> MagicMock:
+    return MagicMock(skills_dir="s3://bucket/team", skills_max_loaded_per_root=100, skills_cache_dir=tmp_path)
+
+
+def test_from_settings_strict_raises_on_an_unusable_remote_root(tmp_path: Path) -> None:
+    from pincer.exceptions import SkillLoadError
+
+    with (
+        patch(
+            "pincer.services.skills.open_usable_skills_root",
+            side_effect=SkillLoadError("Skills root s3://bucket/team is not usable"),
+        ),
+        pytest.raises(SkillLoadError, match="not usable"),
+    ):
+        SkillService.from_settings(_remote_settings(tmp_path), require_usable_root=True)
+
+
+def test_from_settings_lenient_degrades_to_bundled_only(tmp_path: Path) -> None:
+    with patch("pincer.services.skills.open_user_skills_root", return_value=None):
+        service = SkillService.from_settings(_remote_settings(tmp_path))
+    assert service.user_dir is None
+
+
+def test_get_skill_service_strict_failure_creates_no_singleton(tmp_path: Path) -> None:
+    from pincer.exceptions import SkillLoadError
+
+    reset_skill_service()
+    try:
+        with (
+            patch("pincer.services.skills.open_usable_skills_root", side_effect=SkillLoadError("nope")),
+            pytest.raises(SkillLoadError),
+        ):
+            get_skill_service(_remote_settings(tmp_path), require_usable_root=True)
+        with patch("pincer.services.skills.open_user_skills_root", return_value=None):
+            assert get_skill_service(_remote_settings(tmp_path)).user_dir is None
+    finally:
+        reset_skill_service()

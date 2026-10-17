@@ -612,7 +612,12 @@ async def _mcp_serve(
         approval_policy=approval_policy,
     )
 
+    from pincer.exceptions import SkillLoadError
+
     try:
         await shell.run()
     except KeyboardInterrupt:
         console.print("\n[dim]Stopped.[/dim]")
+    except SkillLoadError as e:
+        console.print(f"[red]Skills: {e}[/red]", soft_wrap=True)
+        raise typer.Exit(1) from e

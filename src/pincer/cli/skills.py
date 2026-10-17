@@ -30,8 +30,8 @@ def skills_rebuild(
     from pincer.services.skills import SkillService
 
     settings = get_settings_relaxed()
-    service = SkillService.from_settings(settings)
     try:
+        service = SkillService.from_settings(settings, require_usable_root=True)
         index = service.rebuild(clear_cache=not keep_cache)
     except Exception as e:
         console.print(f"[red]Could not rebuild the skill index: {e}[/red]")

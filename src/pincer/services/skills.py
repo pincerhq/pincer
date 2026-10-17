@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 from pincer.tools.skills import index as index_module
 from pincer.tools.skills.index import SkillIndex
-from pincer.tools.skills.storage import clear_remote_cache, open_user_skills_root
+from pincer.tools.skills.storage import clear_remote_cache, open_usable_skills_root, open_user_skills_root
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -86,10 +86,18 @@ class SkillService:
         self._watched = False
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> SkillService:
+    def from_settings(cls, settings: Settings, *, require_usable_root: bool = False) -> SkillService:
+        """Build from settings. With `require_usable_root`, a remote `skills_dir` that
+        can't be used (missing extra, bad credentials, unreachable bucket) raises
+        SkillLoadError naming the storage settings to configure; otherwise it is
+        logged and the service runs with bundled skills only."""
+        if require_usable_root:
+            user_dir: SkillPath | None = open_usable_skills_root(settings.skills_dir, settings)
+        else:
+            user_dir = open_user_skills_root(settings)
         return cls(
             bundled_dir=index_module.BUNDLED_SKILLS_DIR,
-            user_dir=open_user_skills_root(settings),
+            user_dir=user_dir,
             max_per_root=settings.skills_max_loaded_per_root,
             cache_dir=settings.skills_cache_dir,
         )
@@ -300,9 +308,10 @@ _service: SkillService | None = None
 _service_lock = threading.Lock()
 
 
-def get_skill_service(settings: Settings | None = None) -> SkillService:
+def get_skill_service(settings: Settings | None = None, *, require_usable_root: bool = False) -> SkillService:
     """The process-wide SkillService, created on first use from `settings`
-    (default: the relaxed settings singleton)."""
+    (default: the relaxed settings singleton). `require_usable_root` applies to
+    that first creation — startup passes it, so later callers get the same service."""
     global _service
     with _service_lock:
         if _service is None:
@@ -310,7 +319,7 @@ def get_skill_service(settings: Settings | None = None) -> SkillService:
                 from pincer.config import get_settings_relaxed
 
                 settings = get_settings_relaxed()
-            _service = SkillService.from_settings(settings)
+            _service = SkillService.from_settings(settings, require_usable_root=require_usable_root)
         return _service
 
 

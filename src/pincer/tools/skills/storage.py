@@ -36,6 +36,25 @@ type SkillPath = Path | CloudPath
 
 _REMOTE_URI_RE = re.compile(r"^(s3|az|gs)://", re.IGNORECASE)
 _ANY_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+# What to configure when a remote root can't be used. SDK default credentials
+# (IAM role / ~/.aws, managed identity / az login, ADC) count as configured too.
+_STORAGE_HINTS = {
+    "s3": (
+        "Configure PINCER_STORAGE_S3_ACCESS_KEY_ID and PINCER_STORAGE_S3_SECRET_ACCESS_KEY "
+        "(or PINCER_STORAGE_S3_PROFILE), PINCER_STORAGE_S3_REGION, and PINCER_STORAGE_S3_ENDPOINT_URL "
+        "for S3-compatible servers (MinIO, R2) — or provide AWS default credentials (IAM role, AWS_* env, ~/.aws)."
+    ),
+    "az": (
+        "Configure PINCER_STORAGE_AZURE_CONNECTION_STRING, or PINCER_STORAGE_AZURE_ACCOUNT_URL with "
+        "PINCER_STORAGE_AZURE_CREDENTIAL (account key or SAS token) — or make DefaultAzureCredential "
+        "available (managed identity, az login) alongside the account URL."
+    ),
+    "gs": (
+        "Configure PINCER_STORAGE_GCS_CREDENTIALS_FILE (service-account JSON) and PINCER_STORAGE_GCS_PROJECT "
+        "— or provide Application Default Credentials."
+    ),
+}
+
 _MISSING_EXTRA_MSG = (
     "Remote skill roots ({uri}) need cloudpathlib. Install it with: pip install 'pincer-agent[remote-skills]'"
 )
@@ -136,13 +155,37 @@ def open_skills_root(location: str | Path, settings: Settings) -> SkillPath:
     except Exception as e:
         # SDK messages describe the failure (bad profile, malformed connection
         # string), never the secret values themselves.
-        raise SkillLoadError(f"Cannot open skills root {uri}: {type(e).__name__}: {e}") from e
+        raise SkillLoadError(
+            f"Cannot open skills root {uri}: {type(e).__name__}: {e}. {_STORAGE_HINTS.get(scheme, '')}"
+        ) from e
+
+
+def open_usable_skills_root(location: str | Path, settings: Settings) -> SkillPath:
+    """`open_skills_root`, plus proof that a remote root can actually be used.
+
+    For a cloud URI this lists the root once — the same call discovery makes — so
+    missing or wrong credentials, a missing bucket or an unreachable endpoint fail
+    here, at startup, with what to configure. An empty prefix is fine (no skills
+    yet). Local paths are returned as-is: a missing local dir just has no skills.
+    Startup calls this so a misconfigured remote root refuses to start.
+    """
+    root = open_skills_root(location, settings)
+    if isinstance(root, Path):
+        return root
+    uri = str(location)
+    hint = _STORAGE_HINTS.get(uri.split("://", 1)[0].lower(), "")
+    try:
+        next(iter(root.iterdir()), None)
+    except Exception as e:
+        raise SkillLoadError(f"Skills root {uri} is not usable: {type(e).__name__}: {e}. {hint}") from e
+    return root
 
 
 def open_user_skills_root(settings: Settings) -> SkillPath | None:
-    """`open_skills_root` for `settings.skills_dir`, logging instead of raising so a
-    misconfigured remote root degrades to "bundled skills only" rather than
-    aborting startup."""
+    """`open_skills_root` for `settings.skills_dir`, logging instead of raising: a
+    misconfigured remote root degrades to "bundled skills only". For code that
+    builds an index lazily after startup; startup itself uses the strict
+    `open_usable_skills_root`."""
     try:
         return open_skills_root(settings.skills_dir, settings)
     except SkillLoadError as e:

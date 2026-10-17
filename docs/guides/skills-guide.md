@@ -134,7 +134,15 @@ PINCER_SKILLS_DIR=az://my-container/team-skills   # Azure Blob Storage
 PINCER_SKILLS_DIR=gs://my-bucket/team-skills      # Google Cloud Storage
 ```
 
-There is still exactly one user root; bundled skills always stay local. Without the extra, a remote `skills_dir` logs an error naming the install command and Pincer runs with bundled skills only. An unreachable bucket does the same (with a warning) instead of aborting startup.
+There is still exactly one user root; bundled skills always stay local.
+
+**A remote root must be usable at startup.** `pincer run`, `pincer run tasks`, `pincer mcp serve` and `pincer skills rebuild` refuse to start, exiting with code 1, when a remote `skills_dir` can't be used. The error says what to fix:
+
+- **the `remote-skills` extra isn't installed:** the error names the install command;
+- **the storage client can't be built** (for example, an unknown AWS profile or a malformed connection string): the error lists the `PINCER_STORAGE_*` settings for that provider;
+- **listing the root fails** (missing or wrong credentials, a bucket that doesn't exist, an unreachable endpoint): same as above. Startup makes this one listing, the same call discovery makes.
+
+An empty prefix is fine (no skills yet). SDK default credentials (an IAM role, `~/.aws`, managed identity, Application Default Credentials) count as configured. If the bucket becomes unreachable after startup, Pincer keeps running: a rescan logs a warning and the user root contributes no skills until it's reachable again.
 
 **Credentials.** Every setting below is optional. Anything left unset falls through to the provider SDK's own default chain (`AWS_*` env vars / `~/.aws` / instance roles, `DefaultAzureCredential`, Application Default Credentials). Secrets are never logged — log lines show only the URI.
 

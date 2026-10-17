@@ -62,3 +62,16 @@ def test_rebuild_reports_failure(settings) -> None:
         result = runner.invoke(app, ["skills", "rebuild"])
     assert result.exit_code == 1
     assert "bucket on fire" in result.output
+
+
+def test_rebuild_refuses_an_unusable_remote_root(settings) -> None:
+    from pincer.exceptions import SkillLoadError
+
+    settings.skills_dir = "s3://bucket/team"
+    with patch(
+        "pincer.services.skills.open_usable_skills_root",
+        side_effect=SkillLoadError("Skills root s3://bucket/team is not usable: NoCredentialsError. Configure X"),
+    ):
+        result = runner.invoke(app, ["skills", "rebuild"])
+    assert result.exit_code == 1
+    assert "not usable" in result.output

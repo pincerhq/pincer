@@ -17,6 +17,7 @@ from pincer.tools.skills.storage import (
     is_remote_uri,
     localize_skill_dir,
     open_skills_root,
+    open_usable_skills_root,
     open_user_skills_root,
 )
 
@@ -336,3 +337,55 @@ def test_open_user_skills_root_logs_and_disables_on_error(
     with caplog.at_level(logging.ERROR):
         assert open_user_skills_root(settings) is None
     assert "remote-skills" in caplog.text
+
+
+# ── open_usable_skills_root (startup) ────────────────────────────────────────
+
+
+def test_usable_root_local_path_is_returned_even_if_missing(tmp_path: Path) -> None:
+    assert open_usable_skills_root(str(tmp_path / "nope"), _settings()) == tmp_path / "nope"
+
+
+def test_usable_root_reachable_cloud_root_passes(s3_skill_dir) -> None:
+    with patch("pincer.tools.skills.storage.open_skills_root", return_value=s3_skill_dir.parent):
+        assert open_usable_skills_root("s3://bucket/team", _settings()) == s3_skill_dir.parent
+
+
+def test_usable_root_empty_cloud_prefix_passes(s3_skill_dir) -> None:
+    empty = s3_skill_dir.parent / "nothing-here-yet"
+    with patch("pincer.tools.skills.storage.open_skills_root", return_value=empty):
+        assert open_usable_skills_root("s3://bucket/team/nothing-here-yet", _settings()) == empty
+
+
+@pytest.mark.parametrize(
+    ("uri", "expected_settings"),
+    [
+        ("s3://bucket/team", ["PINCER_STORAGE_S3_ACCESS_KEY_ID", "PINCER_STORAGE_S3_ENDPOINT_URL"]),
+        ("az://container/team", ["PINCER_STORAGE_AZURE_CONNECTION_STRING", "PINCER_STORAGE_AZURE_ACCOUNT_URL"]),
+        ("gs://bucket/team", ["PINCER_STORAGE_GCS_CREDENTIALS_FILE", "PINCER_STORAGE_GCS_PROJECT"]),
+    ],
+)
+def test_usable_root_failed_listing_names_the_storage_settings(uri: str, expected_settings: list[str]) -> None:
+    root = MagicMock()
+    root.iterdir.side_effect = PermissionError("AccessDenied")
+    with (
+        patch("pincer.tools.skills.storage.open_skills_root", return_value=root),
+        pytest.raises(SkillLoadError, match=f"Skills root {uri} is not usable: PermissionError") as exc_info,
+    ):
+        open_usable_skills_root(uri, _settings())
+    for name in expected_settings:
+        assert name in str(exc_info.value)
+
+
+def test_client_construction_error_names_the_storage_settings(tmp_path: Path) -> None:
+    with (
+        patch("boto3.Session", side_effect=RuntimeError("The config profile (team) could not be found")),
+        pytest.raises(SkillLoadError, match="PINCER_STORAGE_S3_PROFILE"),
+    ):
+        open_usable_skills_root("s3://bucket/team", _settings(data_dir=tmp_path))
+
+
+def test_usable_root_missing_extra_says_what_to_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "cloudpathlib", None)
+    with pytest.raises(SkillLoadError, match=r"pincer-agent\[remote-skills\]"):
+        open_usable_skills_root("s3://bucket/team", _settings())
