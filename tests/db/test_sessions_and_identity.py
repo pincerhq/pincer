@@ -17,6 +17,7 @@ from pincer.repositories.identity import (
     IdentityCredentialRepository,
     IdentityProfileRepository,
 )
+from pincer.repositories.sessions import SessionRepository
 from pincer.services.identity import IdentityService, SeedEntry
 from pincer.services.sessions import SessionService
 
@@ -146,6 +147,46 @@ async def test_renaming_moves_the_profile_links_and_sessions(url):
     assert await sessions.load("unified:usr_hash", user_id="usr_hash", channel="telegram") is None
     moved = await sessions.load("unified:alice", user_id="alice", channel="telegram")
     assert moved["user_id"] == "alice"
+
+
+async def _session_ids(url: str) -> set[str]:
+    async with session_scope(url) as session:
+        return set(await SessionRepository(session).ids())
+
+
+async def _updated_at(url: str, session_id: str) -> float:
+    async with session_scope(url) as session:
+        row = await SessionRepository(session).get(session_id)
+        assert row is not None
+        return row.updated_at
+
+
+@pytest.mark.parametrize(("old_at", "new_at", "kept_at"), [(200.0, 100.0, 200.0), (100.0, 200.0, 200.0)])
+async def test_merging_keeps_the_more_recent_unified_session(url, old_at, new_at, kept_at):
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
+    await service.create_identity("alice", channel="whatsapp", channel_user_id="4930111")
+    await _store_session(url, "unified:usr_hash", user_id="usr_hash", at=old_at)
+    await _store_session(url, "unified:alice", user_id="alice", at=new_at)
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert await _session_ids(url) == {"unified:alice"}
+    assert await _updated_at(url, "unified:alice") == kept_at
+
+
+async def test_renaming_leaves_keys_that_do_not_name_the_identity(url):
+    """`<channel>:<id>` keys hold the channel's user id and `voice:` keys a
+    call SID; neither follows the pincer id, even when it is a substring."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
+    untouched = {"telegram:usr_hash", "voice:CAusr_hash01", "unified:usr_hash_2", "unified:xusr_hash"}
+    for session_id in untouched:
+        await _store_session(url, session_id, user_id="someone_else")
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert await _session_ids(url) == untouched
 
 
 async def test_touch_active_channel_records_when(url):
