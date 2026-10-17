@@ -46,8 +46,8 @@ if TYPE_CHECKING:
     from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import AuditLogger
     from pincer.security.rate_limiter import RateLimiter
+    from pincer.services.skills import SkillService
     from pincer.tools.registry import ToolRegistry
-    from pincer.tools.skills.index import SkillIndex
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +176,7 @@ class CoreComponents:
     memory_store: BaseMemoryBackend | None
     summarizer: Summarizer | None
     tools: ToolRegistry
-    skill_index: SkillIndex
+    skill_service: SkillService
     mcp_manager: MCPClientManager | None
     agent: Agent
 
@@ -507,22 +507,15 @@ async def _build_core(settings: Settings) -> CoreComponents:
             )
 
     # Skills: SKILL.md-based discovery, coexists unconditionally with MCP.
+    from pincer.services.skills import get_skill_service
     from pincer.tools.builtin.skills_tools import make_skills_tools
-    from pincer.tools.skills.index import BUNDLED_SKILLS_DIR, SkillIndex
-    from pincer.tools.skills.storage import open_user_skills_root
 
-    skill_index = SkillIndex(
-        bundled_dir=BUNDLED_SKILLS_DIR,
-        user_dir=open_user_skills_root(settings),
-        max_per_root=settings.skills_max_loaded_per_root,
-    )
-    skill_index.discover()
+    # The process-wide service: the dashboard API served from this process reads
+    # the same index.
+    skill_service = get_skill_service(settings)
+    skill_index = skill_service.ensure_current()
 
-    skill_tools = make_skills_tools(
-        skill_index,
-        sandbox_disabled=settings.skill_sandbox_disabled,
-        cache_root=settings.skills_remote_cache_dir,
-    )
+    skill_tools = make_skills_tools(skill_service, sandbox_disabled=settings.skill_sandbox_disabled)
     tools.register(
         name="load_skill",
         description="Load a skill's full instructions by name (see Available Skills in the system prompt).",
@@ -627,7 +620,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
         memory_store=memory_store,
         summarizer=summarizer,
     )
-    agent.skill_index = skill_index
+    agent.skill_service = skill_service
     if mcp_manager:
         agent.mcp_manager = mcp_manager
         from pincer.memory.mcp import MCPMemoryBackend
@@ -645,7 +638,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
         memory_store=memory_store,
         summarizer=summarizer,
         tools=tools,
-        skill_index=skill_index,
+        skill_service=skill_service,
         mcp_manager=mcp_manager,
         agent=agent,
     )
@@ -989,6 +982,14 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
     if there is nothing to serve (no channel configured)."""
     core = await _build_core(settings)
     _stop_core_on_shutdown(shutdown, core)
+    if settings.skills_index_watch_interval_seconds > 0:
+        # Applies `pincer skills rebuild` (or any other process's index change) in the
+        # background, so agent turns and skill tools never wait on a rescan.
+        from pincer.services.skills import SkillIndexWatcher
+
+        skill_watcher = SkillIndexWatcher(core.skill_service, interval=settings.skills_index_watch_interval_seconds)
+        await skill_watcher.start()
+        shutdown.on_stop("skill index watcher", skill_watcher.stop)
     session_mgr, cost_tracker, audit_logger, rate_limiter = (
         core.session_mgr,
         core.cost_tracker,

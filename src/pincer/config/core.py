@@ -39,15 +39,23 @@ class CoreSettings(BaseModel):
         default=None,
         description="Soft budget for the Available Skills prompt block; None disables truncation",
     )
-    skills_remote_cache_dir: Path | None = Field(
+    skills_cache_dir: Path | None = Field(
         default=None,
-        description="Local cache for remote skill roots (downloaded files, materialized scripts); "
+        description="Skills cache: cloudpathlib's copies of remote skill files and the index generation stamp; "
         "defaults to <data_dir>/cache/skills",
     )
     skills_index_cache_ttl_seconds: int = Field(
         default=60,
         ge=0,
-        description="How long the dashboard API reuses a scanned skill index; 0 rescans on every request",
+        le=60,
+        description="Max age in seconds of the skill index served by the dashboard API before it rescans "
+        "(0 = rescan on every request). Index changes invalidate it immediately.",
+    )
+    skills_index_watch_interval_seconds: int = Field(
+        default=300,
+        ge=0,
+        description="How often `pincer run` checks for skill index changes announced by other processes "
+        "(e.g. `pincer skills rebuild`) and rescans in the background; 0 = no watcher, requests check themselves",
     )
     # ── Remote skill root credentials (unset = the provider SDK's default chain) ──
     skills_s3_endpoint_url: str | None = Field(
@@ -113,9 +121,9 @@ class CoreSettings(BaseModel):
         return Path(value).expanduser()
 
     @model_validator(mode="after")
-    def _default_skills_remote_cache_dir(self) -> Self:
-        if self.skills_remote_cache_dir is None:
-            self.skills_remote_cache_dir = self.data_dir / "cache" / "skills"
+    def _default_skills_cache_dir(self) -> Self:
+        if self.skills_cache_dir is None:
+            self.skills_cache_dir = self.data_dir / "cache" / "skills"
         return self
 
     @model_validator(mode="after")

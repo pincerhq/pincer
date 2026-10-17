@@ -54,6 +54,17 @@ def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_skill_service() -> Iterator[None]:
+    """The SkillService is a per-process singleton built from the first settings
+    that ask for it; a test's mocked settings must not leak into the next test."""
+    from pincer.services.skills import reset_skill_service
+
+    reset_skill_service()
+    yield
+    reset_skill_service()
+
+
+@pytest.fixture(autouse=True)
 def _reset_thread_manager() -> None:
     """Sprint 13: the ThreadManager is a process-wide singleton keyed to one
     database. Without a reset between tests, the first tmp_path's DB would be

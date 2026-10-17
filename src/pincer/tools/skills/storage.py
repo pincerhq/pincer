@@ -1,10 +1,14 @@
 """Storage layer for skill roots: local directories and cloud object storage.
 
-Every skill operation (discovery, hashing, listing, reading, script
-materialisation) goes through `SkillPath`, which is either a local
-`pathlib.Path` or a cloudpathlib `CloudPath`. The two share the pathlib API,
-so callers stay backend-agnostic; only path confinement and script
-materialisation need to know which one they hold.
+Every skill operation (discovery, hashing, listing, reading, running scripts)
+goes through `SkillPath`, which is either a local `pathlib.Path` or a
+cloudpathlib `CloudPath`. The two share the pathlib API, so callers stay
+backend-agnostic; only path confinement and script execution need to know
+which one they hold.
+
+Remote files are cached by cloudpathlib alone, under `<skills_cache_dir>/objects/`:
+every read refreshes the cached copy when the bucket's object is newer, and
+scripts run straight from those cached copies. There is no second file cache.
 
 cloudpathlib is an optional dependency (the `remote-skills` extra) and is only
 imported when a skills root is an `s3://`, `az://` or `gs://` URI.
@@ -12,13 +16,9 @@ imported when a skills root is an `s3://`, `az://` or `gs://` URI.
 
 from __future__ import annotations
 
-import hashlib
 import logging
-import os
 import posixpath
 import re
-import shutil
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -41,7 +41,7 @@ _MISSING_EXTRA_MSG = (
 )
 
 
-def is_remote_uri(value: str | os.PathLike[str]) -> bool:
+def is_remote_uri(value: str | Path) -> bool:
     """True for `s3://`, `az://` and `gs://` URIs."""
     return isinstance(value, str) and bool(_REMOTE_URI_RE.match(value))
 
@@ -127,7 +127,7 @@ def open_skills_root(location: str | Path, settings: Settings) -> SkillPath:
     except ImportError as e:
         raise SkillLoadError(_MISSING_EXTRA_MSG.format(uri=uri)) from e
 
-    cache_root = settings.skills_remote_cache_dir
+    cache_root = settings.skills_cache_dir
     try:
         client = _build_client(scheme, settings, cache_root / "objects" if cache_root else None)
         return client.CloudPath(uri)  # type: ignore[no-any-return]
@@ -177,43 +177,61 @@ def iter_skill_md(base: SkillPath) -> list[SkillPath]:
     return sorted(base.glob("*/SKILL.md"), key=str)
 
 
-def walk_files(skill_dir: SkillPath) -> list[str]:
-    """Relative paths of all files under `skill_dir`, excluding SKILL.md files."""
+def _walk_relative(skill_dir: SkillPath) -> list[str]:
+    """Relative paths of every file under `skill_dir`."""
     base_depth = len(skill_dir.parts)
     files: list[str] = []
     for dirpath, _dirnames, filenames in skill_dir.walk():
         rel_dir = dirpath.parts[base_depth:]
-        files.extend("/".join((*rel_dir, name)) for name in filenames if name != "SKILL.md")
-    return sorted(files)
+        files.extend("/".join((*rel_dir, name)) for name in filenames)
+    return files
 
 
-def materialize_skill_dir(skill_dir: SkillPath, cache_root: Path, version: str) -> Path:
-    """Return a local directory holding `skill_dir`'s contents.
+def walk_files(skill_dir: SkillPath) -> list[str]:
+    """Relative paths of all files under `skill_dir`, excluding SKILL.md files."""
+    return sorted(f for f in _walk_relative(skill_dir) if posixpath.basename(f) != "SKILL.md")
 
-    Local skill dirs are returned as-is. Cloud skill dirs are downloaded once per
-    `version` (the SKILL.md hash) into `cache_root/materialized/<uri-hash>/<version>`;
-    the download goes to a temp dir and is renamed into place, so concurrent
-    runs never see a half-written copy.
+
+def _cached_copy(path: CloudPath) -> Path:
+    """Refresh cloudpathlib's cached copy of `path` and return its local path."""
+    from cloudpathlib.exceptions import OverwriteDirtyFileError, OverwriteNewerLocalError
+
+    try:
+        return Path(path.fspath)
+    except (OverwriteNewerLocalError, OverwriteDirtyFileError):
+        # Something (e.g. an unsandboxed script) modified the cached copy. The
+        # bucket is the source of truth: drop the local edit and fetch again.
+        path._local.unlink(missing_ok=True)
+        return Path(path.fspath)
+
+
+def localize_skill_dir(skill_dir: SkillPath) -> Path:
+    """Return a local directory with the current contents of `skill_dir`.
+
+    Local skill dirs are returned as-is. For cloud skill dirs this brings
+    cloudpathlib's cache for the dir up to date with the bucket: every file is
+    refreshed (re-downloaded only if the object is newer), and cached files
+    whose object was deleted are removed, so a script never sees stale siblings.
     """
     if isinstance(skill_dir, Path):
         return skill_dir
 
-    uri_hash = hashlib.sha256(str(skill_dir).encode("utf-8")).hexdigest()[:16]
-    dest = cache_root / "materialized" / uri_hash / version
-    if dest.is_dir():
-        return dest
+    remote_files = _walk_relative(skill_dir)
+    local_dir = _cached_copy(skill_dir / "SKILL.md").parent
+    for rel in remote_files:
+        _cached_copy(skill_dir / rel)
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.mkdtemp(prefix=f".{version[:8]}-", dir=dest.parent))
-    try:
-        skill_dir.download_to(tmp)
-        try:
-            os.replace(tmp, dest)
-        except OSError:
-            # Another run won the race and already put a complete copy in place.
-            if not dest.is_dir():
-                raise
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-    logger.info("Materialized remote skill %s into %s", skill_dir, dest)
-    return dest
+    keep = set(remote_files)
+    for dirpath, _dirnames, filenames in local_dir.walk(top_down=False):
+        for name in filenames:
+            if (dirpath / name).relative_to(local_dir).as_posix() not in keep:
+                (dirpath / name).unlink()
+        if dirpath != local_dir and not any(dirpath.iterdir()):
+            dirpath.rmdir()
+    return local_dir
+
+
+def clear_remote_cache(root: SkillPath | None) -> None:
+    """Empty cloudpathlib's file cache for a cloud root; a no-op for local roots."""
+    if root is not None and not isinstance(root, Path):
+        root.client.clear_cache()

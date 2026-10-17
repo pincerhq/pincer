@@ -123,15 +123,25 @@ mounting a directory. Install the new `remote-skills` extra
 
 - Discovery, `load_skill`, `load_skill_reference` and the dashboard's `/api/skills`
   work unchanged on remote roots; blocking storage I/O runs off the event loop.
-- `run_skill_script` downloads a remote skill to `skills_remote_cache_dir`
-  (default `<data_dir>/cache/skills`) and runs it through the usual approval gate
-  and sandbox.
+- Remote files are cached only by cloudpathlib, under `skills_cache_dir/objects/`
+  (default `<data_dir>/cache/skills`); each read checks the bucket for a newer
+  object. `run_skill_script` brings a remote skill's cached folder up to date,
+  then runs it from there through the usual approval gate and sandbox, so
+  script-only edits take effect on the next run.
 - Credentials: optional `PINCER_SKILLS_S3_*`, `PINCER_SKILLS_AZURE_*` and
   `PINCER_SKILLS_GCS_*` settings; unset ones fall back to each SDK's default chain.
 - An unreachable bucket or missing extra logs an error and leaves only the bundled
   skills, instead of failing startup.
-- `/api/skills` caches its scanned index for `skills_index_cache_ttl_seconds`
-  (default 60; `0` disables).
+- New `pincer skills rebuild [--keep-cache]`: clears cached remote files, rescans
+  and announces the change through a generation stamp in `skills_cache_dir`. A
+  running `pincer run` reloads without a restart: a background watcher checks the
+  stamp every `skills_index_watch_interval_seconds` (default 300; `0` disables it)
+  and rescans off the request path, and the dashboard checks it on every request.
+- One skill index per process, owned by `pincer.services.skills.SkillService` and
+  shared by the agent, its skill tools, the dashboard API and the CLI.
+- `/api/skills` rescans when its index is older than `skills_index_cache_ttl_seconds`
+  (default 60, maximum 60, `0` = every request), and immediately after any index
+  change in any process.
 - `pincer doctor` checks that a remote root is reachable.
 
 ### Fixed

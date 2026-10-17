@@ -1,6 +1,7 @@
 """Tests for pincer.tools.skills.storage — the local/cloud skill-root layer."""
 
 import logging
+import os
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -11,9 +12,10 @@ from pincer.config.main import _RelaxedSettings
 from pincer.exceptions import SkillLoadError
 from pincer.tools.path_sandbox import SandboxDenied
 from pincer.tools.skills.storage import (
+    clear_remote_cache,
     confine_skill_path,
     is_remote_uri,
-    materialize_skill_dir,
+    localize_skill_dir,
     open_skills_root,
     open_user_skills_root,
 )
@@ -62,9 +64,22 @@ def test_settings_coerce_local_skills_dir_to_expanded_path() -> None:
     assert skills_dir == Path.home() / "my-skills"
 
 
-def test_settings_default_remote_cache_under_data_dir(tmp_path: Path) -> None:
+def test_settings_default_skills_cache_under_data_dir(tmp_path: Path) -> None:
     settings = _settings(data_dir=tmp_path)
-    assert settings.skills_remote_cache_dir == tmp_path / "cache" / "skills"
+    assert settings.skills_cache_dir == tmp_path / "cache" / "skills"
+
+
+@pytest.mark.parametrize("ttl", [0, 30, 60])
+def test_settings_api_index_ttl_accepts_up_to_60s(ttl: int) -> None:
+    assert _settings(skills_index_cache_ttl_seconds=ttl).skills_index_cache_ttl_seconds == ttl
+
+
+@pytest.mark.parametrize("ttl", [-1, 61, 3600])
+def test_settings_api_index_ttl_rejects_out_of_range(ttl: int) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _settings(skills_index_cache_ttl_seconds=ttl)
 
 
 def test_settings_read_remote_skills_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,55 +121,76 @@ def test_confine_skill_path_local_base_delegates_to_confine_path(tmp_path: Path)
         confine_skill_path(tmp_path, "../outside")
 
 
-# ── materialize_skill_dir ────────────────────────────────────────────────────
+# ── localize_skill_dir / clear_remote_cache ─────────────────────────────────
 
 
-def test_materialize_returns_local_dirs_unchanged(tmp_path: Path) -> None:
-    assert materialize_skill_dir(tmp_path, tmp_path / "cache", "v1") == tmp_path
+def _cache_dir(skill_dir) -> Path:
+    return Path(skill_dir.client._local_cache_dir)
 
 
-def test_materialize_downloads_once_per_version(s3_skill_dir, tmp_path: Path) -> None:
-    cache = tmp_path / "cache"
-    download_to = type(s3_skill_dir).download_to
-    with patch.object(type(s3_skill_dir), "download_to", autospec=True, side_effect=download_to) as spy:
-        first = materialize_skill_dir(s3_skill_dir, cache, "v1")
-        second = materialize_skill_dir(s3_skill_dir, cache, "v1")
-
-    # download_to recurses per object; count only the top-level directory downloads.
-    assert [c.args[0] for c in spy.call_args_list].count(s3_skill_dir) == 1
-    assert first == second
-    assert first.parent.parent == cache / "materialized"
-    assert (first / "SKILL.md").read_text(encoding="utf-8").endswith("v1\n")
-    assert (first / "scripts" / "run.sh").is_file()
-    # The temp download dir is renamed into place, never left behind.
-    assert [p.name for p in first.parent.iterdir()] == ["v1"]
+def test_localize_returns_local_dirs_unchanged(tmp_path: Path) -> None:
+    assert localize_skill_dir(tmp_path) == tmp_path
 
 
-def test_materialize_redownloads_for_a_new_version(s3_skill_dir, tmp_path: Path) -> None:
-    cache = tmp_path / "cache"
-    old = materialize_skill_dir(s3_skill_dir, cache, "v1")
-    (s3_skill_dir / "SKILL.md").write_text("---\nname: demo\ndescription: d\n---\nv2\n", encoding="utf-8")
-    new = materialize_skill_dir(s3_skill_dir, cache, "v2")
+def test_localize_uses_cloudpathlib_cache_dir(s3_skill_dir) -> None:
+    local = localize_skill_dir(s3_skill_dir)
 
-    assert new != old
-    assert (new / "SKILL.md").read_text(encoding="utf-8").endswith("v2\n")
-    assert (old / "SKILL.md").read_text(encoding="utf-8").endswith("v1\n")
+    assert local == _cache_dir(s3_skill_dir) / "bucket" / "team" / "demo"
+    assert (local / "SKILL.md").read_text(encoding="utf-8").endswith("v1\n")
+    assert (local / "scripts" / "run.sh").read_text(encoding="utf-8") == "#!/bin/sh\necho hi\n"
+    # It *is* cloudpathlib's cache: a later read of the same object resolves to the same file.
+    assert Path((s3_skill_dir / "scripts" / "run.sh").fspath) == local / "scripts" / "run.sh"
 
 
-def test_materialize_tolerates_losing_the_rename_race(s3_skill_dir, tmp_path: Path) -> None:
-    """A concurrent run that finished first leaves `dest` in place; ours must reuse it."""
-    cache = tmp_path / "cache"
+def test_localize_refreshes_changed_objects(s3_skill_dir) -> None:
+    localize_skill_dir(s3_skill_dir)
+    (s3_skill_dir / "scripts" / "run.sh").write_text("#!/bin/sh\necho changed\n", encoding="utf-8")
 
-    def _lose_race(src: str, dst: str) -> None:
-        Path(dst).mkdir(parents=True)
-        (Path(dst) / "SKILL.md").write_text("winner", encoding="utf-8")
-        raise OSError(66, "Directory not empty")
+    local = localize_skill_dir(s3_skill_dir)
 
-    with patch("pincer.tools.skills.storage.os.replace", side_effect=_lose_race):
-        dest = materialize_skill_dir(s3_skill_dir, cache, "v1")
+    assert (local / "scripts" / "run.sh").read_text(encoding="utf-8") == "#!/bin/sh\necho changed\n"
 
-    assert (dest / "SKILL.md").read_text(encoding="utf-8") == "winner"
-    assert [p.name for p in dest.parent.iterdir()] == ["v1"]
+
+def test_localize_removes_files_deleted_from_bucket(s3_skill_dir) -> None:
+    (s3_skill_dir / "old" / "gone.txt").write_text("x", encoding="utf-8")
+    local = localize_skill_dir(s3_skill_dir)
+    assert (local / "old" / "gone.txt").is_file()
+
+    (s3_skill_dir / "old" / "gone.txt").unlink()
+    local = localize_skill_dir(s3_skill_dir)
+
+    assert not (local / "old").exists()
+    assert (local / "scripts" / "run.sh").is_file()
+
+
+def test_localize_overwrites_locally_modified_copies(s3_skill_dir) -> None:
+    """The bucket is the source of truth, even if a script edited its own cached copy."""
+    local = localize_skill_dir(s3_skill_dir)
+    cached = local / "scripts" / "run.sh"
+    cached.write_text("tampered", encoding="utf-8")
+    future = cached.stat().st_mtime + 3600
+    os.utime(cached, (future, future))
+
+    localize_skill_dir(s3_skill_dir)
+
+    assert cached.read_text(encoding="utf-8") == "#!/bin/sh\necho hi\n"
+
+
+def test_clear_remote_cache_empties_cloudpathlib_cache(s3_skill_dir) -> None:
+    localize_skill_dir(s3_skill_dir)
+    assert any(_cache_dir(s3_skill_dir).iterdir())
+
+    clear_remote_cache(s3_skill_dir)
+
+    assert not any(_cache_dir(s3_skill_dir).iterdir())
+    assert (s3_skill_dir / "SKILL.md").is_file()  # the bucket itself is untouched
+
+
+def test_clear_remote_cache_ignores_local_and_missing_roots(tmp_path: Path) -> None:
+    (tmp_path / "keep.txt").write_text("x", encoding="utf-8")
+    clear_remote_cache(tmp_path)
+    clear_remote_cache(None)
+    assert (tmp_path / "keep.txt").is_file()
 
 
 # ── open_skills_root ─────────────────────────────────────────────────────────

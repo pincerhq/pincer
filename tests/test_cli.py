@@ -329,6 +329,7 @@ def _mock_settings_for_build_core(tmp_path: Path):
     settings.skills_dir = tmp_path / "skills"
     settings.skills_max_loaded_per_root = 50
     settings.skill_sandbox_disabled = False
+    settings.skills_cache_dir = tmp_path / "skills-cache"
     settings.data_dir = tmp_path
     return settings
 
@@ -564,7 +565,7 @@ async def test_run_agent_wires_core_and_channel_bound_tools_before_channel_start
         memory_store=None,
         summarizer=None,
         tools=mock_tools,
-        skill_index=MagicMock(),
+        skill_service=MagicMock(),
         mcp_manager=None,
         agent=MagicMock(),
     )
@@ -578,7 +579,38 @@ async def test_run_agent_wires_core_and_channel_bound_tools_before_channel_start
     monkeypatch.setattr("pincer.cli.run._build_core", AsyncMock(return_value=core))
     monkeypatch.setattr("pincer.cli.run._register_channel_bound_tools", _fake_register)
 
+    settings = MagicMock()
+    settings.skills_index_watch_interval_seconds = 0
     with pytest.raises(RuntimeError, match="stop here"):
-        await _run_agent(MagicMock())
+        await _run_agent(settings)
 
     assert registered_with == [(mock_tools, {})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval", [300, 0])
+async def test_run_agent_starts_skill_index_watcher(monkeypatch: pytest.MonkeyPatch, interval: int) -> None:
+    """`pincer run` applies `pincer skills rebuild` in the background (unless disabled)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pincer.cli.run import _run_agent
+
+    core = MagicMock()
+    watcher_cls = MagicMock()
+    watcher_cls.return_value.start = AsyncMock()
+    monkeypatch.setattr("pincer.cli.run._build_core", AsyncMock(return_value=core))
+    monkeypatch.setattr("pincer.services.skills.SkillIndexWatcher", watcher_cls)
+    monkeypatch.setattr(
+        "pincer.cli.run._register_channel_bound_tools", MagicMock(side_effect=RuntimeError("stop here"))
+    )
+
+    settings = MagicMock()
+    settings.skills_index_watch_interval_seconds = interval
+    with pytest.raises(RuntimeError, match="stop here"):
+        await _run_agent(settings)
+
+    if interval:
+        watcher_cls.assert_called_once_with(core.skill_service, interval=300)
+        watcher_cls.return_value.start.assert_awaited_once()
+    else:
+        watcher_cls.assert_not_called()

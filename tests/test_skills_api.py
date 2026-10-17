@@ -14,17 +14,18 @@ os.environ.setdefault("PINCER_TELEGRAM_BOT_TOKEN", "123456:TEST")
 os.environ.setdefault("PINCER_DATA_DIR", "/tmp/pincer-test")
 
 from pincer.api.server import create_app
-from pincer.api.skills import _build_index, _reset_index_cache, _skill_detail, _skill_entries
+from pincer.api.skills import _build_index, _skill_detail, _skill_entries
+from pincer.services.skills import SkillService, reset_skill_service
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
-def _fresh_index_cache():
-    _reset_index_cache()
+def _fresh_skill_service():
+    reset_skill_service()
     yield
-    _reset_index_cache()
+    reset_skill_service()
 
 
 @pytest.fixture
@@ -46,6 +47,7 @@ def test_skill_entries_empty_when_no_dirs(tmp_path: Path) -> None:
     settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
     settings.skills_index_cache_ttl_seconds = 0
+    settings.skills_cache_dir = tmp_path / "cache"
     with (
         patch("pincer.config.get_settings_relaxed", return_value=settings),
         patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", tmp_path / "bundled"),
@@ -63,6 +65,7 @@ def test_skill_entries_discovers_skill_md(tmp_path: Path) -> None:
     settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
     settings.skills_index_cache_ttl_seconds = 0
+    settings.skills_cache_dir = tmp_path / "cache"
     with (
         patch("pincer.config.get_settings_relaxed", return_value=settings),
         patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", bundled),
@@ -91,6 +94,7 @@ def test_skill_entries_dir_reflects_disk_name_even_when_frontmatter_name_differs
     settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
     settings.skills_index_cache_ttl_seconds = 0
+    settings.skills_cache_dir = tmp_path / "cache"
     with (
         patch("pincer.config.get_settings_relaxed", return_value=settings),
         patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", bundled),
@@ -113,6 +117,7 @@ def test_skill_entries_bundled_and_user(tmp_path: Path) -> None:
     settings.skills_dir = user
     settings.skills_max_loaded_per_root = 100
     settings.skills_index_cache_ttl_seconds = 0
+    settings.skills_cache_dir = tmp_path / "cache"
     with (
         patch("pincer.config.get_settings_relaxed", return_value=settings),
         patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", bundled),
@@ -131,6 +136,7 @@ def test_skill_detail_returns_none_for_unknown(tmp_path: Path) -> None:
     settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
     settings.skills_index_cache_ttl_seconds = 0
+    settings.skills_cache_dir = tmp_path / "cache"
     with (
         patch("pincer.config.get_settings_relaxed", return_value=settings),
         patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", tmp_path / "bundled"),
@@ -151,6 +157,7 @@ def test_skill_detail_returns_body_and_files(tmp_path: Path) -> None:
     settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
     settings.skills_index_cache_ttl_seconds = 0
+    settings.skills_cache_dir = tmp_path / "cache"
     with (
         patch("pincer.config.get_settings_relaxed", return_value=settings),
         patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", bundled),
@@ -178,6 +185,7 @@ def test_skill_detail_matches_by_directory_name_not_frontmatter_name(tmp_path: P
     settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
     settings.skills_index_cache_ttl_seconds = 0
+    settings.skills_cache_dir = tmp_path / "cache"
     with (
         patch("pincer.config.get_settings_relaxed", return_value=settings),
         patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", bundled),
@@ -186,48 +194,71 @@ def test_skill_detail_matches_by_directory_name_not_frontmatter_name(tmp_path: P
         assert _skill_detail("different-frontmatter-name") is None
 
 
-# ── index cache ──────────────────────────────────────────────────────────────
+# ── index freshness ──────────────────────────────────────────────────────────
 
 
-def _cache_settings(user: Path, ttl: int) -> MagicMock:
+def _cache_settings(tmp_path: Path, ttl: int) -> MagicMock:
     settings = MagicMock()
-    settings.skills_dir = user
+    settings.skills_dir = tmp_path / "user"
     settings.skills_max_loaded_per_root = 100
     settings.skills_index_cache_ttl_seconds = ttl
+    settings.skills_cache_dir = tmp_path / "cache"
     return settings
 
 
-def test_index_is_reused_within_ttl(tmp_path: Path) -> None:
-    settings = _cache_settings(tmp_path / "user", ttl=60)
-    with (
-        patch("pincer.config.get_settings_relaxed", return_value=settings),
-        patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", tmp_path / "bundled"),
-        # Clock reads: build stamp, cache check, cache check, rebuild stamp.
-        patch("pincer.api.skills.monotonic", side_effect=[100.0, 159.0, 160.0, 160.0]),
-    ):
-        first = _build_index()
-        assert _build_index() is first  # 59s later: cached
-        assert _build_index() is not first  # 60s later: expired, rescanned
+def _add_user_skill(tmp_path: Path, name: str) -> None:
+    skill_dir = tmp_path / "user" / name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\nx\n", encoding="utf-8")
 
 
-def test_index_cache_ttl_zero_rescans_every_time(tmp_path: Path) -> None:
-    settings = _cache_settings(tmp_path / "user", ttl=0)
-    with (
-        patch("pincer.config.get_settings_relaxed", return_value=settings),
-        patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", tmp_path / "bundled"),
-    ):
-        assert _build_index() is not _build_index()
+def _user_names() -> list[str]:
+    return [e["name"] for e in _skill_entries() if e["root"] == "user"]
 
 
-def test_index_cache_invalidated_when_skills_dir_changes(tmp_path: Path) -> None:
-    settings = _cache_settings(tmp_path / "user", ttl=60)
+@pytest.fixture
+def api_settings(tmp_path: Path):
+    settings = _cache_settings(tmp_path, ttl=60)
     with (
         patch("pincer.config.get_settings_relaxed", return_value=settings),
         patch("pincer.tools.skills.index.BUNDLED_SKILLS_DIR", tmp_path / "bundled"),
     ):
-        first = _build_index()
-        settings.skills_dir = tmp_path / "other"
-        assert _build_index() is not first
+        yield settings
+
+
+def test_index_is_reused_within_max_age(api_settings, tmp_path: Path) -> None:
+    with patch("pincer.services.skills.monotonic", return_value=100.0):
+        assert _user_names() == []
+    _add_user_skill(tmp_path, "late")
+
+    with patch("pincer.services.skills.monotonic", return_value=159.0):
+        assert _user_names() == []  # 59s: still the same scan
+    with patch("pincer.services.skills.monotonic", return_value=160.0):
+        assert _user_names() == ["late"]  # 60s: rescanned
+
+
+def test_ttl_zero_rescans_every_request(api_settings, tmp_path: Path) -> None:
+    api_settings.skills_index_cache_ttl_seconds = 0
+    assert _user_names() == []
+    _add_user_skill(tmp_path, "late")
+    assert _user_names() == ["late"]
+
+
+def test_index_change_in_another_process_invalidates_immediately(api_settings, tmp_path: Path) -> None:
+    """`pincer skills rebuild` (another process) must not wait out the API's max age."""
+    assert _user_names() == []
+    _add_user_skill(tmp_path, "late")
+
+    SkillService(bundled_dir=None, user_dir=tmp_path / "user", cache_dir=tmp_path / "cache").rebuild()
+
+    assert _user_names() == ["late"]
+
+
+def test_api_shares_the_process_index(api_settings) -> None:
+    """The dashboard and the agent read one index per process."""
+    from pincer.services.skills import get_skill_service
+
+    assert _build_index() is get_skill_service().index
 
 
 def test_skill_entries_from_mocked_s3_root(tmp_path: Path) -> None:
@@ -237,7 +268,7 @@ def test_skill_entries_from_mocked_s3_root(tmp_path: Path) -> None:
     (root / "remote-skill" / "SKILL.md").write_text("---\nname: remote\ndescription: d\n---\nhi\n", encoding="utf-8")
     (root / "remote-skill" / "ref.md").write_text("x", encoding="utf-8")
 
-    settings = _cache_settings(tmp_path / "unused", ttl=0)
+    settings = _cache_settings(tmp_path, ttl=0)
     settings.skills_dir = "s3://bucket/team"
     with (
         patch("pincer.config.get_settings_relaxed", return_value=settings),

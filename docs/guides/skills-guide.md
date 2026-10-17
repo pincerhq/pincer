@@ -100,8 +100,25 @@ A user skill with the same `name` as a bundled skill overrides it.
 | `skills_max_loaded_per_root` | `100` | Hard cap on skills loaded per root — applied at discovery, before prompt construction |
 | `skills_max_prompt_tokens` | `None` (no limit) | Soft budget for the Available Skills prompt block; once exceeded, descriptions are truncated and then trailing entries are dropped with an "X more skills" note. Tune this down for small-context local models. |
 | `skill_sandbox_disabled` | `False` | Bypass sandboxing for `run_skill_script` (trusted/dev workflows only) |
-| `skills_remote_cache_dir` | `<data_dir>/cache/skills` | Local cache for remote skill roots |
-| `skills_index_cache_ttl_seconds` | `60` | How long `GET /api/skills` reuses a scanned index; `0` rescans on every request |
+| `skills_cache_dir` | `<data_dir>/cache/skills` | cloudpathlib's copies of remote skill files (`objects/`) and the index generation stamp |
+| `skills_index_cache_ttl_seconds` | `60` | Max age of the index the dashboard API serves before it rescans (0–60; `0` rescans on every request). Any index change invalidates it immediately. |
+| `skills_index_watch_interval_seconds` | `300` | How often `pincer run` checks in the background for index changes made by other processes (e.g. `pincer skills rebuild`); `0` disables the watcher, and requests then check themselves |
+
+### Rebuilding the Index
+
+Skills are discovered at startup. To pick up added, removed or edited skills without restarting, run:
+
+```bash
+pincer skills rebuild            # clear cached remote files, rescan, notify running processes
+pincer skills rebuild --keep-cache
+```
+
+The command rescans both roots and writes a new generation stamp to `skills_cache_dir/index-generation`. A running `pincer run` picks that up in two ways:
+
+- **Agent and skill tools:** a background watcher checks the stamp every `skills_index_watch_interval_seconds` (5 minutes by default) and rescans off the request path. The agent therefore sees a rebuild within at most the interval plus the scan time, and no chat turn ever waits on a rescan.
+- **Dashboard (`/api/skills`):** checks the stamp on every request, so it shows the rebuild immediately (and rescans whenever its index is older than `skills_index_cache_ttl_seconds`). A dashboard request in `pincer run` reloads the shared index, so the agent sees that reload too.
+
+Processes without a watcher (the standalone MCP server, or `pincer run` with the interval set to `0`) check the stamp on every read instead. The command and the API share one implementation, `pincer.services.skills.SkillService` — its `rebuild()` and `invalidate()` are the hooks for anything else that changes skills (such as a future upload endpoint).
 
 ### Remote Skill Roots
 
@@ -125,9 +142,14 @@ There is still exactly one user root; bundled skills always stay local. Without 
 | Azure | `skills_azure_connection_string`, **or** `skills_azure_account_url` + `skills_azure_credential` (account key or SAS token). With only the account URL, `DefaultAzureCredential` is used. |
 | GCS | `skills_gcs_credentials_file` (service-account JSON), `skills_gcs_project` |
 
-**Caching.** Files read from a remote root are cached under `skills_remote_cache_dir/objects/` and re-downloaded only when the object in the bucket is newer. Skills are discovered once at startup, so restart Pincer to pick up new or removed remote skills. The dashboard's `/api/skills` rescans at most every `skills_index_cache_ttl_seconds`.
+**Caching.** There are two layers, no more:
 
-**Scripts.** `run_skill_script` on a remote skill first downloads the whole skill directory into `skills_remote_cache_dir/materialized/<uri-hash>/<SKILL.md-hash>/`, then runs it through the same approval gate and sandbox as a local script. Object storage keeps no file modes, so non-Python scripts get the owner execute bit restored after download. The copy is keyed on the SKILL.md hash: **if you change only a script, also change SKILL.md** (or delete that skill's `materialized/` folder), otherwise the previous copy keeps running.
+1. **cloudpathlib's file cache** (`skills_cache_dir/objects/<bucket>/<key>`). Every read of a remote file goes through it and checks the bucket first; a file is downloaded again only when the object is newer. Reference files are therefore always current.
+2. **The dashboard API's rescan interval.** `/api/skills` serves the process's index for at most `skills_index_cache_ttl_seconds` (≤ 60) before rescanning, and immediately after any index change in any process.
+
+The skill index itself is state, not a cache: one per process, shared by the agent, its tools and the dashboard API. It changes on startup, on `pincer skills rebuild` (applied by the watcher), and when the dashboard's rescan finds different skills (which it announces to other processes in turn). The watcher only reacts to announced changes; it doesn't rescan the bucket on its own. So outside the dashboard, run `pincer skills rebuild` after changing SKILL.md files.
+
+**Scripts.** `run_skill_script` on a remote skill first brings the skill's folder in cloudpathlib's cache up to date: changed files are downloaded again, and files deleted from the bucket are removed. It then runs the script from there, through the same approval gate and sandbox as a local script. There is no separate copy, so editing only a script takes effect on the next run. Object storage keeps no file modes, so non-Python scripts get the owner execute bit restored. If a script changed its own cached files, they are replaced from the bucket on the next run.
 
 ---
 
@@ -144,4 +166,4 @@ Prior to this migration, skills used a `manifest.json` + `skill.py` pair with Py
 1. Create `skills/<name>/SKILL.md`. Move `manifest.json`'s `description` into the frontmatter `description` field; write a markdown body explaining what the skill does (this replaces the old per-tool `tools[]` schema entries — the model now reads instructions instead of calling a fixed function signature).
 2. If `skill.py` did real work (an API call, a computation), move it into `skills/<name>/scripts/` as a standalone script invoked via `run_skill_script`, rather than a function called directly by the tool registry.
 3. Drop `permissions`/`env_required` from the old manifest — the new sandbox model uses `SandboxConfig.allowed_domains`/`allowed_env_vars` passed by the caller, not a self-declared manifest field.
-4. Remove any dependency on the old `pincer skills` CLI (`list`/`install`/`create`/`scan`/`remove`/`info` are all gone) — skills are now filesystem-discovered only, no install step.
+4. Remove any dependency on the old `pincer skills` CLI (`list`/`install`/`create`/`scan`/`remove`/`info` are all gone) — skills are discovered from their root, no install step. The only `pincer skills` subcommand now is `rebuild`, which rescans.

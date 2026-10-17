@@ -1,11 +1,12 @@
 """Skill tools: progressive disclosure (load_skill / load_skill_reference) and
-sandboxed script execution (run_skill_script) over a SkillIndex.
+sandboxed script execution (run_skill_script) over a SkillService's index.
 
 Skill roots may be local or cloud (see `pincer.tools.skills.storage`). Blocking
 path I/O runs in a worker thread so remote reads never stall the event loop, and
-scripts from cloud roots are downloaded to a local cache before they run.
+scripts from cloud roots run from cloudpathlib's cached copy of the skill dir,
+refreshed against the bucket before every run.
 
-These are caller-wired (constructed with a live SkillIndex) rather than
+These are caller-wired (constructed with a live SkillService) rather than
 registered via bootstrap.py's static builtin list — see that module's
 docstring for why skills/MCP/channel tools need caller-owned state.
 """
@@ -20,14 +21,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from pincer.tools.sandbox import SandboxConfig, execute_script
-from pincer.tools.skills.storage import confine_skill_path, materialize_skill_dir
+from pincer.tools.skills.storage import confine_skill_path, localize_skill_dir
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from cloudpathlib import CloudPath
 
-    from pincer.tools.skills.index import SkillIndex
+    from pincer.services.skills import SkillService
     from pincer.tools.skills.storage import SkillPath
 
 logger = logging.getLogger(__name__)
@@ -63,13 +64,12 @@ def _read_text(path: SkillPath) -> str:
 
 
 def make_skills_tools(
-    index: SkillIndex,
+    service: SkillService,
     sandbox_disabled: bool = False,
-    cache_root: Path | None = None,
 ) -> dict[str, Callable[..., Awaitable[str]]]:
     """Build the load_skill / load_skill_reference / run_skill_script handlers
-    bound to a specific SkillIndex. `cache_root` is where scripts from cloud
-    skill roots are materialized; it is unused for local roots."""
+    bound to a SkillService. Each call reads the service's current index, so a
+    rebuild elsewhere (e.g. `pincer skills rebuild`) is picked up immediately."""
 
     async def load_skill(name: str) -> str:
         """
@@ -77,6 +77,7 @@ def make_skills_tools(
 
         name: Exact skill name, as shown in the Available Skills list
         """
+        index = await asyncio.to_thread(service.ensure_current)
         entry = index.get(name)
         if entry is None:
             available = ", ".join(e.name for e in index.all_skills()) or "(none)"
@@ -99,7 +100,7 @@ def make_skills_tools(
         name: Exact skill name
         path: File path relative to the skill's own directory
         """
-        entry = index.get(name)
+        entry = (await asyncio.to_thread(service.ensure_current)).get(name)
         if entry is None:
             return f"Error: no skill named '{name}'"
 
@@ -123,7 +124,7 @@ def make_skills_tools(
         script: Script path relative to the skill's own directory
         args: Command-line arguments to pass to the script
         """
-        entry = index.get(name)
+        entry = (await asyncio.to_thread(service.ensure_current)).get(name)
         if entry is None:
             return f"Error: no skill named '{name}'"
 
@@ -142,17 +143,15 @@ def make_skills_tools(
         if isinstance(remote_script, Path):
             local_dir, script_path = skill_dir, remote_script
         else:
-            if cache_root is None:
-                return "Error: no local cache configured for scripts from remote skill roots"
             try:
-                local_dir = await asyncio.to_thread(materialize_skill_dir, skill_dir, cache_root, entry.file_hash)
+                local_dir = await asyncio.to_thread(localize_skill_dir, skill_dir)
             except Exception as e:
                 return f"Error: failed to download skill '{name}': {e}"
             # Confinement was checked against the remote dir; the relative part is
-            # already normalised and cannot escape the materialized copy.
+            # already normalised and cannot escape the cached copy.
             script_path = local_dir / str(remote_script.relative_to(cast("CloudPath", skill_dir)))
             if script_path.suffix != ".py":
-                # Object storage keeps no file mode, so downloads arrive non-executable.
+                # Object storage keeps no file mode, so cached copies arrive non-executable.
                 script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
 
         if sandbox_disabled:

@@ -12,6 +12,7 @@ Flow:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable
@@ -60,8 +61,8 @@ if TYPE_CHECKING:
     from pincer.mcp.server import PincerMCPServer
     from pincer.memory.base import BaseMemoryBackend
     from pincer.memory.summarizer import Summarizer
+    from pincer.services.skills import SkillService
     from pincer.tools.registry import ToolRegistry
-    from pincer.tools.skills.index import SkillIndex
 
 logger = logging.getLogger(__name__)
 
@@ -329,7 +330,7 @@ class Agent:
         self._tool_event_callback = tool_event_callback
         self.mcp_manager: MCPClientManager | None = None  # set by cli after startup
         self.mcp_server: PincerMCPServer | None = None  # set by cli after startup
-        self.skill_index: SkillIndex | None = None  # set by cli after startup
+        self.skill_service: SkillService | None = None  # set by cli after startup
         # set by cli after startup; supplies each user's own timezone so the
         # clock in the system prompt reads in *their* zone, not the server's
         self.identity_resolver: Any = None
@@ -1210,8 +1211,10 @@ class Agent:
             base_prompt += "\n" + _GOOGLE_TOOL_CHAIN_HINTS
 
         # Inject available skills (progressive disclosure level 1)
-        if self.skill_index:
-            skills_block = self.skill_index.render_prompt_block(max_tokens=self._settings.skills_max_prompt_tokens)
+        if self.skill_service:
+            # Picks up a rebuild announced by another process (one local file read otherwise).
+            skill_index = await asyncio.to_thread(self.skill_service.ensure_current)
+            skills_block = skill_index.render_prompt_block(max_tokens=self._settings.skills_max_prompt_tokens)
             if skills_block:
                 base_prompt += (
                     "\n\n[Available Skills — call load_skill(name) to read one before using its scripts]\n"
