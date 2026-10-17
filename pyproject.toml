@@ -108,7 +108,7 @@ telemetry = [
     "pincer-telemetry",
 ]
 tasks-redis = ["repid[redis]"]
-all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry,tasks-redis,postgres]"]
+all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry,tasks-redis,postgres,remote-skills]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
@@ -126,6 +126,8 @@ postgres = [
     "asyncpg>=0.30",
     "psycopg[binary]>=3.2",
 ]
+# Skill roots in object storage: PINCER_SKILLS_DIR=s3://… / az://… / gs://…
+remote-skills = ["cloudpathlib[s3,azure,gs]>=0.21"]
 
 [project.scripts]
 pincer = "pincer.cli.main:app"

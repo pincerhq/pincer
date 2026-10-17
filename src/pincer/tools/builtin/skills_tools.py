@@ -1,6 +1,10 @@
 """Skill tools: progressive disclosure (load_skill / load_skill_reference) and
 sandboxed script execution (run_skill_script) over a SkillIndex.
 
+Skill roots may be local or cloud (see `pincer.tools.skills.storage`). Blocking
+path I/O runs in a worker thread so remote reads never stall the event loop, and
+scripts from cloud roots are downloaded to a local cache before they run.
+
 These are caller-wired (constructed with a live SkillIndex) rather than
 registered via bootstrap.py's static builtin list — see that module's
 docstring for why skills/MCP/channel tools need caller-owned state.
@@ -10,17 +14,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import stat
 import sys
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
-from pincer.tools.path_sandbox import confine_path
 from pincer.tools.sandbox import SandboxConfig, execute_script
+from pincer.tools.skills.storage import confine_skill_path, materialize_skill_dir
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from pathlib import Path
+
+    from cloudpathlib import CloudPath
 
     from pincer.tools.skills.index import SkillIndex
+    from pincer.tools.skills.storage import SkillPath
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +58,18 @@ async def _run_unsandboxed(script_path: Path, args: list[str]) -> str:
     return stdout or "(script produced no output)"
 
 
-def make_skills_tools(index: SkillIndex, sandbox_disabled: bool = False) -> dict[str, Callable[..., Awaitable[str]]]:
+def _read_text(path: SkillPath) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def make_skills_tools(
+    index: SkillIndex,
+    sandbox_disabled: bool = False,
+    cache_root: Path | None = None,
+) -> dict[str, Callable[..., Awaitable[str]]]:
     """Build the load_skill / load_skill_reference / run_skill_script handlers
-    bound to a specific SkillIndex."""
+    bound to a specific SkillIndex. `cache_root` is where scripts from cloud
+    skill roots are materialized; it is unused for local roots."""
 
     async def load_skill(name: str) -> str:
         """
@@ -65,7 +82,10 @@ def make_skills_tools(index: SkillIndex, sandbox_disabled: bool = False) -> dict
             available = ", ".join(e.name for e in index.all_skills()) or "(none)"
             return f"Error: no skill named '{name}'. Available skills: {available}"
 
-        files = entry.list_files()
+        try:
+            files = await asyncio.to_thread(entry.list_files)
+        except Exception as e:
+            return f"Error listing files for skill '{name}': {e}"
         manifest = "\n".join(f"  - {f}" for f in files) if files else "  (none)"
         return (
             f"{entry.skill.body}\n\n---\nFiles in this skill's directory "
@@ -84,15 +104,14 @@ def make_skills_tools(index: SkillIndex, sandbox_disabled: bool = False) -> dict
             return f"Error: no skill named '{name}'"
 
         try:
-            target = confine_path(entry.skill.path, path, label=f"skill '{name}'")
+            target = confine_skill_path(entry.skill.path, path, label=f"skill '{name}'")
         except ValueError as e:
             return f"Error: {e}"
 
-        if not target.is_file():
-            return f"Error: file not found: {path}"
-
         try:
-            return target.read_text(encoding="utf-8", errors="replace")
+            if not await asyncio.to_thread(target.is_file):
+                return f"Error: file not found: {path}"
+            return await asyncio.to_thread(_read_text, target)
         except Exception as e:
             return f"Error reading file: {e}"
 
@@ -108,13 +127,33 @@ def make_skills_tools(index: SkillIndex, sandbox_disabled: bool = False) -> dict
         if entry is None:
             return f"Error: no skill named '{name}'"
 
+        skill_dir = entry.skill.path
         try:
-            script_path = confine_path(entry.skill.path, script, label=f"skill '{name}'")
+            remote_script = confine_skill_path(skill_dir, script, label=f"skill '{name}'")
         except ValueError as e:
             return f"Error: {e}"
 
-        if not script_path.is_file():
-            return f"Error: script not found: {script}"
+        try:
+            if not await asyncio.to_thread(remote_script.is_file):
+                return f"Error: script not found: {script}"
+        except Exception as e:
+            return f"Error: cannot access script {script}: {e}"
+
+        if isinstance(remote_script, Path):
+            local_dir, script_path = skill_dir, remote_script
+        else:
+            if cache_root is None:
+                return "Error: no local cache configured for scripts from remote skill roots"
+            try:
+                local_dir = await asyncio.to_thread(materialize_skill_dir, skill_dir, cache_root, entry.file_hash)
+            except Exception as e:
+                return f"Error: failed to download skill '{name}': {e}"
+            # Confinement was checked against the remote dir; the relative part is
+            # already normalised and cannot escape the materialized copy.
+            script_path = local_dir / str(remote_script.relative_to(cast("CloudPath", skill_dir)))
+            if script_path.suffix != ".py":
+                # Object storage keeps no file mode, so downloads arrive non-executable.
+                script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
 
         if sandbox_disabled:
             logger.warning(
@@ -125,7 +164,7 @@ def make_skills_tools(index: SkillIndex, sandbox_disabled: bool = False) -> dict
         result = await execute_script(
             str(script_path),
             args=args or [],
-            config=SandboxConfig(skill_dir=str(entry.skill.path)),
+            config=SandboxConfig(skill_dir=str(local_dir)),
         )
 
         if not result.success:

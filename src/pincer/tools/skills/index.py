@@ -12,9 +12,13 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from pincer.tools.skills.parser import ParsedSkill, parse_skill_md
+from pincer.tools.skills.parser import ParsedSkill, parse_skill_md, read_skill_md
+from pincer.tools.skills.storage import iter_skill_md, walk_files
+
+if TYPE_CHECKING:
+    from pincer.tools.skills.storage import SkillPath
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +36,8 @@ _TRUNCATION_NOTE = (
 )
 
 
-def _hash_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+def _hash_bytes(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
 
 
 @dataclass
@@ -53,20 +57,16 @@ class SkillEntry:
 
     def list_files(self) -> list[str]:
         """Relative paths of files in the skill dir, excluding SKILL.md itself."""
-        return sorted(
-            str(p.relative_to(self.skill.path))
-            for p in self.skill.path.rglob("*")
-            if p.is_file() and p.name != "SKILL.md"
-        )
+        return walk_files(self.skill.path)
 
 
 class SkillIndex:
-    """Discovers SKILL.md-based skills from bundled and user directories."""
+    """Discovers SKILL.md-based skills from bundled and user roots (local or cloud)."""
 
     def __init__(
         self,
-        bundled_dir: Path | None,
-        user_dir: Path | None,
+        bundled_dir: SkillPath | None,
+        user_dir: SkillPath | None,
         max_per_root: int = 100,
     ) -> None:
         self._bundled_dir = bundled_dir
@@ -74,29 +74,34 @@ class SkillIndex:
         self._max_per_root = max_per_root
         self._skills: dict[str, SkillEntry] = {}
 
-    def _discover_root(self, base: Path | None, source_root: Literal["bundled", "user"]) -> list[SkillEntry]:
-        if base is None or not base.is_dir():
+    def _discover_root(self, base: SkillPath | None, source_root: Literal["bundled", "user"]) -> list[SkillEntry]:
+        if base is None:
+            return []
+        try:
+            if not base.is_dir():
+                return []
+            candidates = iter_skill_md(base)
+        except Exception as e:
+            # An unreachable bucket or bad credentials must not take startup down.
+            logger.warning("Skill root %s is unreachable, skipping it: %s: %s", base, type(e).__name__, e)
             return []
 
         entries: list[SkillEntry] = []
         skipped = 0
-        for entry_dir in sorted(base.iterdir()):
-            if not entry_dir.is_dir():
-                continue
+        for skill_md in candidates:
+            entry_dir = skill_md.parent
             if entry_dir.name.startswith(".") or entry_dir.name in _SKIP_DIRS:
-                continue
-            skill_md = entry_dir / "SKILL.md"
-            if not skill_md.is_file():
                 continue
             if len(entries) >= self._max_per_root:
                 skipped += 1
                 continue
             try:
-                parsed = parse_skill_md(skill_md, source_root=source_root)
+                raw = read_skill_md(skill_md)
+                parsed = parse_skill_md(skill_md, source_root=source_root, raw=raw)
             except Exception:
                 logger.warning("Skipped skill dir %s: failed to parse SKILL.md", entry_dir, exc_info=True)
                 continue
-            entries.append(SkillEntry(skill=parsed, file_hash=_hash_file(skill_md)))
+            entries.append(SkillEntry(skill=parsed, file_hash=_hash_bytes(raw)))
 
         if skipped:
             logger.warning(
@@ -130,11 +135,12 @@ class SkillIndex:
                 reloaded.append(name)
                 logger.info("Removed skill '%s' (SKILL.md no longer present)", name)
                 continue
-            current_hash = _hash_file(skill_md)
+            raw = read_skill_md(skill_md)
+            current_hash = _hash_bytes(raw)
             if current_hash == entry.file_hash:
                 continue
             try:
-                parsed = parse_skill_md(skill_md, source_root=entry.skill.source_root)
+                parsed = parse_skill_md(skill_md, source_root=entry.skill.source_root, raw=raw)
             except Exception:
                 logger.exception("Failed to hot-reload skill '%s', keeping old version", name)
                 continue

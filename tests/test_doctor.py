@@ -714,6 +714,53 @@ def test_skills_dir_permissions_warning(tmp_path):
     assert result.status == CheckStatus.WARNING
 
 
+def test_skills_dir_remote_root_reachable(tmp_path):
+    from unittest.mock import MagicMock, patch
+
+    root = MagicMock()
+    root.exists.return_value = True
+    doc = SecurityDoctor(skills_dir="s3://bucket/team", config_dir=tmp_path)
+    with patch("pincer.tools.skills.storage.open_skills_root", return_value=root) as opener:
+        result = doc._check_skills_dir_permissions(MagicMock())
+    assert opener.call_args.args[0] == "s3://bucket/team"
+    assert result.status == CheckStatus.PASS
+    assert "s3://bucket/team" in result.message
+
+
+def test_skills_dir_remote_root_empty(tmp_path):
+    from unittest.mock import MagicMock, patch
+
+    root = MagicMock()
+    root.exists.return_value = False
+    doc = SecurityDoctor(skills_dir="gs://bucket/team", config_dir=tmp_path)
+    with patch("pincer.tools.skills.storage.open_skills_root", return_value=root):
+        result = doc._check_skills_dir_permissions(MagicMock())
+    assert result.status == CheckStatus.WARNING
+
+
+def test_skills_dir_remote_root_unreachable(tmp_path):
+    from unittest.mock import MagicMock, patch
+
+    root = MagicMock()
+    root.exists.side_effect = ConnectionError("no route")
+    doc = SecurityDoctor(skills_dir="az://container/team", config_dir=tmp_path)
+    with patch("pincer.tools.skills.storage.open_skills_root", return_value=root):
+        result = doc._check_skills_dir_permissions(MagicMock())
+    assert result.status == CheckStatus.WARNING
+    assert "unreachable" in result.message
+
+
+def test_skills_dir_remote_root_missing_extra(tmp_path, monkeypatch):
+    import sys
+    from unittest.mock import MagicMock
+
+    monkeypatch.setitem(sys.modules, "cloudpathlib", None)
+    doc = SecurityDoctor(skills_dir="s3://bucket/team", config_dir=tmp_path)
+    result = doc._check_skills_dir_permissions(MagicMock())
+    assert result.status == CheckStatus.WARNING
+    assert "remote-skills" in result.message
+
+
 def test_no_world_readable_secrets_pass(tmp_path):
     data = tmp_path / "data"
     data.mkdir()

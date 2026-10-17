@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic.networks import AnyHttpUrl
 
 
@@ -26,9 +26,9 @@ class CoreSettings(BaseModel):
         default=Path.home() / ".pincer",
         description="Data directory for database, logs, etc.",
     )
-    skills_dir: Path = Field(
+    skills_dir: str | Path = Field(
         default=Path.home() / ".pincer/skills",
-        description="User-installed skills directory (SKILL.md subdirectories)",
+        description="User skills root (SKILL.md subdirectories): a local path or an s3://, az:// or gs:// URI",
     )
     skills_max_loaded_per_root: int = Field(
         default=100,
@@ -39,6 +39,38 @@ class CoreSettings(BaseModel):
         default=None,
         description="Soft budget for the Available Skills prompt block; None disables truncation",
     )
+    skills_remote_cache_dir: Path | None = Field(
+        default=None,
+        description="Local cache for remote skill roots (downloaded files, materialized scripts); "
+        "defaults to <data_dir>/cache/skills",
+    )
+    skills_index_cache_ttl_seconds: int = Field(
+        default=60,
+        ge=0,
+        description="How long the dashboard API reuses a scanned skill index; 0 rescans on every request",
+    )
+    # ── Remote skill root credentials (unset = the provider SDK's default chain) ──
+    skills_s3_endpoint_url: str | None = Field(
+        default=None, description="S3-compatible endpoint, e.g. MinIO or Cloudflare R2"
+    )
+    skills_s3_region: str | None = Field(default=None, description="AWS region for the skills bucket")
+    skills_s3_profile: str | None = Field(default=None, description="AWS shared-config profile name")
+    skills_s3_access_key_id: SecretStr | None = Field(default=None, description="AWS access key ID")
+    skills_s3_secret_access_key: SecretStr | None = Field(default=None, description="AWS secret access key")
+    skills_s3_session_token: SecretStr | None = Field(default=None, description="AWS session token")
+    skills_azure_connection_string: SecretStr | None = Field(
+        default=None, description="Azure Storage connection string (takes precedence over account URL)"
+    )
+    skills_azure_account_url: str | None = Field(
+        default=None, description="Azure Blob account URL, e.g. https://<account>.blob.core.windows.net"
+    )
+    skills_azure_credential: SecretStr | None = Field(
+        default=None, description="Azure account key or SAS token used with skills_azure_account_url"
+    )
+    skills_gcs_credentials_file: Path | None = Field(
+        default=None, description="Path to a Google service-account JSON key file"
+    )
+    skills_gcs_project: str | None = Field(default=None, description="Google Cloud project ID")
     mcp_instructions_max_chars: int = Field(
         default=400,
         ge=0,
@@ -69,6 +101,22 @@ class CoreSettings(BaseModel):
         default="",
         description="ngrok static domain, e.g. my-bot.ngrok-free.app (PINCER_NGROK_DOMAIN)",
     )
+
+    @field_validator("skills_dir", mode="before")
+    @classmethod
+    def _keep_remote_skills_uri(cls, value: Any) -> Any:
+        """Keep cloud URIs as strings: Path coercion would collapse `s3://` into `s3:/`."""
+        from pincer.tools.skills.storage import is_remote_uri
+
+        if isinstance(value, str) and is_remote_uri(value):
+            return value
+        return Path(value).expanduser()
+
+    @model_validator(mode="after")
+    def _default_skills_remote_cache_dir(self) -> Self:
+        if self.skills_remote_cache_dir is None:
+            self.skills_remote_cache_dir = self.data_dir / "cache" / "skills"
+        return self
 
     @model_validator(mode="after")
     def check_ngrok_domain(self) -> Self:

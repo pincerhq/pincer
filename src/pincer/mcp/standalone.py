@@ -247,15 +247,20 @@ def _load_builtin_tools_into(registry: Any) -> None:
         from pincer.config import get_settings_relaxed
         from pincer.tools.builtin.skills_tools import make_skills_tools
         from pincer.tools.skills.index import BUNDLED_SKILLS_DIR, SkillIndex
+        from pincer.tools.skills.storage import open_user_skills_root
 
         settings = get_settings_relaxed()
         index = SkillIndex(
             bundled_dir=BUNDLED_SKILLS_DIR,
-            user_dir=settings.skills_dir,
+            user_dir=open_user_skills_root(settings),
             max_per_root=settings.skills_max_loaded_per_root,
         )
         index.discover()
-        skill_tools = make_skills_tools(index, sandbox_disabled=settings.skill_sandbox_disabled)
+        skill_tools = make_skills_tools(
+            index,
+            sandbox_disabled=settings.skill_sandbox_disabled,
+            cache_root=settings.skills_remote_cache_dir,
+        )
         registry.register(
             name="load_skill",
             description="Load a skill's full instructions by name.",

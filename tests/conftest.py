@@ -528,6 +528,46 @@ async def migrated_url(migration_url: str, tmp_path: Path):
     await dispose_engines()
 
 
+# ── Skill roots (local + offline cloud mocks) ────────────────────────
+
+# A dummy connection string: cloudpathlib's Azure mock refuses anonymous
+# clients but never connects anywhere.
+_FAKE_AZURE_CONNECTION_STRING = (
+    "DefaultEndpointsProtocol=https;AccountName=pincertest;AccountKey=dGVzdA==;EndpointSuffix=core.windows.net"
+)
+
+
+@pytest.fixture(params=["local", "s3", "azure", "gs"])
+def skill_root(request: pytest.FixtureRequest, tmp_path: Path) -> Callable[[str], Any]:
+    """Factory for skill roots on every storage backend: `skill_root("bundled")`.
+
+    `local` returns a plain directory under tmp_path; the cloud params return
+    CloudPaths from cloudpathlib's offline mock clients, whose simulated bucket
+    and file cache also live under tmp_path, so nothing is shared between
+    tests and no network is touched. Write skills through the path API
+    (`write_text`, `unlink`), which works the same on every backend.
+    """
+    backend = request.param
+    if backend == "local":
+        return lambda name: tmp_path / name
+
+    local = pytest.importorskip("cloudpathlib.local")
+    storage = tmp_path / f"{backend}-storage"
+    cache = tmp_path / f"{backend}-cache"
+    if backend == "s3":
+        client = local.LocalS3Client(local_storage_dir=storage, local_cache_dir=cache)
+        prefix = "s3://skills-bucket"
+    elif backend == "azure":
+        client = local.LocalAzureBlobClient(
+            local_storage_dir=storage, local_cache_dir=cache, connection_string=_FAKE_AZURE_CONNECTION_STRING
+        )
+        prefix = "az://skills-container"
+    else:
+        client = local.LocalGSClient(local_storage_dir=storage, local_cache_dir=cache)
+        prefix = "gs://skills-bucket"
+    return lambda name: client.CloudPath(f"{prefix}/{name}")
+
+
 # ── Real Pincer processes (daemon, `pincer run`) ─────────────────────
 
 

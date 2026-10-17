@@ -509,15 +509,20 @@ async def _build_core(settings: Settings) -> CoreComponents:
     # Skills: SKILL.md-based discovery, coexists unconditionally with MCP.
     from pincer.tools.builtin.skills_tools import make_skills_tools
     from pincer.tools.skills.index import BUNDLED_SKILLS_DIR, SkillIndex
+    from pincer.tools.skills.storage import open_user_skills_root
 
     skill_index = SkillIndex(
         bundled_dir=BUNDLED_SKILLS_DIR,
-        user_dir=settings.skills_dir,
+        user_dir=open_user_skills_root(settings),
         max_per_root=settings.skills_max_loaded_per_root,
     )
     skill_index.discover()
 
-    skill_tools = make_skills_tools(skill_index, sandbox_disabled=settings.skill_sandbox_disabled)
+    skill_tools = make_skills_tools(
+        skill_index,
+        sandbox_disabled=settings.skill_sandbox_disabled,
+        cache_root=settings.skills_remote_cache_dir,
+    )
     tools.register(
         name="load_skill",
         description="Load a skill's full instructions by name (see Available Skills in the system prompt).",

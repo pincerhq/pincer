@@ -281,7 +281,7 @@ def create_app() -> FastAPI:
     async def run_doctor() -> dict[str, object]:
         from pincer.security.doctor import SecurityDoctor
 
-        doc = SecurityDoctor()
+        doc = SecurityDoctor(skills_dir=get_settings_relaxed().skills_dir)
         return doc.run_all().to_dict()
 
     dist = _dashboard_dist()

@@ -88,7 +88,7 @@ Prefer pure-instruction skills (no scripts) when the model can already accomplis
 ## Where Skills Live
 
 - **Bundled skills:** shipped inside the installed package at `src/pincer/skills/` (fixed path, not configurable). Ships with `pip install pincer-agent` — no project checkout required.
-- **User skills:** `~/.pincer/skills/` (`skills_dir` config).
+- **User skills:** `~/.pincer/skills/` (`skills_dir` config) — a local directory, or an S3 / Azure Blob / GCS prefix (see [Remote Skill Roots](#remote-skill-roots)).
 
 A user skill with the same `name` as a bundled skill overrides it.
 
@@ -96,10 +96,38 @@ A user skill with the same `name` as a bundled skill overrides it.
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `skills_dir` | `~/.pincer/skills` | User skills root |
+| `skills_dir` | `~/.pincer/skills` | User skills root: a local path, or an `s3://`, `az://` or `gs://` URI |
 | `skills_max_loaded_per_root` | `100` | Hard cap on skills loaded per root — applied at discovery, before prompt construction |
 | `skills_max_prompt_tokens` | `None` (no limit) | Soft budget for the Available Skills prompt block; once exceeded, descriptions are truncated and then trailing entries are dropped with an "X more skills" note. Tune this down for small-context local models. |
 | `skill_sandbox_disabled` | `False` | Bypass sandboxing for `run_skill_script` (trusted/dev workflows only) |
+| `skills_remote_cache_dir` | `<data_dir>/cache/skills` | Local cache for remote skill roots |
+| `skills_index_cache_ttl_seconds` | `60` | How long `GET /api/skills` reuses a scanned index; `0` rescans on every request |
+
+### Remote Skill Roots
+
+Teams can host shared skills in object storage instead of mounting a directory — useful in containers. Point `skills_dir` at a bucket prefix whose subdirectories each hold a `SKILL.md`, exactly like a local root:
+
+```bash
+pip install "pincer-agent[remote-skills]"   # cloudpathlib + the S3, Azure and GCS SDKs
+
+PINCER_SKILLS_DIR=s3://my-bucket/team-skills      # Amazon S3, MinIO, Cloudflare R2, …
+PINCER_SKILLS_DIR=az://my-container/team-skills   # Azure Blob Storage
+PINCER_SKILLS_DIR=gs://my-bucket/team-skills      # Google Cloud Storage
+```
+
+There is still exactly one user root; bundled skills always stay local. Without the extra, a remote `skills_dir` logs an error naming the install command and Pincer runs with bundled skills only. An unreachable bucket does the same (with a warning) instead of aborting startup.
+
+**Credentials.** Every setting below is optional. Anything left unset falls through to the provider SDK's own default chain (`AWS_*` env vars / `~/.aws` / instance roles, `DefaultAzureCredential`, Application Default Credentials). Secrets are never logged — log lines show only the URI.
+
+| Provider | Settings (`PINCER_` + upper-case name) |
+|---|---|
+| S3 | `skills_s3_endpoint_url` (MinIO/R2), `skills_s3_region`, `skills_s3_profile`, `skills_s3_access_key_id`, `skills_s3_secret_access_key`, `skills_s3_session_token` |
+| Azure | `skills_azure_connection_string`, **or** `skills_azure_account_url` + `skills_azure_credential` (account key or SAS token). With only the account URL, `DefaultAzureCredential` is used. |
+| GCS | `skills_gcs_credentials_file` (service-account JSON), `skills_gcs_project` |
+
+**Caching.** Files read from a remote root are cached under `skills_remote_cache_dir/objects/` and re-downloaded only when the object in the bucket is newer. Skills are discovered once at startup, so restart Pincer to pick up new or removed remote skills. The dashboard's `/api/skills` rescans at most every `skills_index_cache_ttl_seconds`.
+
+**Scripts.** `run_skill_script` on a remote skill first downloads the whole skill directory into `skills_remote_cache_dir/materialized/<uri-hash>/<SKILL.md-hash>/`, then runs it through the same approval gate and sandbox as a local script. Object storage keeps no file modes, so non-Python scripts get the owner execute bit restored after download. The copy is keyed on the SKILL.md hash: **if you change only a script, also change SKILL.md** (or delete that skill's `materialized/` folder), otherwise the previous copy keeps running.
 
 ---
 

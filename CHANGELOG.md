@@ -113,6 +113,34 @@ silently open.
 
 ### Added
 
+#### Remote skill roots: S3, Azure Blob Storage and Google Cloud Storage
+
+`PINCER_SKILLS_DIR` now also accepts `s3://bucket/prefix`, `az://container/prefix`
+or `gs://bucket/prefix`, so teams can share skills from object storage instead of
+mounting a directory. Install the new `remote-skills` extra
+(`pip install "pincer-agent[remote-skills]"`, built on cloudpathlib). See
+[Skills Guide → Remote Skill Roots](docs/guides/skills-guide.md#remote-skill-roots).
+
+- Discovery, `load_skill`, `load_skill_reference` and the dashboard's `/api/skills`
+  work unchanged on remote roots; blocking storage I/O runs off the event loop.
+- `run_skill_script` downloads a remote skill to `skills_remote_cache_dir`
+  (default `<data_dir>/cache/skills`) and runs it through the usual approval gate
+  and sandbox.
+- Credentials: optional `PINCER_SKILLS_S3_*`, `PINCER_SKILLS_AZURE_*` and
+  `PINCER_SKILLS_GCS_*` settings; unset ones fall back to each SDK's default chain.
+- An unreachable bucket or missing extra logs an error and leaves only the bundled
+  skills, instead of failing startup.
+- `/api/skills` caches its scanned index for `skills_index_cache_ttl_seconds`
+  (default 60; `0` disables).
+- `pincer doctor` checks that a remote root is reachable.
+
+### Fixed
+
+- `pincer doctor` and `GET /api/doctor` now check the configured `skills_dir`;
+  they always looked at `~/.pincer/skills` before.
+
+### Added
+
 #### Daemon mode: `pincer run -d`, `logs`, `status`, `stop`, `restart`
 
 Pincer can run in the background without `nohup` or Docker, scoped to its data
