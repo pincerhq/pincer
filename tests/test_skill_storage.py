@@ -69,6 +69,31 @@ def test_settings_default_skills_cache_under_data_dir(tmp_path: Path) -> None:
     assert settings.skills_cache_dir == tmp_path / "cache" / "skills"
 
 
+@pytest.mark.parametrize("uri", ["s3://bucket/cache", "az://c/cache", "gs://b/cache", "file:///tmp/cache"])
+def test_settings_reject_a_uri_for_the_skills_cache_dir(uri: str) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="skills_cache_dir must be a local directory"):
+        _settings(skills_cache_dir=uri)
+
+
+def test_settings_skills_cache_dir_is_an_expanded_local_path(tmp_path: Path) -> None:
+    assert _settings(skills_cache_dir="~/pincer-cache").skills_cache_dir == Path.home() / "pincer-cache"
+    assert _settings(skills_cache_dir=str(tmp_path)).skills_cache_dir == tmp_path
+
+
+def test_storage_credentials_use_the_storage_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("PINCER_STORAGE_S3_ENDPOINT_URL", "http://minio:9000")
+    monkeypatch.setenv("PINCER_STORAGE_AZURE_ACCOUNT_URL", "https://a.blob.core.windows.net")
+    monkeypatch.setenv("PINCER_STORAGE_GCS_PROJECT", "proj")
+    monkeypatch.setenv("PINCER_SKILLS_S3_ENDPOINT_URL", "http://old-name:9000")  # the old prefix is not read
+    settings = _settings()
+    assert settings.storage_s3_endpoint_url == "http://minio:9000"
+    assert settings.storage_azure_account_url == "https://a.blob.core.windows.net"
+    assert settings.storage_gcs_project == "proj"
+    assert not hasattr(settings, "skills_s3_endpoint_url")
+
+
 @pytest.mark.parametrize("ttl", [0, 30, 60])
 def test_settings_api_index_ttl_accepts_up_to_60s(ttl: int) -> None:
     assert _settings(skills_index_cache_ttl_seconds=ttl).skills_index_cache_ttl_seconds == ttl
@@ -84,10 +109,10 @@ def test_settings_api_index_ttl_rejects_out_of_range(ttl: int) -> None:
 
 def test_settings_read_remote_skills_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PINCER_SKILLS_DIR", "gs://bucket/skills")
-    monkeypatch.setenv("PINCER_SKILLS_S3_SECRET_ACCESS_KEY", "shh")
+    monkeypatch.setenv("PINCER_STORAGE_S3_SECRET_ACCESS_KEY", "shh")
     settings = _settings()
     assert settings.skills_dir == "gs://bucket/skills"
-    assert settings.skills_s3_secret_access_key.get_secret_value() == "shh"
+    assert settings.storage_s3_secret_access_key.get_secret_value() == "shh"
     assert "shh" not in repr(settings)
 
 
@@ -205,12 +230,12 @@ def test_open_skills_root_local_path(tmp_path: Path) -> None:
 def test_open_skills_root_s3_passes_explicit_credentials(tmp_path: Path) -> None:
     settings = _settings(
         data_dir=tmp_path,
-        skills_s3_endpoint_url="http://localhost:9000",
-        skills_s3_region="eu-central-1",
-        skills_s3_profile="team",
-        skills_s3_access_key_id="AKIA",
-        skills_s3_secret_access_key="secret",
-        skills_s3_session_token="token",
+        storage_s3_endpoint_url="http://localhost:9000",
+        storage_s3_region="eu-central-1",
+        storage_s3_profile="team",
+        storage_s3_access_key_id="AKIA",
+        storage_s3_secret_access_key="secret",
+        storage_s3_session_token="token",
     )
     with patch("boto3.Session") as session_cls, patch("cloudpathlib.S3Client") as client_cls:
         root = open_skills_root("s3://bucket/team", settings)
@@ -242,9 +267,9 @@ def test_open_skills_root_s3_unset_credentials_use_default_chain(tmp_path: Path)
 def test_open_skills_root_azure_connection_string_wins(tmp_path: Path) -> None:
     settings = _settings(
         data_dir=tmp_path,
-        skills_azure_connection_string="DefaultEndpointsProtocol=https;AccountName=a",
-        skills_azure_account_url="https://a.blob.core.windows.net",
-        skills_azure_credential="key",
+        storage_azure_connection_string="DefaultEndpointsProtocol=https;AccountName=a",
+        storage_azure_account_url="https://a.blob.core.windows.net",
+        storage_azure_credential="key",
     )
     with patch("cloudpathlib.AzureBlobClient") as client_cls:
         open_skills_root("az://container/skills", settings)
@@ -258,8 +283,8 @@ def test_open_skills_root_azure_connection_string_wins(tmp_path: Path) -> None:
 def test_open_skills_root_azure_account_url_and_credential(tmp_path: Path) -> None:
     settings = _settings(
         data_dir=tmp_path,
-        skills_azure_account_url="https://a.blob.core.windows.net",
-        skills_azure_credential="sas-token",
+        storage_azure_account_url="https://a.blob.core.windows.net",
+        storage_azure_credential="sas-token",
     )
     with patch("cloudpathlib.AzureBlobClient") as client_cls:
         open_skills_root("az://container/skills", settings)
@@ -274,8 +299,8 @@ def test_open_skills_root_azure_account_url_and_credential(tmp_path: Path) -> No
 def test_open_skills_root_gcs(tmp_path: Path) -> None:
     settings = _settings(
         data_dir=tmp_path,
-        skills_gcs_credentials_file=tmp_path / "sa.json",
-        skills_gcs_project="proj",
+        storage_gcs_credentials_file=tmp_path / "sa.json",
+        storage_gcs_project="proj",
     )
     with patch("cloudpathlib.GSClient") as client_cls:
         open_skills_root("gs://bucket/skills", settings)
@@ -294,7 +319,7 @@ def test_open_skills_root_missing_extra_is_a_helpful_error(monkeypatch: pytest.M
 
 
 def test_open_skills_root_wraps_client_errors_without_leaking_secrets(tmp_path: Path) -> None:
-    settings = _settings(data_dir=tmp_path, skills_s3_secret_access_key="super-secret")
+    settings = _settings(data_dir=tmp_path, storage_s3_secret_access_key="super-secret")
     with (
         patch("boto3.Session", side_effect=RuntimeError("profile not found")),
         pytest.raises(SkillLoadError, match="Cannot open skills root s3://bucket/team") as exc_info,

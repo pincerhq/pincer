@@ -1471,7 +1471,10 @@ class SecurityDoctor:
                 "skills_dir_permissions",
                 CheckStatus.WARNING,
                 str(e),
-                fix_hint="pip install 'pincer-agent[remote-skills]' and check the PINCER_SKILLS_* settings",
+                fix_hint=(
+                    "pip install 'pincer-agent[remote-skills]' and check PINCER_SKILLS_DIR "
+                    "and the PINCER_STORAGE_* settings"
+                ),
                 category="filesystem",
             )
         except Exception as e:
@@ -1479,7 +1482,7 @@ class SecurityDoctor:
                 "skills_dir_permissions",
                 CheckStatus.WARNING,
                 f"Remote skills root {uri} is unreachable: {type(e).__name__}",
-                fix_hint="Check the PINCER_SKILLS_* credential settings and network access to the bucket",
+                fix_hint="Check the PINCER_STORAGE_* credential settings and network access to the bucket",
                 category="filesystem",
             )
         if not reachable:

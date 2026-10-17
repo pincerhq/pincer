@@ -124,12 +124,13 @@ mounting a directory. Install the new `remote-skills` extra
 - Discovery, `load_skill`, `load_skill_reference` and the dashboard's `/api/skills`
   work unchanged on remote roots; blocking storage I/O runs off the event loop.
 - Remote files are cached only by cloudpathlib, under `skills_cache_dir/objects/`
-  (default `<data_dir>/cache/skills`); each read checks the bucket for a newer
+  (default `<data_dir>/cache/skills`; always a local directory, a URI is
+  rejected at startup); each read checks the bucket for a newer
   object. `run_skill_script` brings a remote skill's cached folder up to date,
   then runs it from there through the usual approval gate and sandbox, so
   script-only edits take effect on the next run.
-- Credentials: optional `PINCER_SKILLS_S3_*`, `PINCER_SKILLS_AZURE_*` and
-  `PINCER_SKILLS_GCS_*` settings; unset ones fall back to each SDK's default chain.
+- Credentials: optional `PINCER_STORAGE_S3_*`, `PINCER_STORAGE_AZURE_*` and
+  `PINCER_STORAGE_GCS_*` settings; unset ones fall back to each SDK's default chain.
 - An unreachable bucket or missing extra logs an error and leaves only the bundled
   skills, instead of failing startup.
 - New `pincer skills rebuild [--keep-cache]`: clears cached remote files, rescans

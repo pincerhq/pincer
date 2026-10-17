@@ -100,7 +100,7 @@ A user skill with the same `name` as a bundled skill overrides it.
 | `skills_max_loaded_per_root` | `100` | Hard cap on skills loaded per root — applied at discovery, before prompt construction |
 | `skills_max_prompt_tokens` | `None` (no limit) | Soft budget for the Available Skills prompt block; once exceeded, descriptions are truncated and then trailing entries are dropped with an "X more skills" note. Tune this down for small-context local models. |
 | `skill_sandbox_disabled` | `False` | Bypass sandboxing for `run_skill_script` (trusted/dev workflows only) |
-| `skills_cache_dir` | `<data_dir>/cache/skills` | cloudpathlib's copies of remote skill files (`objects/`) and the index generation stamp |
+| `skills_cache_dir` | `<data_dir>/cache/skills` | Local directory (never a URI) for cloudpathlib's copies of remote skill files (`objects/`), the index generation stamp and the disk ID. Scripts from remote skills run from here. |
 | `skills_index_cache_ttl_seconds` | `60` | Max age of the index the dashboard API serves before it rescans (0–60; `0` rescans on every request). Any index change invalidates it immediately. |
 | `skills_index_watch_interval_seconds` | `300` | How often `pincer run` checks in the background for index changes made by other processes (e.g. `pincer skills rebuild`); `0` disables the watcher, and requests then check themselves |
 
@@ -140,9 +140,9 @@ There is still exactly one user root; bundled skills always stay local. Without 
 
 | Provider | Settings (`PINCER_` + upper-case name) |
 |---|---|
-| S3 | `skills_s3_endpoint_url` (MinIO/R2), `skills_s3_region`, `skills_s3_profile`, `skills_s3_access_key_id`, `skills_s3_secret_access_key`, `skills_s3_session_token` |
-| Azure | `skills_azure_connection_string`, **or** `skills_azure_account_url` + `skills_azure_credential` (account key or SAS token). With only the account URL, `DefaultAzureCredential` is used. |
-| GCS | `skills_gcs_credentials_file` (service-account JSON), `skills_gcs_project` |
+| S3 | `storage_s3_endpoint_url` (MinIO/R2), `storage_s3_region`, `storage_s3_profile`, `storage_s3_access_key_id`, `storage_s3_secret_access_key`, `storage_s3_session_token` |
+| Azure | `storage_azure_connection_string`, **or** `storage_azure_account_url` + `storage_azure_credential` (account key or SAS token). With only the account URL, `DefaultAzureCredential` is used. |
+| GCS | `storage_gcs_credentials_file` (service-account JSON), `storage_gcs_project` |
 
 **Caching.** There are two layers, no more:
 

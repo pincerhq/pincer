@@ -67,30 +67,30 @@ def _build_client(scheme: str, settings: Settings, cache_dir: Path | None) -> An
 
         session = boto3.Session(
             **_drop_none(
-                aws_access_key_id=_secret(settings.skills_s3_access_key_id),
-                aws_secret_access_key=_secret(settings.skills_s3_secret_access_key),
-                aws_session_token=_secret(settings.skills_s3_session_token),
-                profile_name=settings.skills_s3_profile or None,
-                region_name=settings.skills_s3_region or None,
+                aws_access_key_id=_secret(settings.storage_s3_access_key_id),
+                aws_secret_access_key=_secret(settings.storage_s3_secret_access_key),
+                aws_session_token=_secret(settings.storage_s3_session_token),
+                profile_name=settings.storage_s3_profile or None,
+                region_name=settings.storage_s3_region or None,
             )
         )
         return S3Client(
             boto3_session=session,
-            **_drop_none(endpoint_url=settings.skills_s3_endpoint_url or None),
+            **_drop_none(endpoint_url=settings.storage_s3_endpoint_url or None),
             **cache_kwargs,
         )
 
     if scheme == "az":
         from cloudpathlib import AzureBlobClient
 
-        connection_string = _secret(settings.skills_azure_connection_string)
+        connection_string = _secret(settings.storage_azure_connection_string)
         if connection_string:
             return AzureBlobClient(connection_string=connection_string, **cache_kwargs)
         # With only account_url set, cloudpathlib falls back to DefaultAzureCredential.
         return AzureBlobClient(
             **_drop_none(
-                account_url=settings.skills_azure_account_url or None,
-                credential=_secret(settings.skills_azure_credential),
+                account_url=settings.storage_azure_account_url or None,
+                credential=_secret(settings.storage_azure_credential),
             ),
             **cache_kwargs,
         )
@@ -98,11 +98,11 @@ def _build_client(scheme: str, settings: Settings, cache_dir: Path | None) -> An
     if scheme == "gs":
         from cloudpathlib import GSClient
 
-        credentials_file = settings.skills_gcs_credentials_file
+        credentials_file = settings.storage_gcs_credentials_file
         return GSClient(
             **_drop_none(
                 application_credentials=str(credentials_file) if credentials_file else None,
-                project=settings.skills_gcs_project or None,
+                project=settings.storage_gcs_project or None,
             ),
             **cache_kwargs,
         )
