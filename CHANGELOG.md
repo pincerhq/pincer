@@ -137,6 +137,10 @@ mounting a directory. Install the new `remote-skills` extra
   running `pincer run` reloads without a restart: a background watcher checks the
   stamp every `skills_index_watch_interval_seconds` (default 300; `0` disables it)
   and rescans off the request path, and the dashboard checks it on every request.
+- New `POST /api/skills/rebuild[?keep_cache=true]`: rebuilds the serving process's
+  index, then queues a `rebuild_skill_index` background job with the new
+  generation for the task workers (consumed by one process; idempotent). Returns
+  the rebuilt skill list and whether the job was queued.
 - One skill index per process, owned by `pincer.services.skills.SkillService` and
   shared by the agent, its skill tools, the dashboard API and the CLI.
 - `/api/skills` rescans when its index is older than `skills_index_cache_ttl_seconds`

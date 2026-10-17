@@ -294,3 +294,58 @@ def test_watch_interval_setting_defaults_to_five_minutes() -> None:
     assert _RelaxedSettings(skills_index_watch_interval_seconds=0).skills_index_watch_interval_seconds == 0
     with pytest.raises(ValidationError):
         _RelaxedSettings(skills_index_watch_interval_seconds=-1)
+
+
+# ── apply_generation (the rebuild_skill_index background job) ────────────────
+
+
+def test_rebuild_records_its_generation(user: SkillPath, cache_dir: Path) -> None:
+    service = _service(user, cache_dir)
+    assert service.generation is None
+    service.rebuild()
+    assert service.generation == _stamp(cache_dir)
+
+
+def test_apply_generation_is_a_noop_in_the_rebuilding_process(user: SkillPath, cache_dir: Path) -> None:
+    app = _service(user, cache_dir)
+    app.rebuild()
+    with patch.object(SkillIndex, "discover", side_effect=AssertionError("rescanned")):
+        assert app.apply_generation(app.generation) is False
+
+
+def test_apply_generation_on_a_shared_disk_rescans_without_clearing(user: SkillPath, cache_dir: Path) -> None:
+    app, worker = _service(user, cache_dir), _service(user, cache_dir)
+    worker.ensure_current()
+    _make_skill(user, "beta")
+    app.rebuild()
+    stamp = _stamp(cache_dir)
+
+    with patch("pincer.services.skills.clear_remote_cache") as clear:
+        assert worker.apply_generation(app.generation) is True
+
+    clear.assert_not_called()  # the rebuilding process already cleared the shared cache
+    assert _names(worker.index) == ["alpha", "beta"]
+    assert worker.generation == app.generation
+    assert _stamp(cache_dir) == stamp  # nothing new announced
+    assert worker.apply_generation(app.generation) is False
+
+
+def test_apply_generation_on_its_own_disk_clears_and_adopts_the_generation(
+    user: SkillPath, cache_dir: Path, tmp_path: Path
+) -> None:
+    app = _service(user, cache_dir)
+    worker_disk = tmp_path / "worker-cache"
+    worker, worker_sibling = _service(user, worker_disk), _service(user, worker_disk)
+    worker.ensure_current()
+    worker_sibling.ensure_current()
+    _make_skill(user, "beta")
+    app.rebuild()
+
+    with patch("pincer.services.skills.clear_remote_cache") as clear:
+        assert worker.apply_generation(app.generation, clear_cache=True) is True
+        worker.apply_generation("other", clear_cache=False)
+    clear.assert_called_once_with(user)
+
+    # Processes sharing the worker's disk follow it once, via the stamp.
+    assert _stamp(worker_disk) == "other"
+    assert "beta" in _names(worker_sibling.ensure_current())

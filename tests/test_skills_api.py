@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
@@ -290,6 +291,116 @@ def test_skill_entries_from_mocked_s3_root(tmp_path: Path) -> None:
     ]
     assert detail["body"] == "hi"
     assert detail["files"] == ["ref.md"]
+
+
+# ── POST /api/skills/rebuild ─────────────────────────────────────────────────
+
+
+@pytest.fixture
+def queued_jobs():
+    """Captures what the endpoint sends to the task queue."""
+    from unittest.mock import AsyncMock
+
+    from pincer.tasks import app as task_app  # the Repid instance (it shadows the submodule)
+
+    send = AsyncMock()
+    with patch.object(task_app, "send_message_json", send):
+        yield send
+
+
+def test_rebuild_endpoint_rebuilds_in_app_then_queues_the_job(api_settings, tmp_path: Path, queued_jobs) -> None:
+    from pincer.api.skills import rebuild_skills
+    from pincer.services.skills import get_skill_service
+
+    assert _user_names() == []
+    _add_user_skill(tmp_path, "late")
+
+    body = asyncio.run(rebuild_skills(keep_cache=False))
+
+    # The app's own index is rebuilt before the job is queued.
+    assert [s["name"] for s in body["skills"] if s["root"] == "user"] == ["late"]
+    assert _user_names() == ["late"]
+    assert body["generation"] == get_skill_service().generation
+    assert body["generation"] == (tmp_path / "cache" / "index-generation").read_text(encoding="utf-8")
+    assert body["cache_cleared"] is True
+    assert body["job"] == {"queued": True, "topic": "rebuild_skill_index"}
+    queued_jobs.assert_awaited_once_with(
+        channel="pincer_tasks",
+        payload={"generation": body["generation"], "clear_cache": True},
+        headers={"topic": "rebuild_skill_index"},
+    )
+
+
+def test_rebuild_endpoint_keep_cache(api_settings, queued_jobs) -> None:
+    from pincer.api.skills import rebuild_skills
+
+    with patch("pincer.services.skills.clear_remote_cache") as clear:
+        body = asyncio.run(rebuild_skills(keep_cache=True))
+    clear.assert_not_called()
+    assert body["cache_cleared"] is False
+    assert queued_jobs.await_args.kwargs["payload"]["clear_cache"] is False
+
+
+def test_rebuild_endpoint_reports_a_failed_enqueue_without_failing(api_settings, queued_jobs) -> None:
+    from pincer.api.skills import rebuild_skills
+
+    queued_jobs.side_effect = ConnectionError("redis down")
+    body = asyncio.run(rebuild_skills(keep_cache=False))
+
+    assert body["job"]["queued"] is False
+    assert "redis down" in body["job"]["error"]
+    assert body["generation"]  # the in-app rebuild still happened
+
+
+def test_rebuild_endpoint_over_http(client: TestClient, queued_jobs) -> None:
+    resp = client.post("/api/skills/rebuild?keep_cache=true")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["cache_cleared"] is False
+    assert data["job"]["queued"] is True
+    assert {s["root"] for s in data["skills"]} == {"bundled"}
+
+
+def test_rebuild_endpoint_failure_is_a_500(client: TestClient, queued_jobs) -> None:
+    from pincer.services.skills import SkillService
+
+    with patch.object(SkillService, "rebuild", side_effect=RuntimeError("bucket on fire")):
+        resp = client.post("/api/skills/rebuild")
+    assert resp.status_code == 500
+    assert "bucket on fire" in resp.json()["detail"]
+    queued_jobs.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rebuild_job_round_trip_through_the_task_queue(api_settings, tmp_path: Path) -> None:
+    """Endpoint → in-memory repid broker → worker → rebuild_skill_index, in a "worker
+    process" with its own disk (a separate SkillService), which must end up rebuilt."""
+    from repid import InMemoryServer
+
+    from pincer.api.skills import rebuild_skills
+    from pincer.services.skills import SkillService
+    from pincer.tasks import app as task_app
+
+    worker_service = SkillService(bundled_dir=None, user_dir=tmp_path / "user", cache_dir=tmp_path / "worker-cache")
+    worker_service.ensure_current()
+    _add_user_skill(tmp_path, "late")
+
+    task_app.servers.register_server("default", InMemoryServer(), is_default=True)
+    connection = task_app.servers.default.connection()
+    await connection.__aenter__()
+    try:
+        body = await rebuild_skills(keep_cache=False)
+        assert body["job"]["queued"] is True
+        with patch("pincer.services.skills.get_skill_service", return_value=worker_service):
+            await asyncio.wait_for(
+                task_app.run_worker(messages_limit=1, graceful_shutdown_time=1.0, register_signals=[]),
+                timeout=10,
+            )
+    finally:
+        await connection.__aexit__(None, None, None)
+
+    assert [e.name for e in worker_service.index.all_skills()] == ["late"]
+    assert worker_service.generation == body["generation"]
 
 
 # ── GET /api/skills ─────────────────────────────────────────────────────────────

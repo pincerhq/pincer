@@ -118,7 +118,9 @@ The command rescans both roots and writes a new generation stamp to `skills_cach
 - **Agent and skill tools:** a background watcher checks the stamp every `skills_index_watch_interval_seconds` (5 minutes by default) and rescans off the request path. The agent therefore sees a rebuild within at most the interval plus the scan time, and no chat turn ever waits on a rescan.
 - **Dashboard (`/api/skills`):** checks the stamp on every request, so it shows the rebuild immediately (and rescans whenever its index is older than `skills_index_cache_ttl_seconds`). A dashboard request in `pincer run` reloads the shared index, so the agent sees that reload too.
 
-Processes without a watcher (the standalone MCP server, or `pincer run` with the interval set to `0`) check the stamp on every read instead. The command and the API share one implementation, `pincer.services.skills.SkillService` — its `rebuild()` and `invalidate()` are the hooks for anything else that changes skills (such as a future upload endpoint).
+Processes without a watcher (the standalone MCP server, or `pincer run` with the interval set to `0`) check the stamp on every read instead.
+
+**Over the API:** `POST /api/skills/rebuild` (optional `?keep_cache=true`) does the same from the dashboard or a script. It rebuilds the serving process's own index first, so the agent and dashboard see the result straight away. It then queues a `rebuild_skill_index` background job for the task workers. In a Redis setup that job reaches **one** consumer, which may be the main process (where it does nothing). Workers sharing the data volume pick the change up from the stamp regardless. See the [REST API reference](../reference/rest-api.md#post-apiskillsrebuild). The command and the API share one implementation, `pincer.services.skills.SkillService` — its `rebuild()` and `invalidate()` are the hooks for anything else that changes skills (such as a future upload endpoint).
 
 ### Remote Skill Roots
 

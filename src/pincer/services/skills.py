@@ -80,6 +80,11 @@ class SkillService:
     def user_dir(self) -> SkillPath | None:
         return self._user_dir
 
+    @property
+    def generation(self) -> str | None:
+        """The announced change this process's index reflects (None before any)."""
+        return self._generation
+
     def ensure_current(self, max_age: float | None = None) -> SkillIndex:
         """Return the index, rescanning first if it was never scanned, if another
         process announced a change, or if the last scan is older than `max_age`
@@ -126,6 +131,29 @@ class SkillService:
             self._scanned_at = monotonic()
             return self.index
 
+    def apply_generation(self, generation: str, clear_cache: bool = True) -> bool:
+        """Bring this process up to a rebuild another process announced as `generation`
+        (the `rebuild_skill_index` background job). Idempotent; returns whether it rescanned.
+
+        - Already at `generation` (e.g. the job ran in the process that rebuilt): no-op.
+        - Shares the rebuilder's disk (the stamp already says `generation`): rescan only;
+          the cache was cleared by the rebuilder.
+        - Has its own disk: clear its own cache if asked, rescan, and record `generation`
+          as its stamp so processes sharing *this* disk follow without another rescan wave.
+        """
+        with self._lock:
+            if self._generation == generation:
+                return False
+            shares_disk = self._read_stamp() == generation
+            if clear_cache and not shares_disk:
+                clear_remote_cache(self._user_dir)
+            self.index.discover()
+            self._scanned_at = monotonic()
+            if not shares_disk:
+                self._write_stamp(generation)
+            self._generation = generation
+            return True
+
     def invalidate(self) -> None:
         """Mark the index stale in every process (this one included) without
         scanning now — e.g. after uploading skill files."""
@@ -147,16 +175,19 @@ class SkillService:
 
     def _read_stamp(self) -> str | None:
         if self._stamp_path is None:
-            return None
+            # No stamp file means no other process can announce anything.
+            return self._generation
         try:
             return self._stamp_path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return None
 
-    def _write_stamp(self) -> str | None:
+    def _write_stamp(self, stamp: str | None = None) -> str:
+        """Write `stamp` (a new random one by default) and return it. Without a
+        cache dir nothing is written, but the generation is still returned."""
+        stamp = stamp or uuid.uuid4().hex
         if self._stamp_path is None:
-            return None
-        stamp = uuid.uuid4().hex
+            return stamp
         self._stamp_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._stamp_path.with_name(f".{_STAMP_FILENAME}.{os.getpid()}.tmp")
         tmp.write_text(stamp, encoding="utf-8")
