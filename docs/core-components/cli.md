@@ -477,11 +477,16 @@ Total: 1,247 entries | Cost: $2.4510 | Failed: 3
 
 ### Skills
 
-There is no `pincer skills` CLI command group. Skills are discovered purely from
-the filesystem: drop a directory containing a `SKILL.md` file into
-`src/pincer/skills/` (bundled, shipped inside the package) or `~/.pincer/skills/`
-(user) and restart Pincer. See the
-[Skills Guide](../guides/skills-guide.md) for the format and the
+Skills are discovered from their roots: `src/pincer/skills/` (bundled, shipped
+inside the package) and `skills_dir` (user — `~/.pincer/skills/` by default, or an
+`s3://` / `az://` / `gs://` prefix). There is no install step.
+
+| Command | What it does |
+|---|---|
+| `pincer skills rebuild` | Clear cached remote skill files, rescan both roots, and make a running `pincer run` reload: the dashboard on its next request, the agent within `skills_index_watch_interval_seconds` (5 min by default) |
+| `pincer skills rebuild --keep-cache` | Same, but keep cloudpathlib's cached copies of remote files |
+
+See the [Skills Guide](../guides/skills-guide.md) for the format and the
 `load_skill` / `load_skill_reference` / `run_skill_script` tools the agent
 uses to read and act on them.
 

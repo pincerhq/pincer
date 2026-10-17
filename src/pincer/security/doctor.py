@@ -93,7 +93,7 @@ class SecurityDoctor:
         self,
         data_dir: Path | None = None,
         config_dir: Path | None = None,
-        skills_dir: Path | None = None,
+        skills_dir: str | Path | None = None,
         production: bool = False,
     ) -> None:
         self.data_dir = data_dir or Path("data")
@@ -135,7 +135,7 @@ class SecurityDoctor:
         report.checks.append(self._check_tool_call_limits(settings))
         # Filesystem (4 checks)
         report.checks.append(self._check_data_dir_permissions())
-        report.checks.append(self._check_skills_dir_permissions())
+        report.checks.append(self._check_skills_dir_permissions(settings))
         report.checks.append(self._check_no_world_readable_secrets())
         report.checks.append(self._check_sqlite_not_world_readable())
         # Network (2 checks)
@@ -1428,15 +1428,20 @@ class SecurityDoctor:
             category="filesystem",
         )
 
-    def _check_skills_dir_permissions(self) -> CheckResult:
-        if not self.skills_dir.exists():
+    def _check_skills_dir_permissions(self, cfg: Settings | None = None) -> CheckResult:
+        from pincer.tools.skills.storage import is_remote_uri
+
+        if isinstance(self.skills_dir, str) and is_remote_uri(self.skills_dir):
+            return self._check_remote_skills_root(self.skills_dir, self._cfg(cfg))
+        skills_dir = Path(self.skills_dir)
+        if not skills_dir.exists():
             return CheckResult(
                 "skills_dir_permissions",
                 CheckStatus.SKIPPED,
                 "Skills dir doesn't exist yet",
                 category="filesystem",
             )
-        mode = oct(self.skills_dir.stat().st_mode)[-3:]
+        mode = oct(skills_dir.stat().st_mode)[-3:]
         if mode in ("700", "750", "755"):
             return CheckResult(
                 "skills_dir_permissions",
@@ -1449,6 +1454,49 @@ class SecurityDoctor:
             CheckStatus.WARNING,
             f"Skills dir permissions: {mode}",
             fix_hint="chmod 750 ~/.pincer/skills/",
+            category="filesystem",
+        )
+
+    def _check_remote_skills_root(self, uri: str, cfg: Settings) -> CheckResult:
+        """Remote roots have no POSIX mode to check; verify the extra is installed
+        and the root answers instead."""
+        from pincer.exceptions import SkillLoadError
+        from pincer.tools.skills.storage import open_skills_root
+
+        try:
+            root = open_skills_root(uri, cfg)
+            reachable = root.exists()
+        except SkillLoadError as e:
+            return CheckResult(
+                "skills_dir_permissions",
+                CheckStatus.WARNING,
+                str(e),
+                fix_hint=(
+                    "pip install 'pincer-agent[remote-skills]' and check PINCER_SKILLS_DIR "
+                    "and the PINCER_STORAGE_* settings"
+                ),
+                category="filesystem",
+            )
+        except Exception as e:
+            return CheckResult(
+                "skills_dir_permissions",
+                CheckStatus.WARNING,
+                f"Remote skills root {uri} is unreachable: {type(e).__name__}",
+                fix_hint="Check the PINCER_STORAGE_* credential settings and network access to the bucket",
+                category="filesystem",
+            )
+        if not reachable:
+            return CheckResult(
+                "skills_dir_permissions",
+                CheckStatus.WARNING,
+                f"Remote skills root {uri} is reachable but empty or missing",
+                fix_hint="Upload skill directories (each with a SKILL.md) under that prefix",
+                category="filesystem",
+            )
+        return CheckResult(
+            "skills_dir_permissions",
+            CheckStatus.PASS,
+            f"Remote skills root reachable: {uri}",
             category="filesystem",
         )
 

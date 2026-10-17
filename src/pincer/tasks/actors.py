@@ -11,6 +11,7 @@ it's unused here.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -200,3 +201,32 @@ async def process_webhook(webhook_id: str, payload: dict[str, Any], pincer_user_
         logger.exception("Webhook processing failed after retries: webhook_id=%s", webhook_id)
         raise
     logger.info("Webhook processed: webhook_id=%s user=%s", webhook_id, pincer_user_id)
+
+
+@router.actor(confirmation_mode="auto", on_error="nack")
+async def rebuild_skill_index(generation: str, clear_cache: bool = True, disk_id: str | None = None) -> None:
+    """Apply a skill index rebuild announced as `generation` in this process.
+
+    Enqueued by POST /api/skills/rebuild after it has rebuilt the app's own index.
+    One consumer runs it — with `task_broker=redis` that can be any `pincer run
+    tasks` worker or the main `pincer run` itself, where it is a no-op. Processes
+    sharing the main process's data volume follow the generation stamp anyway;
+    this job is what reaches a worker that doesn't. `disk_id` identifies the
+    sender's cache dir, so a worker on the same volume doesn't clear it twice.
+    """
+    from pincer.services.skills import get_skill_service
+
+    service = get_skill_service()
+    try:
+        rescanned = await asyncio.to_thread(service.apply_generation, generation, clear_cache, disk_id)
+    except Exception:
+        logger.exception("Skill index rebuild failed: generation=%s", generation)
+        raise
+    if rescanned:
+        logger.info(
+            "Skill index rebuilt by background job: generation=%s, %d skill(s)",
+            generation,
+            len(service.index.all_skills()),
+        )
+    else:
+        logger.info("Skill index rebuild job skipped: already at generation=%s", generation)

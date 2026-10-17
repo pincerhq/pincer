@@ -46,8 +46,8 @@ if TYPE_CHECKING:
     from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import AuditLogger
     from pincer.security.rate_limiter import RateLimiter
+    from pincer.services.skills import SkillService
     from pincer.tools.registry import ToolRegistry
-    from pincer.tools.skills.index import SkillIndex
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +176,7 @@ class CoreComponents:
     memory_store: BaseMemoryBackend | None
     summarizer: Summarizer | None
     tools: ToolRegistry
-    skill_index: SkillIndex
+    skill_service: SkillService
     mcp_manager: MCPClientManager | None
     agent: Agent
 
@@ -507,17 +507,21 @@ async def _build_core(settings: Settings) -> CoreComponents:
             )
 
     # Skills: SKILL.md-based discovery, coexists unconditionally with MCP.
+    from pincer.exceptions import SkillLoadError
+    from pincer.services.skills import get_skill_service
     from pincer.tools.builtin.skills_tools import make_skills_tools
-    from pincer.tools.skills.index import BUNDLED_SKILLS_DIR, SkillIndex
 
-    skill_index = SkillIndex(
-        bundled_dir=BUNDLED_SKILLS_DIR,
-        user_dir=settings.skills_dir,
-        max_per_root=settings.skills_max_loaded_per_root,
-    )
-    skill_index.discover()
+    # The process-wide service: the dashboard API served from this process reads
+    # the same index. A remote skills root that can't be used refuses to start
+    # (shared by `pincer run` and `pincer run tasks`), naming what to configure.
+    try:
+        skill_service = get_skill_service(settings, require_usable_root=True)
+    except SkillLoadError as e:
+        console.print(f"[red]Skills: {e}[/red]", soft_wrap=True)
+        raise typer.Exit(1) from e
+    skill_index = skill_service.ensure_current()
 
-    skill_tools = make_skills_tools(skill_index, sandbox_disabled=settings.skill_sandbox_disabled)
+    skill_tools = make_skills_tools(skill_service, sandbox_disabled=settings.skill_sandbox_disabled)
     tools.register(
         name="load_skill",
         description="Load a skill's full instructions by name (see Available Skills in the system prompt).",
@@ -622,7 +626,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
         memory_store=memory_store,
         summarizer=summarizer,
     )
-    agent.skill_index = skill_index
+    agent.skill_service = skill_service
     if mcp_manager:
         agent.mcp_manager = mcp_manager
         from pincer.memory.mcp import MCPMemoryBackend
@@ -640,7 +644,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
         memory_store=memory_store,
         summarizer=summarizer,
         tools=tools,
-        skill_index=skill_index,
+        skill_service=skill_service,
         mcp_manager=mcp_manager,
         agent=agent,
     )
@@ -984,6 +988,14 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
     if there is nothing to serve (no channel configured)."""
     core = await _build_core(settings)
     _stop_core_on_shutdown(shutdown, core)
+    if settings.skills_index_watch_interval_seconds > 0:
+        # Applies `pincer skills rebuild` (or any other process's index change) in the
+        # background, so agent turns and skill tools never wait on a rescan.
+        from pincer.services.skills import SkillIndexWatcher
+
+        skill_watcher = SkillIndexWatcher(core.skill_service, interval=settings.skills_index_watch_interval_seconds)
+        await skill_watcher.start()
+        shutdown.on_stop("skill index watcher", skill_watcher.stop)
     session_mgr, cost_tracker, audit_logger, rate_limiter = (
         core.session_mgr,
         core.cost_tracker,

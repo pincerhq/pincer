@@ -358,7 +358,7 @@ List extracted entities. Types: `person`, `place`, `project`, `organization`.
 
 ### `GET /api/skills`
 
-List discovered `SKILL.md` skills — bundled (shipped inside the package at `src/pincer/skills/`) and user (`~/.pincer/skills/`), listed uniformly. Read-only — there is no install/scan/delete API; skills are added by placing a directory under `~/.pincer/skills/` and restarting. See the [Skills Guide](../guides/skills-guide.md).
+List discovered `SKILL.md` skills — bundled (shipped inside the package at `src/pincer/skills/`) and user (`skills_dir`: `~/.pincer/skills/` or an `s3://` / `az://` / `gs://` prefix), listed uniformly. There is no install/delete API; add a skill directory to the user root, then call `POST /api/skills/rebuild` (or `pincer skills rebuild`). See the [Skills Guide](../guides/skills-guide.md).
 
 ```json
 {
@@ -368,9 +368,30 @@ List discovered `SKILL.md` skills — bundled (shipped inside the package at `sr
       "description": "How to write a new Pincer skill as a SKILL.md directory...",
       "status": "active",
       "source": "file",
-      "root": "bundled"
+      "root": "bundled",
+      "dir": "skill-authoring"
     }
   ]
+}
+```
+
+### `POST /api/skills/rebuild`
+
+Rebuild the skill index — the API counterpart of `pincer skills rebuild`. Query parameter `keep_cache` (default `false`) keeps cloudpathlib's cached copies of remote skill files instead of re-fetching them.
+
+1. Rebuilds the index of the process serving the request first, so the agent and dashboard it serves already see the result when the response returns.
+2. Queues one `rebuild_skill_index` background job carrying the new `generation`.
+
+The job is consumed by **one** process: with `task_broker=redis` that is any `pincer run tasks` worker, or the main `pincer run` itself, where it is a no-op. Workers that share the main process's data volume (the default `docker-compose.yml` setup) also follow the generation stamp the rebuild wrote; the job is what reaches a worker that doesn't. The job is idempotent and never moves a process to an older generation: a process already at that generation (or a newer one) skips it. The job carries the sender's disk ID (a file in `skills_cache_dir`), so a worker on the same data volume only catches up with the stamp instead of clearing the shared cache a second time.
+
+A failed enqueue doesn't fail the request — the in-app rebuild has already happened — and is reported in `job`. A failed rebuild is a `500`.
+
+```json
+{
+  "generation": "3f1c9e4a7b2d4e0f9a8c6b5d4e3f2a1b",
+  "cache_cleared": true,
+  "skills": [{"name": "skill-authoring", "root": "bundled", "dir": "skill-authoring", "...": "..."}],
+  "job": {"queued": true, "topic": "rebuild_skill_index"}
 }
 ```
 

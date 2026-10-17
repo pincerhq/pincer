@@ -12,7 +12,7 @@ import pytest_asyncio
 from pincer.channels.base import ChannelType
 from pincer.db.ids import new_id
 from pincer.scheduler.cron import CronScheduler
-from pincer.tasks.actors import process_webhook, run_scheduled_action
+from pincer.tasks.actors import process_webhook, rebuild_skill_index, run_scheduled_action
 from pincer.tasks.context import set_context
 
 
@@ -273,3 +273,36 @@ class TestProcessWebhook:
             await process_webhook(webhook_id="wh_1", payload={"a": 1}, pincer_user_id="usr_test")
 
         assert triggers.handle_webhook.await_count == 3
+
+
+@pytest.mark.asyncio
+class TestRebuildSkillIndex:
+    async def test_applies_the_generation_in_this_process(self):
+        calls = []
+        service = SimpleNamespace(
+            apply_generation=lambda gen, clear, disk: calls.append((gen, clear, disk)) or True,
+            index=SimpleNamespace(all_skills=list),
+        )
+        with patch("pincer.services.skills.get_skill_service", return_value=service):
+            await rebuild_skill_index(generation="gen-1", clear_cache=False, disk_id="disk-a")
+        assert calls == [("gen-1", False, "disk-a")]
+
+    async def test_already_current_is_logged_as_skipped(self, caplog):
+        service = SimpleNamespace(apply_generation=lambda gen, clear, disk: False)
+        with (
+            patch("pincer.services.skills.get_skill_service", return_value=service),
+            caplog.at_level(logging.INFO),
+        ):
+            await rebuild_skill_index(generation="gen-1")
+        assert "skipped: already at generation=gen-1" in caplog.text
+
+    async def test_failure_is_reraised_so_repid_nacks(self):
+        def boom(gen, clear, disk):
+            raise ConnectionError("bucket unreachable")
+
+        service = SimpleNamespace(apply_generation=boom)
+        with (
+            patch("pincer.services.skills.get_skill_service", return_value=service),
+            pytest.raises(ConnectionError),
+        ):
+            await rebuild_skill_index(generation="gen-1")

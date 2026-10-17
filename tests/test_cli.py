@@ -329,8 +329,44 @@ def _mock_settings_for_build_core(tmp_path: Path):
     settings.skills_dir = tmp_path / "skills"
     settings.skills_max_loaded_per_root = 50
     settings.skill_sandbox_disabled = False
+    settings.skills_cache_dir = tmp_path / "skills-cache"
     settings.data_dir = tmp_path
     return settings
+
+
+@pytest.mark.asyncio
+async def test_build_core_refuses_an_unusable_remote_skills_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`pincer run` and `pincer run tasks` (both via _build_core) must not start with a
+    remote skills root they can't use; the error names the storage settings."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    import typer
+
+    from pincer.cli.run import _build_core
+    from pincer.exceptions import SkillLoadError
+
+    settings = _mock_settings_for_build_core(tmp_path)
+    settings.skills_dir = "s3://bucket/team"
+    mock_router = MagicMock()
+    mock_router.get_llm.return_value = AsyncMock()
+    monkeypatch.setattr("pincer.core.session.SessionManager", MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr("pincer.llm.cost_tracker.CostTracker", MagicMock(return_value=AsyncMock()))
+    monkeypatch.setattr("pincer.security.rate_limiter.get_rate_limiter", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("pincer.llm.router.LLMRouter", MagicMock(return_value=mock_router))
+    monkeypatch.setattr("pincer.tools.bootstrap.register_default_tools", MagicMock(return_value={}))
+    monkeypatch.setattr("pincer.mcp.load_mcp_config", MagicMock(side_effect=RuntimeError("no config in test env")))
+    monkeypatch.setattr(
+        "pincer.services.skills.open_usable_skills_root",
+        MagicMock(side_effect=SkillLoadError("Skills root s3://bucket/team is not usable. PINCER_STORAGE_S3_X")),
+    )
+
+    with pytest.raises(typer.Exit) as exc_info:
+        await _build_core(settings)
+
+    assert exc_info.value.exit_code == 1
+    assert "PINCER_STORAGE_S3_X" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
@@ -564,7 +600,7 @@ async def test_run_agent_wires_core_and_channel_bound_tools_before_channel_start
         memory_store=None,
         summarizer=None,
         tools=mock_tools,
-        skill_index=MagicMock(),
+        skill_service=MagicMock(),
         mcp_manager=None,
         agent=MagicMock(),
     )
@@ -578,7 +614,38 @@ async def test_run_agent_wires_core_and_channel_bound_tools_before_channel_start
     monkeypatch.setattr("pincer.cli.run._build_core", AsyncMock(return_value=core))
     monkeypatch.setattr("pincer.cli.run._register_channel_bound_tools", _fake_register)
 
+    settings = MagicMock()
+    settings.skills_index_watch_interval_seconds = 0
     with pytest.raises(RuntimeError, match="stop here"):
-        await _run_agent(MagicMock())
+        await _run_agent(settings)
 
     assert registered_with == [(mock_tools, {})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval", [300, 0])
+async def test_run_agent_starts_skill_index_watcher(monkeypatch: pytest.MonkeyPatch, interval: int) -> None:
+    """`pincer run` applies `pincer skills rebuild` in the background (unless disabled)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from pincer.cli.run import _run_agent
+
+    core = MagicMock()
+    watcher_cls = MagicMock()
+    watcher_cls.return_value.start = AsyncMock()
+    monkeypatch.setattr("pincer.cli.run._build_core", AsyncMock(return_value=core))
+    monkeypatch.setattr("pincer.services.skills.SkillIndexWatcher", watcher_cls)
+    monkeypatch.setattr(
+        "pincer.cli.run._register_channel_bound_tools", MagicMock(side_effect=RuntimeError("stop here"))
+    )
+
+    settings = MagicMock()
+    settings.skills_index_watch_interval_seconds = interval
+    with pytest.raises(RuntimeError, match="stop here"):
+        await _run_agent(settings)
+
+    if interval:
+        watcher_cls.assert_called_once_with(core.skill_service, interval=300)
+        watcher_cls.return_value.start.assert_awaited_once()
+    else:
+        watcher_cls.assert_not_called()

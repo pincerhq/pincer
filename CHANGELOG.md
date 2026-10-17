@@ -113,6 +113,53 @@ silently open.
 
 ### Added
 
+#### Remote skill roots: S3, Azure Blob Storage and Google Cloud Storage
+
+`PINCER_SKILLS_DIR` now also accepts `s3://bucket/prefix`, `az://container/prefix`
+or `gs://bucket/prefix`, so teams can share skills from object storage instead of
+mounting a directory. Install the new `remote-skills` extra
+(`pip install "pincer-agent[remote-skills]"`, built on cloudpathlib). See
+[Skills Guide → Remote Skill Roots](docs/guides/skills-guide.md#remote-skill-roots).
+
+- Discovery, `load_skill`, `load_skill_reference` and the dashboard's `/api/skills`
+  work unchanged on remote roots; blocking storage I/O runs off the event loop.
+- Remote files are cached only by cloudpathlib, under `skills_cache_dir/objects/`
+  (default `<data_dir>/cache/skills`; always a local directory, a URI is
+  rejected at startup); each read checks the bucket for a newer
+  object. `run_skill_script` brings a remote skill's cached folder up to date,
+  then runs it from there through the usual approval gate and sandbox, so
+  script-only edits take effect on the next run.
+- Credentials: optional `PINCER_STORAGE_S3_*`, `PINCER_STORAGE_AZURE_*` and
+  `PINCER_STORAGE_GCS_*` settings; unset ones fall back to each SDK's default chain.
+- A remote `skills_dir` must be usable at startup. `pincer run`, `pincer run tasks`,
+  `pincer mcp serve` and `pincer skills rebuild` exit 1 if the extra is missing,
+  the storage client can't be built, or listing the root fails (credentials,
+  bucket, endpoint). The error names the `PINCER_STORAGE_*` settings to
+  configure. SDK default credentials count as configured. A bucket that becomes
+  unreachable after startup only logs a warning on rescan.
+- New `pincer skills rebuild [--keep-cache]`: clears cached remote files, rescans
+  and announces the change through a generation stamp in `skills_cache_dir`. A
+  running `pincer run` reloads without a restart: a background watcher checks the
+  stamp every `skills_index_watch_interval_seconds` (default 300; `0` disables it)
+  and rescans off the request path, and the dashboard checks it on every request.
+- New `POST /api/skills/rebuild[?keep_cache=true]`: rebuilds the serving process's
+  index, then queues a `rebuild_skill_index` background job with the new
+  generation for the task workers (consumed by one process; idempotent). Returns
+  the rebuilt skill list and whether the job was queued.
+- One skill index per process, owned by `pincer.services.skills.SkillService` and
+  shared by the agent, its skill tools, the dashboard API and the CLI.
+- `/api/skills` rescans when its index is older than `skills_index_cache_ttl_seconds`
+  (default 60, maximum 60, `0` = every request), and immediately after any index
+  change in any process.
+- `pincer doctor` checks that a remote root is reachable.
+
+### Fixed
+
+- `pincer doctor` and `GET /api/doctor` now check the configured `skills_dir`;
+  they always looked at `~/.pincer/skills` before.
+
+### Added
+
 #### Daemon mode: `pincer run -d`, `logs`, `status`, `stop`, `restart`
 
 Pincer can run in the background without `nohup` or Docker, scoped to its data

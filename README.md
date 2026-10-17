@@ -199,7 +199,7 @@ Pincer ships **303 first-party tools** and plugs into **any MCP server** to reac
 | **Microsoft 365** — Outlook · Calendar · OneDrive · OneNote · To Do · Contacts · Directory (multi-user) | **62** | `ms365-mcp-setup` |
 | **Slack (native)** — messages · channels · users · files · reactions · pins · reminders · search | **71** | `PINCER_SLACK_BOT_TOKEN` |
 | **MCP tools** (GitHub, Postgres, Notion, Linear, Stripe, filesystem, …) | unlimited | `pincer.toml` + `[mcp]` |
-| Custom skills (drop a `SKILL.md` dir in `~/.pincer/skills/`, sandboxed scripts) | unlimited | filesystem, no install step |
+| Custom skills (drop a `SKILL.md` dir in `~/.pincer/skills/` or an S3/Azure/GCS prefix, sandboxed scripts) | unlimited | filesystem or `PINCER_SKILLS_DIR=s3://…` + `[remote-skills]` |
 
 **Approval model:** destructive tools (`shell_exec`, `python_exec`, `file_write`, `email_send`, `make_phone_call`, and every writing action on external APIs) ask in chat before executing. You reply ✅ or ❌.
 
@@ -637,6 +637,7 @@ pincer/
 ```bash
 pip install "pincer-agent[mcp]"    # MCP client + OAuth server
 pip install "pincer-agent[image]"  # Image generation (fal.ai + Gemini)
+pip install "pincer-agent[remote-skills]"  # Skills hosted in S3 / Azure Blob / GCS
 ```
 
 </details>

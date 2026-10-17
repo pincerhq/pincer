@@ -54,6 +54,17 @@ def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_skill_service() -> Iterator[None]:
+    """The SkillService is a per-process singleton built from the first settings
+    that ask for it; a test's mocked settings must not leak into the next test."""
+    from pincer.services.skills import reset_skill_service
+
+    reset_skill_service()
+    yield
+    reset_skill_service()
+
+
+@pytest.fixture(autouse=True)
 def _reset_thread_manager() -> None:
     """Sprint 13: the ThreadManager is a process-wide singleton keyed to one
     database. Without a reset between tests, the first tmp_path's DB would be
@@ -526,6 +537,46 @@ async def migrated_url(migration_url: str, tmp_path: Path):
     await asyncio.to_thread(command.upgrade, config, "head")
     yield to_async_url(migration_url)
     await dispose_engines()
+
+
+# ── Skill roots (local + offline cloud mocks) ────────────────────────
+
+# A dummy connection string: cloudpathlib's Azure mock refuses anonymous
+# clients but never connects anywhere.
+_FAKE_AZURE_CONNECTION_STRING = (
+    "DefaultEndpointsProtocol=https;AccountName=pincertest;AccountKey=dGVzdA==;EndpointSuffix=core.windows.net"
+)
+
+
+@pytest.fixture(params=["local", "s3", "azure", "gs"])
+def skill_root(request: pytest.FixtureRequest, tmp_path: Path) -> Callable[[str], Any]:
+    """Factory for skill roots on every storage backend: `skill_root("bundled")`.
+
+    `local` returns a plain directory under tmp_path; the cloud params return
+    CloudPaths from cloudpathlib's offline mock clients, whose simulated bucket
+    and file cache also live under tmp_path, so nothing is shared between
+    tests and no network is touched. Write skills through the path API
+    (`write_text`, `unlink`), which works the same on every backend.
+    """
+    backend = request.param
+    if backend == "local":
+        return lambda name: tmp_path / name
+
+    local = pytest.importorskip("cloudpathlib.local")
+    storage = tmp_path / f"{backend}-storage"
+    cache = tmp_path / f"{backend}-cache"
+    if backend == "s3":
+        client = local.LocalS3Client(local_storage_dir=storage, local_cache_dir=cache)
+        prefix = "s3://skills-bucket"
+    elif backend == "azure":
+        client = local.LocalAzureBlobClient(
+            local_storage_dir=storage, local_cache_dir=cache, connection_string=_FAKE_AZURE_CONNECTION_STRING
+        )
+        prefix = "az://skills-container"
+    else:
+        client = local.LocalGSClient(local_storage_dir=storage, local_cache_dir=cache)
+        prefix = "gs://skills-bucket"
+    return lambda name: client.CloudPath(f"{prefix}/{name}")
 
 
 # ── Real Pincer processes (daemon, `pincer run`) ─────────────────────
