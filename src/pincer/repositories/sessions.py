@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, update
+from sqlalchemy import update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
@@ -60,14 +60,31 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         stmt = update(ChatSession).where(col(ChatSession.user_id) == old_user_id).values(user_id=new_user_id)
         return int((await self.session.exec(stmt)).rowcount)
 
-    async def rewrite_session_ids(self, old_fragment: str, new_fragment: str) -> int:
-        """Replace a user id embedded in the session key (`unified:<uid>`)."""
-        stmt = (
-            update(ChatSession)
-            .where(col(ChatSession.session_id).contains(old_fragment))
-            .values(session_id=func.replace(col(ChatSession.session_id), old_fragment, new_fragment))
+    async def rewrite_session_ids(self, old_user_id: str, new_user_id: str) -> int:
+        """Re-key the `unified:<uid>` session from the old id to the new one.
+
+        Only that key names the pincer id: `<channel>:<id>` keys hold the
+        channel's own user id and `voice:<call_sid>` keys hold neither, so
+        they stay as they are. When a merge finds a session under both ids,
+        the most recently updated conversation is kept and the other dropped.
+        Returns the number of rows changed or removed.
+        """
+        old_key, new_key = f"unified:{old_user_id}", f"unified:{new_user_id}"
+        # Plain columns, not ORM objects: re-keying a row the session holds
+        # would leave its identity map pointing at the old key.
+        stmt = select(ChatSession.session_id, ChatSession.updated_at).where(
+            col(ChatSession.session_id).in_([old_key, new_key])
         )
-        return int((await self.session.exec(stmt)).rowcount)
+        updated = dict((await self.session.exec(stmt)).all())
+        if old_key not in updated:
+            return 0
+        removed = 0
+        if new_key in updated:
+            if updated[new_key] >= updated[old_key]:
+                return await self.delete_where(col(ChatSession.session_id) == old_key)
+            removed = await self.delete_where(col(ChatSession.session_id) == new_key)
+        rekey = update(ChatSession).where(col(ChatSession.session_id) == old_key).values(session_id=new_key)
+        return removed + int((await self.session.exec(rekey)).rowcount)
 
     async def ids(self) -> Sequence[str]:
         return (await self.session.exec(select(ChatSession.session_id))).all()
