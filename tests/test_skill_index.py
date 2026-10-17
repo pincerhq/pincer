@@ -4,7 +4,12 @@ Every test runs once per storage backend (local, S3, Azure, GCS) via the
 `skill_root` fixture.
 """
 
+import logging
 from collections.abc import Callable
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from pincer.tools.skills.index import SkillIndex
 from pincer.tools.skills.storage import SkillPath
@@ -221,3 +226,45 @@ def test_unreachable_root_yields_no_skills(skill_root: SkillRoot, caplog) -> Non
 
     assert [e.name for e in index.all_skills()] == ["alpha"]
     assert "s3://gone/skills is unreachable" in caplog.text
+
+
+def test_list_files_skips_symlinked_directories(tmp_path) -> None:
+    """Review finding: Path.walk reports a symlink to a directory as a file."""
+    bundled = tmp_path / "bundled"
+    _make_skill(bundled, "demo")
+    _write(tmp_path / "shared" / "a.txt", "x")
+    (bundled / "demo" / "assets").symlink_to(tmp_path / "shared", target_is_directory=True)
+    _write(bundled / "demo" / "notes.txt", "x")
+
+    index = SkillIndex(bundled_dir=bundled, user_dir=None, max_per_root=100)
+    index.discover()
+
+    assert index.get("demo").list_files() == ["notes.txt"]
+
+
+def test_cloud_discovery_lists_only_the_top_level(skill_root: SkillRoot, caplog) -> None:
+    """Review finding: a `*/SKILL.md` glob made cloudpathlib list every object under
+    the root. Discovery now lists the root's children only, and entries without a
+    SKILL.md (stray files, plain folders) are skipped silently."""
+    bundled = skill_root("bundled")
+    if isinstance(bundled, Path):
+        pytest.skip("local roots glob the filesystem")
+    _make_skill(bundled, "alpha")
+    _write(bundled / "alpha" / "assets" / "deep" / "big.bin", "x")
+    _write(bundled / "README.md", "not a skill")
+    _write(bundled / "folder-without-skill" / "notes.txt", "x")
+
+    listings: list[bool] = []
+    real_list_dir = bundled.client._list_dir
+
+    def spy(path, recursive=False):
+        listings.append(recursive)
+        return real_list_dir(path, recursive=recursive)
+
+    index = SkillIndex(bundled_dir=bundled, user_dir=None, max_per_root=100)
+    with patch.object(bundled.client, "_list_dir", side_effect=spy), caplog.at_level(logging.WARNING):
+        index.discover()
+
+    assert [e.name for e in index.all_skills()] == ["alpha"]
+    assert True not in listings  # no recursive listing of the whole root
+    assert "Skipped skill dir" not in caplog.text

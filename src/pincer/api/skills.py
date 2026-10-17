@@ -56,16 +56,7 @@ def _skill_detail(dir_name: str) -> dict[str, Any] | None:
     """
     for entry in _build_index().all_skills():
         if entry.skill.path.name == dir_name:
-            return {
-                "name": entry.name,
-                "description": entry.description,
-                "status": "active",
-                "source": "file",
-                "root": entry.skill.source_root,
-                "dir": entry.skill.path.name,
-                "body": entry.skill.body,
-                "files": entry.list_files(),
-            }
+            return {**_entry_summary(entry), "body": entry.skill.body, "files": entry.list_files()}
     return None
 
 
@@ -75,7 +66,7 @@ async def list_skills() -> dict[str, list[dict[str, Any]]]:
     return {"skills": await asyncio.to_thread(_skill_entries)}
 
 
-async def _enqueue_rebuild_job(generation: str, clear_cache: bool) -> dict[str, Any]:
+async def _enqueue_rebuild_job(generation: str, clear_cache: bool, disk_id: str | None) -> dict[str, Any]:
     """Queue `rebuild_skill_index` for the background task workers. Reported, not
     raised, on failure: the app's own index is already rebuilt at this point."""
     from pincer.tasks import TASK_CHANNEL
@@ -85,7 +76,7 @@ async def _enqueue_rebuild_job(generation: str, clear_cache: bool) -> dict[str, 
     try:
         await task_app.send_message_json(
             channel=TASK_CHANNEL,
-            payload={"generation": generation, "clear_cache": clear_cache},
+            payload={"generation": generation, "clear_cache": clear_cache, "disk_id": disk_id},
             headers={"topic": topic},
         )
     except Exception as e:
@@ -111,8 +102,12 @@ async def rebuild_skills(
 
     service = get_skill_service(get_settings_relaxed())
     clear_cache = not keep_cache
+
+    def _rebuild() -> tuple[SkillIndex, str | None]:
+        return service.rebuild(clear_cache), service.disk_id
+
     try:
-        index = await asyncio.to_thread(service.rebuild, clear_cache)
+        index, disk_id = await asyncio.to_thread(_rebuild)
     except Exception as e:
         logger.exception("Skill index rebuild failed")
         raise HTTPException(status_code=500, detail=f"Skill index rebuild failed: {e}") from e
@@ -123,7 +118,7 @@ async def rebuild_skills(
         "generation": generation,
         "cache_cleared": clear_cache,
         "skills": [_entry_summary(entry) for entry in index.all_skills()],
-        "job": await _enqueue_rebuild_job(generation, clear_cache),
+        "job": await _enqueue_rebuild_job(generation, clear_cache, disk_id),
     }
 
 

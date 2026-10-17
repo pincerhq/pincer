@@ -382,7 +382,7 @@ Rebuild the skill index — the API counterpart of `pincer skills rebuild`. Quer
 1. Rebuilds the index of the process serving the request first, so the agent and dashboard it serves already see the result when the response returns.
 2. Queues one `rebuild_skill_index` background job carrying the new `generation`.
 
-The job is consumed by **one** process: with `task_broker=redis` that is any `pincer run tasks` worker, or the main `pincer run` itself, where it is a no-op. Workers that share the main process's data volume (the default `docker-compose.yml` setup) also follow the generation stamp the rebuild wrote; the job is what reaches a worker that doesn't. The job is idempotent: a process already at that generation skips it.
+The job is consumed by **one** process: with `task_broker=redis` that is any `pincer run tasks` worker, or the main `pincer run` itself, where it is a no-op. Workers that share the main process's data volume (the default `docker-compose.yml` setup) also follow the generation stamp the rebuild wrote; the job is what reaches a worker that doesn't. The job is idempotent and never moves a process to an older generation: a process already at that generation (or a newer one) skips it. The job carries the sender's disk ID (a file in `skills_cache_dir`), so a worker on the same data volume only catches up with the stamp instead of clearing the shared cache a second time.
 
 A failed enqueue doesn't fail the request — the in-app rebuild has already happened — and is reported in `job`. A failed rebuild is a `500`.
 

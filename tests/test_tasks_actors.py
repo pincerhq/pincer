@@ -280,15 +280,15 @@ class TestRebuildSkillIndex:
     async def test_applies_the_generation_in_this_process(self):
         calls = []
         service = SimpleNamespace(
-            apply_generation=lambda gen, clear: calls.append((gen, clear)) or True,
+            apply_generation=lambda gen, clear, disk: calls.append((gen, clear, disk)) or True,
             index=SimpleNamespace(all_skills=list),
         )
         with patch("pincer.services.skills.get_skill_service", return_value=service):
-            await rebuild_skill_index(generation="gen-1", clear_cache=False)
-        assert calls == [("gen-1", False)]
+            await rebuild_skill_index(generation="gen-1", clear_cache=False, disk_id="disk-a")
+        assert calls == [("gen-1", False, "disk-a")]
 
     async def test_already_current_is_logged_as_skipped(self, caplog):
-        service = SimpleNamespace(apply_generation=lambda gen, clear: False)
+        service = SimpleNamespace(apply_generation=lambda gen, clear, disk: False)
         with (
             patch("pincer.services.skills.get_skill_service", return_value=service),
             caplog.at_level(logging.INFO),
@@ -297,7 +297,7 @@ class TestRebuildSkillIndex:
         assert "skipped: already at generation=gen-1" in caplog.text
 
     async def test_failure_is_reraised_so_repid_nacks(self):
-        def boom(gen, clear):
+        def boom(gen, clear, disk):
             raise ConnectionError("bucket unreachable")
 
         service = SimpleNamespace(apply_generation=boom)

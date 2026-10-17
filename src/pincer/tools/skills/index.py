@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from pincer.exceptions import SkillLoadError
 from pincer.tools.skills.parser import ParsedSkill, parse_skill_md, read_skill_md
 from pincer.tools.skills.storage import iter_skill_md, walk_files
 
@@ -97,6 +98,12 @@ class SkillIndex:
                 continue
             try:
                 raw = read_skill_md(skill_md)
+            except SkillLoadError as e:
+                if isinstance(e.__cause__, (FileNotFoundError, NotADirectoryError)):
+                    continue  # a cloud root entry without a SKILL.md: not a skill
+                logger.warning("Skipped skill dir %s: failed to read SKILL.md", entry_dir, exc_info=True)
+                continue
+            try:
                 parsed = parse_skill_md(skill_md, source_root=source_root, raw=raw)
             except Exception:
                 logger.warning("Skipped skill dir %s: failed to parse SKILL.md", entry_dir, exc_info=True)

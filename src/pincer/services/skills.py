@@ -28,6 +28,7 @@ import contextlib
 import logging
 import os
 import threading
+import time
 import uuid
 from time import monotonic
 from typing import TYPE_CHECKING
@@ -45,6 +46,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _STAMP_FILENAME = "index-generation"
+_DISK_ID_FILENAME = "disk-id"
+
+
+def _new_generation() -> str:
+    """A unique generation that sorts by creation time (`<time_ns>-<uuid>`), so a
+    stale announcement can be recognised as older and never roll the stamp back."""
+    return f"{time.time_ns():020d}-{uuid.uuid4().hex}"
+
+
+def _is_older(candidate: str, current: str | None) -> bool:
+    """Whether generation `candidate` was created before `current`. Only
+    time-ordered generations are comparable; anything else counts as not older."""
+    if current is None or "-" not in candidate or "-" not in current:
+        return False
+    return candidate < current
 
 
 class SkillService:
@@ -60,7 +76,9 @@ class SkillService:
     ) -> None:
         self.index = SkillIndex(bundled_dir=bundled_dir, user_dir=user_dir, max_per_root=max_per_root)
         self._user_dir = user_dir
+        self._cache_dir = cache_dir
         self._stamp_path = cache_dir / _STAMP_FILENAME if cache_dir else None
+        self._disk_id: str | None = None
         self._generation: str | None = None
         self._scanned_at: float | None = None
         self._lock = threading.Lock()
@@ -84,6 +102,30 @@ class SkillService:
     def generation(self) -> str | None:
         """The announced change this process's index reflects (None before any)."""
         return self._generation
+
+    @property
+    def disk_id(self) -> str | None:
+        """A persistent ID for this process's cache dir, created on first use.
+
+        Processes that share a cache dir (one data volume) report the same ID, so a
+        rebuild job can tell whether its sender already cleared this disk's cache
+        and wrote its stamp. None without a cache dir.
+        """
+        if self._cache_dir is None:
+            return None
+        if self._disk_id is None:
+            path = self._cache_dir / _DISK_ID_FILENAME
+            try:
+                self._disk_id = path.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with path.open("x", encoding="utf-8") as f:
+                        f.write(uuid.uuid4().hex)
+                except FileExistsError:
+                    pass  # another process created it first; use theirs
+                self._disk_id = path.read_text(encoding="utf-8").strip()
+        return self._disk_id
 
     def ensure_current(self, max_age: float | None = None) -> SkillIndex:
         """Return the index, rescanning first if it was never scanned, if another
@@ -131,25 +173,33 @@ class SkillService:
             self._scanned_at = monotonic()
             return self.index
 
-    def apply_generation(self, generation: str, clear_cache: bool = True) -> bool:
+    def apply_generation(self, generation: str, clear_cache: bool = True, disk_id: str | None = None) -> bool:
         """Bring this process up to a rebuild another process announced as `generation`
-        (the `rebuild_skill_index` background job). Idempotent; returns whether it rescanned.
+        (the `rebuild_skill_index` background job). Idempotent and never moves this
+        process to an older generation; returns whether it rescanned.
 
-        - Already at `generation` (e.g. the job ran in the process that rebuilt): no-op.
-        - Shares the rebuilder's disk (the stamp already says `generation`): rescan only;
-          the cache was cleared by the rebuilder.
-        - Has its own disk: clear its own cache if asked, rescan, and record `generation`
-          as its stamp so processes sharing *this* disk follow without another rescan wave.
+        - Already at `generation`, or at a newer one: no-op.
+        - Same disk as the sender (`disk_id` matches): the sender already cleared the
+          shared cache and wrote the stamp, so just catch up with the stamp — which may
+          by now be even newer — without clearing or writing anything.
+        - Its own disk: clear its own cache if asked, rescan, and record `generation`
+          as its stamp (unless that stamp is already newer), so processes sharing
+          *this* disk follow once.
         """
         with self._lock:
-            if self._generation == generation:
+            if self._generation == generation or _is_older(generation, self._generation):
                 return False
-            shares_disk = self._read_stamp() == generation
-            if clear_cache and not shares_disk:
+            stamp = self._read_stamp()
+            if disk_id is not None and disk_id == self.disk_id:
+                if self._scanned_at is not None and stamp == self._generation:
+                    return False
+                self._scan(stamp)
+                return True
+            if clear_cache:
                 clear_remote_cache(self._user_dir)
             self.index.discover()
             self._scanned_at = monotonic()
-            if not shares_disk:
+            if stamp is None or not _is_older(generation, stamp):
                 self._write_stamp(generation)
             self._generation = generation
             return True
@@ -159,9 +209,17 @@ class SkillService:
         scanning now — e.g. after uploading skill files."""
         with self._lock:
             self._write_stamp()
+            if self._stamp_path is None:
+                # No stamp to compare against: force this process's next read to rescan.
+                self._scanned_at = None
 
     def _scan(self, stamp: str | None) -> None:
-        before = self._snapshot() if self._scanned_at is not None else None
+        """Rescan and record `stamp` (the stamp read just before) as current."""
+        # Only a rescan nobody announced (a max-age rescan) can discover news. One
+        # triggered by an announcement just catches up with it, and re-announcing
+        # that would make every process rescan again in turn.
+        unannounced = self._scanned_at is not None and stamp == self._generation
+        before = self._snapshot() if unannounced else None
         self.index.discover()
         self._scanned_at = monotonic()
         if before is not None and before != self._snapshot():
@@ -185,7 +243,7 @@ class SkillService:
     def _write_stamp(self, stamp: str | None = None) -> str:
         """Write `stamp` (a new random one by default) and return it. Without a
         cache dir nothing is written, but the generation is still returned."""
-        stamp = stamp or uuid.uuid4().hex
+        stamp = stamp or _new_generation()
         if self._stamp_path is None:
             return stamp
         self._stamp_path.parent.mkdir(parents=True, exist_ok=True)

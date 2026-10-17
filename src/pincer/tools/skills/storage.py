@@ -173,8 +173,17 @@ def confine_skill_path(base: SkillPath, requested: str, label: str = "directory"
 
 
 def iter_skill_md(base: SkillPath) -> list[SkillPath]:
-    """Every `<base>/<dir>/SKILL.md`, sorted. One listing call on cloud roots."""
-    return sorted(base.glob("*/SKILL.md"), key=str)
+    """Candidate `<base>/<dir>/SKILL.md` paths, sorted.
+
+    Local roots return only existing files. Cloud roots cost one non-recursive
+    listing of the root's children — a `*/SKILL.md` glob would page through every
+    object under the root, assets included. A cloud candidate may not exist (a
+    folder without SKILL.md, or a stray file at the root); reading it raises
+    FileNotFoundError, which discovery treats as "not a skill".
+    """
+    if isinstance(base, Path):
+        return sorted(base.glob("*/SKILL.md"), key=str)
+    return sorted((child / "SKILL.md" for child in base.iterdir()), key=str)
 
 
 def _walk_relative(skill_dir: SkillPath) -> list[str]:
@@ -183,7 +192,11 @@ def _walk_relative(skill_dir: SkillPath) -> list[str]:
     files: list[str] = []
     for dirpath, _dirnames, filenames in skill_dir.walk():
         rel_dir = dirpath.parts[base_depth:]
-        files.extend("/".join((*rel_dir, name)) for name in filenames)
+        for name in filenames:
+            # Path.walk lists a symlink to a directory among the files; it is not one.
+            if isinstance(dirpath, Path) and (dirpath / name).is_dir():
+                continue
+            files.append("/".join((*rel_dir, name)))
     return files
 
 

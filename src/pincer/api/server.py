@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -282,7 +283,10 @@ def create_app() -> FastAPI:
         from pincer.security.doctor import SecurityDoctor
 
         doc = SecurityDoctor(skills_dir=get_settings_relaxed().skills_dir)
-        return doc.run_all().to_dict()
+        # Some checks block (git, file scans, a remote skills root's network call):
+        # keep them off the event loop that serves every other request.
+        report = await asyncio.to_thread(doc.run_all)
+        return report.to_dict()
 
     dist = _dashboard_dist()
     if dist.is_dir():

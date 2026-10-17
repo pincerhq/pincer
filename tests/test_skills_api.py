@@ -326,7 +326,7 @@ def test_rebuild_endpoint_rebuilds_in_app_then_queues_the_job(api_settings, tmp_
     assert body["job"] == {"queued": True, "topic": "rebuild_skill_index"}
     queued_jobs.assert_awaited_once_with(
         channel="pincer_tasks",
-        payload={"generation": body["generation"], "clear_cache": True},
+        payload={"generation": body["generation"], "clear_cache": True, "disk_id": get_skill_service().disk_id},
         headers={"topic": "rebuild_skill_index"},
     )
 

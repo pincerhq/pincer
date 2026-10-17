@@ -306,11 +306,29 @@ def test_rebuild_records_its_generation(user: SkillPath, cache_dir: Path) -> Non
     assert service.generation == _stamp(cache_dir)
 
 
+def test_generations_sort_by_creation_time(user: SkillPath, cache_dir: Path) -> None:
+    service = _service(user, cache_dir)
+    service.rebuild()
+    first = service.generation
+    service.rebuild()
+    assert first is not None
+    assert first < service.generation
+
+
+def test_disk_id_is_shared_per_cache_dir(user: SkillPath, cache_dir: Path, tmp_path: Path) -> None:
+    a, b = _service(user, cache_dir), _service(user, cache_dir)
+    other = _service(user, tmp_path / "other-disk")
+    assert a.disk_id == b.disk_id
+    assert a.disk_id != other.disk_id
+    assert _service(user, cache_dir).disk_id == a.disk_id  # persisted, not per instance
+    assert _service(user, None).disk_id is None
+
+
 def test_apply_generation_is_a_noop_in_the_rebuilding_process(user: SkillPath, cache_dir: Path) -> None:
     app = _service(user, cache_dir)
     app.rebuild()
     with patch.object(SkillIndex, "discover", side_effect=AssertionError("rescanned")):
-        assert app.apply_generation(app.generation) is False
+        assert app.apply_generation(app.generation, disk_id=app.disk_id) is False
 
 
 def test_apply_generation_on_a_shared_disk_rescans_without_clearing(user: SkillPath, cache_dir: Path) -> None:
@@ -321,13 +339,44 @@ def test_apply_generation_on_a_shared_disk_rescans_without_clearing(user: SkillP
     stamp = _stamp(cache_dir)
 
     with patch("pincer.services.skills.clear_remote_cache") as clear:
-        assert worker.apply_generation(app.generation) is True
+        assert worker.apply_generation(app.generation, disk_id=app.disk_id) is True
 
     clear.assert_not_called()  # the rebuilding process already cleared the shared cache
     assert _names(worker.index) == ["alpha", "beta"]
     assert worker.generation == app.generation
     assert _stamp(cache_dir) == stamp  # nothing new announced
-    assert worker.apply_generation(app.generation) is False
+    assert worker.apply_generation(app.generation, disk_id=app.disk_id) is False
+
+
+def test_apply_generation_on_a_shared_disk_never_rolls_a_newer_stamp_back(user: SkillPath, cache_dir: Path) -> None:
+    """Review finding: the job's generation X was superseded (stamp now Y) before the
+    job ran. A worker on the shared disk must not clear the shared cache or write X back."""
+    app, worker = _service(user, cache_dir), _service(user, cache_dir)
+    worker.ensure_current()
+    app.rebuild()
+    job_generation = app.generation
+    app.rebuild()  # a newer change lands before the job is consumed
+    newest = _stamp(cache_dir)
+
+    with patch("pincer.services.skills.clear_remote_cache") as clear:
+        assert worker.apply_generation(job_generation, disk_id=app.disk_id) is True
+
+    clear.assert_not_called()
+    assert _stamp(cache_dir) == newest
+    assert worker.generation == newest
+
+
+def test_apply_generation_ignores_an_older_generation(user: SkillPath, cache_dir: Path, tmp_path: Path) -> None:
+    app = _service(user, cache_dir)
+    worker = _service(user, tmp_path / "worker-cache")
+    app.rebuild()
+    older = app.generation
+    app.rebuild()
+    assert worker.apply_generation(app.generation, disk_id=app.disk_id) is True
+
+    with patch.object(SkillIndex, "discover", side_effect=AssertionError("rescanned")):
+        assert worker.apply_generation(older, disk_id=app.disk_id) is False
+    assert worker.generation == app.generation
 
 
 def test_apply_generation_on_its_own_disk_clears_and_adopts_the_generation(
@@ -342,10 +391,59 @@ def test_apply_generation_on_its_own_disk_clears_and_adopts_the_generation(
     app.rebuild()
 
     with patch("pincer.services.skills.clear_remote_cache") as clear:
-        assert worker.apply_generation(app.generation, clear_cache=True) is True
-        worker.apply_generation("other", clear_cache=False)
+        assert worker.apply_generation(app.generation, clear_cache=True, disk_id=app.disk_id) is True
     clear.assert_called_once_with(user)
 
     # Processes sharing the worker's disk follow it once, via the stamp.
-    assert _stamp(worker_disk) == "other"
+    assert _stamp(worker_disk) == app.generation
     assert "beta" in _names(worker_sibling.ensure_current())
+
+
+def test_apply_generation_on_its_own_disk_keeps_a_newer_local_stamp(
+    user: SkillPath, cache_dir: Path, tmp_path: Path
+) -> None:
+    app = _service(user, cache_dir)
+    worker_disk = tmp_path / "worker-cache"
+    worker, local_writer = _service(user, worker_disk), _service(user, worker_disk)
+    app.rebuild()
+    job_generation = app.generation
+    local_writer.rebuild()  # a newer change on the worker's own disk
+    newest = _stamp(worker_disk)
+
+    worker.apply_generation(job_generation, clear_cache=False, disk_id=app.disk_id)
+
+    assert _stamp(worker_disk) == newest
+
+
+# ── review fixes ─────────────────────────────────────────────────────────────
+
+
+def test_catching_up_with_an_announcement_does_not_reannounce(user: SkillPath, cache_dir: Path) -> None:
+    """Review finding: a process that rescans *because* of an announcement must not
+    write a new stamp, or every process sharing the disk keeps rescanning in turn."""
+    api, worker, mcp = (_service(user, cache_dir) for _ in range(3))
+    for service in (api, worker, mcp):
+        service.ensure_current()
+
+    _make_skill(user, "alpha", body="edited")
+    api.ensure_current(max_age=0)  # finds the edit and announces it once
+    announced = _stamp(cache_dir)
+    assert announced is not None
+
+    with patch.object(SkillIndex, "discover", autospec=True, side_effect=SkillIndex.discover) as discover:
+        for service in (worker, mcp, api, worker, mcp):
+            service.ensure_current()
+
+    assert _stamp(cache_dir) == announced
+    assert discover.call_count == 2  # worker and mcp catch up once each; nobody rescans again
+    assert worker.index.get("alpha").skill.body == "edited"
+
+
+def test_invalidate_without_a_cache_dir_marks_this_process_stale(user: SkillPath) -> None:
+    service = _service(user, None)
+    service.ensure_current()
+    _make_skill(user, "beta")
+
+    service.invalidate()
+
+    assert _names(service.ensure_current()) == ["alpha", "beta"]
