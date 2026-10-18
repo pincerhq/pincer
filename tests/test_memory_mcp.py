@@ -15,13 +15,20 @@ from pincer.memory.mcp import MCPMemoryBackend
 
 
 def _mock_manager(tool_responses: dict[str, object]) -> MagicMock:
-    """Build a fake MCPClientManager that returns preset results per tool name."""
+    """Build a fake MCPClientManager that returns preset results per tool name.
+
+    A tool mapped to ``None`` returns no content items, which is how fastmcp
+    serialises an empty list result.
+    """
     session = AsyncMock()
 
     async def call_tool(name: str, args: dict) -> MagicMock:
         raw = tool_responses.get(name, "[]")
         result = MagicMock()
-        result.content = [MagicMock(text=raw if isinstance(raw, str) else json.dumps(raw))]
+        if raw is None:
+            result.content = []
+        else:
+            result.content = [MagicMock(text=raw if isinstance(raw, str) else json.dumps(raw))]
         return result
 
     session.call_tool.side_effect = call_tool
@@ -330,3 +337,36 @@ async def test_store_memory_includes_extra_tags(backend: MCPMemoryBackend) -> No
     await backend.store_memory("u1", "content", extra_tags=["user:telegram:123"])
     tags_sent = captured[0]["args"]["tags"]
     assert "user:telegram:123" in tags_sent
+
+
+# ── empty content (fastmcp empty list) ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_memories_empty_content_returns_empty(backend: MCPMemoryBackend) -> None:
+    backend.set_mcp_manager(_mock_manager({"memory_list": None}))
+    assert await backend.list_memories(tags=["thread:abc"]) == []
+
+
+@pytest.mark.asyncio
+async def test_count_empty_content_returns_zero(backend: MCPMemoryBackend) -> None:
+    backend.set_mcp_manager(_mock_manager({"memory_list": None}))
+    assert await backend.count(user_id="nobody") == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_user_memories_empty_content_returns_zero(backend: MCPMemoryBackend) -> None:
+    backend.set_mcp_manager(_mock_manager({"memory_list": None}))
+    assert await backend.delete_user_memories("nobody") == 0
+
+
+@pytest.mark.asyncio
+async def test_search_text_empty_content_returns_empty(backend: MCPMemoryBackend) -> None:
+    backend.set_mcp_manager(_mock_manager({"memory_search": None}))
+    assert await backend.search_text("anything", user_id="u1") == []
+
+
+@pytest.mark.asyncio
+async def test_get_memory_empty_content_returns_none(backend: MCPMemoryBackend) -> None:
+    backend.set_mcp_manager(_mock_manager({"memory_get": None}))
+    assert await backend.get_memory("42") is None

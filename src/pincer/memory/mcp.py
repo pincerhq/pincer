@@ -109,8 +109,10 @@ class MCPMemoryBackend(BaseMemoryBackend):
         return content[0].text if content else ""
 
     async def _call_json(self, tool_name: str, args: dict[str, Any]) -> Any:
-        logger.info(args)
         raw = await self._call(tool_name, args)
+        # fastmcp serialises an empty list result as no content items at all.
+        if not raw.strip():
+            return None
         return json.loads(raw)
 
     # ── Core CRUD ─────────────────────────────────────────
@@ -163,7 +165,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
             if match_all_tags or len(filter_tags) > 1:
                 args["match_all_tags"] = True
 
-        rows = await self._call_json("memory_list", args)
+        rows = await self._call_json("memory_list", args) or []
         return [_row_to_memory(r) for r in rows]
 
     async def update_memory(
@@ -187,7 +189,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
 
     async def delete_user_memories(self, user_id: str) -> int:
         tag = f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}"
-        rows = await self._call_json("memory_list", {"limit": PINCER_MEMORY_COUNT_FETCH_LIMIT, "tags": tag})
+        rows = await self._call_json("memory_list", {"limit": PINCER_MEMORY_COUNT_FETCH_LIMIT, "tags": tag}) or []
         deleted = 0
         for r in rows:
             try:
@@ -216,7 +218,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
             args["tags"] = filter_tags
             if match_all_tags or len(filter_tags) > 1:
                 args["match_all_tags"] = True
-        rows = await self._call_json("memory_list", args)
+        rows = await self._call_json("memory_list", args) or []
         return len(rows)
 
     # ── Search ────────────────────────────────────────────
@@ -238,5 +240,5 @@ class MCPMemoryBackend(BaseMemoryBackend):
             filter_tags.extend(tags)
         if filter_tags:
             args["tags"] = filter_tags
-        rows = await self._call_json("memory_search", args)
+        rows = await self._call_json("memory_search", args) or []
         return [_row_to_memory(r, score=max(0.0, 1.0 - r.get("distance", 0.0))) for r in rows]
