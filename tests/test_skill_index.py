@@ -5,6 +5,7 @@ Every test runs once per storage backend (local, S3, Azure, GCS) via the
 """
 
 import logging
+import os
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
@@ -268,23 +269,44 @@ def test_strict_discover_raises_and_leaves_the_index_unchanged(skill_root: Skill
     assert [e.name for e in index.all_skills()] == ["alpha", "beta"]
 
 
-def test_unreadable_skill_md_keeps_the_previous_version(skill_root: SkillRoot) -> None:
+def test_unreadable_skill_md_is_never_fatal(skill_root: SkillRoot) -> None:
+    """PR review: one SKILL.md that can't be read must not fail a strict rebuild or
+    mark the scan incomplete. A cloud root keeps that skill's previous version (a
+    one-object failure is usually transient); a local root skips it."""
     from pincer.exceptions import SkillLoadError
-    from pincer.tools.skills.index import SkillRootUnreachable
+    from pincer.tools.skills.parser import read_skill_md
 
     bundled = skill_root("bundled")
     _make_skill(bundled, "alpha", description="v1")
+    _make_skill(bundled, "beta")
     index = SkillIndex(bundled_dir=bundled, user_dir=None, max_per_root=100)
     index.discover()
 
-    def unreadable(path):
-        raise SkillLoadError(f"Cannot read {path}") from ConnectionError("connection reset")
+    def alpha_unreadable(path):
+        if path.parent.name == "alpha":
+            raise SkillLoadError(f"Cannot read {path}") from ConnectionError("connection reset")
+        return read_skill_md(path)
 
-    with patch("pincer.tools.skills.index.read_skill_md", side_effect=unreadable):
-        assert index.discover() is False
-        assert index.get("alpha").description == "v1"
-        with pytest.raises(SkillRootUnreachable):
-            index.discover(strict=True)
+    expected = ["beta"] if isinstance(bundled, Path) else ["alpha", "beta"]
+    with patch("pincer.tools.skills.index.read_skill_md", side_effect=alpha_unreadable):
+        for strict in (False, True):
+            assert index.discover(strict=strict) is True
+            assert [e.name for e in index.all_skills()] == expected
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a chmod 000 file")
+def test_local_skill_md_without_read_permission_is_skipped(tmp_path) -> None:
+    """The reviewer's reproduction: a `chmod 000` SKILL.md in a local root."""
+    user = tmp_path / "user"
+    _make_skill(user, "ok")
+    _make_skill(user, "locked")
+    (user / "locked" / "SKILL.md").chmod(0)
+    try:
+        index = SkillIndex(bundled_dir=None, user_dir=user, max_per_root=100)
+        assert index.discover(strict=True) is True
+        assert [e.name for e in index.all_skills()] == ["ok"]
+    finally:
+        (user / "locked" / "SKILL.md").chmod(0o644)
 
 
 def test_list_files_skips_symlinked_directories(tmp_path) -> None:

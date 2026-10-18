@@ -187,7 +187,7 @@ class SkillService:
         With `clear_cache`, cloudpathlib's file cache is emptied first, so every
         remote file is fetched fresh from the bucket.
 
-        Raises SkillRootUnreachable if a root can't be read; then nothing is
+        Raises SkillRootUnreachable if a root can't be listed; then nothing is
         announced and the index keeps its previous skills.
         """
         with self._lock:
@@ -212,7 +212,7 @@ class SkillService:
           as its stamp (unless that stamp is already newer), so processes sharing
           *this* disk follow once.
 
-        Raises SkillRootUnreachable if a root can't be read, without adopting
+        Raises SkillRootUnreachable if a root can't be listed, without adopting
         `generation` (the job fails; a later announcement or job retries it).
         """
         with self._lock:

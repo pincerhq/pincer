@@ -62,8 +62,8 @@ class SkillEntry:
 
 
 class SkillRootUnreachable(SkillLoadError):
-    """A skill root, or a SKILL.md in it, couldn't be read: an outage or a credentials
-    problem, as opposed to bad skill content (which only skips that skill)."""
+    """A skill root couldn't be listed: an outage or a credentials problem. Problems
+    with a single skill (unreadable or invalid SKILL.md) never raise this."""
 
 
 class SkillIndex:
@@ -83,11 +83,17 @@ class SkillIndex:
     def _discover_root(
         self, base: SkillPath | None, source_root: Literal["bundled", "user"], *, strict: bool
     ) -> tuple[list[SkillEntry], bool]:
-        """Entries for one root, and whether the root could be read completely.
+        """Entries for one root, and whether the root could be listed.
 
-        If it can't (listing fails, or a SKILL.md can't be read): `strict` raises
-        SkillRootUnreachable; otherwise the previously discovered skills it would
-        have produced are kept, so an outage never empties the index.
+        If listing fails, `strict` raises SkillRootUnreachable; otherwise the root's
+        previously discovered skills are kept, so an outage never empties the index.
+
+        A single SKILL.md that can't be read is never fatal and doesn't make the
+        scan incomplete — one broken skill must not block rebuilds or stop
+        announcements from being applied. On a local root it is skipped (an
+        unreadable file is a lasting state, e.g. `chmod 000`); on a cloud root the
+        previous version is kept if there is one (a one-object failure is usually
+        transient), otherwise it is skipped.
         """
         if base is None:
             return [], True
@@ -104,7 +110,6 @@ class SkillIndex:
             return list(previous.values()), False
 
         entries: list[SkillEntry] = []
-        complete = True
         skipped = 0
         for skill_md in candidates:
             entry_dir = skill_md.parent
@@ -118,10 +123,7 @@ class SkillIndex:
             except SkillLoadError as e:
                 if isinstance(e.__cause__, (FileNotFoundError, NotADirectoryError)):
                     continue  # a cloud root entry without a SKILL.md: not a skill
-                if strict:
-                    raise SkillRootUnreachable(str(e)) from e
-                complete = False
-                kept = previous.get(str(entry_dir))
+                kept = None if isinstance(skill_md, Path) else previous.get(str(entry_dir))
                 logger.warning(
                     "Could not read %s%s",
                     skill_md,
@@ -145,7 +147,7 @@ class SkillIndex:
                 skipped,
                 self._max_per_root,
             )
-        return entries, complete
+        return entries, True
 
     def discover(self, *, strict: bool = False) -> bool:
         """(Re)scan both roots and populate the index. User skills win name collisions.

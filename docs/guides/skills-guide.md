@@ -148,6 +148,8 @@ An empty prefix is fine (no skills yet). SDK default credentials count as config
 - A background or dashboard rescan logs a warning and keeps that root's previously discovered skills. It announces nothing, and retries a pending change at most once a minute.
 - `pincer skills rebuild` and `POST /api/skills/rebuild` fail instead (exit 1, or HTTP 503). The index and the generation stamp stay as they were.
 
+This applies to the root's *listing*. A single skill whose SKILL.md can't be read is never fatal, and the rest of the root loads normally. On a local root the skill is skipped (e.g. a `chmod 000` file). On a cloud root it keeps its previous version, because a one-object failure is usually transient. Either way, a warning is logged.
+
 **Credentials.** For S3 and GCS every setting below is optional; anything left unset falls through to the SDK's default chain (`AWS_*` env vars / `~/.aws` / instance roles, Application Default Credentials). Azure needs at least a connection string or an account URL; there's no default chain without one. Secrets are never logged — log lines show only the URI.
 
 | Provider | Settings (`PINCER_` + upper-case name) |

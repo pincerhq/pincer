@@ -5,6 +5,7 @@ a running `pincer run` and a `pincer skills rebuild`).
 """
 
 import asyncio
+import os
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -571,3 +572,26 @@ def test_apply_generation_during_an_outage_raises_without_adopting(
 
     assert worker.generation != app.generation
     assert _names(worker.index) == ["alpha"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a chmod 000 file")
+def test_one_unreadable_skill_does_not_block_rebuilds_or_announcements(tmp_path: Path) -> None:
+    """PR review: with one `chmod 000` SKILL.md, rebuilds and catch-up scans still
+    succeed, and the announcement is adopted (not retried every minute)."""
+    user, cache_dir = tmp_path / "user", tmp_path / "cache"
+    _make_skill(user, "ok")
+    _make_skill(user, "locked")
+    (user / "locked" / "SKILL.md").chmod(0)
+    try:
+        app, worker = _service(user, cache_dir), _service(user, cache_dir)
+        worker.ensure_current()
+        _make_skill(user, "new")
+
+        app.rebuild()  # must not raise
+
+        assert worker.refresh_if_announced() is True
+        assert worker.generation == app.generation
+        assert worker.refresh_if_announced() is False  # adopted, not pending a retry
+        assert _names(worker.index) == ["new", "ok"]
+    finally:
+        (user / "locked" / "SKILL.md").chmod(0o644)
