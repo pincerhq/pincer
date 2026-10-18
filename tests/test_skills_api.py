@@ -34,6 +34,10 @@ def client(monkeypatch, tmp_path):
     from pincer.config import get_settings_relaxed
 
     monkeypatch.chdir(tmp_path)
+    # Real settings would read the developer's ~/.pincer/skills and leave the stamp
+    # and disk ID in the shared PINCER_DATA_DIR; keep both inside this test.
+    monkeypatch.setenv("PINCER_SKILLS_DIR", str(tmp_path / "skills"))
+    monkeypatch.setenv("PINCER_SKILLS_CACHE_DIR", str(tmp_path / "skills-cache"))
     get_settings_relaxed.cache_clear()
     app = create_app()
     yield TestClient(app)
@@ -369,6 +373,33 @@ def test_rebuild_endpoint_failure_is_a_500(client: TestClient, queued_jobs) -> N
     assert resp.status_code == 500
     assert "bucket on fire" in resp.json()["detail"]
     queued_jobs.assert_not_awaited()
+
+
+def test_rebuild_endpoint_unreachable_root_is_a_503_and_announces_nothing(
+    client: TestClient, queued_jobs, tmp_path: Path
+) -> None:
+    """PR review: an outage during a rebuild must fail the request, not answer 200
+    with bundled skills only and announce that to every process."""
+    from pincer.tools.skills.index import SkillRootUnreachable
+
+    with patch(
+        "pincer.tools.skills.index.SkillIndex.discover",
+        side_effect=SkillRootUnreachable("Skill root s3://b/t is unreachable: EndpointConnectionError"),
+    ):
+        resp = client.post("/api/skills/rebuild")
+
+    assert resp.status_code == 503
+    assert "index unchanged" in resp.json()["detail"]
+    assert not (tmp_path / "skills-cache" / "index-generation").exists()
+    queued_jobs.assert_not_awaited()
+
+
+def test_client_fixture_is_isolated_from_the_developer_skills(client: TestClient, tmp_path: Path) -> None:
+    from pincer.config import get_settings_relaxed
+
+    settings = get_settings_relaxed()
+    assert settings.skills_dir == tmp_path / "skills"
+    assert settings.skills_cache_dir == tmp_path / "skills-cache"
 
 
 @pytest.mark.asyncio

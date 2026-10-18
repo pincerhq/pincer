@@ -147,12 +147,16 @@ async def test_run_skill_script_non_python(service: SkillService, sandbox_disabl
 
 
 @pytest.mark.asyncio
-async def test_run_skill_script_sees_script_only_changes(service: SkillService) -> None:
-    """Editing a script (without touching SKILL.md or rebuilding) takes effect on the next run."""
+async def test_run_skill_script_sees_script_only_changes(service: SkillService, skill_root) -> None:
+    """Editing a script (without touching SKILL.md or rebuilding) takes effect on the next run.
+
+    The edit goes through `skill_root.external`, behind this service's cache, as an
+    upload from elsewhere would — writing through the service's own client would
+    update its cached copy and prove nothing (PR review)."""
     tools = make_skills_tools(service, sandbox_disabled=True)
     assert "ran" in await tools["run_skill_script"]("demo", "run.py", [])
 
-    _write(_skill_dir(service) / "run.py", 'print("edited")\n')
+    _write(skill_root.external("bundled") / "demo" / "run.py", 'print("edited")\n')
 
     assert await tools["run_skill_script"]("demo", "run.py", []) == "edited"
 

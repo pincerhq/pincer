@@ -489,3 +489,85 @@ def test_get_skill_service_strict_failure_creates_no_singleton(tmp_path: Path) -
             assert get_skill_service(_remote_settings(tmp_path)).user_dir is None
     finally:
         reset_skill_service()
+
+
+# ── outages (PR review: an unreachable root must not become an announced empty index) ──
+
+
+def _user_outage(user: SkillPath):
+    """Patch discovery so listing the user root fails like an expired STS token."""
+    from pincer.tools.skills.storage import iter_skill_md
+
+    def flaky(base):
+        if base == user:
+            raise ConnectionError("ExpiredToken")
+        return iter_skill_md(base)
+
+    return patch("pincer.tools.skills.index.iter_skill_md", side_effect=flaky)
+
+
+def test_rebuild_during_an_outage_raises_and_announces_nothing(user: SkillPath, cache_dir: Path) -> None:
+    from pincer.tools.skills.index import SkillRootUnreachable
+
+    app, watcher_process = _service(user, cache_dir), _service(user, cache_dir)
+    app.rebuild()
+    watcher_process.ensure_current()
+    stamp = _stamp(cache_dir)
+
+    with _user_outage(user), pytest.raises(SkillRootUnreachable, match="ExpiredToken"):
+        app.rebuild()
+
+    assert _stamp(cache_dir) == stamp  # nothing announced
+    assert _names(app.index) == ["alpha"]  # user skills kept
+    assert _names(watcher_process.ensure_current()) == ["alpha"]
+
+
+def test_outage_during_a_catch_up_scan_keeps_skills_and_retries(user: SkillPath, cache_dir: Path) -> None:
+    api, worker = _service(user, cache_dir), _service(user, cache_dir)
+    worker.ensure_current()
+    _make_skill(user, "beta")
+    with patch("pincer.services.skills.monotonic", return_value=1000.0):
+        api.rebuild()
+    announced = _stamp(cache_dir)
+
+    with _user_outage(user), patch("pincer.services.skills.monotonic", return_value=1000.0):
+        assert worker.refresh_if_announced() is True
+
+    assert _names(worker.index) == ["alpha"]  # previous user skills kept, not emptied
+    assert worker.generation != announced  # the announcement isn't marked as applied
+    assert _stamp(cache_dir) == announced  # and the failed scan announced nothing
+
+    with patch("pincer.services.skills.monotonic", return_value=1030.0):
+        assert worker.refresh_if_announced() is False  # no retry storm during the outage
+    with patch("pincer.services.skills.monotonic", return_value=1061.0):
+        assert worker.refresh_if_announced() is True  # retried once the pause is over
+    assert _names(worker.index) == ["alpha", "beta"]
+    assert worker.generation == announced
+
+
+def test_outage_during_a_max_age_rescan_announces_nothing(user: SkillPath, cache_dir: Path) -> None:
+    api = _service(user, cache_dir)
+    api.rebuild()
+    stamp = _stamp(cache_dir)
+
+    with _user_outage(user):
+        assert _names(api.ensure_current(max_age=0)) == ["alpha"]
+
+    assert _stamp(cache_dir) == stamp
+
+
+def test_apply_generation_during_an_outage_raises_without_adopting(
+    user: SkillPath, cache_dir: Path, tmp_path: Path
+) -> None:
+    from pincer.tools.skills.index import SkillRootUnreachable
+
+    app = _service(user, cache_dir)
+    worker = _service(user, tmp_path / "worker-cache")
+    worker.ensure_current()
+    app.rebuild()
+
+    with _user_outage(user), pytest.raises(SkillRootUnreachable):
+        worker.apply_generation(app.generation, disk_id=app.disk_id)
+
+    assert worker.generation != app.generation
+    assert _names(worker.index) == ["alpha"]

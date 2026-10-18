@@ -384,11 +384,13 @@ Rebuild the skill index — the API counterpart of `pincer skills rebuild`. Quer
 
 The job is consumed by **one** process: with `task_broker=redis` that is any `pincer run tasks` worker, or the main `pincer run` itself, where it is a no-op. Workers that share the main process's data volume (the default `docker-compose.yml` setup) also follow the generation stamp the rebuild wrote; the job is what reaches a worker that doesn't. The job is idempotent and never moves a process to an older generation: a process already at that generation (or a newer one) skips it. The job carries the sender's disk ID (a file in `skills_cache_dir`), so a worker on the same data volume only catches up with the stamp instead of clearing the shared cache a second time.
 
-A failed enqueue doesn't fail the request — the in-app rebuild has already happened — and is reported in `job`. A failed rebuild is a `500`.
+A failed enqueue doesn't fail the request — the in-app rebuild has already happened — and is reported in `job`. If a skill root can't be read (an outage, expired credentials) the response is `503`, and nothing changes: the index keeps its previous skills and no generation is announced. Any other failed rebuild is a `500`.
+
+`generation` is opaque, but it sorts by creation time: it has the form `<time_ns, 20 digits>-<uuid hex>`. A process never moves to a generation that sorts before its current one.
 
 ```json
 {
-  "generation": "3f1c9e4a7b2d4e0f9a8c6b5d4e3f2a1b",
+  "generation": "01760000000000000000-3f1c9e4a7b2d4e0f9a8c6b5d4e3f2a1b",
   "cache_cleared": true,
   "skills": [{"name": "skill-authoring", "root": "bundled", "dir": "skill-authoring", "...": "..."}],
   "job": {"queued": true, "topic": "rebuild_skill_index"}

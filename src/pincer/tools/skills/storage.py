@@ -46,8 +46,8 @@ _STORAGE_HINTS = {
     ),
     "az": (
         "Configure PINCER_STORAGE_AZURE_CONNECTION_STRING, or PINCER_STORAGE_AZURE_ACCOUNT_URL with "
-        "PINCER_STORAGE_AZURE_CREDENTIAL (account key or SAS token) — or make DefaultAzureCredential "
-        "available (managed identity, az login) alongside the account URL."
+        "PINCER_STORAGE_AZURE_CREDENTIAL (account key or SAS token). With only the account URL, "
+        "DefaultAzureCredential is used, so a managed / workload identity or `az login` must be available."
     ),
     "gs": (
         "Configure PINCER_STORAGE_GCS_CREDENTIALS_FILE (service-account JSON) and PINCER_STORAGE_GCS_PROJECT "
@@ -105,14 +105,18 @@ def _build_client(scheme: str, settings: Settings, cache_dir: Path | None) -> An
         connection_string = _secret(settings.storage_azure_connection_string)
         if connection_string:
             return AzureBlobClient(connection_string=connection_string, **cache_kwargs)
-        # With only account_url set, cloudpathlib falls back to DefaultAzureCredential.
-        return AzureBlobClient(
-            **_drop_none(
-                account_url=settings.storage_azure_account_url or None,
-                credential=_secret(settings.storage_azure_credential),
-            ),
-            **cache_kwargs,
-        )
+        account_url = settings.storage_azure_account_url or None
+        credential: Any = _secret(settings.storage_azure_credential)
+        if account_url and credential is None:
+            # cloudpathlib would connect anonymously here (credential=None), so build
+            # the SDK's default chain ourselves: managed / workload identity, Azure CLI
+            # login, environment credentials. It authenticates on first use.
+            from azure.identity import DefaultAzureCredential
+
+            credential = DefaultAzureCredential()
+        # With neither a connection string nor an account URL, cloudpathlib raises
+        # MissingCredentialsError (unless AZURE_STORAGE_CONNECTION_STRING is set).
+        return AzureBlobClient(**_drop_none(account_url=account_url, credential=credential), **cache_kwargs)
 
     if scheme == "gs":
         from cloudpathlib import GSClient

@@ -106,8 +106,14 @@ async def rebuild_skills(
     def _rebuild() -> tuple[SkillIndex, str | None]:
         return service.rebuild(clear_cache), service.disk_id
 
+    from pincer.tools.skills.index import SkillRootUnreachable
+
     try:
         index, disk_id = await asyncio.to_thread(_rebuild)
+    except SkillRootUnreachable as e:
+        # Storage outage or credentials: nothing was announced, the index is unchanged.
+        logger.warning("Skill index rebuild failed: %s", e)
+        raise HTTPException(status_code=503, detail=f"Skill index rebuild failed, index unchanged: {e}") from e
     except Exception as e:
         logger.exception("Skill index rebuild failed")
         raise HTTPException(status_code=500, detail=f"Skill index rebuild failed: {e}") from e

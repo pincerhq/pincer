@@ -39,6 +39,16 @@ def s3_skill_dir(tmp_path: Path):
     return skill_dir
 
 
+@pytest.fixture
+def s3_external(tmp_path: Path, s3_skill_dir):
+    """The same skill dir through a second client with its own cache: writes here
+    change the object behind `s3_skill_dir`'s cache, like an upload from elsewhere."""
+    client = cloudpathlib_local.LocalS3Client(
+        local_storage_dir=tmp_path / "storage", local_cache_dir=tmp_path / "objects-external"
+    )
+    return client.CloudPath(str(s3_skill_dir))
+
+
 # ── is_remote_uri / settings ────────────────────────────────────────────────
 
 
@@ -168,13 +178,27 @@ def test_localize_uses_cloudpathlib_cache_dir(s3_skill_dir) -> None:
     assert Path((s3_skill_dir / "scripts" / "run.sh").fspath) == local / "scripts" / "run.sh"
 
 
-def test_localize_refreshes_changed_objects(s3_skill_dir) -> None:
-    localize_skill_dir(s3_skill_dir)
-    (s3_skill_dir / "scripts" / "run.sh").write_text("#!/bin/sh\necho changed\n", encoding="utf-8")
+def test_localize_refreshes_changed_objects(s3_skill_dir, s3_external) -> None:
+    cached = localize_skill_dir(s3_skill_dir) / "scripts" / "run.sh"
+    assert cached.read_text(encoding="utf-8") == "#!/bin/sh\necho hi\n"
+
+    # Changed behind this client's cache (PR review: writing through the same
+    # client updates the cached copy too, so it can't prove a refresh happened).
+    (s3_external / "scripts" / "run.sh").write_text("#!/bin/sh\necho changed\n", encoding="utf-8")
+    assert cached.read_text(encoding="utf-8") == "#!/bin/sh\necho hi\n"  # stale until localized
 
     local = localize_skill_dir(s3_skill_dir)
 
     assert (local / "scripts" / "run.sh").read_text(encoding="utf-8") == "#!/bin/sh\necho changed\n"
+
+
+def test_localize_picks_up_files_added_behind_the_cache(s3_skill_dir, s3_external) -> None:
+    localize_skill_dir(s3_skill_dir)
+    (s3_external / "scripts" / "new.sh").write_text("#!/bin/sh\necho new\n", encoding="utf-8")
+
+    local = localize_skill_dir(s3_skill_dir)
+
+    assert (local / "scripts" / "new.sh").read_text(encoding="utf-8") == "#!/bin/sh\necho new\n"
 
 
 def test_localize_removes_files_deleted_from_bucket(s3_skill_dir) -> None:
@@ -389,3 +413,57 @@ def test_usable_root_missing_extra_says_what_to_install(monkeypatch: pytest.Monk
     monkeypatch.setitem(sys.modules, "cloudpathlib", None)
     with pytest.raises(SkillLoadError, match=r"pincer-agent\[remote-skills\]"):
         open_usable_skills_root("s3://bucket/team", _settings())
+
+
+def test_open_skills_root_azure_account_url_only_uses_default_azure_credential(tmp_path: Path) -> None:
+    """PR review: cloudpathlib would connect anonymously with credential=None, so a
+    managed-identity setup needs DefaultAzureCredential built explicitly."""
+    settings = _settings(data_dir=tmp_path, storage_azure_account_url="https://a.blob.core.windows.net")
+    with (
+        patch("azure.identity.DefaultAzureCredential") as default_credential,
+        patch("cloudpathlib.AzureBlobClient") as client_cls,
+    ):
+        open_skills_root("az://container/skills", settings)
+
+    default_credential.assert_called_once_with()
+    client_cls.assert_called_once_with(
+        account_url="https://a.blob.core.windows.net",
+        credential=default_credential.return_value,
+        local_cache_dir=str(tmp_path / "cache" / "skills" / "objects"),
+    )
+
+
+def test_open_skills_root_azure_explicit_credential_skips_the_default_chain(tmp_path: Path) -> None:
+    settings = _settings(
+        data_dir=tmp_path,
+        storage_azure_account_url="https://a.blob.core.windows.net",
+        storage_azure_credential="account-key",
+    )
+    with patch("azure.identity.DefaultAzureCredential") as default_credential, patch("cloudpathlib.AzureBlobClient"):
+        open_skills_root("az://container/skills", settings)
+    default_credential.assert_not_called()
+
+
+def test_open_skills_root_azure_without_any_settings_names_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AZURE_STORAGE_CONNECTION_STRING", raising=False)
+    with pytest.raises(SkillLoadError, match="MissingCredentialsError.*PINCER_STORAGE_AZURE_CONNECTION_STRING"):
+        open_skills_root("az://container/skills", _settings(data_dir=tmp_path))
+
+
+def test_remote_skills_extra_requires_a_traversal_safe_cloudpathlib() -> None:
+    """PR review: cloudpathlib < 0.25 maps an object key like `a/../../.bashrc` to a
+    cache path outside the cache dir; localize_skill_dir relies on the guard."""
+    import tomllib
+
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    extra = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["optional-dependencies"]["remote-skills"]
+    requirements = {Requirement(spec).name: Requirement(spec) for spec in extra}
+
+    assert not requirements["cloudpathlib"].specifier.contains(Version("0.24.9"))
+    assert requirements["cloudpathlib"].specifier.contains(Version("0.25.0"))
+    assert "azure-identity" in requirements

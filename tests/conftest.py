@@ -548,35 +548,62 @@ _FAKE_AZURE_CONNECTION_STRING = (
 )
 
 
+class SkillRoots:
+    """What the `skill_root` fixture returns: `roots("bundled")` gives a root.
+
+    `roots.external("bundled")` is the same location reached through a second
+    client that shares the simulated bucket but has its own file cache — a write
+    there changes the object *behind* the first client's cache, like an upload
+    from another machine. (A write through the first client also updates its own
+    cached copy, so it can't show whether a cache refresh happened.) For local
+    roots both are the same directory.
+    """
+
+    def __init__(self, make: Callable[[str], Any], make_external: Callable[[str], Any]) -> None:
+        self._make = make
+        self._make_external = make_external
+
+    def __call__(self, name: str) -> Any:
+        return self._make(name)
+
+    def external(self, name: str) -> Any:
+        return self._make_external(name)
+
+
 @pytest.fixture(params=["local", "s3", "azure", "gs"])
-def skill_root(request: pytest.FixtureRequest, tmp_path: Path) -> Callable[[str], Any]:
+def skill_root(request: pytest.FixtureRequest, tmp_path: Path) -> SkillRoots:
     """Factory for skill roots on every storage backend: `skill_root("bundled")`.
 
     `local` returns a plain directory under tmp_path; the cloud params return
     CloudPaths from cloudpathlib's offline mock clients, whose simulated bucket
     and file cache also live under tmp_path, so nothing is shared between
     tests and no network is touched. Write skills through the path API
-    (`write_text`, `unlink`), which works the same on every backend.
+    (`write_text`, `unlink`), which works the same on every backend. See
+    `SkillRoots.external` for changing objects behind the cache.
     """
     backend = request.param
     if backend == "local":
-        return lambda name: tmp_path / name
+        return SkillRoots(lambda name: tmp_path / name, lambda name: tmp_path / name)
 
     local = pytest.importorskip("cloudpathlib.local")
     storage = tmp_path / f"{backend}-storage"
-    cache = tmp_path / f"{backend}-cache"
-    if backend == "s3":
-        client = local.LocalS3Client(local_storage_dir=storage, local_cache_dir=cache)
-        prefix = "s3://skills-bucket"
-    elif backend == "azure":
-        client = local.LocalAzureBlobClient(
-            local_storage_dir=storage, local_cache_dir=cache, connection_string=_FAKE_AZURE_CONNECTION_STRING
-        )
-        prefix = "az://skills-container"
-    else:
-        client = local.LocalGSClient(local_storage_dir=storage, local_cache_dir=cache)
-        prefix = "gs://skills-bucket"
-    return lambda name: client.CloudPath(f"{prefix}/{name}")
+
+    def make_client(cache: Path) -> Any:
+        if backend == "s3":
+            return local.LocalS3Client(local_storage_dir=storage, local_cache_dir=cache)
+        if backend == "azure":
+            return local.LocalAzureBlobClient(
+                local_storage_dir=storage, local_cache_dir=cache, connection_string=_FAKE_AZURE_CONNECTION_STRING
+            )
+        return local.LocalGSClient(local_storage_dir=storage, local_cache_dir=cache)
+
+    prefix = {"s3": "s3://skills-bucket", "azure": "az://skills-container", "gs": "gs://skills-bucket"}[backend]
+    client = make_client(tmp_path / f"{backend}-cache")
+    external_client = make_client(tmp_path / f"{backend}-external-cache")
+    return SkillRoots(
+        lambda name: client.CloudPath(f"{prefix}/{name}"),
+        lambda name: external_client.CloudPath(f"{prefix}/{name}"),
+    )
 
 
 # ── Real Pincer processes (daemon, `pincer run`) ─────────────────────

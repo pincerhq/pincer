@@ -46,6 +46,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _STAMP_FILENAME = "index-generation"
+# After a scan that couldn't read a root, wait this long before retrying the same
+# announcement, so an outage doesn't put a failing bucket listing on every request.
+_UNREACHABLE_RETRY_SECONDS = 60.0
 _DISK_ID_FILENAME = "disk-id"
 
 
@@ -84,6 +87,9 @@ class SkillService:
         self._lock = threading.Lock()
         # Set while a SkillIndexWatcher owns stamp checks for this service.
         self._watched = False
+        # An announcement a scan couldn't apply (a root was unreachable), and when to retry it.
+        self._unapplied_stamp: str | None = None
+        self._retry_at = 0.0
 
     @classmethod
     def from_settings(cls, settings: Settings, *, require_usable_root: bool = False) -> SkillService:
@@ -151,10 +157,8 @@ class SkillService:
             return self.index
         with self._lock:
             stamp = self._read_stamp()
-            if (
-                self._scanned_at is None
-                or stamp != self._generation
-                or (max_age is not None and monotonic() - self._scanned_at >= max_age)
+            if self._announcement_due(stamp) or (
+                max_age is not None and self._scanned_at is not None and monotonic() - self._scanned_at >= max_age
             ):
                 self._scan(stamp)
             return self.index
@@ -164,21 +168,35 @@ class SkillService:
         Returns whether it rescanned. Blocking — the watcher runs it in a thread."""
         with self._lock:
             stamp = self._read_stamp()
-            if self._scanned_at is not None and stamp == self._generation:
+            if not self._announcement_due(stamp):
                 return False
             self._scan(stamp)
             return True
 
+    def _announcement_due(self, stamp: str | None) -> bool:
+        """Whether a scan is needed for `stamp`: never scanned, or an announcement
+        not applied yet — unless a scan just failed to apply this very one."""
+        if self._scanned_at is None:
+            return True
+        if stamp == self._generation:
+            return False
+        return stamp != self._unapplied_stamp or monotonic() >= self._retry_at
+
     def rebuild(self, clear_cache: bool = True) -> SkillIndex:
         """Rescan both roots now and announce the result to every process.
         With `clear_cache`, cloudpathlib's file cache is emptied first, so every
-        remote file is fetched fresh from the bucket."""
+        remote file is fetched fresh from the bucket.
+
+        Raises SkillRootUnreachable if a root can't be read; then nothing is
+        announced and the index keeps its previous skills.
+        """
         with self._lock:
             if clear_cache:
                 clear_remote_cache(self._user_dir)
-            self.index.discover()
+            self.index.discover(strict=True)
             self._generation = self._write_stamp()
             self._scanned_at = monotonic()
+            self._unapplied_stamp = None
             return self.index
 
     def apply_generation(self, generation: str, clear_cache: bool = True, disk_id: str | None = None) -> bool:
@@ -193,6 +211,9 @@ class SkillService:
         - Its own disk: clear its own cache if asked, rescan, and record `generation`
           as its stamp (unless that stamp is already newer), so processes sharing
           *this* disk follow once.
+
+        Raises SkillRootUnreachable if a root can't be read, without adopting
+        `generation` (the job fails; a later announcement or job retries it).
         """
         with self._lock:
             if self._generation == generation or _is_older(generation, self._generation):
@@ -201,15 +222,19 @@ class SkillService:
             if disk_id is not None and disk_id == self.disk_id:
                 if self._scanned_at is not None and stamp == self._generation:
                     return False
-                self._scan(stamp)
+                self.index.discover(strict=True)
+                self._scanned_at = monotonic()
+                self._generation = stamp
+                self._unapplied_stamp = None
                 return True
             if clear_cache:
                 clear_remote_cache(self._user_dir)
-            self.index.discover()
+            self.index.discover(strict=True)
             self._scanned_at = monotonic()
             if stamp is None or not _is_older(generation, stamp):
                 self._write_stamp(generation)
             self._generation = generation
+            self._unapplied_stamp = None
             return True
 
     def invalidate(self) -> None:
@@ -228,8 +253,17 @@ class SkillService:
         # that would make every process rescan again in turn.
         unannounced = self._scanned_at is not None and stamp == self._generation
         before = self._snapshot() if unannounced else None
-        self.index.discover()
+        complete = self.index.discover()
         self._scanned_at = monotonic()
+        if not complete:
+            # A root couldn't be read, so its previous skills were kept. Announce
+            # nothing, and don't adopt `stamp` either: that announcement isn't
+            # applied yet, so it is retried (after a pause) instead of being lost.
+            if stamp != self._generation:
+                self._unapplied_stamp = stamp
+                self._retry_at = monotonic() + _UNREACHABLE_RETRY_SECONDS
+            return
+        self._unapplied_stamp = None
         if before is not None and before != self._snapshot():
             # The skills themselves changed (e.g. files edited in the bucket):
             # tell other processes, so their indexes don't lag behind ours.

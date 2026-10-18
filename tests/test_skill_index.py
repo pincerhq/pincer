@@ -211,7 +211,7 @@ def test_skill_md_must_sit_directly_under_a_skill_dir(skill_root: SkillRoot) -> 
     assert [e.name for e in index.all_skills()] == ["top"]
 
 
-def test_unreachable_root_yields_no_skills(skill_root: SkillRoot, caplog) -> None:
+def test_unreachable_root_on_first_scan_yields_no_skills(skill_root: SkillRoot, caplog) -> None:
     class _Unreachable:
         def is_dir(self) -> bool:
             raise ConnectionError("bucket unreachable")
@@ -222,10 +222,69 @@ def test_unreachable_root_yields_no_skills(skill_root: SkillRoot, caplog) -> Non
     bundled = skill_root("bundled")
     _make_skill(bundled, "alpha")
     index = SkillIndex(bundled_dir=bundled, user_dir=_Unreachable(), max_per_root=100)  # type: ignore[arg-type]
-    index.discover()
+    assert index.discover() is False
 
     assert [e.name for e in index.all_skills()] == ["alpha"]
     assert "s3://gone/skills is unreachable" in caplog.text
+
+
+def test_unreachable_root_keeps_its_previous_skills(skill_root: SkillRoot) -> None:
+    """Review finding: an outage during a rescan must not empty the root's skills."""
+    bundled, user = skill_root("bundled"), skill_root("user")
+    _make_skill(bundled, "alpha")
+    _make_skill(user, "beta")
+    index = SkillIndex(bundled_dir=bundled, user_dir=user, max_per_root=100)
+    assert index.discover() is True
+
+    from pincer.tools.skills.storage import iter_skill_md
+
+    def flaky(base):
+        if base == user:
+            raise ConnectionError("S3 503 SlowDown")
+        return iter_skill_md(base)
+
+    with patch("pincer.tools.skills.index.iter_skill_md", side_effect=flaky):
+        assert index.discover() is False
+
+    assert {e.name: e.skill.source_root for e in index.all_skills()} == {"alpha": "bundled", "beta": "user"}
+
+
+def test_strict_discover_raises_and_leaves_the_index_unchanged(skill_root: SkillRoot) -> None:
+    from pincer.tools.skills.index import SkillRootUnreachable
+
+    bundled, user = skill_root("bundled"), skill_root("user")
+    _make_skill(bundled, "alpha")
+    _make_skill(user, "beta")
+    index = SkillIndex(bundled_dir=bundled, user_dir=user, max_per_root=100)
+    index.discover()
+    _make_skill(bundled, "gamma")
+
+    with (
+        patch("pincer.tools.skills.index.iter_skill_md", side_effect=ConnectionError("expired token")),
+        pytest.raises(SkillRootUnreachable, match="expired token"),
+    ):
+        index.discover(strict=True)
+
+    assert [e.name for e in index.all_skills()] == ["alpha", "beta"]
+
+
+def test_unreadable_skill_md_keeps_the_previous_version(skill_root: SkillRoot) -> None:
+    from pincer.exceptions import SkillLoadError
+    from pincer.tools.skills.index import SkillRootUnreachable
+
+    bundled = skill_root("bundled")
+    _make_skill(bundled, "alpha", description="v1")
+    index = SkillIndex(bundled_dir=bundled, user_dir=None, max_per_root=100)
+    index.discover()
+
+    def unreadable(path):
+        raise SkillLoadError(f"Cannot read {path}") from ConnectionError("connection reset")
+
+    with patch("pincer.tools.skills.index.read_skill_md", side_effect=unreadable):
+        assert index.discover() is False
+        assert index.get("alpha").description == "v1"
+        with pytest.raises(SkillRootUnreachable):
+            index.discover(strict=True)
 
 
 def test_list_files_skips_symlinked_directories(tmp_path) -> None:

@@ -142,14 +142,18 @@ There is still exactly one user root; bundled skills always stay local.
 - **the storage client can't be built** (for example, an unknown AWS profile or a malformed connection string): the error lists the `PINCER_STORAGE_*` settings for that provider;
 - **listing the root fails** (missing or wrong credentials, a bucket that doesn't exist, an unreachable endpoint): same as above. Startup makes this one listing, the same call discovery makes.
 
-An empty prefix is fine (no skills yet). SDK default credentials (an IAM role, `~/.aws`, managed identity, Application Default Credentials) count as configured. If the bucket becomes unreachable after startup, Pincer keeps running: a rescan logs a warning and the user root contributes no skills until it's reachable again.
+An empty prefix is fine (no skills yet). SDK default credentials count as configured: an IAM role, `AWS_*` env vars or `~/.aws` for S3; Application Default Credentials for GCS; `DefaultAzureCredential` for Azure once `storage_azure_account_url` is set (see the table below).
 
-**Credentials.** Every setting below is optional. Anything left unset falls through to the provider SDK's own default chain (`AWS_*` env vars / `~/.aws` / instance roles, `DefaultAzureCredential`, Application Default Credentials). Secrets are never logged — log lines show only the URI.
+**After startup, an outage never empties the index.** If the bucket becomes unreachable later (an expired token, a 5xx), Pincer keeps running:
+- A background or dashboard rescan logs a warning and keeps that root's previously discovered skills. It announces nothing, and retries a pending change at most once a minute.
+- `pincer skills rebuild` and `POST /api/skills/rebuild` fail instead (exit 1, or HTTP 503). The index and the generation stamp stay as they were.
+
+**Credentials.** For S3 and GCS every setting below is optional; anything left unset falls through to the SDK's default chain (`AWS_*` env vars / `~/.aws` / instance roles, Application Default Credentials). Azure needs at least a connection string or an account URL; there's no default chain without one. Secrets are never logged — log lines show only the URI.
 
 | Provider | Settings (`PINCER_` + upper-case name) |
 |---|---|
 | S3 | `storage_s3_endpoint_url` (MinIO/R2), `storage_s3_region`, `storage_s3_profile`, `storage_s3_access_key_id`, `storage_s3_secret_access_key`, `storage_s3_session_token` |
-| Azure | `storage_azure_connection_string`, **or** `storage_azure_account_url` + `storage_azure_credential` (account key or SAS token). With only the account URL, `DefaultAzureCredential` is used. |
+| Azure | `storage_azure_connection_string`, **or** `storage_azure_account_url` + `storage_azure_credential` (account key or SAS token). With only the account URL, Pincer uses `DefaultAzureCredential` (managed / workload identity, `az login`, `AZURE_*` env vars), from the `azure-identity` package the extra installs. |
 | GCS | `storage_gcs_credentials_file` (service-account JSON), `storage_gcs_project` |
 
 **Caching.** There are two layers, no more:

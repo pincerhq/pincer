@@ -61,6 +61,11 @@ class SkillEntry:
         return walk_files(self.skill.path)
 
 
+class SkillRootUnreachable(SkillLoadError):
+    """A skill root, or a SKILL.md in it, couldn't be read: an outage or a credentials
+    problem, as opposed to bad skill content (which only skips that skill)."""
+
+
 class SkillIndex:
     """Discovers SKILL.md-based skills from bundled and user roots (local or cloud)."""
 
@@ -75,19 +80,31 @@ class SkillIndex:
         self._max_per_root = max_per_root
         self._skills: dict[str, SkillEntry] = {}
 
-    def _discover_root(self, base: SkillPath | None, source_root: Literal["bundled", "user"]) -> list[SkillEntry]:
+    def _discover_root(
+        self, base: SkillPath | None, source_root: Literal["bundled", "user"], *, strict: bool
+    ) -> tuple[list[SkillEntry], bool]:
+        """Entries for one root, and whether the root could be read completely.
+
+        If it can't (listing fails, or a SKILL.md can't be read): `strict` raises
+        SkillRootUnreachable; otherwise the previously discovered skills it would
+        have produced are kept, so an outage never empties the index.
+        """
         if base is None:
-            return []
+            return [], True
+        previous = {str(e.skill.path): e for e in self._skills.values() if e.skill.source_root == source_root}
         try:
             if not base.is_dir():
-                return []
+                return [], True
             candidates = iter_skill_md(base)
         except Exception as e:
-            # An unreachable bucket or bad credentials must not take startup down.
-            logger.warning("Skill root %s is unreachable, skipping it: %s: %s", base, type(e).__name__, e)
-            return []
+            error = SkillRootUnreachable(f"Skill root {base} is unreachable: {type(e).__name__}: {e}")
+            if strict:
+                raise error from e
+            logger.warning("%s; keeping its %d previously discovered skill(s)", error, len(previous))
+            return list(previous.values()), False
 
         entries: list[SkillEntry] = []
+        complete = True
         skipped = 0
         for skill_md in candidates:
             entry_dir = skill_md.parent
@@ -101,7 +118,18 @@ class SkillIndex:
             except SkillLoadError as e:
                 if isinstance(e.__cause__, (FileNotFoundError, NotADirectoryError)):
                     continue  # a cloud root entry without a SKILL.md: not a skill
-                logger.warning("Skipped skill dir %s: failed to read SKILL.md", entry_dir, exc_info=True)
+                if strict:
+                    raise SkillRootUnreachable(str(e)) from e
+                complete = False
+                kept = previous.get(str(entry_dir))
+                logger.warning(
+                    "Could not read %s%s",
+                    skill_md,
+                    "; keeping the previously discovered version" if kept else "; skipping it",
+                    exc_info=True,
+                )
+                if kept is not None:
+                    entries.append(kept)
                 continue
             try:
                 parsed = parse_skill_md(skill_md, source_root=source_root, raw=raw)
@@ -117,19 +145,27 @@ class SkillIndex:
                 skipped,
                 self._max_per_root,
             )
-        return entries
+        return entries, complete
 
-    def discover(self) -> None:
-        """(Re)scan both roots and populate the index. User skills win name collisions."""
+    def discover(self, *, strict: bool = False) -> bool:
+        """(Re)scan both roots and populate the index. User skills win name collisions.
+
+        Returns whether every root could be read. A root that couldn't keeps its
+        previously discovered skills — or, with `strict`, SkillRootUnreachable is
+        raised and the index is left exactly as it was.
+        """
+        bundled, bundled_complete = self._discover_root(self._bundled_dir, "bundled", strict=strict)
+        user, user_complete = self._discover_root(self._user_dir, "user", strict=strict)
         skills: dict[str, SkillEntry] = {}
-        for entry in self._discover_root(self._bundled_dir, "bundled"):
+        for entry in bundled:
             skills[entry.name] = entry
-        for entry in self._discover_root(self._user_dir, "user"):
+        for entry in user:
             if entry.name in skills and skills[entry.name].skill.source_root == "bundled":
                 logger.info("User skill '%s' overrides bundled skill of the same name", entry.name)
             skills[entry.name] = entry
         self._skills = skills
         logger.info("Skill index: discovered %d skill(s)", len(self._skills))
+        return bundled_complete and user_complete
 
     def check_for_changes(self) -> list[str]:
         """Re-parse any skill whose SKILL.md hash changed, and drop any whose SKILL.md

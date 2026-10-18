@@ -127,7 +127,10 @@ postgres = [
     "psycopg[binary]>=3.2",
 ]
 # Skill roots in object storage: PINCER_SKILLS_DIR=s3://… / az://… / gs://…
-remote-skills = ["cloudpathlib[s3,azure,gs]>=0.21"]
+# cloudpathlib >= 0.25 refuses object keys that would map outside its local cache
+# dir; remote skills rely on that. azure-identity provides DefaultAzureCredential
+# for an account URL without an explicit credential.
+remote-skills = ["cloudpathlib[s3,azure,gs]>=0.25", "azure-identity>=1.15"]
 
 [project.scripts]
 pincer = "pincer.cli.main:app"

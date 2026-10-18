@@ -135,8 +135,13 @@ mounting a directory. Install the new `remote-skills` extra
   `pincer mcp serve` and `pincer skills rebuild` exit 1 if the extra is missing,
   the storage client can't be built, or listing the root fails (credentials,
   bucket, endpoint). The error names the `PINCER_STORAGE_*` settings to
-  configure. SDK default credentials count as configured. A bucket that becomes
-  unreachable after startup only logs a warning on rescan.
+  configure. SDK default credentials count as configured (for Azure, via
+  `DefaultAzureCredential` once `storage_azure_account_url` is set).
+- An outage after startup never empties the index. Rescans keep the unreachable
+  root's previous skills and announce nothing; `pincer skills rebuild` and
+  `POST /api/skills/rebuild` fail (exit 1, or HTTP 503) and change nothing.
+- The `remote-skills` extra requires cloudpathlib >= 0.25 (whose cache refuses
+  object keys that would land outside it) and adds `azure-identity`.
 - New `pincer skills rebuild [--keep-cache]`: clears cached remote files, rescans
   and announces the change through a generation stamp in `skills_cache_dir`. A
   running `pincer run` reloads without a restart: a background watcher checks the
