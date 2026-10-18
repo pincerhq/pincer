@@ -184,17 +184,19 @@ class WhatsAppChannel(BaseChannel):
         Only the bot owner's own phone can be resolved this way: the LID is
         learned from the first is_from_me message after connection.  For any
         other phone number the LID is unknown until that contact sends a message,
-        so the identifier is returned unchanged.
+        so the identifier is returned unchanged. A failed lookup raises, so the
+        identity layer leaves the pair out instead of storing a guess.
         """
         identifier = identifier.removeprefix("+").removeprefix("@")
         from neonize.utils.jid import build_jid
 
-        try:
-            _jid = build_jid(identifier)
-            lid_jid = await self._client.get_lid_from_pn(_jid)
+        lid_jid = await self._client.get_lid_from_pn(build_jid(identifier))
+        if lid_jid.User:
             return lid_jid.User
-        except Exception:
-            logger.error("Whatsapp: could not resolve identifier %r to user_id", identifier)
+        # whatsmeow answers an unknown phone→LID mapping with an empty JID
+        # rather than an error; that "" must never become a channel ID, or
+        # every not-yet-seen contact would share one identity.
+        logger.info("Whatsapp: no LID known yet for %r, keeping the phone number", identifier)
         return identifier
 
     # ── Interactive prompts (approval / ask_user) ────

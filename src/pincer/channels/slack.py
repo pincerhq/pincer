@@ -118,16 +118,15 @@ class SlackChannel(BaseChannel):
         - An email address → resolved via users.lookupByEmail (requires the
           users:read.email scope on the bot token).
 
-        Any other format (display name, etc.) is returned unchanged.
+        Any other format (display name, etc.) is returned unchanged. A failed
+        email lookup raises, so the identity layer leaves the pair out instead
+        of storing the email as a user ID.
         """
         if identifier.startswith("U"):
             return identifier
         if "@" in identifier and self._app is not None:
-            try:
-                result = await self._app.client.users_lookupByEmail(email=identifier)
-                return str(result["user"]["id"])
-            except Exception:
-                logger.debug("Slack: could not resolve email %r to user_id", identifier)
+            result = await self._app.client.users_lookupByEmail(email=identifier)
+            return str(result["user"]["id"])
         return identifier
 
     # ── Lifecycle ────────────────────────────────────────────────────────────

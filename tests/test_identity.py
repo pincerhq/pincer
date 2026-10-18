@@ -572,6 +572,84 @@ class TestSeedFromConfig:
         assert await r.resolve(ChannelType.TELEGRAM, 111) == "jane"
         assert await r.resolve(ChannelType.SLACK, "333") == "jane"
 
+    async def test_empty_resolved_ids_are_left_out(self, tmp_path, caplog):
+        """A channel that resolves unknown contacts to "" must not fold them into one identity."""
+
+        class UnresolvedWhatsApp:
+            async def resolve_internal_user_id(self, identifier: str) -> str:
+                return ""
+
+        r = IdentityResolver(
+            tmp_path / "empty_lid.db",
+            identity_map_config="alice@telegram:111=whatsapp:490000000001,bob@telegram:222=whatsapp:490000000002",
+        )
+        await r.ensure_table()
+        channels = {ChannelType.WHATSAPP: UnresolvedWhatsApp()}
+        with caplog.at_level("ERROR", logger="pincer.core.identity"):
+            await r.seed_from_config(channels)
+            await r.seed_from_config(channels)
+
+        assert await r.get_all_channels("alice") == {ChannelType.TELEGRAM: "111"}
+        assert await r.get_all_channels("bob") == {ChannelType.TELEGRAM: "222"}
+        async with (
+            _rows(r) as db,
+            db.execute("SELECT COUNT(*) FROM pincer_channel_identities WHERE channel_user_id = ''") as cur,
+        ):
+            assert (await cur.fetchone())[0] == 0
+        assert any("empty ID for '490000000001'" in rec.message for rec in caplog.records)
+
+    async def test_failed_resolution_leaves_the_pair_out(self, tmp_path, caplog):
+        """A channel lookup that raises drops only that pair; the entry keeps its other channels."""
+
+        class BrokenWhatsApp:
+            async def resolve_internal_user_id(self, identifier: str) -> str:
+                raise RuntimeError("not connected")
+
+        r = IdentityResolver(tmp_path / "broken.db", identity_map_config="alice@telegram:111=whatsapp:490000000001")
+        await r.ensure_table()
+        with caplog.at_level("ERROR", logger="pincer.core.identity"):
+            await r.seed_from_config({ChannelType.WHATSAPP: BrokenWhatsApp()})
+
+        assert await r.get_all_channels("alice") == {ChannelType.TELEGRAM: "111"}
+        assert any("not connected" in rec.message for rec in caplog.records)
+
+    async def test_two_config_ids_resolving_to_one_id_are_not_merged(self, tmp_path, caplog):
+        """Two different phones that resolve to the same internal ID is a lookup
+        error: the second claimant is left out instead of joining the first."""
+
+        class CollidingWhatsApp:
+            async def resolve_internal_user_id(self, identifier: str) -> str:
+                return "999"
+
+        r = IdentityResolver(
+            tmp_path / "collide.db",
+            identity_map_config="telegram:111=whatsapp:490000000001,telegram:222=whatsapp:490000000002",
+        )
+        await r.ensure_table()
+        with caplog.at_level("ERROR", logger="pincer.core.identity"):
+            await r.seed_from_config({ChannelType.WHATSAPP: CollidingWhatsApp()})
+
+        first = await r.find(ChannelType.TELEGRAM, 111)
+        second = await r.find(ChannelType.TELEGRAM, 222)
+        assert first and second and first != second
+        assert await r.get_all_channels(first) == {ChannelType.TELEGRAM: "111", ChannelType.WHATSAPP: "999"}
+        assert await r.get_all_channels(second) == {ChannelType.TELEGRAM: "222"}
+        assert any("both resolve to whatsapp:999" in rec.message for rec in caplog.records)
+
+    async def test_unnamed_entry_does_not_merge_two_named_identities(self, tmp_path):
+        """An unnamed entry spanning pairs of two named identities keeps them apart."""
+        db_path = tmp_path / "bridge.db"
+        r1 = IdentityResolver(db_path, identity_map_config="alice@telegram:111,bob@telegram:222")
+        await r1.ensure_table()
+        await r1.seed_from_config()
+
+        r2 = IdentityResolver(db_path, identity_map_config="telegram:111=telegram:222=whatsapp:490000000001")
+        await r2.seed_from_config()
+
+        assert await r2.find(ChannelType.TELEGRAM, 111) == "alice"
+        assert await r2.find(ChannelType.TELEGRAM, 222) == "bob"
+        assert await r2.find(ChannelType.WHATSAPP, "490000000001") == "alice"
+
 
 @pytest.mark.asyncio
 class TestNamedCanonicalId:
@@ -653,6 +731,29 @@ class TestNamedCanonicalId:
         r2 = IdentityResolver(db_path, identity_map_config="david@telegram:333=whatsapp:491000000007")
         await r2.seed_from_config()  # warns, keeps "dave"
         assert await r2.resolve(ChannelType.TELEGRAM, 333) == "dave"
+
+    async def test_pair_owned_by_another_named_identity_is_not_merged(self, tmp_path, caplog):
+        """A named entry claiming a pair another named identity owns keeps its own
+        channels instead of being folded into that identity."""
+        db_path = tmp_path / "named_conflict.db"
+        r1 = IdentityResolver(db_path, identity_map_config="alice@telegram:111=whatsapp:490000000001")
+        await r1.ensure_table()
+        await r1.seed_from_config()
+
+        r2 = IdentityResolver(
+            db_path,
+            identity_map_config="alice@telegram:111,bob@telegram:222=whatsapp:490000000001",
+        )
+        with caplog.at_level("ERROR", logger="pincer.core.identity"):
+            await r2.seed_from_config()
+
+        assert await r2.resolve(ChannelType.TELEGRAM, 222) == "bob"
+        assert await r2.get_all_channels("bob") == {ChannelType.TELEGRAM: "222"}
+        assert await r2.get_all_channels("alice") == {
+            ChannelType.TELEGRAM: "111",
+            ChannelType.WHATSAPP: "490000000001",
+        }
+        assert any("whatsapp:490000000001" in rec.message and "'alice'" in rec.message for rec in caplog.records)
 
     async def test_single_channel_named_entry_seeds_identity(self, tmp_path):
         """A single channel:id pair — no linking partner needed — seeds a named identity."""
@@ -922,6 +1023,26 @@ class TestCleanup:
         # Blank entries (a trailing comma) are not entries at all: the sweep runs.
         await IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890, ,").cleanup()
         assert await links() == 0
+
+    async def test_cleanup_prunes_nothing_when_a_pair_does_not_resolve(self, tmp_path, caplog):
+        """A pair whose lookup fails is a hole in the whitelist: its stored link
+        (e.g. a LID learned earlier) is unknown, so nothing may be pruned."""
+
+        class BrokenWhatsApp:
+            async def resolve_internal_user_id(self, identifier: str) -> str:
+                raise RuntimeError("not connected")
+
+        db_path = tmp_path / "unresolved.db"
+        r = IdentityResolver(db_path, identity_map_config="alice@telegram:111=whatsapp:490000000001")
+        await r.ensure_table()
+        await r.seed_from_config()
+        await r.link_if_new("alice", ChannelType.WHATSAPP, "123456789012345")  # LID learned at runtime
+
+        with caplog.at_level("ERROR", logger="pincer.core.identity"):
+            await r.cleanup({ChannelType.WHATSAPP: BrokenWhatsApp()})
+
+        assert "skipping cleanup" in caplog.text
+        assert await r.find(ChannelType.WHATSAPP, "123456789012345") == "alice"
 
     async def test_cleanup_skips_wipe_when_config_has_no_usable_pairs(self, tmp_path):
         """A config string that's non-empty but parses to zero usable pairs (e.g. an

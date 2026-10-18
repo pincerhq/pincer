@@ -380,3 +380,37 @@ class TestWhatsAppLoginFailure:
         # should still be able to wait for a real Connected event.
         assert wa_channel._login_error is None
         assert not wa_channel._connected.is_set()
+
+
+class TestResolveInternalUserId:
+    @pytest.fixture(autouse=True)
+    def _jid_module(self, monkeypatch):
+        jid_mod = ModuleType("neonize.utils.jid")
+        jid_mod.build_jid = MagicMock()  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "neonize.utils.jid", jid_mod)
+
+    @pytest.mark.asyncio
+    async def test_known_phone_resolves_to_lid(self, wa_channel):
+        wa_channel._client = MagicMock()
+        wa_channel._client.get_lid_from_pn = AsyncMock(return_value=MagicMock(User="123456789012345"))
+
+        assert await wa_channel.resolve_internal_user_id("+491622549781") == "123456789012345"
+
+    @pytest.mark.asyncio
+    async def test_unknown_phone_keeps_the_phone_number(self, wa_channel):
+        # whatsmeow returns an empty JID, not an error, for a contact whose
+        # LID it has not learned yet.
+        wa_channel._client = MagicMock()
+        wa_channel._client.get_lid_from_pn = AsyncMock(return_value=MagicMock(User=""))
+
+        assert await wa_channel.resolve_internal_user_id("+491622549781") == "491622549781"
+
+    @pytest.mark.asyncio
+    async def test_failed_lookup_raises(self, wa_channel):
+        # The identity layer leaves a pair out when its lookup fails; returning
+        # the phone here would hide the failure from it.
+        wa_channel._client = MagicMock()
+        wa_channel._client.get_lid_from_pn = AsyncMock(side_effect=RuntimeError("not connected"))
+
+        with pytest.raises(RuntimeError):
+            await wa_channel.resolve_internal_user_id("+491622549781")

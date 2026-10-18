@@ -183,16 +183,14 @@ class MicrosoftTeamsChannel(BaseChannel):
         return "teams"
 
     async def resolve_internal_user_id(self, identifier: str) -> str:
+        # A failed Graph lookup raises, so the identity layer leaves the pair
+        # out instead of storing a guess.
         _identifier = identifier.replace("@", "_")
-        try:
-            graph = self._app.get_app_graph()
-            result = await graph.users.get()
-            for u in result.value:
-                if _identifier in u.user_principal_name or identifier in u.mail:
-                    return str(u.id)
-
-        except Exception:
-            logger.error("MS Teams: could not resolve identifier %r to user_id", identifier)
+        graph = self._app.get_app_graph()
+        result = await graph.users.get()
+        for u in result.value:
+            if _identifier in (u.user_principal_name or "") or identifier in (u.mail or ""):
+                return str(u.id)
         return identifier
 
     def get_sub_app(self) -> Any:
