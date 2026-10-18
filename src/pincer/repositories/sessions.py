@@ -61,30 +61,41 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         return int((await self.session.exec(stmt)).rowcount)
 
     async def rewrite_session_ids(self, old_user_id: str, new_user_id: str) -> int:
-        """Re-key the `unified:<uid>` session from the old id to the new one.
+        """Re-key the old id's sessions to the new id.
 
-        Only that key names the pincer id: `<channel>:<id>` keys hold the
-        channel's own user id and `voice:<call_sid>` keys hold neither, so
-        they stay as they are. When a merge finds a session under both ids,
-        the most recently updated conversation is kept and the other dropped.
+        Session keys are `<prefix>:<user_id>`, where the prefix is a channel,
+        a Slack or Teams conversation, or `unified`. A key moves when its last
+        segment is exactly the old id; a key that only contains it does not.
+        `voice:<call_sid>` keys belong to a call, not a user, and never move.
+        When a merge finds the target key taken, the more recently updated
+        conversation is kept (the target's on a tie) and the other dropped.
         Returns the number of rows changed or removed.
         """
-        old_key, new_key = f"unified:{old_user_id}", f"unified:{new_user_id}"
+        suffix = f":{old_user_id}"
+        keys = select(ChatSession.session_id).where(
+            col(ChatSession.session_id).endswith(suffix, autoescape=True),
+            ~col(ChatSession.session_id).startswith("voice:", autoescape=True),
+        )
+        old_keys = (await self.session.exec(keys)).all()
+        if not old_keys:
+            return 0
+        moves = {key: f"{key.removesuffix(suffix)}:{new_user_id}" for key in old_keys}
         # Plain columns, not ORM objects: re-keying a row the session holds
         # would leave its identity map pointing at the old key.
         stmt = select(ChatSession.session_id, ChatSession.updated_at).where(
-            col(ChatSession.session_id).in_([old_key, new_key])
+            col(ChatSession.session_id).in_([*moves, *moves.values()])
         )
         updated = dict((await self.session.exec(stmt)).all())
-        if old_key not in updated:
-            return 0
-        removed = 0
-        if new_key in updated:
-            if updated[new_key] >= updated[old_key]:
-                return await self.delete_where(col(ChatSession.session_id) == old_key)
-            removed = await self.delete_where(col(ChatSession.session_id) == new_key)
-        rekey = update(ChatSession).where(col(ChatSession.session_id) == old_key).values(session_id=new_key)
-        return removed + int((await self.session.exec(rekey)).rowcount)
+        changed = 0
+        for old_key, new_key in moves.items():
+            if new_key in updated:
+                if updated[new_key] >= updated[old_key]:
+                    changed += await self.delete_where(col(ChatSession.session_id) == old_key)
+                    continue
+                changed += await self.delete_where(col(ChatSession.session_id) == new_key)
+            rekey = update(ChatSession).where(col(ChatSession.session_id) == old_key).values(session_id=new_key)
+            changed += int((await self.session.exec(rekey)).rowcount)
+        return changed
 
     async def ids(self) -> Sequence[str]:
         return (await self.session.exec(select(ChatSession.session_id))).all()

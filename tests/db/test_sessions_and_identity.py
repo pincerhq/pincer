@@ -6,10 +6,14 @@ sessions follow it to its new id.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from pincer.core.session import SessionManager
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
+from pincer.llm.base import LLMMessage, MessageRole
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityProfile
 from pincer.models.sessions import ChatSession
 from pincer.repositories.identity import (
@@ -43,12 +47,14 @@ async def url(db_url: str):
         await conn.run_sync(lambda c: IdentityProfile.metadata.drop_all(c, tables=_TABLES))
 
 
-async def _store_session(url: str, session_id: str, *, user_id: str, channel: str = "telegram", at: float = 1.0):
+async def _store_session(
+    url: str, session_id: str, *, user_id: str, channel: str = "telegram", at: float = 1.0, messages: str = "[]"
+):
     await SessionService(url).save(
         session_id=session_id,
         user_id=user_id,
         channel=channel,
-        messages="[]",
+        messages=messages,
         metadata="{}",
         created_at=at,
         updated_at=at,
@@ -154,39 +160,67 @@ async def _session_ids(url: str) -> set[str]:
         return set(await SessionRepository(session).ids())
 
 
-async def _updated_at(url: str, session_id: str) -> float:
-    async with session_scope(url) as session:
-        row = await SessionRepository(session).get(session_id)
-        assert row is not None
-        return row.updated_at
+async def _say(url: str, user_id: str, channel: str, text: str) -> None:
+    """Store a message the way the main message path does."""
+    # Attached to `url` directly rather than through `initialize()`, which
+    # only takes a SQLite path, so this runs on either dialect.
+    manager = SessionManager(Path(), max_messages=20)
+    manager._service = SessionService(url)
+    session = await manager.get_or_create(user_id, channel)
+    await manager.add_message(session, LLMMessage(role=MessageRole.USER, content=text))
 
 
-@pytest.mark.parametrize(("old_at", "new_at", "kept_at"), [(200.0, 100.0, 200.0), (100.0, 200.0, 200.0)])
-async def test_merging_keeps_the_more_recent_unified_session(url, old_at, new_at, kept_at):
+async def _messages(url: str, session_id: str) -> str:
+    row = await SessionService(url).load(session_id, user_id="", channel="", legacy_fallback=False)
+    assert row is not None
+    return row["messages"]
+
+
+@pytest.mark.parametrize("newest", ["usr_hash", "alice"])
+async def test_merging_keeps_the_more_recent_channel_session(url, newest):
     service = IdentityService(url)
     await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
     await service.create_identity("alice", channel="whatsapp", channel_user_id="4930111")
-    await _store_session(url, "unified:usr_hash", user_id="usr_hash", at=old_at)
-    await _store_session(url, "unified:alice", user_id="alice", at=new_at)
+    older = "alice" if newest == "usr_hash" else "usr_hash"
+    await _say(url, older, "whatsapp", f"from {older}")
+    await _say(url, newest, "whatsapp", f"from {newest}")
 
     await service.rename_identity("usr_hash", "alice")
 
-    assert await _session_ids(url) == {"unified:alice"}
-    assert await _updated_at(url, "unified:alice") == kept_at
+    assert await _session_ids(url) == {"whatsapp:alice"}
+    assert f"from {newest}" in await _messages(url, "whatsapp:alice")
 
 
-async def test_renaming_leaves_keys_that_do_not_name_the_identity(url):
-    """`<channel>:<id>` keys hold the channel's user id and `voice:` keys a
-    call SID; neither follows the pincer id, even when it is a substring."""
+async def test_merging_keeps_the_target_s_session_on_a_tie(url):
     service = IdentityService(url)
     await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
-    untouched = {"telegram:usr_hash", "voice:CAusr_hash01", "unified:usr_hash_2", "unified:xusr_hash"}
-    for session_id in untouched:
-        await _store_session(url, session_id, user_id="someone_else")
+    await service.create_identity("alice", channel="whatsapp", channel_user_id="4930111")
+    await _store_session(url, "whatsapp:usr_hash", user_id="usr_hash", at=100.0, messages='["old"]')
+    await _store_session(url, "whatsapp:alice", user_id="alice", at=100.0, messages='["target"]')
 
     await service.rename_identity("usr_hash", "alice")
 
-    assert await _session_ids(url) == untouched
+    assert await _session_ids(url) == {"whatsapp:alice"}
+    assert await _messages(url, "whatsapp:alice") == '["target"]'
+
+
+async def test_renaming_moves_only_keys_ending_in_the_identity(url):
+    """A key moves when its last segment is exactly the old id. A call's
+    `voice:` key never does, and a key merely containing the id stays."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="telegram", channel_user_id="12345")
+    moved = {
+        "telegram:usr_hash": "telegram:alice",
+        "unified:usr_hash": "unified:alice",
+        "teams-chat-19:abc@thread.v2:usr_hash": "teams-chat-19:abc@thread.v2:alice",
+    }
+    untouched = {"voice:usr_hash", "voice:CAusr_hash01", "unified:usr_hash_2", "unified:xusr_hash", "telegram:usrXhash"}
+    for session_id in [*moved, *untouched]:
+        await _store_session(url, session_id, user_id="usr_hash")
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert await _session_ids(url) == set(moved.values()) | untouched
 
 
 async def test_touch_active_channel_records_when(url):
