@@ -188,7 +188,7 @@ class MicrosoftTeamsChannel(BaseChannel):
         if "@" not in identifier:
             return identifier
         # Exact match only: a substring match would hand bob@x.com the ID of
-        # jimbob@x.com. A failed or ambiguous Graph lookup raises, so the
+        # jimbob@x.com. A failed, empty or ambiguous Graph lookup raises, so the
         # identity layer leaves the pair out instead of storing a guess.
         from kiota_abstractions.base_request_configuration import RequestConfiguration
         from msgraph.generated.users.users_request_builder import UsersRequestBuilder
@@ -200,10 +200,12 @@ class MicrosoftTeamsChannel(BaseChannel):
         )
         graph = self._app.get_app_graph()
         result = await graph.users.get(request_configuration=RequestConfiguration(query_parameters=query))
-        ids = {str(u.id) for u in (result.value if result else None) or []}
-        if len(ids) > 1:
-            raise ValueError(f"{identifier!r} matches {len(ids)} Teams users")
-        return ids.pop() if ids else identifier
+        ids = {str(u.id) for u in (result.value if result else None) or [] if u.id}
+        if len(ids) != 1:
+            # No match fails too: the email would never match the AAD object
+            # ID incoming messages carry.
+            raise LookupError(f"{identifier!r} matches {len(ids)} Teams users")
+        return ids.pop()
 
     def get_sub_app(self) -> Any:
         """Return the initialized FastAPI sub-app, or None if not yet initialized."""

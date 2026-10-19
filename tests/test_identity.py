@@ -766,6 +766,43 @@ class TestNamedCanonicalId:
         assert await r2.find(ChannelType.SLACK, "U1") == "alice"
         assert "Named canonical ID 'alicia' ignored" in caplog.text
 
+    async def test_renamed_entry_seeds_the_profile_configured_under_the_new_name(self, tmp_path):
+        """A rename keeps the old identity, but the profile is configured under the new name."""
+        db_path = tmp_path / "rename_profile.db"
+        r1 = IdentityResolver(db_path, identity_map_config="alice@telegram:111")
+        await r1.ensure_table()
+        await r1.seed_from_config()
+
+        r2 = IdentityResolver(
+            db_path,
+            identity_map_config="alicia@telegram:111=slack:U1",
+            profiles={"alicia": IdentityProfile(display_name="Alicia", timezone="Europe/Berlin")},
+        )
+        await r2.seed_from_config()
+
+        assert await r2.get_timezone("alice") == "Europe/Berlin"
+
+    async def test_old_identity_reached_by_two_entries_is_not_a_rename(self, tmp_path, caplog):
+        """Two entries reaching one unconfigured named identity cannot both be its
+        rename: neither seeds into it, so they are not folded into one person."""
+
+        class LidWhatsApp:
+            async def resolve_internal_user_id(self, identifier: str) -> str:
+                return "123456789012345"
+
+        db_path = tmp_path / "rename_twice.db"
+        r1 = IdentityResolver(db_path, identity_map_config="alice@telegram:111=whatsapp:123456789012345")
+        await r1.ensure_table()
+        await r1.seed_from_config()
+
+        r2 = IdentityResolver(db_path, identity_map_config="alicia@telegram:111,bob@telegram:222=whatsapp:490000000002")
+        with caplog.at_level("ERROR", logger="pincer.core.identity"):
+            await r2.seed_from_config({ChannelType.WHATSAPP: LidWhatsApp()})
+
+        assert await r2.find(ChannelType.TELEGRAM, 111) == "alice"
+        assert await r2.get_all_channels("bob") == {ChannelType.TELEGRAM: "222"}
+        assert "already belongs to 'alice'" in caplog.text
+
     async def test_pair_owned_by_another_named_identity_is_not_merged(self, tmp_path, caplog):
         """A named entry claiming a pair another named identity owns keeps its own
         channels instead of being folded into that identity."""

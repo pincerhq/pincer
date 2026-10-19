@@ -374,20 +374,43 @@ class IdentityResolver:
             resolved.append((ch_str, ch_type, norm))
         return resolved
 
+    async def _rename_targets(
+        self,
+        resolved_entries: list[tuple[str | None, list[tuple[str, ChannelType, str]]]],
+    ) -> set[str]:
+        """Named identities a renamed config entry may keep seeding into.
+
+        That is a stored named identity whose name the config no longer
+        mentions and whose pairs only one entry touches. Two entries reaching
+        the same old identity cannot both be its rename, and picking one
+        would fold the other person into it.
+        """
+        configured_names = {name for name, _ in resolved_entries if name}
+        touched_by: dict[str, int] = {}
+        for _name, resolved in resolved_entries:
+            owners: set[str] = set()
+            for _ch_str, ch_type, norm in resolved:
+                uid = await self._find_existing(ch_type, norm)
+                if uid and not uid.startswith("usr_") and uid not in configured_names:
+                    owners.add(uid)
+            for uid in owners:
+                touched_by[uid] = touched_by.get(uid, 0) + 1
+        return {uid for uid, count in touched_by.items() if count == 1}
+
     async def _claim_pairs(
         self,
         name: str | None,
         resolved: list[tuple[str, ChannelType, str]],
         pending: dict[tuple[str, str], str],
-        configured_names: set[str],
+        rename_targets: set[str],
     ) -> tuple[list[tuple[str, ChannelType, str]], str | None, list[str]]:
         """Decide which identity an entry seeds into and which pairs it keeps.
 
         Returns (kept pairs, keeper, existing owners of the kept pairs). The
         entry keeps at most one named identity, the keeper: its own name; or,
         when the name owns none of the pairs and they all belong to one named
-        identity the config no longer mentions, that identity (a rename keeps
-        the existing identity, as it always has); or, for an unnamed entry,
+        identity in `rename_targets`, that identity (a rename keeps the
+        existing identity, as it always has); or, for an unnamed entry,
         the first named owner. A pair owned by any other named identity is
         dropped: folding one named person into another would silently share
         their memory and sessions. Unnamed (usr_…) owners are kept and merged.
@@ -400,7 +423,7 @@ class IdentityResolver:
         named = list(dict.fromkeys(uid for _, uid in owned if uid and not uid.startswith("usr_")))
 
         keeper = name
-        if name and len(named) == 1 and named[0] not in configured_names and await self._store.profile(name) is None:
+        if name and len(named) == 1 and named[0] in rename_targets and await self._store.profile(name) is None:
             logger.warning("Named canonical ID %r ignored: identity already has name %r", name, named[0])
             keeper = named[0]
         elif not name and named:
@@ -583,11 +606,14 @@ class IdentityResolver:
                 logger.warning("Invalid identity map entry: %r", raw_entry.strip())
                 continue
             parsed.append((raw_entry, name, pairs))
-        configured_names = {name for _, name, _ in parsed if name}
+        resolved_entries = [
+            (name, await self._resolve_entry(raw_entry, pairs, channels, resolved_from))
+            for raw_entry, name, pairs in parsed
+        ]
+        rename_targets = await self._rename_targets(resolved_entries)
 
-        for raw_entry, name, pairs in parsed:
-            resolved = await self._resolve_entry(raw_entry, pairs, channels, resolved_from)
-            resolved, keeper, existing_uids = await self._claim_pairs(name, resolved, pending, configured_names)
+        for name, resolved in resolved_entries:
+            resolved, keeper, existing_uids = await self._claim_pairs(name, resolved, pending, rename_targets)
             if not resolved:
                 continue
 
@@ -608,7 +634,8 @@ class IdentityResolver:
                 pincer_uid = self._generate_user_id(first_ch_type, first_norm)
 
             first_channel = resolved[0][0]
-            profile = self._profiles.get(pincer_uid, IdentityProfile())
+            # A renamed entry seeds into the old identity, configured under the new name.
+            profile = self._profiles.get(pincer_uid) or self._profiles.get(name or "") or IdentityProfile()
             # `preferred_channel` is write-once at creation; day-to-day channel
             # use is tracked by `active_channel` (see touch_active_channel).
             config_fields: dict[str, Any] = {

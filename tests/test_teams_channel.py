@@ -506,7 +506,7 @@ async def test_activity_filter_passes_non_message_paths() -> None:
 # ── resolve_internal_user_id ──────────────────────────────────────────────────
 
 
-def _graph_returning(*user_ids: str) -> Any:
+def _graph_returning(*user_ids: str | None) -> Any:
     graph = MagicMock()
     graph.users.get = AsyncMock(return_value=MagicMock(value=[MagicMock(id=uid) for uid in user_ids]))
     ch_app = MagicMock()
@@ -534,15 +534,23 @@ async def test_resolve_email_filters_graph_by_exact_address() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_unknown_email_is_returned_unchanged() -> None:
+async def test_resolve_unknown_email_raises() -> None:
     ch = MicrosoftTeamsChannel(make_settings())
     ch._app = _graph_returning()
-    assert await ch.resolve_internal_user_id("bob@x.com") == "bob@x.com"
+    with pytest.raises(LookupError, match="matches 0 Teams users"):
+        await ch.resolve_internal_user_id("bob@x.com")
+
+
+@pytest.mark.asyncio
+async def test_resolve_ignores_users_without_an_id() -> None:
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._app = _graph_returning(None, "aad-bob")
+    assert await ch.resolve_internal_user_id("bob@x.com") == "aad-bob"
 
 
 @pytest.mark.asyncio
 async def test_resolve_ambiguous_email_raises() -> None:
     ch = MicrosoftTeamsChannel(make_settings())
     ch._app = _graph_returning("aad-1", "aad-2")
-    with pytest.raises(ValueError, match="matches 2 Teams users"):
+    with pytest.raises(LookupError, match="matches 2 Teams users"):
         await ch.resolve_internal_user_id("bob@x.com")
