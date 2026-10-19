@@ -1619,6 +1619,36 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
         else:
             console.print("[yellow]Signal enabled but PINCER_SIGNAL_PHONE_NUMBER not set[/yellow]")
 
+    sendblue = None
+    if settings.sendblue_enabled:
+        from pincer.channels.sendblue import SendblueChannel, SendblueConfigurationError
+
+        try:
+            sendblue = SendblueChannel(settings, identity=identity)
+            await sendblue.start(on_message)
+            channel_map[sendblue.name] = sendblue
+            router.register(ChannelType.SENDBLUE, sendblue)
+            prior_approval = agent._approval_callback
+
+            async def sendblue_approval(tool_name: str, arguments: dict, user_id: str, channel: str) -> bool:
+                if channel == "sendblue":
+                    logger.warning("No approval UI for Sendblue; denying %s", tool_name)
+                    return False
+                # Preserve the existing policy for every other channel and MCP.
+                if prior_approval is not None:
+                    return await prior_approval(tool_name, arguments, user_id, channel)
+                return True
+
+            agent._approval_callback = sendblue_approval
+            console.print("[green]Sendblue connected (webhook: /api/apps/sendblue/webhook)[/green]")
+        except SendblueConfigurationError as exc:
+            console.print(f"[yellow]Sendblue failed to start: {exc}[/yellow]")
+            sendblue = None
+        except Exception as exc:
+            sendblue = None
+            # Do not expose credentials embedded in provider/config exceptions.
+            console.print(f"[yellow]Sendblue failed to start ({type(exc).__name__}); check settings[/yellow]")
+
     # Slack channel (optional — requires PINCER_SLACK_BOT_TOKEN + PINCER_SLACK_APP_TOKEN)
     slk = None
     if settings.slack_bot_token.get_secret_value() and settings.slack_app_token.get_secret_value():
@@ -1843,6 +1873,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
             # disconnected instance.
             api_app.state.agent = agent
             api_app.state.teams_channel = ms
+            api_app.state.sendblue_channel = sendblue
             api_config = uvicorn.Config(
                 api_app,
                 host=settings.dashboard_host,
@@ -1851,7 +1882,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
             )
             api_server = _embedded_api_server(api_config)
             api_task = asyncio.create_task(api_server.serve())
-            shutdown.on_stop("API server", lambda: _stop_api_server(api_server, api_task))
+            shutdown.on_stop("API server", lambda: _stop_api_server(api_server, api_task, sendblue))
             console.print(
                 f"[green]API server started on http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
             )
@@ -1872,6 +1903,11 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
 
     if settings.voice_enabled or settings.voice_outbound_enabled:
         _print_voice_webhook_urls(settings, console)
+
+    # Registered last: stop admission and cancel turns before any dependency
+    # (including the API lifespan's database cleanup) starts shutting down.
+    if sendblue is not None:
+        shutdown.on_stop("Sendblue ingress and turns", sendblue.stop)
 
     active = [ch.name for ch in router.channels.values()]
     console.print(
@@ -1894,10 +1930,16 @@ async def _cancel_task_worker(task_worker: asyncio.Task[Any]) -> None:
         await task_worker
 
 
-async def _stop_api_server(api_server: Any, api_task: asyncio.Task[Any]) -> None:
-    api_server.should_exit = True
-    with contextlib.suppress(TimeoutError):
-        await asyncio.wait_for(api_task, timeout=3.0)
+async def _stop_api_server(api_server: Any, api_task: asyncio.Task[Any], ingress: BaseChannel | None = None) -> None:
+    # This callback is registered before tunnel startup can suspend. Even a
+    # cancelled startup must stop channel turns before API lifespan closes DBs.
+    try:
+        if ingress is not None:
+            await ingress.stop()
+    finally:
+        api_server.should_exit = True
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(api_task, timeout=3.0)
 
 
 async def _shut_down_agent(shutdown: _Shutdown, lease: DaemonLease | None) -> NoReturn:

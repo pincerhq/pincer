@@ -19,6 +19,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from pincer.config.channels import is_sendblue_phone
+
 if TYPE_CHECKING:
     from pincer.config import Settings
 
@@ -173,6 +175,9 @@ class SecurityDoctor:
         # Live listen-in (1 check, Sprint 15)
         report.checks.append(self._check_listen_in_announce(settings))
         # Signal (3 checks, Sprint 7.5)
+        report.checks.append(self._check_sendblue_credentials(settings))
+        report.checks.append(self._check_sendblue_access(settings))
+        report.checks.append(self._check_sendblue_listener(settings))
         report.checks.append(self._check_signal_phone_set(settings))
         report.checks.append(self._check_signal_api_local(settings))
         report.checks.append(self._check_signal_access_control(settings))
@@ -2592,4 +2597,83 @@ class SecurityDoctor:
             CheckStatus.PASS,
             "Prompt injection detection is active on MCP tool outputs",
             category="mcp",
+        )
+
+    def _check_sendblue_credentials(self, cfg: Settings | None = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.sendblue_enabled:
+            return CheckResult("sendblue_credentials", CheckStatus.SKIPPED, "Sendblue disabled", category="sendblue")
+        if not all(
+            (
+                cfg.sendblue_api_key.get_secret_value(),
+                cfg.sendblue_api_secret.get_secret_value(),
+                cfg.sendblue_signing_secret.get_secret_value(),
+            )
+        ):
+            return CheckResult(
+                "sendblue_credentials",
+                CheckStatus.CRITICAL,
+                "Sendblue requires API credentials and a webhook signing secret",
+                "Set PINCER_SENDBLUE_API_KEY, API_SECRET and SIGNING_SECRET",
+                category="sendblue",
+            )
+        if not is_sendblue_phone(cfg.sendblue_from_number):
+            return CheckResult(
+                "sendblue_credentials",
+                CheckStatus.CRITICAL,
+                "Sendblue sending line is not E.164",
+                "Set PINCER_SENDBLUE_FROM_NUMBER to the assigned line",
+                category="sendblue",
+            )
+        return CheckResult(
+            "sendblue_credentials", CheckStatus.PASS, "Sendblue credentials and line configured", category="sendblue"
+        )
+
+    def _check_sendblue_access(self, cfg: Settings | None = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.sendblue_enabled:
+            return CheckResult("sendblue_access", CheckStatus.SKIPPED, "Sendblue disabled", category="sendblue")
+        if any(number != "*" and not is_sendblue_phone(number) for number in cfg.sendblue_allow_from):
+            return CheckResult(
+                "sendblue_access",
+                CheckStatus.CRITICAL,
+                "Sendblue allowlist contains invalid numbers",
+                "Use E.164 numbers in PINCER_SENDBLUE_ALLOW_FROM",
+                category="sendblue",
+            )
+        if "*" in cfg.sendblue_allow_from:
+            return CheckResult(
+                "sendblue_access",
+                CheckStatus.WARNING,
+                "Sendblue allows any phone sender",
+                "Use an explicit PINCER_SENDBLUE_ALLOW_FROM list",
+                category="sendblue",
+            )
+        if not cfg.sendblue_allow_from:
+            return CheckResult(
+                "sendblue_access",
+                CheckStatus.WARNING,
+                "Sendblue denies all senders (empty allowlist)",
+                "Add allowed E.164 numbers to PINCER_SENDBLUE_ALLOW_FROM",
+                category="sendblue",
+            )
+
+        return CheckResult(
+            "sendblue_access", CheckStatus.PASS, "Sendblue sender allowlist configured", category="sendblue"
+        )
+
+    def _check_sendblue_listener(self, cfg: Settings | None = None) -> CheckResult:
+        cfg = self._cfg(cfg)
+        if not cfg.sendblue_enabled:
+            return CheckResult("sendblue_listener", CheckStatus.SKIPPED, "Sendblue disabled", category="sendblue")
+        if cfg.dashboard_host not in ("127.0.0.1", "localhost", "::1"):
+            return CheckResult(
+                "sendblue_listener",
+                CheckStatus.WARNING,
+                "Sendblue shared API listener binds publicly",
+                "Use HTTPS ingress, restrict network access and keep the signing secret private",
+                category="sendblue",
+            )
+        return CheckResult(
+            "sendblue_listener", CheckStatus.PASS, "Sendblue uses the loopback API listener", category="sendblue"
         )

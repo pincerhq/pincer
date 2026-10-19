@@ -31,6 +31,7 @@ from pincer.api.integrations import router as integrations_router
 from pincer.api.ops import router as ops_router
 from pincer.api.public_demo import router as public_demo_router
 from pincer.api.schedules import router as schedules_router
+from pincer.api.sendblue import router as sendblue_router
 from pincer.api.skills import router as skills_router
 from pincer.api.telephony import router as telephony_router
 from pincer.api.voice import router as voice_api_router
@@ -236,6 +237,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    app.include_router(sendblue_router)
     app.include_router(auth_router)
     app.include_router(costs_router)
     app.include_router(audit_router)
@@ -275,6 +277,7 @@ def create_app() -> FastAPI:
                 "discord": bool(settings.discord_bot_token.get_secret_value()),
                 "voice": settings.voice_enabled,
                 "signal": settings.signal_enabled,
+                "sendblue": bool(getattr(getattr(app.state, "sendblue_channel", None), "running", False)),
             },
         }
 

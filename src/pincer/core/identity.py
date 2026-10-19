@@ -67,7 +67,7 @@ logger = logging.getLogger(__name__)
 RESERVED_IDENTITY_NAMES = frozenset({"me"})
 
 # Channels whose IDs are phone numbers — leading "+" is stripped for storage
-_PHONE_CHANNELS = {ChannelType.WHATSAPP, ChannelType.VOICE, ChannelType.SIGNAL}
+_PHONE_CHANNELS = {ChannelType.WHATSAPP, ChannelType.VOICE, ChannelType.SIGNAL, ChannelType.SENDBLUE}
 
 
 @dataclass(frozen=True)

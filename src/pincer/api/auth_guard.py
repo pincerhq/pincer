@@ -46,6 +46,7 @@ PUBLIC_PATHS = (
 
 # Sub-apps and webhooks with their own authentication scheme.
 SELF_AUTHENTICATED_PREFIXES = (
+    "/api/apps/sendblue/",  # sb-signing-secret checked by the channel
     "/api/apps/teams/",  # Teams HMAC
     "/api/apps/twilio/",  # X-Twilio-Signature (voice/webhook_auth.py)
 )

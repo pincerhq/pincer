@@ -179,6 +179,7 @@ gate decorative.
 | **Slack** | 🟡 | DMs, channels, threads via slack-bolt |
 | **Microsoft Teams** | 🧪 | DMs, channel @mentions, threads, group chats via microsoft-teams-apps SDK (inbound HTTP push) |
 | **Email** | 🟡 | Gmail OAuth — read, search, draft, send |
+| **[Sendblue](docs/guides/sendblue.md)** | 🧪 | Direct iMessage/SMS text via hosted API and authenticated webhook |
 | **Signal** | 🧪 | E2E encrypted via signal-cli-rest-api Docker sidecar; WebSocket or poll receive mode |
 | **Voice** | 🧪→🟡 | Make/receive phone calls via Twilio (~$0.12/3-min call). Appointment scheduling, DACH compliance, ops tooling. **Promotion to 🟡 is gated on `pincer voice ops ga-gate` passing** — see [GA gate](docs/operations/ga-gate.md) |
 | **Web UI** | 🟡 | Dashboard + chat at `localhost:8080` |

@@ -32,7 +32,7 @@ def test_run_all_returns_report(doctor_env):
     # + 3 in-call tool execution (Sprint 11) + 2 receptionist (Sprint 12)
     # + 1 live listen-in announce gate (Sprint 15) + 1 schedule action types (issue #217)
     # + 1 leftover shared API tokens (issue #228)
-    assert len(report.checks) == 61
+    assert len(report.checks) == 64
 
     assert 0 <= report.score <= 100
 

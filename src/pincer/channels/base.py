@@ -21,6 +21,7 @@ class ChannelType(StrEnum):
     SIGNAL = "signal"
     SLACK = "slack"
     TEAMS = "teams"
+    SENDBLUE = "sendblue"
 
 
 @dataclass

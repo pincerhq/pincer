@@ -67,6 +67,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sendblue = []  # Uses the shared FastAPI server and core HTTP client.
 browser = ["playwright>=1.40.0"]
 memory = ["sqlite-vec>=0.1.0"]
 pdf = ["pymupdf>=1.24.0"]
@@ -108,7 +109,7 @@ telemetry = [
     "pincer-telemetry",
 ]
 tasks-redis = ["repid[redis]"]
-all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry,tasks-redis,postgres,remote-skills]"]
+all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,sendblue,local,telemetry,tasks-redis,postgres,remote-skills]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
