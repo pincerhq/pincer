@@ -99,9 +99,9 @@ class IdentityService(DatabaseService):
         async with session_scope(self._url) as session:
             return await ChannelIdentityRepository(session).channels_for(pincer_user_id)
 
-    async def channel_pairs(self) -> Sequence[tuple[str, str]]:
+    async def owners_on(self, channel: str) -> Sequence[tuple[str, str]]:
         async with session_scope(self._url) as session:
-            return await ChannelIdentityRepository(session).pairs()
+            return await ChannelIdentityRepository(session).owners_on(channel)
 
     async def list_profiles(self, *, search: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """Identities with their linked channels, for the dashboard."""
