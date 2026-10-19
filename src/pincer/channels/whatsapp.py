@@ -196,7 +196,7 @@ class WhatsAppChannel(BaseChannel):
         # whatsmeow answers an unknown phone→LID mapping with an empty JID
         # rather than an error; that "" must never become a channel ID, or
         # every not-yet-seen contact would share one identity.
-        logger.info("Whatsapp: no LID known yet for %r, keeping the phone number", identifier)
+        logger.debug("Whatsapp: no LID known yet for %r, keeping the phone number", identifier)
         return identifier
 
     # ── Interactive prompts (approval / ask_user) ────

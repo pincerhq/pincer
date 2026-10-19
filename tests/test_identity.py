@@ -636,6 +636,24 @@ class TestSeedFromConfig:
         assert await r.get_all_channels(second) == {ChannelType.TELEGRAM: "222"}
         assert any("both resolve to whatsapp:999" in rec.message for rec in caplog.records)
 
+    async def test_config_id_equal_to_a_resolved_id_is_a_shared_pair(self, tmp_path):
+        """A phone in one entry and the LID it resolves to in another name the
+        same account: the pair is shared, not dropped as a lookup error."""
+
+        class LidWhatsApp:
+            async def resolve_internal_user_id(self, identifier: str) -> str:
+                return "123456789012345"
+
+        r = IdentityResolver(
+            tmp_path / "phone_and_lid.db",
+            identity_map_config="alice@telegram:111=whatsapp:490000000001,whatsapp:123456789012345=slack:U1",
+        )
+        await r.ensure_table()
+        await r.seed_from_config({ChannelType.WHATSAPP: LidWhatsApp()})
+
+        assert await r.find(ChannelType.WHATSAPP, "123456789012345") == "alice"
+        assert await r.find(ChannelType.SLACK, "U1") == "alice"
+
     async def test_unnamed_entry_does_not_merge_two_named_identities(self, tmp_path):
         """An unnamed entry spanning pairs of two named identities keeps them apart."""
         db_path = tmp_path / "bridge.db"
@@ -731,6 +749,22 @@ class TestNamedCanonicalId:
         r2 = IdentityResolver(db_path, identity_map_config="david@telegram:333=whatsapp:491000000007")
         await r2.seed_from_config()  # warns, keeps "dave"
         assert await r2.resolve(ChannelType.TELEGRAM, 333) == "dave"
+
+    async def test_renamed_entry_with_a_new_channel_keeps_the_existing_identity(self, tmp_path, caplog):
+        """Renaming an entry while adding a channel is a rename, not a second
+        person: the new channel joins the existing identity."""
+        db_path = tmp_path / "rename_add.db"
+        r1 = IdentityResolver(db_path, identity_map_config="alice@telegram:111")
+        await r1.ensure_table()
+        await r1.seed_from_config()
+
+        r2 = IdentityResolver(db_path, identity_map_config="alicia@telegram:111=slack:U1")
+        with caplog.at_level("WARNING", logger="pincer.core.identity"):
+            await r2.seed_from_config()
+
+        assert await r2.find(ChannelType.TELEGRAM, 111) == "alice"
+        assert await r2.find(ChannelType.SLACK, "U1") == "alice"
+        assert "Named canonical ID 'alicia' ignored" in caplog.text
 
     async def test_pair_owned_by_another_named_identity_is_not_merged(self, tmp_path, caplog):
         """A named entry claiming a pair another named identity owns keeps its own
@@ -1024,25 +1058,57 @@ class TestCleanup:
         await IdentityResolver(db_path, identity_map_config="telegram:12345=whatsapp:491234567890, ,").cleanup()
         assert await links() == 0
 
-    async def test_cleanup_prunes_nothing_when_a_pair_does_not_resolve(self, tmp_path, caplog):
-        """A pair whose lookup fails is a hole in the whitelist: its stored link
-        (e.g. a LID learned earlier) is unknown, so nothing may be pruned."""
+    async def test_cleanup_keeps_the_entry_links_of_a_pair_that_does_not_resolve(self, tmp_path, caplog):
+        """A pair whose lookup fails stands for a stored link that is unknown
+        (e.g. a LID learned earlier): the entry's identity keeps its links on
+        that channel, while removed entries are still pruned."""
 
         class BrokenWhatsApp:
             async def resolve_internal_user_id(self, identifier: str) -> str:
                 raise RuntimeError("not connected")
 
         db_path = tmp_path / "unresolved.db"
-        r = IdentityResolver(db_path, identity_map_config="alice@telegram:111=whatsapp:490000000001")
+        r = IdentityResolver(
+            db_path,
+            identity_map_config="alice@telegram:111=whatsapp:490000000001,bob@telegram:222=whatsapp:490000000002",
+        )
         await r.ensure_table()
         await r.seed_from_config()
         await r.link_if_new("alice", ChannelType.WHATSAPP, "123456789012345")  # LID learned at runtime
 
+        r2 = IdentityResolver(db_path, identity_map_config="alice@telegram:111=whatsapp:490000000001")
         with caplog.at_level("ERROR", logger="pincer.core.identity"):
-            await r.cleanup({ChannelType.WHATSAPP: BrokenWhatsApp()})
+            await r2.cleanup({ChannelType.WHATSAPP: BrokenWhatsApp()})
 
-        assert "skipping cleanup" in caplog.text
-        assert await r.find(ChannelType.WHATSAPP, "123456789012345") == "alice"
+        assert "keeping the whatsapp links of alice" in caplog.text
+        assert await r2.find(ChannelType.WHATSAPP, "123456789012345") == "alice"
+        assert await r2.find(ChannelType.WHATSAPP, "490000000001") == "alice"
+        assert await r2.find(ChannelType.TELEGRAM, 222) is None
+        assert await r2.find(ChannelType.WHATSAPP, "490000000002") is None
+        r2.mark_seeding_complete()
+        assert await r2.is_guest(ChannelType.TELEGRAM, 222)
+
+    async def test_cleanup_keeps_the_channel_when_an_unresolved_pair_has_no_identity(self, tmp_path, caplog):
+        """With no known identity for the entry, its unresolved pair could be any
+        stored link on the channel: that channel is not pruned, the others are."""
+
+        class BrokenSlack:
+            async def resolve_internal_user_id(self, identifier: str) -> str:
+                raise RuntimeError("users_not_found")
+
+        db_path = tmp_path / "unresolved_unknown.db"
+        r = IdentityResolver(db_path, identity_map_config="telegram:111=slack:U1,bob@telegram:222")
+        await r.ensure_table()
+        await r.seed_from_config()
+
+        r2 = IdentityResolver(db_path, identity_map_config="slack:carol")
+        with caplog.at_level("ERROR", logger="pincer.core.identity"):
+            await r2.cleanup({ChannelType.SLACK: BrokenSlack()})
+
+        assert "keeping all slack links" in caplog.text
+        assert await r2.find(ChannelType.SLACK, "U1")
+        assert await r2.find(ChannelType.TELEGRAM, 111) is None
+        assert await r2.find(ChannelType.TELEGRAM, 222) is None
 
     async def test_cleanup_skips_wipe_when_config_has_no_usable_pairs(self, tmp_path):
         """A config string that's non-empty but parses to zero usable pairs (e.g. an

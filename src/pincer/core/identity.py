@@ -327,6 +327,104 @@ class IdentityResolver:
             return None
         return self._normalize_id(ch_type, resolved)
 
+    async def _resolve_entry(
+        self,
+        raw_entry: str,
+        pairs: list[tuple[str, str]],
+        channels: dict[ChannelType, BaseChannel] | None,
+        resolved_from: dict[tuple[str, str], str],
+    ) -> list[tuple[str, ChannelType, str]]:
+        """Resolve an entry's config IDs to internal IDs (phone → LID, etc.).
+
+        A pair is left out when its lookup fails, or when a different config
+        ID already resolved to the same internal ID: that is a lookup error,
+        not a shared pair. A config ID that is itself the internal ID it
+        collides with (a phone in one entry, its LID in another) names the
+        same account, so it counts as shared. `resolved_from` maps each
+        resolved pair to the config ID that claimed it, across entries.
+        """
+        resolved: list[tuple[str, ChannelType, str]] = []
+        for ch_str, cid in pairs:
+            try:
+                ch_type = ChannelType(ch_str)
+            except ValueError:
+                logger.warning("Unknown channel %r in identity map entry %r", ch_str, raw_entry.strip())
+                continue
+            config_id = self._normalize_id(ch_type, cid)
+            norm = config_id
+            if channels:
+                internal = await self._resolve_via_channel(ch_type, config_id, channels)
+                if internal is None:
+                    continue
+                norm = internal
+            source = resolved_from.setdefault((ch_type.value, norm), config_id)
+            if source != config_id and norm not in (source, config_id):
+                logger.error(
+                    "Identity map: %s:%s and %s:%s both resolve to %s:%s — leaving %s:%s out",
+                    ch_str,
+                    source,
+                    ch_str,
+                    config_id,
+                    ch_str,
+                    norm,
+                    ch_str,
+                    config_id,
+                )
+                continue
+            resolved.append((ch_str, ch_type, norm))
+        return resolved
+
+    async def _claim_pairs(
+        self,
+        name: str | None,
+        resolved: list[tuple[str, ChannelType, str]],
+        pending: dict[tuple[str, str], str],
+        configured_names: set[str],
+    ) -> tuple[list[tuple[str, ChannelType, str]], str | None, list[str]]:
+        """Decide which identity an entry seeds into and which pairs it keeps.
+
+        Returns (kept pairs, keeper, existing owners of the kept pairs). The
+        entry keeps at most one named identity, the keeper: its own name; or,
+        when the name owns none of the pairs and they all belong to one named
+        identity the config no longer mentions, that identity (a rename keeps
+        the existing identity, as it always has); or, for an unnamed entry,
+        the first named owner. A pair owned by any other named identity is
+        dropped: folding one named person into another would silently share
+        their memory and sessions. Unnamed (usr_…) owners are kept and merged.
+        """
+        owned: list[tuple[tuple[str, ChannelType, str], str | None]] = []
+        for pair in resolved:
+            _ch_str, ch_type, norm = pair
+            uid = await self._find_existing(ch_type, norm) or pending.get((ch_type.value, norm))
+            owned.append((pair, uid))
+        named = list(dict.fromkeys(uid for _, uid in owned if uid and not uid.startswith("usr_")))
+
+        keeper = name
+        if name and len(named) == 1 and named[0] not in configured_names and await self._store.profile(name) is None:
+            logger.warning("Named canonical ID %r ignored: identity already has name %r", name, named[0])
+            keeper = named[0]
+        elif not name and named:
+            keeper = named[0]
+
+        kept: list[tuple[str, ChannelType, str]] = []
+        existing_uids: list[str] = []
+        for pair, uid in owned:
+            if uid and not uid.startswith("usr_") and uid != keeper:
+                ch_str, _ch_type, norm = pair
+                logger.error(
+                    "Identity map: %s:%s is configured with %r but already belongs to %r — "
+                    "not merging them; fix the config or the stored link",
+                    ch_str,
+                    norm,
+                    keeper,
+                    uid,
+                )
+                continue
+            kept.append(pair)
+            if uid and uid not in existing_uids:
+                existing_uids.append(uid)
+        return kept, keeper, existing_uids
+
     async def cleanup(
         self,
         channels: dict[ChannelType, BaseChannel] | None = None,
@@ -342,7 +440,9 @@ class IdentityResolver:
 
         When no config is set the method is a no-op (nothing to enforce), and
         so it is when any entry does not parse: a whitelist with a hole in it
-        must not be enforced.
+        must not be enforced. A pair whose lookup fails is a smaller hole: the
+        entry's identity keeps its links on that channel, and only if the
+        entry has no known identity is that channel left unpruned.
         """
         if not self._identity_map_config:
             return
@@ -352,25 +452,28 @@ class IdentityResolver:
             if not raw_entry.strip():
                 continue
             try:
-                _, pairs = self._parse_mapping(raw_entry)
+                name, pairs = self._parse_mapping(raw_entry)
             except ValueError as e:
                 # Its channels are unknown, so the whitelist is incomplete:
                 # pruning against it would delete the very identity the
                 # entry was meant to keep.
                 logger.error("Identity map entry %r is invalid (%s) — skipping cleanup", raw_entry.strip(), e)
                 return
+            entry_allowed: list[tuple[str, str]] = []
+            unresolved: list[tuple[str, str]] = []
             for ch, cid in pairs:
                 ch_type = ChannelType(ch)
                 norm = self._normalize_id(ch_type, cid)
                 if channels:
                     internal = await self._resolve_via_channel(ch_type, norm, channels)
                     if internal is None:
-                        # The stored link for this pair is unknown, so pruning
-                        # would delete it along with whatever is really stale.
-                        logger.error("Identity map pair %s:%s did not resolve — skipping cleanup", ch, norm)
-                        return
+                        unresolved.append((ch, norm))
+                        continue
                     norm = internal
-                allowed.add((ch, norm))
+                entry_allowed.append((ch, norm))
+            allowed.update(entry_allowed)
+            if unresolved:
+                allowed |= await self._unresolved_keep(name, entry_allowed, unresolved)
 
         if not allowed:
             logger.error(
@@ -393,6 +496,49 @@ class IdentityResolver:
                 channelless,
             )
 
+    async def _unresolved_keep(
+        self,
+        name: str | None,
+        resolved: list[tuple[str, str]],
+        unresolved: list[tuple[str, str]],
+    ) -> set[tuple[str, str]]:
+        """Stored pairs cleanup must keep for an entry's unresolved pairs.
+
+        The link an unresolved pair stands for (e.g. a LID learned at runtime)
+        is unknown, but it belongs to the entry's identity, so that identity
+        keeps its links on the channel. With no known identity the link could
+        be anyone's, and the whole channel is kept instead.
+        """
+        owners: set[str] = {name} if name else set()
+        for ch, norm in resolved:
+            uid = await self._find_existing(ChannelType(ch), norm)
+            if uid:
+                owners.add(uid)
+        owned: set[tuple[str, str]] = set()
+        for uid in owners:
+            owned.update(await self._store.channels_for(uid))
+        everything = [] if owned else await self._store.channel_pairs()
+        keep: set[tuple[str, str]] = set()
+        for ch, norm in unresolved:
+            if owned:
+                logger.error(
+                    "Identity map pair %s:%s did not resolve — keeping the %s links of %s",
+                    ch,
+                    norm,
+                    ch,
+                    ", ".join(sorted(owners)),
+                )
+                keep.update(pair for pair in owned if pair[0] == ch)
+            else:
+                logger.error(
+                    "Identity map pair %s:%s did not resolve and its identity is unknown — keeping all %s links",
+                    ch,
+                    norm,
+                    ch,
+                )
+                keep.update(pair for pair in everything if pair[0] == ch)
+        return keep
+
     async def seed_from_config(
         self,
         channels: dict[ChannelType, BaseChannel] | None = None,
@@ -414,8 +560,7 @@ class IdentityResolver:
         # finds them here instead, or one person sharing a channel pair across
         # two entries would be split into two identities.
         pending: dict[tuple[str, str], str] = {}
-        # Resolved pair → the config ID it came from. Two different config IDs
-        # landing on one internal ID is a resolution error, not a shared pair.
+        # Resolved pair → the config ID it came from (see _resolve_entry).
         resolved_from: dict[tuple[str, str], str] = {}
 
         async def rename(old_uid: str, new_uid: str) -> None:
@@ -428,6 +573,7 @@ class IdentityResolver:
                 for entry in entries
             ]
 
+        parsed: list[tuple[str, str | None, list[tuple[str, str]]]] = []
         for raw_entry in self._identity_map_config.split(","):
             if ":" not in raw_entry:
                 continue
@@ -436,98 +582,30 @@ class IdentityResolver:
             except ValueError:
                 logger.warning("Invalid identity map entry: %r", raw_entry.strip())
                 continue
+            parsed.append((raw_entry, name, pairs))
+        configured_names = {name for _, name, _ in parsed if name}
 
-            # Resolve each pair's ID through the channel (phone → LID, etc.)
-            resolved: list[tuple[str, ChannelType, str]] = []
-            for ch_str, cid in pairs:
-                try:
-                    ch_type = ChannelType(ch_str)
-                except ValueError:
-                    logger.warning("Unknown channel %r in identity map entry %r", ch_str, raw_entry.strip())
-                    continue
-                config_id = self._normalize_id(ch_type, cid)
-                norm = config_id
-                if channels:
-                    internal = await self._resolve_via_channel(ch_type, config_id, channels)
-                    if internal is None:
-                        continue
-                    norm = internal
-                source = resolved_from.setdefault((ch_type.value, norm), config_id)
-                if source != config_id:
-                    logger.error(
-                        "Identity map: %s:%s and %s:%s both resolve to %s:%s — leaving %s:%s out",
-                        ch_str,
-                        source,
-                        ch_str,
-                        config_id,
-                        ch_str,
-                        norm,
-                        ch_str,
-                        config_id,
-                    )
-                    continue
-                resolved.append((ch_str, ch_type, norm))
-
+        for raw_entry, name, pairs in parsed:
+            resolved = await self._resolve_entry(raw_entry, pairs, channels, resolved_from)
+            resolved, keeper, existing_uids = await self._claim_pairs(name, resolved, pending, configured_names)
             if not resolved:
                 continue
 
-            # Collect all existing identities for the channels in this entry.
-            # The entry keeps at most one named identity (its own name, else
-            # the first named owner found); a pair owned by any other named
-            # identity is dropped: folding one named person into another
-            # would silently share their memory and sessions.
-            keeper = name
-            existing_uids: list[str] = []
-            unclaimed: list[tuple[str, ChannelType, str]] = []
-            for ch_str, ch_type, norm in resolved:
-                uid = await self._find_existing(ch_type, norm) or pending.get((ch_type.value, norm))
-                if uid and not uid.startswith("usr_"):
-                    keeper = keeper or uid
-                    if uid != keeper:
-                        logger.error(
-                            "Identity map: %s:%s is configured with %r but already belongs to %r — "
-                            "not merging them; fix the config or the stored link",
-                            ch_str,
-                            norm,
-                            keeper,
-                            uid,
-                        )
-                        continue
-                unclaimed.append((ch_str, ch_type, norm))
-                if uid and uid not in existing_uids:
-                    existing_uids.append(uid)
-            resolved = unclaimed
-
-            if not resolved:
-                continue
-
-            # Determine or create the canonical pincer_user_id
-            if len(existing_uids) > 1:
-                # Multiple distinct identities — merge them all into one. At
-                # most one of them is named (see above), and it must survive.
-                target_uid = keeper or existing_uids[0]
+            # Determine or create the canonical pincer_user_id. Every existing
+            # identity but the keeper is unnamed (see _claim_pairs) and is
+            # renamed/merged into it.
+            if existing_uids:
+                pincer_uid = keeper or existing_uids[0]
                 for uid in existing_uids:
-                    if uid != target_uid:
-                        logger.info("Identity conflict resolved: merging %s into %s", uid, target_uid)
-                        await rename(uid, target_uid)
-                pincer_uid = target_uid
-            elif len(existing_uids) == 1:
-                existing_uid = existing_uids[0]
-                if name:
-                    # Pairs owned by another named identity were dropped above,
-                    # so the owner here is either this name or an unnamed one.
-                    if existing_uid != name:
-                        await rename(existing_uid, name)
-                    pincer_uid = name
-                else:
-                    pincer_uid = existing_uid
+                    if uid != pincer_uid:
+                        if len(existing_uids) > 1:
+                            logger.info("Identity conflict resolved: merging %s into %s", uid, pincer_uid)
+                        await rename(uid, pincer_uid)
+            elif keeper:
+                pincer_uid = keeper
             else:
-                # No existing identity — create fresh
-                if name:
-                    pincer_uid = name
-                else:
-                    first_ch_str, first_ch_type, first_norm = resolved[0]
-                    pincer_uid = self._generate_user_id(first_ch_type, first_norm)
+                _first_ch_str, first_ch_type, first_norm = resolved[0]
+                pincer_uid = self._generate_user_id(first_ch_type, first_norm)
 
             first_channel = resolved[0][0]
             profile = self._profiles.get(pincer_uid, IdentityProfile())

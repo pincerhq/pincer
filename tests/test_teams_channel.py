@@ -501,3 +501,48 @@ async def test_activity_filter_passes_non_message_paths() -> None:
     mw = _ActivityFilterMiddleware(inner_app)
     await mw({"type": "http", "path": "/health", "method": "GET"}, MagicMock(), MagicMock())
     assert inner_called
+
+
+# ── resolve_internal_user_id ──────────────────────────────────────────────────
+
+
+def _graph_returning(*user_ids: str) -> Any:
+    graph = MagicMock()
+    graph.users.get = AsyncMock(return_value=MagicMock(value=[MagicMock(id=uid) for uid in user_ids]))
+    ch_app = MagicMock()
+    ch_app.get_app_graph.return_value = graph
+    return ch_app
+
+
+@pytest.mark.asyncio
+async def test_resolve_aad_object_id_skips_graph() -> None:
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._app = _graph_returning("other")
+    assert await ch.resolve_internal_user_id("00000000-0000-0000-0000-000000000001") == (
+        "00000000-0000-0000-0000-000000000001"
+    )
+    ch._app.get_app_graph.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resolve_email_filters_graph_by_exact_address() -> None:
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._app = _graph_returning("aad-bob")
+    assert await ch.resolve_internal_user_id("bob@x.com") == "aad-bob"
+    config = ch._app.get_app_graph.return_value.users.get.call_args.kwargs["request_configuration"]
+    assert config.query_parameters.filter == "mail eq 'bob@x.com' or userPrincipalName eq 'bob@x.com'"
+
+
+@pytest.mark.asyncio
+async def test_resolve_unknown_email_is_returned_unchanged() -> None:
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._app = _graph_returning()
+    assert await ch.resolve_internal_user_id("bob@x.com") == "bob@x.com"
+
+
+@pytest.mark.asyncio
+async def test_resolve_ambiguous_email_raises() -> None:
+    ch = MicrosoftTeamsChannel(make_settings())
+    ch._app = _graph_returning("aad-1", "aad-2")
+    with pytest.raises(ValueError, match="matches 2 Teams users"):
+        await ch.resolve_internal_user_id("bob@x.com")

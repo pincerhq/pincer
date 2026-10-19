@@ -183,15 +183,27 @@ class MicrosoftTeamsChannel(BaseChannel):
         return "teams"
 
     async def resolve_internal_user_id(self, identifier: str) -> str:
-        # A failed Graph lookup raises, so the identity layer leaves the pair
-        # out instead of storing a guess.
-        _identifier = identifier.replace("@", "_")
+        # Incoming messages use the AAD object ID as the user ID, so anything
+        # that isn't an email is already the internal ID; no Graph call.
+        if "@" not in identifier:
+            return identifier
+        # Exact match only: a substring match would hand bob@x.com the ID of
+        # jimbob@x.com. A failed or ambiguous Graph lookup raises, so the
+        # identity layer leaves the pair out instead of storing a guess.
+        from kiota_abstractions.base_request_configuration import RequestConfiguration
+        from msgraph.generated.users.users_request_builder import UsersRequestBuilder
+
+        email = identifier.replace("'", "''")
+        query = UsersRequestBuilder.UsersRequestBuilderGetQueryParameters(
+            filter=f"mail eq '{email}' or userPrincipalName eq '{email}'",
+            select=["id"],
+        )
         graph = self._app.get_app_graph()
-        result = await graph.users.get()
-        for u in result.value:
-            if _identifier in (u.user_principal_name or "") or identifier in (u.mail or ""):
-                return str(u.id)
-        return identifier
+        result = await graph.users.get(request_configuration=RequestConfiguration(query_parameters=query))
+        ids = {str(u.id) for u in (result.value if result else None) or []}
+        if len(ids) > 1:
+            raise ValueError(f"{identifier!r} matches {len(ids)} Teams users")
+        return ids.pop() if ids else identifier
 
     def get_sub_app(self) -> Any:
         """Return the initialized FastAPI sub-app, or None if not yet initialized."""
