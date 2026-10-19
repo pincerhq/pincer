@@ -365,6 +365,15 @@ class Agent:
             logger.exception("ask_user callback failed")
             return f"[Error contacting user: {e}]"
 
+    async def _maybe_summarize(self, session: Session) -> None:
+        # Memory is degradable: a failing memory server must not cost the user their reply.
+        if not self._summarizer:
+            return
+        try:
+            await self._summarizer.maybe_summarize(session)
+        except Exception:
+            logger.warning("Session summarization failed", exc_info=True)
+
     async def handle_message(
         self,
         user_id: str,
@@ -428,8 +437,7 @@ class Agent:
         await self._sessions.add_message(session, user_msg)
 
         # Summarize if conversation is getting long
-        if self._summarizer:
-            await self._summarizer.maybe_summarize(session)
+        await self._maybe_summarize(session)
 
         # Build system prompt with relevant memories — inject the onboarding
         # followup instruction only on the turn that handles the user's reply.
@@ -779,8 +787,7 @@ class Agent:
         )
         await self._sessions.add_message(session, user_msg)
 
-        if self._summarizer:
-            await self._summarizer.maybe_summarize(session)
+        await self._maybe_summarize(session)
 
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if awaiting_onboarding_reply else None
         system_prompt = await self._build_system_prompt(user_id, text, extra_system=extra_system)
