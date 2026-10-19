@@ -69,6 +69,8 @@ RESERVED_IDENTITY_NAMES = frozenset({"me"})
 # Channels whose IDs are phone numbers — leading "+" is stripped for storage
 _PHONE_CHANNELS = {ChannelType.WHATSAPP, ChannelType.VOICE, ChannelType.SIGNAL}
 
+_CHANNEL_VALUES = frozenset(c.value for c in ChannelType)
+
 
 @dataclass(frozen=True)
 class IdentityProfile:
@@ -493,8 +495,8 @@ class IdentityResolver:
         seed_from_config does (see `_resolve_entry`).
 
         When no config is set the method is a no-op (nothing to enforce), and
-        so it is when any entry does not parse: a whitelist with a hole in it
-        must not be enforced. A pair whose lookup fails is a smaller hole,
+        so it is when any entry does not parse or names an unknown channel: a
+        whitelist with a hole in it must not be enforced. A pair whose lookup fails is a smaller hole,
         filled by `_unresolved_keep`.
         """
         if not self._identity_map_config:
@@ -511,6 +513,11 @@ class IdentityResolver:
                 # pruning against it would delete the very identity the
                 # entry was meant to keep.
                 logger.error("Identity map entry %r is invalid (%s) — skipping cleanup", raw_entry.strip(), e)
+                return
+            if any(ch not in _CHANNEL_VALUES for ch, _cid in pairs):
+                # Likely a typo for a real channel (`WhatsApp:4911`): the pair's
+                # stored link would be pruned, and with it a one-channel identity.
+                logger.error("Identity map entry %r names an unknown channel — skipping cleanup", raw_entry.strip())
                 return
             parsed.append((raw_entry, name, pairs))
 

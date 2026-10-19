@@ -1196,19 +1196,27 @@ class TestCleanup:
         r2.mark_seeding_complete()
         assert await r2.is_guest(ChannelType.WHATSAPP, "4911")
 
-    async def test_cleanup_skips_pairs_on_unknown_channels(self, tmp_path):
-        """Cleanup resolves pairs the same way seeding does: a pair on an unknown
-        channel is skipped (it is never stored), not an error that stops the sweep."""
+    @pytest.mark.parametrize(
+        "config",
+        ["alice@telegram:111=WhatsApp:4911", "alice@WhatsApp:4911,bob@telegram:222"],
+        ids=["typo-beside-a-real-channel", "typo-is-the-only-channel"],
+    )
+    async def test_cleanup_skips_when_an_entry_names_an_unknown_channel(self, tmp_path, caplog, config):
+        """A channel typo (`WhatsApp:`) leaves a hole in the whitelist: enforcing it
+        would prune the person's real link, or delete a one-channel identity."""
         db_path = tmp_path / "unknown_channel.db"
-        r = IdentityResolver(db_path, identity_map_config="alice@telegram:111")
+        r = IdentityResolver(db_path, identity_map_config="alice@telegram:111=whatsapp:4911,bob@telegram:222")
         await r.ensure_table()
         await r.seed_from_config()
-        await r.resolve(ChannelType.TELEGRAM, 999)
 
-        await IdentityResolver(db_path, identity_map_config="alice@telegram:111=fax:1").cleanup()
+        with caplog.at_level("ERROR", logger="pincer.core.identity"):
+            await IdentityResolver(db_path, identity_map_config=config).cleanup()
 
+        assert "names an unknown channel — skipping cleanup" in caplog.text
+        assert await r.find(ChannelType.WHATSAPP, "4911") == "alice"
         assert await r.find(ChannelType.TELEGRAM, 111) == "alice"
-        assert await r.find(ChannelType.TELEGRAM, 999) is None
+        assert await r.find(ChannelType.TELEGRAM, 222) == "bob"
+        assert await r._store.profile("alice") is not None
 
     async def test_cleanup_skips_wipe_when_config_has_no_usable_pairs(self, tmp_path):
         """A config string that's non-empty but parses to zero usable pairs (e.g. an
