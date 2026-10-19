@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +13,12 @@ from pincer.memory.base import (
     PINCER_MEMORY_USER_TAG_PREFIX,
 )
 from pincer.memory.mcp import MCPMemoryBackend
+
+
+def _result(text: str | None, *, structured: object = None, is_error: bool = False) -> MagicMock:
+    """Build a fake CallToolResult. ``text=None`` means no content items."""
+    content = [] if text is None else [MagicMock(text=text)]
+    return MagicMock(content=content, isError=is_error, structuredContent=structured)
 
 
 def _mock_manager(tool_responses: dict[str, object]) -> MagicMock:
@@ -24,14 +31,19 @@ def _mock_manager(tool_responses: dict[str, object]) -> MagicMock:
 
     async def call_tool(name: str, args: dict) -> MagicMock:
         raw = tool_responses.get(name, "[]")
-        result = MagicMock()
         if raw is None:
-            result.content = []
-        else:
-            result.content = [MagicMock(text=raw if isinstance(raw, str) else json.dumps(raw))]
-        return result
+            return _result(None)
+        return _result(raw if isinstance(raw, str) else json.dumps(raw))
 
     session.call_tool.side_effect = call_tool
+    manager = AsyncMock()
+    manager.get_session.return_value = session
+    return manager
+
+
+def _manager_returning(result: MagicMock) -> MagicMock:
+    session = AsyncMock()
+    session.call_tool.return_value = result
     manager = AsyncMock()
     manager.get_session.return_value = session
     return manager
@@ -104,9 +116,7 @@ async def test_list_memories_passes_user_and_category_tags(backend: MCPMemoryBac
 
     async def call_tool(name: str, args: dict) -> MagicMock:
         captured.append({"name": name, "args": args})
-        result = MagicMock()
-        result.content = [MagicMock(text=json.dumps(rows))]
-        return result
+        return _result(json.dumps(rows))
 
     session.call_tool.side_effect = call_tool
     manager = AsyncMock()
@@ -127,9 +137,7 @@ async def test_list_memories_sets_match_all_when_multiple_tags(backend: MCPMemor
 
     async def call_tool(name: str, args: dict) -> MagicMock:
         captured.append(args)
-        result = MagicMock()
-        result.content = [MagicMock(text=json.dumps(rows))]
-        return result
+        return _result(json.dumps(rows))
 
     session.call_tool.side_effect = call_tool
     manager = AsyncMock()
@@ -148,9 +156,7 @@ async def test_list_memories_sets_match_all_when_explicitly_requested(backend: M
 
     async def call_tool(name: str, args: dict) -> MagicMock:
         captured.append(args)
-        result = MagicMock()
-        result.content = [MagicMock(text="[]")]
-        return result
+        return _result("[]")
 
     session.call_tool.side_effect = call_tool
     manager = AsyncMock()
@@ -168,9 +174,7 @@ async def test_list_memories_passes_offset(backend: MCPMemoryBackend) -> None:
 
     async def call_tool(name: str, args: dict) -> MagicMock:
         captured.append(args)
-        result = MagicMock()
-        result.content = [MagicMock(text="[]")]
-        return result
+        return _result("[]")
 
     session.call_tool.side_effect = call_tool
     manager = AsyncMock()
@@ -202,13 +206,10 @@ async def test_delete_user_memories_returns_deleted_count(backend: MCPMemoryBack
     session = AsyncMock()
 
     async def call_tool(name: str, args: dict) -> MagicMock:
-        result = MagicMock()
         if name == "memory_list":
-            result.content = [MagicMock(text=json.dumps(rows))]
-        else:
-            delete_count["n"] += 1
-            result.content = [MagicMock(text="ok")]
-        return result
+            return _result(json.dumps(rows))
+        delete_count["n"] += 1
+        return _result("ok")
 
     session.call_tool.side_effect = call_tool
     manager = AsyncMock()
@@ -249,9 +250,7 @@ def _capturing_manager(rows: list, captured: list[dict]) -> MagicMock:
 
     async def call_tool(name: str, args: dict) -> MagicMock:
         captured.append(args)
-        result = MagicMock()
-        result.content = [MagicMock(text=json.dumps(rows))]
-        return result
+        return _result(json.dumps(rows))
 
     session.call_tool.side_effect = call_tool
     manager = AsyncMock()
@@ -325,9 +324,7 @@ async def test_store_memory_includes_extra_tags(backend: MCPMemoryBackend) -> No
 
     async def call_tool(name: str, args: dict) -> MagicMock:
         captured.append({"name": name, "args": args})
-        result = MagicMock()
-        result.content = [MagicMock(text="stored:5")]
-        return result
+        return _result("stored:5")
 
     session.call_tool.side_effect = call_tool
     manager = AsyncMock()
@@ -343,30 +340,58 @@ async def test_store_memory_includes_extra_tags(backend: MCPMemoryBackend) -> No
 
 
 @pytest.mark.asyncio
-async def test_list_memories_empty_content_returns_empty(backend: MCPMemoryBackend) -> None:
-    backend.set_mcp_manager(_mock_manager({"memory_list": None}))
-    assert await backend.list_memories(tags=["thread:abc"]) == []
+@pytest.mark.parametrize(
+    ("tool", "call", "expected"),
+    [
+        ("memory_list", lambda b: b.list_memories(tags=["thread:abc"]), []),
+        ("memory_list", lambda b: b.count(user_id="nobody"), 0),
+        ("memory_list", lambda b: b.delete_user_memories("nobody"), 0),
+        ("memory_search", lambda b: b.search_text("anything", user_id="u1"), []),
+        ("memory_get", lambda b: b.get_memory("42"), None),
+    ],
+    ids=["list_memories", "count", "delete_user_memories", "search_text", "get_memory"],
+)
+async def test_empty_content_is_treated_as_empty(
+    backend: MCPMemoryBackend, tool: str, call: Callable[[MCPMemoryBackend], Awaitable[object]], expected: object
+) -> None:
+    backend.set_mcp_manager(_mock_manager({tool: None}))
+    assert await call(backend) == expected
+
+
+# ── isError / structuredContent ───────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_count_empty_content_returns_zero(backend: MCPMemoryBackend) -> None:
-    backend.set_mcp_manager(_mock_manager({"memory_list": None}))
-    assert await backend.count(user_id="nobody") == 0
+async def test_list_memories_raises_on_tool_error(backend: MCPMemoryBackend) -> None:
+    err = _result("Error calling tool 'memory_list': limit must be <= 1000", is_error=True)
+    backend.set_mcp_manager(_manager_returning(err))
+    with pytest.raises(RuntimeError, match="memory_list failed: Error calling tool"):
+        await backend.list_memories(user_id="u1")
 
 
 @pytest.mark.asyncio
-async def test_delete_user_memories_empty_content_returns_zero(backend: MCPMemoryBackend) -> None:
-    backend.set_mcp_manager(_mock_manager({"memory_list": None}))
-    assert await backend.delete_user_memories("nobody") == 0
+async def test_get_memory_returns_none_on_tool_error(backend: MCPMemoryBackend) -> None:
+    backend.set_mcp_manager(_manager_returning(_result("Error calling tool 'memory_get'", is_error=True)))
+    assert await backend.get_memory("42") is None
 
 
 @pytest.mark.asyncio
-async def test_search_text_empty_content_returns_empty(backend: MCPMemoryBackend) -> None:
-    backend.set_mcp_manager(_mock_manager({"memory_search": None}))
-    assert await backend.search_text("anything", user_id="u1") == []
+async def test_store_memory_raises_on_tool_error(backend: MCPMemoryBackend) -> None:
+    backend.set_mcp_manager(_manager_returning(_result("Error calling tool 'memory_store'", is_error=True)))
+    with pytest.raises(RuntimeError, match="memory_store failed"):
+        await backend.store_memory("u1", "content")
 
 
 @pytest.mark.asyncio
-async def test_get_memory_empty_content_returns_none(backend: MCPMemoryBackend) -> None:
-    backend.set_mcp_manager(_mock_manager({"memory_get": None}))
+@pytest.mark.parametrize("text", [None, "not json"])
+async def test_structured_content_preferred_over_text(backend: MCPMemoryBackend, text: str | None) -> None:
+    row = _row(id=7, content="from structured")
+    backend.set_mcp_manager(_manager_returning(_result(text, structured={"result": [row]})))
+    results = await backend.list_memories(user_id="u1")
+    assert [m.content for m in results] == ["from structured"]
+
+
+@pytest.mark.asyncio
+async def test_get_memory_structured_null_returns_none(backend: MCPMemoryBackend) -> None:
+    backend.set_mcp_manager(_manager_returning(_result("null", structured={"result": None})))
     assert await backend.get_memory("42") is None
