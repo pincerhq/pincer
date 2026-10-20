@@ -62,6 +62,8 @@ _ALWAYS_RECORD: frozenset[str] = frozenset(
         str(EventName.MEDIA_STREAM_CLOSED),
         str(EventName.CALL_ENDED),
         str(EventName.CALL_DECLINED),
+        str(EventName.TRANSFER_STARTED),
+        str(EventName.TRANSFER_RESULT),
         str(EventName.CALL_PHASE),
         str(EventName.ERROR),
         str(EventName.TIMEOUT),

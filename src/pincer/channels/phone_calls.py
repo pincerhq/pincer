@@ -1703,7 +1703,7 @@ class VoiceChannel(BaseChannel):
         self._close_turn_trace(call_sid)
 
         # A code, not display text: the column is read by machines.
-        reason = str(state.metadata.get(END_CODE_KEY) or "")
+        reason = str(state.metadata.get(END_CODE_KEY) or state.metadata.get("remote_end_reason") or "")
         if not reason and sm is not None and sm.state.transitions:
             reason = str(sm.state.transitions[-1].reason or "")
         with contextlib.suppress(Exception):

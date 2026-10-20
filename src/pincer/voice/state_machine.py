@@ -9,6 +9,7 @@ transitions are deterministic to ensure safety and predictability.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -107,9 +108,13 @@ PHASE_TIMEOUTS: dict[CallPhase, int] = {
     CallPhase.FAQ_ANSWER: 60,
     CallPhase.TAKE_MESSAGE: 120,
     CallPhase.INBOUND_BOOKING: 180,
-    CallPhase.TRANSFERRING: 30,
     CallPhase.AFTER_HOURS: 90,
 }
+
+# Phases in which the call is not ours to time: the media session is gone
+# (e.g. the call is bridged to a human via <Dial>). Their end is signalled by
+# Twilio (/transfer-result, /status), and the ceiling is the Dial timeLimit.
+UNTIMED_PHASES: frozenset[CallPhase] = frozenset({CallPhase.TRANSFERRING})
 
 VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
     CallPhase.RINGING: {CallPhase.GREETING, CallPhase.OUTBOUND_GREETING, CallPhase.FAILED},
@@ -356,12 +361,16 @@ class CallStateMachine:
         self._state.phase_entered_at = time.monotonic()
 
     def check_timeout(self) -> bool:
-        """Check if current phase has timed out."""
+        """Check if current phase has timed out. Never for UNTIMED_PHASES."""
+        if self._state.phase in UNTIMED_PHASES:
+            return False
         timeout = PHASE_TIMEOUTS.get(self._state.phase, 60)
         elapsed = time.monotonic() - self._state.phase_entered_at
         return elapsed > timeout
 
     def get_timeout_remaining(self) -> float:
+        if self._state.phase in UNTIMED_PHASES:
+            return math.inf
         timeout = PHASE_TIMEOUTS.get(self._state.phase, 60)
         elapsed = time.monotonic() - self._state.phase_entered_at
         return max(0.0, timeout - elapsed)

@@ -228,7 +228,6 @@ PHASE_TIMEOUT_MESSAGES = {
     "faq_answer": "I'll leave it there. Feel free to call again anytime. Goodbye!",
     "take_message": "I didn't catch anything more, so I'll pass on what I have. Thank you — goodbye!",
     "inbound_booking": "I didn't catch a decision, so nothing has been booked. Feel free to call again. Goodbye!",
-    "transferring": "I'm sorry, I couldn't complete the transfer. Please call again. Goodbye!",
     "after_hours": "I haven't heard anything more. We'll be happy to help during opening hours. Goodbye!",
 }
 

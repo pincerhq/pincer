@@ -79,6 +79,8 @@ webhook — but that projection never produces a duration.
 | `call.media_stream_closed` | socket gone |
 | `call.ended` | teardown, with failure code and termination reason |
 | `call.declined` | refused by policy before the engine saw it |
+| `call.transfer_started` | redirected into `<Dial>` to a human (target masked) |
+| `call.transfer_result` | the `<Dial action>` callback: `dial_status`, `dial_duration_s` |
 | `call.phase` | a lifecycle state transition (`CallStateMachine`), with its reason |
 | `stt.speech_start` / `speech_end` | caller speech bounds (Media Streams only) |
 | `stt.partial` / `stt.final` | recognition output |

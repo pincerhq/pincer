@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import math
+import time
+
+import pytest
+
 from pincer.voice.state_machine import (
+    PHASE_TIMEOUTS,
+    UNTIMED_PHASES,
     VALID_TRANSITIONS,
     CallPhase,
     CallStateMachine,
@@ -144,3 +151,28 @@ class TestCallStateMachine:
         instruction = sm.get_phase_instruction()
         assert len(instruction) > 0
         assert "greet" in instruction.lower() or "Greet" in instruction
+
+
+class TestUntimedPhases:
+    """A call bridged to a human via <Dial> is not ours to time (the 30 s
+    transfer drop): Twilio ends it, the Dial timeLimit is the ceiling."""
+
+    def test_untimed_phase_never_times_out(self):
+        assert CallPhase.TRANSFERRING in UNTIMED_PHASES
+        assert not UNTIMED_PHASES & PHASE_TIMEOUTS.keys()
+        sm = CallStateMachine("CA123")
+        sm._state.phase = CallPhase.TRANSFERRING
+        sm._state.phase_entered_at = time.monotonic() - 100_000
+        assert sm.check_timeout() is False
+        assert sm.get_timeout_remaining() == math.inf
+
+    @pytest.mark.parametrize(("phase", "timeout"), sorted(PHASE_TIMEOUTS.items()))
+    def test_timed_phases_unchanged(self, phase, timeout):
+        sm = CallStateMachine("CA123")
+        sm._state.phase = phase
+        sm._state.phase_entered_at = time.monotonic() - (timeout - 5)
+        assert sm.check_timeout() is False
+        assert 0 < sm.get_timeout_remaining() <= 5
+        sm._state.phase_entered_at = time.monotonic() - (timeout + 1)
+        assert sm.check_timeout() is True
+        assert sm.get_timeout_remaining() == 0.0

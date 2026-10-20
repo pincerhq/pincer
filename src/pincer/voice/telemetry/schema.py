@@ -38,6 +38,9 @@ class EventName(StrEnum):
     MEDIA_STREAM_CLOSED = "call.media_stream_closed"
     CALL_ENDED = "call.ended"
     CALL_DECLINED = "call.declined"
+    #: Redirected into <Dial> to a human, and the dial's outcome.
+    TRANSFER_STARTED = "call.transfer_started"
+    TRANSFER_RESULT = "call.transfer_result"
     #: A call LIFECYCLE state transition. Separate from the pipeline spans
     #: on purpose: the call has states, the streaming pipeline does not.
     CALL_PHASE = "call.phase"

@@ -250,7 +250,6 @@ PHASE_TIMEOUT_MESSAGES = {
     "inbound_booking": (
         "Ich habe keine Entscheidung gehört, daher ist nichts gebucht. Rufen Sie gern wieder an. Auf Wiederhören!"
     ),
-    "transferring": "Entschuldigung, die Weiterleitung hat nicht geklappt. Bitte rufen Sie erneut an. Auf Wiederhören!",
     "after_hours": "Ich habe nichts mehr gehört. Zu den Öffnungszeiten helfen wir Ihnen gern weiter. Auf Wiederhören!",
 }
 

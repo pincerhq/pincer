@@ -173,6 +173,13 @@ class ChannelSettings(BaseModel):
     )
     voice_max_call_duration: int = Field(default=600, ge=30, le=3600, description="Max call seconds")
     voice_max_hold_time: int = Field(default=300, ge=30, le=600, description="Max IVR hold seconds")
+    voice_transfer_max_duration_s: int = Field(
+        default=3600,
+        ge=60,
+        le=14400,
+        description="Ceiling for a call bridged to a human (<Dial timeLimit>); "
+        "also the stuck-call allowance for transferred calls",
+    )
     voice_hangup_grace_s: float = Field(
         default=2.0,
         ge=0.0,

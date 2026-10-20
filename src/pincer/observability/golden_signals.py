@@ -324,16 +324,24 @@ def stuck_calls(settings: Settings | Any, active_calls: dict[str, Any] | None = 
         except Exception:
             active_calls = {}
 
+    # A call bridged to a human runs under the <Dial timeLimit>, which Twilio
+    # enforces. It is only stuck if it outlives that ceiling as well.
+    transfer_allowance = int(getattr(settings, "voice_transfer_max_duration_s", 3600) or 3600)
+
     stuck: list[dict[str, Any]] = []
     for call_sid, state in (active_calls or {}).items():
         duration = int(getattr(state, "duration_seconds", 0) or 0)
-        if duration > threshold:
+        metadata = getattr(state, "metadata", None)
+        transferring = isinstance(metadata, dict) and bool(metadata.get("transferring"))
+        limit = threshold + (transfer_allowance if transferring else 0)
+        if duration > limit:
             stuck.append(
                 {
                     "call_sid": call_sid,
                     "duration_seconds": duration,
                     "direction": str(getattr(state, "direction", "")),
-                    "over_by_seconds": duration - threshold,
+                    "over_by_seconds": duration - limit,
+                    "transferring": transferring,
                 }
             )
 

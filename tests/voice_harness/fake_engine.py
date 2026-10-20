@@ -97,6 +97,10 @@ class FakeVoiceEngine(VoiceEngine):
         )
         if getattr(self, "transfer_raises", False):
             raise RuntimeError("dial failed")
+        # like the real engines: the call has left us for <Dial>
+        live = self._active_calls.get(call_sid)
+        if live is not None:
+            live.metadata["transferring"] = True
 
     async def end_call(self, call_sid: str) -> None:
         if call_sid in self.ended:
