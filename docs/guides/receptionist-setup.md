@@ -105,7 +105,7 @@ the TwiML Pincer returns; the transfer dial result arrives at
 | Question | Answered **only** from the profile (FAQ/hours/address/services). Not in the profile → "Das kann ich nicht sicher sagen — ich gebe die Frage gern weiter. Darf ich Ihren Namen und Ihre Nummer notieren?" → message |
 | Message | Slot filling, one question per turn: name (spelled back when unsure or uncommon), callback number (caller ID offered, dictated numbers read back in pairs), matter (capped, summarized back), urgency (asked only if it sounds time-critical) → spoken verification → "Danke, ich gebe das weiter." |
 | Appointment | Timeframe → up to 3 free slots (profile hours ∩ calendar free/busy) → name + number → optional email → verification → written via the Sprint 11 policy (`off` = immediately, `user` = owner approves while the caller holds) → spoken confirmation only after a successful write; a slot taken in the meantime is re-offered |
-| Human | Never argued with: one sentence, then `<Dial>` to `transfer.target` (20 s); busy/no-answer → apology → message |
+| Human | Never argued with: one sentence, then `<Dial>` to `transfer.target` (20 s); busy/no-answer → apology → message. A connected call can run up to `PINCER_VOICE_TRANSFER_MAX_DURATION_S` (default 1 h) and is reported to the owner as transferred, with its duration |
 | After hours | The greeting announces the closure and takes a message; no booking after hours in v1 |
 | Silence | 10 s after the greeting → "Sind Sie noch dran?" → 10 s more → polite goodbye + hangup |
 | Two unclear intents | Straight to message-taking — never a third clarifying question |
@@ -134,6 +134,8 @@ run in CI in English and German.
   `inbound_intent`.
 - Metrics: `pincer.voice.inbound.events{event=answered|intent|message_taken|booking|transfer|silent_hangup|busy_capacity|blocked, intent=…}`;
   the golden signal `busy_capacity` alerts at > 5 declined calls/day.
+- `pincer.voice.receptionist.transfers{result=completed|busy|no_answer|failed|caller_hangup}`.
+  A call transferred to a human does not count toward `inbound_max_concurrent`.
 
 ## 7. Release checklist (before go-live)
 

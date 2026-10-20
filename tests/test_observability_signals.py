@@ -42,6 +42,7 @@ def settings(tmp_path) -> MagicMock:
     cfg.data_dir = tmp_path
     cfg.voice_max_call_duration = 600
     cfg.alert_stuck_call_grace_s = 60
+    cfg.voice_transfer_max_duration_s = 3600
     cfg.alert_call_success_window_h = 2
     cfg.alert_call_success_min_volume = 5
     cfg.alert_call_success_min = 0.85
@@ -276,6 +277,23 @@ def test_stuck_calls_respects_the_grace_period(settings):
     """max_duration + grace, not max_duration — Twilio hangs up a hair late."""
     assert stuck_calls(settings, {"CA": _call_state(650)}).value == 0.0
     assert stuck_calls(settings, {"CA": _call_state(661)}).value == 1.0
+
+
+def test_stuck_calls_allows_transfer(settings):
+    """A call bridged to a human runs under the Dial timeLimit, not the agent's
+    max duration — a long talk with staff is not stuck and must not page."""
+    transferring = _call_state(700)
+    transferring.metadata = {"transferring": True}
+    assert stuck_calls(settings, {"CA": transferring}).value == 0.0
+    transferring.duration_seconds = 600 + 60 + 3600 + 1
+    signal = stuck_calls(settings, {"CA": transferring})
+    assert signal.value == 1.0
+    assert signal.detail["stuck"][0]["over_by_seconds"] == 1
+    assert signal.detail["stuck"][0]["transferring"] is True
+    # a call that is not transferring keeps the normal limit
+    plain = _call_state(700)
+    plain.metadata = {}
+    assert stuck_calls(settings, {"CA": plain}).value == 1.0
 
 
 def test_no_active_calls_is_not_stuck(settings):

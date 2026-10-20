@@ -177,7 +177,6 @@ class VoiceEngine(ABC):
     @abstractmethod
     async def interrupt_speech(self, call_sid: str) -> None: ...
 
-    @abstractmethod
     async def transfer_call(
         self,
         call_sid: str,
@@ -187,7 +186,52 @@ class VoiceEngine(ABC):
         action_url: str = "",
         announce: str = "",
         language: str = "",
-    ) -> None: ...
+    ) -> None:
+        """Redirect the live call into <Dial>. With ``action_url`` (Sprint 12
+        receptionist) Twilio reports the dial result there, so a busy / no-answer
+        target can fall back to message-taking instead of dropping the caller.
+
+        The bridged call is no longer ours to time, so we attach a status
+        callback: inbound calls get none by default, and without it nothing
+        would tell us when the caller and the human hang up. ``timeLimit`` is
+        the ceiling for the bridge."""
+        # the media socket closes on the <Dial> redirect; that is not a hangup
+        live = self._active_calls.get(call_sid)
+        if live is not None:
+            live.metadata["transferring"] = True
+            live.metadata["transfer"] = {"target": target_number, "started_mono": time.monotonic()}
+        try:
+            from twilio.rest import Client
+
+            client = Client(
+                self._settings.twilio_account_sid,
+                self._settings.twilio_auth_token.get_secret_value(),
+            )
+            twiml = build_dial_twiml(
+                target_number,
+                timeout_s=timeout_s,
+                action_url=action_url,
+                announce=announce,
+                language=language,
+                time_limit_s=int(self._settings.voice_transfer_max_duration_s),
+            )
+            update: dict[str, Any] = {"twiml": twiml}
+            base = str(getattr(self._settings, "voice_webhook_base_url", "") or "").strip().rstrip("/")
+            if base.startswith(("http://", "https://")):
+                update["status_callback"] = f"{base}/api/apps/twilio/status"
+                update["status_callback_method"] = "POST"
+            client.calls(call_sid).update(**update)
+            logger.info("Call %s transferred to %s", call_sid, target_number)
+        except Exception:
+            logger.exception("Transfer failed for call %s", call_sid)
+            # the redirect never happened: the call is still ours
+            if live is not None:
+                live.metadata.pop("transferring", None)
+                live.metadata.pop("transfer", None)
+            raise
+        from pincer.voice.telemetry import hooks as telemetry
+
+        telemetry.transfer_started(call_sid, target=target_number, dial_timeout_s=timeout_s)
 
     @abstractmethod
     async def end_call(self, call_sid: str) -> None: ...
@@ -213,10 +257,26 @@ class VoiceEngine(ABC):
         if state is None or state.metadata.get("transferring"):
             return
         logger.info("Media session closed by Twilio [%s] — ending call", call_sid)
-        await self.close_media_stream(call_sid)
+        await self.finish_remote_ended(call_sid)
+
+    async def finish_remote_ended(self, call_sid: str, reason: str = "") -> bool:
+        """Twilio says the call is over: close media, unregister, run the
+        end-of-call callback. Never issues a REST hangup. Idempotent — returns
+        False if the call was already finalized.
+
+        ``reason`` is a technical code for the trace. It is not ``end_reason``:
+        that one is localized text the post-call report shows to the user."""
+        state = self._active_calls.get(call_sid)
+        if state is None:
+            return False
+        if reason:
+            state.metadata.setdefault("remote_end_reason", reason)
+        with contextlib.suppress(Exception):
+            await self.close_media_stream(call_sid)
         ended = await self._unregister_call(call_sid)
         if ended and self._on_call_end_callback:
             await self._on_call_end_callback(call_sid, ended)
+        return ended is not None
 
     def get_active_calls(self) -> dict[str, CallState]:
         return dict(self._active_calls)
@@ -500,8 +560,9 @@ def build_dial_twiml(
     action_url: str = "",
     announce: str = "",
     language: str = "",
+    time_limit_s: int | None = None,
 ) -> str:
-    """<Response>[<Say>announce</Say>]<Dial timeout=".." action="..">+49…</Dial></Response>.
+    """<Response>[<Say>announce</Say>]<Dial timeout=".." [timeLimit=".."] action="..">+49…</Dial></Response>.
 
     The announcement rides in the same TwiML (Twilio's <Say>) so it cannot be
     cut off by the redirect — the relay socket is gone the moment the call is
@@ -512,7 +573,8 @@ def build_dial_twiml(
 
     say = f'<Say language="{relay_language(language or "en")}">{escape(announce)}</Say>' if announce else ""
     action = f' action="{escape(action_url, {chr(34): "&quot;"})}" method="POST"' if action_url else ""
-    return f'<Response>{say}<Dial timeout="{int(timeout_s)}"{action}>{escape(target_number)}</Dial></Response>'
+    limit = f' timeLimit="{int(time_limit_s)}"' if time_limit_s is not None else ""
+    return f'<Response>{say}<Dial timeout="{int(timeout_s)}"{limit}{action}>{escape(target_number)}</Dial></Response>'
 
 
 class ConversationRelayEngine(VoiceEngine):
@@ -631,40 +693,6 @@ class ConversationRelayEngine(VoiceEngine):
         # `Unavailable` on this engine.
         telemetry.interruption_reported(call_sid, engine="conversation_relay")
         logger.debug("CR interrupt [%s]", call_sid)
-
-    async def transfer_call(
-        self,
-        call_sid: str,
-        target_number: str,
-        *,
-        timeout_s: int = 30,
-        action_url: str = "",
-        announce: str = "",
-        language: str = "",
-    ) -> None:
-        """Redirect the live call into <Dial>. With ``action_url`` (Sprint 12
-        receptionist) Twilio reports the dial result there, so a busy / no-answer
-        target can fall back to message-taking instead of dropping the caller."""
-        # the media socket closes on the <Dial> redirect; that is not a hangup
-        live = self._active_calls.get(call_sid)
-        if live is not None:
-            live.metadata["transferring"] = True
-        try:
-            from twilio.rest import Client
-
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-            )
-            call = client.calls(call_sid)
-            twiml = build_dial_twiml(
-                target_number, timeout_s=timeout_s, action_url=action_url, announce=announce, language=language
-            )
-            call.update(twiml=twiml)
-            logger.info("Call %s transferred to %s", call_sid, target_number)
-        except Exception:
-            logger.exception("Transfer failed for call %s", call_sid)
-            raise
 
     async def end_call(self, call_sid: str) -> None:
         try:
@@ -1152,36 +1180,6 @@ class MediaStreamEngine(VoiceEngine):
         telemetry.buffer_cleared(call_sid, since_ns=detected_ns, acknowledged=False)
 
         logger.debug("MS interrupt [%s]", call_sid)
-
-    async def transfer_call(
-        self,
-        call_sid: str,
-        target_number: str,
-        *,
-        timeout_s: int = 30,
-        action_url: str = "",
-        announce: str = "",
-        language: str = "",
-    ) -> None:
-        # the media socket closes on the <Dial> redirect; that is not a hangup
-        live = self._active_calls.get(call_sid)
-        if live is not None:
-            live.metadata["transferring"] = True
-        try:
-            from twilio.rest import Client
-
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-            )
-            twiml = build_dial_twiml(
-                target_number, timeout_s=timeout_s, action_url=action_url, announce=announce, language=language
-            )
-            client.calls(call_sid).update(twiml=twiml)
-            logger.info("Call %s transferred to %s", call_sid, target_number)
-        except Exception:
-            logger.exception("Transfer failed for call %s", call_sid)
-            raise
 
     async def end_call(self, call_sid: str) -> None:
         await self.close_media_stream(call_sid)

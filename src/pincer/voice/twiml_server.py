@@ -205,7 +205,13 @@ def _active_inbound_count() -> int:
         return 0
     from pincer.voice.engine import CallDirection
 
-    return sum(1 for st in _engine.get_active_calls().values() if st.direction == CallDirection.INBOUND)
+    # A call bridged to a human uses no agent or LLM capacity, so it does not
+    # block new callers.
+    return sum(
+        1
+        for st in _engine.get_active_calls().values()
+        if st.direction == CallDirection.INBOUND and not st.metadata.get("transferring")
+    )
 
 
 async def _receptionist_decline(call_sid: str, caller: str, language: str) -> Response | None:
@@ -275,29 +281,65 @@ async def _record_declined_call(
 async def voice_transfer_result(request: Request) -> Response:
     """Sprint 12 §8.4: <Dial action> callback after a receptionist transfer.
 
-    completed → nothing to do (Twilio hangs up after the bridged leg). Anything
-    else (busy / no-answer / failed / canceled) → apology + message-taking:
-    the call is reconnected to the relay with the apology as its greeting and
-    the session already in TAKE_MESSAGE (name question asked)."""
+    completed → the caller talked to the human: record it and finalize the
+    call (Twilio has ended it; no REST hangup). Anything else (busy /
+    no-answer / failed / canceled) → apology + message-taking: the call is
+    reconnected to the relay with the apology as its greeting and the session
+    already in TAKE_MESSAGE (name question asked) — unless the caller already
+    hung up while the target was ringing, in which case there is nothing to
+    reconnect. Idempotent: a retried callback finds no state and only hangs up."""
     if await _authenticate(request) is None:
         return _forbidden()
     form = await request.form()
     call_sid = str(form.get("CallSid", ""))
     dial_status = str(form.get("DialCallStatus", "")).lower()
-    logger.info("Transfer result [%s]: %s", call_sid, dial_status or "-")
-    if dial_status == "completed" or not _engine or not _settings:
-        return _twiml_response("<Response><Hangup/></Response>")
+    call_status = str(form.get("CallStatus", "")).lower()
+    dial_duration = _int_or_none(form.get("DialCallDuration"))
+    logger.info("Transfer result [%s]: %s (call %s)", call_sid, dial_status or "-", call_status or "-")
+    hangup = _twiml_response("<Response><Hangup/></Response>")
+    if not _engine or not _settings:
+        return hangup
+    state = _engine.get_call_state(call_sid)
+    if state is None:
+        logger.info("Transfer result [%s] for a call already finalized — nothing to do", call_sid)
+        return hangup
+
+    from pincer.voice.telemetry import hooks as telemetry
+
+    telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)
+    transfer = state.metadata.setdefault("transfer", {})
+    if isinstance(transfer, dict):
+        transfer.update(
+            {
+                "dial_status": dial_status,
+                "dial_call_sid": str(form.get("DialCallSid", "")),
+                "dial_duration_s": dial_duration,
+                "dial_bridged": str(form.get("DialBridged", "")).lower() == "true",
+            }
+        )
+    session = _transfer_session_lookup(call_sid)
+
+    if dial_status == "completed":
+        if session is not None:
+            session.on_transfer_completed(dial_duration)
+        await _engine.finish_remote_ended(call_sid, reason="transferred")
+        return hangup
+
+    if call_status == "completed":
+        # The caller hung up while the target was ringing.
+        if session is not None:
+            session.on_transfer_abandoned()
+        await _engine.finish_remote_ended(call_sid, reason="caller_hangup_during_transfer")
+        return hangup
 
     from xml.sax.saxutils import escape
 
     from pincer.voice.twiml_builder import build_connect_twiml
 
-    state = _engine.get_call_state(call_sid)
-    session = _transfer_session_lookup(call_sid)
     language = str(getattr(state, "language", "") or "en")
     greeting = ""
     if session is not None:
-        greeting = await session.on_transfer_failed()
+        greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
     twiml = build_connect_twiml(_settings, call_sid=call_sid, direction="inbound", language=language)
     if greeting:
         # Replace the welcome greeting with the apology + first question
@@ -309,6 +351,17 @@ async def voice_transfer_result(request: Request) -> Response:
         else:
             twiml = twiml.replace("<ConversationRelay ", f'<ConversationRelay welcomeGreeting="{escaped}" ', 1)
     return _twiml_response(twiml)
+
+
+# DialCallStatus → the `result` label of pincer.voice.receptionist.transfers
+_TRANSFER_RESULTS = {"busy": "busy", "no-answer": "no_answer", "failed": "failed", "canceled": "failed"}
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
 
 
 _transfer_session_resolver: Any = None
@@ -527,7 +580,9 @@ async def voice_status(request: Request) -> PlainTextResponse:
     elif status == "completed" and _engine:
         state = _engine.get_call_state(call_sid)
         if state:
-            await _engine.end_call(call_sid)
+            # Twilio has already ended the call: finalize without a REST
+            # hangup, which could only fail.
+            await _engine.finish_remote_ended(call_sid, reason="provider_completed")
         elif _already_torn_down(call_sid):
             # Race: end_call (AMD hangup, caller hangup, shutdown) popped the
             # state and handed the final message to its post-call pipeline,
@@ -967,6 +1022,9 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
                     if hasattr(_engine, "setup_media_stream_stt"):
                         await _engine.setup_media_stream_stt(call_sid, stream_sid)
                 logger.info("Stream started: %s (stream=%s)", call_sid, stream_sid)
+                if state:
+                    # back from a <Dial> transfer: the call is ours again
+                    state.metadata.pop("transferring", None)
 
             elif event == "media":
                 payload = msg.get("media", {}).get("payload", "")

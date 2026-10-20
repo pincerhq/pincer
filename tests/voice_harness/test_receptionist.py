@@ -988,9 +988,208 @@ def test_transfer_result_webhook_reconnects_with_apology():
         busy = client.post("/api/apps/twilio/transfer-result", data={"CallSid": "CAt", "DialCallStatus": "busy"})
         assert "ConversationRelay" in busy.text
         assert 'welcomeGreeting="Leider ist gerade niemand erreichbar. Wie ist Ihr Name?"' in busy.text
-        fake_session.on_transfer_failed.assert_awaited_once()
+        fake_session.on_transfer_failed.assert_awaited_once_with("busy")
+        for dial_status, result in (("no-answer", "no_answer"), ("failed", "failed"), ("canceled", "failed")):
+            fake_session.on_transfer_failed.reset_mock()
+            other = client.post(
+                "/api/apps/twilio/transfer-result",
+                data={"CallSid": "CAt", "DialCallStatus": dial_status, "CallStatus": "in-progress"},
+            )
+            assert "ConversationRelay" in other.text, dial_status
+            fake_session.on_transfer_failed.assert_awaited_once_with(result)
     finally:
         twiml_server.set_transfer_session_resolver(None)
+
+
+def test_capacity_ignores_transferred_calls():
+    """A call bridged to a human uses no agent capacity: it must not decline new callers."""
+    from unittest.mock import AsyncMock
+
+    from pincer.voice.engine import CallState
+
+    settings = _settings(inbound_max_concurrent=1)
+    settings.voice_webhook_validate = False
+    settings.voice_allowed_callers = "*"
+    settings.twilio_auth_token = MagicMock()
+    settings.twilio_auth_token.get_secret_value.return_value = ""
+    engine = AsyncMock()
+    bridged = CallState(call_sid="CA0", direction=CallDirection.INBOUND, caller_number="+491")
+    bridged.metadata["transferring"] = True
+    engine.get_active_calls = MagicMock(return_value={"CA0": bridged})
+    client = _webhook_client(settings, engine)
+    ok = client.post("/api/apps/twilio/webhook", data={"CallSid": "CAn", "From": "+4917299999999", "To": "+4952"})
+    assert "<Hangup/>" not in ok.text
+    engine.on_call_start.assert_called_once()
+    # the same call back on the relay (failed transfer) counts again
+    bridged.metadata.pop("transferring")
+    engine.on_call_start.reset_mock()
+    busy = client.post("/api/apps/twilio/webhook", data={"CallSid": "CAm", "From": "+4917299999999", "To": "+4952"})
+    assert "alle Leitungen belegt" in busy.text
+    engine.on_call_start.assert_not_called()
+
+
+# ── Transfer lifecycle: watchdog, end signals, finalization ──────────
+
+
+def _transfer_settings():
+    settings = _settings()
+    settings.voice_webhook_validate = False
+    settings.voice_engine = "conversation_relay"
+    settings.twilio_auth_token = MagicMock()
+    settings.twilio_auth_token.get_secret_value.return_value = ""
+    settings.voice_assistant_name = ""
+    settings.voice_consent_mode = "none"
+    settings.elevenlabs_voice_id = ""
+    settings.cr_tts_provider = ""
+    settings.voice_max_call_duration = 600
+    settings.alert_stuck_call_grace_s = 60
+    settings.voice_transfer_max_duration_s = 3600
+    return settings
+
+
+async def _transferred(h: Harness):
+    await h.say("Ich möchte bitte mit einem Menschen sprechen.")
+    assert h.sm.phase == CallPhase.TRANSFERRING
+    assert h.state.metadata.get("transferring") is True
+    ended: list[str] = []
+    original = h.engine._on_call_end_callback
+
+    async def counting(call_sid, state):
+        ended.append(call_sid)
+        await original(call_sid, state)
+
+    h.engine.set_on_call_end(counting)
+    return ended
+
+
+async def _watchdog_pass(h: Harness) -> None:
+    """One iteration of VoiceChannel._watchdog_loop."""
+    for call_sid, sm in list(h.channel._state_machines.items()):
+        if not sm.is_terminal and sm.check_timeout():
+            await h.channel._handle_phase_timeout(call_sid, sm)
+    await h.channel._reap_stuck_calls()
+
+
+def _async_client(h: Harness):
+    import httpx
+    from fastapi import FastAPI
+
+    from pincer.voice import twiml_server
+
+    twiml_server.init_voice_routes(h.engine, h.channel._settings)
+    twiml_server.set_transfer_session_resolver(h.channel.get_reception_session)
+    app = FastAPI()
+    app.include_router(twiml_server.twilio_router)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+
+@pytest.fixture
+def _no_transfer_resolver():
+    yield
+    from pincer.voice import twiml_server
+
+    twiml_server.set_transfer_session_resolver(None)
+
+
+async def test_transfer_not_cut_by_watchdog():
+    """The P0: the 30 s TRANSFERRING timeout hung up the bridged call."""
+    h = await _start(settings=_transfer_settings())
+    ended = await _transferred(h)
+    sm = h.sm
+    for age in (31, 3600):
+        sm._state.phase_entered_at -= age
+        h.state.started_at -= timedelta(seconds=age)
+        await _watchdog_pass(h)
+        assert CALL not in h.engine.ended
+        assert ended == []
+        assert sm.phase == CallPhase.TRANSFERRING
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+@pytest.mark.parametrize("transfer_result_first", [True, False])
+async def test_transfer_result_completed_finalizes_once(transfer_result_first):
+    h = await _start(settings=_transfer_settings())
+    ended = await _transferred(h)
+    sm = h.sm
+    transfer_result = (
+        "/api/apps/twilio/transfer-result",
+        {
+            "CallSid": CALL,
+            "DialCallStatus": "completed",
+            "DialCallDuration": "192",
+            "DialCallSid": "CAdial",
+            "DialBridged": "true",
+            "CallStatus": "completed",
+        },
+    )
+    status = ("/api/apps/twilio/status", {"CallSid": CALL, "CallStatus": "completed", "CallDuration": "230"})
+    order = [transfer_result, status] if transfer_result_first else [status, transfer_result]
+    async with _async_client(h) as client:
+        for path, data in [*order, *order]:  # Twilio retries: second round is a no-op
+            response = await client.post(path, data=data)
+            assert response.status_code == 200
+            if path.endswith("transfer-result"):
+                assert response.text == "<Response><Hangup/></Response>"
+    assert ended == [CALL]
+    assert CALL not in h.engine.ended  # finalized without a REST hangup
+    assert sm.phase == CallPhase.COMPLETED
+    await _wait_owner(h)
+    assert len(h.owner_msgs) == 1
+    reception = h.state.metadata["reception"]
+    if transfer_result_first:
+        assert reception["transfer_completed"] is True
+        assert reception["transfer_duration_s"] == 192
+        assert h.state.metadata["transfer"]["dial_call_sid"] == "CAdial"
+        assert h.state.metadata["remote_end_reason"] == "transferred"
+        assert "📲 Weitergeleitet an +4952233344455 (3 Min 12 s)" in h.owner_msgs[0][2]
+    else:
+        # /status arrived first: the call is finalized without the dial
+        # result (the late callback finds no state), so the report states
+        # only that the transfer started — never that it failed.
+        assert h.state.metadata["remote_end_reason"] == "provider_completed"
+        assert "📲 Weiterleitung an +4952233344455 gestartet" in h.owner_msgs[0][2]
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_transfer_result_parent_gone_no_reconnect():
+    h = await _start(settings=_transfer_settings())
+    ended = await _transferred(h)
+    sm = h.sm
+    async with _async_client(h) as client:
+        response = await client.post(
+            "/api/apps/twilio/transfer-result",
+            data={"CallSid": CALL, "DialCallStatus": "no-answer", "CallStatus": "completed"},
+        )
+        assert response.text == "<Response><Hangup/></Response>"
+        assert "<Connect>" not in response.text
+        await client.post("/api/apps/twilio/status", data={"CallSid": CALL, "CallStatus": "completed"})
+    assert ended == [CALL]
+    assert sm.is_terminal
+    assert h.state.metadata["remote_end_reason"] == "caller_hangup_during_transfer"
+    reception = h.state.metadata["reception"]
+    assert reception["transfer_failed"] is True and reception["transfer_completed"] is False
+    assert reception["end_reason"] == "caller_hangup_during_transfer"
+    await _wait_owner(h)
+    assert "kam nicht zustande" in h.owner_msgs[-1][2]
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_back_from_failed_transfer_is_timed_again():
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+    async with _async_client(h) as client:
+        response = await client.post(
+            "/api/apps/twilio/transfer-result",
+            data={"CallSid": CALL, "DialCallStatus": "busy", "CallStatus": "in-progress"},
+        )
+    assert "ConversationRelay" in response.text
+    assert h.sm.phase == CallPhase.TAKE_MESSAGE
+    assert CALL not in h.engine.ended
+    # the reconnected relay `setup` hands the call back to us
+    h.state.metadata.pop("transferring", None)
+    h.sm._state.phase_entered_at -= 121
+    await _watchdog_pass(h)
+    assert CALL in h.engine.ended  # silence/timeout exits work again
 
 
 # ── §9 red team (en + de) ────────────────────────────────────────────

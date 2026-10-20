@@ -843,6 +843,7 @@ The `phone_contacts` bundled skill provides tools for managing a contact directo
 | `PINCER_VOICE_MAX_CALL_DURATION` | No | `600` | Max call seconds |
 | `PINCER_VOICE_HANGUP_GRACE_S` | No | `2.0` | Seconds between the agent's farewell finishing and the hangup (the "both said bye" window) |
 | `PINCER_VOICE_MAX_HOLD_TIME` | No | `300` | Max IVR hold seconds |
+| `PINCER_VOICE_TRANSFER_MAX_DURATION_S` | No | `3600` | Ceiling for a call transferred to a human (`<Dial timeLimit>`, 60–14400); also the stuck-call allowance for transferred calls |
 | `PINCER_VOICE_RECORDING_ENABLED` | No | `false` | Enable recording |
 | `PINCER_VOICE_CONSENT_MODE` | No | `one_party` | Consent mode |
 | `PINCER_VOICE_OUTBOUND_ENABLED` | No | `false` | Enable outbound calls |

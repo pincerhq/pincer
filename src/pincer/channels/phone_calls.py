@@ -1388,7 +1388,7 @@ class VoiceChannel(BaseChannel):
         from pincer.voice.telemetry import hooks as telemetry
 
         self._close_turn_trace(call_sid)
-        reason = str(state.metadata.get("end_reason") or "")
+        reason = str(state.metadata.get("end_reason") or state.metadata.get("remote_end_reason") or "")
         if not reason and sm is not None and sm.state.transitions:
             reason = str(sm.state.transitions[-1].reason or "")
         with contextlib.suppress(Exception):

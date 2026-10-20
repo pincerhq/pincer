@@ -124,6 +124,12 @@ def _build_instruments() -> dict[str, Any] | None:
                 description="Receptionist events: answered, intent (by intent), message_taken, booking, "
                 "transfer, silent_hangup, busy_capacity, blocked",
             ),
+            "receptionist_transfers": meter.create_counter(
+                "pincer.voice.receptionist.transfers",
+                unit="1",
+                description="Receptionist transfers to a human, by result "
+                "(completed, busy, no_answer, failed, caller_hangup)",
+            ),
             # Sprint 11: every in-call tool decision, by tier / action / reason / mode
             "tool_decisions": meter.create_counter(
                 "pincer.voice.tool.decisions",
@@ -315,6 +321,14 @@ def record_inbound_event(event: str, *, intent: str = "", language: str = "") ->
     if inst is None:
         return
     _safe(lambda: inst["inbound_events"].add(1, _dims(event=event, intent=intent, language=language)))
+
+
+def record_receptionist_transfer(result: str, *, language: str = "") -> None:
+    """How a transfer to a human ended: completed, busy, no_answer, failed, caller_hangup."""
+    inst = _get()
+    if inst is None:
+        return
+    _safe(lambda: inst["receptionist_transfers"].add(1, _dims(result=result, language=language)))
 
 
 def record_tool_decision(*, tool: str, action: str, reason: str = "", tier: str = "", mode: str = "") -> None:
