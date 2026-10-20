@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import bindparam, text
+from sqlalchemy import bindparam, text, update
 
 from pincer.models.telephony import TelephonyCall, TelephonyEvent, TelephonySpan, TelephonyTurn
 
@@ -168,6 +168,15 @@ class TelemetryStatements:
             "call_id",
             ", ".join(_call_assignment(column) for column in known),
         )
+
+    def correct_call(self, call_id: str, values: dict[str, Any]) -> Executable:
+        """Overwrite a finished call row's outcome fields.
+
+        For backfills only (`pincer telephony reclassify`): unlike `call()`, a
+        terminal status is replaced, because correcting it is the point.
+        """
+        calls = _TABLES["pincer_telephony_calls"]
+        return update(calls).where(calls.c.call_id == call_id).values(**values)
 
     def turn(self, known: dict[str, Any]) -> Executable:
         """Write a completed turn's derived latencies.

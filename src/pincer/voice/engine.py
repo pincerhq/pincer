@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from pincer.config import Settings
+    from pincer.observability.failure_codes import FailureCode
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,19 @@ class CallState:
         transcribed too, and it must not suppress the AMD hangup."""
         if (datetime.now(UTC) - self.started_at).total_seconds() > AMD_GRACE_SECONDS:
             self.metadata["caller_spoke"] = True
+
+
+#: Metadata key for WHY a call ended: a `FailureCode` value, set by whoever learns it.
+END_CODE_KEY = "end_code"
+
+
+def set_end_cause(state: CallState, code: FailureCode | str, display: str = "") -> None:
+    """Record why the call ended. First writer wins: the earliest authoritative
+    signal (Twilio status, AMD) must not be overwritten by a later generic one
+    (our own end_call, shutdown)."""
+    state.metadata.setdefault(END_CODE_KEY, str(code))
+    if display:
+        state.metadata.setdefault("end_reason", display)
 
 
 @dataclass

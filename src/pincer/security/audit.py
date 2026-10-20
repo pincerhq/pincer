@@ -53,6 +53,8 @@ class AuditAction(StrEnum):
     VOICE_THREAD_LIFECYCLE = "voice_thread_lifecycle"
     # Sprint 15: one row per live listen-in session (who listened to which call, how long)
     LISTEN_IN_SESSION = "listen_in_session"
+    # One row per applied `pincer telephony reclassify` backfill, with its counts
+    TELEPHONY_RECLASSIFY = "telephony.reclassify"
 
 
 @dataclass

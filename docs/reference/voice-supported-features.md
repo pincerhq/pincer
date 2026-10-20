@@ -73,7 +73,7 @@ anything marked ⚠️ works but has a caveat you must read.
 | Synthetic canary | ✅ | Real loop call, default every 6h |
 | Per-call cost record | ⚠️ | Complete, but only as accurate as your `PINCER_PRICE_*` rates |
 | Weekly failure digest | ✅ | Week-over-week deltas |
-| SLO tracking + error budget | ⚠️ | Availability is **inferred** from canary runs, not measured |
+| SLO tracking + error budget | ⚠️ | Availability is **inferred** from canary runs, not measured. Outcome numbers recorded before the October 2026 outbound-outcome fix were inflated (see `pincer telephony reclassify`) |
 | Runbook | ✅ | 15 failure modes, every alert links to its section |
 | **Multi-tenant (many customers per instance)** | ❌ | One instance per customer. See the capacity statement |
 | **Postgres backend** | ❌ | SQLite only; the scale trigger is documented |

@@ -96,6 +96,15 @@ POLICY_BLOCKED: frozenset[FailureCode] = frozenset(
     }
 )
 
+# Twilio call statuses that mean the call never connected, and what each one is.
+# `canceled` is ours (we hung up before an answer), so it is not "unreachable".
+NOT_CONNECTED_STATUS: dict[str, FailureCode] = {
+    "busy": FailureCode.BUSY,
+    "no-answer": FailureCode.NO_ANSWER,
+    "failed": FailureCode.CALL_SETUP,
+    "canceled": FailureCode.CALL_SETUP,
+}
+
 # Everything else that is not NONE is ours to fix.
 EXCLUDED_FROM_SLO: frozenset[FailureCode] = CALLEE_UNREACHABLE | POLICY_BLOCKED
 

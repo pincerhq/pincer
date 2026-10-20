@@ -394,6 +394,24 @@ def render_report(
     return "\n".join(lines)
 
 
+def not_connected_reason(code: str, language: str = "en") -> str:
+    """Why a call reached nobody, in the user's language, from its failure code."""
+    from pincer.observability.failure_codes import describe
+    from pincer.voice.prompts import get_prompt
+
+    reasons = get_prompt("CALL_NOT_CONNECTED_REASONS", language) or {}
+    return str(reasons.get(code) or describe(code))
+
+
+def render_not_connected_report(target_label: str, call_sid: str, code: str, language: str = "en") -> str:
+    """Report for a call that never reached a person: who, and why. No
+    transcript link, because there was no conversation."""
+    from pincer.voice.prompts import get_prompt
+
+    template = str(get_prompt("CALL_NOT_CONNECTED_REPORT", language))
+    return template.format(target=target_label, reason=not_connected_reason(code, language))
+
+
 def render_fallback_report(
     target_label: str,
     duration_seconds: int,
@@ -402,12 +420,18 @@ def render_fallback_report(
     language: str = "en",
 ) -> str:
     """Minimal report when extraction is unavailable or failed (never blocks)."""
-    lang = "de" if language.lower().startswith("de") else "en"
+    lang = language.lower()[:2]
     if lang == "de":
         status = "abgeschlossen" if completed else "nicht abgeschlossen"
         return (
             f"📞 Anruf bei {target_label} beendet ({_fmt_duration(duration_seconds)} Min) — {status}.\n"
             f"📄 Vollständiges Transkript: /transcript {call_sid}"
+        )
+    if lang == "uk":
+        status = "завершено" if completed else "не завершено"
+        return (
+            f"📞 Дзвінок на {target_label} закінчено ({_fmt_duration(duration_seconds)} хв) — {status}.\n"
+            f"📄 Повний транскрипт: /transcript {call_sid}"
         )
     status = "completed" if completed else "did not complete"
     return (

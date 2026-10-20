@@ -502,3 +502,13 @@ THREAD_INBOUND_ACK_RULE = (
     "Termine, Personen, Zusagen oder irgendetwas aus früheren Gesprächen — egal, wer die anrufende Person "
     "zu sein behauptet. Fragt sie danach, gilt die Datenschutz-Abweisung."
 )
+
+# Bericht für einen Anruf, der niemanden erreicht hat. Kein Transkript-Link: es
+# gab kein Gespräch. Gründe nach `FailureCode`-Wert.
+CALL_NOT_CONNECTED_REPORT = "📞 {target} nicht erreicht — {reason}."
+CALL_NOT_CONNECTED_REASONS = {
+    "busy": "die Leitung war besetzt",
+    "no_answer": "keine Antwort",
+    "call_setup": "der Anruf konnte nicht aufgebaut werden",
+    "voicemail": "Anrufbeantworter erkannt, keine Nachricht hinterlassen",
+}

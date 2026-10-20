@@ -113,6 +113,15 @@ silently open.
 
 ### Added
 
+#### `pincer telephony reclassify`
+
+Corrects the failure code of historical outbound calls that never reached a
+person, from the `call.provider_status` / `call.amd_verdict` events on their
+telemetry timeline. Dry run by default (`--since 30d`, `--json`); `--apply`
+updates `voice_calls` and the telemetry call row in one transaction and writes
+a `telephony.reclassify` audit row. Idempotent. Only calls inside the telemetry
+retention window (`PINCER_TELEPHONY_TELEMETRY_RETENTION_DAYS`) can be corrected.
+
 #### Storage browser API: `/api/storage`
 
 Browse, preview, edit, upload and manage files in local or cloud storage from
@@ -196,6 +205,13 @@ mounting a directory. Install the new `remote-skills` extra
 
 ### Fixed
 
+- Outbound calls that were busy, unanswered, failed, cancelled or reached
+  voicemail were recorded as completed (or, for late voicemail, as callee
+  hang-ups). They now get their own failure codes, which inflated success
+  rate, SLO and GA-gate numbers before. `pincer telephony reclassify` corrects
+  history within the telemetry retention window. The user's report for such a
+  call now says plainly that it did not connect and why, in their language
+  (en/de/uk), without a transcript link.
 - `pincer doctor` and `GET /api/doctor` now check the configured `skills_dir`;
   they always looked at `~/.pincer/skills` before.
 

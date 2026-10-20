@@ -380,12 +380,10 @@ async def _handle_amd_verdict(call_sid: str, answered_by: str, user_lang: str) -
         return False
 
     logger.info("Voicemail/machine detected [%s] (%s) — hanging up", call_sid, answered_by)
-    voicemail_reasons = {
-        "en": "voicemail detected, no message left",
-        "de": "Anrufbeantworter erkannt, keine Nachricht hinterlassen",
-        "uk": "виявлено автовідповідач, повідомлення не залишено",
-    }
-    voicemail_reason = voicemail_reasons[user_lang]
+    from pincer.observability.failure_codes import FailureCode
+    from pincer.voice.engine import set_end_cause
+    from pincer.voice.outcome import not_connected_reason
+
     # Appointment calls (Sprint 6): voicemail triggers the retry
     # policy. Consumes the scheduling context BEFORE end_call so the
     # post-call pipeline doesn't double-handle it.
@@ -397,15 +395,16 @@ async def _handle_amd_verdict(call_sid: str, answered_by: str, user_lang: str) -
     if vm_state is not None:
         # The post-call pipeline owns the final message: sending the
         # ENDED stage here would pop the call from tracking and the
-        # structured report would be built but never delivered.
-        vm_state.metadata["end_reason"] = voicemail_reason
+        # structured report would be built but never delivered. Only the
+        # code is stored; the report renders it in the report language.
+        set_end_cause(vm_state, FailureCode.VOICEMAIL)
     elif _already_torn_down(call_sid):
         # The state was torn down moments ago, not absent all along: end_call
         # already ran and its post-call pipeline owns the final message.
         logger.info("AMD verdict [%s] — call already torn down, leaving the report to the pipeline", call_sid)
     else:
         # No conversation state -> end_call fires no post-call pipeline
-        await notify_ended(call_sid, voicemail_reason)
+        await notify_ended(call_sid, not_connected_reason(FailureCode.VOICEMAIL, user_lang))
     if _engine:
         # The call is live (greeting a voicemail box) — always hang up
         await _engine.end_call(call_sid)
@@ -485,27 +484,11 @@ async def voice_status(request: Request) -> PlainTextResponse:
 
     elif status in ("busy", "no-answer", "failed", "canceled"):
         # Call never connected — the user still gets a final status (T1.3/T1.5)
-        reasons = {
-            "en": {
-                "busy": "the line was busy",
-                "no-answer": "no answer",
-                "failed": "the call could not be placed",
-                "canceled": "the call was canceled",
-            },
-            "de": {
-                "busy": "die Leitung war besetzt",
-                "no-answer": "keine Antwort",
-                "failed": "der Anruf konnte nicht aufgebaut werden",
-                "canceled": "der Anruf wurde abgebrochen",
-            },
-            "uk": {
-                "busy": "лінія була зайнята",
-                "no-answer": "немає відповіді",
-                "failed": "не вдалося здійснити дзвінок",
-                "canceled": "дзвінок було скасовано",
-            },
-        }
-        not_connected_reason = reasons[user_lang].get(status, status)
+        from pincer.observability.failure_codes import NOT_CONNECTED_STATUS
+        from pincer.voice.engine import set_end_cause
+        from pincer.voice.outcome import not_connected_reason
+
+        end_code = NOT_CONNECTED_STATUS[status]
         # Appointment calls (Sprint 6): busy/no-answer/failed triggers the retry policy
         if _settings is not None:
             from pincer.voice.scheduling import handle_call_not_connected
@@ -515,14 +498,15 @@ async def voice_status(request: Request) -> PlainTextResponse:
         if _engine is not None and nc_state is not None:
             # Conversation state exists (e.g. a late failure) -> the post-call
             # pipeline sends the final report; pre-empting it here would
-            # consume the ENDED stage and drop that report.
-            nc_state.metadata["end_reason"] = not_connected_reason
+            # consume the ENDED stage and drop that report. Only the code is
+            # stored; the report renders it in the report language.
+            set_end_cause(nc_state, end_code)
             await _engine.end_call(call_sid)
         elif _already_torn_down(call_sid):
             logger.info("Status '%s' [%s] — call already torn down, pipeline owns the report", status, call_sid)
         else:
-            # Usual shape: the call never connected, no pipeline will run
-            await notify_ended(call_sid, not_connected_reason)
+            # The call never had state, so no pipeline will run
+            await notify_ended(call_sid, not_connected_reason(end_code, user_lang))
 
     elif status == "completed" and _engine:
         state = _engine.get_call_state(call_sid)

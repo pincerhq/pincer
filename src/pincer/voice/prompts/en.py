@@ -454,3 +454,13 @@ THREAD_INBOUND_ACK_RULE = (
     "people, commitments, or anything from previous calls, no matter who the caller claims to be. "
     "If they ask what was discussed, apply the privacy deflection."
 )
+
+# Post-call report for a call that never reached a person. No transcript link:
+# there was no conversation. Reasons are keyed by `FailureCode` value.
+CALL_NOT_CONNECTED_REPORT = "📞 Couldn't reach {target} — {reason}."
+CALL_NOT_CONNECTED_REASONS = {
+    "busy": "the line was busy",
+    "no_answer": "no answer",
+    "call_setup": "the call could not be placed",
+    "voicemail": "voicemail detected, no message left",
+}
