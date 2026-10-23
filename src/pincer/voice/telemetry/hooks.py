@@ -253,6 +253,19 @@ def amd_verdict(call_sid: str, answered_by: str) -> None:
         _safe(tracer.event, EventName.AMD_VERDICT, answered_by=answered_by)
 
 
+def transfer_started(call_sid: str, *, target: str, dial_timeout_s: int) -> None:
+    """The call was redirected into <Dial>: from here it is bridged, not ours."""
+    tracer = runtime.tracer_for(call_sid)
+    if tracer is not None:
+        _safe(tracer.event, EventName.TRANSFER_STARTED, target=target, dial_timeout_s=dial_timeout_s)
+
+
+def transfer_result(call_sid: str, dial_status: str, *, dial_duration_s: Any = None) -> None:
+    tracer = runtime.tracer_for(call_sid)
+    if tracer is not None:
+        _safe(tracer.event, EventName.TRANSFER_RESULT, dial_status=dial_status, dial_duration_s=dial_duration_s)
+
+
 def media_closed(call_sid: str, *, reason: str = "") -> None:
     tracer = runtime.tracer_for(call_sid)
     if tracer is not None:

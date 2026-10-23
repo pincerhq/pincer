@@ -468,9 +468,11 @@ class VoiceChannel(BaseChannel):
                         rule="stuck_calls",
                         severity=Severity.PAGE,
                         title=f"{int(signal.value)} stuck call(s) force-ended",
-                        detail=(
-                            f"Exceeded {signal.detail.get('threshold_seconds')}s: "
-                            + ", ".join(str(c.get("call_sid")) for c in signal.detail.get("stuck", []))
+                        # per call: a transferred call has a different limit
+                        detail=", ".join(
+                            f"{c.get('call_sid')}: {c.get('elapsed_seconds')}s > {c.get('limit_seconds')}s limit"
+                            + (" (transfer)" if c.get("transferring") else "")
+                            for c in signal.detail.get("stuck", [])
                         ),
                         value=signal.value,
                         threshold=0.0,
@@ -1388,7 +1390,7 @@ class VoiceChannel(BaseChannel):
         from pincer.voice.telemetry import hooks as telemetry
 
         self._close_turn_trace(call_sid)
-        reason = str(state.metadata.get("end_reason") or "")
+        reason = str(state.metadata.get("end_reason") or state.metadata.get("remote_end_reason") or "")
         if not reason and sm is not None and sm.state.transitions:
             reason = str(sm.state.transitions[-1].reason or "")
         with contextlib.suppress(Exception):

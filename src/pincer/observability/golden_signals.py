@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -304,6 +305,10 @@ async def turn_latency(settings: Settings | Any, window_hours: float | None = No
 # ── 4. Stuck calls ───────────────────────────────────────────────────
 
 
+# Time for the transfer announcement (<Say> before <Dial>) to play.
+_TRANSFER_ANNOUNCE_MARGIN_S = 30
+
+
 def stuck_calls(settings: Settings | Any, active_calls: dict[str, Any] | None = None) -> Signal:
     """Calls still running past `voice_max_call_duration` + grace.
 
@@ -324,16 +329,37 @@ def stuck_calls(settings: Settings | Any, active_calls: dict[str, Any] | None = 
         except Exception:
             active_calls = {}
 
+    # A call bridged to a human runs under the <Dial timeLimit>, which Twilio
+    # enforces from bridge time. It is only stuck if the transfer outlives the
+    # announcement, the ringing and that ceiling — measured from the transfer
+    # start, since the AI part of the call before it can be any length.
+    transfer_allowance = int(getattr(settings, "voice_transfer_max_duration_s", 3600) or 3600)
+
     stuck: list[dict[str, Any]] = []
     for call_sid, state in (active_calls or {}).items():
         duration = int(getattr(state, "duration_seconds", 0) or 0)
-        if duration > threshold:
+        metadata = getattr(state, "metadata", None)
+        transferring = isinstance(metadata, dict) and bool(metadata.get("transferring"))
+        transfer = metadata.get("transfer") if transferring and isinstance(metadata, dict) else None
+        if isinstance(transfer, dict) and isinstance(transfer.get("started_mono"), int | float):
+            elapsed = int(time.monotonic() - transfer["started_mono"])
+            dial_timeout = int(transfer.get("dial_timeout_s") or 30)
+            limit = _TRANSFER_ANNOUNCE_MARGIN_S + dial_timeout + transfer_allowance + grace
+        else:
+            elapsed = duration
+            limit = threshold + (transfer_allowance if transferring else 0)
+        if elapsed > limit:
             stuck.append(
                 {
                     "call_sid": call_sid,
                     "duration_seconds": duration,
                     "direction": str(getattr(state, "direction", "")),
-                    "over_by_seconds": duration - threshold,
+                    "over_by_seconds": elapsed - limit,
+                    # the limit this call was held to, and what was measured
+                    # against it (time since the transfer start for a bridge)
+                    "limit_seconds": limit,
+                    "elapsed_seconds": elapsed,
+                    "transferring": transferring,
                 }
             )
 

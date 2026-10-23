@@ -113,6 +113,10 @@ silently open.
 
 ### Added
 
+- `PINCER_VOICE_TRANSFER_MAX_DURATION_S` (default 3600): ceiling for a call
+  transferred to a human (`<Dial timeLimit>`), and the metric
+  `pincer.voice.receptionist.transfers{result=…}`.
+
 #### Storage browser API: `/api/storage`
 
 Browse, preview, edit, upload and manage files in local or cloud storage from
@@ -198,6 +202,12 @@ mounting a directory. Install the new `remote-skills` extra
 
 - `pincer doctor` and `GET /api/doctor` now check the configured `skills_dir`;
   they always looked at `~/.pincer/skills` before.
+- Receptionist transfers to a human were hung up after ~30 s by the phase
+  watchdog; transferred calls are now finalized by Twilio's end signal and
+  reported as transferred. Calls bridged to a human no longer trip the
+  stuck-call page (they still count toward `inbound_max_concurrent`, since a
+  failed transfer reconnects them to the agent), and a `completed` status
+  callback no longer issues a REST hangup on a call Twilio already ended.
 
 ### Added
 

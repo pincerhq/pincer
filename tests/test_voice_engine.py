@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -11,6 +11,7 @@ from pincer.voice.engine import (
     CallState,
     ConversationRelayEngine,
     MediaStreamEngine,
+    build_dial_twiml,
     get_voice_engine,
 )
 
@@ -30,6 +31,7 @@ def mock_settings():
     settings.elevenlabs_api_key = MagicMock()
     settings.elevenlabs_api_key.get_secret_value.return_value = ""
     settings.elevenlabs_voice_id = ""
+    settings.voice_transfer_max_duration_s = 3600
     return settings
 
 
@@ -148,3 +150,95 @@ class TestEngineFactory:
         mock_settings.voice_engine = "unknown"
         engine = get_voice_engine(mock_settings)
         assert isinstance(engine, ConversationRelayEngine)
+
+
+# ── Transfer to a human (<Dial>) ─────────────────────────────────────
+
+
+def test_dial_twiml_time_limit():
+    with_limit = build_dial_twiml("+4930123", timeout_s=20, time_limit_s=3600)
+    assert '<Dial timeout="20" timeLimit="3600">+4930123</Dial>' in with_limit
+    assert "timeLimit" not in build_dial_twiml("+4930123", timeout_s=20)
+
+
+@pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
+async def test_transfer_call_sets_status_callback(mock_settings, engine_cls):
+    """Inbound calls get no status callback by default: without one, nothing
+    tells us when the bridged caller and the human hang up."""
+    engine = engine_cls(mock_settings)
+    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls:
+        await engine.transfer_call("CAx", "+4930123", timeout_s=20, action_url="https://example.com/tr")
+    update = client_cls.return_value.calls.return_value.update
+    update.assert_called_once()
+    kwargs = update.call_args.kwargs
+    assert 'timeLimit="3600"' in kwargs["twiml"] and 'action="https://example.com/tr"' in kwargs["twiml"]
+    assert kwargs["status_callback"] == "https://example.com/api/apps/twilio/status"
+    assert kwargs["status_callback_method"] == "POST"
+    assert state.metadata["transferring"] is True
+    assert state.metadata["transfer"]["target"] == "+4930123"
+
+
+async def test_transfer_call_redirect_runs_off_the_event_loop(mock_settings):
+    """The Twilio REST call blocks for 1–3 s; on the loop it stalls every other call's media."""
+    import threading
+
+    engine = ConversationRelayEngine(mock_settings)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    threads: list[int] = []
+    with patch("twilio.rest.Client") as client_cls:
+        client_cls.return_value.calls.return_value.update.side_effect = lambda **_: threads.append(
+            threading.get_ident()
+        )
+        await engine.transfer_call("CAx", "+4930123")
+    assert threads and threads[0] != threading.get_ident()
+
+
+async def test_transfer_call_without_http_base_has_no_status_callback(mock_settings):
+    mock_settings.voice_webhook_base_url = ""
+    engine = ConversationRelayEngine(mock_settings)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls:
+        await engine.transfer_call("CAx", "+4930123")
+    kwargs = client_cls.return_value.calls.return_value.update.call_args.kwargs
+    assert set(kwargs) == {"twiml"}
+
+
+async def test_transfer_call_failure_leaves_call_ours(mock_settings):
+    engine = ConversationRelayEngine(mock_settings)
+    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls:
+        client_cls.return_value.calls.return_value.update.side_effect = RuntimeError("twilio down")
+        with pytest.raises(RuntimeError):
+            await engine.transfer_call("CAx", "+4930123")
+    assert "transferring" not in state.metadata
+
+
+async def test_finish_remote_ended_is_idempotent_and_never_hangs_up(mock_settings):
+    engine = ConversationRelayEngine(mock_settings)
+    on_end = AsyncMock()
+    engine.set_on_call_end(on_end)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls:
+        assert await engine.finish_remote_ended("CAx", "transferred") is True
+        assert await engine.finish_remote_ended("CAx", "provider_completed") is False
+    client_cls.assert_not_called()
+    on_end.assert_awaited_once()
+    assert on_end.call_args.args[1].metadata["remote_end_reason"] == "transferred"
+
+
+async def test_fallback_and_end_says_goodbye_then_finalizes_once(mock_settings):
+    """TTS fallback: one <Say>+<Hangup> update, then the shared teardown (no REST hangup)."""
+    engine = ConversationRelayEngine(mock_settings)
+    on_end = AsyncMock()
+    engine.set_on_call_end(on_end)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls, patch.object(engine, "end_call") as end_call:
+        await engine.fallback_and_end("CAx")
+        await engine.fallback_and_end("CAx")  # already finalized: no-op
+    update = client_cls.return_value.calls.return_value.update
+    update.assert_called_once()
+    assert "<Say" in update.call_args.kwargs["twiml"] and "<Hangup/>" in update.call_args.kwargs["twiml"]
+    end_call.assert_not_called()
+    on_end.assert_awaited_once()
+    assert engine.get_call_state("CAx") is None

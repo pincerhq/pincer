@@ -271,7 +271,11 @@ need telling.
 **What already happened automatically:** the watchdog detected a call past
 `voice_max_call_duration` + grace, forced its state machine terminal
 (`stuck_max_duration_exceeded`), and ended it. The page is telling you it
-*happened*, not that it is ongoing.
+*happened*, not that it is ongoing. It lists each call as
+`<CallSid>: <elapsed>s > <limit>s limit`; a call marked `(transfer)` was
+bridged to a human and is held to its own limit instead: 30 s announcement +
+dial timeout + `voice_transfer_max_duration_s` + grace, measured from the
+transfer start.
 
 **Your job is the cause, not the cleanup:**
 ```bash
@@ -288,6 +292,30 @@ calls never get their terminal event).
 **Verify the money stopped:** cross-check Twilio Console → Monitor → Calls that
 the call is actually terminated on their side too. Our reaper ends our state; a
 Twilio-side call that survives keeps billing.
+
+A call transferred to a human is only reaped after
+`voice_max_call_duration` + grace + `voice_transfer_max_duration_s`: Twilio
+should have ended it at the `<Dial timeLimit>` by then, so a page for one
+(`"transferring": true` in the alert context) means Twilio's end signal never
+reached us. See [Transferred call dropped](#transfer-dropped).
+
+### Transferred call dropped {#transfer-dropped}
+
+**Symptom.** A caller or the owner reports that a receptionist transfer to a
+human cut off, or the owner got no "transferred" report.
+
+```bash
+docker compose -f docker-compose.prod.yml logs pincer | grep <call_sid> | grep -i transfer
+```
+- Telephony page → the call's timeline: `call.transfer_started`, then
+  `call.transfer_result` with `dial_status` and `dial_duration_s`. No result
+  event means Twilio never reached `/api/apps/twilio/transfer-result` (check the
+  signature-rejection log and `PINCER_VOICE_WEBHOOK_BASE_URL`).
+- Twilio Console → the parent call → its child `<Dial>` leg: the dial status and
+  duration. A bridge that ended at exactly `PINCER_VOICE_TRANSFER_MAX_DURATION_S`
+  hit the `timeLimit`; raise it if staff calls legitimately run longer.
+- `busy` / `no-answer` / `failed` is expected to fall back to message-taking;
+  the caller should have heard the apology.
 
 ---
 

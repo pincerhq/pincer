@@ -39,6 +39,55 @@ def _fmt_time(ts: datetime | None, profile: BusinessProfile | None, language: st
     return ts.strftime("%Y-%m-%d %H:%M")
 
 
+# The owner-report transfer line per language; {to} is " <target>" or the staff fallback.
+_TRANSFER_TEXT: dict[str, dict[str, str]] = {
+    "de": {
+        "staff": " Mitarbeiter",
+        "failed": "📲 Weiterleitung an{to} kam nicht zustande",
+        "started": "📲 Weiterleitung an{to} gestartet",
+        "transferred": "📲 Weitergeleitet an{to}{duration}",
+        "min": "Min",
+        "s": "s",
+    },
+    "uk": {
+        "staff": " співробітника",
+        "failed": "📲 Переведення на{to} не вдалося",
+        "started": "📲 Переведення на{to} розпочато",
+        "transferred": "📲 Переведено на{to}{duration}",
+        "min": "хв",
+        "s": "с",
+    },
+    "en": {
+        "staff": " staff",
+        "failed": "📲 Transfer to{to} did not connect",
+        "started": "📲 Transfer to{to} started",
+        "transferred": "📲 Transferred to{to}{duration}",
+        "min": "min",
+        "s": "s",
+    },
+}
+
+
+def _transfer_line(reception: dict[str, Any], profile: BusinessProfile | None, lang: str) -> str:
+    """'' unless a transfer to a human was attempted."""
+    if not reception.get("transfer_attempted"):
+        return ""
+    text = _TRANSFER_TEXT.get(lang, _TRANSFER_TEXT["en"])
+    target = profile.transfer.target if profile is not None else ""
+    to = f" {target}" if target else text["staff"]
+    if reception.get("transfer_failed"):
+        return text["failed"].format(to=to)
+    if not reception.get("transfer_completed"):
+        # The call ended before Twilio reported the dial result: don't guess.
+        return text["started"].format(to=to)
+    seconds = reception.get("transfer_duration_s")
+    duration = ""
+    if isinstance(seconds, int) and seconds >= 0:
+        minutes, rest = divmod(seconds, 60)
+        duration = f" ({minutes} {text['min']} {rest} {text['s']})" if minutes else f" ({rest} {text['s']})"
+    return text["transferred"].format(to=to, duration=duration)
+
+
 def render_owner_report(
     reception: dict[str, Any],
     *,
@@ -81,7 +130,7 @@ def render_owner_report(
                 "⚠️ Der Anruf wirkte beleidigend/missbräuchlich — soll die Nummer auf die Sperrliste? "
                 "Antworte mit Ja, dann lege ich sie per Freigabe an."
             )
-        lines.append(f"📄 Transkript: /transcript {call_sid}")
+        transcript = f"📄 Transkript: /transcript {call_sid}"
     elif lang == "uk":
         unknown = "невідомо"
         lines = [
@@ -99,7 +148,7 @@ def render_owner_report(
             lines.append(f"📅 Зустріч заброньовано: {booking.get('slot_spoken', '')}{' — ' + link if link else ''}")
         if abusive:
             lines.append("⚠️ Дзвінок виглядав образливим — додати номер до списку блокування? Відповідайте «так».")
-        lines.append(f"📄 Транскрипт: /transcript {call_sid}")
+        transcript = f"📄 Транскрипт: /transcript {call_sid}"
     else:
         unknown = "unknown"
         lines = [
@@ -119,16 +168,19 @@ def render_owner_report(
             lines.append(
                 "⚠️ The call seemed abusive — add the number to the blocklist? Reply yes and I'll add it via approval."
             )
-        lines.append(f"📄 Transcript: /transcript {call_sid}")
+        transcript = f"📄 Transcript: /transcript {call_sid}"
+    if transfer := _transfer_line(reception, profile, lang):
+        lines.append(transfer)
+    lines.append(transcript)
     return "\n".join(lines)
 
 
 def should_report(reception: dict[str, Any]) -> bool:
-    """Message/booking/after-hours calls always report; a pure FAQ call that
-    left nothing behind does not wake the owner."""
+    """Message/booking/after-hours calls and transfers to a human always
+    report; a pure FAQ call that left nothing behind does not wake the owner."""
     intent = str(reception.get("intent") or "")
     slots = dict(reception.get("slots") or {})
-    if intent in (INTENT_MESSAGE, INTENT_APPOINTMENT, INTENT_AFTER_HOURS):
+    if intent in (INTENT_MESSAGE, INTENT_APPOINTMENT, INTENT_AFTER_HOURS) or reception.get("transfer_attempted"):
         return True
     return bool(slots.get("matter") or slots.get("caller_name") or (reception.get("booking") or {}).get("booked"))
 
