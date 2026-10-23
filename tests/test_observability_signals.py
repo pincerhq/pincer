@@ -289,11 +289,29 @@ def test_stuck_calls_allows_transfer(settings):
     signal = stuck_calls(settings, {"CA": transferring})
     assert signal.value == 1.0
     assert signal.detail["stuck"][0]["over_by_seconds"] == 1
+    assert signal.detail["stuck"][0]["limit_seconds"] == 600 + 60 + 3600
     assert signal.detail["stuck"][0]["transferring"] is True
     # a call that is not transferring keeps the normal limit
     plain = _call_state(700)
     plain.metadata = {}
     assert stuck_calls(settings, {"CA": plain}).value == 1.0
+
+
+def test_stuck_calls_measures_transfer_from_its_start(settings):
+    """<Dial timeLimit> counts from the bridge, not from call start: a long AI
+    conversation before a full-length bridge must not be reaped."""
+    import time
+
+    state = _call_state(640 + 30 + 30 + 3600)  # AI talk + announce + ringing + full bridge
+    now = time.monotonic()
+    state.metadata = {"transferring": True, "transfer": {"started_mono": now - (30 + 30 + 3600), "dial_timeout_s": 30}}
+    assert stuck_calls(settings, {"CA": state}).value == 0.0
+    # announce margin 30 + dial timeout 30 + timeLimit 3600 + grace 60
+    state.metadata["transfer"]["started_mono"] = now - (30 + 30 + 3600 + 60 + 5)
+    signal = stuck_calls(settings, {"CA": state})
+    assert signal.value == 1.0
+    assert signal.detail["stuck"][0]["over_by_seconds"] in (5, 6)
+    assert signal.detail["stuck"][0]["limit_seconds"] == 30 + 30 + 3600 + 60
 
 
 def test_no_active_calls_is_not_stuck(settings):

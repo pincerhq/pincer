@@ -39,33 +39,53 @@ def _fmt_time(ts: datetime | None, profile: BusinessProfile | None, language: st
     return ts.strftime("%Y-%m-%d %H:%M")
 
 
+# The owner-report transfer line per language; {to} is " <target>" or the staff fallback.
+_TRANSFER_TEXT: dict[str, dict[str, str]] = {
+    "de": {
+        "staff": " Mitarbeiter",
+        "failed": "📲 Weiterleitung an{to} kam nicht zustande",
+        "started": "📲 Weiterleitung an{to} gestartet",
+        "transferred": "📲 Weitergeleitet an{to}{duration}",
+        "min": "Min",
+        "s": "s",
+    },
+    "uk": {
+        "staff": " співробітника",
+        "failed": "📲 Переведення на{to} не вдалося",
+        "started": "📲 Переведення на{to} розпочато",
+        "transferred": "📲 Переведено на{to}{duration}",
+        "min": "хв",
+        "s": "с",
+    },
+    "en": {
+        "staff": " staff",
+        "failed": "📲 Transfer to{to} did not connect",
+        "started": "📲 Transfer to{to} started",
+        "transferred": "📲 Transferred to{to}{duration}",
+        "min": "min",
+        "s": "s",
+    },
+}
+
+
 def _transfer_line(reception: dict[str, Any], profile: BusinessProfile | None, lang: str) -> str:
     """'' unless a transfer to a human was attempted."""
     if not reception.get("transfer_attempted"):
         return ""
+    text = _TRANSFER_TEXT.get(lang, _TRANSFER_TEXT["en"])
     target = profile.transfer.target if profile is not None else ""
-    to = f" {target}" if target else ""
+    to = f" {target}" if target else text["staff"]
     if reception.get("transfer_failed"):
-        return {
-            "de": f"📲 Weiterleitung an{to or ' Mitarbeiter'} kam nicht zustande",
-            "uk": f"📲 Переведення на{to or ' співробітника'} не вдалося",
-        }.get(lang, f"📲 Transfer to{to or ' staff'} did not connect")
+        return text["failed"].format(to=to)
     if not reception.get("transfer_completed"):
         # The call ended before Twilio reported the dial result: don't guess.
-        return {
-            "de": f"📲 Weiterleitung an{to or ' Mitarbeiter'} gestartet",
-            "uk": f"📲 Переведення на{to or ' співробітника'} розпочато",
-        }.get(lang, f"📲 Transfer to{to or ' staff'} started")
+        return text["started"].format(to=to)
     seconds = reception.get("transfer_duration_s")
     duration = ""
     if isinstance(seconds, int) and seconds >= 0:
-        unit_min, unit_s = {"de": ("Min", "s"), "uk": ("хв", "с")}.get(lang, ("min", "s"))
         minutes, rest = divmod(seconds, 60)
-        duration = f" ({minutes} {unit_min} {rest} {unit_s})" if minutes else f" ({rest} {unit_s})"
-    return {
-        "de": f"📲 Weitergeleitet an{to or ' Mitarbeiter'}{duration}",
-        "uk": f"📲 Переведено на{to or ' співробітника'}{duration}",
-    }.get(lang, f"📲 Transferred to{to or ' staff'}{duration}")
+        duration = f" ({minutes} {text['min']} {rest} {text['s']})" if minutes else f" ({rest} {text['s']})"
+    return text["transferred"].format(to=to, duration=duration)
 
 
 def render_owner_report(
@@ -110,9 +130,7 @@ def render_owner_report(
                 "⚠️ Der Anruf wirkte beleidigend/missbräuchlich — soll die Nummer auf die Sperrliste? "
                 "Antworte mit Ja, dann lege ich sie per Freigabe an."
             )
-        if transfer := _transfer_line(reception, profile, lang):
-            lines.append(transfer)
-        lines.append(f"📄 Transkript: /transcript {call_sid}")
+        transcript = f"📄 Transkript: /transcript {call_sid}"
     elif lang == "uk":
         unknown = "невідомо"
         lines = [
@@ -130,9 +148,7 @@ def render_owner_report(
             lines.append(f"📅 Зустріч заброньовано: {booking.get('slot_spoken', '')}{' — ' + link if link else ''}")
         if abusive:
             lines.append("⚠️ Дзвінок виглядав образливим — додати номер до списку блокування? Відповідайте «так».")
-        if transfer := _transfer_line(reception, profile, lang):
-            lines.append(transfer)
-        lines.append(f"📄 Транскрипт: /transcript {call_sid}")
+        transcript = f"📄 Транскрипт: /transcript {call_sid}"
     else:
         unknown = "unknown"
         lines = [
@@ -152,9 +168,10 @@ def render_owner_report(
             lines.append(
                 "⚠️ The call seemed abusive — add the number to the blocklist? Reply yes and I'll add it via approval."
             )
-        if transfer := _transfer_line(reception, profile, lang):
-            lines.append(transfer)
-        lines.append(f"📄 Transcript: /transcript {call_sid}")
+        transcript = f"📄 Transcript: /transcript {call_sid}"
+    if transfer := _transfer_line(reception, profile, lang):
+        lines.append(transfer)
+    lines.append(transcript)
     return "\n".join(lines)
 
 

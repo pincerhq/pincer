@@ -468,9 +468,11 @@ class VoiceChannel(BaseChannel):
                         rule="stuck_calls",
                         severity=Severity.PAGE,
                         title=f"{int(signal.value)} stuck call(s) force-ended",
-                        detail=(
-                            f"Exceeded {signal.detail.get('threshold_seconds')}s: "
-                            + ", ".join(str(c.get("call_sid")) for c in signal.detail.get("stuck", []))
+                        # per call: a transferred call has a different limit
+                        detail=", ".join(
+                            f"{c.get('call_sid')}: {c.get('elapsed_seconds')}s > {c.get('limit_seconds')}s limit"
+                            + (" (transfer)" if c.get("transferring") else "")
+                            for c in signal.detail.get("stuck", [])
                         ),
                         value=signal.value,
                         threshold=0.0,

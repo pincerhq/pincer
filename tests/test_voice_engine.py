@@ -179,6 +179,21 @@ async def test_transfer_call_sets_status_callback(mock_settings, engine_cls):
     assert state.metadata["transfer"]["target"] == "+4930123"
 
 
+async def test_transfer_call_redirect_runs_off_the_event_loop(mock_settings):
+    """The Twilio REST call blocks for 1–3 s; on the loop it stalls every other call's media."""
+    import threading
+
+    engine = ConversationRelayEngine(mock_settings)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    threads: list[int] = []
+    with patch("twilio.rest.Client") as client_cls:
+        client_cls.return_value.calls.return_value.update.side_effect = lambda **_: threads.append(
+            threading.get_ident()
+        )
+        await engine.transfer_call("CAx", "+4930123")
+    assert threads and threads[0] != threading.get_ident()
+
+
 async def test_transfer_call_without_http_base_has_no_status_callback(mock_settings):
     mock_settings.voice_webhook_base_url = ""
     engine = ConversationRelayEngine(mock_settings)
@@ -210,3 +225,20 @@ async def test_finish_remote_ended_is_idempotent_and_never_hangs_up(mock_setting
     client_cls.assert_not_called()
     on_end.assert_awaited_once()
     assert on_end.call_args.args[1].metadata["remote_end_reason"] == "transferred"
+
+
+async def test_fallback_and_end_says_goodbye_then_finalizes_once(mock_settings):
+    """TTS fallback: one <Say>+<Hangup> update, then the shared teardown (no REST hangup)."""
+    engine = ConversationRelayEngine(mock_settings)
+    on_end = AsyncMock()
+    engine.set_on_call_end(on_end)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls, patch.object(engine, "end_call") as end_call:
+        await engine.fallback_and_end("CAx")
+        await engine.fallback_and_end("CAx")  # already finalized: no-op
+    update = client_cls.return_value.calls.return_value.update
+    update.assert_called_once()
+    assert "<Say" in update.call_args.kwargs["twiml"] and "<Hangup/>" in update.call_args.kwargs["twiml"]
+    end_call.assert_not_called()
+    on_end.assert_awaited_once()
+    assert engine.get_call_state("CAx") is None

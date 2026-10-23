@@ -199,14 +199,14 @@ class VoiceEngine(ABC):
         live = self._active_calls.get(call_sid)
         if live is not None:
             live.metadata["transferring"] = True
-            live.metadata["transfer"] = {"target": target_number, "started_mono": time.monotonic()}
+            live.metadata["transfer"] = {
+                "target": target_number,
+                "started_mono": time.monotonic(),
+                "dial_timeout_s": timeout_s,
+            }
         try:
             from twilio.rest import Client
 
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-            )
             twiml = build_dial_twiml(
                 target_number,
                 timeout_s=timeout_s,
@@ -220,7 +220,16 @@ class VoiceEngine(ABC):
             if base.startswith(("http://", "https://")):
                 update["status_callback"] = f"{base}/api/apps/twilio/status"
                 update["status_callback_method"] = "POST"
-            client.calls(call_sid).update(**update)
+
+            def _redirect() -> None:
+                client = Client(
+                    self._settings.twilio_account_sid,
+                    self._settings.twilio_auth_token.get_secret_value(),
+                )
+                client.calls(call_sid).update(**update)
+
+            # blocking HTTP: keep it off the loop so other calls' media keeps flowing
+            await asyncio.to_thread(_redirect)
             logger.info("Call %s transferred to %s", call_sid, target_number)
         except Exception:
             logger.exception("Transfer failed for call %s", call_sid)
@@ -245,6 +254,15 @@ class VoiceEngine(ABC):
     @abstractmethod
     async def close_media_stream(self, call_sid: str) -> None:
         """Override in MediaStreamEngine to close STT stream and consumer."""
+
+    async def end_transfer(self, call_sid: str) -> None:
+        """The <Dial> is over and the call is ours again (failed transfer →
+        reconnect). The one place the ``transferring`` flag is cleared once
+        ``transfer_call`` succeeded: from here the call counts as an AI call for
+        the stuck-call reaper and ``on_media_closed``."""
+        state = self._active_calls.get(call_sid)
+        if state is not None:
+            state.metadata.pop("transferring", None)
 
     async def on_media_closed(self, call_sid: str) -> None:
         """The media WebSocket closed: the call is over on Twilio's side.
@@ -310,10 +328,7 @@ class VoiceEngine(ABC):
             return
 
         # Twilio speaks the apology and hangs up; clean up our side now.
-        await self.close_media_stream(call_sid)
-        ended = await self._unregister_call(call_sid)
-        if ended and self._on_call_end_callback:
-            await self._on_call_end_callback(call_sid, ended)
+        await self.finish_remote_ended(call_sid)
 
     # ── Outbound registration, before the dial ────────────
     #

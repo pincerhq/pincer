@@ -31,13 +31,13 @@ D1 is the customer-facing bug. D2–D4 appear as soon as D1 is fixed, so all of 
 - A transferred call is never ended by Pincer while the caller and the human are talking, up to an explicit ceiling.
 - Each transferred call is finalized exactly once, when Twilio tells us it ended, with no REST hangup. The post-call pipeline runs and the report says the call was transferred.
 - The busy / no-answer / failed fallback to message-taking keeps working unchanged.
-- Bridged calls don't use receptionist capacity and don't page.
+- Bridged calls don't page. They keep their receptionist capacity slot (see D-1).
 - Regression tests cover each defect.
 
 **Non-goals**
 
 - Warm or attended transfer, transfer to multiple targets, or routing by department. The dead `voice/transfer.py` (`WarmTransfer`) is out of scope and gets removed in the cleanup sprint.
-- Moving Twilio REST calls off the event loop. That is a separate P0 issue; this sprint only avoids adding new blocking calls.
+- Moving Twilio REST calls off the event loop. That is a separate P0 issue; this sprint only avoids adding new blocking calls. (*Revised in review:* the transfer redirect in `transfer_call` now runs in `asyncio.to_thread`, since both engines share it; the other `Client(...)` call sites stay for the P0.)
 - Recording the bridged leg.
 
 ## 3. Design
@@ -125,29 +125,36 @@ async def finish_remote_ended(self, call_sid: str, reason: str = "") -> bool:
 
   | Input | Action |
   |---|---|
-  | `DialCallStatus=completed` (bridged conversation happened) | Store `DialCallSid`, `DialCallDuration` and `DialBridged` in `state.metadata["transfer"]`. Call `session.on_transfer_completed(duration_s)`. Call `finish_remote_ended(call_sid, "transferred")`. Return `<Hangup/>`. |
-  | `busy` / `no-answer` / `failed` / `canceled`, parent still live | Unchanged: `session.on_transfer_failed()` → reconnect TwiML with the apology greeting. `setup` pops `transferring` (`twiml_server.py:622`), the phase becomes `TAKE_MESSAGE`, and the watchdog times it again. |
+  | `DialCallStatus` `completed` or `answered`, or `DialBridged=true` (bridged conversation happened; *`answered`/`DialBridged` added in review*) | Store `DialCallSid`, `DialCallDuration` and `DialBridged` in `state.metadata["transfer"]`. Call `session.on_transfer_completed(duration_s)`. Call `finish_remote_ended(call_sid, "transferred")`. Return `<Hangup/>`. |
+  | `busy` / `no-answer` / `failed` / `canceled`, parent still live | `engine.end_transfer()` clears `transferring` right away (*revised in review*: it used to stay set until the relay `setup`, or forever if the reconnect never connected), then `session.on_transfer_failed()` → reconnect TwiML with the apology greeting. The phase becomes `TAKE_MESSAGE`, and the watchdog times it again. |
+  | Any other `DialCallStatus` (empty, unknown) and not bridged | Don't guess: no `on_transfer_*` call, `finish_remote_ended(call_sid, "transfer_result_unknown")`, return `<Hangup/>`. The report says the transfer started. (*Added in review.*) |
   | Any status, and the request's `CallStatus` is `completed` (caller hung up during ringing) | Don't build reconnect TwiML. Set `session.transfer_failed = True` with `end_reason="caller_hangup_during_transfer"`, call `finish_remote_ended`, and return `<Hangup/>`. *Open question Q1: confirm on a live call that Twilio requests the action URL and sends `CallStatus` in this case. If it doesn't, the status callback from §3.2 covers the end anyway.* |
-  | No state for the CallSid (already finalized) | Return `<Hangup/>`. Log at INFO and do nothing else. |
+  | No state for the CallSid, and the dial bridged or `CallStatus` is `completed` (already finalized) | Return `<Hangup/>`. Log at INFO and do nothing else. |
+  | No state for the CallSid, caller still on the line (state lost to a restart while ringing) | Reconnect to the relay with the generic `transfer_failed` line as the greeting (*added in review*; the call was previously hung up). |
 
 `src/pincer/voice/receptionist/session.py`
 
 - New `on_transfer_completed(duration_s: int | None)`: sets `self.transfer_completed = True`, emits metric `transfer_completed`, records `_log_action("transfer_completed", target, duration)`, and calls `_sync()`. Phase stays `TRANSFERRING`. `TRANSFERRING` is in `_BENIGN_HANGUP_PHASES`, so `_handle_call_end` maps it to `COMPLETED`.
 - Add `transfer_completed` and `transfer_duration_s` to the snapshot dict next to `transfer_attempted` / `transfer_failed` (`session.py:311-312`), so the receptionist report (`receptionist/report.py`) can print "Weitergeleitet an … (3 Min 12 s)". Add one line per language pack: `RECEPTIONIST_REPORT_TRANSFERRED`.
 
-### 3.4 Reaper and capacity (fixes D3 and D4)
+### 3.4 Reaper and capacity (fixes D3; D4 kept by design)
 
 `src/pincer/observability/golden_signals.py` → `stuck_calls()`:
 
 ```python
-transferring = bool(getattr(state, "metadata", {}).get("transferring"))
-limit = threshold + (int(getattr(settings, "voice_transfer_max_duration_s", 3600)) if transferring else 0)
-if duration > limit: ...
+transfer = metadata.get("transfer") if transferring else None
+if transfer has started_mono:
+    elapsed = monotonic() - transfer["started_mono"]
+    limit = announce_margin (30) + transfer["dial_timeout_s"] + voice_transfer_max_duration_s + grace
+else:
+    elapsed = duration
+    limit = threshold + (voice_transfer_max_duration_s if transferring else 0)
+if elapsed > limit: ...
 ```
 
-A transferred call is only "stuck" if it outlives the Dial `timeLimit` as well. At that point Twilio should already have ended it, so the page is real.
+A transferred call is only "stuck" if it outlives the announcement, the ringing and the Dial `timeLimit`. At that point Twilio should already have ended it, so the page is real. The transferring part is measured from `transfer["started_mono"]` (set in `transfer_call`), not from call start: `timeLimit` counts from the bridge, and a long AI conversation before the transfer would otherwise eat into the allowance (*revised in review*: ~640 s of AI talk + a full 3600 s bridge would have been reaped).
 
-`src/pincer/voice/twiml_server.py` → `_active_inbound_count()`: exclude states with `metadata.get("transferring")`. *Decision D-1 (product): a bridged call uses no agent or LLM capacity, so it shouldn't block new callers. If the owner wants "max N simultaneous calls on the line" instead, that is a different setting.*
+`src/pincer/voice/twiml_server.py` → `_active_inbound_count()`: unchanged — transferring calls still count. *Decision D-1 (revised in review): a failed transfer (busy / no-answer / failed) reconnects the call to ConversationRelay, where it uses agent and LLM capacity again. Excluding bridged calls would let a new caller take the slot, and the reconnect would then exceed `inbound_max_concurrent`. D4 is accepted: a bridged call is still a live line.*
 
 ### 3.5 Observability
 
@@ -186,7 +193,8 @@ All new tests go next to the existing ones. Async tests need no decorator.
 | 8 | `test_transfer_result_parent_gone_no_reconnect` | `tests/voice_harness/test_receptionist.py` | `DialCallStatus=no-answer` with `CallStatus=completed` → `<Hangup/>`, no `<Connect>`, finalized once, `end_reason=caller_hangup_during_transfer`. |
 | 9 | `test_back_from_failed_transfer_is_timed_again` | `tests/voice_harness/test_receptionist.py` | Busy → reconnect → `setup` → phase `TAKE_MESSAGE` → the watchdog times it again (so the silence/timeout exits still work). |
 | 10 | `test_stuck_calls_allows_transfer` | `tests/test_observability_signals.py` | A transferring state at 700 s isn't stuck. At `600 + 60 + 3600 + 1` s it is. A non-transferring state at 700 s still is. |
-| 11 | `test_capacity_ignores_transferred_calls` | `tests/voice_harness/test_receptionist.py` | With `inbound_max_concurrent=1` and one transferring call, a new inbound call isn't declined. |
+| 10b | `test_stuck_calls_measures_transfer_from_its_start` | `tests/test_observability_signals.py` | 640 s of AI talk + announce + ringing + a full 3600 s bridge isn't stuck; past `30 + 30 + 3600 + 60` s since the transfer start it is. |
+| 11 | `test_capacity_counts_transferred_calls` | `tests/voice_harness/test_receptionist.py` | With `inbound_max_concurrent=1` and one transferring call, a new inbound call is declined (the bridged call may reconnect to the relay). |
 | 12 | `test_media_closed_during_transfer_is_noop` | existing `tests/test_voice_media_closed.py` | Stays green after the refactor onto `finish_remote_ended`. |
 
 The gates from `AGENTS.md` must stay green: `uv run pytest`, `ruff check .`, `ruff format --check .`, `mypy src/` and `bandit -r src/pincer -ll -s B101,B104,B310,B608`.
@@ -231,6 +239,6 @@ Where the implementation differs from the design above, and why:
 - **The report line is rendered in `receptionist/report.py`**, like every other line of the owner report, not as a `RECEPTIONIST_REPORT_TRANSFERRED` prompt key. It has three states: transferred (with duration), did not connect (`transfer_failed`), and started (the call ended before Twilio reported the dial result, e.g. `/status` arrived first; the report does not guess).
 - **`should_report` is true for any attempted transfer.** A transfer-only call has intent `human`, which never produced an owner report, so "the report says the call was transferred" needed it.
 - **Caller hang-up during ringing** is `session.on_transfer_abandoned()`: `transfer_failed`, `end_reason="caller_hangup_during_transfer"` on the reception snapshot, metric `result=caller_hangup`.
-- **`transfer_call` clears `transferring` when the REST redirect raises.** The call never left the relay; leaving the flag set would hide it from capacity, give it the reaper allowance and make `on_media_closed` a no-op.
-- **Media Streams `start` pops `transferring`**, as the ConversationRelay `setup` already did, so a Media Streams call back from a failed transfer is ours again.
+- **`transfer_call` clears `transferring` when the REST redirect raises.** The call never left the relay; leaving the flag set would give it the reaper allowance and make `on_media_closed` a no-op.
+- **Media Streams `start` clears `transferring`**, as the ConversationRelay `setup` does, so a Media Streams call back from a failed transfer is ours again. Both go through `VoiceEngine.end_transfer()`, the only place the flag is cleared after a successful `transfer_call` (*revised in review*).
 - **Test 5, reversed order:** when `/status completed` arrives before `/transfer-result`, the call is finalized as `COMPLETED` once and the late dial result is a no-op, but `transfer_completed` cannot be known, so the report says the transfer started.
