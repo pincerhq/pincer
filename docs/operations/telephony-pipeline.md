@@ -64,9 +64,15 @@ Consequences for measurement:
   token reached the WebSocket — that is *text handed to Twilio*, not audio
   played to the caller. TTS latency on this engine is Twilio-internal and
   invisible.
-* Barge-in is handled by Twilio; we receive `{"type":"interrupt"}` after the
-  fact. `ConversationRelayEngine.interrupt_speech` is a no-op that only counts
-  the interruption (sending a Media-Streams `clear` here is Twilio error 64107).
+* Twilio stops its own playback on barge-in and then sends
+  `{"type":"interrupt"}`. `relay_ws` passes it to `on_caller_barge_in`, which
+  cancels the turn still streaming tokens and re-marks unheard agent lines from
+  `utteranceUntilInterrupt`. `ConversationRelayEngine.interrupt_speech` only
+  counts the interruption (sending a Media-Streams `clear` here is Twilio
+  error 64107).
+* The socket loop never awaits a turn: `prompt` hands the utterance to a
+  per-call task (`VoiceChannel._on_caller_speech`), so `interrupt` and the next
+  `prompt` are read while the agent is still talking.
 * Tokens are buffered by Twilio until `last=true`, so the engine keeps an
   `open_stream` flag and must close the utterance explicitly.
 
@@ -106,9 +112,24 @@ Consequences:
 
 * Deepgram gives word-level start/end times (`TranscriptWord`), which is why
   `analytics_method = "exact"` here. Speech-end is therefore **observable**.
-* `interrupt_speech` cancels the TTS stream and sends Twilio `{"event":"clear"}`
-  — this is the only place a buffer-clear actually happens, and Twilio sends no
-  acknowledgement for it.
+* `interrupt_speech` bumps the call's speech epoch (stopping that call's
+  synthesis at its next chunk — the TTS provider is shared, so it is never
+  cancelled as a whole) and sends Twilio `{"event":"clear"}` — this is the only
+  place a buffer-clear actually happens, and Twilio sends no acknowledgement
+  for it.
+* Barge-in detection lives in the transcript consumer, while the agent is
+  audible (`playout_until_ns` in the future — estimated from the μ-law bytes
+  written, 8000 bytes = 1 s, since Twilio does not report playout).
+  `PINCER_VOICE_BARGE_IN_TRIGGER` picks the trigger:
+  * `vad` (default): Deepgram `SpeechStarted`, ignored in the first
+    `BARGE_IN_ARM_DELAY_MS` (250 ms) of a stretch of agent audio (echo of our
+    own onset); recognised words still trigger if VAD missed.
+  * `interim`: only recognised words (at least
+    `PINCER_VOICE_BARGE_IN_MIN_WORDS`, default 1). Use it on lines where VAD
+    reacts to coughs, noise or speakerphone echo.
+  * `off`: never; the caller's next final utterance still cancels the turn.
+* The low-confidence re-ask is a task (`aux_speech_task`), so the consumer
+  keeps reading while it plays; the next final transcript cancels it.
 * Time-to-first-audio-chunk is measured today (`_SpeechProgress.first_chunk_ms`,
   `CallMetrics.record_tts_first_chunk`).
 * Writing a media frame to the WebSocket is **not** playback. Twilio buffers an
@@ -243,8 +264,8 @@ Written as one `TURN_LATENCY` log line, one JSONL record in
    hears sentence one. Summing stages double-counts.
 4. Nothing is stored per call in a queryable place. The JSONL is the only
    per-turn record and it is not joined to `voice_calls`.
-5. Barge-in reaction is recorded in-memory only (`CallMetrics.barge_in_reactions_ms`)
-   and nothing ever calls `record_barge_in_reaction`.
+5. Barge-in reaction is recorded in-memory only (`CallMetrics.barge_in_reactions_ms`,
+   Media Streams: speech onset from Deepgram word timing → `clear` written).
 6. No correlation ids beyond `call_sid`. No trace/span, no turn id, no provider
    request ids, no deployment version.
 
@@ -252,8 +273,9 @@ Written as one `TURN_LATENCY` log line, one JSONL record in
 
 | Behaviour | Where | Telemetry implication |
 |---|---|---|
-| Turn runs as its own task `voice-turn-{sid}` | `phone_calls.py` | context must be carried into the task, not read from a global |
-| Barge-in cancels the prior turn, then `interrupt_speech` | `_cancel_prior_turn` | two separate events: cancellation and buffer clear |
+| Each utterance runs as its own task `voice-utterance-{sid}`, serialized per call by a lock; the LLM turn is a sub-task `voice-turn-{sid}` awaited outside the lock | `phone_calls.py` | context must be carried into the task, not read from a global; the read loops never await a turn |
+| Barge-in cancels the prior turn, then `interrupt_speech` — on the next utterance (`_cancel_prior_turn`) or as soon as it is detected (`_on_barge_in`) | `phone_calls.py` | two separate events: cancellation and buffer clear |
+| Call end cancels the in-flight turn and queued utterances | `_handle_call_end` | the turn trace closes as `call_ended`, not as an interruption |
 | Deterministic handlers speak and return early (gate re-ask, receptionist, mutual goodbye) | `_handle_speech_turn` | **not every turn reaches the LLM** — a "turn" with no LLM span is normal, not missing telemetry |
 | Buffered drift mode re-runs the whole turn through `check_and_fix` with one regeneration | `_speak_guarded_block` | a second LLM request inside one turn |
 | TTS failure retries once, resuming at `segments_done` | `MediaStreamEngine.send_speech` | attempt number belongs on the TTS span |

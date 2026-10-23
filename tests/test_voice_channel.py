@@ -25,6 +25,7 @@ def mock_engine():
     engine.get_active_calls = MagicMock(return_value={})
     engine.get_call_state = MagicMock(return_value=None)
     engine.set_on_speech = MagicMock()
+    engine.set_on_barge_in = MagicMock()
     engine.set_on_call_end = MagicMock()
     return engine
 

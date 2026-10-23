@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import UTC, datetime
@@ -13,8 +14,10 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from pincer.voice import twiml_server
-from pincer.voice.engine import CallDirection, CallState
+from pincer.channels.phone_calls import VoiceChannel
+from pincer.voice import scheduling, twiml_server
+from pincer.voice.engine import CallDirection, CallState, ConversationRelayEngine
+from pincer.voice.transcript import Speaker
 from pincer.voice.webhook_auth import WS_RELAY_PATH, WS_STREAM_PATH, signed_ws_query, ws_token
 
 
@@ -23,6 +26,7 @@ class FakeEngine:
         self.states: dict[str, CallState] = {}
         self.speech_inputs: list[tuple[str, str]] = []
         self.interrupts: list[str] = []
+        self.heard: list[str | None] = []
         self.started: list[tuple[str, str, CallDirection]] = []
         self.fallbacks: list[str] = []
         self.media_closed: list[str] = []
@@ -54,8 +58,9 @@ class FakeEngine:
     async def on_speech_input(self, call_sid: str, text: str) -> None:
         self.speech_inputs.append((call_sid, text))
 
-    async def interrupt_speech(self, call_sid: str) -> None:
+    async def on_caller_barge_in(self, call_sid: str, heard: str | None = None) -> None:
         self.interrupts.append(call_sid)
+        self.heard.append(heard)
 
     def get_active_calls(self) -> dict[str, CallState]:
         return dict(self.states)
@@ -370,3 +375,155 @@ class TestRelayWebSocketAuth:
             ws.send_text(json.dumps({"type": "prompt", "voicePrompt": "hi"}))
         assert engine.answered == ["CA_open"]
         assert ("CA_open", "hi") in engine.speech_inputs
+
+
+# ── Barge-in through the real read loop ─────────────────────────────────────
+#
+# The FakeEngine above returns from on_speech_input at once, so it can never
+# show the socket loop blocked. These drive the production stack —
+# relay_ws → ConversationRelayEngine → VoiceChannel — with a scripted LLM that
+# stalls mid-reply, in the test's own event loop (TestClient runs the app on
+# another thread, where the stall and the interrupt could not be sequenced
+# without sleeping).
+
+OLD_FIRST = "Der erste Satz der alten Antwort."
+OLD_NEVER = "Dieser Satz darf niemals gesprochen werden."
+NEW_REPLY = "Die neue Antwort auf die Unterbrechung."
+
+
+class _Trace:
+    """Turn trace stand-in: records the cancellation, ignores the stamps."""
+
+    def __init__(self) -> None:
+        self.cancelled_with: str | None = None
+
+    def cancel(self, reason: str = "") -> None:
+        self.cancelled_with = self.cancelled_with or reason
+
+    def __getattr__(self, _name: str) -> Any:
+        return lambda *_a, **_k: None
+
+
+@pytest.fixture
+def relay_call(monkeypatch):
+    from test_voice_streaming_turn import FakeStreamAgent, _settings
+    from voice_harness.transport_fakes import FakeSocket
+
+    scheduling._reset_for_tests()
+    monkeypatch.setattr("twilio.rest.Client", MagicMock())  # real engine: ending a call would hit Twilio
+
+    async def _authenticated(*_args) -> bool:
+        return True
+
+    async def _start(scripts):
+        settings = _settings()
+        engine = ConversationRelayEngine(settings)
+        channel = VoiceChannel(settings)
+        channel.set_engine(engine)
+        agent = FakeStreamAgent(scripts)
+        channel.set_stream_agent(agent)
+        traces: list[_Trace] = []
+
+        def _open_trace(call_sid, _state, _arrival_ns, _markers=None):
+            traces.append(_Trace())
+            channel._turn_traces[call_sid] = traces[-1]
+            return traces[-1]
+
+        channel._open_turn_trace = _open_trace
+
+        async def _handler(_incoming):
+            return ""
+
+        await channel.start(_handler)
+        monkeypatch.setattr(twiml_server, "_engine", engine)
+        monkeypatch.setattr(twiml_server, "_settings", settings)
+        monkeypatch.setattr(twiml_server, "_authenticate_ws", _authenticated)
+        await engine.on_call_start("CA_cr", "+4930123456", CallDirection.INBOUND, language="de")
+        sock = FakeSocket()
+        loop = asyncio.create_task(twiml_server.relay_ws(sock))
+        sock.push(type="setup", callSid="CA_cr", **{"from": "+4930123456"})
+        return engine, channel, agent, sock, loop, traces
+
+    yield _start
+    scheduling._reset_for_tests()
+
+
+def _scripts():
+    from test_voice_streaming_turn import text_chunks
+
+    return [text_chunks(f"{OLD_FIRST} ", OLD_NEVER), text_chunks(NEW_REPLY)]
+
+
+class TestRelayBargeIn:
+    # regression: fails on dev @ 0a1c320 (the loop never reads the interrupt)
+    async def test_interrupt_is_read_and_cancels_the_paused_turn(self, relay_call):
+        engine, channel, agent, sock, loop, traces = await relay_call(_scripts())
+        agent.pause_after = 1
+        sock.push(type="prompt", voicePrompt="Erste Frage?", last=True)
+        await asyncio.wait_for(agent.paused.wait(), timeout=2)
+        assert sock.tokens() == [OLD_FIRST]
+
+        # The turn is still running. The read loop must get to this anyway.
+        agent.pause_after = None
+        sock.push(type="interrupt", utteranceUntilInterrupt="Der erste Satz", durationUntilInterruptMs=900)
+        await asyncio.wait_for(sock.inbox.join(), timeout=2)
+        assert traces[0].cancelled_with == "barge_in"  # before the LLM was ever resumed
+        assert "CA_cr" not in channel._active_turns
+
+        sock.push(type="prompt", voicePrompt="Zweite Frage", last=True)
+        await asyncio.wait_for(sock.inbox.join(), timeout=2)
+        await channel.wait_for_turn("CA_cr")
+
+        assert sock.tokens() == [OLD_FIRST, NEW_REPLY]
+        transcript = channel.get_transcript("CA_cr")
+        old_line = next(e for e in transcript.entries if e.speaker == Speaker.AGENT and e.text == OLD_FIRST)
+        assert old_line.state == "interrupted"
+
+        sock.hang_up()
+        await asyncio.wait_for(loop, timeout=2)
+        await channel.stop()
+
+    # regression: fails on dev @ 0a1c320
+    async def test_interrupt_and_the_next_prompt_count_once(self, relay_call):
+        engine, channel, agent, sock, loop, _traces = await relay_call(_scripts())
+        counted: list[str] = []
+        original = engine.interrupt_speech
+
+        async def _counting(call_sid: str) -> None:
+            counted.append(call_sid)
+            await original(call_sid)
+
+        engine.interrupt_speech = _counting
+        agent.pause_after = 1
+        sock.push(type="prompt", voicePrompt="Erste Frage?", last=True)
+        await asyncio.wait_for(agent.paused.wait(), timeout=2)
+        agent.pause_after = None
+        sock.push(type="interrupt", utteranceUntilInterrupt="")
+        sock.push(type="prompt", voicePrompt="Moment!", last=True)
+        await asyncio.wait_for(sock.inbox.join(), timeout=2)
+        await channel.wait_for_turn("CA_cr")
+
+        assert counted == ["CA_cr"]
+        assert sock.tokens()[-1] == NEW_REPLY
+        sock.hang_up()
+        await asyncio.wait_for(loop, timeout=2)
+        await channel.stop()
+
+    # regression: fails on dev @ 0a1c320 (the hangup is never read mid-turn)
+    async def test_hangup_mid_reply_stops_the_turn(self, relay_call, caplog):
+        engine, channel, agent, sock, loop, traces = await relay_call(_scripts())
+        agent.pause_after = 1
+        sock.push(type="prompt", voicePrompt="Erste Frage?", last=True)
+        await asyncio.wait_for(agent.paused.wait(), timeout=2)
+        turn = channel._active_turns["CA_cr"]
+
+        sock.hang_up()
+        await asyncio.wait_for(loop, timeout=2)
+        await asyncio.wait_for(asyncio.wait([turn]), timeout=2)
+
+        assert turn.cancelled()
+        assert traces[0].cancelled_with == "call_ended"
+        assert not channel._active_turns and not channel._utterance_tasks
+        assert OLD_NEVER not in sock.tokens()
+        assert "DROPPED" not in caplog.text
+        await channel.stop()

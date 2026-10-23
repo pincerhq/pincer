@@ -60,7 +60,7 @@ PSTN Caller / Outbound Target
    Voice Gateway
    ├─ STT Engine (Deepgram)            ← Streaming transcription
    ├─ TTS Engine (ElevenLabs)          ← Streaming synthesis
-   └─ Barge-In Controller              ← VAD-based interrupt detection
+   └─ Barge-in detection               ← caller words during agent playout (Media Streams)
         │
    Voice Agent Brain
    ├─ Call State Machine               ← greeting → intent → verify → execute → confirm → end
@@ -82,7 +82,7 @@ PSTN Caller / Outbound Target
 | Complexity | Low — text in/out | High — raw audio |
 | Latency | ~2-3s | ~0.8-1.5s |
 | Voice quality | Twilio default | ElevenLabs custom voices |
-| Barge-in | Basic (Twilio handles) | Advanced (custom VAD) |
+| Barge-in | Twilio stops playback; we cancel the turn | Deepgram VAD / words during playout (`PINCER_VOICE_BARGE_IN_TRIGGER`) |
 | Dependencies | twilio only | twilio + deepgram + elevenlabs |
 
 Set `PINCER_VOICE_ENGINE=conversation_relay` (default) or `PINCER_VOICE_ENGINE=media_streams`.
@@ -116,8 +116,11 @@ Per-call latency is instrumented in `pincer/voice/metrics.py` and logged at call
 Provisional default: `conversation_relay` (fewest moving parts, no extra provider
 keys). Revisit after the live measurement — if media_streams meets its documented
 ~0.8–1.5s turn latency with stable Deepgram/ElevenLabs EU connectivity, it becomes
-the DACH default. The barge-in <500ms target is only achievable on media_streams
-(custom VAD, `voice/bargein.py`); ConversationRelay barge-in is Twilio-controlled.
+the DACH default. The barge-in reaction is only measured on media_streams, where we
+detect it (Deepgram `SpeechStarted`, or caller words with
+`PINCER_VOICE_BARGE_IN_TRIGGER=interim`, while our audio is still playing) and clear Twilio's buffer ourselves; it includes Deepgram's interim
+latency and is unmeasured on a live line. ConversationRelay barge-in is
+Twilio-controlled; we only cancel the turn behind it.
 
 ### Call language (Sprint 2: English default, German)
 

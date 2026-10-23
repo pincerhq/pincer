@@ -243,6 +243,19 @@ class ChannelSettings(BaseModel):
         le=1.0,
         description="Below this STT confidence the agent asks the caller to repeat instead of acting (0 = disabled)",
     )
+    voice_barge_in_trigger: str = Field(
+        default="vad",
+        pattern="^(vad|interim|off)$",
+        description=(
+            "Media Streams barge-in: 'vad' stops the agent on Deepgram's SpeechStarted (fastest; can react "
+            "to coughs/echo), 'interim' on the first recognised words, 'off' never"
+        ),
+    )
+    voice_barge_in_min_words: int = Field(
+        default=1,
+        ge=1,
+        description="Media Streams barge-in: words an interim transcript needs before it stops the agent",
+    )
     voice_machine_detection: bool = Field(
         default=True,
         description="Twilio Answering Machine Detection on outbound calls (voicemail is reported, not conversed with)",

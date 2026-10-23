@@ -7,10 +7,11 @@ dict; these tests hold the other two to the same rule, because the failure is
 silent either way — a dropped trace is simply never persisted, and a
 cross-closed one ends the wrong turn early.
 
-Only the streaming pipeline populates `_active_turns`, and the live
-VoiceChannel always calls `set_stream_agent`, so the buffered path is not
-reachable in production today. That is precisely why it needs a test: nothing
-else would notice it rotting.
+Both LLM paths — streamed and buffered — run their turn as a tracked task in
+`_active_turns`, so a barge-in cancels either one and takes its trace with it.
+What is NOT in `_active_turns` is a turn still in its deterministic handlers
+(gate, receptionist, goodbye): that one closes its own trace, and the canceller
+must leave it alone.
 """
 
 from __future__ import annotations
@@ -51,12 +52,12 @@ def _channel() -> VoiceChannel:
     return channel
 
 
-async def test_barge_in_leaves_a_buffered_turns_trace_to_its_owner():
+async def test_no_turn_in_flight_leaves_the_trace_to_its_owner():
     """No cancellable task means the open trace is not ours to take.
 
-    The buffered path never fills `_active_turns`, so the canceller used to pop
-    the trace and then return without finalising it — the turn's telemetry
-    vanished before it could be written.
+    A turn still in its deterministic handlers is not in `_active_turns`; the
+    canceller used to pop its trace and return without finalising it — the
+    turn's telemetry vanished before it could be written.
     """
     channel = _channel()
     trace = FakeTrace("in-flight")
@@ -67,6 +68,44 @@ async def test_barge_in_leaves_a_buffered_turns_trace_to_its_owner():
     assert channel._turn_traces.get("CA1") is trace, "the trace was taken from its owner"
     assert trace.cancelled_with is None
     assert trace.finished is False
+
+
+async def test_barge_in_cancels_a_buffered_turn_and_its_trace():
+    """End to end on the buffered path: the second utterance cancels the first
+    handler call, its trace closes as a barge-in, and its answer is never spoken."""
+    from pincer.voice.engine import CallDirection
+
+    channel = _channel()
+    engine = channel._engine
+    engine.wait_for_turns = False
+    traces: list[FakeTrace] = []
+
+    def _open(call_sid, _state, _arrival_ns, _markers=None):
+        traces.append(FakeTrace(f"turn-{len(traces) + 1}"))
+        channel._turn_traces[call_sid] = traces[-1]
+        return traces[-1]
+
+    channel._open_turn_trace = _open
+    entered = asyncio.Event()
+
+    async def _handler(incoming):
+        if not entered.is_set():
+            entered.set()
+            await asyncio.Event().wait()  # the first answer is never produced
+        return "Second answer."
+
+    await channel.start(_handler)
+    await engine.on_call_start("CA1", "+4930123456", CallDirection.INBOUND)
+
+    await engine.on_speech_input("CA1", "First question?")
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    await engine.on_speech_input("CA1", "Actually, something else.")
+    await channel.wait_for_turn("CA1", timeout=2)
+
+    assert traces[0].cancelled_with == "barge_in"
+    assert traces[1].cancelled_with is None and traces[1].finished
+    assert engine.spoken["CA1"] == ["Second answer."]
+    await channel.stop()
 
 
 async def test_barge_in_cancels_a_streaming_turn_and_its_trace():
@@ -134,7 +173,7 @@ async def test_the_gates_early_return_leaves_a_later_turns_trace_open():
     await channel._engine.on_call_start("CA1", "+4930123456", CallDirection.INBOUND)
     mine, successor = FakeTrace("mine"), FakeTrace("successor")
 
-    def _open(call_sid, _state, _arrival_ns):
+    def _open(call_sid, _state, _arrival_ns, _markers=None):
         channel._turn_traces[call_sid] = mine
         return mine
 

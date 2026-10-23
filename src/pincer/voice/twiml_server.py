@@ -660,8 +660,12 @@ async def relay_ws(websocket: WebSocket) -> None:
                     await _engine.on_speech_input(call_sid, text)
 
             elif msg_type == "interrupt":
+                # Twilio has already stopped its playback; this cancels the turn
+                # still writing tokens behind it. Reached mid-turn only because
+                # the prompt above hands its turn off instead of awaiting it.
                 if call_sid:
-                    await _engine.interrupt_speech(call_sid)
+                    heard = msg.get("utteranceUntilInterrupt")
+                    await _engine.on_caller_barge_in(call_sid, str(heard) if heard is not None else None)
 
             elif msg_type == "error":
                 logger.error("ConversationRelay error [%s]: %s", call_sid, msg)

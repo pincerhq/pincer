@@ -37,6 +37,10 @@ class Transcript:
     words: list[TranscriptWord] = field(default_factory=list)
     language: str = ""
     speech_final: bool = False
+    #: Deepgram VAD "SpeechStarted": the caller started talking, no text yet.
+    speech_started: bool = False
+    #: Deepgram's audio-timeline position of a SpeechStarted event (seconds).
+    timestamp_s: float | None = None
 
 
 @dataclass
@@ -161,6 +165,13 @@ class DeepgramSTTStream(STTStream):
 
                 elif msg_type == "UtteranceEnd":
                     await self._transcript_queue.put(Transcript(text="", is_final=True, speech_final=True))
+
+                elif msg_type == "SpeechStarted":
+                    # Voice onset, typically 100-300 ms before the first interim
+                    # Results — the earliest barge-in signal there is.
+                    await self._transcript_queue.put(
+                        Transcript(text="", speech_started=True, timestamp_s=parsed.get("timestamp"))
+                    )
 
         except Exception:
             if not self._closed:

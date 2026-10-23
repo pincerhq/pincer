@@ -112,6 +112,38 @@ class TranscriptLogger:
         self._entries.append(entry)
         logger.debug("[%s] %s: %s", self._call_sid, speaker, text[:100])
 
+    def mark_interrupted(self, heard: str) -> int:
+        """Re-mark the agent lines of the current reply the caller did not hear.
+
+        `heard` is what the provider says it played before the caller cut in
+        (ConversationRelay's `utteranceUntilInterrupt`). Lines it contains keep
+        their state; the first one it does not is the line that was cut off
+        ("interrupted"), and every later one never played ("undelivered").
+        Returns how many lines were re-marked.
+        """
+
+        def _norm(value: str) -> str:
+            return " ".join(value.split()).casefold()
+
+        reply: list[TranscriptEntry] = []
+        for entry in reversed(self._entries):
+            if entry.speaker == Speaker.CALLER:
+                break
+            if entry.speaker == Speaker.AGENT:
+                reply.append(entry)
+        heard_norm = _norm(heard)
+        marked = 0
+        cut = False
+        for entry in reversed(reply):
+            if not cut and _norm(entry.text) in heard_norm:
+                continue
+            if entry.state == "undelivered":
+                continue
+            entry.state = "undelivered" if cut else "interrupted"
+            cut = True
+            marked += 1
+        return marked
+
     def log_action(
         self,
         action_type: str,

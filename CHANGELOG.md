@@ -198,6 +198,29 @@ mounting a directory. Install the new `remote-skills` extra
 
 - `pincer doctor` and `GET /api/doctor` now check the configured `skills_dir`;
   they always looked at `~/.pincer/skills` before.
+- **Voice: barge-in works on live calls.** The transport read loops (the
+  ConversationRelay socket, the Media Streams transcript consumer) awaited the
+  whole LLM turn, so Twilio's `interrupt` and the caller's next utterance were
+  not read until the old reply had finished — the cancellation code was
+  unreachable in production. Utterances are now handed to a per-call task and
+  the loops keep reading.
+  - ConversationRelay: `interrupt` cancels the turn still streaming tokens, and
+    `utteranceUntilInterrupt` re-marks the agent lines the caller never heard
+    (`interrupted` / `undelivered`) in the transcript.
+  - Media Streams: the caller talking while our audio is still playing
+    cancels the turn, stops that call's synthesis and sends Twilio `clear`.
+    Deepgram `SpeechStarted` is the default trigger;
+    `PINCER_VOICE_BARGE_IN_TRIGGER=interim` waits for recognised words
+    (`PINCER_VOICE_BARGE_IN_MIN_WORDS`), `off` disables it. The reaction time
+    (speech onset → clear written) is now recorded in
+    `CallMetrics.barge_in_reactions_ms`.
+  - Media Streams: the low-confidence "please repeat" no longer stops the
+    transcript consumer while it plays.
+  - Interrupting one call no longer stops the audio of every other call
+    (ElevenLabs cancellation and its socket were shared by all calls).
+  - A hangup mid-reply cancels the turn instead of letting it stream into a
+    closed socket.
+  - The unused `voice/bargein.py` energy-VAD controller is removed.
 
 ### Added
 
