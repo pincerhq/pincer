@@ -469,6 +469,11 @@ CALL_NOT_CONNECTED_REASONS = {
     "no_answer": "no answer",
     "call_setup": "the call could not be placed",
     "voicemail": "voicemail detected, no message left",
+    "shutdown": "the assistant was restarted before anyone answered",
+    "stuck": "the call rang past its time limit and was ended",
+    "unknown": "the call ended before anyone answered",
+    # Any other code: never fall back to the English operator text.
+    "_other": "the call ended before anyone answered",
 }
 # Provider statuses whose text is more specific than their code's: `canceled`
 # shares `call_setup` with `failed`, but nothing failed.

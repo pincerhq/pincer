@@ -211,7 +211,9 @@ mounting a directory. Install the new `remote-skills` extra
   rate, SLO and GA-gate numbers before. `pincer telephony reclassify` corrects
   history within the telemetry retention window. The user's report for such a
   call now says plainly that it did not connect and why, in their language
-  (en/de/uk), without a transcript link.
+  (en/de/uk), without a transcript link — including calls still ringing when
+  the assistant was restarted, reaped by the watchdog, or ended without a
+  recorded cause.
 - `pincer doctor` and `GET /api/doctor` now check the configured `skills_dir`;
   they always looked at `~/.pincer/skills` before.
 

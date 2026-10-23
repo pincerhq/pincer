@@ -446,6 +446,11 @@ CALL_NOT_CONNECTED_REASONS = {
     "no_answer": "немає відповіді",
     "call_setup": "не вдалося здійснити дзвінок",
     "voicemail": "виявлено автовідповідач, повідомлення не залишено",
+    "shutdown": "асистента було перезапущено, перш ніж хтось відповів",
+    "stuck": "дзвінок дзвонив довше за ліміт часу і був завершений",
+    "unknown": "дзвінок завершився, перш ніж хтось відповів",
+    # Any other code: never fall back to the English operator text.
+    "_other": "дзвінок завершився, перш ніж хтось відповів",
 }
 # Provider statuses whose text is more specific than their code's: `canceled`
 # shares `call_setup` with `failed`, but nothing failed.

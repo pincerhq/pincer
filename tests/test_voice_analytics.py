@@ -210,6 +210,11 @@ def test_voicemail_null_analytics():
         ("", "no_answer", False),
         ("", "none", True),
         ("", "llm_error", True),  # the call happened; it just went badly
+        # A cut call may have been a conversation — the post-call gate reads
+        # answered_at, not the code. Do not add these to the set.
+        ("", "shutdown", True),
+        ("", "stuck", True),
+        ("", "unknown", True),
     ],
 )
 def test_was_conversational(outcome_code, failure_code, expected):
@@ -559,7 +564,9 @@ async def _run_pipeline(tmp_path, payload: str, *, conversed: bool = True, speec
         purpose="Confirm the delivery date for the order.",
         language="en",
     )
-    if not conversed:
+    if conversed:
+        state.metadata["answered_at"] = state.started_at
+    else:
         state.metadata["failure_code"] = "voicemail"
     state.ended_at = state.started_at + timedelta(seconds=60)
 

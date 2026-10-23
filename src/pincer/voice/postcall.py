@@ -22,7 +22,7 @@ from pincer.services.voice import CallsService
 from pincer.voice import analytics as an
 from pincer.voice import scheduling, status_notify, threads
 from pincer.voice.briefing import briefing_from_state, report_adherence
-from pincer.voice.engine import END_CODE_KEY, PROVIDER_STATUS_KEY
+from pincer.voice.engine import END_CODE_KEY, PROVIDER_STATUS_KEY, CallDirection
 from pincer.voice.outcome import (
     CallOutcome,
     extract_outcome,
@@ -98,16 +98,19 @@ class PostCallProcessor:
         if isinstance(state.metadata, dict) and state.metadata.get("receptionist") is True:
             return await self._process_receptionist(call_sid, state, transcript, completed)
 
+        failure_code = str(state.metadata.get("failure_code") or "")
+        conversational = an.was_conversational(failure_code=failure_code)
+        never_connected = self._never_connected(state, conversational)
+
         # Talk time is closed BEFORE extraction so the sentiment pass can see
         # it: long silences and a lopsided ratio are signals about how the call
         # went, and the extractor gets them as context rather than guessing.
-        call_analytics = self._finalize_analytics(state, completed)
+        # A call nobody answered has nothing to measure, whatever its code says.
+        call_analytics = self._finalize_analytics(state, completed, conversed=conversational and not never_connected)
 
         # Nobody was ever on the line: there is nothing to extract, nothing to
         # remember, and no transcript to link.
-        failure_code = str(state.metadata.get("failure_code") or "")
-        conversational = an.was_conversational(failure_code=failure_code)
-        if not conversational and state.metadata.get("answered_at") is None:
+        if never_connected:
             return await self._process_not_connected(
                 call_sid, state, transcript, call_analytics, target_label, failure_code, language
             )
@@ -218,6 +221,22 @@ class PostCallProcessor:
 
         return await self._deliver(call_sid, report, thread_update, language)
 
+    @staticmethod
+    def _never_connected(state: CallState, conversational: bool) -> bool:
+        """Nobody was ever on the line.
+
+        An OUTBOUND call that was never answered did not connect, whatever
+        ended it — busy, a deploy drain (`shutdown`), the watchdog (`stuck`) or
+        an unrecorded cause (`unknown`). The failure code alone cannot decide
+        this: `shutdown` on a 4-minute call is a cut conversation, `shutdown`
+        on a ringing call is a call that never happened. Inbound calls are
+        answered by definition (`_register_call` stamps `answered_at`), so for
+        them only a code that rules out a conversation counts.
+        """
+        if state.metadata.get("answered_at") is not None:
+            return False
+        return state.direction == CallDirection.OUTBOUND or not conversational
+
     async def _process_not_connected(
         self,
         call_sid: str,
@@ -290,15 +309,15 @@ class PostCallProcessor:
 
     # ── Conversation analytics ────────────────────────────
 
-    def _finalize_analytics(self, state: CallState, completed: bool) -> an.CallAnalytics:
+    def _finalize_analytics(self, state: CallState, completed: bool, *, conversed: bool) -> an.CallAnalytics:
         """Close the talk-time books for this call.
 
-        A call nobody had a conversation on (voicemail, no answer) still gets a
-        row — with null speech fields, saying "nothing to measure" rather than
-        leaving the UI to guess whether zero means silent or unmeasured.
+        A call nobody had a conversation on (voicemail, no answer, or never
+        answered) still gets a row — with null speech fields, saying "nothing
+        to measure" rather than leaving the UI to guess whether zero means
+        silent or unmeasured.
         """
         accumulator = an.get_accumulator(state)
-        conversed = an.was_conversational(failure_code=str(state.metadata.get("failure_code", "") or ""))
         if accumulator is None:
             return an.CallAnalytics(
                 method=an.METHOD_ESTIMATED,
@@ -442,7 +461,11 @@ class PostCallProcessor:
 
         # Talk time is closed before extraction, same as the outbound path, so
         # the sentiment pass sees the ratio rather than guessing at it.
-        call_analytics = self._finalize_analytics(state, completed)
+        call_analytics = self._finalize_analytics(
+            state,
+            completed,
+            conversed=an.was_conversational(failure_code=str(state.metadata.get("failure_code") or "")),
+        )
 
         # Abuse flag from the extractor (best effort; a failed extraction is simply "not abusive")
         outcome: CallOutcome | None = None

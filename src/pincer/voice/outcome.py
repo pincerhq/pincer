@@ -404,7 +404,10 @@ def not_connected_reason(code: str, language: str = "en", provider_status: str =
     if provider_status in by_status:
         return str(by_status[provider_status])
     reasons = get_prompt("CALL_NOT_CONNECTED_REASONS", language) or {}
-    return str(reasons.get(code) or describe(code))
+    if code in reasons:
+        return str(reasons[code])
+    logger.info("no localized not-connected reason for %r (%s) — using the generic line", code, language)
+    return str(reasons.get("_other") or describe(code))
 
 
 def render_not_connected_report(

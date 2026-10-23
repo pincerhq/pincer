@@ -127,10 +127,21 @@ class TestPromptI18n:
         """No fallback to English for a report the user reads in their own language."""
         from pincer.voice.prompts import de, en, uk
 
+        assert set(en.CALL_NOT_CONNECTED_REASONS) >= {
+            "busy",
+            "no_answer",
+            "call_setup",
+            "voicemail",
+            "shutdown",
+            "stuck",
+            "unknown",
+            "_other",
+        }
         for pack in (en, de, uk):
             assert "{target}" in pack.CALL_NOT_CONNECTED_REPORT
             assert "{reason}" in pack.CALL_NOT_CONNECTED_REPORT
-            assert set(pack.CALL_NOT_CONNECTED_REASONS) == {"busy", "no_answer", "call_setup", "voicemail"}
+            # A key added to one pack cannot be forgotten in another.
+            assert set(pack.CALL_NOT_CONNECTED_REASONS) == set(en.CALL_NOT_CONNECTED_REASONS)
 
     def test_german_fillers(self):
         phrases = get_filler_phrases("de")

@@ -517,6 +517,11 @@ CALL_NOT_CONNECTED_REASONS = {
     "no_answer": "keine Antwort",
     "call_setup": "der Anruf konnte nicht aufgebaut werden",
     "voicemail": "Anrufbeantworter erkannt, keine Nachricht hinterlassen",
+    "shutdown": "der Assistent wurde neu gestartet, bevor jemand abgenommen hat",
+    "stuck": "der Anruf klingelte über das Zeitlimit hinaus und wurde beendet",
+    "unknown": "der Anruf endete, bevor jemand abgenommen hat",
+    # Any other code: never fall back to the English operator text.
+    "_other": "der Anruf endete, bevor jemand abgenommen hat",
 }
 # Provider statuses whose text is more specific than their code's: `canceled`
 # shares `call_setup` with `failed`, but nothing failed.

@@ -244,23 +244,148 @@ async def test_unanswered_without_cause_is_unknown(rig, caplog):
 
 
 # 8
-async def test_shutdown_while_ringing(rig):
-    await rig.dial("CA_down")
+NOT_REACHED = {
+    "en": "📞 Couldn't reach {target} — {reason}.",
+    "de": "📞 {target} nicht erreicht — {reason}.",
+    "uk": "📞 Не вдалося додзвонитися до {target} — {reason}.",
+}
+SHUTDOWN_REASON = {
+    "en": "the assistant was restarted before anyone answered",
+    "de": "der Assistent wurde neu gestartet, bevor jemand abgenommen hat",
+    "uk": "асистента було перезапущено, перш ніж хтось відповів",
+}
+
+
+def _capture_analytics(monkeypatch) -> list[Any]:
+    captured: list[Any] = []
+    original = PostCallProcessor._finalize_analytics
+
+    def spy(self, state, completed, *, conversed):
+        result = original(self, state, completed, conversed=conversed)
+        captured.append(result)
+        return result
+
+    monkeypatch.setattr(PostCallProcessor, "_finalize_analytics", spy)
+    return captured
+
+
+def _assert_not_reached(rig, extract, analytics, language: str, reason: str) -> None:
+    report = "\n".join(rig.sent)
+    assert NOT_REACHED[language].format(target=TARGET, reason=reason) in report
+    assert "/transcript" not in report
+    assert "0:00" not in report  # the fallback report's duration line
+    # An LLM asked about an empty transcript invents an outcome.
+    extract.assert_not_called()
+    # Nothing to measure, not a silent call.
+    (row,) = analytics
+    assert row.agent_speech_ms is None
+    assert row.caller_speech_ms is None
+    assert row.sentiment_reason == "not_conversed"
+
+
+@pytest.mark.parametrize("language", ["en", "de", "uk"])
+async def test_shutdown_while_ringing(rig, monkeypatch, language):
+    extract = AsyncMock()
+    monkeypatch.setattr("pincer.voice.postcall.extract_outcome", extract)
+    analytics = _capture_analytics(monkeypatch)
+    rig.with_post_call(llm=MagicMock())
+
+    state = await rig.dial("CA_down", language=language)
     await rig.channel.stop()
+    await rig.settle()
 
     metric = rig.ended_once()
     assert metric["failure_code"] == "shutdown"
     assert metric["outcome"] == "failed"
+    assert state.metadata["failure_code"] == "shutdown"
+    _assert_not_reached(rig, extract, analytics, language, SHUTDOWN_REASON[language])
 
 
-async def test_shutdown_while_ringing_with_a_state_machine(rig):
+async def test_shutdown_while_ringing_with_a_state_machine(rig, monkeypatch):
     """No path tracks a call before it is answered today; if one ever does,
-    the deploy is still the cause of an unanswered call."""
-    state = await rig.dial("CA_down_sm")
+    the deploy is still the cause of an unanswered call — and a state machine
+    (which brings a transcript with it) must not flip the report gate."""
+    extract = AsyncMock()
+    monkeypatch.setattr("pincer.voice.postcall.extract_outcome", extract)
+    analytics = _capture_analytics(monkeypatch)
+    rig.with_post_call(llm=MagicMock())
+
+    state = await rig.dial("CA_down_sm", language="de")
     rig.channel._ensure_call_tracking("CA_down_sm", state)
     await rig.channel.stop()
+    await rig.settle()
 
     assert rig.ended_once()["failure_code"] == "shutdown"
+    _assert_not_reached(rig, extract, analytics, "de", SHUTDOWN_REASON["de"])
+
+
+@pytest.mark.parametrize(
+    ("language", "reason"),
+    [
+        ("en", "the call ended before anyone answered"),
+        ("de", "der Anruf endete, bevor jemand abgenommen hat"),
+        ("uk", "дзвінок завершився, перш ніж хтось відповів"),
+    ],
+)
+async def test_unknown_cause_while_ringing_reports_not_connected(rig, monkeypatch, language, reason):
+    extract = AsyncMock()
+    monkeypatch.setattr("pincer.voice.postcall.extract_outcome", extract)
+    analytics = _capture_analytics(monkeypatch)
+    rig.with_post_call(llm=MagicMock())
+
+    await rig.dial("CA_unk", language=language)
+    await rig.engine.end_call("CA_unk")
+    await rig.settle()
+
+    assert rig.ended_once()["failure_code"] == "unknown"
+    _assert_not_reached(rig, extract, analytics, language, reason)
+
+
+@pytest.mark.parametrize(
+    ("language", "reason"),
+    [
+        ("en", "the call rang past its time limit and was ended"),
+        ("de", "der Anruf klingelte über das Zeitlimit hinaus und wurde beendet"),
+        ("uk", "дзвінок дзвонив довше за ліміт часу і був завершений"),
+    ],
+)
+async def test_stuck_while_ringing_reports_not_connected(rig, monkeypatch, language, reason):
+    extract = AsyncMock()
+    monkeypatch.setattr("pincer.voice.postcall.extract_outcome", extract)
+    analytics = _capture_analytics(monkeypatch)
+    rig.with_post_call(llm=MagicMock())
+    signal = MagicMock(
+        value=1, detail={"stuck": [{"call_sid": "CA_stuck", "duration_seconds": 960, "over_by_seconds": 60}]}
+    )
+    monkeypatch.setattr("pincer.observability.golden_signals.stuck_calls", lambda *_a: signal)
+    monkeypatch.setattr(rig.channel, "_page_stuck_calls", AsyncMock())
+
+    await rig.dial("CA_stuck", language=language)
+    await rig.channel._reap_stuck_calls()
+    await rig.settle()
+
+    assert rig.ended_once()["failure_code"] == "stuck"
+    _assert_not_reached(rig, extract, analytics, language, reason)
+
+
+async def test_shutdown_after_answer_keeps_the_conversational_report(rig, monkeypatch):
+    """A cut conversation is still a conversation: `shutdown` alone must not
+    route a call to the not-connected report."""
+    extract = AsyncMock(return_value=None)
+    monkeypatch.setattr("pincer.voice.postcall.extract_outcome", extract)
+    rig.with_post_call(llm=MagicMock())
+
+    state = await rig.dial("CA_cut", language="de")
+    sm = await rig.answer("CA_cut")
+    assert sm.transition(CallPhase.FREEFORM, reason="conversation")
+    await rig.channel.stop()
+    await rig.settle()
+
+    assert state.metadata["failure_code"] == "shutdown"
+    report = "\n".join(rig.sent)
+    assert "/transcript CA_cut" in report
+    assert "nicht erreicht" not in report
+    extract.assert_called_once()
 
 
 # 9 + 10
