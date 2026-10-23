@@ -223,13 +223,9 @@ def _active_inbound_count() -> int:
         return 0
     from pincer.voice.engine import CallDirection
 
-    # A call bridged to a human uses no agent or LLM capacity, so it does not
-    # block new callers.
-    return sum(
-        1
-        for st in _engine.get_active_calls().values()
-        if st.direction == CallDirection.INBOUND and not st.metadata.get("transferring")
-    )
+    # A call bridged to a human still counts: a failed transfer reconnects it
+    # to the relay, and its slot must still be free when it does.
+    return sum(1 for st in _engine.get_active_calls().values() if st.direction == CallDirection.INBOUND)
 
 
 async def _receptionist_decline(call_sid: str, caller: str, language: str) -> Response | None:
@@ -299,13 +295,17 @@ async def _record_declined_call(
 async def voice_transfer_result(request: Request) -> Response:
     """Sprint 12 §8.4: <Dial action> callback after a receptionist transfer.
 
-    completed → the caller talked to the human: record it and finalize the
-    call (Twilio has ended it; no REST hangup). Anything else (busy /
-    no-answer / failed / canceled) → apology + message-taking: the call is
-    reconnected to the relay with the apology as its greeting and the session
-    already in TAKE_MESSAGE (name question asked) — unless the caller already
-    hung up while the target was ringing, in which case there is nothing to
-    reconnect. Idempotent: a retried callback finds no state and only hangs up."""
+    completed / answered / DialBridged=true → the caller talked to the human:
+    record it and finalize the call (Twilio has ended it; no REST hangup).
+    busy / no-answer / failed / canceled → apology + message-taking: the call
+    is reconnected to the relay with the apology as its greeting and the
+    session already in TAKE_MESSAGE (name question asked) — unless the caller
+    already hung up while the target was ringing, in which case there is
+    nothing to reconnect. Any other status (empty, unknown) is not guessed at:
+    the call is finalized and the report says the transfer started.
+    Idempotent: a retried callback finds no state and only hangs up.
+    No state with the caller still on the line (process restarted while the
+    target rang) → reconnect with a generic apology."""
     if await _authenticate(request) is None:
         return _forbidden()
     form = await request.form()
@@ -313,14 +313,28 @@ async def voice_transfer_result(request: Request) -> Response:
     dial_status = str(form.get("DialCallStatus", "")).lower()
     call_status = str(form.get("CallStatus", "")).lower()
     dial_duration = _int_or_none(form.get("DialCallDuration"))
+    dial_bridged = str(form.get("DialBridged", "")).lower() == "true"
+    bridged = dial_status in ("completed", "answered") or dial_bridged
     logger.info("Transfer result [%s]: %s (call %s)", call_sid, dial_status or "-", call_status or "-")
     hangup = _twiml_response("<Response><Hangup/></Response>")
     if not _engine or not _settings:
         return hangup
     state = _engine.get_call_state(call_sid)
     if state is None:
-        logger.info("Transfer result [%s] for a call already finalized — nothing to do", call_sid)
-        return hangup
+        if bridged or call_status == "completed":
+            logger.info("Transfer result [%s] for a call already finalized — nothing to do", call_sid)
+            return hangup
+        # Call state lost (restart/redeploy while the target rang), but the
+        # caller is still on the line: fall back to message-taking.
+        logger.warning("Transfer result [%s] with no call state — reconnecting the caller", call_sid)
+        from pincer.voice.language import resolve_call_language
+        from pincer.voice.prompts import get_prompt
+        from pincer.voice.receptionist.profile import get_profile, receptionist_active
+
+        profile = get_profile() if receptionist_active(_settings) else None
+        language = resolve_call_language(_settings, profile.default_language if profile else "")
+        lines = get_prompt("RECEPTIONIST_LINES", language) or {}
+        return _reconnect_after_transfer(call_sid, language, str(lines.get("transfer_failed", "")))
 
     from pincer.voice.telemetry import hooks as telemetry
 
@@ -332,15 +346,20 @@ async def voice_transfer_result(request: Request) -> Response:
                 "dial_status": dial_status,
                 "dial_call_sid": str(form.get("DialCallSid", "")),
                 "dial_duration_s": dial_duration,
-                "dial_bridged": str(form.get("DialBridged", "")).lower() == "true",
+                "dial_bridged": dial_bridged,
             }
         )
     session = _transfer_session_lookup(call_sid)
 
-    if dial_status == "completed":
+    if bridged:
         if session is not None:
             session.on_transfer_completed(dial_duration)
         await _engine.finish_remote_ended(call_sid, reason="transferred")
+        return hangup
+
+    if dial_status not in _TRANSFER_RESULTS:
+        logger.warning("Transfer result [%s]: unknown DialCallStatus %r — finalizing", call_sid, dial_status)
+        await _engine.finish_remote_ended(call_sid, reason="transfer_result_unknown")
         return hangup
 
     if call_status == "completed":
@@ -350,14 +369,23 @@ async def voice_transfer_result(request: Request) -> Response:
         await _engine.finish_remote_ended(call_sid, reason="caller_hangup_during_transfer")
         return hangup
 
+    # The dial is over: the call is ours again now, not when (or if) the
+    # reconnected relay/stream connects.
+    await _engine.end_transfer(call_sid)
+    language = str(getattr(state, "language", "") or "en")
+    greeting = ""
+    if session is not None:
+        greeting = await session.on_transfer_failed(_TRANSFER_RESULTS[dial_status])
+    return _reconnect_after_transfer(call_sid, language, greeting)
+
+
+def _reconnect_after_transfer(call_sid: str, language: str, greeting: str) -> Response:
+    """ConversationRelay TwiML for a caller back from a failed transfer, with
+    ``greeting`` (if any) replacing the welcome greeting."""
     from xml.sax.saxutils import escape
 
     from pincer.voice.twiml_builder import build_connect_twiml
 
-    language = str(getattr(state, "language", "") or "en")
-    greeting = ""
-    if session is not None:
-        greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
     twiml = build_connect_twiml(_settings, call_sid=call_sid, direction="inbound", language=language)
     if greeting:
         # Replace the welcome greeting with the apology + first question
@@ -676,10 +704,9 @@ async def relay_ws(websocket: WebSocket) -> None:
                 call_sid = str(msg.get("callSid", ""))
                 caller = str(msg.get("from", ""))
                 logger.info("ConversationRelay connected: %s from %s", call_sid, caller)
+                # back from a <Dial> transfer: the call is ours again
+                await _engine.end_transfer(call_sid)
                 state = _engine.get_call_state(call_sid)
-                if state is not None:
-                    # back from a <Dial> transfer: the call is ours again
-                    state.metadata.pop("transferring", None)
                 if state is None:
                     state = await _resolve_setup_state(
                         call_sid,
@@ -1057,9 +1084,8 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
                     if hasattr(_engine, "setup_media_stream_stt"):
                         await _engine.setup_media_stream_stt(call_sid, stream_sid)
                 logger.info("Stream started: %s (stream=%s)", call_sid, stream_sid)
-                if state:
-                    # back from a <Dial> transfer: the call is ours again
-                    state.metadata.pop("transferring", None)
+                # back from a <Dial> transfer: the call is ours again
+                await _engine.end_transfer(call_sid)
 
             elif event == "media":
                 payload = msg.get("media", {}).get("payload", "")

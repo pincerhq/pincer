@@ -65,6 +65,11 @@ class FakeEngine:
     def get_active_calls(self) -> dict[str, CallState]:
         return dict(self.states)
 
+    async def end_transfer(self, call_sid: str) -> None:
+        state = self.states.get(call_sid)
+        if state is not None:
+            state.metadata.pop("transferring", None)
+
     async def on_media_closed(self, call_sid: str) -> None:
         state = self.states.get(call_sid)
         if state is None or state.metadata.get("transferring"):

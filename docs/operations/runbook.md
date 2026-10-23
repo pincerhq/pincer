@@ -271,7 +271,11 @@ need telling.
 **What already happened automatically:** the watchdog detected a call past
 `voice_max_call_duration` + grace, forced its state machine terminal
 (`stuck_max_duration_exceeded`), and ended it. The page is telling you it
-*happened*, not that it is ongoing.
+*happened*, not that it is ongoing. It lists each call as
+`<CallSid>: <elapsed>s > <limit>s limit`; a call marked `(transfer)` was
+bridged to a human and is held to its own limit instead: 30 s announcement +
+dial timeout + `voice_transfer_max_duration_s` + grace, measured from the
+transfer start.
 
 **Your job is the cause, not the cleanup:**
 ```bash
