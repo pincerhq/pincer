@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import types
 from typing import Any
 from unittest.mock import MagicMock
@@ -19,6 +18,7 @@ import aiosqlite
 import pytest
 from voice_harness.fake_engine import FakeVoiceEngine
 from voice_harness.settings import apply_in_call_tool_defaults, apply_test_paths
+from voice_harness.transport_fakes import install_fake_twilio
 
 from pincer.channels.phone_calls import VoiceChannel
 from pincer.voice import briefing as bf
@@ -170,7 +170,7 @@ def voice(tmp_path, monkeypatch):
     hold.set()
 
     class FakeCalls:
-        def create(self, **kwargs: Any) -> Any:
+        async def create_async(self, **kwargs: Any) -> Any:
             placed.append(kwargs)
             call = MagicMock()
             call.sid = f"CA_{len(placed)}"
@@ -180,12 +180,7 @@ def voice(tmp_path, monkeypatch):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             self.calls = FakeCalls()
 
-    twilio_rest = types.ModuleType("twilio.rest")
-    twilio_rest.Client = FakeClient
-    twilio_mod = types.ModuleType("twilio")
-    twilio_mod.rest = twilio_rest
-    monkeypatch.setitem(sys.modules, "twilio", twilio_mod)
-    monkeypatch.setitem(sys.modules, "twilio.rest", twilio_rest)
+    install_fake_twilio(monkeypatch, FakeClient)
 
     status_notify._reset_for_tests()
     yield types.SimpleNamespace(
@@ -207,16 +202,14 @@ async def test_state_is_registered_before_the_dial(voice):
     voice.engine.register_pending_outbound = _spy  # type: ignore[method-assign]
 
     class OrderedCalls:
-        def create(self, **kwargs: Any) -> Any:
+        async def create_async(self, **kwargs: Any) -> Any:
             seen.append("dialled")
             call = MagicMock()
             call.sid = "CA_1"
             return call
 
     voice.server._engine = voice.engine
-    import twilio.rest as twilio_rest  # noqa: PLC0415 — the fake installed by the fixture
-
-    twilio_rest.Client = lambda *a, **k: types.SimpleNamespace(calls=OrderedCalls())
+    voice.engine._rest._client = types.SimpleNamespace(calls=OrderedCalls())
 
     result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
     assert "Call SID: CA_1" in result
@@ -253,6 +246,72 @@ async def test_setup_before_registration_outbound_waits_then_binds(voice):
 
     sm = voice.channel._ensure_call_tracking(call_sid, state)
     assert TASK in voice.channel._build_voice_system(state, sm)
+
+
+async def test_setup_during_an_awaited_dial_binds_the_briefing(voice):
+    """The REST dial is awaited now, so Twilio's relay `setup` can be handled
+    while `create_async` is still in flight — before `promote_pending` has
+    re-keyed the briefed state to the CallSid. The setup must wait for it."""
+    setups: list[asyncio.Task] = []
+
+    class SetupFirstCalls:
+        async def create_async(self, **kwargs: Any) -> Any:
+            setups.append(asyncio.create_task(voice.server._resolve_setup_state("CA_mid", TARGET, "outbound-api")))
+            await asyncio.sleep(0.05)  # setup is now parked in await_call_state
+            assert not setups[0].done()
+            return types.SimpleNamespace(sid="CA_mid")
+
+    voice.server._engine = voice.engine
+    voice.engine._rest._client = types.SimpleNamespace(calls=SetupFirstCalls())
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    state = await setups[0]
+
+    assert "Call SID: CA_mid" in result
+    assert state is voice.engine.get_call_state("CA_mid")
+    assert state.direction == CallDirection.OUTBOUND
+    assert state.purpose == TASK
+
+
+# regression: structurally untestable on dev @ 0a1c320 — the sync Client held
+# the loop for the whole dial, and the sync fakes returned instantly
+async def test_a_pending_dial_does_not_stall_a_live_relay_socket(voice, monkeypatch):
+    from voice_harness.transport_fakes import FakeSocket, FakeTwilioRest
+
+    fake = FakeTwilioRest()
+    fake.hold = asyncio.Event()  # carrier dial setup takes a while
+    voice.engine._rest = fake
+    heard: list[str] = []
+
+    async def _on_speech(_sid: str, text: str) -> None:
+        heard.append(text)
+
+    voice.engine.set_on_speech(_on_speech)
+
+    async def _authenticated(*_args: Any) -> bool:
+        return True
+
+    monkeypatch.setattr(voice.server, "_authenticate_ws", _authenticated)
+    await voice.engine.on_call_start("CA_live", "+4917612345", CallDirection.INBOUND)
+    sock = FakeSocket()
+    relay = asyncio.create_task(voice.server.relay_ws(sock))
+    sock.push(type="setup", callSid="CA_live", **{"from": "+4917612345"})
+
+    dial = asyncio.create_task(outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}))
+    async with asyncio.timeout(2):
+        while not fake.in_flight:
+            await asyncio.sleep(0)
+
+    sock.push(type="prompt", voicePrompt="Hallo, sind Sie noch da?", last=True)
+    await asyncio.wait_for(sock.inbox.join(), timeout=2)
+
+    assert heard == ["Hallo, sind Sie noch da?"]
+    assert not dial.done()
+    fake.hold.set()
+    assert "Call SID: CA_fake" in await dial
+    assert fake.creates[-1]["to"] == TARGET
+    sock.hang_up()
+    await asyncio.wait_for(relay, timeout=2)
 
 
 async def test_setup_orphan_outbound_terminates(voice):
@@ -317,16 +376,14 @@ async def test_setup_with_unknown_sid_is_refused(voice):
     assert voice.engine.get_call_state("CA_unknown") is None
 
 
-async def test_failed_dial_discards_the_pre_registration(voice, monkeypatch):
+async def test_failed_dial_discards_the_pre_registration(voice):
     """Twilio raised → no orphaned pending state left behind."""
 
     class ExplodingCalls:
-        def create(self, **kwargs: Any) -> Any:
+        async def create_async(self, **kwargs: Any) -> Any:
             raise RuntimeError("twilio down")
 
-    import twilio.rest as twilio_rest  # noqa: PLC0415
-
-    twilio_rest.Client = lambda *a, **k: types.SimpleNamespace(calls=ExplodingCalls())
+    voice.engine._rest._client = types.SimpleNamespace(calls=ExplodingCalls())
 
     result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
     assert result.startswith("Error")

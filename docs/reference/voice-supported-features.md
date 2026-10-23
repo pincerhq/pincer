@@ -21,7 +21,7 @@ anything marked ⚠️ works but has a caveat you must read.
 | Barge-in (caller interrupts the agent) | ✅ | Native on ConversationRelay; turn-level cancellation on both |
 | Answering-machine detection | ✅ | Voicemail is reported, never conversed with |
 | Automatic redial after no-answer | ✅ | `PINCER_VOICE_RETRY_ATTEMPTS`; shares the abuse-gate budget |
-| Call transfer to a human | ⚠️ | Implemented (`voice/transfer.py`), not exercised by a pilot yet |
+| Call transfer to a human | ⚠️ | Implemented (`VoiceEngine.transfer_call` in `voice/engine.py`), not exercised by a pilot yet |
 | DTMF / IVR navigation | ⚠️ | `voice/ivr_navigator.py` exists; menu coverage is best-effort |
 | **Live listen-in on an active call** | ⚠️ | Built (Sprint 15), **off by default**: `PINCER_LISTEN_IN_ENABLED=true`. Listen-only, announced on the call, audited, never recorded — see [DACH compliance](../guides/dach-compliance.md#live-listen-in-monitoring) |
 | **Call recording playback** | ❌ | Recording is off by default and audio is never stored by us |

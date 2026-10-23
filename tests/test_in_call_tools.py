@@ -365,11 +365,12 @@ async def test_user_mode_callee_hangup_cancels_card():
     agent = ToolAgent([[Tool("google__create_event", CREATE_ARGS, result=CREATE_RESULT)]])
     channel, engine, state = await _start(agent, settings=_user_mode_settings(), appointment=True)
 
-    turn = asyncio.create_task(engine.on_speech_input(CALL, "Dienstag passt."))
+    engine.wait_for_turns = False
+    await engine.on_speech_input(CALL, "Dienstag passt.")
     while not cards.requests:
         await asyncio.sleep(0.01)
     await engine.end_call(CALL)  # callee hangs up while the card is open
-    await asyncio.wait_for(turn, timeout=2)
+    await asyncio.wait_for(channel.wait_for_turn(CALL), timeout=2)
     assert cards.finals[-1][1] == "call_ended"
     assert agent.executed == []
     assert not approvals.pending()

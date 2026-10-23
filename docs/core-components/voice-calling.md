@@ -58,9 +58,9 @@ PSTN Caller / Outbound Target
    └─ Media Streams WS (Phase 2)       ← Raw mu-law audio, custom STT/TTS
         │
    Voice Gateway
-   ├─ STT Engine (Deepgram)            ← Streaming transcription
+   ├─ STT Engine (Deepgram)            ← Streaming transcription, μ-law 8 kHz straight through
    ├─ TTS Engine (ElevenLabs)          ← Streaming synthesis
-   └─ Barge-In Controller              ← VAD-based interrupt detection
+   └─ Barge-in detection               ← caller words during agent playout (Media Streams)
         │
    Voice Agent Brain
    ├─ Call State Machine               ← greeting → intent → verify → execute → confirm → end
@@ -82,7 +82,7 @@ PSTN Caller / Outbound Target
 | Complexity | Low — text in/out | High — raw audio |
 | Latency | ~2-3s | ~0.8-1.5s |
 | Voice quality | Twilio default | ElevenLabs custom voices |
-| Barge-in | Basic (Twilio handles) | Advanced (custom VAD) |
+| Barge-in | Twilio stops playback; we cancel the turn | Deepgram VAD / words during playout (`PINCER_VOICE_BARGE_IN_TRIGGER`) |
 | Dependencies | twilio only | twilio + deepgram + elevenlabs |
 
 Set `PINCER_VOICE_ENGINE=conversation_relay` (default) or `PINCER_VOICE_ENGINE=media_streams`.
@@ -116,8 +116,11 @@ Per-call latency is instrumented in `pincer/voice/metrics.py` and logged at call
 Provisional default: `conversation_relay` (fewest moving parts, no extra provider
 keys). Revisit after the live measurement — if media_streams meets its documented
 ~0.8–1.5s turn latency with stable Deepgram/ElevenLabs EU connectivity, it becomes
-the DACH default. The barge-in <500ms target is only achievable on media_streams
-(custom VAD, `voice/bargein.py`); ConversationRelay barge-in is Twilio-controlled.
+the DACH default. The barge-in reaction is only measured on media_streams, where we
+detect it (Deepgram `SpeechStarted`, or caller words with
+`PINCER_VOICE_BARGE_IN_TRIGGER=interim`, while our audio is still playing) and clear Twilio's buffer ourselves; it includes Deepgram's interim
+latency and is unmeasured on a live line. ConversationRelay barge-in is
+Twilio-controlled; we only cancel the turn behind it.
 
 ### Call language (Sprint 2: English default, German)
 
@@ -412,15 +415,13 @@ whether the agent's first three turns referenced the task — if not, it logs
 That check never blocks anything; it is the smoke detector for this whole
 mechanism regressing again.
 
-### Warm Transfer
+### Call Transfer
 
-The agent can call a provider, navigate to the right person, and then patch you in:
-
-```
-Call my insurance company at +1-800-555-0123 and get me to the claims department
-```
-
-The agent navigates the IVR, waits on hold, and connects you once a human is available.
+A live call is handed to a human by redirecting it into `<Dial>`
+(`VoiceEngine.transfer_call`). The receptionist passes an `action` URL, so a
+busy or unanswered target falls back to message-taking instead of dropping the
+caller. Conference-based warm transfer (patching you into a call the agent
+placed) is not implemented.
 
 ---
 
@@ -824,9 +825,12 @@ The `phone_contacts` bundled skill provides tools for managing a contact directo
 | `PINCER_TWILIO_ACCOUNT_SID` | Yes* | — | Twilio Account SID |
 | `PINCER_TWILIO_AUTH_TOKEN` | Yes* | — | Twilio Auth Token |
 | `PINCER_TWILIO_PHONE_NUMBER` | Yes* | — | Twilio phone number (E.164) |
+| `PINCER_TWILIO_EDGE` | No | — | Twilio edge for REST calls (hangup, transfer, dial), e.g. `frankfurt`; empty = US default |
+| `PINCER_TWILIO_REGION` | No | — | Twilio region, e.g. `ie1`; only for accounts provisioned in that region |
 | `PINCER_VOICE_ENGINE` | No | `conversation_relay` | Engine type |
 | `PINCER_VOICE_WEBHOOK_BASE_URL` | Yes* | — | Public HTTPS URL |
 | `PINCER_DEEPGRAM_API_KEY` | Phase 2 | — | Deepgram STT key |
+| `PINCER_VOICE_STT_ENCODING` | No | `mulaw` | Deepgram wire format: `mulaw` (Twilio native) or `linear16` (legacy in-process upsample; removed next release) |
 | `PINCER_ELEVENLABS_API_KEY` | Phase 2 | — | ElevenLabs TTS key |
 | `PINCER_ELEVENLABS_VOICE_ID` | No | default | Voice selection (global fallback) |
 | `PINCER_LISTEN_IN_ENABLED` | No | `false` | Live listen-in: add the rx-only `<Start><Stream>` fork to every call |

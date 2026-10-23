@@ -114,14 +114,15 @@ class TestSentenceStreaming:
         channel, engine, agent, state = await _start([script])
         agent.pause_after = 1  # pause after the first TEXT chunk was consumed
 
-        turn = asyncio.create_task(engine.on_speech_input("CA_stream", "Hallo?"))
+        engine.wait_for_turns = False
+        await engine.on_speech_input("CA_stream", "Hallo?")
         await asyncio.wait_for(agent.paused.wait(), timeout=2)
 
         # Generation is paused — the first sentence must already be out
         assert engine.spoken["CA_stream"] == ["Einen Moment bitte, ich prüfe das."]
 
         agent.resume.set()
-        await asyncio.wait_for(turn, timeout=2)
+        await asyncio.wait_for(channel.wait_for_turn("CA_stream"), timeout=2)
         assert engine.spoken["CA_stream"][-1] == "Das dauert nur kurz, versprochen."
         await channel.stop()
 
@@ -144,23 +145,35 @@ class TestSentenceStreaming:
 
 
 class TestBargeIn:
+    # A barge-in test drives the production entry point the way the transport
+    # does: sequential `await`s on `engine.on_speech_input` / WS messages / STT
+    # transcripts. If the test needs `asyncio.create_task` to make two turns
+    # overlap, the test is proving nothing about barge-in.
+    # (`wait_for_turns = False` makes the harness engine hand off and return
+    # like the real transports, instead of waiting for each reply.)
+
+    # regression: fails on dev @ 0a1c320
     async def test_barge_in_cancels_streamed_turn(self):
         """A new caller utterance mid-stream cancels the running turn; no
         queued sentences from the old turn play afterwards."""
         slow_script = text_chunks("Der erste Satz der alten Antwort. ", "Dieser Satz darf niemals gesprochen werden.")
         next_script = text_chunks("Die neue Antwort auf die Unterbrechung.")
         channel, engine, agent, state = await _start([slow_script, next_script])
+        engine.wait_for_turns = False  # hand off and keep reading, like the transports
         agent.pause_after = 1  # old turn stalls after sentence 1
 
-        old_turn = asyncio.create_task(engine.on_speech_input("CA_stream", "Erste Frage?"))
+        # Returns while the turn is still running: the hand-off never waits
+        await asyncio.wait_for(engine.on_speech_input("CA_stream", "Erste Frage?"), timeout=2)
         await asyncio.wait_for(agent.paused.wait(), timeout=2)
         assert engine.spoken["CA_stream"] == ["Der erste Satz der alten Antwort."]
+        turn = channel._active_turns.get("CA_stream")
+        assert turn is not None and not turn.done(), "the hand-off must return with the turn still running"
 
         # Barge-in: the caller speaks again while the old turn is mid-stream
         # (the second turn must run without the pause hook)
         agent.pause_after = None
         await asyncio.wait_for(engine.on_speech_input("CA_stream", "Moment, etwas anderes!"), timeout=2)
-        await asyncio.wait_for(old_turn, timeout=2)
+        await asyncio.wait_for(channel.wait_for_turn("CA_stream"), timeout=2)
 
         spoken = engine.spoken["CA_stream"]
         assert "Dieser Satz darf niemals gesprochen werden." not in spoken
@@ -170,11 +183,11 @@ class TestBargeIn:
 
     async def _stall_a_turn(self, channel, engine, agent):
         """Leave a streamed turn mid-generation, one sentence already spoken."""
+        engine.wait_for_turns = False
         agent.pause_after = 1
-        old_turn = asyncio.create_task(engine.on_speech_input("CA_stream", "Erste Frage?"))
+        await asyncio.wait_for(engine.on_speech_input("CA_stream", "Erste Frage?"), timeout=2)
         await asyncio.wait_for(agent.paused.wait(), timeout=2)
         assert engine.spoken["CA_stream"] == ["Der erste Satz der alten Antwort."]
-        return old_turn
 
     async def test_gate_reask_interrupts_the_prior_turn(self):
         """The confirmation gate speaks its re-ask and returns `handled`, which
@@ -184,7 +197,7 @@ class TestBargeIn:
 
         slow_script = text_chunks("Der erste Satz der alten Antwort. ", "Dieser Satz darf niemals gesprochen werden.")
         channel, engine, agent, _state = await _start([slow_script])
-        old_turn = await self._stall_a_turn(channel, engine, agent)
+        await self._stall_a_turn(channel, engine, agent)
 
         class ReaskingGate:
             def begin_turn(self): ...
@@ -196,7 +209,7 @@ class TestBargeIn:
         channel._tool_gates["CA_stream"] = ReaskingGate()
 
         await asyncio.wait_for(engine.on_speech_input("CA_stream", "Moment!"), timeout=2)
-        await asyncio.wait_for(old_turn, timeout=2)
+        await asyncio.wait_for(channel.wait_for_turn("CA_stream"), timeout=2)
 
         assert engine.interrupts.get("CA_stream", 0) >= 1, "the re-ask must silence the prior turn first"
         spoken = engine.spoken["CA_stream"]
@@ -209,7 +222,7 @@ class TestBargeIn:
 
         slow_script = text_chunks("Der erste Satz der alten Antwort. ", "Dieser Satz darf niemals gesprochen werden.")
         channel, engine, agent, _state = await _start([slow_script])
-        old_turn = await self._stall_a_turn(channel, engine, agent)
+        await self._stall_a_turn(channel, engine, agent)
 
         class HandlingSession:
             async def on_caller_utterance(self, text):
@@ -219,7 +232,7 @@ class TestBargeIn:
         channel._reception_sessions["CA_stream"] = HandlingSession()
 
         await asyncio.wait_for(engine.on_speech_input("CA_stream", "Moment!"), timeout=2)
-        await asyncio.wait_for(old_turn, timeout=2)
+        await asyncio.wait_for(channel.wait_for_turn("CA_stream"), timeout=2)
 
         assert engine.interrupts.get("CA_stream", 0) >= 1
         spoken = engine.spoken["CA_stream"]
@@ -231,14 +244,14 @@ class TestBargeIn:
         """A farewell hangs up and returns before the old block was reached."""
         slow_script = text_chunks("Der erste Satz der alten Antwort. ", "Dieser Satz darf niemals gesprochen werden.")
         channel, engine, agent, _state = await _start([slow_script])
-        old_turn = await self._stall_a_turn(channel, engine, agent)
+        await self._stall_a_turn(channel, engine, agent)
 
         # The agent is treated as having already said goodbye, so the caller's
         # farewell is the mutual one that ends the call immediately.
         channel._transcripts["CA_stream"].log_utterance(Speaker.AGENT, "Auf Wiederhören.", state="wrapup")
 
         await asyncio.wait_for(engine.on_speech_input("CA_stream", "Tschüss!"), timeout=2)
-        await asyncio.wait_for(old_turn, timeout=2)
+        await asyncio.wait_for(channel.wait_for_turn("CA_stream"), timeout=2)
 
         assert engine.interrupts.get("CA_stream", 0) >= 1
         assert "Dieser Satz darf niemals gesprochen werden." not in engine.spoken["CA_stream"]
@@ -253,6 +266,111 @@ class TestBargeIn:
         await asyncio.wait_for(engine.on_speech_input("CA_stream", "Bitte einen Termin."), timeout=2)
 
         assert engine.interrupts.get("CA_stream", 0) == 0
+        await channel.stop()
+
+
+class TestHandOff:
+    """Task 01: the engine callback hands the utterance off and returns."""
+
+    # regression: fails on dev @ 0a1c320
+    async def test_speech_entry_point_returns_before_the_turn_speaks(self):
+        """The production invariant: the transport's await must come back at once."""
+        channel, engine, agent, _state = await _start([text_chunks("Gerne, das mache ich.")])
+        engine.wait_for_turns = False
+        agent.pause_after = 0  # the "LLM" has produced nothing yet
+
+        await asyncio.wait_for(engine.on_speech_input("CA_stream", "Hallo?"), timeout=0.1)
+        await asyncio.wait_for(agent.paused.wait(), timeout=2)
+
+        assert engine.spoken["CA_stream"] == []
+        turn = channel._active_turns.get("CA_stream")
+        assert turn is not None and not turn.done(), "the hand-off must return with the turn still running"
+        agent.resume.set()
+        await asyncio.wait_for(channel.wait_for_turn("CA_stream"), timeout=2)
+        assert engine.spoken["CA_stream"] == ["Gerne, das mache ich."]
+        await channel.stop()
+
+    async def test_buffered_answer_is_cancelled_by_the_next_utterance(self):
+        """Without a stream agent the whole answer is generated first; a
+        barge-in during that wait means the old answer is never spoken."""
+        from voice_harness.fake_engine import FakeVoiceEngine
+
+        settings = _settings()
+        engine = FakeVoiceEngine(settings)
+        engine.wait_for_turns = False
+        channel = VoiceChannel(settings)
+        channel.set_engine(engine)
+        release = asyncio.Event()
+        entered = asyncio.Event()
+        asked: list[str] = []
+
+        async def _handler(incoming):
+            asked.append(incoming.text)
+            entered.set()
+            if len(asked) == 1:
+                await release.wait()  # never released: the caller cuts in
+                return "Diese alte Antwort darf niemals gesprochen werden."
+            return "Die neue Antwort auf die Unterbrechung."
+
+        await channel.start(_handler)
+        await engine.on_call_start("CA_buf", "+4930123456", CallDirection.INBOUND, language="de")
+
+        await engine.on_speech_input("CA_buf", "Erste Frage?")
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await engine.on_speech_input("CA_buf", "Moment, etwas anderes!")
+        await asyncio.wait_for(channel.wait_for_turn("CA_buf"), timeout=2)
+
+        assert engine.spoken["CA_buf"] == ["Die neue Antwort auf die Unterbrechung."]
+        assert engine.interrupts.get("CA_buf", 0) == 1
+        await channel.stop()
+
+    async def test_call_end_mid_turn_speaks_nothing_more(self):
+        channel, engine, agent, _state = await _start([text_chunks("Der erste Satz. ", "Der zweite Satz.")])
+        engine.wait_for_turns = False
+        agent.pause_after = 1
+        await engine.on_speech_input("CA_stream", "Hallo?")
+        await asyncio.wait_for(agent.paused.wait(), timeout=2)
+        turn = channel._active_turns["CA_stream"]
+
+        await engine.end_call("CA_stream")
+        await asyncio.wait_for(asyncio.wait([turn]), timeout=2)
+
+        assert turn.cancelled()
+        assert engine.spoken["CA_stream"] == ["Der erste Satz."]
+        assert not channel._active_turns and not channel._utterance_tasks
+        await channel.stop()
+
+    async def test_stop_cancels_the_turn_before_the_goodbye(self):
+        channel, engine, agent, _state = await _start([text_chunks("Der erste Satz. ", "Der zweite Satz.")])
+        engine.wait_for_turns = False
+        agent.pause_after = 1
+        await engine.on_speech_input("CA_stream", "Hallo?")
+        await asyncio.wait_for(agent.paused.wait(), timeout=2)
+
+        await channel.stop()  # waits for the cancelled turn to unwind
+
+        spoken = engine.spoken["CA_stream"]
+        assert spoken[0] == "Der erste Satz."
+        assert "Der zweite Satz." not in spoken
+        assert len(spoken) == 2  # the reply's first sentence + one goodbye
+        leaked = [t.get_name() for t in asyncio.all_tasks() if t.get_name().startswith(("voice-turn-", "voice-utt"))]
+        assert leaked == []
+
+    async def test_call_end_while_a_sentence_is_being_spoken(self):
+        """Held mid-sentence at the engine (not the LLM): the hangup still
+        cancels the turn, and the held sentence never counts as spoken."""
+        channel, engine, agent, _state = await _start([text_chunks("Der erste Satz. ", "Der zweite Satz.")])
+        engine.wait_for_turns = False
+        engine.speech_blocker = asyncio.Event()  # never released
+        await engine.on_speech_input("CA_stream", "Hallo?")
+        await asyncio.wait_for(engine.speech_waiting.wait(), timeout=2)
+        turn = channel._active_turns["CA_stream"]
+
+        await engine.end_call("CA_stream")
+        await asyncio.wait_for(asyncio.wait([turn]), timeout=2)
+
+        assert turn.cancelled()
+        assert engine.spoken["CA_stream"] == []
         await channel.stop()
 
 

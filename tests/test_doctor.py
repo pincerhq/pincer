@@ -32,7 +32,7 @@ def test_run_all_returns_report(doctor_env):
     # + 3 in-call tool execution (Sprint 11) + 2 receptionist (Sprint 12)
     # + 1 live listen-in announce gate (Sprint 15) + 1 schedule action types (issue #217)
     # + 1 leftover shared API tokens (issue #228)
-    assert len(report.checks) == 62
+    assert len(report.checks) == 63
 
     assert 0 <= report.score <= 100
 
@@ -1351,6 +1351,25 @@ def test_voice_provider_regions_none_configured():
     result = SecurityDoctor()._check_voice_provider_regions(_voice_cfg())
     assert result.status == CheckStatus.PASS
     assert "No external" in result.message
+
+
+def test_voice_twilio_edge_unset_is_advice_not_a_failure():
+    result = SecurityDoctor()._check_voice_twilio_edge(_voice_cfg(twilio_account_sid="AC123", twilio_edge=""))
+    assert result.status == CheckStatus.PASS
+    assert "not set" in result.message
+    assert "frankfurt" in result.fix_hint
+
+
+def test_voice_twilio_edge_set():
+    result = SecurityDoctor()._check_voice_twilio_edge(_voice_cfg(twilio_account_sid="AC123", twilio_edge="frankfurt"))
+    assert result.status == CheckStatus.PASS
+    assert "'frankfurt' edge" in result.message
+    assert result.fix_hint == ""
+
+
+def test_voice_twilio_edge_skipped_without_voice():
+    cfg = _voice_cfg(voice_enabled=False, voice_outbound_enabled=False, twilio_account_sid="AC123", twilio_edge="")
+    assert SecurityDoctor()._check_voice_twilio_edge(cfg).status == CheckStatus.SKIPPED
 
 
 # ── Production deploy gate (Sprint 7, T7.3) ──────────────────────────

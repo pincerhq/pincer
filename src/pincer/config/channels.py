@@ -113,6 +113,14 @@ class ChannelSettings(BaseModel):
     twilio_account_sid: str = Field(default="", description="Twilio Account SID")
     twilio_auth_token: SecretStr = Field(default=SecretStr(""), description="Twilio Auth Token")
     twilio_phone_number: str = Field(default="", description="Twilio phone number (E.164)")
+    twilio_edge: str = Field(
+        default="",
+        description="Twilio REST edge location, e.g. 'frankfurt' or 'dublin' (empty = Twilio default, US)",
+    )
+    twilio_region: str = Field(
+        default="",
+        description="Twilio region, e.g. 'ie1' — only for accounts provisioned in that region (empty = US1)",
+    )
     voice_engine: str = Field(
         default="conversation_relay",
         description="Voice engine: conversation_relay | media_streams",
@@ -218,6 +226,13 @@ class ChannelSettings(BaseModel):
         le=5000,
         description="Deepgram utterance_end_ms override (0 = per-language default: en 800, de 1000)",
     )
+    voice_stt_encoding: str = Field(
+        default="mulaw",
+        description=(
+            "Deepgram wire format: 'mulaw' (Twilio native, default) or 'linear16' "
+            "(legacy in-process upsample to 16 kHz; removed next release)"
+        ),
+    )
     # Appointment scheduling (Sprint 6)
     business_hours: str = Field(
         default="09:00-17:00",
@@ -242,6 +257,19 @@ class ChannelSettings(BaseModel):
         ge=0.0,
         le=1.0,
         description="Below this STT confidence the agent asks the caller to repeat instead of acting (0 = disabled)",
+    )
+    voice_barge_in_trigger: str = Field(
+        default="vad",
+        pattern="^(vad|interim|off)$",
+        description=(
+            "Media Streams barge-in: 'vad' stops the agent on Deepgram's SpeechStarted (fastest; can react "
+            "to coughs/echo), 'interim' on the first recognised words, 'off' never"
+        ),
+    )
+    voice_barge_in_min_words: int = Field(
+        default=1,
+        ge=1,
+        description="Media Streams barge-in: words an interim transcript needs before it stops the agent",
     )
     voice_machine_detection: bool = Field(
         default=True,

@@ -153,6 +153,7 @@ class SecurityDoctor:
         report.checks.append(self._check_voice_dach_consent(settings))
         report.checks.append(self._check_voice_retention(settings))
         report.checks.append(self._check_voice_provider_regions(settings))
+        report.checks.append(self._check_voice_twilio_edge(settings))
         # Voice ElevenLabs (1 check, Sprint 4)
         report.checks.append(self._check_voice_elevenlabs_voices(settings))
         report.checks.append(self._check_voice_language_pairing(settings))
@@ -1868,6 +1869,34 @@ class SecurityDoctor:
             CheckStatus.PASS,
             "Data processing: " + "; ".join(providers),
             fix_hint="See docs/guides/dach-compliance.md for DPA/AVV guidance",
+            category="voice",
+        )
+
+    def _check_voice_twilio_edge(self, cfg: Settings | None = None) -> CheckResult:
+        """Hangup, transfer, DTMF and the outbound dial are Twilio REST calls,
+        routed to the US unless an edge is set. Advice, never a failure: the
+        default works, an EU edge only shortens the round-trip."""
+        cfg = self._cfg(cfg)
+        if not (cfg.voice_enabled or cfg.voice_outbound_enabled) or not cfg.twilio_account_sid:
+            return CheckResult(
+                "voice_twilio_edge",
+                CheckStatus.SKIPPED,
+                "Voice not enabled",
+                category="voice",
+            )
+        edge = cfg.twilio_edge.strip()
+        if edge:
+            return CheckResult(
+                "voice_twilio_edge",
+                CheckStatus.PASS,
+                f"Twilio REST calls go through the '{edge}' edge",
+                category="voice",
+            )
+        return CheckResult(
+            "voice_twilio_edge",
+            CheckStatus.PASS,
+            "Twilio edge not set: REST calls (hangup, transfer, dial) go to the US default",
+            fix_hint="EU deployments benefit from PINCER_TWILIO_EDGE=frankfurt (or dublin)",
             category="voice",
         )
 

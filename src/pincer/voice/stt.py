@@ -37,15 +37,22 @@ class Transcript:
     words: list[TranscriptWord] = field(default_factory=list)
     language: str = ""
     speech_final: bool = False
+    #: Deepgram VAD "SpeechStarted": the caller started talking, no text yet.
+    speech_started: bool = False
+    #: Deepgram's audio-timeline position of a SpeechStarted event (seconds).
+    timestamp_s: float | None = None
 
 
 @dataclass
 class STTConfig:
     model: str = "nova-2"
     language: str = "en"
-    sample_rate: int = 16000
+    # The wire format of the SOURCE: Twilio Media Streams' mu-law 8 kHz mono,
+    # sent to Deepgram as-is. It used to be linear16 @ 16 kHz, converted per
+    # 20 ms frame in pure Python on the event loop.
+    sample_rate: int = 8000
     channels: int = 1
-    encoding: str = "linear16"
+    encoding: str = "mulaw"
     smart_format: bool = True
     interim_results: bool = True
     endpointing: int = 300
@@ -70,13 +77,19 @@ def stt_config_for_language(language: str, settings: Any = None) -> STTConfig:
     """Per-call STT config (Sprint 2; latency-tuned in Sprint 5).
 
     PINCER_VOICE_STT_ENDPOINTING_MS / _UTTERANCE_END_MS (when > 0) override
-    the per-language defaults for A/B latency measurement."""
+    the per-language defaults for A/B latency measurement.
+    PINCER_VOICE_STT_ENCODING=linear16 restores the legacy in-process upsample
+    to 16 kHz (one release, then removed)."""
     lang = str(language or "en").strip().lower()[:2] or "en"
     endpointing, utterance_end = _ENDPOINTING_DEFAULTS.get(lang, _ENDPOINTING_DEFAULTS["en"])
+    cfg = STTConfig(language=lang)
     if settings is not None:
         endpointing = int(getattr(settings, "voice_stt_endpointing_ms", 0) or 0) or endpointing
         utterance_end = int(getattr(settings, "voice_stt_utterance_end_ms", 0) or 0) or utterance_end
-    return STTConfig(language=lang, endpointing=endpointing, utterance_end_ms=utterance_end)
+        if str(getattr(settings, "voice_stt_encoding", "") or "").lower() == "linear16":
+            cfg.encoding, cfg.sample_rate = "linear16", 16000
+    cfg.endpointing, cfg.utterance_end_ms = endpointing, utterance_end
+    return cfg
 
 
 class STTStream(ABC):
@@ -161,6 +174,13 @@ class DeepgramSTTStream(STTStream):
 
                 elif msg_type == "UtteranceEnd":
                     await self._transcript_queue.put(Transcript(text="", is_final=True, speech_final=True))
+
+                elif msg_type == "SpeechStarted":
+                    # Voice onset, typically 100-300 ms before the first interim
+                    # Results — the earliest barge-in signal there is.
+                    await self._transcript_queue.put(
+                        Transcript(text="", speech_started=True, timestamp_s=parsed.get("timestamp"))
+                    )
 
         except Exception:
             if not self._closed:

@@ -654,7 +654,7 @@ class TestOutboundMachineDetection:
         captured: dict = {}
 
         class FakeCalls:
-            def create(self, **kwargs):
+            async def create_async(self, **kwargs):
                 captured.update(kwargs)
                 call = MagicMock()
                 call.sid = "CA_out"
@@ -664,15 +664,11 @@ class TestOutboundMachineDetection:
             def __init__(self, *args, **kwargs):
                 self.calls = FakeCalls()
 
-        import sys
-        import types
+        from voice_harness.transport_fakes import install_fake_twilio
 
-        twilio_rest = types.ModuleType("twilio.rest")
-        twilio_rest.Client = FakeClient
-        twilio_mod = types.ModuleType("twilio")
-        twilio_mod.rest = twilio_rest
-        monkeypatch.setitem(sys.modules, "twilio", twilio_mod)
-        monkeypatch.setitem(sys.modules, "twilio.rest", twilio_rest)
+        install_fake_twilio(monkeypatch, FakeClient)
+        # an engine another test left in twiml_server would take the dial instead
+        monkeypatch.setattr("pincer.voice.twiml_server._engine", None)
 
         result = await outbound.make_phone_call("+14155551234", "test purpose", context={"user_id": "u1"})
         assert "Call initiated" in result

@@ -10,6 +10,7 @@ import pytest
 
 os.environ.setdefault("PINCER_ANTHROPIC_API_KEY", "sk-ant-test-key")
 
+from pincer.channels.telegram import TelegramChannel
 from pincer.voice import approvals
 
 
@@ -122,8 +123,6 @@ async def test_presenter_exception_is_contained():
 
 
 async def test_telegram_card_present_and_finalize():
-    from pincer.channels.telegram import TelegramChannel
-
     settings = MagicMock()
     settings.telegram_allowed_users = []
     tg = TelegramChannel(settings)
@@ -153,8 +152,6 @@ async def test_telegram_card_present_and_finalize():
 
 
 async def test_telegram_card_non_numeric_user_not_presented():
-    from pincer.channels.telegram import TelegramChannel
-
     settings = MagicMock()
     settings.telegram_allowed_users = []
     tg = TelegramChannel(settings)

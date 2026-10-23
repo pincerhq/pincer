@@ -36,10 +36,39 @@ In rough order of effort:
    and the first thing to try.
 2. `PINCER_VOICE_TURN_MODEL` on the fast tier — cuts the dominant latency stage,
    which raises effective concurrency without more hardware.
-3. More vCPU. Audio handling is I/O-bound, but TTS/STT framing on
-   `media_streams` is not free.
+3. More vCPU. Audio handling is I/O-bound. On `media_streams` the STT leg
+   forwards Twilio's μ-law untouched; TTS framing is the remaining per-frame
+   work.
 4. Split the API server from the voice worker (`pincer run` already supports
    component selection). Untested at scale.
+
+### The event loop
+
+Every call shares one asyncio loop, so anything that holds it holds every call's
+audio. Two per-call costs that grew with call count are gone:
+
+- **Twilio REST round-trips.** Hangup, transfer, DTMF and the outbound dial
+  used to block the loop for the whole HTTPS round-trip (150–800 ms from DACH,
+  a cold TLS handshake each time). Each one froze audio on every other live
+  call, so with more calls there were both more stalls and more callers hearing
+  each one. They are now awaited (`voice/twilio_rest.py`) and delay only their
+  own call. `PINCER_TWILIO_EDGE=frankfurt` shortens the round-trip itself.
+- **μ-law decode on `media_streams`.** Each 20 ms frame was decoded and
+  upsampled to PCM16 16 kHz in pure Python: ~4.6 ms of loop CPU per second of
+  audio per call (measured on CPython 3.13; 57.7 µs vs 5.3 µs per frame on
+  3.14). At 25 concurrent calls that was ~115 ms of every wall-clock second.
+  Deepgram now takes the μ-law directly.
+
+**Ops signal for new blocking code:** asyncio's slow-callback warning,
+`Executing <Task …> took 0.xxx seconds`, on the `asyncio` logger. It is only
+emitted in debug mode. The voice test suite runs with it on and fails a test
+above 0.5 s, so production does not need `PYTHONASYNCIODEBUG=1`. Turn it on
+for one soak run when hunting a stall.
+
+> **To re-measure after merge:** the event-loop changes are unit-tested, not
+> load-tested. The next soak should record loop CPU share and p95 inbound-audio
+> gap (`audio_gap` telemetry) at the "comfortable" and "hard limit" call counts
+> above, and replace the modelled numbers.
 
 ---
 

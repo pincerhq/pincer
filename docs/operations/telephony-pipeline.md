@@ -64,9 +64,15 @@ Consequences for measurement:
   token reached the WebSocket — that is *text handed to Twilio*, not audio
   played to the caller. TTS latency on this engine is Twilio-internal and
   invisible.
-* Barge-in is handled by Twilio; we receive `{"type":"interrupt"}` after the
-  fact. `ConversationRelayEngine.interrupt_speech` is a no-op that only counts
-  the interruption (sending a Media-Streams `clear` here is Twilio error 64107).
+* Twilio stops its own playback on barge-in and then sends
+  `{"type":"interrupt"}`. `relay_ws` passes it to `on_caller_barge_in`, which
+  cancels the turn still streaming tokens and re-marks unheard agent lines from
+  `utteranceUntilInterrupt`. `ConversationRelayEngine.interrupt_speech` only
+  counts the interruption (sending a Media-Streams `clear` here is Twilio
+  error 64107).
+* The socket loop never awaits a turn: `prompt` hands the utterance to a
+  per-call task (`VoiceChannel._on_caller_speech`), so `interrupt` and the next
+  `prompt` are read while the agent is still talking.
 * Tokens are buffered by Twilio until `last=true`, so the engine keeps an
   `open_stream` flag and must close the utterance explicitly.
 
@@ -81,7 +87,7 @@ caller audio (μ-law 8 kHz, base64, 20 ms frames)
 wss://…/api/apps/twilio/stream/{call_sid}   (media_stream_ws)
         │
         ▼
-MediaStreamEngine.on_speech_input ──► audio.mulaw8k_to_pcm16k ──► Deepgram WS
+MediaStreamEngine.on_speech_input ──► Deepgram WS (mulaw/8000, no conversion)¹
         │                                                            │
         │                          endpointing=300-400 ms, utterance_end=800-1000 ms
         │                                                            ▼
@@ -102,13 +108,39 @@ send_speech(text) ──► split_into_segments ──► _stream_tts
     Twilio outbound buffer ───────────────────────► caller
 ```
 
+¹ Legacy `PINCER_VOICE_STT_ENCODING=linear16` (one release, then removed):
+`audio.mulaw8k_to_pcm16k` converts each frame to PCM16 16 kHz in Python
+before sending it.
+
 Consequences:
+
+* Deepgram ingests Twilio's frames as they arrive (`encoding=mulaw,
+  sample_rate=8000, channels=1`). There is no per-frame decode on the event
+  loop, and the upstream is 160 bytes per 20 ms instead of 640 (4× less
+  bandwidth). Word timings are seconds of audio, so they do not depend on the
+  wire encoding. `media_stream_ws` stores Twilio's declared `mediaFormat`, and
+  STT setup logs a warning if it is not μ-law 8 kHz mono.
 
 * Deepgram gives word-level start/end times (`TranscriptWord`), which is why
   `analytics_method = "exact"` here. Speech-end is therefore **observable**.
-* `interrupt_speech` cancels the TTS stream and sends Twilio `{"event":"clear"}`
-  — this is the only place a buffer-clear actually happens, and Twilio sends no
-  acknowledgement for it.
+* `interrupt_speech` bumps the call's speech epoch (stopping that call's
+  synthesis at its next chunk — the TTS provider is shared, so it is never
+  cancelled as a whole) and sends Twilio `{"event":"clear"}` — this is the only
+  place a buffer-clear actually happens, and Twilio sends no acknowledgement
+  for it.
+* Barge-in detection lives in the transcript consumer, while the agent is
+  audible (`playout_until_ns` in the future — estimated from the μ-law bytes
+  written, 8000 bytes = 1 s, since Twilio does not report playout).
+  `PINCER_VOICE_BARGE_IN_TRIGGER` picks the trigger:
+  * `vad` (default): Deepgram `SpeechStarted`, ignored in the first
+    `BARGE_IN_ARM_DELAY_MS` (250 ms) of a stretch of agent audio (echo of our
+    own onset); recognised words still trigger if VAD missed.
+  * `interim`: only recognised words (at least
+    `PINCER_VOICE_BARGE_IN_MIN_WORDS`, default 1). Use it on lines where VAD
+    reacts to coughs, noise or speakerphone echo.
+  * `off`: never; the caller's next final utterance still cancels the turn.
+* The low-confidence re-ask is a task (`aux_speech_task`), so the consumer
+  keeps reading while it plays; the next final transcript cancels it.
 * Time-to-first-audio-chunk is measured today (`_SpeechProgress.first_chunk_ms`,
   `CallMetrics.record_tts_first_chunk`).
 * Writing a media frame to the WebSocket is **not** playback. Twilio buffers an
@@ -163,6 +195,13 @@ sequenceDiagram
     deactivate A
     Note over CH,T: response latency ENDS here (audio SENT)<br/>the rest of the turn is post-response work
 ```
+
+**Twilio REST never blocks the loop.** Hangup, transfer, DTMF, the
+TTS-failure `<Say>` fallback and the outbound dial are awaited through
+`voice/twilio_rest.py` (`TwilioRest`, one per engine, 10 s limit per request).
+They used to be synchronous `twilio.rest.Client` calls made from coroutines,
+and each one froze every live call's audio for the whole round-trip. While a
+hangup on one call is in flight, every other call keeps streaming.
 
 **Read the overlap literally.** `llm.generation` is usually still open when
 `tts.synthesis` starts; a turn where they *do not* overlap is a turn that lost
@@ -243,8 +282,8 @@ Written as one `TURN_LATENCY` log line, one JSONL record in
    hears sentence one. Summing stages double-counts.
 4. Nothing is stored per call in a queryable place. The JSONL is the only
    per-turn record and it is not joined to `voice_calls`.
-5. Barge-in reaction is recorded in-memory only (`CallMetrics.barge_in_reactions_ms`)
-   and nothing ever calls `record_barge_in_reaction`.
+5. Barge-in reaction is recorded in-memory only (`CallMetrics.barge_in_reactions_ms`,
+   Media Streams: speech onset from Deepgram word timing → `clear` written).
 6. No correlation ids beyond `call_sid`. No trace/span, no turn id, no provider
    request ids, no deployment version.
 
@@ -252,8 +291,9 @@ Written as one `TURN_LATENCY` log line, one JSONL record in
 
 | Behaviour | Where | Telemetry implication |
 |---|---|---|
-| Turn runs as its own task `voice-turn-{sid}` | `phone_calls.py` | context must be carried into the task, not read from a global |
-| Barge-in cancels the prior turn, then `interrupt_speech` | `_cancel_prior_turn` | two separate events: cancellation and buffer clear |
+| Each utterance runs as its own task `voice-utterance-{sid}`, serialized per call by a lock; the LLM turn is a sub-task `voice-turn-{sid}` awaited outside the lock | `phone_calls.py` | context must be carried into the task, not read from a global; the read loops never await a turn |
+| Barge-in cancels the prior turn, then `interrupt_speech` — on the next utterance (`_cancel_prior_turn`) or as soon as it is detected (`_on_barge_in`) | `phone_calls.py` | two separate events: cancellation and buffer clear |
+| Call end cancels the in-flight turn and queued utterances | `_handle_call_end` | the turn trace closes as `call_ended`, not as an interruption |
 | Deterministic handlers speak and return early (gate re-ask, receptionist, mutual goodbye) | `_handle_speech_turn` | **not every turn reaches the LLM** — a "turn" with no LLM span is normal, not missing telemetry |
 | Buffered drift mode re-runs the whole turn through `check_and_fix` with one regeneration | `_speak_guarded_block` | a second LLM request inside one turn |
 | TTS failure retries once, resuming at `segments_done` | `MediaStreamEngine.send_speech` | attempt number belongs on the TTS span |
@@ -262,6 +302,7 @@ Written as one `TURN_LATENCY` log line, one JSONL record in
 | Approval hold `voice_approval_timeout_s` (25 s) with reassurance | `InCallToolGate._user_approval` | this is wall-clock inside a turn and must not read as LLM latency |
 | Watchdog reaps phase-inactive calls every 2 s | `_watchdog_loop` | stuck-call termination reason |
 | Late Twilio status webhooks for up to 15 min after teardown | `_remember_ended` | **out-of-order events are normal**, not a bug |
+| Twilio REST (hangup, transfer, DTMF, `<Say>` fallback, outbound dial) is awaited on one async client per engine, 10 s limit per request | `voice/twilio_rest.py` (`TwilioRest`) | a slow REST call delays only its own call, never the loop; nothing else may import `twilio.rest` (ruff `TID251`) |
 
 ## 6. Existing observability inventory
 

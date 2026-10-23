@@ -57,7 +57,12 @@ class TTSProvider(ABC):
 
     @abstractmethod
     async def cancel(self) -> None:
-        """Cancel current synthesis (for barge-in)."""
+        """Stop every synthesis in flight on this provider instance.
+
+        Provider-wide: one instance serves every concurrent call, so this is
+        NOT how a single call's barge-in stops its audio — the engine does
+        that per call (MediaStreamEngine.interrupt_speech).
+        """
         ...
 
 
@@ -87,7 +92,6 @@ class ElevenLabsTTS(TTSProvider):
         if output_format not in (OUTPUT_ULAW_8000, OUTPUT_PCM_16000):
             output_format = OUTPUT_ULAW_8000
         self.output_format = output_format
-        self._ws: Any = None
         self._cancelled = False
         #: Time-to-first-audio of the most recent utterance (ms), for metrics
         self.last_first_chunk_ms: float | None = None
@@ -133,8 +137,11 @@ class ElevenLabsTTS(TTSProvider):
         started = time.monotonic()
         first_chunk_at: float | None = None
 
+        # Local, never an attribute: the provider is shared by concurrent
+        # calls, and a shared socket let one call's cleanup close another's.
+        ws: Any = None
         try:
-            self._ws = await websockets.connect(
+            ws = await websockets.connect(
                 url,
                 additional_headers={"xi-api-key": self._api_key},
             )
@@ -146,19 +153,19 @@ class ElevenLabsTTS(TTSProvider):
                     "xi_api_key": self._api_key,
                 }
             )
-            await self._ws.send(init_msg)
+            await ws.send(init_msg)
 
             sentences = _split_sentences(text)
             for sentence in sentences:
                 if self._cancelled:
                     break
                 msg = json.dumps({"text": sentence + " ", "try_trigger_generation": True})
-                await self._ws.send(msg)
+                await ws.send(msg)
 
             close_msg = json.dumps({"text": ""})
-            await self._ws.send(close_msg)
+            await ws.send(close_msg)
 
-            async for raw in self._ws:
+            async for raw in ws:
                 if self._cancelled:
                     break
 
@@ -202,19 +209,14 @@ class ElevenLabsTTS(TTSProvider):
                 logger.exception("ElevenLabs TTS stream error")
                 raise TTSSynthesisError(str(e)) from e
         finally:
-            await self._close_ws()
+            if ws is not None:
+                with contextlib.suppress(Exception):
+                    await ws.close()
 
     async def cancel(self) -> None:
+        # Each stream checks the flag between chunks and closes its own socket.
         self._cancelled = True
-        await self._close_ws()
         logger.debug("ElevenLabs TTS cancelled")
-
-    async def _close_ws(self) -> None:
-        ws = self._ws
-        self._ws = None
-        if ws:
-            with contextlib.suppress(Exception):
-                await ws.close()
 
 
 def _split_sentences(text: str) -> list[str]:
