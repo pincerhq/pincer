@@ -208,12 +208,14 @@ def call_detail(
 
 def _parse_since(value: str, now: datetime) -> datetime:
     """The start of a `--since` window: `30d` / `12h` back from `now`, or an
-    ISO date/time (UTC when it has no offset). ValueError for anything else."""
+    ISO date/time (UTC when it has no offset), always normalised to UTC so it
+    compares correctly against the `+00:00` text SQLite stores. ValueError for
+    anything else."""
     if value[-1:] in ("d", "h") and value[:-1].isdigit():
         amount = int(value[:-1])
         return now - (timedelta(days=amount) if value.endswith("d") else timedelta(hours=amount))
     start = datetime.fromisoformat(value)
-    return start if start.tzinfo is not None else start.replace(tzinfo=UTC)
+    return start.astimezone(UTC) if start.tzinfo is not None else start.replace(tzinfo=UTC)
 
 
 def _retention_note(start: datetime, now: datetime, retention_days: int) -> str:
@@ -284,7 +286,7 @@ def reclassify(
     now = datetime.now(UTC)
     try:
         start = _parse_since(since, now)
-    except ValueError:
+    except (ValueError, OverflowError):
         console.print(f"[red]--since must look like 30d, 12h or an ISO date/time, got {since!r}[/red]")
         raise typer.Exit(2) from None
 

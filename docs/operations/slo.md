@@ -40,10 +40,15 @@ attempts, 10 may fail before the SLO is missed.
 **Numbers before October 2026 were inflated.** Until the outbound-outcome fix,
 busy, no-answer, failed and cancelled calls, and voicemail detected before
 pickup, were recorded as `none` (completed), and voicemail detected after
-pickup as `callee_hangup`. So `call_success_rate` read high. The call-attempt
-SLI was mostly unaffected, because those codes are excluded, but each late
-voicemail burned budget. After the fix, `call_success_rate` drops by the share
-of unreachable callees. That is the number becoming true, not a regression.
+pickup as `callee_hangup`. So `call_success_rate` read high, and so did the
+call-attempt SLI, which counted the `none` rows as successes. After the fix, busy,
+no-answer and voicemail calls (early or late) leave the SLI denominator, so late
+voicemail stops burning budget. Failed and cancelled calls are `call_setup`,
+which is ours, so they now count against the SLI and burn budget. Expect
+`call_success_rate` to drop by the share of calls that never connected. The SLI
+goes down with the failed / cancelled calls and up with each late voicemail that
+leaves the denominator; `reclassify` prints the net before → after. That is the
+number becoming true, not a regression.
 Correct the stored history with `pincer telephony reclassify`
 ([runbook](runbook.md#reclassify)). Rows older than the telemetry retention
 window keep their old codes.

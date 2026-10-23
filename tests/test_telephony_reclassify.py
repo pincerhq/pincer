@@ -231,10 +231,23 @@ def test_parse_since(value, expected):
     assert _parse_since(value, _NOW) == expected
 
 
+def test_parse_since_normalises_offset_to_utc():
+    # SQLite compares started_at as text, so the bound must serialise as +00:00 too.
+    start = _parse_since("2026-10-01T00:00:00+02:00", _NOW)
+    assert start.isoformat() == "2026-09-30T22:00:00+00:00"
+    assert start.isoformat() <= "2026-09-30T22:30:00+00:00"
+
+
 @pytest.mark.parametrize("value", ["", "30", "d", "30m", "-3d", "yesterday"])
 def test_parse_since_rejects(value):
     with pytest.raises(ValueError):
         _parse_since(value, _NOW)
+
+
+def test_cli_rejects_out_of_range_since():
+    result = CliRunner().invoke(telephony_app, ["reclassify", "--since", "1000000d"])
+    assert result.exit_code == 2
+    assert "--since must look like" in result.output
 
 
 def test_retention_note_only_beyond_retention():

@@ -56,6 +56,10 @@ _ENDED_BY_PARTY: frozenset[FailureCode] = frozenset(
     }
 )
 
+#: Terminal statuses of a call row (see `repositories.telemetry.LIVE_STATUSES`).
+STATUS_COMPLETED = "completed"
+STATUS_FAILED = "failed"
+
 
 def categorise(code: FailureCode | str | None) -> FailureCategory:
     """Map a failure code onto its reporting category."""
@@ -74,11 +78,6 @@ def categorise(code: FailureCode | str | None) -> FailureCategory:
     if parsed in _ENDED_BY_PARTY:
         return FailureCategory.ENDED_BY_PARTY
     return FailureCategory.TECHNICAL
-
-
-#: Terminal statuses of a call row (see `repositories.telemetry.LIVE_STATUSES`).
-STATUS_COMPLETED = "completed"
-STATUS_FAILED = "failed"
 
 
 def outcome_fields(status: str, failure_code: str, termination_reason: str, outcome: str = "") -> dict[str, str]:
