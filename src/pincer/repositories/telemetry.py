@@ -19,8 +19,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import bindparam, text, update
+from sqlmodel import col
 
 from pincer.models.telephony import TelephonyCall, TelephonyEvent, TelephonySpan, TelephonyTurn
+from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -169,15 +171,6 @@ class TelemetryStatements:
             ", ".join(_call_assignment(column) for column in known),
         )
 
-    def correct_call(self, call_id: str, values: dict[str, Any]) -> Executable:
-        """Overwrite a finished call row's outcome fields.
-
-        For backfills only (`pincer telephony reclassify`): unlike `call()`, a
-        terminal status is replaced, because correcting it is the point.
-        """
-        calls = _TABLES["pincer_telephony_calls"]
-        return update(calls).where(calls.c.call_id == call_id).values(**values)
-
     def turn(self, known: dict[str, Any]) -> Executable:
         """Write a completed turn's derived latencies.
 
@@ -191,3 +184,22 @@ class TelemetryStatements:
             "turn_id",
             ", ".join(f"{column}=excluded.{column}" for column in known),
         )
+
+
+class TelemetryCallRepository(BaseRepository[TelephonyCall, str]):
+    """Session-bound writes to the call row, for work that is not on the audio
+    path and must share a transaction with other tables."""
+
+    model = TelephonyCall
+
+    async def correct(self, call_id: str, values: dict[str, Any]) -> int:
+        """Overwrite a finished call row's outcome fields; the number of rows changed.
+
+        For backfills only (`pincer telephony reclassify`): unlike
+        `TelemetryStatements.call()`, a terminal status is replaced, because
+        correcting it is the point. A Core `update()` built per call rather
+        than a precompiled `text()`: precompiling is for the audio loop's
+        latency, and a one-off CLI backfill never runs there.
+        """
+        stmt = update(TelephonyCall).where(col(TelephonyCall.call_id) == call_id).values(**values)
+        return int((await self.session.exec(stmt)).rowcount)

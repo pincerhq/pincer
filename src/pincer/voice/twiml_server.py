@@ -485,7 +485,7 @@ async def voice_status(request: Request) -> PlainTextResponse:
     elif status in ("busy", "no-answer", "failed", "canceled"):
         # Call never connected — the user still gets a final status (T1.3/T1.5)
         from pincer.observability.failure_codes import NOT_CONNECTED_STATUS
-        from pincer.voice.engine import set_end_cause
+        from pincer.voice.engine import END_CODE_KEY, PROVIDER_STATUS_KEY, set_end_cause
         from pincer.voice.outcome import not_connected_reason
 
         end_code = NOT_CONNECTED_STATUS[status]
@@ -500,13 +500,16 @@ async def voice_status(request: Request) -> PlainTextResponse:
             # pipeline sends the final report; pre-empting it here would
             # consume the ENDED stage and drop that report. Only the code is
             # stored; the report renders it in the report language.
+            if END_CODE_KEY not in nc_state.metadata:
+                # Only when this status is the cause: first writer wins.
+                nc_state.metadata[PROVIDER_STATUS_KEY] = status
             set_end_cause(nc_state, end_code)
             await _engine.end_call(call_sid)
         elif _already_torn_down(call_sid):
             logger.info("Status '%s' [%s] — call already torn down, pipeline owns the report", status, call_sid)
         else:
             # The call never had state, so no pipeline will run
-            await notify_ended(call_sid, not_connected_reason(end_code, user_lang))
+            await notify_ended(call_sid, not_connected_reason(end_code, user_lang, status))
 
     elif status == "completed" and _engine:
         state = _engine.get_call_state(call_sid)

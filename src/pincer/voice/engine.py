@@ -54,6 +54,12 @@ class CallDirection(StrEnum):
 # only speech after this window counts as a demonstrably conversing human.
 AMD_GRACE_SECONDS = 10.0
 
+#: Metadata key for WHY a call ended: a `FailureCode` value, set by whoever learns it.
+END_CODE_KEY = "end_code"
+#: Metadata key for the provider status that set `end_code`, when one did: the
+#: report wording can be more specific than the code (`canceled` vs `failed`).
+PROVIDER_STATUS_KEY = "provider_status"
+
 # How long a torn-down call stays recognisable to late status webhooks. Twilio
 # retries a status callback for minutes, so this outlives the post-call
 # pipeline rather than just the create_task hand-off.
@@ -96,17 +102,11 @@ class CallState:
             self.metadata["caller_spoke"] = True
 
 
-#: Metadata key for WHY a call ended: a `FailureCode` value, set by whoever learns it.
-END_CODE_KEY = "end_code"
-
-
-def set_end_cause(state: CallState, code: FailureCode | str, display: str = "") -> None:
+def set_end_cause(state: CallState, code: FailureCode | str) -> None:
     """Record why the call ended. First writer wins: the earliest authoritative
     signal (Twilio status, AMD) must not be overwritten by a later generic one
     (our own end_call, shutdown)."""
     state.metadata.setdefault(END_CODE_KEY, str(code))
-    if display:
-        state.metadata.setdefault("end_reason", display)
 
 
 @dataclass

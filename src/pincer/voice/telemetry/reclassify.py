@@ -19,12 +19,13 @@ from typing import Any
 
 from pincer.observability.failure_codes import EXCLUDED_FROM_SLO, NOT_CONNECTED_STATUS, FailureCode
 from pincer.voice.telemetry import store
-from pincer.voice.telemetry.outcomes import categorise
+from pincer.voice.telemetry.outcomes import STATUS_FAILED, outcome_fields
 from pincer.voice.telemetry.schema import EventName
 
 #: Stored codes an unanswered call could wrongly carry. Anything else was
 #: classified from real evidence and is not second-guessed.
-RECLASSIFIABLE = ("none", "callee_hangup", "")
+#: "" is a row written before any code was recorded.
+RECLASSIFIABLE = (str(FailureCode.NONE), str(FailureCode.CALLEE_HANGUP), "")
 
 _EVIDENCE = (str(EventName.PROVIDER_STATUS), str(EventName.AMD_VERDICT))
 
@@ -86,7 +87,7 @@ def derive(events: list[dict[str, Any]], turn_count: int) -> tuple[FailureCode, 
 
 def _rates(codes: list[str]) -> dict[str, float | None]:
     excluded = {str(c) for c in EXCLUDED_FROM_SLO}
-    completed = sum(1 for c in codes if c in ("none", ""))
+    completed = sum(1 for c in codes if c in (FailureCode.NONE, ""))
     eligible = sum(1 for c in codes if c not in excluded)
     return {
         "call_success_rate": completed / len(codes) if codes else None,
@@ -105,7 +106,7 @@ async def plan(url: str, since: str) -> Plan:
     if found is None:
         result.telemetry_missing = True
         return result
-    candidates, events, turns = found
+    candidates, events = found
 
     by_call: dict[str, list[dict[str, Any]]] = {}
     for event in events:
@@ -117,7 +118,7 @@ async def plan(url: str, since: str) -> Plan:
         call_id = str(row["call_id"] or "")
         old = str(row["failure_code"] or "")
         started = str(row["started_at"] or "")
-        derived = derive(by_call.get(call_id, []), turns.get(call_id, 0)) if call_id else None
+        derived = derive(by_call.get(call_id, []), int(row["turn_count"] or 0)) if call_id else None
         if derived is None:
             result.undetermined.append((call_sid, started, old))
         elif str(derived[0]) != old:
@@ -143,12 +144,7 @@ async def apply(url: str, result: Plan) -> None:
             "call_sid": c.call_sid,
             "failure_code": c.new,
             "call_id": c.call_id,
-            "telemetry": {
-                "status": "failed",
-                "outcome": "failed",
-                "failure_code": c.new,
-                "failure_category": str(categorise(c.new)),
-            },
+            "telemetry": outcome_fields(STATUS_FAILED, c.new, termination_reason=c.new),
         }
         for c in result.changes
     ]
@@ -161,6 +157,10 @@ async def apply(url: str, result: Plan) -> None:
             "changed": len(result.changes),
             "by_code": dict(Counter(c.new for c in result.changes)),
             "undetermined": len(result.undetermined),
+            # Per call, so one wrong correction can be reverted on its own.
+            "changes": [
+                {"call_sid": c.call_sid, "old": c.old, "new": c.new, "evidence": c.evidence} for c in result.changes
+            ],
         },
     )
     await TelephonyReclassifyService(url).apply(changes, audit)

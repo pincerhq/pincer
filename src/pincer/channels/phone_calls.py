@@ -20,7 +20,9 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
+from pincer.observability.failure_codes import FailureCode, classify_failure
 from pincer.voice import call_end
+from pincer.voice.engine import END_CODE_KEY, PROVIDER_STATUS_KEY, CallDirection, set_end_cause
 from pincer.voice.metrics import VoiceMetricsRegistry
 from pincer.voice.state_machine import CallPhase, CallStateMachine
 from pincer.voice.transcript import Speaker, TranscriptLogger
@@ -161,7 +163,6 @@ class VoiceChannel(BaseChannel):
         is decided by ``build_context`` from PINCER_THREAD_INBOUND_CONTEXT,
         and in the default `off` mode that is nothing at all.
         """
-        from pincer.voice.engine import CallDirection
         from pincer.voice.threads import KIND_INBOUND_MATCHED, ThreadError, get_thread_manager
 
         manager = get_thread_manager(self._settings)
@@ -215,6 +216,13 @@ class VoiceChannel(BaseChannel):
             except TimeoutError:
                 logger.error("Shutdown drain exceeded %.0fs — force-ending remaining calls", SHUTDOWN_DRAIN_TIMEOUT_S)
                 for call_sid in list(self._engine.get_active_calls()):
+                    # The deploy cut these too. A terminal state machine is the
+                    # call whose goodbye finished before the deadline: it keeps
+                    # the outcome `_speak_shutdown_ending` gave it.
+                    sm = self._state_machines.get(call_sid)
+                    state = self._engine.get_call_state(call_sid)
+                    if state is not None and (sm is None or not sm.is_terminal):
+                        set_end_cause(state, FailureCode.SHUTDOWN)
                     with contextlib.suppress(Exception):
                         await self._engine.end_call(call_sid)
         # The drained calls' failure reports are user-facing (the initiator
@@ -253,15 +261,13 @@ class VoiceChannel(BaseChannel):
             phase = sm.phase
             terminal = CallPhase.COMPLETED if phase in _BENIGN_TIMEOUT_PHASES else CallPhase.FAILED
             sm.force_terminal(terminal, reason=f"shutdown_{phase.value}")
-        elif sm is None and self._engine:
-            # Still ringing: there is no state machine to carry the reason, so
-            # the deploy that cut the call is recorded as its cause.
-            state = self._engine.get_call_state(call_sid)
-            if state is not None:
-                from pincer.observability.failure_codes import FailureCode
-                from pincer.voice.engine import set_end_cause
+        state = self._engine.get_call_state(call_sid) if self._engine else None
+        if state is not None and (sm is None or state.metadata.get("answered_at") is None):
+            # Still ringing (state machines are created at answer, but keyed on
+            # `answered_at` so a call tracked early is covered too), or no state
+            # machine to carry the reason: the deploy is recorded as the cause.
 
-                set_end_cause(state, FailureCode.SHUTDOWN)
+            set_end_cause(state, FailureCode.SHUTDOWN)
 
     async def send(self, user_id: str, text: str, **kwargs: Any) -> None:
         """Send a text response to the active voice call for this user.
@@ -290,8 +296,6 @@ class VoiceChannel(BaseChannel):
         """Lazily create the state machine, transcript, and metrics for a call."""
         sm = self._state_machines.get(call_sid)
         if sm is None:
-            from pincer.voice.engine import CallDirection
-
             sm = CallStateMachine(call_sid, is_outbound=state.direction == CallDirection.OUTBOUND)
             sm.start_call()
             self._state_machines[call_sid] = sm
@@ -319,7 +323,6 @@ class VoiceChannel(BaseChannel):
         return sm
 
     def _receptionist_call(self, state: CallState) -> bool:
-        from pincer.voice.engine import CallDirection
         from pincer.voice.receptionist.profile import receptionist_active
 
         return state.direction == CallDirection.INBOUND and receptionist_active(self._settings)
@@ -462,9 +465,6 @@ class VoiceChannel(BaseChannel):
             # has no state machine whose reason would say so.
             state = self._engine.get_call_state(call_sid)
             if state is not None:
-                from pincer.observability.failure_codes import FailureCode
-                from pincer.voice.engine import set_end_cause
-
                 set_end_cause(state, FailureCode.STUCK)
             sm = self._state_machines.get(call_sid)
             if sm is not None and not sm.is_terminal:
@@ -1329,9 +1329,6 @@ class VoiceChannel(BaseChannel):
             with contextlib.suppress(Exception):
                 await self._stream_agent.end_voice_session(self._session_key(state))
 
-        from pincer.observability.failure_codes import FailureCode
-        from pincer.voice.engine import END_CODE_KEY, CallDirection
-
         # Whoever learned WHY the call ended (a webhook, shutdown, the reaper)
         # recorded it as `end_code`; that beats anything inferred from the phase.
         end_code = str(state.metadata.get(END_CODE_KEY) or "")
@@ -1351,11 +1348,13 @@ class VoiceChannel(BaseChannel):
                 # NORMAL ending ("thanks, bye" + click) — only a hangup during
                 # an action (VERIFY/EXECUTE), an error state, or before any
                 # conversation (greeting phases) counts as failed.
-                terminal = CallPhase.COMPLETED if sm.phase in _BENIGN_HANGUP_PHASES else CallPhase.FAILED
+                benign = sm.phase in _BENIGN_HANGUP_PHASES and not never_answered_outbound
+                terminal = CallPhase.COMPLETED if benign else CallPhase.FAILED
                 sm.force_terminal(terminal, reason="call_end_cleanup")
             completed = sm.phase == CallPhase.COMPLETED
-        elif never_answered_outbound:
-            # No human was ever on the line: never a success.
+        if never_answered_outbound:
+            # No human was ever on the line: never a success, whatever phase
+            # a state machine reached.
             completed = False
 
         unverified: list[str] = []
@@ -1402,7 +1401,10 @@ class VoiceChannel(BaseChannel):
             from pincer.voice.outcome import not_connected_reason
             from pincer.voice.status_notify import get_call_language
 
-            outcome = f"{not_connected_reason(end_code, get_call_language(call_sid))} ({state.duration_seconds}s)"
+            reason = not_connected_reason(
+                end_code, get_call_language(call_sid), str(state.metadata.get(PROVIDER_STATUS_KEY) or "")
+            )
+            outcome = f"{reason} ({state.duration_seconds}s)"
         if unverified:
             outcome += " — note: the agent made a completion claim I could not verify against tool results"
         with contextlib.suppress(Exception):
@@ -1423,9 +1425,9 @@ class VoiceChannel(BaseChannel):
         so the row is always closed with whatever is known.
         """
         from pincer.voice.telemetry import hooks as telemetry
+        from pincer.voice.telemetry.outcomes import STATUS_COMPLETED, STATUS_FAILED
 
         self._close_turn_trace(call_sid)
-        from pincer.voice.engine import END_CODE_KEY
 
         # A code, not display text: the column is read by machines.
         reason = str(state.metadata.get(END_CODE_KEY) or "")
@@ -1434,7 +1436,7 @@ class VoiceChannel(BaseChannel):
         with contextlib.suppress(Exception):
             await telemetry.call_ended(
                 call_sid,
-                status="completed" if completed else "failed",
+                status=STATUS_COMPLETED if completed else STATUS_FAILED,
                 failure_code=str(failure_code),
                 termination_reason=reason,
                 duration_s=float(state.duration_seconds),
@@ -1461,8 +1463,6 @@ class VoiceChannel(BaseChannel):
         look healthy and the callee heard nothing. It is reclassified as
         `no_audio` so the failure is visible instead of scoring as a win.
         """
-        from pincer.observability.failure_codes import FailureCode, classify_failure
-        from pincer.voice.engine import END_CODE_KEY, CallDirection
 
         if state is not None:
             end_code = str(state.metadata.get(END_CODE_KEY) or "")

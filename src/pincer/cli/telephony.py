@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import json as json_lib
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.table import Table
 
 from pincer.cli._shared import console
+
+if TYPE_CHECKING:
+    from pincer.voice.telemetry.reclassify import Plan
 
 telephony_app = typer.Typer(name="telephony", help="Telephony telemetry: latency baselines and call diagnosis")
 
@@ -202,60 +206,27 @@ def call_detail(
     )
 
 
-@telephony_app.command(name="reclassify")
-def reclassify(
-    since: str = typer.Option("30d", "--since", help="Window: e.g. 30d or 12h, or an ISO date/time (UTC if no offset)"),
-    apply: bool = typer.Option(False, "--apply", help="Write the corrections (default: dry run)"),
-    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
-) -> None:
-    """Correct the failure code of outbound calls that never reached a person.
+def _parse_since(value: str, now: datetime) -> datetime:
+    """The start of a `--since` window: `30d` / `12h` back from `now`, or an
+    ISO date/time (UTC when it has no offset). ValueError for anything else."""
+    if value[-1:] in ("d", "h") and value[:-1].isdigit():
+        amount = int(value[:-1])
+        return now - (timedelta(days=amount) if value.endswith("d") else timedelta(hours=amount))
+    start = datetime.fromisoformat(value)
+    return start if start.tzinfo is not None else start.replace(tzinfo=UTC)
 
-    Busy / no-answer / failed / canceled calls and voicemail used to be recorded
-    as completed (late voicemail as a callee hang-up). The provider events on
-    each call's telemetry timeline say what really happened; this re-derives the
-    code from them. Dry run unless `--apply`, which updates `voice_calls` and the
-    telemetry row in one transaction and writes an audit row. Idempotent.
-    """
-    from datetime import UTC, datetime, timedelta
-    from pathlib import Path
 
-    from pincer.db.engine import get_database_url
-    from pincer.voice.telemetry import reclassify as rc
+def _retention_note(start: datetime, now: datetime, retention_days: int) -> str:
+    """Why calls before the telemetry retention cut-off cannot be corrected; "" inside it."""
+    if not retention_days or start >= now - timedelta(days=retention_days):
+        return ""
+    return (
+        f"Telemetry is kept for {retention_days} days: calls before "
+        f"{(now - timedelta(days=retention_days)).date()} have no events left and cannot be corrected."
+    )
 
-    now = datetime.now(UTC)
-    try:
-        if since[-1:] in ("d", "h") and since[:-1].isdigit():
-            amount = int(since[:-1])
-            start = now - (timedelta(days=amount) if since.endswith("d") else timedelta(hours=amount))
-        else:
-            start = datetime.fromisoformat(since)
-            if start.tzinfo is None:
-                start = start.replace(tzinfo=UTC)
-    except ValueError:
-        console.print(f"[red]--since must look like 30d, 12h or an ISO date/time, got {since!r}[/red]")
-        raise typer.Exit(2) from None
 
-    settings = _settings()
-    url = get_database_url(Path(str(settings.db_path)))
-
-    async def _run() -> rc.Plan:
-        result = await rc.plan(url, start.isoformat())
-        if apply:
-            await rc.apply(url, result)
-        return result
-
-    result = asyncio.run(_run())
-    retention = int(getattr(settings, "telephony_telemetry_retention_days", 30) or 0)
-    retention_note = ""
-    if retention and start < now - timedelta(days=retention):
-        retention_note = (
-            f"Telemetry is kept for {retention} days: calls before "
-            f"{(now - timedelta(days=retention)).date()} have no events left and cannot be corrected."
-        )
-
-    if output_json:
-        console.print_json(json_lib.dumps({**result.to_dict(), "applied": apply, "retention_note": retention_note}))
-        return
+def _render_plan(result: Plan, *, applied: bool, retention_note: str) -> None:
     if result.telemetry_missing:
         console.print("[yellow]Telemetry tables are missing — run `pincer db upgrade`.[/yellow]")
         return
@@ -285,10 +256,53 @@ def reclassify(
 
     if not result.changes:
         console.print("\nNothing to reclassify.")
-    elif apply:
+    elif applied:
         console.print(f"\n[green]Reclassified {len(result.changes)} call(s).[/green]")
     else:
         console.print(f"\n[yellow]Dry run: {len(result.changes)} call(s) would change. Re-run with --apply.[/yellow]")
+
+
+@telephony_app.command(name="reclassify")
+def reclassify(
+    since: str = typer.Option("30d", "--since", help="Window: e.g. 30d or 12h, or an ISO date/time (UTC if no offset)"),
+    apply: bool = typer.Option(False, "--apply", help="Write the corrections (default: dry run)"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """Correct the failure code of outbound calls that never reached a person.
+
+    Busy / no-answer / failed / canceled calls and voicemail used to be recorded
+    as completed (late voicemail as a callee hang-up). The provider events on
+    each call's telemetry timeline say what really happened; this re-derives the
+    code from them. Dry run unless `--apply`, which updates `voice_calls` and the
+    telemetry row in one transaction and writes an audit row. Idempotent.
+    """
+    from pathlib import Path
+
+    from pincer.db.engine import get_database_url
+    from pincer.voice.telemetry import reclassify as rc
+
+    now = datetime.now(UTC)
+    try:
+        start = _parse_since(since, now)
+    except ValueError:
+        console.print(f"[red]--since must look like 30d, 12h or an ISO date/time, got {since!r}[/red]")
+        raise typer.Exit(2) from None
+
+    settings = _settings()
+    url = get_database_url(Path(str(settings.db_path)))
+
+    async def _run() -> rc.Plan:
+        result = await rc.plan(url, start.isoformat())
+        if apply:
+            await rc.apply(url, result)
+        return result
+
+    result = asyncio.run(_run())
+    retention_note = _retention_note(start, now, int(getattr(settings, "telephony_telemetry_retention_days", 30) or 0))
+    if output_json:
+        console.print_json(json_lib.dumps({**result.to_dict(), "applied": apply, "retention_note": retention_note}))
+        return
+    _render_plan(result, applied=apply, retention_note=retention_note)
 
 
 @telephony_app.command(name="health")

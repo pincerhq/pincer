@@ -22,7 +22,7 @@ from pincer.services.voice import CallsService
 from pincer.voice import analytics as an
 from pincer.voice import scheduling, status_notify, threads
 from pincer.voice.briefing import briefing_from_state, report_adherence
-from pincer.voice.engine import END_CODE_KEY
+from pincer.voice.engine import END_CODE_KEY, PROVIDER_STATUS_KEY
 from pincer.voice.outcome import (
     CallOutcome,
     extract_outcome,
@@ -106,13 +106,18 @@ class PostCallProcessor:
         # Nobody was ever on the line: there is nothing to extract, nothing to
         # remember, and no transcript to link.
         failure_code = str(state.metadata.get("failure_code") or "")
-        if not an.was_conversational(failure_code=failure_code) and state.metadata.get("answered_at") is None:
+        conversational = an.was_conversational(failure_code=failure_code)
+        if not conversational and state.metadata.get("answered_at") is None:
             return await self._process_not_connected(
                 call_sid, state, transcript, call_analytics, target_label, failure_code, language
             )
 
+        # Answered by a machine (voicemail detected after pickup): the
+        # transcript is our greeting and its greeting, so an extracted outcome
+        # would be made up. No outcome means no memory notes and the fallback
+        # report, which still gets the reason line below.
         outcome: CallOutcome | None = None
-        if transcript is not None and self._llm is not None:
+        if conversational and transcript is not None and self._llm is not None:
             transcript_text = transcript.get_full_transcript()
             actions_text = "\n".join(
                 f"{action.tool_name or action.action_type}: {action.output_summary[:200]}"
@@ -163,11 +168,8 @@ class PostCallProcessor:
         # An answered call that still ended without a conversation (voicemail
         # detected after pickup) says so, in the report language.
         end_code = str(state.metadata.get(END_CODE_KEY) or "")
-        end_reason = str(state.metadata.get("end_reason") or "")
         if end_code and not an.was_conversational(failure_code=end_code):
-            end_reason = end_reason or not_connected_reason(end_code, language)
-        if end_reason:
-            report = f"{report}\nℹ️ {end_reason}"
+            report = f"{report}\nℹ️ {not_connected_reason(end_code, language)}"
 
         note = await self._appointment_note(call_sid, language)
         if note:
@@ -232,7 +234,8 @@ class PostCallProcessor:
         one — and no memory notes. The call row, analytics and thread
         bookkeeping still happen: they are what the success numbers read.
         """
-        report = render_not_connected_report(target_label, call_sid, failure_code, language)
+        provider_status = str(state.metadata.get(PROVIDER_STATUS_KEY) or "")
+        report = render_not_connected_report(target_label, call_sid, failure_code, language, provider_status)
         persisted = await self._persist(call_sid, state, transcript)
         opt_out_note, thread_update = await self._run_shared_pipeline(
             call_sid, state, transcript, None, call_analytics, language
@@ -261,11 +264,9 @@ class PostCallProcessor:
             )
         except Exception:
             logger.exception("Appointment finalization crashed [%s]", call_sid)
-            note = (
-                "⚠️ Die Terminverarbeitung nach dem Anruf ist fehlgeschlagen — bitte Kalender manuell prüfen."
-                if language.startswith("de")
-                else "⚠️ Post-call appointment processing failed — please check the calendar manually."
-            )
+            from pincer.voice.prompts import get_prompt
+
+            note = str(get_prompt("APPOINTMENT_POSTCALL_FAILED", language))
         scheduling.clear_appointment(call_sid)
         return str(note or "")
 

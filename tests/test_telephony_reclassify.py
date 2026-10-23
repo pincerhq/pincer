@@ -12,7 +12,7 @@ import pytest
 from support import seeded_id
 from typer.testing import CliRunner
 
-from pincer.cli.telephony import telephony_app
+from pincer.cli.telephony import _parse_since, _retention_note, telephony_app
 from pincer.db import ensure_schema_current
 from pincer.db.engine import get_database_url, get_engine
 from pincer.models.audit import AuditLog
@@ -85,7 +85,11 @@ HISTORY = {
     "CA_human": ("none", ["in-progress", "completed"], "human", 3, True),
     "CA_no_telemetry": ("none", [], "", 0, False),
     "CA_classified": ("ws_drop", ["busy"], "", 0, True),
+    # A person answered and the false-positive verdict was ignored, on a call
+    # too unsampled to keep turn rows: only the call row counts its turns.
+    "CA_vm_unsampled": ("none", [], "machine_start", 2, True),
 }
+UNSAMPLED = {"CA_vm_unsampled"}
 
 
 async def _seed(url: str) -> None:
@@ -127,10 +131,14 @@ async def _seed(url: str) -> None:
             ],
             [],
         )
+        # As `TurnTracer._persist`: every turn counts on the call row, only a
+        # sampled call keeps the turn row.
         for t in range(turns):
-            await telemetry.upsert_turn(
-                seeded_id(f"{sid}-turn-{t}"), {"call_id": call_id, "turn_no": t + 1, "created_at": started}
-            )
+            if sid not in UNSAMPLED:
+                await telemetry.upsert_turn(
+                    seeded_id(f"{sid}-turn-{t}"), {"call_id": call_id, "turn_no": t + 1, "created_at": started}
+                )
+            await telemetry.upsert_call(call_id, {"turn_count": 1})
     # An inbound call is never a candidate.
     await calls.save_call(
         {"call_sid": "CA_inbound", "direction": "inbound", "started_at": T0.isoformat(), "failure_code": "none"}
@@ -157,7 +165,12 @@ async def test_reclassify_dry_run_and_apply(url):
         "CA_busy": ("none", "busy"),
         "CA_vm_early": ("none", "voicemail"),
     }
-    assert {sid for sid, _, _ in plan.undetermined} == {"CA_vm_spoken", "CA_human", "CA_no_telemetry"}
+    assert {sid for sid, _, _ in plan.undetermined} == {
+        "CA_vm_spoken",
+        "CA_human",
+        "CA_no_telemetry",
+        "CA_vm_unsampled",
+    }
     assert plan.rates["before"]["call_success_rate"] > plan.rates["after"]["call_success_rate"]
     assert (await calls.get("CA_busy") or {})["failure_code"] == "none", "a plan writes nothing"
 
@@ -170,6 +183,7 @@ async def test_reclassify_dry_run_and_apply(url):
         "CA_human": "none",
         "CA_no_telemetry": "none",
         "CA_classified": "ws_drop",
+        "CA_vm_unsampled": "none",
     }
     for sid, code in expected.items():
         assert (await calls.get(sid) or {})["failure_code"] == code, sid
@@ -177,17 +191,56 @@ async def test_reclassify_dry_run_and_apply(url):
         assert reads is not None
         row = await reads.call("CA_busy")
     assert row is not None
-    assert (row["status"], row["failure_code"], row["failure_category"]) == ("failed", "busy", "callee_unavailable")
+    assert (row["status"], row["failure_code"], row["failure_category"], row["termination_reason"]) == (
+        "failed",
+        "busy",
+        "callee_unavailable",
+        "busy",
+    )
 
     audit = await AuditService(url).query(action="telephony.reclassify")
     assert len(audit) == 1
-    assert json.loads(audit[0]["metadata_json"])["changed"] == 2
+    metadata = json.loads(audit[0]["metadata_json"])
+    assert metadata["changed"] == 2
+    assert {c["call_sid"]: (c["old"], c["new"]) for c in metadata["changes"]} == {
+        "CA_busy": ("none", "busy"),
+        "CA_vm_early": ("none", "voicemail"),
+    }
+    assert all(c["evidence"] for c in metadata["changes"])
 
     again = await rc.plan(url, SINCE)
     assert again.changes == []
 
 
 # ── the CLI ──────────────────────────────────────────────────────────
+
+
+_NOW = datetime(2026, 10, 23, 12, 0, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("30d", _NOW - timedelta(days=30)),
+        ("12h", _NOW - timedelta(hours=12)),
+        ("2026-10-01", datetime(2026, 10, 1, tzinfo=UTC)),
+        ("2026-10-01T08:30:00+02:00", datetime(2026, 10, 1, 6, 30, tzinfo=UTC)),
+    ],
+)
+def test_parse_since(value, expected):
+    assert _parse_since(value, _NOW) == expected
+
+
+@pytest.mark.parametrize("value", ["", "30", "d", "30m", "-3d", "yesterday"])
+def test_parse_since_rejects(value):
+    with pytest.raises(ValueError):
+        _parse_since(value, _NOW)
+
+
+def test_retention_note_only_beyond_retention():
+    assert _retention_note(_NOW - timedelta(days=10), _NOW, 30) == ""
+    assert _retention_note(_NOW - timedelta(days=90), _NOW, 0) == ""
+    assert "2026-09-23" in _retention_note(_NOW - timedelta(days=90), _NOW, 30)
 
 
 async def test_cli_dry_run_then_apply(tmp_path, monkeypatch):

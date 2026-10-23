@@ -485,7 +485,7 @@ class CallTracer:
         if self._finished:
             return
         self._finished = True
-        from pincer.voice.telemetry.outcomes import categorise
+        from pincer.voice.telemetry.outcomes import outcome_fields
 
         for key, handle in list(self._open.items()):
             handle.close(SpanStatus.CANCELLED, reason="call_ended")
@@ -499,11 +499,7 @@ class CallTracer:
             **attributes,
         )
         fields: dict[str, Any] = {
-            "status": status,
-            "outcome": outcome or status,
-            "failure_code": failure_code,
-            "failure_category": str(categorise(failure_code or None)),
-            "termination_reason": termination_reason,
+            **outcome_fields(status, failure_code, termination_reason, outcome),
             "ended_at": utc_iso(),
             "duration_ms": (duration_s * 1000.0) if duration_s is not None else self.watch.elapsed_ms(),
             # NOT turn_count: `turn_count` accumulates, and each TurnTracer

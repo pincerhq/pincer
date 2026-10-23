@@ -256,9 +256,18 @@ class TelemetryReads:
 
     async def reclassify_candidates(self, since: str, codes: Sequence[str]) -> list[dict[str, Any]]:
         """Outbound calls started since `since` whose stored code is one of `codes`
-        (or empty), each with its telemetry call id — None when telemetry has no row."""
+        (or empty), each with its telemetry call id and turn count — None when telemetry has no row.
+
+        The turn count is the call row's, which every turn adds to; turn rows
+        are written only for sampled calls."""
         stmt = (
-            select(VOICE_CALLS.c.call_sid, VOICE_CALLS.c.started_at, VOICE_CALLS.c.failure_code, CALLS.c.call_id)
+            select(
+                VOICE_CALLS.c.call_sid,
+                VOICE_CALLS.c.started_at,
+                VOICE_CALLS.c.failure_code,
+                CALLS.c.call_id,
+                CALLS.c.turn_count,
+            )
             .select_from(VOICE_CALLS.outerjoin(CALLS, CALLS.c.provider_call_id == VOICE_CALLS.c.call_sid))
             .where(
                 VOICE_CALLS.c.direction == "outbound",
@@ -277,12 +286,3 @@ class TelemetryReads:
             .order_by(EVENTS.c.ts_utc.asc(), EVENTS.c.seq.asc())
         )
         return await self._rows(stmt)
-
-    async def turn_counts(self, call_ids: Sequence[str]) -> dict[str, int]:
-        """How many turns each of these calls recorded; a call with none is absent."""
-        stmt = (
-            select(TURNS.c.call_id, func.count().label("n"))
-            .where(TURNS.c.call_id.in_(list(call_ids)))
-            .group_by(TURNS.c.call_id)
-        )
-        return {str(row["call_id"]): int(row["n"]) for row in await self._rows(stmt)}

@@ -25,7 +25,7 @@ from pincer.observability.failure_codes import FailureCode
 from pincer.voice import status_notify
 from pincer.voice.briefing import CallBriefing
 from pincer.voice.engine import CallDirection, CallState, ConversationRelayEngine, set_end_cause
-from pincer.voice.outcome import render_not_connected_report
+from pincer.voice.outcome import not_connected_reason, render_not_connected_report
 from pincer.voice.postcall import PostCallProcessor
 from pincer.voice.state_machine import CallPhase, CallStateMachine
 from pincer.voice.twiml_server import init_voice_routes, twilio_router
@@ -196,6 +196,19 @@ async def test_human_call_unchanged(rig):
     assert metric["outcome"] == "failed"
 
 
+async def test_unanswered_outbound_with_benign_state_machine_is_not_completed(rig):
+    """A benign phase speaks for a conversation; with no answer there was none."""
+    state = await rig.dial("CA_unans_sm")
+    sm = rig.channel._ensure_call_tracking("CA_unans_sm", state)
+    assert sm.transition(CallPhase.FREEFORM, reason="conversation")
+    await rig.post("status", CallSid="CA_unans_sm", CallStatus="completed")
+
+    metric = rig.ended_once()
+    assert metric["outcome"] == "failed"
+    assert metric["failure_code"] == "unknown"
+    assert sm.phase == CallPhase.FAILED
+
+
 # 6
 def test_end_cause_first_writer_wins():
     state = CallState(call_sid="CA_fw", direction=CallDirection.OUTBOUND, caller_number=TARGET)
@@ -240,6 +253,16 @@ async def test_shutdown_while_ringing(rig):
     assert metric["outcome"] == "failed"
 
 
+async def test_shutdown_while_ringing_with_a_state_machine(rig):
+    """No path tracks a call before it is answered today; if one ever does,
+    the deploy is still the cause of an unanswered call."""
+    state = await rig.dial("CA_down_sm")
+    rig.channel._ensure_call_tracking("CA_down_sm", state)
+    await rig.channel.stop()
+
+    assert rig.ended_once()["failure_code"] == "shutdown"
+
+
 # 9 + 10
 @pytest.mark.parametrize(
     ("language", "expected"),
@@ -266,6 +289,28 @@ async def test_not_connected_report(rig, monkeypatch, language, expected):
     extract.assert_not_called()
 
 
+async def test_canceled_report_says_canceled_not_unplaced(rig):
+    """`canceled` shares `call_setup` with `failed`; the user is told which."""
+    rig.with_post_call()
+    state = await rig.dial("CA_cancel")
+    await rig.post("status", CallSid="CA_cancel", CallStatus="canceled")
+    await rig.settle()
+
+    assert state.metadata["failure_code"] == "call_setup"
+    report = "\n".join(rig.sent)
+    assert f"📞 Couldn't reach {TARGET} — the call was canceled." in report
+    assert "could not be placed" not in report
+
+
+@pytest.mark.parametrize(
+    ("language", "text"),
+    [("en", "the call was canceled"), ("de", "der Anruf wurde abgebrochen"), ("uk", "дзвінок було скасовано")],
+)
+def test_canceled_reason_is_keyed_by_provider_status(language, text):
+    assert not_connected_reason("call_setup", language, provider_status="canceled") == text
+    assert not_connected_reason("call_setup", language, provider_status="failed") != text
+
+
 @pytest.mark.parametrize(
     ("code", "fragment"),
     [
@@ -289,3 +334,54 @@ async def test_late_voicemail_report_carries_the_voicemail_line(rig):
     await rig.settle()
 
     assert "Anrufbeantworter erkannt" in "\n".join(rig.sent)
+
+
+async def test_late_voicemail_extracts_nothing_and_remembers_nothing(rig, monkeypatch):
+    """The transcript is two greetings: any extracted outcome would be made up."""
+    extract = AsyncMock()
+    notes = AsyncMock()
+    monkeypatch.setattr("pincer.voice.postcall.extract_outcome", extract)
+    monkeypatch.setattr(PostCallProcessor, "_write_memory_notes", notes)
+    rig.with_post_call(llm=MagicMock())
+    await rig.dial("CA_late2")
+    await rig.answer("CA_late2")
+    await rig.post("amd", CallSid="CA_late2", AnsweredBy="machine_end_beep")
+    await rig.settle()
+
+    extract.assert_not_called()
+    notes.assert_not_called()
+    report = "\n".join(rig.sent)
+    assert f"Call with {TARGET} ended" in report
+    assert "voicemail detected" in report
+
+
+@pytest.mark.parametrize(
+    ("language", "fragment"),
+    [("en", "check the calendar manually"), ("de", "Kalender manuell prüfen"), ("uk", "перевірте календар вручну")],
+)
+async def test_appointment_crash_note_is_localized(rig, monkeypatch, language, fragment):
+    monkeypatch.setattr("pincer.voice.postcall.scheduling.get_appointment", lambda _sid: object())
+    monkeypatch.setattr(
+        "pincer.voice.postcall.scheduling.finalize_appointment", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+    monkeypatch.setattr("pincer.voice.postcall.scheduling.clear_appointment", lambda _sid: None)
+    processor = PostCallProcessor(rig.settings, llm=None, memory=None, db_path=rig.settings.db_path)
+
+    assert fragment in await processor._appointment_note("CA_appt", language)
+
+
+@pytest.mark.parametrize(
+    ("language", "done", "not_done"),
+    [
+        ("en", "— completed.", "— did not complete."),
+        ("de", "— abgeschlossen.", "— nicht abgeschlossen."),
+        ("uk", "— завершено.", "— не завершено."),
+    ],
+)
+def test_fallback_report_comes_from_the_prompt_pack(language, done, not_done):
+    from pincer.voice.outcome import render_fallback_report
+
+    assert done in render_fallback_report(TARGET, 95, "CA1", True, language)
+    report = render_fallback_report(TARGET, 95, "CA1", False, language)
+    assert not_done in report
+    assert report.endswith("/transcript CA1")
