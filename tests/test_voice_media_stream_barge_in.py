@@ -13,11 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 from test_voice_streaming_turn import FakeStreamAgent, _settings, text_chunks
-from voice_harness.transport_fakes import FakeSocket, FakeSTT, FakeSTTStream, FakeTTS
+from voice_harness.transport_fakes import FakeSocket, FakeSTT, FakeSTTStream, FakeTTS, FakeTwilio, install_fake_twilio
 
 from pincer.channels.phone_calls import VoiceChannel
 from pincer.voice import scheduling
@@ -41,7 +40,7 @@ def _clean_scheduling():
 @pytest.fixture(autouse=True)
 def _no_twilio_rest(monkeypatch):
     """A real engine: ending a call would hit the Twilio REST API."""
-    monkeypatch.setattr("twilio.rest.Client", MagicMock())
+    install_fake_twilio(monkeypatch, FakeTwilio)
 
 
 def _engine(tts: FakeTTS, trigger: str = "vad") -> MediaStreamEngine:

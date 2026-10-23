@@ -297,13 +297,6 @@ async def make_phone_call(
         return f"Error: {decision.message}"
 
     try:
-        from twilio.rest import Client
-
-        client = Client(
-            settings.twilio_account_sid,
-            settings.twilio_auth_token.get_secret_value(),
-        )
-
         base_url = settings.voice_webhook_base_url.strip().rstrip("/")
         status_url = f"{base_url}/api/apps/twilio/status"
 
@@ -381,7 +374,18 @@ async def make_phone_call(
         )
 
         try:
-            call = client.calls.create(**call_kwargs)
+            if engine is not None:
+                call = await engine._rest.create_call(**call_kwargs)
+            else:
+                # No voice engine in this process (API-only deployment): a
+                # one-off session, closed here so it never outlives its loop.
+                from pincer.voice.twilio_rest import TwilioRest
+
+                rest = TwilioRest(settings)
+                try:
+                    call = await rest.create_call(**call_kwargs)
+                finally:
+                    await rest.aclose()
         except Exception as e:
             await telemetry.dial_rejected(trace_key, error=f"{type(e).__name__}: {e}"[:160])
             if engine is not None and pre_state is not None:

@@ -231,6 +231,10 @@ class VoiceChannel(BaseChannel):
                 for call_sid in list(self._engine.get_active_calls()):
                     with contextlib.suppress(Exception):
                         await self._engine.end_call(call_sid)
+            # every hangup above has gone out; the aiohttp session must not
+            # outlive the loop
+            with contextlib.suppress(Exception):
+                await self._engine.aclose()
         # The drained calls' failure reports are user-facing (the initiator
         # must learn the call was cut) — let them finish before exiting,
         # bounded so a hung LLM request can't block shutdown indefinitely.

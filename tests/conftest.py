@@ -1,6 +1,7 @@
 """Shared test fixtures."""
 
 import asyncio
+import logging
 import os
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
@@ -120,6 +121,70 @@ def _isolate_audit_logger(tmp_path: Path) -> None:
     audit._audit_logger = _InMemoryAuditLogger(tmp_path / "audit.db")
     yield audit._audit_logger
     audit._audit_logger = previous
+
+
+# ── Event-loop stall guard (tests/test_voice*) ─────────────────────────────
+#
+# One call's work must never freeze another call's audio. A blocking Twilio
+# REST call on the loop did exactly that and no test could see it. The static
+# half of the guard is ruff's TID251 ban on `twilio.rest`; this is the dynamic
+# half, for whatever blocks next (file I/O, a CPU loop, time.sleep): asyncio
+# debug mode logs every callback that holds the loop longer than the threshold,
+# and the test fails on it.
+
+# Above the ~0.25 s a step can take under full-suite CPU contention, below a
+# time.sleep or a real network round-trip. Imports count too: import heavy
+# modules at test-module level, not inside the test coroutine.
+LOOP_STALL_THRESHOLD_S = 0.5
+
+
+class _StallCapture(logging.Handler):
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.stalls: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if message.startswith("Executing "):
+            self.stalls.append(message)
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    for item in items:
+        # fixture closures are computed by now; a usefixtures marker would be ignored
+        if item.nodeid.startswith("tests/test_voice") and not item.get_closest_marker("allow_loop_stall"):
+            item.fixturenames.insert(0, "_loop_stall_guard")
+
+
+@pytest_asyncio.fixture
+async def _loop_stall_guard() -> Any:
+    loop = asyncio.get_running_loop()
+    debug, threshold = loop.get_debug(), loop.slow_callback_duration
+    loop.set_debug(True)
+    loop.slow_callback_duration = LOOP_STALL_THRESHOLD_S
+    capture = _StallCapture()
+    logging.getLogger("asyncio").addHandler(capture)
+    try:
+        yield
+    finally:
+        logging.getLogger("asyncio").removeHandler(capture)
+        loop.set_debug(debug)
+        loop.slow_callback_duration = threshold
+    assert not capture.stalls, "event loop stalled: " + "; ".join(capture.stalls)
+
+
+@pytest.fixture
+def fake_twilio_rest(monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+    """Every TwilioRest built during the test is this FakeTwilioRest. An engine
+    constructed before the fixture keeps its own: assign `engine._rest = fake`."""
+    from voice_harness.transport_fakes import FakeTwilioRest
+
+    fake = FakeTwilioRest()
+    monkeypatch.setattr("pincer.voice.engine.TwilioRest", lambda _settings: fake)
+    monkeypatch.setattr("pincer.voice.twilio_rest.TwilioRest", lambda _settings: fake)
+    yield fake
+    if fake.hold is not None:
+        fake.hold.set()  # never leave a held request behind
 
 
 @pytest.fixture

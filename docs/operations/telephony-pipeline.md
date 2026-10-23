@@ -87,7 +87,7 @@ caller audio (μ-law 8 kHz, base64, 20 ms frames)
 wss://…/api/apps/twilio/stream/{call_sid}   (media_stream_ws)
         │
         ▼
-MediaStreamEngine.on_speech_input ──► audio.mulaw8k_to_pcm16k ──► Deepgram WS
+MediaStreamEngine.on_speech_input ──► Deepgram WS (mulaw/8000, no conversion)¹
         │                                                            │
         │                          endpointing=300-400 ms, utterance_end=800-1000 ms
         │                                                            ▼
@@ -108,7 +108,18 @@ send_speech(text) ──► split_into_segments ──► _stream_tts
     Twilio outbound buffer ───────────────────────► caller
 ```
 
+¹ Legacy `PINCER_VOICE_STT_ENCODING=linear16` (one release, then removed):
+`audio.mulaw8k_to_pcm16k` converts each frame to PCM16 16 kHz in Python
+before sending it.
+
 Consequences:
+
+* Deepgram ingests Twilio's frames as they arrive (`encoding=mulaw,
+  sample_rate=8000, channels=1`). There is no per-frame decode on the event
+  loop, and the upstream is 160 bytes per 20 ms instead of 640 (4× less
+  bandwidth). Word timings are seconds of audio, so they do not depend on the
+  wire encoding. `media_stream_ws` stores Twilio's declared `mediaFormat`, and
+  STT setup logs a warning if it is not μ-law 8 kHz mono.
 
 * Deepgram gives word-level start/end times (`TranscriptWord`), which is why
   `analytics_method = "exact"` here. Speech-end is therefore **observable**.
@@ -184,6 +195,13 @@ sequenceDiagram
     deactivate A
     Note over CH,T: response latency ENDS here (audio SENT)<br/>the rest of the turn is post-response work
 ```
+
+**Twilio REST never blocks the loop.** Hangup, transfer, DTMF, the
+TTS-failure `<Say>` fallback and the outbound dial are awaited through
+`voice/twilio_rest.py` (`TwilioRest`, one per engine, 10 s limit per request).
+They used to be synchronous `twilio.rest.Client` calls made from coroutines,
+and each one froze every live call's audio for the whole round-trip. While a
+hangup on one call is in flight, every other call keeps streaming.
 
 **Read the overlap literally.** `llm.generation` is usually still open when
 `tts.synthesis` starts; a turn where they *do not* overlap is a turn that lost
@@ -284,6 +302,7 @@ Written as one `TURN_LATENCY` log line, one JSONL record in
 | Approval hold `voice_approval_timeout_s` (25 s) with reassurance | `InCallToolGate._user_approval` | this is wall-clock inside a turn and must not read as LLM latency |
 | Watchdog reaps phase-inactive calls every 2 s | `_watchdog_loop` | stuck-call termination reason |
 | Late Twilio status webhooks for up to 15 min after teardown | `_remember_ended` | **out-of-order events are normal**, not a bug |
+| Twilio REST (hangup, transfer, DTMF, `<Say>` fallback, outbound dial) is awaited on one async client per engine, 10 s limit per request | `voice/twilio_rest.py` (`TwilioRest`) | a slow REST call delays only its own call, never the loop; nothing else may import `twilio.rest` (ruff `TID251`) |
 
 ## 6. Existing observability inventory
 

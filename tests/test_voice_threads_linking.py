@@ -8,13 +8,12 @@ a re-implementation of them.
 
 from __future__ import annotations
 
-import sys
-import types
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from voice_harness.transport_fakes import install_fake_twilio
 
 from pincer.voice import outbound, scheduling
 from pincer.voice import threads as th
@@ -87,7 +86,7 @@ def dialer(settings, manager, monkeypatch):
     placed: list[dict[str, Any]] = []
 
     class FakeCalls:
-        def create(self, **kwargs: Any) -> Any:
+        async def create_async(self, **kwargs: Any) -> Any:
             placed.append(kwargs)
             call = MagicMock()
             call.sid = f"CA_{len(placed)}"
@@ -97,12 +96,9 @@ def dialer(settings, manager, monkeypatch):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             self.calls = FakeCalls()
 
-    twilio_rest = types.ModuleType("twilio.rest")
-    twilio_rest.Client = FakeClient
-    twilio_mod = types.ModuleType("twilio")
-    twilio_mod.rest = twilio_rest
-    monkeypatch.setitem(sys.modules, "twilio", twilio_mod)
-    monkeypatch.setitem(sys.modules, "twilio.rest", twilio_rest)
+    install_fake_twilio(monkeypatch, FakeClient)
+    # an engine another test left in twiml_server would take the dial instead
+    monkeypatch.setattr("pincer.voice.twiml_server._engine", None)
     monkeypatch.setattr(outbound, "_daily_outbound_counts", {})
 
     async def call(**kwargs: Any) -> str:

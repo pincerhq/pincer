@@ -360,6 +360,25 @@ class TestRelayWebSocketAuth:
             ws.send_text(json.dumps({"event": "connected"}))
             ws.send_text(json.dumps({"event": "stop"}))
 
+    def test_start_media_format_is_known_before_stt_setup(self):
+        """setup_media_stream_stt checks Twilio's declared format; it has to
+        be on the state by the time STT is configured."""
+        seen: list[Any] = []
+
+        class StreamEngine(FakeEngine):
+            async def setup_media_stream_stt(self, call_sid: str, stream_sid: str) -> None:
+                seen.append(self.states[call_sid].metadata.get("media_format"))
+
+        engine = StreamEngine()
+        _register(engine, "CA_fmt")
+        client = _app_with_engine(engine)
+        media_format = {"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1}
+        with client.websocket_connect(_signed("/api/apps/twilio/stream/CA_fmt", WS_STREAM_PATH)) as ws:
+            ws.send_text(json.dumps({"event": "start", "streamSid": "MZ1", "start": {"mediaFormat": media_format}}))
+            ws.send_text(json.dumps({"event": "stop"}))
+
+        assert seen == [media_format]
+
     def test_auth_disabled_allows_unsigned_connect(self):
         """Dev escape hatch still works — and doctor reports it CRITICAL."""
         engine = FakeEngine()
@@ -407,10 +426,10 @@ class _Trace:
 @pytest.fixture
 def relay_call(monkeypatch):
     from test_voice_streaming_turn import FakeStreamAgent, _settings
-    from voice_harness.transport_fakes import FakeSocket
+    from voice_harness.transport_fakes import FakeSocket, FakeTwilio, install_fake_twilio
 
     scheduling._reset_for_tests()
-    monkeypatch.setattr("twilio.rest.Client", MagicMock())  # real engine: ending a call would hit Twilio
+    install_fake_twilio(monkeypatch, FakeTwilio)  # real engine: ending a call would hit Twilio
 
     async def _authenticated(*_args) -> bool:
         return True

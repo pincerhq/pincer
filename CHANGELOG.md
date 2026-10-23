@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Voice (Media Streams): caller audio goes to Deepgram as μ-law 8 kHz
+
+Each 20 ms frame was decoded and upsampled to 16 kHz PCM in pure Python on the
+event loop (~4.6 ms CPU per second of audio per call) and sent at 4× the size.
+Deepgram accepts Twilio's native format; the conversion is gone. Transcripts,
+word timings and analytics are unchanged. `PINCER_VOICE_STT_ENCODING=linear16`
+restores the old path for one release.
+
 #### BREAKING: per-identity API authentication replaces the shared tokens (#228)
 
 The REST API and the dashboard now authenticate **identities** instead of two
@@ -196,6 +204,19 @@ mounting a directory. Install the new `remote-skills` extra
 
 ### Fixed
 
+- **Voice: Twilio REST calls no longer freeze every live call.** Hanging up,
+  transferring, sending DTMF, the TTS-failure fallback and dialling an outbound
+  call used the synchronous Twilio client from inside the event loop, each
+  building a fresh HTTPS session. For the duration of the round-trip (hundreds
+  of milliseconds from Europe) no other call's audio moved: inbound frames
+  queued, outbound TTS gapped, timers fired late. All Twilio REST access now
+  goes through one shared async client per engine (`pincer.voice.twilio_rest`),
+  with a 10 s limit per request.
+  - `PINCER_TWILIO_EDGE` lets EU deployments route to a nearby Twilio edge;
+    `PINCER_TWILIO_REGION` is for region-pinned accounts. `pincer doctor`
+    suggests an edge when none is set.
+  - Ruff's banned-api rule keeps `twilio.rest` out of every other module.
+  - The unused `voice/transfer.py` conference-transfer prototype was removed.
 - `pincer doctor` and `GET /api/doctor` now check the configured `skills_dir`;
   they always looked at `~/.pincer/skills` before.
 - **Voice: barge-in works on live calls.** The transport read loops (the

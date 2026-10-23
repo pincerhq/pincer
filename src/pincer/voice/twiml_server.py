@@ -967,6 +967,8 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
                 stream_sid = msg.get("streamSid", "")
                 if state:
                     state.metadata["stream_sid"] = stream_sid
+                    # {"encoding":"audio/x-mulaw","sampleRate":8000,"channels":1}
+                    state.metadata["media_format"] = (msg.get("start") or {}).get("mediaFormat") or {}
                     # Media Streams: set up STT and transcript consumer
                     if hasattr(_engine, "setup_media_stream_stt"):
                         await _engine.setup_media_stream_stt(call_sid, stream_sid)

@@ -19,6 +19,8 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from pincer.voice.twilio_rest import TwilioRest
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -151,6 +153,8 @@ class VoiceEngine(ABC):
         self._ended_calls: dict[str, float] = {}
         # Optional VoiceMetricsRegistry, injected by VoiceChannel.set_engine
         self.metrics_registry: Any = None
+        # Hangup, transfer, DTMF, fallback <Say>: awaited, never blocking the loop.
+        self._rest = TwilioRest(settings)
 
     def set_on_speech(self, callback: Callable) -> None:
         self._on_speech_callback = callback
@@ -207,7 +211,6 @@ class VoiceEngine(ABC):
     @abstractmethod
     async def interrupt_speech(self, call_sid: str) -> None: ...
 
-    @abstractmethod
     async def transfer_call(
         self,
         call_sid: str,
@@ -217,13 +220,46 @@ class VoiceEngine(ABC):
         action_url: str = "",
         announce: str = "",
         language: str = "",
-    ) -> None: ...
+    ) -> None:
+        """Redirect the live call into <Dial>. With ``action_url`` (Sprint 12
+        receptionist) Twilio reports the dial result there, so a busy / no-answer
+        target can fall back to message-taking instead of dropping the caller."""
+        # the media socket closes on the <Dial> redirect; that is not a hangup
+        live = self._active_calls.get(call_sid)
+        if live is not None:
+            live.metadata["transferring"] = True
+        try:
+            twiml = build_dial_twiml(
+                target_number, timeout_s=timeout_s, action_url=action_url, announce=announce, language=language
+            )
+            await self._rest.update_call(call_sid, twiml=twiml)
+            logger.info("Call %s transferred to %s", call_sid, target_number)
+        except Exception:
+            logger.exception("Transfer failed for call %s", call_sid)
+            raise
 
-    @abstractmethod
-    async def end_call(self, call_sid: str) -> None: ...
+    async def end_call(self, call_sid: str) -> None:
+        try:
+            await self._rest.update_call(call_sid, status="completed")
+        except Exception:
+            logger.exception("Failed to end call %s", call_sid)
+        finally:
+            state = await self._unregister_call(call_sid)
+            if state and self._on_call_end_callback:
+                await self._on_call_end_callback(call_sid, state)
 
-    @abstractmethod
-    async def send_dtmf(self, call_sid: str, digits: str) -> None: ...
+    async def send_dtmf(self, call_sid: str, digits: str) -> None:
+        try:
+            twiml = f'<Response><Play digits="{digits}"/></Response>'
+            await self._rest.update_call(call_sid, twiml=twiml)
+            logger.info("DTMF sent [%s]: %s", call_sid, digits)
+        except Exception:
+            logger.exception("DTMF failed for call %s", call_sid)
+            raise
+
+    async def aclose(self) -> None:
+        """Release the Twilio REST session (VoiceChannel.stop)."""
+        await self._rest.aclose()
 
     def get_call_state(self, call_sid: str) -> CallState | None:
         return self._active_calls.get(call_sid)
@@ -265,14 +301,8 @@ class VoiceEngine(ABC):
 
         apology = get_prompt("TTS_FAILURE_GOODBYE", state.language, de_formality(self._settings))
         try:
-            from twilio.rest import Client
-
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-            )
             twiml = f'<Response><Say language="{relay_language(state.language)}">{apology}</Say><Hangup/></Response>'
-            client.calls(call_sid).update(twiml=twiml)
+            await self._rest.update_call(call_sid, twiml=twiml)
         except Exception:
             logger.exception("TTS fallback <Say> failed [%s] — ending call directly", call_sid)
             with contextlib.suppress(Exception):
@@ -663,71 +693,6 @@ class ConversationRelayEngine(VoiceEngine):
         telemetry.interruption_reported(call_sid, engine="conversation_relay")
         logger.debug("CR interrupt [%s]", call_sid)
 
-    async def transfer_call(
-        self,
-        call_sid: str,
-        target_number: str,
-        *,
-        timeout_s: int = 30,
-        action_url: str = "",
-        announce: str = "",
-        language: str = "",
-    ) -> None:
-        """Redirect the live call into <Dial>. With ``action_url`` (Sprint 12
-        receptionist) Twilio reports the dial result there, so a busy / no-answer
-        target can fall back to message-taking instead of dropping the caller."""
-        # the media socket closes on the <Dial> redirect; that is not a hangup
-        live = self._active_calls.get(call_sid)
-        if live is not None:
-            live.metadata["transferring"] = True
-        try:
-            from twilio.rest import Client
-
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-            )
-            call = client.calls(call_sid)
-            twiml = build_dial_twiml(
-                target_number, timeout_s=timeout_s, action_url=action_url, announce=announce, language=language
-            )
-            call.update(twiml=twiml)
-            logger.info("Call %s transferred to %s", call_sid, target_number)
-        except Exception:
-            logger.exception("Transfer failed for call %s", call_sid)
-            raise
-
-    async def end_call(self, call_sid: str) -> None:
-        try:
-            from twilio.rest import Client
-
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-            )
-            client.calls(call_sid).update(status="completed")
-        except Exception:
-            logger.exception("Failed to end call %s", call_sid)
-        finally:
-            state = await self._unregister_call(call_sid)
-            if state and self._on_call_end_callback:
-                await self._on_call_end_callback(call_sid, state)
-
-    async def send_dtmf(self, call_sid: str, digits: str) -> None:
-        try:
-            from twilio.rest import Client
-
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-            )
-            twiml = f'<Response><Play digits="{digits}"/></Response>'
-            client.calls(call_sid).update(twiml=twiml)
-            logger.info("DTMF sent [%s]: %s", call_sid, digits)
-        except Exception:
-            logger.exception("DTMF failed for call %s", call_sid)
-            raise
-
     async def close_media_stream(self, call_sid: str) -> None:
         """No-op for ConversationRelay; MediaStreamEngine overrides."""
         pass
@@ -816,6 +781,18 @@ class MediaStreamEngine(VoiceEngine):
         from pincer.voice.stt import stt_config_for_language
 
         config = stt_config_for_language(state.language, self._settings)
+        # Both STT encodings assume Twilio's mu-law 8 kHz mono source (linear16
+        # only upsamples it). A <Stream> configured otherwise would feed
+        # Deepgram audio it misreads — say so instead of transcribing noise.
+        media_format = state.metadata.get("media_format") or {}
+        if media_format and (
+            media_format.get("encoding"),
+            media_format.get("sampleRate"),
+            media_format.get("channels"),
+        ) != ("audio/x-mulaw", 8000, 1):
+            logger.warning(
+                "Media Streams format %s is not mu-law 8 kHz mono; STT expects it [%s]", media_format, call_sid
+            )
         from pincer.voice.telemetry.clock import mono_ns as _mono_ns
 
         stt_started_ns = _mono_ns()
@@ -826,6 +803,9 @@ class MediaStreamEngine(VoiceEngine):
         # what turns "the caller stopped talking at 4.12 s" into a stamp on the
         # same clock every other stage is measured on.
         state.metadata["stt_started_ns"] = stt_started_ns
+        # what on_speech_input puts on the wire; re-derived from settings on a
+        # reconnect (_recover_stt_stream calls back in here)
+        state.metadata["stt_encoding"] = config.encoding
         state.metadata["stt_endpointing_ms"] = float(config.endpointing)
         state.metadata["stt_utterance_end_ms"] = float(config.utterance_end_ms)
 
@@ -1009,8 +989,11 @@ class MediaStreamEngine(VoiceEngine):
     async def on_speech_input(self, call_sid: str, text_or_audio: Any) -> None:
         """Process raw audio from Media Streams WebSocket.
 
-        Twilio sends base64-encoded mu-law 8kHz. We decode, convert to PCM 16kHz,
-        and send to Deepgram STT.
+        Twilio sends base64-encoded mu-law 8kHz, which Deepgram ingests as-is
+        (the stream is opened with encoding=mulaw, see setup_media_stream_stt).
+        Decoding to PCM16 16 kHz in Python cost ~90 µs per 20 ms frame on the
+        event loop and 4x the bytes upstream; it now only runs on the legacy
+        voice_stt_encoding=linear16 path.
         """
         state = self._active_calls.get(call_sid)
         if not state:
@@ -1027,13 +1010,14 @@ class MediaStreamEngine(VoiceEngine):
         if not raw:
             return
 
-        from pincer.voice.audio import mulaw8k_to_pcm16k
-
-        pcm_16k = mulaw8k_to_pcm16k(raw)
-
         stt_stream = state.metadata.get("stt_stream")
-        if stt_stream:
-            await stt_stream.send_audio(pcm_16k)
+        if stt_stream is None:
+            return
+        if state.metadata.get("stt_encoding", "mulaw") == "linear16":
+            from pincer.voice.audio import mulaw8k_to_pcm16k
+
+            raw = mulaw8k_to_pcm16k(raw)
+        await stt_stream.send_audio(raw)
 
     async def _clear_twilio_buffer(self, state: CallState) -> None:
         """Drop whatever Twilio still has buffered for playout.
@@ -1290,67 +1274,9 @@ class MediaStreamEngine(VoiceEngine):
 
         logger.debug("MS interrupt [%s]", call_sid)
 
-    async def transfer_call(
-        self,
-        call_sid: str,
-        target_number: str,
-        *,
-        timeout_s: int = 30,
-        action_url: str = "",
-        announce: str = "",
-        language: str = "",
-    ) -> None:
-        # the media socket closes on the <Dial> redirect; that is not a hangup
-        live = self._active_calls.get(call_sid)
-        if live is not None:
-            live.metadata["transferring"] = True
-        try:
-            from twilio.rest import Client
-
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-            )
-            twiml = build_dial_twiml(
-                target_number, timeout_s=timeout_s, action_url=action_url, announce=announce, language=language
-            )
-            client.calls(call_sid).update(twiml=twiml)
-            logger.info("Call %s transferred to %s", call_sid, target_number)
-        except Exception:
-            logger.exception("Transfer failed for call %s", call_sid)
-            raise
-
     async def end_call(self, call_sid: str) -> None:
         await self.close_media_stream(call_sid)
-        try:
-            from twilio.rest import Client
-
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-            )
-            client.calls(call_sid).update(status="completed")
-        except Exception:
-            logger.exception("Failed to end call %s", call_sid)
-        finally:
-            state = await self._unregister_call(call_sid)
-            if state and self._on_call_end_callback:
-                await self._on_call_end_callback(call_sid, state)
-
-    async def send_dtmf(self, call_sid: str, digits: str) -> None:
-        try:
-            from twilio.rest import Client
-
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-            )
-            twiml = f'<Response><Play digits="{digits}"/></Response>'
-            client.calls(call_sid).update(twiml=twiml)
-            logger.info("DTMF sent [%s]: %s", call_sid, digits)
-        except Exception:
-            logger.exception("DTMF failed for call %s", call_sid)
-            raise
+        await super().end_call(call_sid)
 
     async def close_media_stream(self, call_sid: str) -> None:
         """Close STT stream and cancel transcript consumer."""

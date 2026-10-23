@@ -113,6 +113,14 @@ class ChannelSettings(BaseModel):
     twilio_account_sid: str = Field(default="", description="Twilio Account SID")
     twilio_auth_token: SecretStr = Field(default=SecretStr(""), description="Twilio Auth Token")
     twilio_phone_number: str = Field(default="", description="Twilio phone number (E.164)")
+    twilio_edge: str = Field(
+        default="",
+        description="Twilio REST edge location, e.g. 'frankfurt' or 'dublin' (empty = Twilio default, US)",
+    )
+    twilio_region: str = Field(
+        default="",
+        description="Twilio region, e.g. 'ie1' — only for accounts provisioned in that region (empty = US1)",
+    )
     voice_engine: str = Field(
         default="conversation_relay",
         description="Voice engine: conversation_relay | media_streams",
@@ -217,6 +225,13 @@ class ChannelSettings(BaseModel):
         ge=0,
         le=5000,
         description="Deepgram utterance_end_ms override (0 = per-language default: en 800, de 1000)",
+    )
+    voice_stt_encoding: str = Field(
+        default="mulaw",
+        description=(
+            "Deepgram wire format: 'mulaw' (Twilio native, default) or 'linear16' "
+            "(legacy in-process upsample to 16 kHz; removed next release)"
+        ),
     )
     # Appointment scheduling (Sprint 6)
     business_hours: str = Field(

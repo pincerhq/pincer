@@ -162,6 +162,10 @@ exclude = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "perf: timing benchmark, runs only with PINCER_RUN_PERF=1",
+    "allow_loop_stall: opt out of the event-loop stall guard on tests/test_voice*",
+]
 
 [tool.ruff]
 # Deliberately behind `requires-python`. This setting governs the syntax the
@@ -173,8 +177,11 @@ target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH", "TID"]
 extend-ignore = ["N814", "N818"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"twilio.rest".msg = "Use pincer.voice.twilio_rest.TwilioRest — twilio.rest is synchronous and blocks the event loop"
 
 [tool.ruff.lint.per-file-ignores]
 # FastMCP tool parameters are declared with `Field(...)` in default arguments.
@@ -187,6 +194,8 @@ extend-ignore = ["N814", "N818"]
 # runtime, so their imports cannot move under TYPE_CHECKING.
 "src/pincer/models/**" = ["TC001", "TC002", "TC003"]
 "src/pincer/api/**" = ["TC001", "TC002", "TC003"]
+# A standalone CLI script with no event loop: the blocking Twilio client is fine there.
+"scripts/check_twilio_number.py" = ["TID251"]
 
 [tool.mypy]
 python_version = "3.14"

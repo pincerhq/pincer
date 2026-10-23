@@ -50,6 +50,13 @@ PINCER_TWILIO_PHONE_NUMBER=+1234567890
 PINCER_VOICE_WEBHOOK_BASE_URL=https://your-ngrok-url # optional if PINCER_BASE_URL is set
 ```
 
+Optional, for EU deployments: `PINCER_TWILIO_EDGE=frankfurt` (or `dublin`)
+routes Pincer's Twilio REST calls (hangup, transfer, DTMF, outbound dial)
+through a nearby Twilio edge instead of the US, which shortens the round-trip from DACH.
+Leave `PINCER_TWILIO_REGION` empty unless the account is provisioned in a
+region such as IE1 (see [Twilio EU region](#twilio-eu-ireland-region)).
+`pincer doctor` mentions it when the edge is unset.
+
 Set `PINCER_VOICE_ENABLED=true` only if you want **inbound** calls (people calling your Twilio number).
 
 ---
@@ -135,7 +142,7 @@ Judge the **mu-law file** — at telephony quality some voices sound very differ
 ### Engine specifics
 
 - **`conversation_relay`** (default engine): Pincer sets `ttsProvider="ElevenLabs"` and your voice ID in the TwiML. Twilio synthesizes using its ElevenLabs integration, so this works with voices from the **public ElevenLabs voice library** without an ElevenLabs API key. One-time Console step: accept the AI/ML terms under **Console → Voice → Settings → Predictive and Generative AI/ML Features Addendum**. As of this writing, Twilio does not document a way to bring your own ElevenLabs API key to ConversationRelay — **custom/cloned voices from your own account need the `media_streams` engine**. Force a provider with `PINCER_CR_TTS_PROVIDER=google|amazon|elevenlabs` (empty = auto).
-- **`media_streams`**: Pincer talks to ElevenLabs directly with your API key — any voice in your account works, including Professional/Instant clones. Audio is requested as native `ulaw_8000` telephony format (lower latency than the old PCM resample path). Tune with `PINCER_ELEVENLABS_MODEL` (default `eleven_flash_v2_5`, multilingual + low latency), `PINCER_ELEVENLABS_STABILITY`, `_SIMILARITY`, `_SPEED`, `_STYLE`.
+- **`media_streams`**: Pincer talks to ElevenLabs directly with your API key — any voice in your account works, including Professional/Instant clones. Audio is requested as native `ulaw_8000` telephony format (lower latency than the old PCM resample path). Tune with `PINCER_ELEVENLABS_MODEL` (default `eleven_flash_v2_5`, multilingual + low latency), `PINCER_ELEVENLABS_STABILITY`, `_SIMILARITY`, `_SPEED`, `_STYLE`. The caller's audio goes to Deepgram in Twilio's own μ-law 8 kHz format, with no conversion. `PINCER_VOICE_STT_ENCODING=linear16` brings back the old in-process conversion to linear PCM. It is a temporary escape hatch and will be removed in the next release.
 
 A misconfigured voice ID fails at startup (`media_streams`) or falls back to the Google voice with a warning (`conversation_relay`) — never mid-call. If ElevenLabs goes down mid-call, the utterance is retried once, then the agent apologizes via Twilio's own voice and ends the call cleanly.
 
@@ -209,7 +216,7 @@ Running Pincer's voice stack against German (+49), Austrian (+43), or Swiss (+41
 Twilio processes voice traffic in the US by default. For EU data residency, use the **Ireland (IE1)** region where available:
 
 - In the Console, switch the region selector to *Ireland (IE1)* and create API keys **in that region** — IE1 credentials are separate from US1.
-- Point SDK/API calls at the regional endpoint (`https://api.dublin.ie1.twilio.com`).
+- Point Pincer's REST calls at the regional endpoint with `PINCER_TWILIO_REGION=ie1` and `PINCER_TWILIO_EDGE=dublin` (→ `api.dublin.ie1.twilio.com`).
 - Note: not all Twilio products are available in IE1 (check current product coverage; ConversationRelay availability may lag US1). Where a product is US1-only, document that flow in your DPA/AVV instead.
 
 ### Recommended DE settings
@@ -220,6 +227,7 @@ PINCER_VOICE_CONSENT_LANGUAGE=de           # German consent/AI-disclosure announ
 PINCER_VOICE_LANGUAGE=de-DE
 PINCER_VOICE_TIMEZONE=Europe/Berlin
 PINCER_VOICE_TRANSCRIPT_RETENTION_DAYS=90  # GDPR storage limitation
+PINCER_TWILIO_EDGE=frankfurt               # shorter Twilio REST round-trip from DACH
 ```
 
 ### Verify

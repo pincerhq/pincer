@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import base64
 import json
-import sys
-import types
 from unittest.mock import MagicMock
+
+from voice_harness.transport_fakes import install_fake_twilio
 
 from pincer.voice.engine import CallDirection, MediaStreamEngine
 from pincer.voice.metrics import VoiceMetricsRegistry
@@ -98,19 +98,14 @@ def _install_fake_twilio(monkeypatch, captured: dict):
         def __init__(self, sid):
             self._sid = sid
 
-        def update(self, **kwargs):
+        async def update_async(self, **kwargs):
             captured.setdefault(self._sid, []).append(kwargs)
 
     class FakeClient:
         def __init__(self, *args, **kwargs):
             self.calls = MagicMock(side_effect=FakeCall)
 
-    twilio_rest = types.ModuleType("twilio.rest")
-    twilio_rest.Client = FakeClient
-    twilio_mod = types.ModuleType("twilio")
-    twilio_mod.rest = twilio_rest
-    monkeypatch.setitem(sys.modules, "twilio", twilio_mod)
-    monkeypatch.setitem(sys.modules, "twilio.rest", twilio_rest)
+    install_fake_twilio(monkeypatch, FakeClient)
 
 
 async def _start_call(engine, language="en"):
@@ -340,12 +335,7 @@ class TestSpokenFallback:
             def __init__(self, *args, **kwargs):
                 raise RuntimeError("twilio down")
 
-        twilio_rest = types.ModuleType("twilio.rest")
-        twilio_rest.Client = BrokenClient
-        twilio_mod = types.ModuleType("twilio")
-        twilio_mod.rest = twilio_rest
-        monkeypatch.setitem(sys.modules, "twilio", twilio_mod)
-        monkeypatch.setitem(sys.modules, "twilio.rest", twilio_rest)
+        install_fake_twilio(monkeypatch, BrokenClient)
 
         engine = MediaStreamEngine(_settings())
         engine._tts_provider = FlakyTTS(fail_times=99)
