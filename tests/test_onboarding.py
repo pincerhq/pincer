@@ -51,6 +51,26 @@ async def test_fresh_session_appends_question(settings, mock_llm, session_manage
 
 
 @pytest.mark.asyncio
+async def test_exact_key_session_is_separate_and_never_prompts(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """A web chat conversation is its own session, and onboarding stays in the
+    user's main one: "New chat" must not ask who they are again."""
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    await agent.handle_message("user-t", "web", "Remember the code word.")
+
+    result = await agent.handle_message("user-t", "web", "Hi!", session_key="web:user-t:thread-1")
+    assert not result.text.endswith(ONBOARDING_QUESTION_EN)
+    chunks = [c async for c in agent.handle_message_stream("user-t", "web", "Hi!", session_key="web:user-t:thread-2")]
+    assert not any(ONBOARDING_QUESTION_EN in c.content for c in chunks)
+
+    thread = await session_manager.get_or_create("user-t", "web", session_key="web:user-t:thread-1")
+    assert [m.content for m in thread.messages if m.role.value == "user"] == ["Hi!"]
+    main = await session_manager.get_or_create("user-t", "web")
+    assert [m.content for m in main.messages if m.role.value == "user"] == ["Remember the code word."]
+
+
+@pytest.mark.asyncio
 async def test_second_message_closes_gate_and_extracts_fields(
     settings, session_manager, cost_tracker, tool_registry, memory_store
 ):

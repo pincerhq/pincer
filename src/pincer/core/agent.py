@@ -410,7 +410,9 @@ class Agent:
             extra_system: Channel-supplied system-prompt addition for this turn
                 (e.g. voice live-call rules in the call language).
             session_key: Exact session key, overriding ``channel:user_id``
-                (voice: one session per call, see ``stream_voice_turn``).
+                (voice: one session per call, see ``stream_voice_turn``; web
+                chat: one per conversation). Such a session is not onboarded: the
+                user's main conversation on the channel is where that happens.
         """
         self._last_active = (user_id, channel_name or channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
@@ -418,7 +420,8 @@ class Agent:
         # Snapshot onboarding state BEFORE the user message is appended.
         # Nobody onboards mid-phone-call — and with a session per call, every
         # call's first blocking turn would otherwise look like a fresh user.
-        onboarding = (channel_name or channel) != "voice"
+        # The same goes for any other exact-key session (a web chat conversation).
+        onboarding = (channel_name or channel) != "voice" and session_key is None
         was_fresh = onboarding and session.is_fresh()
         awaiting_onboarding_reply = (
             onboarding and session.onboarding_prompt_already_sent() and not session.is_onboarded()
@@ -758,6 +761,7 @@ class Agent:
         text: str,
         images: list[tuple[bytes, str]] | None = None,
         channel_user_id: str | None = None,
+        session_key: str | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """
         Process a user message, yielding StreamChunks as the response is generated.
@@ -768,13 +772,17 @@ class Agent:
         ``channel_user_id``, when given, is the channel-native ID and is
         passed to tool execution so channel-bound tools (``send_file``,
         ``send_image``) address the user's real channel ID instead of the
-        cross-channel canonical ``user_id`` — see ``handle_message``.
+        cross-channel canonical ``user_id`` — see ``handle_message``, as is
+        ``session_key``.
         """
         self._last_active = (user_id, channel)
-        session = await self._sessions.get_or_create(user_id, channel)
+        session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
 
-        was_fresh = session.is_fresh()
-        awaiting_onboarding_reply = session.onboarding_prompt_already_sent() and not session.is_onboarded()
+        onboarding = session_key is None
+        was_fresh = onboarding and session.is_fresh()
+        awaiting_onboarding_reply = (
+            onboarding and session.onboarding_prompt_already_sent() and not session.is_onboarded()
+        )
 
         img_contents: list[ImageContent] = []
         if images:
