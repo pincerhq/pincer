@@ -426,6 +426,50 @@ def test_is_triggered_in_group_by_mention_entity() -> None:
     assert channel._is_triggered_in_group(message) is True
 
 
+def _utf16_len(s: str) -> int:
+    return len(s.encode("utf-16-le")) // 2
+
+
+def test_is_triggered_in_group_by_mention_after_emoji() -> None:
+    """Entity offsets are UTF-16 code units; an emoji before the mention must not shift the slice."""
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = ""
+    channel._own_username = "pincer_bot"
+    text = "😀 @pincer_bot help"
+    entity = MagicMock()
+    entity.type = "mention"
+    entity.offset = _utf16_len("😀 ")
+    entity.length = _utf16_len("@pincer_bot")
+    message = _mock_group_message(text=text, entities=[entity])
+    assert channel._is_triggered_in_group(message) is True
+
+
+def test_is_triggered_in_group_by_bot_command_addressed_to_bot() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = "pincer"
+    channel._own_username = "pincer_bot"
+    text = "/ask@pincer_bot what time is it"
+    entity = MagicMock()
+    entity.type = "bot_command"
+    entity.offset = 0
+    entity.length = len("/ask@pincer_bot")
+    message = _mock_group_message(text=text, entities=[entity])
+    assert channel._is_triggered_in_group(message) is True
+
+
+def test_is_not_triggered_in_group_by_bot_command_for_other_bot() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = ""
+    channel._own_username = "pincer_bot"
+    text = "/ask@other_bot hi"
+    entity = MagicMock()
+    entity.type = "bot_command"
+    entity.offset = 0
+    entity.length = len("/ask@other_bot")
+    message = _mock_group_message(text=text, entities=[entity])
+    assert channel._is_triggered_in_group(message) is False
+
+
 def test_is_triggered_in_group_by_reply_to_bot() -> None:
     channel = _make_channel()
     channel._settings.telegram_group_trigger = ""

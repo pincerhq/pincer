@@ -124,9 +124,15 @@ only matches when the `@` is typed. Entries cannot contain commas.
 > longer fires on "pincers" or "@pincer_bot", and a partial trigger such as
 > `pinc` stops matching "pincer". Use the full word instead.
 
-On WhatsApp, picking the bot in the @-picker inserts `@<number>`, which is
-still detected through the mentioned JID; a literal `@pincer` entry only helps
-when someone types it by hand.
+On WhatsApp, picking the bot in the @-picker inserts its phone number, or its
+LID in LID-addressed groups. Both are detected through the mentioned JID
+without any trigger entry (the LID once the bot has seen one of the owner's own
+messages); a literal `@pincer` entry only helps when someone types it by hand.
+Group mentions and triggers in image, video and document captions are now
+detected too, and the bot's own number only matches as a whole number.
+
+On Telegram, a mention after an emoji is now detected (entity offsets are
+UTF-16), and `/command@<bot username>` counts as a mention.
 
 ### Added
 

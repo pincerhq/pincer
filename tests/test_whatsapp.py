@@ -130,6 +130,46 @@ class TestWhatsAppChannel:
         msg.HasField = MagicMock(return_value=False)
         assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
 
+    def test_jid_inside_longer_number_does_not_match(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        msg = MagicMock()
+        msg.conversation = "order 14912345678901 shipped"
+        msg.HasField = MagicMock(return_value=False)
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+
+    @staticmethod
+    def _ext_msg_with_mentions(text: str, mentioned: list[str]) -> MagicMock:
+        ext = MagicMock()
+        ext.text = text
+        ext.contextInfo.mentionedJID = mentioned
+        ext.HasField = MagicMock(side_effect=lambda f: f == "contextInfo")
+        msg = MagicMock()
+        msg.extendedTextMessage = ext
+        msg.HasField = MagicMock(side_effect=lambda f: f == "extendedTextMessage")
+        return msg
+
+    def test_mention_by_lid(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        wa_channel._own_lid = "207855026221128"
+        msg = self._ext_msg_with_mentions("@207855026221128 help", ["207855026221128@lid"])
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+
+    def test_mentioned_jid_with_longer_number_does_not_match(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        msg = self._ext_msg_with_mentions("@Bob hi", ["14912345678901@s.whatsapp.net"])
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+
+    def test_trigger_in_image_caption(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        image = MagicMock()
+        image.caption = "pincer, what is this?"
+        image.HasField = MagicMock(return_value=False)
+        msg = MagicMock()
+        msg.conversation = ""
+        msg.imageMessage = image
+        msg.HasField = MagicMock(side_effect=lambda f: f == "imageMessage")
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+
     def test_trigger_partial_word_does_not_match(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         msg = MagicMock()

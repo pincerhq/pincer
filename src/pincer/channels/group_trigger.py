@@ -24,16 +24,17 @@ def parse_group_triggers(raw: str) -> tuple[str, ...]:
 
 
 @lru_cache(maxsize=32)
-def _compile_group_triggers(raw: str) -> tuple[re.Pattern[str], ...]:
-    patterns = []
-    for entry in parse_group_triggers(raw):
-        body = r"\s+".join(re.escape(word) for word in entry.split())
-        patterns.append(re.compile(rf"(?<!\w){body}(?!\w)", re.IGNORECASE))
-    return tuple(patterns)
+def _compile_group_triggers(raw: str) -> re.Pattern[str] | None:
+    """Compile all entries into one alternation so a message is scanned once."""
+    bodies = [r"\s+".join(re.escape(word) for word in entry.split()) for entry in parse_group_triggers(raw)]
+    if not bodies:
+        return None
+    return re.compile(rf"(?<!\w)(?:{'|'.join(bodies)})(?!\w)", re.IGNORECASE)
 
 
 def matches_group_trigger(text: str, raw: str) -> bool:
     """Return True if *text* contains any trigger from the *raw* setting."""
     if not text or not raw:
         return False
-    return any(pattern.search(text) for pattern in _compile_group_triggers(raw))
+    pattern = _compile_group_triggers(raw)
+    return bool(pattern and pattern.search(text))

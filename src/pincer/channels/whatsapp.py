@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import re
 import threading
 import time
 from collections import deque
@@ -1095,20 +1096,36 @@ class WhatsAppChannel(BaseChannel):
     # ── Group Mention Detection ──────────────────
 
     def _is_mentioned_in_group(self, msg: WAMessage, client: NewAClient) -> bool:
-        own_jid = self._own_jid
+        # The @-picker inserts the phone number in classic groups and the LID
+        # in LID-addressed groups, so accept either of our own identifiers.
+        own_ids = {own_id for own_id in (self._own_jid, self._own_lid) if own_id}
 
-        if msg.HasField("extendedTextMessage") and msg.extendedTextMessage.HasField("contextInfo"):
-            ctx = msg.extendedTextMessage.contextInfo
-            if ctx.mentionedJID:
-                for jid in ctx.mentionedJID:
-                    if own_jid and own_jid in str(jid):
-                        return True
-
+        # Text-bearing payloads: plain text, and captioned media (the extract
+        # path turns an image caption into the message text, so gate on it too).
         text = msg.conversation or ""
+        ctx = None
         if msg.HasField("extendedTextMessage"):
             text = msg.extendedTextMessage.text or ""
+            if msg.extendedTextMessage.HasField("contextInfo"):
+                ctx = msg.extendedTextMessage.contextInfo
+        else:
+            for field in ("imageMessage", "videoMessage", "documentMessage"):
+                if msg.HasField(field):
+                    media = getattr(msg, field)
+                    text = media.caption or ""
+                    if media.HasField("contextInfo"):
+                        ctx = media.contextInfo
+                    break
 
-        if own_jid and own_jid in text:
-            return True
+        if ctx is not None and ctx.mentionedJID:
+            for jid in ctx.mentionedJID:
+                # Compare the user part exactly: a substring test also fires on
+                # any longer number that happens to contain ours.
+                if str(jid).split("@", 1)[0].split(":", 1)[0] in own_ids:
+                    return True
+
+        for own_id in own_ids:
+            if re.search(rf"(?<!\d){re.escape(own_id)}(?!\d)", text):
+                return True
 
         return matches_group_trigger(text, self._settings.whatsapp_group_trigger)

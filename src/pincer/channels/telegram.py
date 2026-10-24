@@ -512,17 +512,25 @@ class TelegramChannel(BaseChannel):
         """Return True when a group message is directed at Pincer.
 
         Mirrors the WhatsApp channel's group gating: a mention of the bot's
-        own @username, a reply to one of the bot's own messages, or one of the
-        configured trigger words/phrases appearing in the text/caption.
+        own @username (including a ``/command@username``), a reply to one of
+        the bot's own messages, or one of the configured trigger words/phrases
+        appearing in the text/caption.
         """
         text = message.text or message.caption or ""
         entities = message.entities or message.caption_entities or []
         if self._own_username:
             own_mention = f"@{self._own_username.lower()}"
+            # Entity offsets/lengths count UTF-16 code units, not code points,
+            # so slice the UTF-16 encoding — a plain str slice drifts after any
+            # emoji or other astral character earlier in the message.
+            utf16 = text.encode("utf-16-le")
             for entity in entities:
-                if (
-                    entity.type == "mention"
-                    and text[entity.offset : entity.offset + entity.length].lower() == own_mention
+                if entity.type not in ("mention", "bot_command"):
+                    continue
+                start = entity.offset * 2
+                span = utf16[start : start + entity.length * 2].decode("utf-16-le", errors="replace").lower()
+                if (entity.type == "mention" and span == own_mention) or (
+                    entity.type == "bot_command" and span.endswith(own_mention)
                 ):
                     return True
         if (
