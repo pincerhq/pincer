@@ -18,6 +18,8 @@ from pincer.channels.phone_calls import VoiceChannel
 from pincer.voice import scheduling, twiml_server
 from pincer.voice.engine import CallDirection, CallState, ConversationRelayEngine
 from pincer.voice.transcript import Speaker, TranscriptLogger
+from pincer.voice import twiml_server
+from pincer.voice.engine import CallDirection, CallState, VoiceEngine
 from pincer.voice.webhook_auth import WS_RELAY_PATH, WS_STREAM_PATH, signed_ws_query, ws_token
 
 
@@ -31,6 +33,9 @@ class FakeEngine:
         self.fallbacks: list[str] = []
         self.media_closed: list[str] = []
         self.answered: list[str] = []
+        # what VoiceEngine.end_transfer reads
+        self._active_calls = self.states
+        self._on_transfer_end_callback: Any = None
 
     async def fallback_and_end(self, call_sid: str) -> None:
         self.fallbacks.append(call_sid)
@@ -65,10 +70,8 @@ class FakeEngine:
     def get_active_calls(self) -> dict[str, CallState]:
         return dict(self.states)
 
-    async def end_transfer(self, call_sid: str) -> None:
-        state = self.states.get(call_sid)
-        if state is not None:
-            state.metadata.pop("transferring", None)
+    # the real implementation, not a copy that can drift from it
+    end_transfer = VoiceEngine.end_transfer
 
     async def on_media_closed(self, call_sid: str) -> None:
         state = self.states.get(call_sid)
@@ -273,6 +276,33 @@ class TestRelaySetupHardening:
         assert engine.started == []
         assert engine.states == {}
         assert engine.speech_inputs == []
+
+    def test_reconnect_after_lost_transfer_state_is_accepted(self, monkeypatch):
+        """State lost while the target rang: the signed transfer-result callback
+        re-registers the call, so the reconnected relay `setup` is not refused
+        as an unknown SID and the caller can leave a message. Only the HTTP
+        signature is stubbed; the WS token check runs for real."""
+
+        async def _verified(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(twiml_server, "verify_http_request", _verified)
+        monkeypatch.setattr("pincer.voice.receptionist.profile.receptionist_active", lambda _s: False)
+        monkeypatch.setattr("pincer.voice.language.resolve_call_language", lambda *_a, **_k: "en")
+        monkeypatch.setattr(twiml_server, "_transfer_session_lookup", lambda _sid: None)
+        engine = FakeEngine()
+        client = _app_with_engine(engine)
+        result = client.post(
+            "/api/apps/twilio/transfer-result",
+            data={"CallSid": "CA_lost", "From": "+15550001111", "DialCallStatus": "busy", "CallStatus": "in-progress"},
+        )
+        assert "ConversationRelay" in result.text
+        assert engine.started == [("CA_lost", "+15550001111", CallDirection.INBOUND)]
+        with client.websocket_connect(_signed("/api/apps/twilio/relay")) as ws:
+            ws.send_text(json.dumps({"type": "setup", "callSid": "CA_lost", "from": "+15550001111"}))
+            ws.send_text(json.dumps({"type": "prompt", "voicePrompt": "Please call me back", "last": True}))
+        assert engine.answered == ["CA_lost"]
+        assert ("CA_lost", "Please call me back") in engine.speech_inputs
 
     def test_stream_with_unknown_sid_is_refused(self):
         engine = FakeEngine()

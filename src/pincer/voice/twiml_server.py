@@ -301,11 +301,13 @@ async def voice_transfer_result(request: Request) -> Response:
     is reconnected to the relay with the apology as its greeting and the
     session already in TAKE_MESSAGE (name question asked) — unless the caller
     already hung up while the target was ringing, in which case there is
-    nothing to reconnect. Any other status (empty, unknown) is not guessed at:
-    the call is finalized and the report says the transfer started.
+    nothing to reconnect. Any other status (empty, unknown) counts as failed
+    while the caller is on the line; once the call is completed it is not
+    guessed at: the call is finalized and the report says the transfer started.
     Idempotent: a retried callback finds no state and only hangs up.
     No state with the caller still on the line (process restarted while the
-    target rang) → reconnect with a generic apology."""
+    target rang) → re-register the call, resume its new receptionist session in
+    TAKE_MESSAGE, and reconnect with the apology."""
     if await _authenticate(request) is None:
         return _forbidden()
     form = await request.form()
@@ -327,12 +329,34 @@ async def voice_transfer_result(request: Request) -> Response:
         # Call state lost (restart/redeploy while the target rang), but the
         # caller is still on the line: fall back to message-taking.
         logger.warning("Transfer result [%s] with no call state — reconnecting the caller", call_sid)
+        from pincer.voice.engine import CallDirection
         from pincer.voice.language import resolve_call_language
         from pincer.voice.prompts import get_prompt
         from pincer.voice.receptionist.profile import get_profile, receptionist_active
+        from pincer.voice.telemetry import hooks as telemetry
 
         profile = get_profile() if receptionist_active(_settings) else None
         language = resolve_call_language(_settings, profile.default_language if profile else "")
+        caller = str(form.get("From", ""))
+        # Register the call as /webhook does (this request is signature-verified
+        # too): the relay `setup` for an unknown SID is refused, so without this
+        # the caller would hear the apology and then be dropped.
+        telemetry.inbound_webhook(
+            call_sid,
+            from_number=caller,
+            to_number=str(form.get("To", "")),
+            engine=str(getattr(_settings, "voice_engine", "") or ""),
+            language=language,
+        )
+        await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=language)
+        # The channel started a fresh receptionist session (RECEPTION_INTENT);
+        # resume it in TAKE_MESSAGE, as a failed transfer does, so the first
+        # turn asks for the name instead of greeting the caller again.
+        session = _transfer_session_lookup(call_sid)
+        if session is not None:
+            session.transfer_attempted = True  # the report says the transfer did not connect
+            greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
+            return _reconnect_after_transfer(call_sid, language, greeting)
         lines = get_prompt("RECEPTIONIST_LINES", language) or {}
         return _reconnect_after_transfer(call_sid, language, str(lines.get("transfer_failed", "")))
 
@@ -357,25 +381,30 @@ async def voice_transfer_result(request: Request) -> Response:
         await _engine.finish_remote_ended(call_sid, reason="transferred")
         return hangup
 
-    if dial_status not in _TRANSFER_RESULTS:
-        logger.warning("Transfer result [%s]: unknown DialCallStatus %r — finalizing", call_sid, dial_status)
-        await _engine.finish_remote_ended(call_sid, reason="transfer_result_unknown")
-        return hangup
-
     if call_status == "completed":
+        if dial_status not in _TRANSFER_RESULTS:
+            # The call is over and the dial result is unknown: don't guess.
+            logger.warning("Transfer result [%s]: unknown DialCallStatus %r — finalizing", call_sid, dial_status)
+            await _engine.finish_remote_ended(call_sid, reason="transfer_result_unknown")
+            return hangup
         # The caller hung up while the target was ringing.
         if session is not None:
             session.on_transfer_abandoned()
         await _engine.finish_remote_ended(call_sid, reason="caller_hangup_during_transfer")
         return hangup
 
-    # The dial is over: the call is ours again now, not when (or if) the
-    # reconnected relay/stream connects.
-    await _engine.end_transfer(call_sid)
+    if dial_status not in _TRANSFER_RESULTS:
+        # Not bridged and the caller is still on the line: whatever the status
+        # means, nobody took the call, so it is a failed transfer.
+        logger.warning("Transfer result [%s]: unknown DialCallStatus %r — treating as failed", call_sid, dial_status)
     language = str(getattr(state, "language", "") or "en")
     greeting = ""
     if session is not None:
-        greeting = await session.on_transfer_failed(_TRANSFER_RESULTS[dial_status])
+        greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
+    # The dial is over: the call is ours again now, not when (or if) the
+    # reconnected relay/stream connects. This also takes the phase out of
+    # TRANSFERRING when there was no session to do it.
+    await _engine.end_transfer(call_sid)
     return _reconnect_after_transfer(call_sid, language, greeting)
 
 

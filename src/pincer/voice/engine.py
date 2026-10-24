@@ -173,6 +173,9 @@ class VoiceEngine(ABC):
         # The caller talked over the agent: lets the channel cancel the turn
         # that is speaking. See on_caller_barge_in().
         self._on_barge_in_callback: Callable | None = None
+        # The channel owns the call's phase: it moves it out of TRANSFERRING
+        # when end_transfer hands the call back, so flag and phase agree.
+        self._on_transfer_end_callback: Callable | None = None
         # Outbound calls briefed and registered BEFORE the Twilio REST dial,
         # keyed by a temporary id until the real CallSid comes back. See
         # register_pending_outbound().
@@ -208,6 +211,8 @@ class VoiceEngine(ABC):
             await self._on_barge_in_callback(call_sid, heard)
         else:
             await self.interrupt_speech(call_sid)
+    def set_on_transfer_end(self, callback: Callable) -> None:
+        self._on_transfer_end_callback = callback
 
     @abstractmethod
     async def on_call_start(
@@ -276,8 +281,6 @@ class VoiceEngine(ABC):
                 "dial_timeout_s": timeout_s,
             }
         try:
-            from twilio.rest import Client
-
             twiml = build_dial_twiml(
                 target_number,
                 timeout_s=timeout_s,
@@ -291,16 +294,7 @@ class VoiceEngine(ABC):
             if base.startswith(("http://", "https://")):
                 update["status_callback"] = f"{base}/api/apps/twilio/status"
                 update["status_callback_method"] = "POST"
-
-            def _redirect() -> None:
-                client = Client(
-                    self._settings.twilio_account_sid,
-                    self._settings.twilio_auth_token.get_secret_value(),
-                )
-                client.calls(call_sid).update(**update)
-
-            # blocking HTTP: keep it off the loop so other calls' media keeps flowing
-            await asyncio.to_thread(_redirect)
+            await self._twilio_update(call_sid, **update)
             logger.info("Call %s transferred to %s", call_sid, target_number)
         except Exception:
             logger.exception("Transfer failed for call %s", call_sid)
@@ -312,6 +306,21 @@ class VoiceEngine(ABC):
         from pincer.voice.telemetry import hooks as telemetry
 
         telemetry.transfer_started(call_sid, target=target_number, dial_timeout_s=timeout_s)
+
+    async def _twilio_update(self, call_sid: str, **update: Any) -> None:
+        """``client.calls(call_sid).update(**update)`` off the event loop: the
+        Twilio SDK is blocking HTTP, and 1–3s on the loop stalls every other
+        call's media, websockets and the watchdog."""
+        from twilio.rest import Client
+
+        def _update() -> None:
+            client = Client(
+                self._settings.twilio_account_sid,
+                self._settings.twilio_auth_token.get_secret_value(),
+            )
+            client.calls(call_sid).update(**update)
+
+        await asyncio.to_thread(_update)
 
     async def end_call(self, call_sid: str) -> None:
         try:
@@ -355,10 +364,13 @@ class VoiceEngine(ABC):
         """The <Dial> is over and the call is ours again (failed transfer →
         reconnect). The one place the ``transferring`` flag is cleared once
         ``transfer_call`` succeeded: from here the call counts as an AI call for
-        the stuck-call reaper and ``on_media_closed``."""
+        the stuck-call reaper and ``on_media_closed``, and the channel takes its
+        phase out of TRANSFERRING (untimed) so the phase timeouts apply again."""
         state = self._active_calls.get(call_sid)
-        if state is not None:
-            state.metadata.pop("transferring", None)
+        if state is None or not state.metadata.pop("transferring", None):
+            return
+        if self._on_transfer_end_callback is not None:
+            await self._on_transfer_end_callback(call_sid)
 
     async def on_media_closed(self, call_sid: str) -> None:
         """The media WebSocket closed: the call is over on Twilio's side.

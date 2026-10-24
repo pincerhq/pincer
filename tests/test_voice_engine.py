@@ -194,6 +194,42 @@ async def test_transfer_call_redirect_runs_off_the_event_loop(mock_settings):
     assert threads and threads[0] != threading.get_ident()
 
 
+async def test_end_transfer_notifies_channel_only_when_a_transfer_ends(mock_settings):
+    """The channel moves the phase out of TRANSFERRING on this callback; a relay
+    `setup` on an ordinary call (no transfer) must not trigger it."""
+    engine = ConversationRelayEngine(mock_settings)
+    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    ended = AsyncMock()
+    engine.set_on_transfer_end(ended)
+    await engine.end_transfer("CAx")
+    ended.assert_not_awaited()
+    state.metadata["transferring"] = True
+    await engine.end_transfer("CAx")
+    await engine.end_transfer("CAx")  # the reconnected relay `setup` repeats it
+    ended.assert_awaited_once_with("CAx")
+    assert "transferring" not in state.metadata
+
+
+@pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
+@pytest.mark.parametrize("action", ["end_call", "send_dtmf", "fallback_and_end"])
+async def test_twilio_updates_run_off_the_event_loop(mock_settings, engine_cls, action):
+    """Every Twilio REST update (hangup, DTMF, TTS fallback), not only the transfer."""
+    import threading
+
+    engine = engine_cls(mock_settings)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    threads: list[int] = []
+    with patch("twilio.rest.Client") as client_cls:
+        client_cls.return_value.calls.return_value.update.side_effect = lambda **_: threads.append(
+            threading.get_ident()
+        )
+        if action == "send_dtmf":
+            await engine.send_dtmf("CAx", "1")
+        else:
+            await getattr(engine, action)("CAx")
+    assert threads and all(t != threading.get_ident() for t in threads)
+
+
 async def test_transfer_call_without_http_base_has_no_status_callback(mock_settings):
     mock_settings.voice_webhook_base_url = ""
     engine = ConversationRelayEngine(mock_settings)

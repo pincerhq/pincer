@@ -133,12 +133,22 @@ class VoiceChannel(BaseChannel):
         engine.set_on_call_end(self._handle_call_end)
         if hasattr(engine, "set_on_call_start"):
             engine.set_on_call_start(self._handle_call_start)
+        if hasattr(engine, "set_on_transfer_end"):
+            engine.set_on_transfer_end(self._handle_transfer_end)
         engine.metrics_registry = self.metrics
 
     def set_tool_registry(self, tools: Any) -> None:
         """Sprint 12: the receptionist reads free/busy and writes bookings
         through the registry (via the Sprint 11 gate)."""
         self._tools = tools
+
+    async def _handle_transfer_end(self, call_sid: str) -> None:
+        """The <Dial> is over and the call is ours again. The receptionist
+        session normally moved the phase already; without one (e.g. no session
+        resolver) the call would stay in the untimed TRANSFERRING phase."""
+        sm = self._state_machines.get(call_sid)
+        if sm is not None and sm.phase == CallPhase.TRANSFERRING:
+            sm.transition(CallPhase.TAKE_MESSAGE, "transfer_ended")
 
     async def _handle_call_start(self, call_sid: str, state: CallState) -> None:
         """Engine registered a call: start tracking now (silence rule, receptionist greeting)."""
@@ -496,10 +506,11 @@ class VoiceChannel(BaseChannel):
         for entry in signal.detail.get("stuck", []):
             call_sid = str(entry.get("call_sid", ""))
             logger.error(
-                "Stuck call detected [%s]: %ds (%ds over the limit) — force-ending",
+                "Stuck call detected [%s]: %ss > %ss limit%s — force-ending",
                 call_sid,
-                entry.get("duration_seconds"),
-                entry.get("over_by_seconds"),
+                entry.get("elapsed_seconds"),
+                entry.get("limit_seconds"),
+                " (transfer)" if entry.get("transferring") else "",
             )
             # Recorded on the call itself: a stuck call that was never answered
             # has no state machine whose reason would say so.
