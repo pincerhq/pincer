@@ -373,19 +373,49 @@ async def make_phone_call(
             language=call_language,
         )
 
-        try:
-            if engine is not None:
-                call = await engine._rest.create_call(**call_kwargs)
-            else:
-                # No voice engine in this process (API-only deployment): a
-                # one-off session, closed here so it never outlives its loop.
-                from pincer.voice.twilio_rest import TwilioRest
+        # The engine and TwilioRest share create_call / find_call.
+        dialer: Any
+        if engine is not None:
+            dialer = engine
+        else:
+            # No voice engine in this process (API-only deployment): a
+            # one-off session, closed here so it never outlives its loop.
+            from pincer.voice.twilio_rest import TwilioRest
 
-                rest = TwilioRest(settings)
+            dialer = TwilioRest(settings)
+        dialed_at = datetime.now(UTC)
+        try:
+            try:
+                call = await dialer.create_call(**call_kwargs)
+            except TimeoutError:
+                # A timeout is not a rejection: Twilio may have accepted the
+                # POST and the phone may already be ringing. Look the call up
+                # before deciding anything.
+                call = None
                 try:
-                    call = await rest.create_call(**call_kwargs)
-                finally:
-                    await rest.aclose()
+                    call = await dialer.find_call(to=validated, from_=settings.twilio_phone_number, since=dialed_at)
+                except Exception:
+                    logger.exception("Lookup of a timed-out dial to %s failed", validated)
+                if call is None:
+                    # Outcome unknown. It still counts toward the daily limit
+                    # and the target cooldown, so a retry cannot ring the same
+                    # person twice or slip past the cap. The pre-registration
+                    # goes: nothing can bind to its temporary key, and a relay
+                    # setup for an unbriefed outbound call is hung up.
+                    await telemetry.dial_rejected(trace_key, error="TimeoutError: dial outcome unknown")
+                    if engine is not None and pre_state is not None:
+                        engine.discard_pending(pre_state)
+                    _increment_daily_count(user_id)
+                    await record_outbound_call(settings, validated, user_id=user_id, channel=ctx.get("channel", ""))
+                    logger.warning("Outbound dial to %s timed out with no call found; outcome unknown", validated)
+                    return (
+                        f"Error: Twilio did not confirm the call to {validated} in time, and it may still "
+                        "be ringing. Do not call again right away; check the call log first."
+                    )
+                logger.warning("Outbound dial to %s timed out but Twilio placed it as %s", validated, call.sid)
+            finally:
+                if engine is None:
+                    await dialer.aclose()
         except Exception as e:
             await telemetry.dial_rejected(trace_key, error=f"{type(e).__name__}: {e}"[:160])
             if engine is not None and pre_state is not None:

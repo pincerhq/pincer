@@ -37,15 +37,15 @@ if TYPE_CHECKING:
 
 from pincer.db.engine import get_database_url
 from pincer.services.voice import AnalyticsService
+from pincer.voice.audio import MULAW_BYTES_PER_SECOND
 
 logger = logging.getLogger(__name__)
 
 METHOD_EXACT = "exact"
 METHOD_ESTIMATED = "estimated"
 
-# Twilio's Media Streams carry 8-bit μ-law at 8 kHz: one byte is one sample is
-# 0.125 ms of playout. This is the whole basis of the `exact` agent path.
-MULAW_BYTES_PER_SECOND = 8000
+# One μ-law byte of Media Streams playout. This is the whole basis of the
+# `exact` agent path.
 MS_PER_MULAW_BYTE = 1000.0 / MULAW_BYTES_PER_SECOND
 
 # Characters of spoken text per second, per language. German averages slower

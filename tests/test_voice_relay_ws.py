@@ -17,7 +17,7 @@ from starlette.websockets import WebSocketDisconnect
 from pincer.channels.phone_calls import VoiceChannel
 from pincer.voice import scheduling, twiml_server
 from pincer.voice.engine import CallDirection, CallState, ConversationRelayEngine
-from pincer.voice.transcript import Speaker
+from pincer.voice.transcript import Speaker, TranscriptLogger
 from pincer.voice.webhook_auth import WS_RELAY_PATH, WS_STREAM_PATH, signed_ws_query, ws_token
 
 
@@ -502,6 +502,34 @@ class TestRelayBargeIn:
         await asyncio.wait_for(loop, timeout=2)
         await channel.stop()
 
+    async def test_the_closing_line_of_a_reply_ends_its_utterance(self, relay_call):
+        engine, channel, agent, sock, loop, _traces = await relay_call([_scripts()[1]])
+        sock.push(type="prompt", voicePrompt="Erste Frage?", last=True)
+        await asyncio.wait_for(sock.inbox.join(), timeout=2)
+        await channel.wait_for_turn("CA_cr")
+
+        line = next(e for e in channel.get_transcript("CA_cr").entries if e.text == NEW_REPLY)
+        assert line.ends_utterance
+        sock.hang_up()
+        await asyncio.wait_for(loop, timeout=2)
+        await channel.stop()
+
+    async def test_shutdown_closes_the_open_utterance_before_the_goodbye(self, relay_call):
+        """The cancelled turn closes its CR utterance; the goodbye never continues it."""
+        engine, channel, agent, sock, loop, _traces = await relay_call(_scripts())
+        agent.pause_after = 1
+        sock.push(type="prompt", voicePrompt="Erste Frage?", last=True)
+        await asyncio.wait_for(agent.paused.wait(), timeout=2)
+        assert [(m["token"], m["last"]) for m in sock.sent if m.get("type") == "text"] == [(OLD_FIRST, False)]
+
+        await channel.stop()
+
+        texts = [(m["token"], m["last"]) for m in sock.sent if m.get("type") == "text"]
+        assert texts[:2] == [(OLD_FIRST, False), ("", True)]  # closed before the goodbye
+        assert texts[2][0] and texts[2][1]  # the goodbye is its own utterance
+        sock.hang_up()
+        await asyncio.wait_for(loop, timeout=2)
+
     # regression: fails on dev @ 0a1c320
     async def test_interrupt_and_the_next_prompt_count_once(self, relay_call):
         engine, channel, agent, sock, loop, _traces = await relay_call(_scripts())
@@ -546,3 +574,60 @@ class TestRelayBargeIn:
         assert OLD_NEVER not in sock.tokens()
         assert "DROPPED" not in caplog.text
         await channel.stop()
+
+
+def _reply(*utterances: list[str]) -> TranscriptLogger:
+    """A caller question, then the agent's reply as provider utterances."""
+    transcript = TranscriptLogger("CA_t")
+    transcript.log_utterance(Speaker.CALLER, "Wann ist mein Termin?")
+    for lines in utterances:
+        for line in lines:
+            transcript.log_utterance(Speaker.AGENT, line, state="freeform")
+        transcript.end_agent_utterance()
+    return transcript
+
+
+def _states(transcript: TranscriptLogger) -> list[str]:
+    return [e.state for e in transcript.entries if e.speaker == Speaker.AGENT]
+
+
+class TestMarkInterrupted:
+    def test_an_earlier_utterance_counts_as_heard(self):
+        """Filler played in full; `heard` covers only the answer being played."""
+        transcript = _reply(["Einen Moment bitte."], ["Der Termin ist am Montag.", "Um zehn Uhr."])
+
+        marked = transcript.mark_interrupted("Der Termin ist am")
+
+        assert _states(transcript) == ["freeform", "interrupted", "undelivered"]
+        assert marked == 2
+
+    def test_heard_lines_of_the_playing_utterance_keep_their_state(self):
+        transcript = _reply(["Einen Moment bitte."], ["Der Termin ist am Montag.", "Um zehn Uhr.", "Passt das?"])
+
+        transcript.mark_interrupted("Der Termin ist am Montag. Um zehn")
+
+        assert _states(transcript) == ["freeform", "freeform", "interrupted", "undelivered"]
+
+    def test_utterances_after_the_playing_one_never_played(self):
+        transcript = _reply(["Einen Moment bitte."], ["Der Termin ist am Montag."])
+
+        transcript.mark_interrupted("Einen Moment")
+
+        assert _states(transcript) == ["interrupted", "undelivered"]
+
+    def test_unmatched_heard_marks_only_the_latest_utterance(self):
+        transcript = _reply(["Einen Moment bitte."], ["Der Termin ist am Montag."])
+
+        transcript.mark_interrupted("")
+
+        assert _states(transcript) == ["freeform", "interrupted"]
+
+    def test_a_single_open_utterance_is_unchanged(self):
+        transcript = TranscriptLogger("CA_t")
+        transcript.log_utterance(Speaker.CALLER, "Hallo?")
+        transcript.log_utterance(Speaker.AGENT, "Der erste Satz.", state="freeform")
+        transcript.log_utterance(Speaker.AGENT, "Der zweite Satz.", state="freeform")
+
+        transcript.mark_interrupted("Der erste Satz. Der zw")
+
+        assert _states(transcript) == ["freeform", "interrupted"]

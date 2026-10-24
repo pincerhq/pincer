@@ -230,7 +230,8 @@ mounting a directory. Install the new `remote-skills` extra
     (`interrupted` / `undelivered`) in the transcript.
   - Media Streams: the caller talking while our audio is still playing
     cancels the turn, stops that call's synthesis and sends Twilio `clear`.
-    Deepgram `SpeechStarted` is the default trigger;
+    Deepgram `SpeechStarted` is the default trigger, confirmed by the first
+    recognised word (a cough with no transcript no longer drops the reply);
     `PINCER_VOICE_BARGE_IN_TRIGGER=interim` waits for recognised words
     (`PINCER_VOICE_BARGE_IN_MIN_WORDS`), `off` disables it. The reaction time
     (speech onset → clear written) is now recorded in

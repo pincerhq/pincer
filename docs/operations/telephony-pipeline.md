@@ -134,9 +134,15 @@ Consequences:
   `PINCER_VOICE_BARGE_IN_TRIGGER` picks the trigger:
   * `vad` (default): Deepgram `SpeechStarted`, ignored in the first
     `BARGE_IN_ARM_DELAY_MS` (250 ms) of a stretch of agent audio (echo of our
-    own onset); recognised words still trigger if VAD missed.
+    own onset). The onset is only a candidate: the agent stops when a
+    recognised word follows within `BARGE_IN_CONFIRM_WINDOW_MS` (1.5 s), any
+    number of words, regardless of `PINCER_VOICE_BARGE_IN_MIN_WORDS`. A cough or line click with
+    no transcript cancels nothing — Twilio's `clear` cannot be undone, so the
+    reply is never cut on VAD alone. Recognised words still trigger if VAD
+    missed, unless the speech began inside the arm window (judged from
+    Deepgram's word timings, not the interim's arrival) — the same echo guard.
   * `interim`: only recognised words (at least
-    `PINCER_VOICE_BARGE_IN_MIN_WORDS`, default 1). Use it on lines where VAD
+    `PINCER_VOICE_BARGE_IN_MIN_WORDS`, default 1), with the same echo guard. Use it on lines where VAD
     reacts to coughs, noise or speakerphone echo.
   * `off`: never; the caller's next final utterance still cancels the turn.
 * The low-confidence re-ask is a task (`aux_speech_task`), so the consumer

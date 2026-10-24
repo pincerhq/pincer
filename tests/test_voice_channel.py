@@ -92,3 +92,27 @@ class TestVoiceChannel:
         channel.set_state_machine("CA123", sm)
         assert channel.get_state_machine("CA123") is sm
         assert channel.get_state_machine("CA999") is None
+
+
+async def test_a_late_utterance_after_hangup_leaves_no_speech_lock():
+    """A Deepgram final / CR prompt that lands just after the call ended."""
+    from voice_harness.fake_engine import FakeVoiceEngine
+    from voice_harness.settings import apply_test_paths
+
+    settings = apply_test_paths(MagicMock())
+    settings.voice_default_language = "en"
+    settings.voice_supported_languages = "en,de"
+    engine = FakeVoiceEngine(settings)
+    channel = VoiceChannel(settings)
+    channel.set_engine(engine)
+    handler = AsyncMock(return_value="Sure.")
+    await channel.start(handler)
+    await engine.on_call_start("CA_late", "+4930123456", CallDirection.INBOUND, language="en")
+    await channel._handle_speech("CA_late", "Hello?")
+    await engine.end_call("CA_late")
+    assert "CA_late" not in channel._speech_locks
+
+    await channel._handle_speech("CA_late", "Bye!")
+
+    assert "CA_late" not in channel._speech_locks
+    await channel.stop()

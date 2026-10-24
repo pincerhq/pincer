@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,23 @@ class TwilioRest:
     async def create_call(self, **kwargs: Any) -> Any:
         client = await self._get()
         return await asyncio.wait_for(client.calls.create_async(**kwargs), REQUEST_TIMEOUT_S)
+
+    async def find_call(self, *, to: str, from_: str, since: datetime) -> Any | None:
+        """The newest call from `from_` to `to` created at or after `since`, or None.
+
+        For a `create_call` that timed out: the POST may still have been
+        accepted. Filtered on `date_created`, not Twilio's `StartTime` filter —
+        that one has day granularity and a queued call has no start time yet.
+        """
+        client = await self._get()
+        calls = await asyncio.wait_for(client.calls.list_async(to=to, from_=from_, limit=20), REQUEST_TIMEOUT_S)
+        # Twilio stamps date_created to the second, on its own clock.
+        cutoff = since - timedelta(seconds=5)
+        for call in calls:
+            created = getattr(call, "date_created", None)
+            if created is not None and created >= cutoff:
+                return call
+        return None
 
     async def aclose(self) -> None:
         client, self._client = self._client, None

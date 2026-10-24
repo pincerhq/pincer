@@ -20,6 +20,11 @@ import struct
 logger = logging.getLogger(__name__)
 
 # mu-law encoding tables
+# Twilio's Media Streams carry 8-bit μ-law at 8 kHz: one byte is one sample is
+# 0.125 ms of playout. Talk-time analytics and the barge-in playout estimate
+# both stand on this number.
+MULAW_BYTES_PER_SECOND = 8000
+
 _MULAW_BIAS = 0x84
 _MULAW_MAX = 0x7FFF
 _MULAW_CLIP = 32635

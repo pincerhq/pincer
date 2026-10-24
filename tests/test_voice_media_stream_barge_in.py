@@ -20,7 +20,7 @@ from voice_harness.transport_fakes import FakeSocket, FakeSTT, FakeSTTStream, Fa
 
 from pincer.channels.phone_calls import VoiceChannel
 from pincer.voice import scheduling
-from pincer.voice.engine import BARGE_IN_ARM_DELAY_MS, CallDirection, MediaStreamEngine
+from pincer.voice.engine import BARGE_IN_ARM_DELAY_MS, BARGE_IN_CONFIRM_WINDOW_MS, CallDirection, MediaStreamEngine
 from pincer.voice.stt import DeepgramSTTStream, STTConfig, Transcript, TranscriptWord
 
 OLD_FIRST = "Der erste Satz der alten Antwort."
@@ -138,10 +138,43 @@ class TestConsumer:
         assert tts.synthesized[-1] == NEW_REPLY
         await channel.stop()
 
+    async def _reask_sent(self, *, played_out: bool):
+        """The re-ask has been fully sent (2 s of audio queued at Twilio).
+        `off` mode, so no barge-in can be what clears it."""
+        engine = _engine(FakeTTS(), "off")
+        channel, agent = await _channel_for(engine, [text_chunks(NEW_REPLY)])
+        sock, stt = await _call(engine, "CA_ms")
+        state = engine.get_call_state("CA_ms")
+
+        await _fed(stt, Transcript(text="Mmh wie bitte", is_final=True, confidence=0.1))
+        await state.metadata["aux_speech_task"]
+        assert sock.events("media")
+        if played_out:
+            state.metadata["playout_until_ns"] = 0
+        sent_before = len(sock.sent)
+
+        await _fed(stt, _final("Ich möchte einen Termin."))
+        await channel.wait_for_turn("CA_ms")
+        return engine, channel, sock, [m.get("event") for m in sock.sent[sent_before:]]
+
+    async def test_a_sent_reask_is_cleared_before_the_reply(self):
+        engine, channel, sock, after = await self._reask_sent(played_out=False)
+
+        assert after[0] == "clear"  # before any of the reply's audio
+        assert "media" in after[1:]
+        assert engine._tts_provider.synthesized[-1] == NEW_REPLY
+        await channel.stop()
+
+    async def test_a_played_out_reask_is_not_cleared(self):
+        engine, channel, sock, after = await self._reask_sent(played_out=True)
+
+        assert "clear" not in after
+        await channel.stop()
+
 
 class TestDetection:
     # regression: fails on dev @ 0a1c320 (nothing reacts to the caller)
-    async def test_speech_started_during_playout_stops_the_agent(self):
+    async def test_speech_started_then_words_stops_the_agent(self):
         engine, channel, agent, sock, stt, state = await _agent_mid_reply()
         interrupts: list[str] = []
         channel_barge_in = engine._on_barge_in_callback
@@ -154,6 +187,8 @@ class TestDetection:
         epoch = state.metadata.get("speech_epoch", 0)
 
         await _fed(stt, SPEECH_STARTED)
+        assert sock.events("clear") == []  # a candidate until words confirm it
+        await _fed(stt, Transcript(text="Moment"))
 
         assert len(sock.events("clear")) == 1
         assert interrupts == ["CA_ms"]
@@ -166,6 +201,49 @@ class TestDetection:
         await channel.wait_for_turn("CA_ms")
         assert OLD_NEVER not in engine._tts_provider.synthesized
         assert engine._tts_provider.synthesized[-1] == NEW_REPLY
+        await channel.stop()
+
+    async def test_speech_started_without_words_keeps_the_reply(self):
+        """A cough: VAD fires, no transcript follows, the reply plays on."""
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply()
+
+        await _fed(stt, SPEECH_STARTED)
+        assert sock.events("clear") == []
+        assert "CA_ms" in channel._active_turns
+
+        agent.resume.set()
+        await channel.wait_for_turn("CA_ms")
+        assert engine._tts_provider.synthesized == [OLD_FIRST, OLD_NEVER]
+        assert engine.metrics_registry.get("CA_ms").barge_in_reactions_ms == []
+        await channel.stop()
+
+    async def test_vad_onset_confirms_on_fewer_words_than_interim_needs(self):
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply()
+        engine._settings.voice_barge_in_min_words = 3
+        # min_words is read when the consumer starts
+        await engine.close_media_stream("CA_ms")
+        await engine.setup_media_stream_stt("CA_ms", "MZ_CA_ms")
+        stt = engine._stt_provider.streams[-1]
+
+        await _fed(stt, Transcript(text="Moment"))
+        assert sock.events("clear") == []  # one word, no onset: below min_words
+
+        await _fed(stt, SPEECH_STARTED, Transcript(text="Moment"))
+        assert len(sock.events("clear")) == 1
+        await channel.stop()
+
+    async def test_a_stale_vad_onset_does_not_confirm(self):
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply()
+        engine._settings.voice_barge_in_min_words = 3
+        await engine.close_media_stream("CA_ms")
+        await engine.setup_media_stream_stt("CA_ms", "MZ_CA_ms")
+        stt = engine._stt_provider.streams[-1]
+
+        await _fed(stt, SPEECH_STARTED)
+        state.metadata["vad_onset_ns"] -= (BARGE_IN_CONFIRM_WINDOW_MS + 100) * 1_000_000
+        await _fed(stt, Transcript(text="Moment"))
+
+        assert sock.events("clear") == []
         await channel.stop()
 
     # regression: fails on dev @ 0a1c320
@@ -189,6 +267,41 @@ class TestDetection:
         await _fed(stt, Transcript(text="Moment"))
         assert len(sock.events("clear")) == 1
         assert "CA_ms" not in channel._active_turns
+        await channel.stop()
+
+    @staticmethod
+    def _words_at(state, after_our_onset_ms: float) -> Transcript:
+        """An interim whose speech began this long after our audio started."""
+        offset_s = (state.metadata["playout_started_ns"] - state.metadata["stt_started_ns"]) / 1e9
+        start = offset_s + after_our_onset_ms / 1000
+        return Transcript(text="Moment", words=[TranscriptWord("Moment", start=start, end=start + 0.3)])
+
+    async def test_interim_echo_of_our_onset_is_ignored(self):
+        """Arrives late (Deepgram latency) but began inside the arm window."""
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply("interim")
+
+        await _fed(stt, self._words_at(state, BARGE_IN_ARM_DELAY_MS / 2))
+
+        assert sock.events("clear") == []
+        assert "CA_ms" in channel._active_turns
+        await channel.stop()
+
+    async def test_interim_words_after_the_arm_window_stop_the_agent(self):
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply("interim")
+
+        await _fed(stt, self._words_at(state, BARGE_IN_ARM_DELAY_MS + 100))
+
+        assert len(sock.events("clear")) == 1
+        assert "CA_ms" not in channel._active_turns
+        await channel.stop()
+
+    async def test_untimed_interim_inside_the_arm_window_is_ignored(self):
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply("interim", armed=False)
+
+        await _fed(stt, Transcript(text="Moment"))
+
+        assert sock.events("clear") == []
+        assert "CA_ms" in channel._active_turns
         await channel.stop()
 
     async def test_off_mode_never_interrupts(self):
@@ -219,6 +332,84 @@ class TestDetection:
         assert sock.events("clear") == []
         assert "CA_ms" in channel._active_turns
         await channel.stop()
+
+
+class TestShutdown:
+    async def test_shutdown_clears_the_queued_reply_before_the_goodbye(self):
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply()
+        epoch = state.metadata.get("speech_epoch", 0)
+
+        await channel.stop()
+
+        kinds = [m.get("event") for m in sock.sent]
+        assert "clear" in kinds
+        # the goodbye's audio comes after the clear, not queued behind the old reply
+        assert "media" in kinds[kinds.index("clear") :]
+        assert state.metadata["speech_epoch"] > epoch
+        assert OLD_NEVER not in engine._tts_provider.synthesized
+        assert engine.metrics_registry.get("CA_ms").barge_in_reactions_ms == []
+
+    async def test_our_own_cut_is_not_a_caller_interruption(self):
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply()
+        from pincer.voice.analytics import get_accumulator
+
+        accumulator = get_accumulator(state)
+        before = accumulator.interruptions if accumulator is not None else 0
+
+        await engine.interrupt_speech("CA_ms", by_caller=False)
+
+        assert len(sock.events("clear")) == 1
+        if accumulator is not None:
+            assert accumulator.interruptions == before
+        await channel.stop()
+
+
+class TestPartialSegments:
+    """A segment cut mid-stream: logged as cut off, and still billed."""
+
+    async def test_a_turn_cancelled_mid_sentence_logs_it_as_interrupted(self):
+        tts = FakeTTS(chunks=20, delay_s=0.05)  # still synthesizing when the caller cuts in
+        engine = _engine(tts, "interim")
+        channel, agent = await _channel_for(engine, [text_chunks(OLD_FIRST), text_chunks(NEW_REPLY)])
+        sock, stt = await _call(engine, "CA_ms")
+        state = engine.get_call_state("CA_ms")
+
+        await _fed(stt, _final("Erste Frage?"))
+        await sock.wait_sent(lambda sent: any(m.get("event") == "media" for m in sent))
+        turn = channel._active_turns["CA_ms"]
+        # began before our audio: not an echo of it
+        await _fed(stt, Transcript(text="Moment", words=[TranscriptWord("Moment", start=0.0, end=0.1)]))
+        await asyncio.wait_for(asyncio.wait([turn]), timeout=2)
+
+        assert turn.cancelled()
+
+        line = next(e for e in channel.get_transcript("CA_ms").entries if e.text == OLD_FIRST)
+        assert line.state == "interrupted"
+        assert state.metadata["tts_characters"] == len(OLD_FIRST)
+        tts.delay_s = 0  # the shutdown goodbye need not take real time
+        await channel.stop()
+
+    async def test_speech_cut_by_a_barge_in_reports_the_cut_and_is_billed(self):
+        engine = _engine(FakeTTS(chunks=20, delay_s=0.05))
+        sock, _stt = await _call(engine, "CA_ms")
+        state = engine.get_call_state("CA_ms")
+
+        speaking = asyncio.create_task(engine.send_speech("CA_ms", OLD_FIRST))
+        await sock.wait_sent(lambda sent: any(m.get("event") == "media" for m in sent))
+        await engine.interrupt_speech("CA_ms")
+
+        assert await speaking is True  # some audio reached Twilio
+        assert state.metadata["last_speech_cut"] is True
+        assert state.metadata["tts_characters"] == len(OLD_FIRST)
+
+    async def test_uncut_speech_is_not_reported_as_cut(self):
+        engine = _engine(FakeTTS())
+        await _call(engine, "CA_ms")
+        state = engine.get_call_state("CA_ms")
+
+        assert await engine.send_speech("CA_ms", OLD_FIRST) is True
+        assert state.metadata["last_speech_cut"] is False
+        assert state.metadata["tts_characters"] == len(OLD_FIRST)
 
 
 class TestPerCallStop:

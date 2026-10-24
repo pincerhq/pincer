@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
 from pincer.voice import call_end
+from pincer.voice.engine import UTTERANCE_MARKERS
 from pincer.voice.metrics import VoiceMetricsRegistry
 from pincer.voice.state_machine import CallPhase, CallStateMachine
 from pincer.voice.transcript import Speaker, TranscriptLogger
@@ -66,10 +67,9 @@ SHUTDOWN_SPEECH_TIMEOUT_S = 10.0
 # shutdown forever.
 POSTCALL_DRAIN_TIMEOUT_S = 30.0
 
-# Per-utterance STT stamps the engine leaves in call metadata (Media Streams).
-# Snapshotted when the utterance is handed off, because the engine clears them
-# as soon as the hand-off returns — long before the turn's trace is opened.
-_UTTERANCE_MARKERS = ("speech_end_ns", "speech_start_ns", "first_partial_ns")
+# The engine's per-utterance STT stamps (UTTERANCE_MARKERS) are snapshotted
+# when the utterance is handed off, because the engine clears them as soon as
+# the hand-off returns — long before the turn's trace is opened.
 
 
 class VoiceChannel(BaseChannel):
@@ -259,6 +259,13 @@ class VoiceChannel(BaseChannel):
         if transcript:
             transcript.log_utterance(Speaker.AGENT, goodbye, state="shutdown")
         if self._engine:
+            # Whatever the reply had queued must not play first: on Media
+            # Streams seconds of it can sit in Twilio's buffer, and the goodbye
+            # would wait behind them past the drain timeout.
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(
+                    self._engine.interrupt_speech(call_sid, by_caller=False), timeout=SHUTDOWN_SPEECH_TIMEOUT_S
+                )
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self._engine.send_speech(call_sid, goodbye), timeout=SHUTDOWN_SPEECH_TIMEOUT_S)
         sm = self._state_machines.get(call_sid)
@@ -697,7 +704,7 @@ class VoiceChannel(BaseChannel):
         # clock can start from.
         arrival_ns = telemetry.now_ns()
         state = self._engine.get_call_state(call_sid) if self._engine else None
-        markers = {k: state.metadata[k] for k in _UTTERANCE_MARKERS if k in state.metadata} if state else {}
+        markers = {k: state.metadata[k] for k in UTTERANCE_MARKERS if k in state.metadata} if state else {}
         task = asyncio.create_task(
             self._handle_speech(call_sid, text, arrival_ns=arrival_ns, markers=markers),
             name=f"voice-utterance-{call_sid}",
@@ -751,6 +758,11 @@ class VoiceChannel(BaseChannel):
         from pincer.voice.telemetry import runtime as telemetry_runtime
         from pincer.voice.telemetry.context import bind_call
 
+        # A late utterance for an ended call (a Deepgram final or CR prompt just
+        # after hangup) has nothing to do, and its lock would never be removed:
+        # _handle_call_end has already popped this call's.
+        if self._engine is None or self._engine.get_call_state(call_sid) is None:
+            return
         if arrival_ns is None:
             arrival_ns = telemetry.now_ns()
         tracer = telemetry_runtime.tracer_for(call_sid)
@@ -1055,11 +1067,7 @@ class VoiceChannel(BaseChannel):
                 # Honest transcripts: "text generated" is not "audio heard".
                 # An undelivered agent turn is marked so post-call summaries
                 # and the truthfulness check reflect what the caller heard.
-                transcript.log_utterance(
-                    Speaker.AGENT,
-                    response,
-                    state=str(sm.phase) if delivered else "undelivered",
-                )
+                transcript.log_utterance(Speaker.AGENT, response, state=self._spoken_state(call_sid, delivered, sm))
             self._after_agent_turn(call_sid, sm, response or "", end_requested)
             self._close_turn_trace(call_sid, own=trace)
         except asyncio.CancelledError:
@@ -1146,13 +1154,23 @@ class VoiceChannel(BaseChannel):
             if not spoken_any and sentence:
                 stamp("first_dispatch_ms")
                 metrics.mark_agent_speech_start()
-            delivered = await engine.send_speech(call_sid, sentence, last=last)
+            try:
+                delivered = await engine.send_speech(call_sid, sentence, last=last)
+            except asyncio.CancelledError:
+                # Barge-in cancelled the turn while this sentence was being
+                # sent: it was cut off, not dropped. After a hangup the
+                # transcript belongs to the post-call pipeline — left alone.
+                if sentence and self._transcripts.get(call_sid) is transcript:
+                    transcript.log_utterance(Speaker.AGENT, sentence, state="interrupted")
+                raise
             if delivered and buffering_engine:
                 open_stream = not last
             if sentence:
                 spoken_any = True
                 spoken_text = f"{spoken_text} {sentence}".strip()
-                transcript.log_utterance(Speaker.AGENT, sentence, state=str(sm.phase) if delivered else "undelivered")
+                transcript.log_utterance(Speaker.AGENT, sentence, state=self._spoken_state(call_sid, delivered, sm))
+            if last:
+                transcript.end_agent_utterance()
 
         async def gate_first_sentence(sentence: str) -> str:
             """Token + drift gate for the first sentence (local, ~0ms)."""
@@ -1352,8 +1370,21 @@ class VoiceChannel(BaseChannel):
         if response and self._engine:
             metrics.mark_agent_speech_start()
             delivered = await self._engine.send_speech(call_sid, response)
-            transcript.log_utterance(Speaker.AGENT, response, state=str(sm.phase) if delivered else "undelivered")
+            transcript.log_utterance(Speaker.AGENT, response, state=self._spoken_state(call_sid, delivered, sm))
         self._after_agent_turn(call_sid, sm, response or "", end_requested)
+
+    def _spoken_state(self, call_sid: str, delivered: bool, sm: CallStateMachine) -> str:
+        """Transcript state for an agent line `send_speech` just returned on.
+
+        Must be called right after it returns: the engine's cut flag is per
+        call and the next utterance overwrites it.
+        """
+        if not delivered:
+            return "undelivered"
+        state = self._engine.get_call_state(call_sid) if self._engine else None
+        if state is not None and state.metadata.get("last_speech_cut"):
+            return "interrupted"  # a barge-in stopped it partway (Media Streams)
+        return str(sm.phase)
 
     def _log_turn_latency(
         self,

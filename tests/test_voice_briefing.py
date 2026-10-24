@@ -390,6 +390,47 @@ async def test_failed_dial_discards_the_pre_registration(voice):
     assert voice.engine._pending_outbound == {}
 
 
+class _TimedOutCalls:
+    """create_async times out; list_async returns whatever Twilio "has"."""
+
+    def __init__(self, listed: list[Any]) -> None:
+        self.listed = listed
+
+    async def create_async(self, **kwargs: Any) -> Any:
+        raise TimeoutError
+
+    async def list_async(self, **kwargs: Any) -> list[Any]:
+        return self.listed
+
+
+async def test_timed_out_dial_that_twilio_placed_is_bound(voice):
+    """Twilio accepted the POST but answered late → the call keeps its briefing."""
+    from datetime import UTC, datetime
+
+    placed = types.SimpleNamespace(sid="CA_late", date_created=datetime.now(UTC))
+    voice.engine._rest._client = types.SimpleNamespace(calls=_TimedOutCalls([placed]))
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert "Call SID: CA_late" in result
+    state = voice.engine.get_call_state("CA_late")
+    assert state is not None and state.purpose == TASK
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+async def test_timed_out_dial_with_unknown_outcome_still_counts(voice):
+    """No call found → not reported as rejected, and the attempt is counted."""
+    from datetime import UTC, datetime, timedelta
+
+    stale = types.SimpleNamespace(sid="CA_old", date_created=datetime.now(UTC) - timedelta(hours=1))
+    voice.engine._rest._client = types.SimpleNamespace(calls=_TimedOutCalls([stale]))
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert result.startswith("Error") and "may still be ringing" in result
+    assert voice.engine.get_call_state("CA_old") is None
+    assert voice.engine._pending_outbound == {}
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
 async def test_promote_pending_is_idempotent(voice):
     briefing = CallBriefing.create(TASK)
     pre = await voice.engine.register_pending_outbound(briefing, TARGET, language="en")

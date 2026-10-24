@@ -262,8 +262,8 @@ class ChannelSettings(BaseModel):
         default="vad",
         pattern="^(vad|interim|off)$",
         description=(
-            "Media Streams barge-in: 'vad' stops the agent on Deepgram's SpeechStarted (fastest; can react "
-            "to coughs/echo), 'interim' on the first recognised words, 'off' never"
+            "Media Streams barge-in: 'vad' stops the agent on Deepgram's SpeechStarted once any recognised "
+            "word confirms it (a cough alone does not), 'interim' on the first recognised words, 'off' never"
         ),
     )
     voice_barge_in_min_words: int = Field(

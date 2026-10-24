@@ -63,6 +63,16 @@ class TestGracefulShutdown:
         agent_lines = [e for e in transcript.entries if e.speaker == Speaker.AGENT and e.state == "shutdown"]
         assert len(agent_lines) == 1 and agent_lines[0].text == goodbye
 
+    async def test_queued_reply_is_silenced_before_the_goodbye(self):
+        """Not counted as the caller interrupting: the deploy cut the reply."""
+        channel, engine = await _live_call("de")
+        spoken_before = len(engine.spoken.get("CA_shutdown", []))
+
+        await channel.stop()
+
+        assert engine.silenced["CA_shutdown"] == [spoken_before]  # before the goodbye
+        assert engine.interrupts.get("CA_shutdown", 0) == 0
+
     async def test_english_call_gets_english_ending(self):
         channel, engine = await _live_call("en")
         await channel.stop()

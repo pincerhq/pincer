@@ -17,6 +17,8 @@ class FakeVoiceEngine(VoiceEngine):
         self.spoken: dict[str, list[str]] = {}
         self.sent_flags: dict[str, list[tuple[str, bool]]] = {}  # (text, last) per send
         self.interrupts: dict[str, int] = {}
+        # by_caller=False silences: how many lines had been spoken at each one
+        self.silenced: dict[str, list[int]] = {}
         self.dtmf: dict[str, list[str]] = {}
         self.ended: list[str] = []
         self.transfers: dict[str, list[dict[str, Any]]] = {}  # Sprint 12: <Dial> redirects
@@ -68,7 +70,10 @@ class FakeVoiceEngine(VoiceEngine):
         self.sent_flags.setdefault(call_sid, []).append((text, last))
         return True
 
-    async def interrupt_speech(self, call_sid: str) -> None:
+    async def interrupt_speech(self, call_sid: str, *, by_caller: bool = True) -> None:
+        if not by_caller:
+            self.silenced.setdefault(call_sid, []).append(len(self.spoken.get(call_sid, [])))
+            return
         self.interrupts[call_sid] = self.interrupts.get(call_sid, 0) + 1
 
     async def transfer_call(
