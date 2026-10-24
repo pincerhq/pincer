@@ -399,6 +399,20 @@ def test_is_triggered_in_group_by_trigger_word() -> None:
     assert channel._is_triggered_in_group(message) is True
 
 
+def test_is_triggered_in_group_by_trigger_list_phrase() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = "@pincer, hey pincer"
+    message = _mock_group_message(text="hey\n pincer, what's up?")
+    assert channel._is_triggered_in_group(message) is True
+
+
+def test_is_not_triggered_in_group_by_partial_word() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = "pincer"
+    message = _mock_group_message(text="pincers are cool")
+    assert channel._is_triggered_in_group(message) is False
+
+
 def test_is_triggered_in_group_by_mention_entity() -> None:
     channel = _make_channel()
     channel._settings.telegram_group_trigger = ""

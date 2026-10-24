@@ -27,6 +27,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
+from pincer.channels.group_trigger import matches_group_trigger
 from pincer.channels.telegram_formatters import markdown_to_telegram_html
 
 if TYPE_CHECKING:
@@ -511,8 +512,8 @@ class TelegramChannel(BaseChannel):
         """Return True when a group message is directed at Pincer.
 
         Mirrors the WhatsApp channel's group gating: a mention of the bot's
-        own @username, a reply to one of the bot's own messages, or the
-        configured trigger word appearing in the text/caption.
+        own @username, a reply to one of the bot's own messages, or one of the
+        configured trigger words/phrases appearing in the text/caption.
         """
         text = message.text or message.caption or ""
         entities = message.entities or message.caption_entities or []
@@ -531,8 +532,7 @@ class TelegramChannel(BaseChannel):
             and message.reply_to_message.from_user.id == self._bot.id
         ):
             return True
-        trigger = self._settings.telegram_group_trigger
-        return bool(trigger and trigger.lower() in text.lower())
+        return matches_group_trigger(text, self._settings.telegram_group_trigger)
 
     def _register_handlers(self, router: Router) -> None:
         """Register all message handlers on the router."""

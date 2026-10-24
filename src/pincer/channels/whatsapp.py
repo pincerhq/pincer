@@ -55,6 +55,7 @@ from pincer.channels.base import (
     IncomingMessage,
     MessageHandler,
 )
+from pincer.channels.group_trigger import matches_group_trigger
 
 if TYPE_CHECKING:
     from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
@@ -1110,5 +1111,4 @@ class WhatsAppChannel(BaseChannel):
         if own_jid and own_jid in text:
             return True
 
-        trigger = self._settings.whatsapp_group_trigger
-        return bool(trigger and trigger.lower() in text.lower())
+        return matches_group_trigger(text, self._settings.whatsapp_group_trigger)

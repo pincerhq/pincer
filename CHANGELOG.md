@@ -111,6 +111,23 @@ silently open.
   API access; `pincer identity revoke <name>` does (password, API key and
   sessions).
 
+#### Group triggers: comma-separated lists, whole-word matching
+
+`PINCER_TELEGRAM_GROUP_TRIGGER` and `PINCER_WHATSAPP_GROUP_TRIGGER` now take a
+comma-separated list of words or phrases, e.g.
+`pincer,hey pincer,@3Days Pincer`. Each entry matches case-insensitively as a
+whole word or phrase; the words of a phrase may be separated by any whitespace
+(spaces, tabs, newlines, non-breaking spaces), and an entry starting with `@`
+only matches when the `@` is typed. Entries cannot contain commas.
+
+> **Behaviour change.** Triggers no longer match as substrings: `pincer` no
+> longer fires on "pincers" or "@pincer_bot", and a partial trigger such as
+> `pinc` stops matching "pincer". Use the full word instead.
+
+On WhatsApp, picking the bot in the @-picker inserts `@<number>`, which is
+still detected through the mentioned JID; a literal `@pincer` entry only helps
+when someone types it by hand.
+
 ### Added
 
 #### Storage browser API: `/api/storage`

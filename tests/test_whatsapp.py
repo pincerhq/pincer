@@ -122,6 +122,21 @@ class TestWhatsAppChannel:
         msg.HasField = MagicMock(return_value=False)
         assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
 
+    def test_trigger_list_phrase(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        wa_channel._settings.whatsapp_group_trigger = "@pincer, hey pincer"
+        msg = MagicMock()
+        msg.conversation = "hey\n pincer, do this"
+        msg.HasField = MagicMock(return_value=False)
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+
+    def test_trigger_partial_word_does_not_match(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        msg = MagicMock()
+        msg.conversation = "pincers are cool"
+        msg.HasField = MagicMock(return_value=False)
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+
 
 class TestWhatsAppMediaAndApproval:
     """Regression tests: tools using media delivery and approval on WhatsApp."""
