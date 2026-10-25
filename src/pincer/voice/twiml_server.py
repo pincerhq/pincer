@@ -304,10 +304,14 @@ async def voice_transfer_result(request: Request) -> Response:
     nothing to reconnect. Any other status (empty, unknown) counts as failed
     while the caller is on the line; once the call is completed it is not
     guessed at: the call is finalized and the report says the transfer started.
-    Idempotent: a retried callback finds no state and only hangs up.
     No state with the caller still on the line (process restarted while the
     target rang) → re-register the call, resume its new receptionist session in
-    TAKE_MESSAGE, and reconnect with the apology."""
+    TAKE_MESSAGE, and reconnect with the apology.
+    Idempotent: a retried callback for a finalized call finds no state (or a
+    call we tore down since) and only hangs up; a retry for a reconnected call
+    (``DialCallSid`` already handled, including a recovered one) returns the
+    same reconnect TwiML without counting the result or restarting the
+    session's message-taking again."""
     if await _authenticate(request) is None:
         return _forbidden()
     form = await request.form()
@@ -325,6 +329,12 @@ async def voice_transfer_result(request: Request) -> Response:
     if state is None:
         if bridged or call_status == "completed":
             logger.info("Transfer result [%s] for a call already finalized — nothing to do", call_sid)
+            return hangup
+        if _already_torn_down(call_sid):
+            # A late/replayed callback for a call we ended: re-registering it
+            # would create a phantom call that never gets media and holds a
+            # capacity slot until the stuck-call reaper pages.
+            logger.info("Transfer result [%s] for a call already torn down — nothing to do", call_sid)
             return hangup
         # Call state lost (restart/redeploy while the target rang), but the
         # caller is still on the line: fall back to message-taking.
@@ -348,7 +358,7 @@ async def voice_transfer_result(request: Request) -> Response:
             engine=str(getattr(_settings, "voice_engine", "") or ""),
             language=language,
         )
-        await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=language)
+        recovered = await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=language)
         # The channel started a fresh receptionist session (RECEPTION_INTENT);
         # resume it in TAKE_MESSAGE, as a failed transfer does, so the first
         # turn asks for the name instead of greeting the caller again.
@@ -356,19 +366,47 @@ async def voice_transfer_result(request: Request) -> Response:
         if session is not None:
             session.transfer_attempted = True  # the report says the transfer did not connect
             greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
-            return _reconnect_after_transfer(call_sid, language, greeting)
-        lines = get_prompt("RECEPTIONIST_LINES", language) or {}
-        return _reconnect_after_transfer(call_sid, language, str(lines.get("transfer_failed", "")))
+        else:
+            lines = get_prompt("RECEPTIONIST_LINES", language) or {}
+            greeting = str(lines.get("transfer_failed", ""))
+        # Mark the dial result as handled on the recovered state, so a retry of
+        # this callback replays the reconnect instead of taking the main path.
+        metadata = getattr(recovered, "metadata", None)
+        if isinstance(metadata, dict):
+            metadata["transfer"] = {
+                "recovered": True,
+                "dial_status": dial_status,
+                "dial_call_sid": str(form.get("DialCallSid", "")),
+                "dial_duration_s": dial_duration,
+                "dial_bridged": dial_bridged,
+                "reconnect_greeting": greeting,
+            }
+        return _reconnect_after_transfer(call_sid, language, greeting)
 
     from pincer.voice.telemetry import hooks as telemetry
 
-    telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)
+    dial_call_sid = str(form.get("DialCallSid", ""))
     transfer = state.metadata.setdefault("transfer", {})
+    if (
+        isinstance(transfer, dict)
+        and "reconnect_greeting" in transfer
+        and transfer.get("dial_call_sid") == dial_call_sid
+        and transfer.get("dial_status") == dial_status
+    ):
+        # Retry of a callback we already answered with a reconnect (the call
+        # is ours again, so its state is still here): answer the same way,
+        # count nothing twice, and leave the session's message-taking alone.
+        # A retry carries the same body; `transfer_call` replaces this dict,
+        # so a later, second transfer is not mistaken for a replay.
+        logger.info("Transfer result [%s] already handled (dial %s) — replaying reconnect", call_sid, dial_call_sid)
+        language = str(getattr(state, "language", "") or "en")
+        return _reconnect_after_transfer(call_sid, language, str(transfer.get("reconnect_greeting", "")))
+    telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)
     if isinstance(transfer, dict):
         transfer.update(
             {
                 "dial_status": dial_status,
-                "dial_call_sid": str(form.get("DialCallSid", "")),
+                "dial_call_sid": dial_call_sid,
                 "dial_duration_s": dial_duration,
                 "dial_bridged": dial_bridged,
             }
@@ -401,6 +439,8 @@ async def voice_transfer_result(request: Request) -> Response:
     greeting = ""
     if session is not None:
         greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
+    if isinstance(transfer, dict):
+        transfer["reconnect_greeting"] = greeting  # what a retried callback replays
     # The dial is over: the call is ours again now, not when (or if) the
     # reconnected relay/stream connects. This also takes the phase out of
     # TRANSFERRING when there was no session to do it.

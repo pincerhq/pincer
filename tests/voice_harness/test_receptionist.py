@@ -1089,6 +1089,83 @@ async def test_lost_transfer_state_resumes_session_in_take_message():
     )
 
 
+def _count_transfer_results(monkeypatch) -> list[str]:
+    """Count telemetry.transfer_result calls (the dial-result metric)."""
+    from pincer.voice.telemetry import hooks
+
+    seen: list[str] = []
+    monkeypatch.setattr(hooks, "transfer_result", lambda call_sid, dial_status, **_: seen.append(dial_status))
+    return seen
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_transfer_result_retry_replays_reconnect_without_rerunning_session(monkeypatch):
+    """Twilio retries the action callback (slow response): the second delivery
+    must answer the same TwiML, count the result once, and not restart the
+    message-taking the caller is already in the middle of."""
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+    results = _count_transfer_results(monkeypatch)
+    data = {"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial", "CallStatus": "in-progress"}
+    async with _async_client(h) as client:
+        first = await client.post("/api/apps/twilio/transfer-result", data=data)
+        assert "ConversationRelay" in first.text
+        failed_again: list[str] = []
+        original = h.session.on_transfer_failed
+        monkeypatch.setattr(h.session, "on_transfer_failed", lambda r: (failed_again.append(r), original(r))[1])
+        await h.say("Anna Müller")  # message capture in progress: the name is taken
+        step, name = h.session.step, h.session.slots.caller_name
+        assert step != "name" and name
+        retry = await client.post("/api/apps/twilio/transfer-result", data=data)
+    assert retry.text == first.text
+    assert failed_again == []
+    assert results == ["busy"]
+    assert (h.session.step, h.session.slots.caller_name) == (step, name)
+    assert h.sm.phase == CallPhase.TAKE_MESSAGE
+
+
+async def test_lost_transfer_state_retry_replays_reconnect(monkeypatch):
+    """The recovered call has state now, so a retried callback would take the
+    main path: it must replay the reconnect instead of re-running the session's
+    transfer handling and counting the result twice."""
+    h = await _start(settings=_transfer_settings())
+    results = _count_transfer_results(monkeypatch)
+    lost = "CAlost"
+    data = {"CallSid": lost, "From": CALLER, "DialCallStatus": "no-answer", "DialCallSid": "CAdial"}
+    data["CallStatus"] = "in-progress"
+    async with _async_client(h) as client:
+        first = await client.post("/api/apps/twilio/transfer-result", data=data)
+        session = h.channel.get_reception_session(lost)
+        failed_again: list[str] = []
+        original = session.on_transfer_failed
+        monkeypatch.setattr(session, "on_transfer_failed", lambda r: (failed_again.append(r), original(r))[1])
+        retry = await client.post("/api/apps/twilio/transfer-result", data=data)
+    assert retry.text == first.text
+    assert failed_again == []
+    assert results == []  # the lost-state path never had a trace to count on; the retry adds none
+    transfer = h.engine.get_call_state(lost).metadata["transfer"]
+    assert transfer["recovered"] is True and transfer["dial_call_sid"] == "CAdial"
+    assert len(h.engine.get_active_calls()) == 2  # CALL + the one recovered call, not a third
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_transfer_result_replay_after_teardown_does_not_recreate_the_call():
+    """A replayed callback still claiming the caller is on the line, for a call
+    we already ended: no phantom INBOUND call that never gets media."""
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+    await h.engine.finish_remote_ended(CALL, reason="provider_completed")
+    assert h.engine.get_call_state(CALL) is None
+    async with _async_client(h) as client:
+        response = await client.post(
+            "/api/apps/twilio/transfer-result",
+            data={"CallSid": CALL, "From": CALLER, "DialCallStatus": "busy", "CallStatus": "in-progress"},
+        )
+    assert response.text == "<Response><Hangup/></Response>"
+    assert h.engine.get_call_state(CALL) is None
+    assert h.engine.get_active_calls() == {}
+
+
 def test_capacity_counts_transferred_calls():
     """A bridged call can come back to the relay (busy / no-answer), so it keeps its slot."""
     from unittest.mock import AsyncMock
