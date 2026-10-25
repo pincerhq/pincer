@@ -1139,7 +1139,27 @@ class MediaStreamEngine(VoiceEngine):
         progress = _SpeechProgress(epoch=int(state.metadata.get("speech_epoch", 0)))
 
         try:
-            delivered = await self._stream_tts(call_sid, state, segments, progress)
+            delivered = await self._synthesize_with_retry(call_sid, state, segments, progress)
+        except asyncio.CancelledError:
+            # The turn was cancelled mid-utterance. The channel logs the line
+            # as cut off only if any of it reached Twilio.
+            state.metadata["last_speech_cut"] = progress.wrote_audio
+            raise
+        if not delivered:
+            return False
+
+        # Read by the channel right after this returns: a cut utterance was
+        # only partly heard, which "delivered" alone cannot say.
+        state.metadata["last_speech_cut"] = progress.cut
+        logger.info("MS speech output [%s] delivered=True cut=%s: %s", call_sid, progress.cut, text[:80])
+        return True
+
+    async def _synthesize_with_retry(
+        self, call_sid: str, state: CallState, segments: list[str], progress: _SpeechProgress
+    ) -> bool:
+        """One utterance through `_stream_tts`, resumed once after a TTS failure."""
+        try:
+            return await self._stream_tts(call_sid, state, segments, progress)
         except Exception:
             from pincer.voice.telemetry import hooks as telemetry
 
@@ -1161,19 +1181,11 @@ class MediaStreamEngine(VoiceEngine):
                 len(segments),
             )
             try:
-                delivered = await self._stream_tts(call_sid, state, segments, progress)
+                return await self._stream_tts(call_sid, state, segments, progress)
             except Exception:
                 logger.exception("TTS retry failed [%s] — spoken fallback + hangup", call_sid)
                 await self.fallback_and_end(call_sid)
                 return False
-        if not delivered:
-            return False
-
-        # Read by the channel right after this returns: a cut utterance was
-        # only partly heard, which "delivered" alone cannot say.
-        state.metadata["last_speech_cut"] = progress.cut
-        logger.info("MS speech output [%s] delivered=True cut=%s: %s", call_sid, progress.cut, text[:80])
-        return True
 
     async def _stream_tts(
         self,

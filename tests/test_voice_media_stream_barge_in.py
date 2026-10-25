@@ -389,6 +389,56 @@ class TestPartialSegments:
         tts.delay_s = 0  # the shutdown goodbye need not take real time
         await channel.stop()
 
+    async def test_a_turn_cancelled_before_any_audio_logs_it_as_undelivered(self):
+        """Cancelled while still waiting for the first TTS chunk: the caller
+        heard none of it, so it must not be credited as cut off part-way."""
+        tts = FakeTTS(chunks=20, delay_s=0.05)
+        tts.hold_first = asyncio.Event()  # the first synthesis produces nothing until released
+        engine = _engine(tts, "off")
+        channel, _agent = await _channel_for(engine, [text_chunks(OLD_FIRST), text_chunks(NEW_REPLY)])
+        sock, stt = await _call(engine, "CA_ms")
+
+        await _fed(stt, _final("Erste Frage?"))
+        await asyncio.wait_for(tts.started.wait(), timeout=2)
+        turn = channel._active_turns["CA_ms"]
+        await _fed(stt, _final("Moment, etwas anderes!"))  # cancels the old turn before any media
+        tts.hold_first.set()
+        await channel.wait_for_turn("CA_ms")
+
+        assert turn.cancelled()
+        assert sock.events("media") and tts.synthesized[-1] == NEW_REPLY
+        line = next(e for e in channel.get_transcript("CA_ms").entries if e.text == OLD_FIRST)
+        assert line.state == "undelivered"
+        tts.delay_s = 0
+        await channel.stop()
+
+    async def test_the_cut_sentence_is_logged_before_the_interrupting_caller_line(self):
+        """The caller line is logged before the old turn unwinds; the cut
+        sentence must still land before it, in the reply it belongs to."""
+        tts = FakeTTS(chunks=20, delay_s=0.05)
+        engine = _engine(tts, "off")
+        channel, _agent = await _channel_for(engine, [text_chunks(OLD_FIRST), text_chunks(NEW_REPLY)])
+        sock, stt = await _call(engine, "CA_ms")
+        state = engine.get_call_state("CA_ms")
+
+        await _fed(stt, _final("Erste Frage?"))
+        await sock.wait_sent(lambda sent: any(m.get("event") == "media" for m in sent))
+        state.metadata["playout_started_ns"] -= (BARGE_IN_ARM_DELAY_MS + 50) * 1_000_000  # not our echo
+        await _fed(stt, _final("Moment, etwas anderes!"))
+        await channel.wait_for_turn("CA_ms")
+
+        lines = [(e.speaker, e.text) for e in channel.get_transcript("CA_ms").entries]
+        assert lines == [
+            ("caller", "Erste Frage?"),
+            ("agent", OLD_FIRST),
+            ("caller", "Moment, etwas anderes!"),
+            ("agent", NEW_REPLY),
+        ]
+        states = [e.state for e in channel.get_transcript("CA_ms").entries if e.speaker == "agent"]
+        assert states == ["interrupted", "intent_capture"]
+        tts.delay_s = 0
+        await channel.stop()
+
     async def test_speech_cut_by_a_barge_in_reports_the_cut_and_is_billed(self):
         engine = _engine(FakeTTS(chunks=20, delay_s=0.05))
         sock, _stt = await _call(engine, "CA_ms")

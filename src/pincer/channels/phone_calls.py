@@ -1374,17 +1374,23 @@ class VoiceChannel(BaseChannel):
         boundary (error/cancel closers, brain-error lines, blocking replies)
         had their lines misattributed on the next barge-in.
 
-        A cancellation mid-send (barge-in) logs the line as interrupted: it
-        was cut off, not dropped. After a hangup the transcript belongs to the
-        post-call pipeline and is left alone.
+        A cancellation mid-send (barge-in) logs the line where the send
+        began — the interrupting caller line is logged while the old turn is
+        still unwinding, so appending would put the cut sentence after it and
+        into the next reply's `mark_interrupted` window. It is "interrupted"
+        only when some of its audio reached Twilio; cancelled before the
+        first TTS chunk it is "undelivered". After a hangup the transcript
+        belongs to the post-call pipeline and is left alone.
         """
         assert self._engine is not None
+        transcript = self._transcripts.get(call_sid)
+        mark = len(transcript.entries) if transcript is not None else 0
         try:
             delivered = await self._engine.send_speech(call_sid, text, last=last)
         except asyncio.CancelledError:
-            transcript = self._transcripts.get(call_sid)
-            if text and transcript is not None:
-                transcript.log_utterance(Speaker.AGENT, text, state="interrupted")
+            if text and transcript is not None and self._transcripts.get(call_sid) is transcript:
+                state = "interrupted" if self._speech_was_heard(call_sid) else "undelivered"
+                transcript.log_utterance(Speaker.AGENT, text, state=state, position=mark)
             raise
         transcript = self._transcripts.get(call_sid)
         if transcript is not None:
@@ -1395,6 +1401,15 @@ class VoiceChannel(BaseChannel):
             if last:
                 transcript.end_agent_utterance()
         return delivered
+
+    def _speech_was_heard(self, call_sid: str) -> bool:
+        """Did any of the utterance `send_speech` was just cancelled in reach
+        Twilio? Media Streams records it on cancellation; ConversationRelay
+        does not, and its interrupt message corrects the line anyway."""
+        state = self._engine.get_call_state(call_sid) if self._engine else None
+        if state is None:
+            return True
+        return bool(state.metadata.get("last_speech_cut", True))
 
     def _spoken_state(self, call_sid: str, delivered: bool, sm: CallStateMachine | None) -> str:
         """Transcript state for an agent line `send_speech` just returned on.

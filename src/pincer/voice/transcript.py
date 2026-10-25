@@ -104,7 +104,11 @@ class TranscriptLogger:
         confidence: float = 1.0,
         is_final: bool = True,
         state: str = "",
+        position: int | None = None,
     ) -> None:
+        """Append a line, or with `position` insert it there: a line whose
+        send was cancelled is logged where the send began, before whatever
+        was logged while it was in flight."""
         entry = TranscriptEntry(
             speaker=speaker,
             text=text,
@@ -112,7 +116,10 @@ class TranscriptLogger:
             is_final=is_final,
             state=state,
         )
-        self._entries.append(entry)
+        if position is None:
+            self._entries.append(entry)
+        else:
+            self._entries.insert(position, entry)
         logger.debug("[%s] %s: %s", self._call_sid, speaker, text[:100])
 
     def end_agent_utterance(self) -> None:
