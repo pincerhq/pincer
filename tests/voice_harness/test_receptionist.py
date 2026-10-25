@@ -1067,6 +1067,40 @@ def test_transfer_result_without_state_reconnects_live_caller():
     engine.on_call_start.assert_not_called()
 
 
+def test_transfer_result_without_state_recovery_failure_finalizes_registered_call():
+    """The call is registered before steps that can raise: if the session's
+    transfer handling fails, the just-registered call must be finalized (not
+    left in _active_calls with no media, holding a capacity slot) and the
+    caller hung up cleanly instead of a 500."""
+    from unittest.mock import AsyncMock
+
+    from pincer.voice import twiml_server
+
+    settings = _settings()
+    settings.voice_webhook_validate = False
+    settings.voice_engine = "conversation_relay"
+    settings.twilio_auth_token = MagicMock()
+    settings.twilio_auth_token.get_secret_value.return_value = ""
+    engine = AsyncMock()
+    engine.get_call_state = MagicMock(return_value=None)
+    engine.was_recently_ended = MagicMock(return_value=False)
+    broken = MagicMock()
+    broken.on_transfer_failed = AsyncMock(side_effect=KeyError("transfer_failed"))
+    twiml_server.set_transfer_session_resolver(lambda _sid: broken)
+    try:
+        client = _webhook_client(settings, engine)
+        response = client.post(
+            "/api/apps/twilio/transfer-result",
+            data={"CallSid": "CAt", "DialCallStatus": "busy", "CallStatus": "in-progress", "From": CALLER},
+        )
+    finally:
+        twiml_server.set_transfer_session_resolver(None)
+    assert response.status_code == 200
+    assert response.text == "<Response><Hangup/></Response>"
+    engine.on_call_start.assert_awaited_once()
+    engine.finish_remote_ended.assert_awaited_once_with("CAt", reason="transfer_recovery_failed")
+
+
 async def test_lost_transfer_state_resumes_session_in_take_message():
     """Restart while the target rang: the recovered call's new session must
     pick up message-taking (name question), not greet the caller again."""

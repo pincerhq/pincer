@@ -359,29 +359,37 @@ async def voice_transfer_result(request: Request) -> Response:
             language=language,
         )
         recovered = await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=language)
-        # The channel started a fresh receptionist session (RECEPTION_INTENT);
-        # resume it in TAKE_MESSAGE, as a failed transfer does, so the first
-        # turn asks for the name instead of greeting the caller again.
-        session = _transfer_session_lookup(call_sid)
-        if session is not None:
-            session.transfer_attempted = True  # the report says the transfer did not connect
-            greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
-        else:
-            lines = get_prompt("RECEPTIONIST_LINES", language) or {}
-            greeting = str(lines.get("transfer_failed", ""))
-        # Mark the dial result as handled on the recovered state, so a retry of
-        # this callback replays the reconnect instead of taking the main path.
-        metadata = getattr(recovered, "metadata", None)
-        if isinstance(metadata, dict):
-            metadata["transfer"] = {
-                "recovered": True,
-                "dial_status": dial_status,
-                "dial_call_sid": str(form.get("DialCallSid", "")),
-                "dial_duration_s": dial_duration,
-                "dial_bridged": dial_bridged,
-                "reconnect_greeting": greeting,
-            }
-        return _reconnect_after_transfer(call_sid, language, greeting)
+        try:
+            # The channel started a fresh receptionist session (RECEPTION_INTENT);
+            # resume it in TAKE_MESSAGE, as a failed transfer does, so the first
+            # turn asks for the name instead of greeting the caller again.
+            session = _transfer_session_lookup(call_sid)
+            if session is not None:
+                session.transfer_attempted = True  # the report says the transfer did not connect
+                greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
+            else:
+                lines = get_prompt("RECEPTIONIST_LINES", language) or {}
+                greeting = str(lines.get("transfer_failed", ""))
+            # Mark the dial result as handled on the recovered state, so a retry of
+            # this callback replays the reconnect instead of taking the main path.
+            metadata = getattr(recovered, "metadata", None)
+            if isinstance(metadata, dict):
+                metadata["transfer"] = {
+                    "recovered": True,
+                    "dial_status": dial_status,
+                    "dial_call_sid": str(form.get("DialCallSid", "")),
+                    "dial_duration_s": dial_duration,
+                    "dial_bridged": dial_bridged,
+                    "reconnect_greeting": greeting,
+                }
+            return _reconnect_after_transfer(call_sid, language, greeting)
+        except Exception:
+            # The call is registered but will never get media if we answer 500
+            # (Twilio drops the caller): finalize it so it does not hold a
+            # capacity slot until the stuck-call reaper pages.
+            logger.exception("Transfer result [%s]: recovery failed — finalizing the recovered call", call_sid)
+            await _engine.finish_remote_ended(call_sid, reason="transfer_recovery_failed")
+            return hangup
 
     from pincer.voice.telemetry import hooks as telemetry
 
