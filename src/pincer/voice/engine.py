@@ -876,13 +876,19 @@ class MediaStreamEngine(VoiceEngine):
             # began rather than when the transcript arrived: Deepgram reports
             # an interim a few hundred ms after the audio, so an echo of our
             # first syllable would almost always arrive "armed". Speech that
-            # began before our audio did cannot be its echo.
+            # began before our audio did cannot be its echo, and neither can
+            # speech that goes on past the window: an echo is one or two
+            # words at our onset, while a caller who started talking at the
+            # same moment as us keeps producing words. Every interim of that
+            # utterance shares the same first word, so the first word alone
+            # would mute the caller for the whole reply.
             started = int(state.metadata.get("playout_started_ns", 0))
+            window_end = started + BARGE_IN_ARM_DELAY_MS * 1_000_000
             words = list(getattr(transcript, "words", None) or [])
-            onset = (
-                int(state.metadata.get("stt_started_ns", 0) + words[0].start * 1_000_000_000) if words else _mono_ns()
-            )
-            return started <= onset < started + BARGE_IN_ARM_DELAY_MS * 1_000_000
+            if not words:
+                return started <= _mono_ns() < window_end
+            stt_started = int(state.metadata.get("stt_started_ns", 0))
+            return all(started <= stt_started + word.start * 1_000_000_000 < window_end for word in words)
 
         def _vad_onset_confirmed() -> bool:
             onset = int(state.metadata.pop("vad_onset_ns", 0))

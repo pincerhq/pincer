@@ -295,6 +295,23 @@ class TestDetection:
         assert "CA_ms" not in channel._active_turns
         await channel.stop()
 
+    async def test_a_caller_who_keeps_talking_past_the_arm_window_stops_the_agent(self):
+        """Caller and agent start at the same moment: every interim of the
+        utterance begins inside the window, but its later words do not."""
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply("interim")
+        offset_s = (state.metadata["playout_started_ns"] - state.metadata["stt_started_ns"]) / 1e9
+        first = offset_s + 0.1  # 100 ms after our audio began
+        words = [
+            TranscriptWord("Moment", start=first, end=first + 0.2),
+            TranscriptWord("bitte", start=first + 0.4, end=first + 0.7),  # past the window
+        ]
+
+        await _fed(stt, Transcript(text="Moment bitte", words=words))
+
+        assert len(sock.events("clear")) == 1
+        assert "CA_ms" not in channel._active_turns
+        await channel.stop()
+
     async def test_untimed_interim_inside_the_arm_window_is_ignored(self):
         engine, channel, agent, sock, stt, state = await _agent_mid_reply("interim", armed=False)
 
