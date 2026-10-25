@@ -891,7 +891,13 @@ class MediaStreamEngine(VoiceEngine):
             return all(started <= stt_started + word.start * 1_000_000_000 < window_end for word in words)
 
         def _vad_onset_confirmed() -> bool:
+            # An onset from before this stretch of audio began belongs to an
+            # earlier reply (a "ja" over our last syllable whose words arrived
+            # after playout ended); confirming it here would let the echo of
+            # the new reply's first syllable cut that reply off.
             onset = int(state.metadata.pop("vad_onset_ns", 0))
+            if onset < int(state.metadata.get("playout_started_ns", 0)):
+                return False
             return bool(onset) and (_mono_ns() - onset) <= BARGE_IN_CONFIRM_WINDOW_MS * 1_000_000
 
         async def _cancel_reask() -> None:
@@ -1017,6 +1023,9 @@ class MediaStreamEngine(VoiceEngine):
                         elif enough_words and not _echo_of_our_onset(transcript):
                             await _barge_in(transcript, "interim")
                     if transcript.is_final:
+                        # The utterance the onset belonged to is over (UtteranceEnd
+                        # arrives as an empty final); it must not confirm a later one.
+                        state.metadata.pop("vad_onset_ns", None)
                         await _handle_final_transcript(transcript)
                     elif transcript.text and "first_partial_ns" not in state.metadata:
                         # Interim results are not acted on, but the FIRST one

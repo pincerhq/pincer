@@ -246,6 +246,24 @@ class TestDetection:
         assert sock.events("clear") == []
         await channel.stop()
 
+    async def test_a_vad_onset_from_the_last_reply_does_not_cut_the_next_one(self):
+        """A short "ja" over our last syllable: VAD fires while we are audible,
+        the words arrive after playout ended. The onset must not confirm the
+        echo of the next reply's first syllable as a barge-in."""
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply()
+
+        await _fed(stt, SPEECH_STARTED)
+        state.metadata["playout_until_ns"] = 0  # Twilio played the reply out
+        await _fed(stt, _final("Ja"))  # not audible: the onset is not consumed here
+        await channel.wait_for_turn("CA_ms")  # the next reply's audio is at Twilio
+        clears = len(sock.events("clear"))
+
+        await _fed(stt, Transcript(text="Die"))  # echo of its first syllable
+
+        assert len(sock.events("clear")) == clears
+        assert engine.metrics_registry.get("CA_ms").barge_in_reactions_ms == []
+        await channel.stop()
+
     # regression: fails on dev @ 0a1c320
     async def test_interim_words_stop_the_agent(self):
         engine, channel, agent, sock, stt, state = await _agent_mid_reply()
