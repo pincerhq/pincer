@@ -1024,10 +1024,13 @@ class MediaStreamEngine(VoiceEngine):
                             state.metadata["vad_onset_ns"] = _mono_ns()
                         continue
                     if transcript.text and trigger != "off" and _agent_audible():
-                        enough_words = len(transcript.words or transcript.text.split()) >= min_words
                         if _vad_onset_confirmed():
+                            # VAD already placed the onset; any recognised word
+                            # confirms it, so min_words deliberately does not apply.
                             await _barge_in(transcript, "vad")
-                        elif enough_words and not _echo_of_our_onset(transcript):
+                        elif len(transcript.words or transcript.text.split()) >= min_words and not _echo_of_our_onset(
+                            transcript
+                        ):
                             await _barge_in(transcript, "interim")
                     if transcript.is_final:
                         # The utterance the onset belonged to is over (UtteranceEnd
