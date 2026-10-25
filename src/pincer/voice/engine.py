@@ -1329,6 +1329,7 @@ class MediaStreamEngine(VoiceEngine):
                                 # buffers outbound audio and acknowledges nothing.
                                 turn.first_audio(kind="audio", engine="media_streams")
                             progress.wrote_audio = True
+                            state.metadata["audio_since_clear"] = True
                             # Twilio plays out in real time; the end of what it
                             # holds is what barge-in detection checks against.
                             now_ns = _mono_ns()
@@ -1377,18 +1378,19 @@ class MediaStreamEngine(VoiceEngine):
         from pincer.voice.analytics import get_accumulator
         from pincer.voice.telemetry import hooks as telemetry
 
+        # One interruption per stretch of agent audio: clearing a re-ask and
+        # the channel's cancel of the prior turn both land here for the same
+        # audio, and only the first of them may count or report it.
+        interrupted = by_caller and bool(state.metadata.pop("audio_since_clear", False))
+        source = str(state.metadata.pop("barge_in_source", "next_utterance"))
         accumulator = get_accumulator(state)
         if accumulator is not None:
             accumulator.agent_audio_cancelled()
-            if by_caller:
+            if interrupted:
                 accumulator.interruption()
 
         detected_ns = (
-            telemetry.interruption_detected(
-                call_sid, engine="media_streams", source=str(state.metadata.pop("barge_in_source", "next_utterance"))
-            )
-            if by_caller
-            else None
+            telemetry.interruption_detected(call_sid, engine="media_streams", source=source) if interrupted else None
         )
         # Per call, not per provider: bumping the epoch stops this call's
         # in-flight synthesis at its next chunk (see _stream_tts). The provider
@@ -1397,7 +1399,7 @@ class MediaStreamEngine(VoiceEngine):
         state.metadata["playout_until_ns"] = 0
 
         await self._clear_twilio_buffer(state)
-        if by_caller:
+        if interrupted:
             # Twilio does not acknowledge a `clear`, so this is when WE stopped
             # sending — audio already in its playout buffer may still be heard.
             telemetry.buffer_cleared(call_sid, since_ns=detected_ns, acknowledged=False)

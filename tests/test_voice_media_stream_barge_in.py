@@ -184,6 +184,28 @@ class TestConsumer:
         assert "clear" not in after
         await channel.stop()
 
+    async def test_clearing_a_reask_and_cancelling_the_turn_count_one_interruption(self, monkeypatch):
+        """`off` mode, a turn still playing, a re-ask on top of it: the next
+        final clears the re-ask and cancels the turn, one interruption."""
+        from pincer.voice.analytics import get_accumulator
+        from pincer.voice.telemetry import hooks
+
+        detected: list[str] = []
+        monkeypatch.setattr(
+            hooks, "interruption_detected", lambda call_sid, **attrs: detected.append(attrs["source"]) or 0
+        )
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply("off")
+        before = get_accumulator(state).interruptions
+        await _fed(stt, Transcript(text="Mmh wie bitte", is_final=True, confidence=0.1))
+        await state.metadata["aux_speech_task"]  # the re-ask's audio is at Twilio too
+
+        await _fed(stt, _final("Ich möchte einen Termin."))
+        await channel.wait_for_turn("CA_ms")
+
+        assert get_accumulator(state).interruptions == before + 1
+        assert detected == ["next_utterance"]
+        await channel.stop()
+
 
 class TestDetection:
     # regression: fails on dev @ 0a1c320 (nothing reacts to the caller)
