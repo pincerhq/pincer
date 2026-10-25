@@ -134,7 +134,7 @@ async def finish_remote_ended(self, call_sid: str, reason: str = "") -> bool:
 
 `src/pincer/voice/receptionist/session.py`
 
-- New `on_transfer_completed(duration_s: int | None)`: sets `self.transfer_completed = True`, emits metric `transfer_completed`, records `_log_action("transfer_completed", target, duration)`, and calls `_sync()`. Phase stays `TRANSFERRING`. `TRANSFERRING` is in `_BENIGN_HANGUP_PHASES`, so `_handle_call_end` maps it to `COMPLETED`.
+- New `on_transfer_completed(duration_s: int | None)`: sets `self.transfer_completed = True` and `self.transfer_duration_s`, records the outcome in the `receptionist_transfers` metric via `_transfer_result("completed")` (the separate `transfer_completed` series was removed in review), records `_log_action("transfer_completed", target, duration)`, and calls `_sync()`. Phase stays `TRANSFERRING`. `TRANSFERRING` is in `_BENIGN_HANGUP_PHASES`, so `_handle_call_end` maps it to `COMPLETED`.
 - Add `transfer_completed` and `transfer_duration_s` to the snapshot dict next to `transfer_attempted` / `transfer_failed` (`session.py:311-312`), so the receptionist report (`receptionist/report.py`) can print "Weitergeleitet an … (3 Min 12 s)". Add one line per language pack: `RECEPTIONIST_REPORT_TRANSFERRED`.
 
 ### 3.4 Reaper and capacity (fixes D3; D4 kept by design)
