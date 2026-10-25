@@ -407,7 +407,7 @@ async def test_timed_out_dial_that_twilio_placed_is_bound(voice):
     """Twilio accepted the POST but answered late → the call keeps its briefing."""
     from datetime import UTC, datetime
 
-    placed = types.SimpleNamespace(sid="CA_late", date_created=datetime.now(UTC))
+    placed = types.SimpleNamespace(sid="CA_late", status="ringing", date_created=datetime.now(UTC))
     voice.engine._rest._client = types.SimpleNamespace(calls=_TimedOutCalls([placed]))
 
     result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
@@ -429,6 +429,86 @@ async def test_timed_out_dial_with_unknown_outcome_still_counts(voice):
     assert voice.engine.get_call_state("CA_old") is None
     assert voice.engine._pending_outbound == {}
     assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+async def test_timed_out_dial_that_already_ended_is_not_promoted(voice):
+    """The lookup finds the call, but it is over (declined, busy, hung up):
+    promoting it would park a dead state in _active_calls that no status
+    callback will ever remove, and tell the user the call is ringing."""
+    from datetime import UTC, datetime
+
+    done = types.SimpleNamespace(sid="CA_done", status="completed", date_created=datetime.now(UTC))
+    voice.engine._rest._client = types.SimpleNamespace(calls=_TimedOutCalls([done]))
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert result.startswith("Error") and "CA_done" in result and "already ended" in result
+    assert voice.engine.get_call_state("CA_done") is None
+    assert voice.engine._pending_outbound == {}
+    assert status_notify.get_call_info("CA_done") is None, "no 'ringing' notification for an ended call"
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+async def test_setup_during_a_slow_dial_claims_the_pending_state_by_number(voice):
+    """The callee can pick up before Twilio has answered the REST POST. The
+    relay setup must bind to the pending dial by its `to` number right away,
+    not wait out a 3 s poll for a promotion that is up to 10 s away."""
+    released = asyncio.Event()
+
+    class SlowCalls:
+        async def create_async(self, **kwargs: Any) -> Any:
+            await released.wait()
+            return types.SimpleNamespace(sid="CA_claim")
+
+    voice.server._engine = voice.engine
+    voice.engine._rest._client = types.SimpleNamespace(calls=SlowCalls())
+
+    dial = asyncio.create_task(outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}))
+    async with asyncio.timeout(2):
+        while not voice.engine._pending_outbound:
+            await asyncio.sleep(0)
+
+    async with asyncio.timeout(1):  # well under SETUP_STATE_WAIT_S: no polling involved
+        state = await voice.server._resolve_setup_state("CA_claim", "+1000", "outbound-api", to=TARGET)
+
+    assert state is not None and state.purpose == TASK
+    assert voice.engine.get_call_state("CA_claim") is state
+    assert voice.engine._pending_outbound == {}
+    assert not dial.done()
+
+    released.set()
+    assert "Call SID: CA_claim" in await dial
+    assert voice.engine.get_call_state("CA_claim") is state
+
+
+async def test_timed_out_dial_already_bound_by_the_relay_needs_no_lookup(voice):
+    """Answered inside the request timeout → the SID is already known."""
+
+    class AnsweredThenTimedOut:
+        async def create_async(self, **kwargs: Any) -> Any:
+            await voice.server._resolve_setup_state("CA_bound", "+1000", "outbound-api", to=TARGET)
+            raise TimeoutError
+
+        async def list_async(self, **kwargs: Any) -> list[Any]:
+            raise AssertionError("the relay already bound the call; no lookup needed")
+
+    voice.server._engine = voice.engine
+    voice.engine._rest._client = types.SimpleNamespace(calls=AnsweredThenTimedOut())
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert "Call SID: CA_bound" in result
+    state = voice.engine.get_call_state("CA_bound")
+    assert state is not None and state.purpose == TASK
+    assert status_notify.get_call_info("CA_bound") is not None
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+async def test_setup_without_a_to_number_does_not_claim(voice):
+    """A setup that names no callee cannot be matched to a pending dial."""
+    briefing = CallBriefing.create(TASK)
+    pre = await voice.engine.register_pending_outbound(briefing, TARGET, language="en")
+    assert await voice.engine.claim_pending_outbound("CA_x", "") is None
+    assert await voice.engine.claim_pending_outbound("CA_x", "+4930999999") is None
+    assert voice.engine._pending_outbound == {pre.call_sid: pre}
 
 
 async def test_promote_pending_is_idempotent(voice):

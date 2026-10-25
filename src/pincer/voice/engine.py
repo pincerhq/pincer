@@ -455,6 +455,33 @@ class VoiceEngine(ABC):
                 logger.exception("on_call_start callback failed [%s]", call_sid)
         return state
 
+    async def claim_pending_outbound(self, call_sid: str, target_number: str) -> CallState | None:
+        """Bind a relay `setup` to the pending dial it belongs to, by callee number.
+
+        Twilio can connect the callee before it has even answered the REST
+        POST: the dial is still awaited in make_phone_call, the CallSid is not
+        known on our side, and promote_pending() cannot run yet. The `to` of
+        the setup message is the one key both sides share before that, so the
+        setup claims the oldest pending dial to that number and promotes it
+        itself. The later REST return (or lookup) then finds the promotion
+        already done. Telemetry is re-keyed here for the same reason: the
+        answer/media events for the real SID follow immediately.
+        """
+        number = str(target_number or "").strip()
+        if not call_sid or not number:
+            return None
+        for pending in self._pending_outbound.values():  # insertion order: oldest dial first
+            if pending.target_number == number:
+                pending_key = pending.call_sid
+                state = await self.promote_pending(pending, call_sid)
+                if state is not None:
+                    from pincer.voice.telemetry import hooks as telemetry
+
+                    telemetry.dial_accepted(pending_key, call_sid)
+                    logger.info("Relay setup claimed pending outbound %s as %s", pending_key, call_sid)
+                return state
+        return None
+
     def discard_pending(self, pre_state: CallState) -> None:
         """Drop a pre-registration whose dial never happened (Twilio raised)."""
         if self._pending_outbound.pop(pre_state.call_sid, None) is not None:

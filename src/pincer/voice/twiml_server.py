@@ -622,7 +622,11 @@ async def relay_ws(websocket: WebSocket) -> None:
                     state.metadata.pop("transferring", None)
                 if state is None:
                     state = await _resolve_setup_state(
-                        call_sid, caller, str(msg.get("direction", "")), client=client_ip(websocket)
+                        call_sid,
+                        caller,
+                        str(msg.get("direction", "")),
+                        client=client_ip(websocket),
+                        to=str(msg.get("to", "")),
                     )
                     if state is None:
                         # Outbound with no retrievable briefing (terminated,
@@ -688,21 +692,23 @@ async def relay_ws(websocket: WebSocket) -> None:
             await _media_closed(call_sid)
 
 
-async def _resolve_setup_state(call_sid: str, caller: str, direction: str = "", client: str = "") -> Any:
+async def _resolve_setup_state(call_sid: str, caller: str, direction: str = "", client: str = "", to: str = "") -> Any:
     """The call state a `setup` message belongs to, or None to refuse the call.
 
     Order matters, and each step exists because the previous one can lose a
     briefing:
 
     1. The state registered before the dial (the normal outbound path).
-    2. A short wait — `setup` can arrive before `calls.create()` has even
-       returned, so the promotion may be milliseconds away.
-    3. The status_notify record, which also carries purpose and language.
-    4. Give up. If Twilio told us this is an outbound API call, we return None
+    2. The pending dial to this `to` number, claimed by the setup itself —
+       Twilio can connect the callee before the REST dial has returned, and
+       the dial's request timeout (10 s) is longer than any wait here.
+    3. A short wait — the promotion may be milliseconds away.
+    4. The status_notify record, which also carries purpose and language.
+    5. Give up. If Twilio told us this is an outbound API call, we return None
        and the caller hangs up: an outbound call whose briefing cannot be
        found MUST NOT run, because what it runs instead is a generic assistant
        persona on a call the user gave a task to.
-    5. Otherwise refuse: an unknown SID on a voice socket is never a
+    6. Otherwise refuse: an unknown SID on a voice socket is never a
        legitimate Twilio call. Genuine inbound calls are registered by the
        signature-verified /webhook before their TwiML (and hence this socket)
        exists, and genuine outbound calls leave a state or a status record.
@@ -722,7 +728,9 @@ async def _resolve_setup_state(call_sid: str, caller: str, direction: str = "", 
         return state
 
     if is_outbound:
-        state = await _engine.await_call_state(call_sid, timeout=SETUP_STATE_WAIT_S)
+        state = await _engine.claim_pending_outbound(call_sid, to)
+        if state is None:
+            state = await _engine.await_call_state(call_sid, timeout=SETUP_STATE_WAIT_S)
         if state is not None:
             return state
 
@@ -888,7 +896,13 @@ async def relay_webhook(request: Request) -> Response:
         if call_sid and not _engine.get_call_state(call_sid):
             # Same resolver as the relay socket, so the briefing rules cannot
             # differ between the two transports.
-            await _resolve_setup_state(call_sid, caller, str(body.get("direction", "")), client=client_ip(request))
+            await _resolve_setup_state(
+                call_sid,
+                caller,
+                str(body.get("direction", "")),
+                client=client_ip(request),
+                to=str(body.get("to", body.get("To", ""))),
+            )
         if call_sid:
             await _engine.mark_call_answered(call_sid)
 
