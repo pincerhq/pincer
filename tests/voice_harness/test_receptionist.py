@@ -1368,7 +1368,6 @@ async def test_transfer_result_bridged_variants_are_success(dial_status, bridged
 
 
 @pytest.mark.usefixtures("_no_transfer_resolver")
-@pytest.mark.usefixtures("_no_transfer_resolver")
 @pytest.mark.parametrize("dial_status", ["", "something-new"])
 async def test_transfer_result_unknown_status_with_caller_on_line_takes_a_message(dial_status):
     """Not bridged and the caller is still there: never hang up on them —
