@@ -102,8 +102,12 @@ def evaluate(signals: GoldenSignals, settings: Settings | Any) -> list[Alert]:
     #    and holds a line open, so there is no threshold and no window.
     stuck = signals.stuck_calls
     if stuck.value:
+        # Per call: a transferred call is measured from the transfer start
+        # against its own (larger) limit, so the signal-wide threshold and the
+        # call-start duration would contradict `over_by_seconds` for it.
         detail = ", ".join(
-            f"{c['call_sid']} ({c['duration_seconds']}s, {c['over_by_seconds']}s over)"
+            f"{c['call_sid']}: {c['elapsed_seconds']}s > {c['limit_seconds']}s limit"
+            + (" (transfer)" if c.get("transferring") else "")
             for c in stuck.detail.get("stuck", [])
         )
         alerts.append(
@@ -111,7 +115,7 @@ def evaluate(signals: GoldenSignals, settings: Settings | Any) -> list[Alert]:
                 rule="stuck_calls",
                 severity=Severity.PAGE,
                 title=f"{int(stuck.value)} stuck call(s)",
-                detail=f"Active past {stuck.detail.get('threshold_seconds')}s: {detail}",
+                detail=detail,
                 value=stuck.value,
                 threshold=0.0,
                 runbook=_anchor("stuck-call"),

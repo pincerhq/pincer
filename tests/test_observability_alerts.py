@@ -129,6 +129,19 @@ def test_missing_data_never_fires(settings):
 # ── Kill-test 1: forced stuck call ───────────────────────────────────
 
 
+def _stuck_entry(call_sid: str, duration: int) -> dict:
+    """One `stuck_calls` detail row for a plain AI call (limit 600 + 60 grace),
+    as golden_signals.stuck_calls emits it."""
+    return {
+        "call_sid": call_sid,
+        "duration_seconds": duration,
+        "elapsed_seconds": duration,
+        "limit_seconds": 660,
+        "over_by_seconds": duration - 660,
+        "transferring": False,
+    }
+
+
 def test_stuck_call_pages_immediately(settings):
     signals = _signals(
         stuck_calls=_signal(
@@ -138,7 +151,7 @@ def test_stuck_call_pages_immediately(settings):
             unit="count",
             detail={
                 "threshold_seconds": 660,
-                "stuck": [{"call_sid": "CA_stuck", "duration_seconds": 900, "over_by_seconds": 240}],
+                "stuck": [_stuck_entry("CA_stuck", 900)],
             },
         )
     )
@@ -146,8 +159,40 @@ def test_stuck_call_pages_immediately(settings):
     assert len(fired) == 1
     assert fired[0].rule == "stuck_calls"
     assert fired[0].severity is Severity.PAGE
-    assert "CA_stuck" in fired[0].detail
+    assert "CA_stuck: 900s > 660s limit" in fired[0].detail
     assert "runbook.md#stuck-call" in fired[0].runbook
+
+
+def test_stuck_call_page_shows_each_calls_own_limit(settings):
+    """A transferred call is measured from the transfer start against
+    threshold + transfer allowance: the page must say that limit and that
+    elapsed time, not the signal-wide 660s next to the call-start duration."""
+    signals = _signals(
+        stuck_calls=_signal(
+            "stuck_calls",
+            2.0,
+            target=0.0,
+            unit="count",
+            detail={
+                "threshold_seconds": 660,
+                "stuck": [
+                    _stuck_entry("CA_ai", 700),
+                    {
+                        "call_sid": "CA_bridge",
+                        "duration_seconds": 4261,  # since call start
+                        "elapsed_seconds": 3721,  # since the transfer started
+                        "limit_seconds": 3720,
+                        "over_by_seconds": 1,
+                        "transferring": True,
+                    },
+                ],
+            },
+        )
+    )
+    fired = evaluate(signals, settings)
+    assert fired[0].detail == "CA_ai: 700s > 660s limit, CA_bridge: 3721s > 3720s limit (transfer)"
+    assert "4261" not in fired[0].detail
+    assert "Active past" not in fired[0].detail
 
 
 def test_pages_sort_before_notifications(settings):
@@ -159,7 +204,7 @@ def test_pages_sort_before_notifications(settings):
             unit="count",
             detail={
                 "threshold_seconds": 660,
-                "stuck": [{"call_sid": "CA", "duration_seconds": 900, "over_by_seconds": 240}],
+                "stuck": [_stuck_entry("CA", 900)],
             },
         ),
         call_success_rate=_signal(
@@ -356,8 +401,8 @@ async def test_scan_evaluates_and_delivers(settings, sent, monkeypatch):
             detail={
                 "threshold_seconds": 660,
                 "stuck": [
-                    {"call_sid": "CA1", "duration_seconds": 900, "over_by_seconds": 240},
-                    {"call_sid": "CA2", "duration_seconds": 950, "over_by_seconds": 290},
+                    _stuck_entry("CA1", 900),
+                    _stuck_entry("CA2", 950),
                 ],
             },
         )
