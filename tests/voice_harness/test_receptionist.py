@@ -1495,6 +1495,29 @@ async def test_back_from_failed_transfer_is_timed_again():
     assert CALL in h.engine.ended  # silence/timeout exits work again
 
 
+async def test_failed_transfer_session_error_still_clears_transferring_flag(monkeypatch):
+    """If the session's failed-transfer handling raises, the call must still be
+    taken out of TRANSFERRING: otherwise on_media_closed ignores the closing
+    socket and the reaper applies the long transfer allowance."""
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+
+    async def boom(_result: str = "failed") -> str:
+        raise KeyError("transfer_failed")
+
+    monkeypatch.setattr(h.session, "on_transfer_failed", boom)
+    async with _async_client(h) as client:
+        with pytest.raises(KeyError):  # the ASGI transport re-raises the handler's 500
+            await client.post(
+                "/api/apps/twilio/transfer-result",
+                data={"CallSid": CALL, "DialCallStatus": "busy", "CallStatus": "in-progress"},
+            )
+    assert "transferring" not in h.state.metadata
+    assert h.sm.phase != CallPhase.TRANSFERRING
+    await h.engine.on_media_closed(CALL)  # the closing socket ends the call again
+    assert h.engine.get_call_state(CALL) is None
+
+
 @pytest.mark.usefixtures("_no_transfer_resolver")
 async def test_failed_transfer_without_session_leaves_transferring_phase():
     """No session to move the phase: end_transfer must not leave the reconnected

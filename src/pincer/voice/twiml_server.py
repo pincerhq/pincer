@@ -450,19 +450,24 @@ async def _resume_failed_transfer(call_sid: str, session: Any, dial_status: str,
     receptionist session in TAKE_MESSAGE (apology + name question), take the
     call out of TRANSFERRING, and build the reconnect TwiML. Returns the
     greeting too, so the caller can record it for a retried callback to replay."""
-    if session is not None:
-        session.transfer_attempted = True  # the report says the transfer did not connect
-        greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
-    else:
-        from pincer.voice.prompts import get_prompt
+    try:
+        if session is not None:
+            session.transfer_attempted = True  # the report says the transfer did not connect
+            greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
+        else:
+            from pincer.voice.prompts import get_prompt
 
-        lines = get_prompt("RECEPTIONIST_LINES", language) or {}
-        greeting = str(lines.get("transfer_failed", ""))
-    # The dial is over: the call is ours again now, not when (or if) the
-    # reconnected relay/stream connects. This also takes the phase out of
-    # TRANSFERRING when there was no session to do it (no-op for a call
-    # recovered from lost state, which was never marked transferring).
-    await _engine.end_transfer(call_sid)
+            lines = get_prompt("RECEPTIONIST_LINES", language) or {}
+            greeting = str(lines.get("transfer_failed", ""))
+    finally:
+        # The dial is over: the call is ours again now, not when (or if) the
+        # reconnected relay/stream connects. This also takes the phase out of
+        # TRANSFERRING when there was no session to do it (no-op for a call
+        # recovered from lost state, which was never marked transferring).
+        # In `finally` so a failing session step cannot leave the call marked
+        # transferring: on_media_closed would then ignore the closing socket
+        # and the reaper would apply the long transfer allowance.
+        await _engine.end_transfer(call_sid)
     return greeting, _reconnect_after_transfer(call_sid, language, greeting)
 
 
