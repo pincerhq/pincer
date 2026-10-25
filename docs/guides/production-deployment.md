@@ -250,7 +250,7 @@ To rotate: edit the value, `scripts/deploy.sh` (containers get the new env).
 | `PINCER_JWT_SECRET` | `secrets.token_urlsafe(48)` | signs session tokens — rotating it signs every dashboard user out; API keys keep working |
 | Dashboard password | `pincer identity set-password <name>`, or the dashboard Account page | signs that identity out everywhere; also how a forgotten password is reset |
 | Identity API key | `pincer identity api-key <name> --force`, or the dashboard Account page | the old key stops working immediately — update the web chat widget / scripts in the same step |
-| Google OAuth | `pincer setup-google` re-run | token cache lives in the data volume |
+| Google OAuth | `pincer google setup` re-run | token cache lives in the data volume |
 | `PINCER_BACKUP_PASSPHRASE` | new value + re-encrypt kept backups | old backups need the old passphrase — store both in the password manager |
 
 ## Top failure modes

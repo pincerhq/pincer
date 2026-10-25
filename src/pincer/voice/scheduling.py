@@ -374,7 +374,7 @@ async def schedule_appointment_call(
 
     if "google__check_freebusy" not in tools.list_tools():
         return (
-            "Error: Google Calendar is not connected — free slots cannot be computed. Run `pincer setup-google` first."
+            "Error: Google Calendar is not connected — free slots cannot be computed. Run `pincer google setup` first."
         )
 
     # The briefing is validated here, before the free/busy round trip: a call

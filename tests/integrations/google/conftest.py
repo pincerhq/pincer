@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pincer.integrations.google.auth import GoogleAuth
+from pincer.integrations.google.auth import SERVICE_SCOPES, GoogleAuth
 from pincer.integrations.google.service_factory import GoogleServiceFactory
 
 # ── Auth & factory fixtures ───────────────────────────────────────────────────
@@ -86,6 +86,7 @@ def _build_mock_service():
 def mock_factory():
     """GoogleServiceFactory where every get() returns a MagicMock service."""
     auth = MagicMock(spec=GoogleAuth)
+    auth.services = list(SERVICE_SCOPES)
     factory = GoogleServiceFactory(auth)
 
     services: dict[str, MagicMock] = {}

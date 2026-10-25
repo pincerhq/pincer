@@ -92,6 +92,7 @@ class GoogleAuth:
     ) -> None:
         self._credentials_path = Path(credentials_path)
         self._token_path = Path(token_path)
+        self._services = list(services) if services is not None else list(SERVICE_SCOPES)
         self._scopes = scopes_for_services(services)
         self._credentials: Any = None  # google.oauth2.credentials.Credentials
 
@@ -200,6 +201,32 @@ class GoogleAuth:
     def credentials_path(self) -> Path:
         return self._credentials_path
 
+    @property
+    def services(self) -> list[str]:
+        """Service names this instance requests scopes for."""
+        return list(self._services)
+
+    def _token_scopes(self) -> list[str]:
+        """Return the scopes listed in the cached token ([] if absent/unreadable/unlisted)."""
+        if not self._token_path.exists():
+            return []
+        try:
+            token_data = json.loads(self._token_path.read_text())
+            return list(token_data.get("scopes") or [])
+        except Exception:
+            return []
+
+    def granted_services(self) -> list[str]:
+        """Return the services in ``SERVICE_SCOPES`` whose scopes are all in the cached token.
+
+        Like :meth:`missing_scopes`, a token without a ``scopes`` field (older
+        tokens) is treated as granting everything.
+        """
+        token_scopes = self._token_scopes()
+        if not token_scopes:
+            return list(SERVICE_SCOPES)
+        return [svc for svc, scopes in SERVICE_SCOPES.items() if all(s in token_scopes for s in scopes)]
+
     def missing_scopes(self) -> list[str]:
         """Return scopes required by this instance that are absent from the cached token.
 
@@ -207,13 +234,7 @@ class GoogleAuth:
         ``scopes`` field (older tokens) — only flags a mismatch when the token
         explicitly lists scopes that are a subset of what is needed.
         """
-        if not self._token_path.exists():
-            return []
-        try:
-            token_data = json.loads(self._token_path.read_text())
-            token_scopes = token_data.get("scopes") or []
-        except Exception:
-            return []
+        token_scopes = self._token_scopes()
         if not token_scopes:
             return []
         return [s for s in self._scopes if s not in token_scopes]

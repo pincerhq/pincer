@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pincer.integrations.google.auth import ALL_SCOPES, GoogleAuth, scopes_for_services
+from pincer.integrations.google.auth import ALL_SCOPES, SERVICE_SCOPES, GoogleAuth, scopes_for_services
 
 # ── scopes_for_services ───────────────────────────────────────────────────────
 
@@ -148,3 +148,56 @@ def test_credentials_path_property(mock_credentials):
     creds_path, token_path = mock_credentials
     auth = GoogleAuth(credentials_path=str(creds_path), token_path=str(token_path))
     assert auth.credentials_path == creds_path
+
+
+# ── GoogleAuth.granted_services ───────────────────────────────────────────────
+
+
+def _auth_with_token_scopes(tmp_path, scopes):
+    import json
+
+    token_path = tmp_path / "token.json"
+    data = {"token": "ya29.fake"}
+    if scopes is not None:
+        data["scopes"] = scopes
+    token_path.write_text(json.dumps(data))
+    return GoogleAuth(credentials_path=str(tmp_path / "creds.json"), token_path=str(token_path))
+
+
+def test_granted_services_calendar_only_token(tmp_path):
+    auth = _auth_with_token_scopes(tmp_path, ["https://www.googleapis.com/auth/calendar"])
+    assert auth.granted_services() == ["calendar"]
+
+
+def test_granted_services_full_token(tmp_path):
+    auth = _auth_with_token_scopes(tmp_path, ALL_SCOPES)
+    assert auth.granted_services() == list(SERVICE_SCOPES)
+
+
+def test_granted_services_token_missing_meet(tmp_path):
+    scopes = [s for s in ALL_SCOPES if "meetings.space" not in s]
+    auth = _auth_with_token_scopes(tmp_path, scopes)
+    assert auth.granted_services() == [s for s in SERVICE_SCOPES if s != "meet"]
+
+
+def test_granted_services_partial_meet_scopes_not_granted(tmp_path):
+    scopes = [s for s in ALL_SCOPES if not s.endswith("meetings.space.settings")]
+    auth = _auth_with_token_scopes(tmp_path, scopes)
+    assert "meet" not in auth.granted_services()
+
+
+def test_granted_services_token_without_scopes_field(tmp_path):
+    auth = _auth_with_token_scopes(tmp_path, None)
+    assert auth.granted_services() == list(SERVICE_SCOPES)
+
+
+def test_services_property_defaults_to_all(tmp_path):
+    auth = GoogleAuth(credentials_path=str(tmp_path / "c.json"), token_path=str(tmp_path / "t.json"))
+    assert auth.services == list(SERVICE_SCOPES)
+
+
+def test_services_property_respects_subset(tmp_path):
+    auth = GoogleAuth(
+        credentials_path=str(tmp_path / "c.json"), token_path=str(tmp_path / "t.json"), services=["gmail"]
+    )
+    assert auth.services == ["gmail"]
