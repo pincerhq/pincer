@@ -10,6 +10,7 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from pincer.integrations.google import get_google_factory, google_status, register_all_tools
 from pincer.integrations.google.auth import ALL_SCOPES, SERVICE_SCOPES
@@ -167,4 +168,62 @@ def test_google_status_active_with_full_token(env):
     oauth_dir, _ = env
     _write_files(oauth_dir, ALL_SCOPES)
     status = google_status()
-    assert status == {"status": "active", "enabled_services": list(SERVICE_SCOPES), "missing_scopes": []}
+    assert status == {
+        "status": "active",
+        "enabled_services": list(SERVICE_SCOPES),
+        "missing_scopes": [],
+        "source": "file",
+    }
+
+
+# ── PINCER_GOOGLE_TOKEN_JSON ──────────────────────────────────────────────────
+
+
+def _env_token(scopes):
+    from pincer.integrations.google.token_source import encode_json_blob
+
+    return encode_json_blob(
+        {
+            "token": "ya29.fake",
+            "refresh_token": "1//fake",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "test.apps.googleusercontent.com",
+            "client_secret": "secret",
+            "scopes": scopes,
+            "expiry": "2099-01-01T00:00:00Z",
+        }
+    )
+
+
+def _set_env_token(scopes):
+    from pincer.config import get_settings_relaxed
+
+    get_settings_relaxed().google_token_json = SecretStr(_env_token(scopes))
+
+
+def test_env_token_without_any_files_returns_factory(env):
+    _set_env_token(ALL_SCOPES)
+    factory = get_google_factory()
+    assert factory is not None
+    assert factory.auth.source == "env"
+    assert len(_registered(factory)) == 113
+
+
+def test_env_token_takes_precedence_over_files(env):
+    oauth_dir, _ = env
+    _write_files(oauth_dir, ALL_SCOPES)
+    _set_env_token([_CALENDAR])
+
+    factory = get_google_factory()
+
+    assert factory is not None
+    assert factory.auth.source == "env"
+    assert factory.auth.services == ["calendar"]
+
+
+def test_env_token_calendar_only_is_partial(env):
+    _set_env_token([_CALENDAR])
+    status = google_status()
+    assert status["status"] == "partial"
+    assert status["source"] == "env"
+    assert status["enabled_services"] == ["calendar"]

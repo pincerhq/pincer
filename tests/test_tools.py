@@ -84,3 +84,48 @@ def test_sandbox_path_blocks_escape(tmp_path: Path, settings) -> None:
 
     with pytest.raises(ValueError, match="outside workspace"):
         _sandbox_path("/etc/passwd")
+
+
+# ── Secret env vars are not visible to agent-run code ────────────────────────
+
+
+def test_scrubbed_env_drops_secrets_keeps_basics(monkeypatch) -> None:
+    from pincer.tools.sandbox import scrubbed_env
+
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", "secret")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/x.json")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+    monkeypatch.setenv("MY_HARMLESS_VAR", "1")
+
+    env = scrubbed_env()
+
+    assert "PINCER_GOOGLE_TOKEN_JSON" not in env
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert env["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
+    assert env["MY_HARMLESS_VAR"] == "1"
+    assert "PATH" in env
+
+
+@pytest.mark.asyncio
+async def test_python_exec_cannot_read_secret_env(monkeypatch) -> None:
+    from pincer.tools.builtin.python_exec import python_exec
+
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", "super-secret-value")
+    result = await python_exec("import os; print(repr(os.environ.get('PINCER_GOOGLE_TOKEN_JSON')))")
+    assert "super-secret-value" not in result
+    assert "None" in result
+
+
+@pytest.mark.asyncio
+async def test_shell_exec_cannot_read_secret_env(monkeypatch, settings) -> None:
+    from unittest.mock import patch
+
+    from pincer.tools.builtin.shell import shell_exec
+
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", "super-secret-value")
+    with patch("pincer.tools.builtin.shell.get_settings", return_value=settings):
+        result = await shell_exec('echo "[$PINCER_GOOGLE_TOKEN_JSON]"', workdir="/tmp")
+    assert "super-secret-value" not in result
+    assert "[]" in result

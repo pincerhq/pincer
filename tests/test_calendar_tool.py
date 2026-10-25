@@ -234,3 +234,61 @@ class TestCalendarCreate:
 
             result = await calendar_create("Test", "not-a-date")
             assert "Invalid" in result or "Error" in result
+
+
+class TestEnvTokenCredentials:
+    """PINCER_GOOGLE_TOKEN_JSON — credentials come from memory, nothing is written."""
+
+    def _settings(self, tmp_path, token):
+        from pydantic import SecretStr
+
+        from pincer.integrations.google.token_source import encode_json_blob
+
+        settings = MagicMock()
+        settings.google_oauth_dir.return_value = tmp_path
+        settings.google_token_json = SecretStr(encode_json_blob(token))
+        return settings
+
+    def test_env_token_used_without_files(self, tmp_path):
+        import pincer.tools.builtin.calendar_tool as cal
+
+        token = {
+            "token": "ya29.env",
+            "refresh_token": "1//rt",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "cid",
+            "client_secret": "cs",
+            "scopes": ["https://www.googleapis.com/auth/calendar"],
+            "expiry": "2000-01-01T00:00:00Z",
+        }
+
+        def _refresh(self, request):
+            self.token = "ya29.refreshed"
+            self.expiry = None
+
+        cal._env_auth = None
+        with (
+            patch("pincer.tools.builtin.calendar_tool.get_settings", return_value=self._settings(tmp_path, token)),
+            patch("google.oauth2.credentials.Credentials.refresh", _refresh),
+            patch("google.auth.transport.requests.Request"),
+        ):
+            creds = cal._get_credentials()
+            assert cal._get_credentials() is creds  # refreshed token cached in memory
+        cal._env_auth = None
+
+        assert creds.token == "ya29.refreshed"
+        assert list(tmp_path.iterdir()) == []
+
+    def test_env_token_refresh_failure_raises_file_not_found(self, tmp_path):
+        import pincer.tools.builtin.calendar_tool as cal
+
+        token = {"refresh_token": "1//rt", "client_id": "cid", "client_secret": "cs", "expiry": "2000-01-01T00:00:00Z"}
+        cal._env_auth = None
+        with (
+            patch("pincer.tools.builtin.calendar_tool.get_settings", return_value=self._settings(tmp_path, token)),
+            patch("google.oauth2.credentials.Credentials.refresh", side_effect=Exception("invalid_grant")),
+            patch("google.auth.transport.requests.Request"),
+            pytest.raises(FileNotFoundError, match="PINCER_GOOGLE_TOKEN_JSON"),
+        ):
+            cal._get_credentials()
+        cal._env_auth = None

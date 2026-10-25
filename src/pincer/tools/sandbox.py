@@ -134,6 +134,26 @@ def _build_runner_script(
     """)
 
 
+# Agent sockets, not secret values — keep them so e.g. `git` over SSH still works.
+_SCRUB_KEEP_PREFIXES: tuple[str, ...] = ("SSH_", "GPG_")
+
+
+def scrubbed_env() -> dict[str, str]:
+    """Return ``os.environ`` without secret-bearing variables (PINCER_*, GOOGLE_*, API keys, ...).
+
+    For tools that run agent-supplied code with the host environment (shell,
+    python_exec): secrets such as PINCER_GOOGLE_TOKEN_JSON must not be one
+    ``os.environ`` lookup away from that code.
+    """
+    from pincer.mcp.sandbox import is_blocked_env_key
+
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key.upper().startswith(_SCRUB_KEEP_PREFIXES) or not is_blocked_env_key(key)
+    }
+
+
 def _build_env(config: SandboxConfig, temp_dir: str) -> dict[str, str]:
     """Build a restricted environment for the subprocess."""
     env: dict[str, str] = {

@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 _GOOGLE_REAUTH_HINT = "pincer google setup"
+_GOOGLE_ENV_REAUTH_HINT = "pincer google setup --print-env, then update PINCER_GOOGLE_TOKEN_JSON"
 
 # ── List integrations ────────────────────────────────────────────
 
@@ -66,7 +67,8 @@ def _integration_entries() -> list[dict[str, Any]]:
             "tools": ["gmail", "calendar", "drive", "docs", "sheets", "slides", "tasks", "contacts", "meet"],
             "enabled_services": google["enabled_services"],
             "missing_scopes": google["missing_scopes"],
-            "reauth_hint": _GOOGLE_REAUTH_HINT,
+            "token_source": google["source"],
+            "reauth_hint": _reauth_hint(google),
             "source": "integration",
             "slug": "google",
         }
@@ -209,7 +211,13 @@ def _google_status() -> dict[str, Any]:
         return google_status()
     except Exception:
         logger.debug("Could not determine Google Workspace status", exc_info=True)
-        return {"status": "disabled", "enabled_services": [], "missing_scopes": []}
+        return {"status": "disabled", "enabled_services": [], "missing_scopes": [], "source": None}
+
+
+def _reauth_hint(state: dict[str, Any]) -> str:
+    if state.get("source") == "env":
+        return _GOOGLE_ENV_REAUTH_HINT
+    return _GOOGLE_REAUTH_HINT
 
 
 def _slack_active() -> bool:
@@ -233,7 +241,6 @@ _CATALOG: dict[str, dict[str, Any]] = {
         "prefix": "google__",
         "categories_fn": _google_categories,
         "status_fn": _google_status,
-        "reauth_hint": _GOOGLE_REAUTH_HINT,
     },
     "slack": {
         "name": "Slack",
@@ -272,7 +279,8 @@ async def get_integration(slug: str) -> dict[str, Any]:
         extra = {
             "enabled_services": state["enabled_services"],
             "missing_scopes": state["missing_scopes"],
-            "reauth_hint": meta.get("reauth_hint"),
+            "token_source": state["source"],
+            "reauth_hint": _reauth_hint(state),
         }
 
     return {

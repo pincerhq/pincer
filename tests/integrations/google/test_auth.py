@@ -201,3 +201,81 @@ def test_services_property_respects_subset(tmp_path):
         credentials_path=str(tmp_path / "c.json"), token_path=str(tmp_path / "t.json"), services=["gmail"]
     )
     assert auth.services == ["gmail"]
+
+
+# ── Env mode (PINCER_GOOGLE_TOKEN_JSON) ───────────────────────────────────────
+
+
+def _env_token(scopes=None, expiry="2099-01-01T00:00:00Z"):
+    data = {
+        "token": "ya29.fake",
+        "refresh_token": "1//fake",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "client_id": "test.apps.googleusercontent.com",
+        "client_secret": "secret",
+        "expiry": expiry,
+    }
+    if scopes is not None:
+        data["scopes"] = scopes
+    return data
+
+
+def test_env_mode_loads_without_any_files(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    auth = GoogleAuth(token_info=_env_token(ALL_SCOPES))
+    creds = auth.get_credentials()
+    assert creds.token == "ya29.fake"
+    assert auth.source == "env"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_env_mode_refresh_stays_in_memory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    auth = GoogleAuth(token_info=_env_token(ALL_SCOPES, expiry="2000-01-01T00:00:00Z"))
+
+    def _refresh(self, request):
+        self.token = "ya29.refreshed"
+        self.expiry = None  # no expiry → valid
+
+    with (
+        patch("google.oauth2.credentials.Credentials.refresh", _refresh),
+        patch("google.auth.transport.requests.Request"),
+    ):
+        creds = auth.get_credentials()
+
+    assert creds.token == "ya29.refreshed"
+    assert auth.get_credentials() is creds  # cached, not reloaded from the stale env value
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_env_mode_refresh_failure_mentions_env_var():
+    auth = GoogleAuth(token_info=_env_token(ALL_SCOPES, expiry="2000-01-01T00:00:00Z"))
+    with (
+        patch("google.oauth2.credentials.Credentials.refresh", side_effect=Exception("invalid_grant")),
+        patch("google.auth.transport.requests.Request"),
+        pytest.raises(RuntimeError, match="PINCER_GOOGLE_TOKEN_JSON"),
+    ):
+        auth.get_credentials()
+
+
+def test_env_mode_scope_mismatch_raises_every_time():
+    auth = GoogleAuth(token_info=_env_token(["https://www.googleapis.com/auth/calendar"]))
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="missing required scopes"):
+            auth.get_credentials()
+
+
+def test_env_mode_granted_and_missing_scopes():
+    auth = GoogleAuth(token_info=_env_token(["https://www.googleapis.com/auth/calendar"]))
+    assert auth.granted_services() == ["calendar"]
+    assert "https://www.googleapis.com/auth/gmail.send" in auth.missing_scopes()
+    assert GoogleAuth(token_info=_env_token(None)).granted_services() == list(SERVICE_SCOPES)
+
+
+def test_env_mode_space_separated_scopes_string():
+    auth = GoogleAuth(token_info=_env_token(" ".join(ALL_SCOPES)))
+    assert auth.missing_scopes() == []
+
+
+def test_file_mode_source():
+    assert GoogleAuth(credentials_path="c.json", token_path="t.json").source == "file"

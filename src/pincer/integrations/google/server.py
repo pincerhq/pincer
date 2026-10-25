@@ -125,6 +125,7 @@ def main() -> None:
 
     from pincer.config import get_settings_relaxed
     from pincer.integrations.google.auth import GoogleAuth
+    from pincer.integrations.google.token_source import locate_token
 
     parser = argparse.ArgumentParser(description="Google Workspace MCP Server")
     parser.add_argument("mode", choices=["stdio", "http"], default="stdio", nargs="?")
@@ -134,11 +135,14 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = get_settings_relaxed()
-    oauth_dir = settings.google_oauth_dir()
-    auth = GoogleAuth(
-        credentials_path=str(oauth_dir / "google_credentials.json"),
-        token_path=str(oauth_dir / "google_workspace_token.json"),
-    )
+    location = locate_token(settings)
+    if location is None:
+        oauth_dir = settings.google_oauth_dir()
+        location = {
+            "credentials_path": str(oauth_dir / "google_credentials.json"),
+            "token_path": str(oauth_dir / "google_workspace_token.json"),
+        }
+    auth = GoogleAuth(**location)
 
     fmcp = _build_fastmcp(auth)
 

@@ -122,6 +122,11 @@ def _check_calendar(settings: Settings | Any) -> tuple[StepStatus, str]:
     import contextlib
     from pathlib import Path
 
+    from pincer.integrations.google.token_source import TOKEN_ENV, env_token_info
+
+    if env_token_info(settings) is not None:
+        return StepStatus.READY, f"OAuth token from {TOKEN_ENV}"
+
     dirs = [Path.home() / ".pincer", Path(str(getattr(settings, "data_dir", "data")))]
     with contextlib.suppress(Exception):
         dirs.insert(0, Path(settings.google_oauth_dir()))

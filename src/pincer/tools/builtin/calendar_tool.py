@@ -2,7 +2,8 @@
 Google Calendar tools — OAuth2 integration.
 
 Provides calendar_today(), calendar_week(), calendar_create().
-Authentication via InstalledAppFlow; tokens stored at data/google_token.json.
+Authentication via InstalledAppFlow; tokens stored at data/google_token.json,
+or supplied in memory via PINCER_GOOGLE_TOKEN_JSON (which takes precedence).
 
 Tools are registered in cli.py via tools.register().
 
@@ -39,6 +40,10 @@ def _get_credentials():  # type: ignore[no-untyped-def]
     from google.oauth2.credentials import Credentials
 
     settings = get_settings()
+    env_creds = _env_credentials(settings)
+    if env_creds is not None:
+        return env_creds
+
     oauth_dir = settings.google_oauth_dir()
     token_path = oauth_dir / "google_token.json"
     credentials_path = oauth_dir / "google_credentials.json"
@@ -77,6 +82,29 @@ def _get_credentials():  # type: ignore[no-untyped-def]
         "Google token exists but is invalid (no refresh token). "
         f"Delete {token_path} and re-authorize with: pincer google auth"
     )
+
+
+# Env-mode auth, cached so the refreshed access token survives between calls
+# (nothing is written to disk). Keyed by the token JSON it was built from.
+_env_auth: tuple[str, Any] | None = None
+
+
+def _env_credentials(settings: Any) -> Any:
+    """Credentials from PINCER_GOOGLE_TOKEN_JSON, or None when it is not set."""
+    global _env_auth
+    from pincer.integrations.google.auth import GoogleAuth
+    from pincer.integrations.google.token_source import env_token_info
+
+    token_info = env_token_info(settings)
+    if token_info is None:
+        return None
+    key = settings.google_token_json.get_secret_value()
+    if _env_auth is None or _env_auth[0] != key:
+        _env_auth = (key, GoogleAuth(services=["calendar"], token_info=token_info))
+    try:
+        return _env_auth[1].get_credentials()
+    except RuntimeError as e:
+        raise FileNotFoundError(f"Google Calendar unavailable: {e}") from e
 
 
 def _get_service():  # type: ignore[no-untyped-def]

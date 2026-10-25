@@ -68,6 +68,19 @@ class ToolSettings(BaseModel):
     )
     image_daily_limit: int = Field(default=50, ge=0, description="Max image generations per day (0 = unlimited)")
 
+    # ── Google OAuth (alternative to token files in the data volume) ──
+    google_token_json: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Google OAuth token JSON (raw or base64) — overrides google_workspace_token.json / "
+            "google_token.json. Generate with `pincer google setup --print-env` or `pincer google export-token`."
+        ),
+    )
+    google_credentials_json: SecretStr = Field(
+        default=SecretStr(""),
+        description="Google OAuth client JSON (raw or base64), used by the consent flow when the file is absent",
+    )
+
     # ── Scheduling ────────────────────────────────────────
     schedule_tool_enabled: bool = Field(default=True, description="Enable schedule_create/list/remove/toggle tools")
     max_schedules_per_user: int = Field(

@@ -469,3 +469,21 @@ def test_get_integration_shows_partial_status_and_missing_scopes(client: TestCli
     assert data["enabled_services"] == ["calendar"]
     assert data["missing_scopes"]
     assert data["reauth_hint"] == "pincer google setup"
+
+
+def test_integration_entries_google_env_token(tmp_path: Path) -> None:
+    import json
+
+    from pydantic import SecretStr
+
+    settings = MagicMock()
+    settings.google_oauth_dir.return_value = tmp_path  # no files at all
+    settings.google_token_json = SecretStr(
+        json.dumps({"refresh_token": "rt", "scopes": ["https://www.googleapis.com/auth/calendar"]})
+    )
+    with patch("pincer.config.get_settings_relaxed", return_value=settings):
+        entries = _integration_entries()
+    google = next(e for e in entries if "Google" in e["name"])
+    assert google["status"] == "partial"
+    assert google["token_source"] == "env"
+    assert "PINCER_GOOGLE_TOKEN_JSON" in google["reauth_hint"]
