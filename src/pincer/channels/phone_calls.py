@@ -264,8 +264,11 @@ class VoiceChannel(BaseChannel):
                     self._engine.interrupt_speech(call_sid, by_caller=False), timeout=SHUTDOWN_SPEECH_TIMEOUT_S
                 )
             with contextlib.suppress(Exception):
-                goodbye_said = self._say(call_sid, goodbye, state="shutdown")
-                await asyncio.wait_for(goodbye_said, timeout=SHUTDOWN_SPEECH_TIMEOUT_S)
+                async with asyncio.timeout(SHUTDOWN_SPEECH_TIMEOUT_S):
+                    await self._say(call_sid, goodbye, state="shutdown")
+                    # On Media Streams the goodbye is at Twilio within
+                    # milliseconds; hanging up now would cut it off.
+                    await self._engine.wait_for_playout(call_sid)
         sm = self._state_machines.get(call_sid)
         if sm and not sm.is_terminal:
             # Same rule as a phase timeout: a call already wrapping up in a

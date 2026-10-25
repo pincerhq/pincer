@@ -43,6 +43,19 @@ def _no_twilio_rest(monkeypatch):
     install_fake_twilio(monkeypatch, FakeTwilio)
 
 
+_REAL_WAIT_FOR_PLAYOUT = MediaStreamEngine.wait_for_playout
+
+
+async def _no_wait_for_playout(self, call_sid: str) -> None:
+    """FakeTTS writes seconds of audio nobody plays; `channel.stop()` must
+    not sleep them out. The shutdown test restores the real wait."""
+
+
+@pytest.fixture(autouse=True)
+def _instant_playout(monkeypatch):
+    monkeypatch.setattr(MediaStreamEngine, "wait_for_playout", _no_wait_for_playout)
+
+
 def _engine(tts: FakeTTS, trigger: str = "vad") -> MediaStreamEngine:
     settings = _settings()
     settings.voice_stt_endpointing_ms = 0
@@ -383,6 +396,29 @@ class TestShutdown:
         assert state.metadata["speech_epoch"] > epoch
         assert OLD_NEVER not in engine._tts_provider.synthesized
         assert engine.metrics_registry.get("CA_ms").barge_in_reactions_ms == []
+
+    async def test_shutdown_hangs_up_only_after_the_goodbye_played_out(self, monkeypatch):
+        """send_speech returns once the goodbye is AT Twilio, which is faster
+        than real time; the hangup has to wait until the caller heard it."""
+        from pincer.voice.telemetry.clock import mono_ns
+
+        monkeypatch.setattr(MediaStreamEngine, "wait_for_playout", _REAL_WAIT_FOR_PLAYOUT)
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply()
+        engine._tts_provider.chunks = 1  # a one-second goodbye
+        hung_up_at: list[int] = []
+        end_call = engine.end_call
+
+        async def _timed_end_call(call_sid: str) -> None:
+            hung_up_at.append(mono_ns())
+            await end_call(call_sid)
+
+        monkeypatch.setattr(engine, "end_call", _timed_end_call)
+
+        await channel.stop()
+
+        kinds = [m.get("event") for m in sock.sent]
+        assert "media" in kinds[kinds.index("clear") :]  # the goodbye went out
+        assert hung_up_at and hung_up_at[0] >= state.metadata["playout_until_ns"]
 
     async def test_our_own_cut_is_not_a_caller_interruption(self):
         engine, channel, agent, sock, stt, state = await _agent_mid_reply()

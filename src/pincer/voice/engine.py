@@ -223,6 +223,13 @@ class VoiceEngine(ABC):
         """Silence the agent. ``by_caller=False`` is our own cut (shutdown):
         the audio stops, but no caller interruption is counted."""
 
+    async def wait_for_playout(self, call_sid: str) -> None:
+        """Return once the speech already sent for the call has been heard.
+        `send_speech` returning means Twilio HAS the audio, not that the
+        caller heard it. Engines that hand Twilio text have nothing to wait
+        for; Media Streams sleeps out its playout estimate."""
+        return None
+
     async def transfer_call(
         self,
         call_sid: str,
@@ -1396,6 +1403,18 @@ class MediaStreamEngine(VoiceEngine):
             telemetry.buffer_cleared(call_sid, since_ns=detected_ns, acknowledged=False)
 
         logger.debug("MS interrupt [%s]", call_sid)
+
+    async def wait_for_playout(self, call_sid: str) -> None:
+        state = self._active_calls.get(call_sid)
+        if not state:
+            return
+        from pincer.voice.telemetry.clock import mono_ns
+
+        # Audio is written faster than real time; `playout_until_ns` is when
+        # Twilio runs out of it (zero after a `clear`).
+        remaining_ns = int(state.metadata.get("playout_until_ns", 0)) - mono_ns()
+        if remaining_ns > 0:
+            await asyncio.sleep(remaining_ns / 1_000_000_000)
 
     async def end_call(self, call_sid: str) -> None:
         await self.close_media_stream(call_sid)
