@@ -583,7 +583,7 @@ class TestUndeliveredTranscript:
             async def on_speech_input(self, call_sid, text_or_audio):
                 pass
 
-            async def send_speech(self, call_sid, text_or_audio):
+            async def send_speech(self, call_sid, text_or_audio, *, last=True):
                 return False
 
             async def interrupt_speech(self, call_sid):

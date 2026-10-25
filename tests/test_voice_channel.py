@@ -58,7 +58,7 @@ class TestVoiceChannel:
         handler = AsyncMock()
         await channel.start(handler)
         await channel.send("+1234", "Hello!", call_sid="CA123")
-        mock_engine.send_speech.assert_called_once_with("CA123", "Hello!")
+        mock_engine.send_speech.assert_called_once_with("CA123", "Hello!", last=True)
 
     async def test_send_finds_active_call(self, channel, mock_engine):
         state = CallState(
@@ -71,7 +71,7 @@ class TestVoiceChannel:
         handler = AsyncMock()
         await channel.start(handler)
         await channel.send("+1234", "Found you!")
-        mock_engine.send_speech.assert_called_once_with("CA456", "Found you!")
+        mock_engine.send_speech.assert_called_once_with("CA456", "Found you!", last=True)
 
     async def test_send_no_active_call_raises(self, channel, mock_engine):
         """No active call for the user must raise, not silently no-op (issue #162)."""

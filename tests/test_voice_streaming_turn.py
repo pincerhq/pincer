@@ -43,6 +43,7 @@ class FakeStreamAgent:
         self.scripts = list(scripts)
         self.calls: list[dict] = []
         self.pause_after: int | None = None  # chunk index to pause at
+        self.fail_after: int | None = None  # raise before yielding this chunk index (the "LLM" dies)
         self.resume = asyncio.Event()
         self.paused = asyncio.Event()
         # Real generation takes time. A latency assertion against a fully
@@ -55,6 +56,8 @@ class FakeStreamAgent:
         self.calls.append(kwargs)
         script = self.scripts.pop(0) if self.scripts else []
         for index, chunk in enumerate(script):
+            if self.fail_after is not None and index == self.fail_after:
+                raise RuntimeError("LLM down")
             if self.pause_after is not None and index == self.pause_after:
                 self.paused.set()
                 await self.resume.wait()

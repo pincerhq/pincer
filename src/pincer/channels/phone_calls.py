@@ -255,9 +255,6 @@ class VoiceChannel(BaseChannel):
         messages = get_prompt("PHASE_TIMEOUT_MESSAGES", language, formality) or {}
         goodbye = messages.get("error_recovery") or str(get_prompt("DEFAULT_TIMEOUT_MESSAGE", language, formality))
 
-        transcript = self._transcripts.get(call_sid)
-        if transcript:
-            transcript.log_utterance(Speaker.AGENT, goodbye, state="shutdown")
         if self._engine:
             # Whatever the reply had queued must not play first: on Media
             # Streams seconds of it can sit in Twilio's buffer, and the goodbye
@@ -267,7 +264,8 @@ class VoiceChannel(BaseChannel):
                     self._engine.interrupt_speech(call_sid, by_caller=False), timeout=SHUTDOWN_SPEECH_TIMEOUT_S
                 )
             with contextlib.suppress(Exception):
-                await asyncio.wait_for(self._engine.send_speech(call_sid, goodbye), timeout=SHUTDOWN_SPEECH_TIMEOUT_S)
+                goodbye_said = self._say(call_sid, goodbye, state="shutdown")
+                await asyncio.wait_for(goodbye_said, timeout=SHUTDOWN_SPEECH_TIMEOUT_S)
         sm = self._state_machines.get(call_sid)
         if sm and not sm.is_terminal:
             # Same rule as a phase timeout: a call already wrapping up in a
@@ -298,7 +296,7 @@ class VoiceChannel(BaseChannel):
         if not call_sid or not self._engine:
             raise RuntimeError(f"No active call for user {user_id!r} to send speech")
 
-        await self._engine.send_speech(call_sid, text)
+        await self._say(call_sid, text, sm=self._state_machines.get(call_sid))
 
     # ── Call tracking ─────────────────────────────────────
 
@@ -521,13 +519,9 @@ class VoiceChannel(BaseChannel):
         message = sm.get_timeout_message(language, formality)
         logger.info("Phase timeout [%s]: %s — speaking exit and ending call", call_sid, phase)
 
-        transcript = self._transcripts.get(call_sid)
-        if transcript:
-            transcript.log_utterance(Speaker.AGENT, message, state=str(phase))
-
         if self._engine:
             with contextlib.suppress(Exception):
-                await self._engine.send_speech(call_sid, message)
+                await self._say(call_sid, message, state=str(phase))
 
         terminal = CallPhase.COMPLETED if phase in _BENIGN_TIMEOUT_PHASES else CallPhase.FAILED
         sm.force_terminal(terminal, reason=f"timeout_{phase.value}")
@@ -1063,11 +1057,10 @@ class VoiceChannel(BaseChannel):
             end_requested, response = call_end.parse_end_call_token(response or "")
             if response and self._engine:
                 metrics.mark_agent_speech_start()
-                delivered = await self._engine.send_speech(call_sid, response)
                 # Honest transcripts: "text generated" is not "audio heard".
                 # An undelivered agent turn is marked so post-call summaries
                 # and the truthfulness check reflect what the caller heard.
-                transcript.log_utterance(Speaker.AGENT, response, state=self._spoken_state(call_sid, delivered, sm))
+                await self._say(call_sid, response, sm=sm)
             self._after_agent_turn(call_sid, sm, response or "", end_requested)
             self._close_turn_trace(call_sid, own=trace)
         except asyncio.CancelledError:
@@ -1154,23 +1147,12 @@ class VoiceChannel(BaseChannel):
             if not spoken_any and sentence:
                 stamp("first_dispatch_ms")
                 metrics.mark_agent_speech_start()
-            try:
-                delivered = await engine.send_speech(call_sid, sentence, last=last)
-            except asyncio.CancelledError:
-                # Barge-in cancelled the turn while this sentence was being
-                # sent: it was cut off, not dropped. After a hangup the
-                # transcript belongs to the post-call pipeline — left alone.
-                if sentence and self._transcripts.get(call_sid) is transcript:
-                    transcript.log_utterance(Speaker.AGENT, sentence, state="interrupted")
-                raise
+            delivered = await self._say(call_sid, sentence, last=last, sm=sm)
             if delivered and buffering_engine:
                 open_stream = not last
             if sentence:
                 spoken_any = True
                 spoken_text = f"{spoken_text} {sentence}".strip()
-                transcript.log_utterance(Speaker.AGENT, sentence, state=self._spoken_state(call_sid, delivered, sm))
-            if last:
-                transcript.end_agent_utterance()
 
         async def gate_first_sentence(sentence: str) -> str:
             """Token + drift gate for the first sentence (local, ~0ms)."""
@@ -1281,7 +1263,7 @@ class VoiceChannel(BaseChannel):
             # Barge-in: close any open CR utterance and stop cleanly.
             if open_stream:
                 with contextlib.suppress(Exception):
-                    await engine.send_speech(call_sid, "", last=True)
+                    await self._say(call_sid, "", last=True)
             if trace is not None:
                 trace.cancel("barge_in")
             raise
@@ -1289,7 +1271,7 @@ class VoiceChannel(BaseChannel):
             logger.exception("Streaming turn failed [%s]", call_sid)
             if open_stream:
                 with contextlib.suppress(Exception):
-                    await engine.send_speech(call_sid, "", last=True)
+                    await self._say(call_sid, "", last=True)
             await self._handle_brain_error(call_sid, sm)
             if trace is not None:
                 trace.fail("streaming_turn_failed")
@@ -1369,11 +1351,52 @@ class VoiceChannel(BaseChannel):
         end_requested, response = call_end.parse_end_call_token(response or "")
         if response and self._engine:
             metrics.mark_agent_speech_start()
-            delivered = await self._engine.send_speech(call_sid, response)
-            transcript.log_utterance(Speaker.AGENT, response, state=self._spoken_state(call_sid, delivered, sm))
+            await self._say(call_sid, response, sm=sm)
         self._after_agent_turn(call_sid, sm, response or "", end_requested)
 
-    def _spoken_state(self, call_sid: str, delivered: bool, sm: CallStateMachine) -> str:
+    async def _say(
+        self,
+        call_sid: str,
+        text: str,
+        *,
+        last: bool = True,
+        state: str | None = None,
+        sm: CallStateMachine | None = None,
+    ) -> bool:
+        """Speak one agent line and record it. The ONLY path to `send_speech`.
+
+        Logs the line with `state` (default: what `_spoken_state` saw right
+        after the send), and on every ``last=True`` send marks the end of the
+        provider utterance — including the empty ConversationRelay closer —
+        which is what lets `TranscriptLogger.mark_interrupted` tell the
+        utterance the caller cut off from the ones that played in full. Each
+        call site used to do its own bookkeeping, and the ones that forgot the
+        boundary (error/cancel closers, brain-error lines, blocking replies)
+        had their lines misattributed on the next barge-in.
+
+        A cancellation mid-send (barge-in) logs the line as interrupted: it
+        was cut off, not dropped. After a hangup the transcript belongs to the
+        post-call pipeline and is left alone.
+        """
+        assert self._engine is not None
+        try:
+            delivered = await self._engine.send_speech(call_sid, text, last=last)
+        except asyncio.CancelledError:
+            transcript = self._transcripts.get(call_sid)
+            if text and transcript is not None:
+                transcript.log_utterance(Speaker.AGENT, text, state="interrupted")
+            raise
+        transcript = self._transcripts.get(call_sid)
+        if transcript is not None:
+            if text:
+                if state is None:
+                    state = self._spoken_state(call_sid, delivered, sm)
+                transcript.log_utterance(Speaker.AGENT, text, state=state)
+            if last:
+                transcript.end_agent_utterance()
+        return delivered
+
+    def _spoken_state(self, call_sid: str, delivered: bool, sm: CallStateMachine | None) -> str:
         """Transcript state for an agent line `send_speech` just returned on.
 
         Must be called right after it returns: the engine's cut flag is per
@@ -1384,7 +1407,7 @@ class VoiceChannel(BaseChannel):
         state = self._engine.get_call_state(call_sid) if self._engine else None
         if state is not None and state.metadata.get("last_speech_cut"):
             return "interrupted"  # a barge-in stopped it partway (Media Streams)
-        return str(sm.phase)
+        return str(sm.phase) if sm is not None else ""
 
     def _log_turn_latency(
         self,
@@ -1455,16 +1478,13 @@ class VoiceChannel(BaseChannel):
 
         errors = self._error_counts.get(call_sid, 0) + 1
         self._error_counts[call_sid] = errors
-        transcript = self._transcripts.get(call_sid)
         language, formality = self._call_language(call_sid)
 
         if errors >= MAX_CONSECUTIVE_ERRORS:
             apology = get_prompt("BRAIN_ERROR_FINAL", language, formality)
-            if transcript:
-                transcript.log_utterance(Speaker.AGENT, apology, state=str(sm.phase))
             if self._engine:
                 with contextlib.suppress(Exception):
-                    await self._engine.send_speech(call_sid, apology)
+                    await self._say(call_sid, apology, state=str(sm.phase))
             sm.force_terminal(CallPhase.FAILED, reason="repeated_errors")
             if self._engine:
                 with contextlib.suppress(Exception):
@@ -1472,11 +1492,9 @@ class VoiceChannel(BaseChannel):
             return
 
         retry_line = get_prompt("BRAIN_ERROR_RETRY", language, formality)
-        if transcript:
-            transcript.log_utterance(Speaker.AGENT, retry_line, state=str(sm.phase))
         if self._engine:
             with contextlib.suppress(Exception):
-                await self._engine.send_speech(call_sid, retry_line)
+                await self._say(call_sid, retry_line, state=str(sm.phase))
 
     # ── Call end ──────────────────────────────────────────
 

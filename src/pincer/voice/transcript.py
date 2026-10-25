@@ -126,8 +126,10 @@ class TranscriptLogger:
         `heard` is what the provider says it played before the caller cut in
         (ConversationRelay's `utteranceUntilInterrupt`), and it covers only the
         utterance being played — a streamed turn spans several (a filler, early
-        sentences sent with last=True). That utterance is the first one `heard`
-        is the start of, else the latest. Utterances before it played in full
+        sentences sent with last=True). That utterance is the latest one `heard`
+        is the start of — searched from the end, because a short earlier line
+        ("Ja.") is easily a prefix of what was really playing ("Ja, der
+        Termin…") — else the latest. Utterances before it played in full
         and keep their state; inside it, lines `heard` contains keep theirs,
         the first one it does not was cut off ("interrupted"), and every later
         line never played ("undelivered"). Returns how many lines were re-marked.
@@ -154,7 +156,8 @@ class TranscriptLogger:
         heard_norm = _norm(heard)
         playing = len(utterances) - 1
         if heard_norm:
-            for index, utterance in enumerate(utterances):
+            for index in range(len(utterances) - 1, -1, -1):
+                utterance = utterances[index]
                 text = _norm(" ".join(entry.text for entry in utterance))
                 if text.startswith(heard_norm) or heard_norm.startswith(_norm(utterance[0].text)):
                     playing = index

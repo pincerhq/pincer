@@ -514,6 +514,39 @@ class TestRelayBargeIn:
         await asyncio.wait_for(loop, timeout=2)
         await channel.stop()
 
+    async def test_a_failed_turn_closes_its_utterance_before_the_retry_line(self, relay_call):
+        """s1 and s2 streamed, then the LLM dies: the closer ends their
+        utterance and the retry line is its own. A barge-in that names the
+        retry line must leave s1 and s2, which played in full, alone."""
+        from test_voice_streaming_turn import text_chunks
+
+        from pincer.voice.prompts import get_prompt
+
+        second = "Der zweite Satz ist auch noch lang genug."
+        script = text_chunks(f"{OLD_FIRST} ", f"{second} ", "Dieser dritte wird nie gesendet. ")
+        engine, channel, agent, sock, loop, _traces = await relay_call([script])
+        agent.fail_after = 2  # two sentences out (last=False), then the stream raises
+        sock.push(type="prompt", voicePrompt="Erste Frage?", last=True)
+        await asyncio.wait_for(sock.inbox.join(), timeout=2)
+        await channel.wait_for_turn("CA_cr")
+
+        retry_line = str(get_prompt("BRAIN_ERROR_RETRY", "de", "sie"))
+        texts = [(m["token"], m["last"]) for m in sock.sent if m.get("type") == "text"]
+        assert texts == [(OLD_FIRST, False), (second, False), ("", True), (retry_line, True)]
+        transcript = channel.get_transcript("CA_cr")
+        assert [(e.text, e.ends_utterance) for e in transcript.entries if e.speaker == Speaker.AGENT] == [
+            (OLD_FIRST, False),
+            (second, True),
+            (retry_line, True),
+        ]
+
+        played = _states(transcript)[:2]  # the two streamed sentences, as the turn recorded them
+        transcript.mark_interrupted(retry_line.split()[0])
+        assert _states(transcript) == [*played, "interrupted"]
+        sock.hang_up()
+        await asyncio.wait_for(loop, timeout=2)
+        await channel.stop()
+
     async def test_shutdown_closes_the_open_utterance_before_the_goodbye(self, relay_call):
         """The cancelled turn closes its CR utterance; the goodbye never continues it."""
         engine, channel, agent, sock, loop, _traces = await relay_call(_scripts())
@@ -619,6 +652,14 @@ class TestMarkInterrupted:
         transcript = _reply(["Einen Moment bitte."], ["Der Termin ist am Montag."])
 
         transcript.mark_interrupted("")
+
+        assert _states(transcript) == ["freeform", "interrupted"]
+
+    def test_the_latest_utterance_starting_with_heard_is_the_one_playing(self):
+        """A short earlier line is easily a prefix of the line really playing."""
+        transcript = _reply(["Ja."], ["Ja, der Termin ist am Montag."])
+
+        transcript.mark_interrupted("Ja")
 
         assert _states(transcript) == ["freeform", "interrupted"]
 
