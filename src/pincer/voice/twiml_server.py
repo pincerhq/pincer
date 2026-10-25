@@ -341,7 +341,6 @@ async def voice_transfer_result(request: Request) -> Response:
         logger.warning("Transfer result [%s] with no call state — reconnecting the caller", call_sid)
         from pincer.voice.engine import CallDirection
         from pincer.voice.language import resolve_call_language
-        from pincer.voice.prompts import get_prompt
         from pincer.voice.receptionist.profile import get_profile, receptionist_active
         from pincer.voice.telemetry import hooks as telemetry
 
@@ -364,12 +363,7 @@ async def voice_transfer_result(request: Request) -> Response:
             # resume it in TAKE_MESSAGE, as a failed transfer does, so the first
             # turn asks for the name instead of greeting the caller again.
             session = _transfer_session_lookup(call_sid)
-            if session is not None:
-                session.transfer_attempted = True  # the report says the transfer did not connect
-                greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
-            else:
-                lines = get_prompt("RECEPTIONIST_LINES", language) or {}
-                greeting = str(lines.get("transfer_failed", ""))
+            greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
             # Mark the dial result as handled on the recovered state, so a retry of
             # this callback replays the reconnect instead of taking the main path.
             metadata = getattr(recovered, "metadata", None)
@@ -382,7 +376,7 @@ async def voice_transfer_result(request: Request) -> Response:
                     "dial_bridged": dial_bridged,
                     "reconnect_greeting": greeting,
                 }
-            return _reconnect_after_transfer(call_sid, language, greeting)
+            return response
         except Exception:
             # The call is registered but will never get media if we answer 500
             # (Twilio drops the caller): finalize it so it does not hold a
@@ -427,8 +421,9 @@ async def voice_transfer_result(request: Request) -> Response:
         await _engine.finish_remote_ended(call_sid, reason="transferred")
         return hangup
 
+    unknown_result = dial_status not in _TRANSFER_RESULTS
     if call_status == "completed":
-        if dial_status not in _TRANSFER_RESULTS:
+        if unknown_result:
             # The call is over and the dial result is unknown: don't guess.
             logger.warning("Transfer result [%s]: unknown DialCallStatus %r — finalizing", call_sid, dial_status)
             await _engine.finish_remote_ended(call_sid, reason="transfer_result_unknown")
@@ -439,21 +434,36 @@ async def voice_transfer_result(request: Request) -> Response:
         await _engine.finish_remote_ended(call_sid, reason="caller_hangup_during_transfer")
         return hangup
 
-    if dial_status not in _TRANSFER_RESULTS:
+    if unknown_result:
         # Not bridged and the caller is still on the line: whatever the status
         # means, nobody took the call, so it is a failed transfer.
         logger.warning("Transfer result [%s]: unknown DialCallStatus %r — treating as failed", call_sid, dial_status)
     language = str(getattr(state, "language", "") or "en")
-    greeting = ""
-    if session is not None:
-        greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
+    greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
     if isinstance(transfer, dict):
         transfer["reconnect_greeting"] = greeting  # what a retried callback replays
+    return response
+
+
+async def _resume_failed_transfer(call_sid: str, session: Any, dial_status: str, language: str) -> tuple[str, Response]:
+    """Nobody took the call and the caller is still on the line: resume the
+    receptionist session in TAKE_MESSAGE (apology + name question), take the
+    call out of TRANSFERRING, and build the reconnect TwiML. Returns the
+    greeting too, so the caller can record it for a retried callback to replay."""
+    if session is not None:
+        session.transfer_attempted = True  # the report says the transfer did not connect
+        greeting = await session.on_transfer_failed(_TRANSFER_RESULTS.get(dial_status, "failed"))
+    else:
+        from pincer.voice.prompts import get_prompt
+
+        lines = get_prompt("RECEPTIONIST_LINES", language) or {}
+        greeting = str(lines.get("transfer_failed", ""))
     # The dial is over: the call is ours again now, not when (or if) the
     # reconnected relay/stream connects. This also takes the phase out of
-    # TRANSFERRING when there was no session to do it.
+    # TRANSFERRING when there was no session to do it (no-op for a call
+    # recovered from lost state, which was never marked transferring).
     await _engine.end_transfer(call_sid)
-    return _reconnect_after_transfer(call_sid, language, greeting)
+    return greeting, _reconnect_after_transfer(call_sid, language, greeting)
 
 
 def _reconnect_after_transfer(call_sid: str, language: str, greeting: str) -> Response:
