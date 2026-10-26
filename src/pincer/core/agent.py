@@ -69,6 +69,11 @@ logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_ERRORS = 3
 _MAX_SANITIZE_ATTEMPTS = 2
+# Onboarding: a question still unanswered after this long is closed, empty,
+# by the user's next message; and this many replies with no profile in them
+# close it too.
+_ONBOARDING_ANSWER_WINDOW_S = 24 * 60 * 60
+_ONBOARDING_MAX_EMPTY_REPLIES = 2
 
 _GOOGLE_TOOL_CHAIN_HINTS = """
 ## Google Workspace Tool Chains
@@ -207,7 +212,11 @@ class _Onboarding:
     """One turn's onboarding decision, taken before its user message is appended."""
 
     prompt: bool  # append the question to this turn's reply
-    ingest: bool  # this message is the reply to the question
+    ingest: bool  # read this message for an answer to the question
+    followup: bool = False  # this session showed the question: say so to the model
+
+
+_NO_ONBOARDING = _Onboarding(prompt=False, ingest=False)
 
 
 @dataclass
@@ -227,6 +236,13 @@ def _clean_profile_value(v: Any) -> str | None:
     if not s or s.lower() in {"null", "none", "n/a", "unknown"}:
         return None
     return s
+
+
+def _shows_onboarding_question(session: Session) -> bool:
+    """True when the session's history still holds the onboarding question."""
+    return any(
+        m.role == MessageRole.ASSISTANT and ONBOARDING_QUESTION_EN in (m.content or "") for m in session.messages
+    )
 
 
 def _safe_json_loads(raw: str) -> Any:
@@ -345,6 +361,9 @@ class Agent:
         self.mcp_shell: Any = None  # set by EmbeddedMCPShell.start()
         # (user_id, channel_name) of the most recent message — used by ask_user
         self._last_active: tuple[str, str] | None = None
+        # (user_id, channel) of turns between appending the onboarding
+        # question and recording it, so a concurrent first turn does not ask too
+        self._onboarding_reserved: set[tuple[str, str]] = set()
         # Injected by cli.py: (user_id, channel_name, question) -> answer
         self._ask_user_callback: Callable[[str, str, str], Awaitable[str]] | None = None
         self._mcp_list_outage = _OutageLog(
@@ -436,7 +455,7 @@ class Agent:
 
         # Build system prompt with relevant memories — inject the onboarding
         # followup instruction only on the turn that handles the user's reply.
-        extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if onboarding.ingest else []
+        extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if onboarding.followup else []
         if extra_system:
             extra_parts.append(extra_system)
         system_prompt = await self._build_system_prompt(user_id, text, extra_system="\n\n".join(extra_parts) or None)
@@ -592,13 +611,20 @@ class Agent:
             )
 
         # ── Onboarding: append warm question on a fresh session ────────────
-        if final_text and await self._claim_onboarding_prompt(onboarding, session, user_id, channel):
-            final_text = final_text.rstrip() + "\n\n" + ONBOARDING_QUESTION_EN
+        asking = bool(final_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
+        try:
+            if asking:
+                final_text = final_text.rstrip() + "\n\n" + ONBOARDING_QUESTION_EN
 
-        # Save final assistant message
-        if final_text:
-            final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=final_text)
-            await self._sessions.add_message(session, final_msg)
+            # Save final assistant message
+            if final_text:
+                final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=final_text)
+                await self._sessions.add_message(session, final_msg)
+            if asking:
+                await self._record_onboarding_prompt(session, user_id, channel)
+        finally:
+            if asking:
+                self._onboarding_reserved.discard((user_id, channel))
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
         if onboarding.ingest:
@@ -783,7 +809,7 @@ class Agent:
         if self._summarizer:
             await self._summarizer.maybe_summarize(session)
 
-        extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.ingest else None
+        extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
         system_prompt = await self._build_system_prompt(user_id, text, extra_system=extra_system)
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
         logger.debug(
@@ -903,14 +929,21 @@ class Agent:
                 full_text = response.content if response else ""
 
         # ── Onboarding: append warm question on a fresh session ────────────
-        if full_text and await self._claim_onboarding_prompt(onboarding, session, user_id, channel):
-            tail = "\n\n" + ONBOARDING_QUESTION_EN
-            full_text = full_text.rstrip() + tail
-            yield StreamChunk(StreamEventType.TEXT, tail)
+        asking = bool(full_text) and await self._reserve_onboarding_prompt(onboarding, user_id, channel)
+        try:
+            if asking:
+                tail = "\n\n" + ONBOARDING_QUESTION_EN
+                full_text = full_text.rstrip() + tail
+                yield StreamChunk(StreamEventType.TEXT, tail)
 
-        if full_text:
-            final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=full_text)
-            await self._sessions.add_message(session, final_msg)
+            if full_text:
+                final_msg = LLMMessage(role=MessageRole.ASSISTANT, content=full_text)
+                await self._sessions.add_message(session, final_msg)
+            if asking:
+                await self._record_onboarding_prompt(session, user_id, channel)
+        finally:
+            if asking:
+                self._onboarding_reserved.discard((user_id, channel))
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
         if onboarding.ingest:
@@ -1278,9 +1311,9 @@ class Agent:
 
         The state is kept per user and channel (``SessionManager.onboarding``),
         whichever session the turn runs in: a web chat conversation asks a
-        brand-new user, and only the session that asked takes the reply.
-        Channels that split sessions through ``channel`` itself (Slack and
-        Teams threads) are onboarded per thread.
+        brand-new user, and once asked, the user's next message in any session
+        is read for an answer. Channels that split sessions through
+        ``channel`` itself (Slack and Teams threads) are onboarded per thread.
 
         A user with no row yet is read from the flags their session carried
         before the table existed, so nobody onboarded then is asked again.
@@ -1289,38 +1322,55 @@ class Agent:
         session per call every call's first turn would look like a new user.
         """
         if (channel_name or channel) == "voice":
-            return _Onboarding(prompt=False, ingest=False)
-        record = await self._sessions.onboarding.get(user_id, channel)
+            return _NO_ONBOARDING
+        onboarding = self._sessions.onboarding
+        if onboarding.is_completed_cached(user_id, channel):
+            return _NO_ONBOARDING
+        record = await onboarding.get(user_id, channel)
         if record is not None:
             if record.completed_at is not None:
-                return _Onboarding(prompt=False, ingest=False)
-            return _Onboarding(prompt=False, ingest=record.asked_session_id == session.session_id)
+                return _NO_ONBOARDING
+            if record.asked_at is not None and time.time() - record.asked_at > _ONBOARDING_ANSWER_WINDOW_S:
+                await onboarding.complete(user_id, channel, now=time.time())
+                logger.info("onboarding.expired user=%s channel=%s", user_id, channel)
+                return _NO_ONBOARDING
+            return _Onboarding(prompt=False, ingest=True, followup=_shows_onboarding_question(session))
         if session.is_onboarded():
-            return _Onboarding(prompt=False, ingest=False)
+            return _NO_ONBOARDING
         if session.onboarding_prompt_already_sent():
-            return _Onboarding(prompt=False, ingest=True)
+            return _Onboarding(prompt=False, ingest=True, followup=_shows_onboarding_question(session))
         # New: nothing stored for this user on the channel, in any session.
         new = session.is_fresh() and not await self._sessions.has_stored_sessions(user_id, channel)
         return _Onboarding(prompt=new, ingest=False)
 
-    async def _claim_onboarding_prompt(
-        self,
-        onboarding: _Onboarding,
-        session: Session,
-        user_id: str,
-        channel: str,
-    ) -> bool:
-        """Record that this turn's reply asks the onboarding question.
+    async def _reserve_onboarding_prompt(self, onboarding: _Onboarding, user_id: str, channel: str) -> bool:
+        """Hold the right to ask, before the question is appended.
 
-        True when the caller should append it; False when another turn for
-        the same user and channel asked first.
+        True when the caller should append it. False while another turn for
+        the user and channel holds it, or once one has recorded it: two first
+        messages at once ask only once. The caller releases it in a `finally`.
         """
-        if not onboarding.prompt:
+        key = (user_id, channel)
+        if not onboarding.prompt or key in self._onboarding_reserved:
             return False
-        if not await self._sessions.onboarding.claim_prompt(user_id, channel, session.session_id, now=time.time()):
-            return False
-        logger.info("onboarding.prompt_sent user=%s channel=%s", user_id, channel)
-        return True
+        self._onboarding_reserved.add(key)
+        try:
+            claimed = await self._sessions.onboarding.get(user_id, channel) is not None
+        except BaseException:
+            self._onboarding_reserved.discard(key)
+            raise
+        if claimed:
+            self._onboarding_reserved.discard(key)
+        return not claimed
+
+    async def _record_onboarding_prompt(self, session: Session, user_id: str, channel: str) -> None:
+        """Record the question as asked, once the reply carrying it is saved:
+        a turn cut off before then leaves no claim behind."""
+        if await self._sessions.onboarding.claim_prompt(user_id, channel, session.session_id, now=time.time()):
+            logger.info("onboarding.prompt_sent user=%s channel=%s", user_id, channel)
+        else:
+            # Another process asked first; this session showed the question too.
+            logger.info("onboarding.prompt_already_recorded user=%s channel=%s", user_id, channel)
 
     async def _ingest_onboarding_reply(
         self,
@@ -1328,10 +1378,12 @@ class Agent:
         user_id: str,
         channel: str,
     ) -> None:
-        """Parse name / use_case / language from the user's reply and persist.
+        """Read name / use_case / language from the user's reply.
 
-        The onboarding gate is ALWAYS closed afterward, even on parse failure,
-        so the user never sees the onboarding question a second time.
+        Any field found closes the gate and becomes the profile. A reply with
+        none (an unrelated task, or a failed extraction) is only counted: the
+        gate closes, empty, at `_ONBOARDING_MAX_EMPTY_REPLIES`, and the text
+        is never kept as a profile.
         """
         name: str | None = None
         use_case: str | None = None
@@ -1353,11 +1405,16 @@ class Agent:
                 use_case = _clean_profile_value(data.get("use_case"))
                 language = _clean_profile_value(data.get("language"))
         except Exception as e:
-            logger.warning("Onboarding extraction failed (closing gate anyway): %s", e)
+            logger.warning("Onboarding extraction failed (counted as a reply with no answer): %s", e)
 
-        # ALWAYS close the gate, even with no captured fields.
+        if not any([name, use_case, language]):
+            closed = await self._sessions.onboarding.record_empty_reply(
+                user_id, channel, max_empty=_ONBOARDING_MAX_EMPTY_REPLIES, now=time.time()
+            )
+            logger.info("onboarding.empty_reply user=%s channel=%s closed=%s", user_id, channel, closed)
+            return
+
         await self._sessions.onboarding.complete(user_id, channel, now=time.time())
-
         logger.info(
             "onboarding.completed user=%s channel=%s fields=%s",
             user_id,
@@ -1365,7 +1422,7 @@ class Agent:
             [k for k, v in (("name", name), ("use_case", use_case), ("language", language)) if v],
         )
 
-        if self._memory and any([name, use_case, language]):
+        if self._memory:
             try:
                 await self._memory.add_profile(
                     user_id=user_id,
