@@ -9,13 +9,18 @@ import pytest
 import pytest_asyncio
 
 from pincer.core.agent import Agent, StreamEventType
-from pincer.core.onboarding import ONBOARDING_FOLLOWUP_INSTRUCTION, ONBOARDING_QUESTION_EN
+from pincer.core.onboarding import (
+    EXTRACTION_PROMPT_TEMPLATE,
+    ONBOARDING_FOLLOWUP_INSTRUCTION,
+    ONBOARDING_QUESTION_EN,
+)
 from pincer.core.session import (
     ONBOARDING_COMPLETE_KEY,
     ONBOARDING_PROMPT_SENT_KEY,
     conversation_key,
 )
 from pincer.db.engine import get_database_url
+from pincer.exceptions import BudgetExceededError
 from pincer.llm.base import LLMMessage, LLMResponse, MessageRole
 from pincer.memory.store import MemoryStore
 from pincer.repositories.onboarding import OnboardingRepository
@@ -136,7 +141,10 @@ async def test_reply_in_asking_session_completes_onboarding(
     path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
 ):
     llm = _scripted_llm(
-        "Hello!", "Nice to meet you, Bob.", '{"name": "Bob", "use_case": "accounting", "language": "en"}', "Sure."
+        "Hello!",
+        "Nice to meet you, Bob.",
+        '{"answers_question": true, "name": "Bob", "use_case": "accounting", "language": "en"}',
+        "Sure.",
     )
     agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
     key = conversation_key("user-b", "web", "x")
@@ -167,7 +175,10 @@ async def test_answer_in_a_new_conversation_is_captured(
     """Asked in the main chat, answered in a new one: captured there, and the
     next main-chat task is not taken for an answer."""
     llm = _scripted_llm(
-        "Hello!", "Nice to meet you, Bob.", '{"name": "Bob", "use_case": "accounting"}', "Here is your summary."
+        "Hello!",
+        "Nice to meet you, Bob.",
+        '{"answers_question": true, "name": "Bob", "use_case": "accounting"}',
+        "Here is your summary.",
     )
     agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
 
@@ -196,7 +207,9 @@ async def test_a_reply_with_no_profile_leaves_the_gate_open_once(
 ):
     """A task sent after the question holds no answer: it is not saved as a
     profile, and the message after it is still read for one."""
-    llm = _scripted_llm("Hello!", "Here is your summary.", _EMPTY, "Nice to meet you, Bob.", '{"name": "Bob"}')
+    llm = _scripted_llm(
+        "Hello!", "Here is your summary.", _EMPTY, "Nice to meet you, Bob.", '{"answers_question": true, "name": "Bob"}'
+    )
     agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
     other = conversation_key("user-g", "web", "b")
 
@@ -295,6 +308,95 @@ async def test_a_disconnect_before_the_reply_is_saved_leaves_no_claim(
     assert await _record(tmp_path, "user-d", "web") is None
 
 
+# What an extraction prompt elicits from a model for a task message. These are
+# stubs written from the prompts, not recorded model output.
+_TASK_REPLIES = {
+    # 06e136b's prompt: infer the language from the text, and take any purpose as the use case.
+    "old_prompt_response": '{"name": null, "use_case": "summarizing contracts", "language": "en"}',
+    # This prompt: the model is asked whether the message answers the question at all.
+    "new_prompt_response": (
+        '{"answers_question": false, "name": null, "use_case": "summarizing contracts", "language": "en"}'
+    ),
+}
+
+
+@pytest.mark.parametrize("extraction", list(_TASK_REPLIES))
+@_PATHS
+async def test_a_task_message_is_not_an_answer(
+    path, extraction, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """Asked in A, a task sent in B is not an answer, even when the model fills
+    in a language and a use case for it: no profile, one attempt counted."""
+    llm = _scripted_llm("Hello!", "Here is the summary.", _TASK_REPLIES[extraction])
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+
+    await _reply(agent, path, "user-s", "web", "Hi!", session_key=conversation_key("user-s", "web", "a"))
+    await _reply(
+        agent,
+        path,
+        "user-s",
+        "web",
+        "Summarize this contract for me",
+        session_key=conversation_key("user-s", "web", "b"),
+    )
+
+    record = await _record(tmp_path, "user-s", "web")
+    assert record is not None
+    assert (record.attempts, record.completed_at) == (1, None)
+    assert await memory_store.list_memories(user_id="user-s", category="profile") == []
+
+
+@_PATHS
+async def test_a_real_answer_in_another_session_completes(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """The answer the question asks for, given in another session (a stub of
+    what the prompt elicits for it), completes onboarding with that profile."""
+    llm = _scripted_llm(
+        "Hello!",
+        "Nice to meet you, Bob.",
+        '{"answers_question": true, "name": "Bob", "use_case": "accounting", "language": "de"}',
+    )
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+
+    await _reply(agent, path, "user-a", "web", "Hi!", session_key=conversation_key("user-a", "web", "a"))
+    await _reply(
+        agent,
+        path,
+        "user-a",
+        "web",
+        "I'm Bob, I do accounting, German please",
+        session_key=conversation_key("user-a", "web", "b"),
+    )
+
+    record = await _record(tmp_path, "user-a", "web")
+    assert record is not None
+    assert record.completed_at is not None
+    profiles = await memory_store.list_memories(user_id="user-a", category="profile")
+    assert len(profiles) == 1
+    assert "Bob" in profiles[0].content
+    assert "de" in profiles[0].content
+
+
+async def test_an_answer_with_no_fields_is_an_empty_reply(
+    tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    llm = _scripted_llm("Hello!", "Ok.", '{"answers_question": true, "name": null, "use_case": null, "language": null}')
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+
+    await agent.handle_message("user-n", "web", "Hi!")
+    await agent.handle_message("user-n", "web", "hm")
+
+    record = await _record(tmp_path, "user-n", "web")
+    assert record is not None
+    assert (record.attempts, record.completed_at) == (1, None)
+
+
+def test_the_extraction_prompt_asks_for_a_judgement_and_never_infers_language():
+    assert '"answers_question"' in EXTRACTION_PROMPT_TEMPLATE
+    assert "inferable from the language they wrote in" not in EXTRACTION_PROMPT_TEMPLATE
+
+
 @_PATHS
 async def test_existing_user_new_conversation_is_separate_and_not_prompted(
     path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
@@ -337,7 +439,7 @@ async def test_legacy_pending_prompt_ingests_reply_in_that_session(
 ):
     """Asked before the table existed: the flag on the session still routes
     the reply, and closes the gate in the table."""
-    llm = _scripted_llm("Nice to meet you, Dana.", '{"name": "Dana"}')
+    llm = _scripted_llm("Nice to meet you, Dana.", '{"answers_question": true, "name": "Dana"}')
     agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry)
     await _store_history(
         session_manager,
@@ -476,7 +578,7 @@ async def test_second_message_closes_gate_and_extracts_fields(
     llm = _scripted_llm(
         "Hello!",
         "Nice to meet you, Alice.",
-        '{"name": "Alice", "use_case": "drafting marketing emails", "language": "en"}',
+        '{"answers_question": true, "name": "Alice", "use_case": "drafting marketing emails", "language": "en"}',
     )
     agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
 
@@ -519,7 +621,9 @@ async def test_gibberish_replies_close_the_gate_on_the_second(
 
 
 async def test_third_message_no_question_appended(settings, session_manager, cost_tracker, tool_registry, memory_store):
-    llm = _scripted_llm("Hi!", "Got it.", '{"name": "Bob", "use_case": null, "language": "en"}', "Sure thing.")
+    llm = _scripted_llm(
+        "Hi!", "Got it.", '{"answers_question": true, "name": "Bob", "use_case": null, "language": "en"}', "Sure thing."
+    )
     agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
 
     await agent.handle_message("user-4", "test", "hi")
@@ -542,19 +646,37 @@ async def test_preexisting_session_never_prompts(
     assert await _record(tmp_path, "user-old", "test") is None
 
 
-async def test_an_extraction_failure_counts_as_an_empty_reply(
+async def test_an_extraction_error_leaves_the_gate_untouched(
     tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
 ):
-    """If the extraction call raises, the reply counts as one with no answer."""
-    llm = _scripted_llm("Hi!", "Got it.", RuntimeError("LLM down"))
+    """A failed extraction call (an outage, the budget) is no reply at all: no
+    attempt is counted, and the answer after it is still taken."""
+    llm = _scripted_llm(
+        "Hi!",
+        "Got it.",
+        RuntimeError("LLM down"),
+        "Still here.",
+        BudgetExceededError(spent=5.0, limit=5.0),
+        "Nice to meet you, Carol.",
+        '{"answers_question": true, "name": "Carol", "use_case": null, "language": null}',
+    )
     agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
 
     await agent.handle_message("user-5", "test", "hi")
     await agent.handle_message("user-5", "test", "I'm Carol")
+    await agent.handle_message("user-5", "test", "I'm Carol, again")
 
     record = await _record(tmp_path, "user-5", "test")
     assert record is not None
-    assert (record.attempts, record.completed_at) == (1, None)
+    assert (record.attempts, record.completed_at) == (0, None)
+
+    await agent.handle_message("user-5", "test", "Carol. My name is Carol.")
+
+    record = await _record(tmp_path, "user-5", "test")
+    assert record is not None
+    assert record.completed_at is not None
+    profiles = await memory_store.list_memories(user_id="user-5", category="profile")
+    assert [("Carol" in p.content) for p in profiles] == [True]
 
 
 @pytest.mark.asyncio

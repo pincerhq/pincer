@@ -1388,12 +1388,14 @@ class Agent:
         user_id: str,
         channel: str,
     ) -> None:
-        """Read name / use_case / language from the user's reply.
+        """Ask the model whether the message answers the onboarding question,
+        and read name / use_case / language from it.
 
-        Any field found closes the gate and becomes the profile. A reply with
-        none (an unrelated task, or a failed extraction) is only counted: the
-        gate closes, empty, at `_ONBOARDING_MAX_EMPTY_REPLIES`, and the text
-        is never kept as a profile.
+        An answer with a field in it closes the gate and becomes the profile.
+        A message the model says is no answer (a task),
+        or one with no field, is only counted: the gate closes, empty, at
+        `_ONBOARDING_MAX_EMPTY_REPLIES`, and its text is never kept. A failed
+        extraction call is not a reply at all and leaves the gate as it was.
         """
         name: str | None = None
         use_case: str | None = None
@@ -1409,13 +1411,14 @@ class Agent:
                 max_tokens=200,
                 temperature=0,
             )
-            data = _safe_json_loads(response.content or "")
-            if isinstance(data, dict):
-                name = _clean_profile_value(data.get("name"))
-                use_case = _clean_profile_value(data.get("use_case"))
-                language = _clean_profile_value(data.get("language"))
         except Exception as e:
-            logger.warning("Onboarding extraction failed (counted as a reply with no answer): %s", e)
+            logger.warning("Onboarding extraction failed; the gate is left as it was: %s", e)
+            return
+        data = _safe_json_loads(response.content or "")
+        if isinstance(data, dict) and data.get("answers_question") is True:
+            name = _clean_profile_value(data.get("name"))
+            use_case = _clean_profile_value(data.get("use_case"))
+            language = _clean_profile_value(data.get("language"))
 
         if not any([name, use_case, language]):
             closed = await self._sessions.onboarding.record_empty_reply(
