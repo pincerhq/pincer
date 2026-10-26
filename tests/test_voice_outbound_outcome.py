@@ -93,12 +93,11 @@ class Rig:
 
 
 @pytest.fixture
-async def rig(tmp_path, monkeypatch):
+async def rig(tmp_path, monkeypatch, fake_twilio_rest):
     settings = apply_test_paths(MagicMock(), tmp_path)
     settings.voice_language = "en-US"
     settings.voice_engine = "conversation_relay"
     settings.twilio_auth_token.get_secret_value.return_value = ""
-    monkeypatch.setattr("twilio.rest.Client", MagicMock())
 
     engine = ConversationRelayEngine(settings)
     channel = VoiceChannel(settings)
