@@ -95,12 +95,15 @@ class FakeVoiceEngine(VoiceEngine):
                 "language": language,
             }
         )
+        # the real bookkeeping (transferring flag, a fresh `transfer` record per
+        # dial, rollback on failure); only the Twilio redirect is faked
+        await super().transfer_call(
+            call_sid, target_number, timeout_s=timeout_s, action_url=action_url, announce=announce, language=language
+        )
+
+    async def _twilio_update(self, call_sid: str, **update: Any) -> None:
         if getattr(self, "transfer_raises", False):
             raise RuntimeError("dial failed")
-        # like the real engines: the call has left us for <Dial>
-        live = self._active_calls.get(call_sid)
-        if live is not None:
-            live.metadata["transferring"] = True
 
     async def end_call(self, call_sid: str) -> None:
         if call_sid in self.ended:

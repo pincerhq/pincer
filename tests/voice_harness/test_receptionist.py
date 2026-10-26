@@ -1005,18 +1005,23 @@ def test_transfer_result_webhook_reconnects_with_apology():
     settings.voice_consent_mode = "none"
     settings.elevenlabs_voice_id = ""
     settings.cr_tts_provider = ""
+    state = CallState(call_sid="CAt", direction=CallDirection.INBOUND, caller_number=CALLER, language="de")
     engine = AsyncMock()
-    engine.get_call_state = MagicMock(
-        return_value=CallState(call_sid="CAt", direction=CallDirection.INBOUND, caller_number=CALLER, language="de")
-    )
+    engine.get_call_state = MagicMock(return_value=state)
     fake_session = MagicMock()
     fake_session.on_transfer_failed = AsyncMock(return_value="Leider ist gerade niemand erreichbar. Wie ist Ihr Name?")
     twiml_server.set_transfer_session_resolver(lambda sid: fake_session)
+
+    def dialled(dial_call_sid: str) -> dict[str, str]:
+        # each post is the result of its own dial (the mocked end_transfer clears nothing)
+        state.metadata["transferring"] = True
+        return {"CallSid": "CAt", "DialCallSid": dial_call_sid}
+
     try:
         client = _webhook_client(settings, engine)
-        done = client.post("/api/apps/twilio/transfer-result", data={"CallSid": "CAt", "DialCallStatus": "completed"})
+        done = client.post("/api/apps/twilio/transfer-result", data={**dialled("CAd1"), "DialCallStatus": "completed"})
         assert done.text == "<Response><Hangup/></Response>"
-        busy = client.post("/api/apps/twilio/transfer-result", data={"CallSid": "CAt", "DialCallStatus": "busy"})
+        busy = client.post("/api/apps/twilio/transfer-result", data={**dialled("CAd2"), "DialCallStatus": "busy"})
         assert "ConversationRelay" in busy.text
         assert 'welcomeGreeting="Leider ist gerade niemand erreichbar. Wie ist Ihr Name?"' in busy.text
         fake_session.on_transfer_failed.assert_awaited_once_with("busy")
@@ -1024,7 +1029,7 @@ def test_transfer_result_webhook_reconnects_with_apology():
             fake_session.on_transfer_failed.reset_mock()
             other = client.post(
                 "/api/apps/twilio/transfer-result",
-                data={"CallSid": "CAt", "DialCallStatus": dial_status, "CallStatus": "in-progress"},
+                data={**dialled(f"CAd-{dial_status}"), "DialCallStatus": dial_status, "CallStatus": "in-progress"},
             )
             assert "ConversationRelay" in other.text, dial_status
             fake_session.on_transfer_failed.assert_awaited_once_with(result)
@@ -1261,6 +1266,56 @@ async def test_transfer_result_retry_replays_reconnect_without_rerunning_session
     assert results == ["busy"]
     assert (h.session.step, h.session.slots.caller_name) == (step, name)
     assert h.sm.phase == CallPhase.TAKE_MESSAGE
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_late_retry_of_an_earlier_dial_is_ignored_during_the_next_dial(monkeypatch):
+    """Dial #1 ends busy, the caller is reconnected and the call is dialled
+    again. A delayed retry of dial #1's callback arriving while dial #2 rings
+    must not count `busy` again, restart message-taking, or take dial #2's call
+    back from the human; dial #2's own callback is still processed.
+
+    Dial #2 is placed on the engine: the receptionist itself cannot go from
+    TAKE_MESSAGE back to TRANSFERRING today, but the route must not rely on that."""
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+    results = _count_transfer_results(monkeypatch)
+    first_dial = {"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial1", "CallStatus": "in-progress"}
+    async with _async_client(h) as client:
+        first = await client.post("/api/apps/twilio/transfer-result", data=first_dial)
+        assert "ConversationRelay" in first.text
+        await h.engine.transfer_call(CALL, "+4952233344455")  # dial #2
+        assert h.state.metadata.get("transferring") is True
+        step = h.session.step
+        late = await client.post("/api/apps/twilio/transfer-result", data=first_dial)
+        assert late.text == "<Response/>"
+        assert results == ["busy"]
+        assert h.state.metadata.get("transferring") is True
+        assert (h.sm.phase, h.session.step) == (CallPhase.TAKE_MESSAGE, step)
+        second_dial = {**first_dial, "DialCallStatus": "no-answer", "DialCallSid": "CAdial2"}
+        second = await client.post("/api/apps/twilio/transfer-result", data=second_dial)
+    assert "ConversationRelay" in second.text
+    assert results == ["busy", "no-answer"]
+    assert h.sm.phase == CallPhase.TAKE_MESSAGE
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_transfer_result_for_a_call_not_transferring_is_ignored(monkeypatch):
+    """A dial result for a live call that is not in a <Dial> (forged, or replayed
+    after the call came back) is a no-op: nothing counted, the session left
+    alone, and no hang-up of the conversation in progress."""
+    h = await _start(settings=_transfer_settings())
+    results = _count_transfer_results(monkeypatch)
+    phase = h.sm.phase
+    async with _async_client(h) as client:
+        response = await client.post(
+            "/api/apps/twilio/transfer-result",
+            data={"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial", "CallStatus": "in-progress"},
+        )
+    assert response.text == "<Response/>"
+    assert results == []
+    assert h.sm.phase == phase
+    assert h.engine.get_call_state(CALL) is h.state
 
 
 async def test_lost_transfer_state_retry_replays_reconnect(monkeypatch):
