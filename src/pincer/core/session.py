@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Sessions held in memory at once; past it the least recently used is
+# persisted and dropped, and reloads from the database on its next turn.
+_DEFAULT_MAX_CACHED_SESSIONS = 1024
 
 
 def _session_key(user_id: str, channel: str) -> str:
@@ -86,11 +91,12 @@ class Session:
 class SessionManager:
     """Async SQLite-backed session store."""
 
-    def __init__(self, db_path: Path, max_messages: int = 50) -> None:
+    def __init__(self, db_path: Path, max_messages: int = 50, max_cached: int = _DEFAULT_MAX_CACHED_SESSIONS) -> None:
         self._db_path = db_path
         self._max_messages = max_messages
+        self._max_cached = max_cached
         self._service: SessionService | None = None
-        self._cache: dict[str, Session] = {}
+        self._cache: OrderedDict[str, Session] = OrderedDict()
 
     async def initialize(self) -> None:
         """Bring the database to head and attach the store.
@@ -137,6 +143,7 @@ class SessionManager:
             key = _session_key(user_id, channel)
 
         if key in self._cache:
+            self._cache.move_to_end(key)
             return self._cache[key]
 
         row = await self._store.load(key, user_id=user_id, channel=channel, legacy_fallback=not session_key)
@@ -162,6 +169,12 @@ class SessionManager:
             )
 
         self._cache[key] = session
+        # Known race: a session evicted while a turn on it is in flight is
+        # reloaded as a second object by the next request, and the last
+        # write wins. It takes more than `max_cached` other keys within one
+        # turn, so only a client minting new conversation ids gets near it.
+        while len(self._cache) > self._max_cached:
+            await self.evict(next(iter(self._cache)))
         return session
 
     async def add_message(self, session: Session, message: LLMMessage) -> None:
