@@ -119,7 +119,49 @@ silently open.
   API access; `pincer identity revoke <name>` does (password, API key and
   sessions).
 
+#### Group triggers: comma-separated lists, whole-word matching
+
+`PINCER_TELEGRAM_GROUP_TRIGGER` and `PINCER_WHATSAPP_GROUP_TRIGGER` now take a
+comma-separated list of words or phrases, e.g.
+`pincer,hey pincer,@3Days Pincer`. Each entry matches case-insensitively as a
+whole word or phrase; the words of a phrase may be separated by any whitespace
+(spaces, tabs, newlines, non-breaking spaces), and an entry starting with `@`
+only matches when the `@` is typed. Entries cannot contain commas.
+
+> **Behaviour change.** Triggers no longer match as substrings: `pincer` no
+> longer fires on "pincers" or "@pincer_bot", and a partial trigger such as
+> `pinc` stops matching "pincer". Use the full word instead.
+>
+> - A comma now always separates entries. An existing value such as
+>   `hey, pincer` becomes two triggers, `hey` and `pincer`, and fires on any
+>   "hey". Remove the comma (`hey pincer`) to keep it a single phrase.
+> - Scripts written without spaces between words (Chinese, Japanese, Korean,
+>   Thai, Lao, Khmer, Myanmar) keep substring-style matching: `钳子` still
+>   matches "请钳子帮忙". Word boundaries only apply against letters of
+>   space-separated scripts such as Latin or Cyrillic.
+
+On WhatsApp, picking the bot in the @-picker inserts its phone number, or its
+LID in LID-addressed groups. Both are detected through the mentioned JID
+without any trigger entry (the LID once the bot has seen one of the owner's own
+messages); a literal `@pincer` entry only helps when someone types it by hand.
+Group mentions and triggers in image and document captions are now detected
+too (video has no content path, so video captions still don't trigger), and a
+document's caption is now passed to the agent along with the file. The bot's
+own number only matches as a whole number.
+
+On Telegram, a mention after an emoji is now detected (entity offsets are
+UTF-16), and `/command@<bot username>` counts as a mention.
+
 ### Added
+
+#### `pincer telephony reclassify`
+
+Corrects the failure code of historical outbound calls that never reached a
+person, from the `call.provider_status` / `call.amd_verdict` events on their
+telemetry timeline. Dry run by default (`--since 30d`, `--json`); `--apply`
+updates `voice_calls` and the telemetry call row in one transaction and writes
+a `telephony.reclassify` audit row. Idempotent. Only calls inside the telemetry
+retention window (`PINCER_TELEPHONY_TELEMETRY_RETENTION_DAYS`) can be corrected.
 
 #### Storage browser API: `/api/storage`
 
@@ -217,6 +259,15 @@ mounting a directory. Install the new `remote-skills` extra
     suggests an edge when none is set.
   - Ruff's banned-api rule keeps `twilio.rest` out of every other module.
   - The unused `voice/transfer.py` conference-transfer prototype was removed.
+- Outbound calls that were busy, unanswered, failed, cancelled or reached
+  voicemail were recorded as completed (or, for late voicemail, as callee
+  hang-ups). They now get their own failure codes, which inflated success
+  rate, SLO and GA-gate numbers before. `pincer telephony reclassify` corrects
+  history within the telemetry retention window. The user's report for such a
+  call now says plainly that it did not connect and why, in their language
+  (en/de/uk), without a transcript link — including calls still ringing when
+  the assistant was restarted, reaped by the watchdog, or ended without a
+  recorded cause.
 - `pincer doctor` and `GET /api/doctor` now check the configured `skills_dir`;
   they always looked at `~/.pincer/skills` before.
 - **Voice: barge-in works on live calls.** The transport read loops (the

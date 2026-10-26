@@ -15,7 +15,10 @@ class ChannelSettings(BaseModel):
     )
     telegram_group_trigger: str = Field(
         default="pincer",
-        description="Trigger word for group chat mentions",
+        description=(
+            "Comma-separated trigger words/phrases for group chats "
+            "(whole-word, case-insensitive; `@name` requires the @)"
+        ),
     )
 
     # ── Discord ───────────────────────────────────────────
@@ -45,7 +48,10 @@ class ChannelSettings(BaseModel):
     )
     whatsapp_group_trigger: str = Field(
         default="pincer",
-        description="Trigger word for group chat mentions",
+        description=(
+            "Comma-separated trigger words/phrases for group chats "
+            "(whole-word, case-insensitive; `@name` requires the @)"
+        ),
     )
     whatsapp_show_progress: bool = Field(
         default=True,

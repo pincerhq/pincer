@@ -180,6 +180,26 @@ class IdentityService(DatabaseService):
         async with session_scope(self._url) as session:
             await ChannelIdentityRepository(session).link(channel, channel_user_id, pincer_user_id)
 
+    async def replace_channel_links(
+        self, pincer_user_id: str, channel: str, new_id: str, old_ids: Iterable[str]
+    ) -> str | None:
+        """Re-key an identity on one channel: link `new_id`, drop `old_ids`.
+
+        One transaction, so the identity is never left with neither id. If
+        `new_id` turns out to belong to another identity by now, nothing
+        changes and that owner is returned; None means the re-key happened.
+        """
+        async with session_scope(self._url) as session:
+            links = ChannelIdentityRepository(session)
+            owner = await links.user_for(channel, new_id)
+            if owner is not None and owner != pincer_user_id:
+                return owner
+            await links.link(channel, new_id, pincer_user_id)
+            for old_id in old_ids:
+                if old_id != new_id:
+                    await links.unlink(channel, old_id)
+        return None
+
     async def rename_identity(self, old_id: str, new_id: str) -> None:
         """Move an identity to a new id: profile, links, credentials and its sessions.
 

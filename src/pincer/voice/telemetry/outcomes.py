@@ -56,6 +56,10 @@ _ENDED_BY_PARTY: frozenset[FailureCode] = frozenset(
     }
 )
 
+#: Terminal statuses of a call row (see `repositories.telemetry.LIVE_STATUSES`).
+STATUS_COMPLETED = "completed"
+STATUS_FAILED = "failed"
+
 
 def categorise(code: FailureCode | str | None) -> FailureCategory:
     """Map a failure code onto its reporting category."""
@@ -74,6 +78,18 @@ def categorise(code: FailureCode | str | None) -> FailureCategory:
     if parsed in _ENDED_BY_PARTY:
         return FailureCategory.ENDED_BY_PARTY
     return FailureCategory.TECHNICAL
+
+
+def outcome_fields(status: str, failure_code: str, termination_reason: str, outcome: str = "") -> dict[str, str]:
+    """A finished call row's outcome columns. The live writer (`CallTracer.finish`)
+    and the backfill (`reclassify.apply`) both build them here, so they cannot drift."""
+    return {
+        "status": status,
+        "outcome": outcome or status,
+        "failure_code": failure_code,
+        "failure_category": str(categorise(failure_code or None)),
+        "termination_reason": termination_reason,
+    }
 
 
 def is_unexpected_disconnect(code: FailureCode | str | None) -> bool:

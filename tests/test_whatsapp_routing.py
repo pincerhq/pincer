@@ -1,5 +1,6 @@
 """Tests for WhatsApp message routing (self-chat vs outgoing vs allowlist vs groups)."""
 
+import asyncio
 import sys
 import time
 from types import ModuleType
@@ -65,10 +66,11 @@ _ensure_neonize_mocks()
 if "pincer.channels.whatsapp" in sys.modules:
     del sys.modules["pincer.channels.whatsapp"]
 
-from pincer.channels.whatsapp import WhatsAppChannel  # noqa: E402
+from pincer.channels.whatsapp import WhatsAppChannel, _active_group  # noqa: E402
 
 OWNER_PHONE = "491622549781"
 OTHER_PHONE = "4917612345678"
+TOM_LID = "207855026221128"
 
 
 def _make_settings(
@@ -92,6 +94,8 @@ def _make_message_event(
     chat_jid: str = "1234@s.whatsapp.net",
     chat_server: str = "s.whatsapp.net",
     sender_server: str = "s.whatsapp.net",
+    sender_alt_user: str = "",
+    sender_alt_server: str = "",
     msg_id: str = "test-msg-id",
     mentioned_jid: str | None = None,
     message_text: str = "hello",
@@ -106,6 +110,10 @@ def _make_message_event(
     source.Sender = MagicMock()
     source.Sender.User = sender_user
     source.Sender.Server = sender_server
+    # Set explicitly: MagicMock attributes are truthy.
+    source.SenderAlt = MagicMock()
+    source.SenderAlt.User = sender_alt_user
+    source.SenderAlt.Server = sender_alt_server
 
     info = MagicMock()
     info.ID = msg_id
@@ -700,6 +708,390 @@ class TestWhatsAppRouting:
         ch._handler.assert_not_called()
         ch._extract_message.assert_not_called()
         assert "echo-msg-id" not in ch._recent_sent_ids
+
+
+def _pn_client(pn_user: str = "", error: Exception | None = None):
+    """A client whose whatsmeow store maps a LID to `pn_user` ("" = unknown)."""
+    client = MagicMock()
+    client.get_pn_from_lid = AsyncMock(
+        side_effect=error, return_value=MagicMock(User=pn_user, Server="s.whatsapp.net" if pn_user else "")
+    )
+    client.send_message = AsyncMock()
+    return client
+
+
+def _promoting_channel():
+    """Guests disallowed; the identity map knows OTHER_PHONE as a placeholder,
+    and promote_channel_id swaps in the LID, like the real resolver."""
+    settings = _make_settings(whatsapp_self_chat_only=False)
+    settings.whatsapp_guests_allowed = False
+    ch = WhatsAppChannel(settings, identity=AsyncMock())
+    ch._identity.has_config = True
+    known = {OTHER_PHONE}
+
+    async def fake_promote(channel, real_id, placeholders):
+        if any(p in known for p in placeholders):
+            known.difference_update(placeholders)
+            known.add(real_id)
+            return "tom"
+        return None
+
+    async def fake_is_guest(channel, candidate):
+        return candidate not in known
+
+    ch._identity.promote_channel_id = AsyncMock(side_effect=fake_promote)
+    ch._identity.is_guest = AsyncMock(side_effect=fake_is_guest)
+    ch._own_jid = OWNER_PHONE
+    ch._handler = AsyncMock(return_value="ok")
+    ch._extract_message = AsyncMock(
+        return_value=IncomingMessage(
+            user_id=TOM_LID,
+            channel="whatsapp",
+            text="hi",
+            channel_type=ChannelType.WHATSAPP,
+            reply_to_message_id="x",
+        )
+    )
+    return ch
+
+
+def _lid_dm(**kwargs):
+    event, _, _ = _make_message_event(
+        from_me=False,
+        chat_user=TOM_LID,
+        sender_user=TOM_LID,
+        chat_server="lid",
+        sender_server="lid",
+        chat_jid=f"{TOM_LID}@lid",
+        **kwargs,
+    )
+    return event
+
+
+@pytest.mark.asyncio
+class TestLidPromotion:
+    """A contact seeded by phone is re-keyed to their LID on their first message."""
+
+    async def test_lid_dm_with_sender_alt_is_promoted_and_routed(self):
+        ch = _promoting_channel()
+        client = _pn_client()
+
+        await ch._on_message(client, _lid_dm(sender_alt_user=OTHER_PHONE, sender_alt_server="s.whatsapp.net"))
+
+        ch._identity.promote_channel_id.assert_awaited_once_with(ChannelType.WHATSAPP, TOM_LID, [OTHER_PHONE])
+        client.get_pn_from_lid.assert_not_called()
+        ch._handler.assert_called_once()
+        # The phone is not offered to the middleware, which would link it back.
+        incoming = ch._handler.await_args.args[0]
+        assert OTHER_PHONE not in (incoming.alt_user_ids or [])
+
+    async def test_lid_dm_falls_back_to_the_store(self):
+        ch = _promoting_channel()
+        client = _pn_client(OTHER_PHONE)
+
+        await ch._on_message(client, _lid_dm())
+
+        client.get_pn_from_lid.assert_awaited_once()
+        ch._identity.promote_channel_id.assert_awaited_once_with(ChannelType.WHATSAPP, TOM_LID, [OTHER_PHONE])
+        ch._handler.assert_called_once()
+
+    async def test_store_lookup_failure_is_treated_as_guest(self):
+        ch = _promoting_channel()
+        client = _pn_client(error=RuntimeError("GetJIDFromStoreError"))
+
+        await ch._on_message(client, _lid_dm())
+
+        ch._identity.promote_channel_id.assert_not_called()
+        ch._handler.assert_not_called()
+
+    async def test_second_message_skips_the_lookup(self):
+        ch = _promoting_channel()
+        client = _pn_client(OTHER_PHONE)
+
+        await ch._on_message(client, _lid_dm(msg_id="m1"))
+        await ch._on_message(client, _lid_dm(msg_id="m2"))
+
+        client.get_pn_from_lid.assert_awaited_once()
+        ch._identity.promote_channel_id.assert_awaited_once()
+        assert ch._handler.await_count == 2
+
+    async def test_group_mention_promotes_the_sender_not_the_group(self):
+        ch = _promoting_channel()
+        client = _pn_client()
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user="120363000000000000",
+            chat_server="g.us",
+            sender_user=TOM_LID,
+            sender_server="lid",
+            sender_alt_user=OTHER_PHONE,
+            sender_alt_server="s.whatsapp.net",
+            is_group=True,
+            message_text=f"hey {OWNER_PHONE} what's up?",
+        )
+
+        await ch._on_message(client, event)
+
+        ch._identity.promote_channel_id.assert_awaited_once_with(ChannelType.WHATSAPP, TOM_LID, [OTHER_PHONE])
+        assert ch._identity.is_guest.await_args_list == [call(ChannelType.WHATSAPP, TOM_LID)]
+        ch._handler.assert_called_once()
+
+    async def test_store_miss_is_retried_on_the_next_message(self):
+        """No SenderAlt and an empty store: not marked done, so a later message
+        that carries SenderAlt still promotes."""
+        ch = _promoting_channel()
+        client = _pn_client()
+
+        await ch._on_message(client, _lid_dm(msg_id="m1"))
+        ch._handler.assert_not_called()
+
+        await ch._on_message(
+            client, _lid_dm(msg_id="m2", sender_alt_user=OTHER_PHONE, sender_alt_server="s.whatsapp.net")
+        )
+        ch._identity.promote_channel_id.assert_awaited_once_with(ChannelType.WHATSAPP, TOM_LID, [OTHER_PHONE])
+        ch._handler.assert_called_once()
+
+    async def test_failed_promotion_is_retried_on_the_next_message(self):
+        ch = _promoting_channel()
+        promote = ch._identity.promote_channel_id.side_effect
+        failures = [TimeoutError("seeding")]
+
+        async def fail_once(*args):
+            if failures:
+                raise failures.pop()
+            return await promote(*args)
+
+        ch._identity.promote_channel_id.side_effect = fail_once
+        client = _pn_client(OTHER_PHONE)
+
+        await ch._on_message(client, _lid_dm(msg_id="m1"))
+        ch._handler.assert_not_called()
+
+        await ch._on_message(client, _lid_dm(msg_id="m2"))
+        assert ch._identity.promote_channel_id.await_count == 2
+        ch._handler.assert_called_once()
+
+    async def test_concurrent_first_messages_share_one_lookup(self):
+        ch = _promoting_channel()
+        client = _pn_client(OTHER_PHONE)
+        release = asyncio.Event()
+        pn = client.get_pn_from_lid.return_value
+
+        async def slow_lookup(_jid):
+            await release.wait()
+            return pn
+
+        client.get_pn_from_lid.side_effect = slow_lookup
+        first = asyncio.create_task(ch._on_message(client, _lid_dm(msg_id="m1")))
+        second = asyncio.create_task(ch._on_message(client, _lid_dm(msg_id="m2")))
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(first, second)
+
+        client.get_pn_from_lid.assert_awaited_once()
+        ch._identity.promote_channel_id.assert_awaited_once()
+        assert ch._handler.await_count == 2
+        assert not ch._lid_checks
+
+    async def test_unmentioned_group_message_is_not_looked_up(self):
+        ch = _promoting_channel()
+        client = _pn_client(OTHER_PHONE)
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user="120363000000000000",
+            chat_server="g.us",
+            sender_user=TOM_LID,
+            sender_server="lid",
+            is_group=True,
+            message_text="just chatting",
+        )
+
+        await ch._on_message(client, event)
+
+        client.get_pn_from_lid.assert_not_called()
+        ch._identity.promote_channel_id.assert_not_called()
+
+    async def test_self_chat_only_dm_is_not_looked_up(self):
+        ch = _promoting_channel()
+        ch._settings.whatsapp_self_chat_only = True
+        client = _pn_client(OTHER_PHONE)
+
+        await ch._on_message(client, _lid_dm())
+
+        client.get_pn_from_lid.assert_not_called()
+        ch._handler.assert_not_called()
+
+    async def test_pn_addressed_sender_is_not_looked_up(self):
+        ch = _promoting_channel()
+        client = _pn_client()
+        event, _, _ = _make_message_event(from_me=False, chat_user=OTHER_PHONE, sender_user=OTHER_PHONE)
+
+        await ch._on_message(client, event)
+
+        ch._identity.promote_channel_id.assert_not_called()
+        client.get_pn_from_lid.assert_not_called()
+        ch._handler.assert_called_once()
+
+
+@pytest.fixture
+def captured(monkeypatch):
+    """build_jid returning "user@server" strings."""
+    # Other test files del+reimport the module: patch the class's own globals.
+    wa_globals = WhatsAppChannel._jid_for.__globals__
+    calls: list[tuple] = []
+
+    def fake_build_jid(user, server=None):
+        calls.append((user, server))
+        return f"{user}@{server or 's.whatsapp.net'}"
+
+    monkeypatch.setitem(wa_globals, "build_jid", fake_build_jid)
+    return calls
+
+
+@pytest.mark.asyncio
+class TestGroupReplyTarget:
+    """A group is a reply target only while its message is being handled, so a
+    later proactive send to the sender never lands in the group."""
+
+    def _group_event(self, text=f"hey {OWNER_PHONE} what's up?"):
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user="120363000000000000",
+            chat_server="g.us",
+            sender_user=TOM_LID,
+            sender_server="lid",
+            is_group=True,
+            message_text=text,
+        )
+        return event
+
+    async def test_prompts_go_to_the_group_only_while_handling(self, captured):
+        ch = _promoting_channel()
+        ch._client = _pn_client(OTHER_PHONE)
+        during: list[str] = []
+
+        async def handler(_incoming):
+            during.append(await ch._jid_for(TOM_LID))
+            return "ok"
+
+        ch._handler = AsyncMock(side_effect=handler)
+        await ch._on_message(ch._client, self._group_event())
+
+        assert during == ["120363000000000000@g.us"]
+        assert ch._reply_targets[TOM_LID] == (TOM_LID, "lid")
+        assert _active_group.get() is None
+        assert await ch._jid_for(TOM_LID) == f"{TOM_LID}@lid"
+
+    async def test_group_target_is_dropped_when_the_handler_fails(self, captured):
+        ch = _promoting_channel()
+        ch._client = _pn_client(OTHER_PHONE)
+        ch._handler = AsyncMock(side_effect=RuntimeError("boom"))
+
+        await ch._on_message(ch._client, self._group_event())
+
+        assert _active_group.get() is None
+
+    async def test_send_from_another_task_skips_the_group(self, captured):
+        """A scheduler reminder sent while the sender's group message is being
+        handled goes to their DM, not the group."""
+        ch = _promoting_channel()
+        ch._client = _pn_client(OTHER_PHONE)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def handler(_incoming):
+            entered.set()
+            await release.wait()
+            return None
+
+        ch._handler = AsyncMock(side_effect=handler)
+        handling = asyncio.create_task(ch._on_message(ch._client, self._group_event()))
+        await entered.wait()
+
+        reminder = asyncio.create_task(ch._jid_for(TOM_LID))
+        assert await reminder == f"{TOM_LID}@lid"
+
+        release.set()
+        await handling
+
+    async def test_concurrent_dm_skips_the_group(self, captured):
+        ch = _promoting_channel()
+        ch._client = _pn_client(OTHER_PHONE)
+        entered, release = asyncio.Event(), asyncio.Event()
+        dm_targets: list[str] = []
+
+        async def handler(_incoming):
+            if not entered.is_set():
+                entered.set()
+                await release.wait()
+            else:
+                dm_targets.append(await ch._jid_for(TOM_LID))
+            return None
+
+        ch._handler = AsyncMock(side_effect=handler)
+        group = asyncio.create_task(ch._on_message(ch._client, self._group_event()))
+        await entered.wait()
+
+        await ch._on_message(ch._client, _lid_dm())
+        assert dm_targets == [f"{TOM_LID}@lid"]
+
+        release.set()
+        await group
+
+    async def test_group_message_learns_the_senders_lid_address(self, captured):
+        """A contact who only writes in groups still gets reminders on "@lid"."""
+        ch = _promoting_channel()
+        ch._client = _pn_client()
+        ch._not_lids.add(TOM_LID)
+
+        await ch._on_message(ch._client, self._group_event(text="just chatting"))
+
+        assert ch._reply_targets[TOM_LID] == (TOM_LID, "lid")
+        assert ch._reply_targets[TOM_LID] != ("120363000000000000", "g.us")
+        assert TOM_LID not in ch._not_lids
+        assert await ch._jid_for(TOM_LID) == f"{TOM_LID}@lid"
+
+    async def test_dm_still_sets_the_target(self, captured):
+        ch = _promoting_channel()
+        client = _pn_client(OTHER_PHONE)
+
+        await ch._on_message(client, _lid_dm())
+
+        assert ch._reply_targets[TOM_LID] == (TOM_LID, "lid")
+
+
+@pytest.mark.asyncio
+class TestJidForBareLid:
+    """Sends with no inbound message this run (scheduler, notifications)."""
+
+    async def test_lid_known_to_the_store_goes_to_lid(self, captured):
+        ch = WhatsAppChannel(_make_settings())
+        ch._client = _pn_client(OTHER_PHONE)
+
+        assert await ch._jid_for(TOM_LID) == f"{TOM_LID}@lid"
+        assert ch._reply_targets[TOM_LID] == (TOM_LID, "lid")
+        # Cached: no second store lookup.
+        assert await ch._jid_for(TOM_LID) == f"{TOM_LID}@lid"
+        ch._client.get_pn_from_lid.assert_awaited_once()
+
+    async def test_unknown_id_keeps_the_default_server(self, captured):
+        ch = WhatsAppChannel(_make_settings())
+        ch._client = _pn_client()
+
+        assert await ch._jid_for(OTHER_PHONE) == f"{OTHER_PHONE}@s.whatsapp.net"
+        assert OTHER_PHONE not in ch._reply_targets
+        # The miss is cached: no store lookup on every send.
+        assert await ch._jid_for(OTHER_PHONE) == f"{OTHER_PHONE}@s.whatsapp.net"
+        ch._client.get_pn_from_lid.assert_awaited_once()
+
+    async def test_store_error_keeps_the_default_server(self, captured):
+        ch = WhatsAppChannel(_make_settings())
+        ch._client = _pn_client(error=RuntimeError("boom"))
+
+        assert await ch._jid_for(OTHER_PHONE) == f"{OTHER_PHONE}@s.whatsapp.net"
+        assert OTHER_PHONE not in ch._not_lids
+        # The failure is not cached: once the store answers, the LID is found.
+        ch._client = _pn_client(TOM_LID)
+        assert await ch._jid_for(OTHER_PHONE) == f"{OTHER_PHONE}@lid"
 
 
 class TestIsSelfChat:

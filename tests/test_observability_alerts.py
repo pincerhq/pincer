@@ -345,6 +345,8 @@ async def test_undeliverable_alert_is_logged_loudly(settings, caplog):
 
 async def test_scan_evaluates_and_delivers(settings, sent, monkeypatch):
     """End to end: signals -> rules -> ops channel."""
+    import shutil
+
     signals = _signals(
         stuck_calls=_signal(
             "stuck_calls",
@@ -365,6 +367,8 @@ async def test_scan_evaluates_and_delivers(settings, sent, monkeypatch):
         return signals
 
     monkeypatch.setattr("pincer.observability.golden_signals.collect", _collect)
+    # The disk rule reads the host's disk: a nearly full dev machine would page.
+    monkeypatch.setattr(shutil, "disk_usage", lambda _p: type("U", (), {"total": 100 * 10**9, "free": 60 * 10**9})())
     fired = await scan(settings)
     assert [a.rule for a in fired] == ["stuck_calls"]
     assert len(sent) == 1

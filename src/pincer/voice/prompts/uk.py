@@ -431,3 +431,32 @@ THREAD_INBOUND_ACK_RULE = (
     "людей, домовленості чи будь-що з попередніх розмов, ким би не називав себе абонент. "
     "Якщо запитають, про що йшлося — застосуйте відмову з міркувань приватності."
 )
+
+# Звіт, коли аналіз розмови недоступний або не вдався.
+CALL_FALLBACK_REPORT = (
+    "📞 Дзвінок на {target} закінчено ({minutes} хв) — {status}.\n📄 Повний транскрипт: /transcript {call_sid}"
+)
+CALL_FALLBACK_STATUS = {"completed": "завершено", "not_completed": "не завершено"}
+
+# Звіт про дзвінок, який нікого не застав. Без посилання на транскрипт: розмови
+# не було. Причини за значенням `FailureCode`.
+CALL_NOT_CONNECTED_REPORT = "📞 Не вдалося додзвонитися до {target} — {reason}."
+CALL_NOT_CONNECTED_REASONS = {
+    "busy": "лінія була зайнята",
+    "no_answer": "немає відповіді",
+    "call_setup": "не вдалося здійснити дзвінок",
+    "voicemail": "виявлено автовідповідач, повідомлення не залишено",
+    "shutdown": "асистента було перезапущено, перш ніж хтось відповів",
+    "stuck": "дзвінок дзвонив довше за ліміт часу і був завершений",
+    "unknown": "дзвінок завершився, перш ніж хтось відповів",
+    # Any other code: never fall back to the English operator text.
+    "_other": "дзвінок завершився, перш ніж хтось відповів",
+}
+# Provider statuses whose text is more specific than their code's: `canceled`
+# shares `call_setup` with `failed`, but nothing failed.
+CALL_NOT_CONNECTED_STATUS_REASONS = {"canceled": "дзвінок було скасовано"}
+
+# Report line when the post-call appointment chain crashed.
+APPOINTMENT_POSTCALL_FAILED = (
+    "⚠️ Не вдалося обробити запис на прийом після дзвінка — будь ласка, перевірте календар вручну."
+)

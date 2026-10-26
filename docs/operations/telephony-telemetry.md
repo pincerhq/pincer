@@ -363,6 +363,13 @@ uv run pytest tests/test_telephony_overhead.py -s --no-cov
    that never connected and even for calls that were not sampled.
 2. Read `failure_code`, `failure_category` and `termination_reason` on the call
    header. `callee_unavailable` and `policy_declined` mean nothing is broken.
+   When something told us *why* the call ended (a Twilio busy / no-answer /
+   failed / canceled status, an AMD voicemail verdict, a shutdown drain, the
+   stuck-call reaper), it is recorded on the call as `end_code` (a
+   `FailureCode` value, first writer wins). That code becomes both
+   `failure_code` and `termination_reason`, whatever the state machine would
+   have inferred. An outbound call that ends unanswered with no recorded cause
+   is `unknown`, and a warning names its CallSid.
 3. The **telemetry gaps** banner says what is missing and why, so a sparse page
    reads as a known limit rather than a bug.
 4. Open the **event timeline**. `error`, `timeout` and `reconnect` events carry a

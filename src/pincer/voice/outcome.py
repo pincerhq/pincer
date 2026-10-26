@@ -394,6 +394,33 @@ def render_report(
     return "\n".join(lines)
 
 
+def not_connected_reason(code: str, language: str = "en", provider_status: str = "") -> str:
+    """Why a call reached nobody, in the user's language: from the provider
+    status when it has its own text, else from the failure code."""
+    from pincer.observability.failure_codes import describe
+    from pincer.voice.prompts import get_prompt
+
+    by_status = get_prompt("CALL_NOT_CONNECTED_STATUS_REASONS", language) or {}
+    if provider_status in by_status:
+        return str(by_status[provider_status])
+    reasons = get_prompt("CALL_NOT_CONNECTED_REASONS", language) or {}
+    if code in reasons:
+        return str(reasons[code])
+    logger.info("no localized not-connected reason for %r (%s) — using the generic line", code, language)
+    return str(reasons.get("_other") or describe(code))
+
+
+def render_not_connected_report(
+    target_label: str, call_sid: str, code: str, language: str = "en", provider_status: str = ""
+) -> str:
+    """Report for a call that never reached a person: who, and why. No
+    transcript link, because there was no conversation."""
+    from pincer.voice.prompts import get_prompt
+
+    template = str(get_prompt("CALL_NOT_CONNECTED_REPORT", language))
+    return template.format(target=target_label, reason=not_connected_reason(code, language, provider_status))
+
+
 def render_fallback_report(
     target_label: str,
     duration_seconds: int,
@@ -402,15 +429,13 @@ def render_fallback_report(
     language: str = "en",
 ) -> str:
     """Minimal report when extraction is unavailable or failed (never blocks)."""
-    lang = "de" if language.lower().startswith("de") else "en"
-    if lang == "de":
-        status = "abgeschlossen" if completed else "nicht abgeschlossen"
-        return (
-            f"📞 Anruf bei {target_label} beendet ({_fmt_duration(duration_seconds)} Min) — {status}.\n"
-            f"📄 Vollständiges Transkript: /transcript {call_sid}"
-        )
-    status = "completed" if completed else "did not complete"
-    return (
-        f"📞 Call with {target_label} ended ({_fmt_duration(duration_seconds)} min) — {status}.\n"
-        f"📄 Full transcript: /transcript {call_sid}"
+    from pincer.voice.prompts import get_prompt
+
+    statuses = get_prompt("CALL_FALLBACK_STATUS", language) or {}
+    template = str(get_prompt("CALL_FALLBACK_REPORT", language))
+    return template.format(
+        target=target_label,
+        minutes=_fmt_duration(duration_seconds),
+        status=statuses.get("completed" if completed else "not_completed", ""),
+        call_sid=call_sid,
     )

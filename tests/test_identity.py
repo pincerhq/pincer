@@ -8,6 +8,9 @@ import pytest_asyncio
 from pincer.channels.base import ChannelType
 from pincer.core.identity import IdentityProfile, IdentityResolver
 
+TOM_PHONE = "4917612345678"
+TOM_LID = "207855026221128"
+
 
 def _rows(resolver):
     """A connection to the resolver's database, for asserting on stored rows."""
@@ -1237,6 +1240,118 @@ class TestCleanup:
         ):
             assert (await cur.fetchone())[0] == 1
         assert await r.resolve(ChannelType.TELEGRAM, 12345) == uid
+
+
+@pytest.mark.asyncio
+class TestPromoteChannelId:
+    """A phone stored as a placeholder (LID unknown at seeding) is swapped for
+    the LID once a message reveals it."""
+
+    async def _seeded(self, tmp_path, config=f"tom@whatsapp:{TOM_PHONE}=telegram:111"):
+        r = IdentityResolver(tmp_path / "promote.db", identity_map_config=config)
+        await r.ensure_table()
+        # whatsmeow has never seen the phone: the lookup keeps it as is.
+        await r.seed_from_config({ChannelType.WHATSAPP: _StubChannel()})
+        r.mark_seeding_complete()
+        return r
+
+    async def _whatsapp_rows(self, r):
+        async with (
+            _rows(r) as db,
+            db.execute(
+                "SELECT channel_user_id, pincer_user_id FROM pincer_channel_identities WHERE channel = 'whatsapp'"
+            ) as cur,
+        ):
+            return sorted(await cur.fetchall())
+
+    async def test_rekeys_the_placeholder_to_the_lid(self, tmp_path, caplog):
+        r = await self._seeded(tmp_path)
+        assert await r.find(ChannelType.WHATSAPP, TOM_LID) is None
+
+        with caplog.at_level("INFO", logger="pincer.core.identity"):
+            owner = await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, [TOM_PHONE])
+
+        assert owner == "tom"
+        assert f"Identity re-keyed: tom whatsapp:{TOM_PHONE} → whatsapp:{TOM_LID}" in caplog.text
+        assert await self._whatsapp_rows(r) == [(TOM_LID, "tom")]
+        assert await r.find(ChannelType.WHATSAPP, TOM_LID) == "tom"
+        assert not await r.is_guest(ChannelType.WHATSAPP, TOM_LID)
+        # The identity itself is untouched: same profile, other channels kept.
+        assert await r._store.profile("tom") is not None
+        assert await r.find(ChannelType.TELEGRAM, 111) == "tom"
+        await r.touch_active_channel("tom", ChannelType.WHATSAPP)
+        assert await r.get_preferred_channel("tom") == (ChannelType.WHATSAPP, TOM_LID)
+
+    async def test_refuses_a_lid_owned_by_someone_else(self, tmp_path, caplog):
+        r = await self._seeded(tmp_path, f"tom@whatsapp:{TOM_PHONE},jane@whatsapp:{TOM_LID}")
+
+        with caplog.at_level("ERROR", logger="pincer.core.identity"):
+            owner = await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, [TOM_PHONE])
+
+        assert owner is None
+        assert "re-key refused" in caplog.text
+        assert await self._whatsapp_rows(r) == [(TOM_LID, "jane"), (TOM_PHONE, "tom")]
+
+    async def test_no_placeholder_linked_is_a_no_op(self, tmp_path):
+        r = await self._seeded(tmp_path)
+
+        assert await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, ["4900000000000"]) is None
+        assert await self._whatsapp_rows(r) == [(TOM_PHONE, "tom")]
+
+    async def test_second_call_is_a_no_op(self, tmp_path, caplog):
+        r = await self._seeded(tmp_path)
+        await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, [TOM_PHONE])
+
+        caplog.clear()
+        with caplog.at_level("INFO", logger="pincer.core.identity"):
+            assert await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, [TOM_PHONE]) == "tom"
+
+        assert "re-keyed" not in caplog.text
+        assert await self._whatsapp_rows(r) == [(TOM_LID, "tom")]
+
+    async def test_drops_a_placeholder_that_reappeared_next_to_the_lid(self, tmp_path):
+        """LID already linked, phone row back (whatsmeow store lost at a restart)."""
+        r = await self._seeded(tmp_path)
+        await r.link_if_new("tom", ChannelType.WHATSAPP, TOM_LID)
+
+        assert await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, [TOM_PHONE]) == "tom"
+        assert await self._whatsapp_rows(r) == [(TOM_LID, "tom")]
+
+    async def test_refuses_a_lid_linked_to_someone_else_mid_rekey(self, tmp_path, caplog):
+        """The LID gets an owner between the resolver's check and the transaction:
+        the store re-checks, so Tom keeps his phone instead of losing both."""
+        r = await self._seeded(tmp_path, f"tom@whatsapp:{TOM_PHONE},jane@telegram:222")
+        replace = r._store.replace_channel_links
+
+        async def racing_replace(*args):
+            await r._store.link_channel("jane", "whatsapp", TOM_LID)
+            return await replace(*args)
+
+        r._store.replace_channel_links = racing_replace
+        with caplog.at_level("ERROR", logger="pincer.core.identity"):
+            assert await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, [TOM_PHONE]) is None
+
+        assert "was linked to 'jane' while re-keying 'tom'" in caplog.text
+        assert await self._whatsapp_rows(r) == [(TOM_LID, "jane"), (TOM_PHONE, "tom")]
+
+    async def test_raises_when_seeding_never_completes(self, tmp_path):
+        """A timeout must not look like "no placeholder": the caller retries."""
+        r = IdentityResolver(tmp_path / "promote.db", identity_map_config=f"tom@whatsapp:{TOM_PHONE}")
+        await r.ensure_table()
+        r._SEEDING_WAIT_TIMEOUT = 0.01
+
+        with pytest.raises(TimeoutError):
+            await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, [TOM_PHONE])
+
+    async def test_cleanup_keeps_the_lid_once_the_phone_resolves_to_it(self, tmp_path):
+        r = await self._seeded(tmp_path)
+        await r.promote_channel_id(ChannelType.WHATSAPP, TOM_LID, [TOM_PHONE])
+
+        await r.cleanup({ChannelType.WHATSAPP: _StubChannel(result=TOM_LID)})
+        await r.seed_from_config({ChannelType.WHATSAPP: _StubChannel(result=TOM_LID)})
+
+        assert await self._whatsapp_rows(r) == [(TOM_LID, "tom")]
+        assert await r.find(ChannelType.TELEGRAM, 111) == "tom"
 
 
 @pytest.mark.asyncio

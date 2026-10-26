@@ -123,6 +123,26 @@ class TestPromptI18n:
         assert get_prompt("VOICE_VERIFY_PROMPT", "de") is not None
         assert get_prompt("LOW_CONFIDENCE_REPLY", "xx") == get_prompt("LOW_CONFIDENCE_REPLY", "en")
 
+    def test_not_connected_texts_exist_in_every_pack(self):
+        """No fallback to English for a report the user reads in their own language."""
+        from pincer.voice.prompts import de, en, uk
+
+        assert set(en.CALL_NOT_CONNECTED_REASONS) >= {
+            "busy",
+            "no_answer",
+            "call_setup",
+            "voicemail",
+            "shutdown",
+            "stuck",
+            "unknown",
+            "_other",
+        }
+        for pack in (en, de, uk):
+            assert "{target}" in pack.CALL_NOT_CONNECTED_REPORT
+            assert "{reason}" in pack.CALL_NOT_CONNECTED_REPORT
+            # A key added to one pack cannot be forgotten in another.
+            assert set(pack.CALL_NOT_CONNECTED_REASONS) == set(en.CALL_NOT_CONNECTED_REASONS)
+
     def test_german_fillers(self):
         phrases = get_filler_phrases("de")
         assert any("Moment" in p for p in phrases)

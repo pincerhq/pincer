@@ -168,16 +168,22 @@ class IdentityResolver:
         """
         if not self.has_config:
             return False
+        if not await self._wait_for_seeding():
+            return False
+        return await self.find(channel, channel_user_id) is None
+
+    async def _wait_for_seeding(self) -> bool:
+        """Wait for startup seeding; False if it is still running after the timeout."""
         try:
             await asyncio.wait_for(self._seeded.wait(), timeout=self._SEEDING_WAIT_TIMEOUT)
         except TimeoutError:
             logger.error(
                 "IdentityResolver: seeding still not complete after %.0fs — "
-                "failing open for this check to avoid hanging the channel handler",
+                "not waiting any longer, to avoid hanging the channel handler",
                 self._SEEDING_WAIT_TIMEOUT,
             )
             return False
-        return await self.find(channel, channel_user_id) is None
+        return True
 
     async def resolve(
         self,
@@ -216,6 +222,77 @@ class IdentityResolver:
         normalized = self._normalize_id(channel, channel_user_id)
         if not await self._find_existing(channel, normalized):
             await self._link_channel(pincer_user_id, channel, normalized)
+
+    async def promote_channel_id(
+        self,
+        channel: ChannelType,
+        real_id: str | int,
+        placeholder_ids: list[str],
+    ) -> str | None:
+        """Replace placeholder channel ids with the real one on the same identity.
+
+        A WhatsApp contact whose LID was unknown at seeding is stored under
+        their phone number; once a message reveals the LID, the phone row is
+        swapped for it. Returns the owning identity, or None when there is none
+        or the swap is refused.
+
+        Owners are looked up with `_find_existing` only: `find()` falls back to
+        the config mapping, which would re-create the placeholder row. Never
+        creates an identity, and never merges two: a real id that already
+        belongs to someone else is refused, as in `_claim_pairs`.
+
+        Waits for startup seeding first, like `is_guest`: the placeholder may
+        not be stored yet, so a timeout raises rather than finding nothing.
+        """
+        if self.has_config and not await self._wait_for_seeding():
+            raise TimeoutError("identity seeding not complete")
+        real = self._normalize_id(channel, real_id)
+        real_owner = await self._find_existing(channel, real)
+        linked: list[tuple[str, str]] = []
+        for placeholder in placeholder_ids:
+            normalized = self._normalize_id(channel, placeholder)
+            if normalized == real:
+                continue
+            owner = await self._find_existing(channel, normalized)
+            if owner:
+                linked.append((normalized, owner))
+        if not linked:
+            return real_owner
+
+        owners = {owner for _pid, owner in linked}
+        if real_owner:
+            owners.add(real_owner)
+        if len(owners) > 1:
+            logger.error(
+                "Identity re-key refused: %s:%s and placeholder(s) %s belong to different identities (%s) — "
+                "not merging them; fix the stored links",
+                channel.value,
+                real,
+                ", ".join(f"{channel.value}:{pid}" for pid, _owner in linked),
+                ", ".join(sorted(owners)),
+            )
+            return None
+
+        owner = owners.pop()
+        old_ids = [pid for pid, _owner in linked]
+        taken_by = await self._store.replace_channel_links(owner, channel.value, real, old_ids)
+        if taken_by is not None:
+            logger.error(
+                "Identity re-key refused: %s:%s was linked to %r while re-keying %r — not merging them",
+                channel.value,
+                real,
+                taken_by,
+                owner,
+            )
+            return None
+        logger.info(
+            "Identity re-keyed: %s %s → %s:%s",
+            owner,
+            ", ".join(f"{channel.value}:{pid}" for pid in old_ids),
+            channel.value,
+            real,
+        )
+        return owner
 
     async def _find_existing(self, channel: ChannelType, normalized_id: str) -> str | None:
         return await self._store.user_for_channel(channel.value, normalized_id)

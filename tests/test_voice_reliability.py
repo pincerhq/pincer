@@ -448,8 +448,8 @@ class TestAnsweringMachineDetection:
         assert response.status_code == 200
         engine.end_call.assert_called_once_with("CA_amd")
         # Live state -> the post-call pipeline delivers the report; the webhook
-        # records the reason instead of notifying directly.
-        assert state.metadata["end_reason"] == "voicemail detected, no message left"
+        # records the cause (a code, not display text) instead of notifying directly.
+        assert state.metadata["end_code"] == "voicemail"
 
     def test_human_answer_notifies_connected(self, webhook_client):
         client, engine = webhook_client
