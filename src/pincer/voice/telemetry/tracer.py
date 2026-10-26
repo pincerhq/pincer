@@ -54,6 +54,7 @@ _ALWAYS_RECORD: frozenset[str] = frozenset(
         str(EventName.DIAL_REQUESTED),
         str(EventName.DIAL_ACCEPTED),
         str(EventName.DIAL_REJECTED),
+        str(EventName.DIAL_UNKNOWN),
         str(EventName.PROVIDER_STATUS),
         str(EventName.AMD_VERDICT),
         str(EventName.CALL_ANSWERED),

@@ -632,6 +632,32 @@ async def test_a_rejected_dial_is_terminal(telemetry):
     assert aggregate.calls["active"] == 0
     assert aggregate.rates["technical_failure_rate"]["denominator"] == 2
     assert aggregate.rates["technical_failure_rate"]["numerator"] == 2
+    call = await queries.get_call(telemetry, "pending-aaa")
+    assert call is not None
+    assert (call["outcome"], call["termination_reason"]) == ("failed", "dial_rejected")
+
+
+async def test_a_timed_out_dial_with_unknown_outcome_is_not_a_rejection(telemetry):
+    """Twilio may have placed the call: the row says so, and stays a technical failure."""
+    hooks.dial_requested("pending-ddd", to_number="+4930111", engine="media_streams", language="de")
+    await hooks.dial_unknown("pending-ddd", error="TimeoutError: dial outcome unknown")
+    await _settle()
+
+    call = await queries.get_call(telemetry, "pending-ddd")
+    assert call is not None
+    assert call["status"] == "failed"
+    assert call["outcome"] == "dial_unknown"
+    assert call["termination_reason"] == "dial_unknown"
+    assert call["failure_code"] == "twilio_api"
+    assert call["failure_category"] == "technical"
+    names = [e["name"] for e in await queries.get_events(telemetry, call["call_id"])]
+    assert "call.dial_unknown" in names
+    assert "call.dial_rejected" not in names
+    assert runtime.tracer_for("pending-ddd") is None
+
+    aggregate = await queries.overview(telemetry, queries.CallFilters.for_hours(1))
+    assert aggregate.calls["active"] == 0
+    assert aggregate.rates["technical_failure_rate"]["numerator"] == 1
 
 
 async def test_a_rejected_dial_closes_even_when_the_write_backlog_is_full(telemetry, monkeypatch):

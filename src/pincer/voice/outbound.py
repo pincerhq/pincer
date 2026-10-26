@@ -230,7 +230,7 @@ async def _recover_timed_out_dial(
     except Exception:
         logger.exception("Lookup of a timed-out dial to %s failed", to_number)
     if call is None:
-        await telemetry.dial_rejected(trace_key, error="TimeoutError: dial outcome unknown")
+        await telemetry.dial_unknown(trace_key, error="TimeoutError: dial outcome unknown")
         logger.warning("Outbound dial to %s timed out with no call found; outcome unknown", to_number)
         return ""
     call_sid = str(call.sid)

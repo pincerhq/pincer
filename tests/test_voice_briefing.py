@@ -431,6 +431,50 @@ async def test_timed_out_dial_with_unknown_outcome_still_counts(voice):
     assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
 
 
+@pytest.fixture
+def dial_outcomes(monkeypatch):
+    """Which terminal dial hook make_phone_call called, and with what error."""
+    from pincer.voice.telemetry import hooks
+
+    seen: dict[str, list[str]] = {"rejected": [], "unknown": []}
+
+    async def rejected(temp_id: str, *, error: str) -> None:
+        seen["rejected"].append(error)
+
+    async def unknown(temp_id: str, *, error: str) -> None:
+        seen["unknown"].append(error)
+
+    monkeypatch.setattr(hooks, "dial_rejected", rejected)
+    # raising=False: before the hook existed this records the rejection instead of erroring in setup
+    monkeypatch.setattr(hooks, "dial_unknown", unknown, raising=False)
+    return seen
+
+
+async def test_timed_out_dial_with_unknown_outcome_is_recorded_as_unknown(voice, dial_outcomes):
+    """No call found → telemetry says "unknown", not "rejected"."""
+    voice.engine._rest._client = types.SimpleNamespace(calls=_TimedOutCalls([]))
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert "may still be ringing" in result
+    assert dial_outcomes == {"rejected": [], "unknown": ["TimeoutError: dial outcome unknown"]}
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+async def test_timed_out_dial_whose_lookup_fails_is_recorded_as_unknown(voice, dial_outcomes):
+    """The lookup itself failing leaves the outcome just as unknown."""
+
+    class LookupFails(_TimedOutCalls):
+        async def list_async(self, **kwargs: Any) -> list[Any]:
+            raise RuntimeError("twilio list down")
+
+    voice.engine._rest._client = types.SimpleNamespace(calls=LookupFails([]))
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert "may still be ringing" in result
+    assert dial_outcomes == {"rejected": [], "unknown": ["TimeoutError: dial outcome unknown"]}
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
 async def test_timed_out_dial_that_already_ended_is_not_promoted(voice):
     """The lookup finds the call, but it is over (declined, busy, hung up):
     promoting it would park a dead state in _active_calls that no status

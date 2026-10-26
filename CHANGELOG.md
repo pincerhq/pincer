@@ -259,6 +259,10 @@ mounting a directory. Install the new `remote-skills` extra
     suggests an edge when none is set.
   - Ruff's banned-api rule keeps `twilio.rest` out of every other module.
   - The unused `voice/transfer.py` conference-transfer prototype was removed.
+  - A dial whose request times out is not a rejection: Twilio may have placed
+    it. No live call found → telephony telemetry records `call.dial_unknown`
+    (outcome and termination `dial_unknown`, still `twilio_api`), not
+    `dial_rejected`.
 - Outbound calls that were busy, unanswered, failed, cancelled or reached
   voicemail were recorded as completed (or, for late voicemail, as callee
   hang-ups). They now get their own failure codes, which inflated success

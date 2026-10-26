@@ -8,7 +8,7 @@ and ...` gets skipped on the error paths, which are exactly the paths that need
 it most.
 
 Nothing in here awaits. The functions that must finish before the process
-forgets a call (`call_ended`, `call_declined`, `dial_rejected`) are async and
+forgets a call (`call_ended`, `call_declined`, `dial_rejected`, `dial_unknown`) are async and
 are awaited from teardown or a refusal path, neither of which is the audio path.
 """
 
@@ -153,19 +153,39 @@ async def dial_rejected(temp_id: str, *, error: str) -> None:
     and a background write dropped under backlog would leave it "active"
     forever. The error text stays on the event; the row gets only the code.
     """
+    await _finish_dial(temp_id, EventName.DIAL_REJECTED, error, termination_reason="dial_rejected")
+
+
+async def dial_unknown(temp_id: str, *, error: str) -> None:
+    """The dial request failed after it was sent, and no live call was found.
+
+    Twilio may still have placed the call, so this is not a rejection — but
+    nothing will ever re-key the temporary row, so it is closed now, like one.
+    Still `twilio_api`: the request to Twilio is what failed, and a slow
+    Twilio must keep showing on the technical failure rate.
+    """
+    await _finish_dial(
+        temp_id, EventName.DIAL_UNKNOWN, error, termination_reason="dial_unknown", outcome="dial_unknown"
+    )
+
+
+async def _finish_dial(
+    temp_id: str, name: EventName, error: str, *, termination_reason: str, outcome: str = ""
+) -> None:
     tracer = runtime.tracer_for(temp_id)
     if tracer is None:
         return
-    _safe(tracer.event, EventName.DIAL_REJECTED, error=error)
+    _safe(tracer.event, name, error=error)
     try:
         await tracer.finish(
             status="failed",
+            outcome=outcome,
             failure_code=FailureCode.TWILIO_API.value,
-            termination_reason="dial_rejected",
+            termination_reason=termination_reason,
             duration_s=0.0,
         )
     except Exception:  # pragma: no cover - defensive
-        logger.debug("rejected-dial finalisation failed", exc_info=True)
+        logger.debug("%s finalisation failed", termination_reason, exc_info=True)
     finally:
         runtime.forget(temp_id)
 

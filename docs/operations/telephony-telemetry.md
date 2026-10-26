@@ -70,6 +70,7 @@ webhook — but that projection never produces a duration.
 | `call.inbound_webhook` | Twilio POSTed `/webhook` |
 | `call.registered` | call state created |
 | `call.dial_requested` / `dial_accepted` / `dial_rejected` | outbound REST dial |
+| `call.dial_unknown` | the dial request failed after it was sent and no live call was found: Twilio may have placed it (`twilio_api`, termination `dial_unknown`) |
 | `call.provider_status` | a status callback (deduplicated on Twilio's `SequenceNumber`) |
 | `call.amd_verdict` | answering-machine detection result |
 | `call.media_stream_open` | relay `setup` / media `start` |

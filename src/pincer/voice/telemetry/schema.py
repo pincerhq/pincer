@@ -29,6 +29,7 @@ class EventName(StrEnum):
     DIAL_REQUESTED = "call.dial_requested"
     DIAL_ACCEPTED = "call.dial_accepted"
     DIAL_REJECTED = "call.dial_rejected"
+    DIAL_UNKNOWN = "call.dial_unknown"
     PROVIDER_STATUS = "call.provider_status"
     AMD_VERDICT = "call.amd_verdict"
     MEDIA_STREAM_OPEN = "call.media_stream_open"
