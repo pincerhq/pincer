@@ -29,6 +29,7 @@ _TABLES = [
 ]
 
 _NOW = "2026-10-10T12:00:00+00:00"
+_CONVERSATION = "22222222-2222-4222-8222-222222222222"
 
 
 @pytest.fixture
@@ -101,6 +102,39 @@ async def test_a_session_stored_under_the_old_key_is_still_found(url):
 
     row = await SessionService(url).load("unified:usr_a", user_id="12345", channel="telegram")
     assert row["session_id"] == "telegram:12345"  # the most recently updated one
+
+
+async def test_the_legacy_fallback_never_adopts_a_conversation_nested_under_the_key(url):
+    """A user whose web traffic has all gone through conversations has no
+    main session yet; the main session must start empty, not continue one
+    of the conversations."""
+    await _store_session(url, f"web:u:{_CONVERSATION}", user_id="u", channel="web")
+
+    row = await SessionService(url).load("web:u", user_id="u", channel="web")
+    assert row is None, f"adopted {row['session_id']}"
+
+
+async def test_the_legacy_fallback_still_finds_a_legacy_row_beside_newer_conversations(url):
+    """Only the requested key's own conversations are skipped: a session left
+    under an older key (here an identity merged into `u`) is still the main
+    session, even when a conversation was updated after it."""
+    await _store_session(url, "web:old", user_id="u", channel="web", at=5.0)
+    await _store_session(url, f"web:u:{_CONVERSATION}", user_id="u", channel="web", at=10.0)
+
+    row = await SessionService(url).load("web:u", user_id="u", channel="web")
+    assert row is not None
+    assert row["session_id"] == "web:old"
+
+
+async def test_the_nested_exclusion_escapes_like_wildcards(url):
+    """`_` in a user id is a literal, not LIKE's any-character: a session
+    that only matches `web:u_1:` as a wildcard is not one of u_1's
+    conversations, so the fallback still finds it."""
+    await _store_session(url, "web:uX1:thread", user_id="u_1", channel="web")
+
+    row = await SessionService(url).load("web:u_1", user_id="u_1", channel="web")
+    assert row is not None, "web:uX1:thread was excluded as if `_` were a wildcard"
+    assert row["session_id"] == "web:uX1:thread"
 
 
 async def test_an_unknown_session_is_none(url):

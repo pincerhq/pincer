@@ -22,18 +22,18 @@ if TYPE_CHECKING:
 class SessionRepository(BaseRepository[ChatSession, str]):
     model = ChatSession
 
-    async def newest_for(self, user_id: str, channel: str) -> ChatSession | None:
+    async def newest_for(self, user_id: str, channel: str, *, exclude_prefix: str | None = None) -> ChatSession | None:
         """The most recently updated session for a channel user.
 
         The fallback lookup for a session stored under the old
         `channel:user_id` key, before cross-channel identities existed.
+        Sessions whose id starts with `exclude_prefix` (matched literally,
+        `_` and `%` included) are skipped.
         """
-        stmt = (
-            select(ChatSession)
-            .where(col(ChatSession.user_id) == user_id, col(ChatSession.channel) == channel)
-            .order_by(col(ChatSession.updated_at).desc())
-            .limit(1)
-        )
+        stmt = select(ChatSession).where(col(ChatSession.user_id) == user_id, col(ChatSession.channel) == channel)
+        if exclude_prefix is not None:
+            stmt = stmt.where(~col(ChatSession.session_id).startswith(exclude_prefix, autoescape=True))
+        stmt = stmt.order_by(col(ChatSession.updated_at).desc()).limit(1)
         return (await self.session.exec(stmt)).first()
 
     async def save(self, values: dict[str, Any]) -> None:
