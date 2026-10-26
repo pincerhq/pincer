@@ -80,10 +80,10 @@ def locate_token(settings: Any) -> dict[str, Any] | None:
     """Return ``GoogleAuth`` keyword arguments for the configured token, or None.
 
     ``PINCER_GOOGLE_TOKEN_JSON`` wins (no files needed). Otherwise uses
-    ``google_credentials.json`` plus ``google_workspace_token.json`` in
-    ``settings.google_oauth_dir()``, falling back to the legacy calendar-only
-    ``google_token.json`` — which still enables the calendar part of the
-    Workspace tools.
+    ``google_workspace_token.json`` in ``settings.google_oauth_dir()``, falling
+    back to the legacy calendar-only ``google_token.json`` — which still enables
+    the calendar part of the Workspace tools. ``google_credentials.json`` is not
+    required: the token JSON already carries the OAuth client id and secret.
     """
     token_info = env_token_info(settings)
     if token_info is not None:
@@ -91,8 +91,6 @@ def locate_token(settings: Any) -> dict[str, Any] | None:
 
     oauth_dir = settings.google_oauth_dir()
     credentials_path = oauth_dir / "google_credentials.json"
-    if not credentials_path.exists():
-        return None
     for name in ("google_workspace_token.json", "google_token.json"):
         token_path = oauth_dir / name
         if token_path.exists():

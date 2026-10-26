@@ -102,6 +102,12 @@ def test_locate_token_files(tmp_path):
     assert locate_token(_settings(oauth_dir=tmp_path))["token_path"] == str(tmp_path / "google_workspace_token.json")
 
 
-def test_locate_token_none_without_credentials_file(tmp_path):
+def test_locate_token_works_without_credentials_file(tmp_path):
+    # The token JSON carries client_id/secret; the client file is only for the consent flow.
     (tmp_path / "google_workspace_token.json").write_text("{}")
+    assert locate_token(_settings(oauth_dir=tmp_path))["token_path"] == str(tmp_path / "google_workspace_token.json")
+
+
+def test_locate_token_none_without_token(tmp_path):
+    (tmp_path / "google_credentials.json").write_text("{}")
     assert locate_token(_settings(oauth_dir=tmp_path)) is None

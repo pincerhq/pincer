@@ -142,8 +142,16 @@ def scrubbed_env() -> dict[str, str]:
     """Return ``os.environ`` without secret-bearing variables (PINCER_*, GOOGLE_*, API keys, ...).
 
     For tools that run agent-supplied code with the host environment (shell,
-    python_exec): secrets such as PINCER_GOOGLE_TOKEN_JSON must not be one
-    ``os.environ`` lookup away from that code.
+    python_exec, unsandboxed skill scripts), so secrets such as
+    PINCER_GOOGLE_TOKEN_JSON are not simply inherited by that code.
+
+    Defence in depth only, not isolation: the child runs as the same user and
+    can still read the parent's start-up environment (``/proc/<ppid>/environ``
+    on Linux, ``ps -E`` on macOS). Real isolation needs a separate uid or
+    container for agent code.
+
+    The block list also drops non-secret config under those prefixes
+    (``AWS_PROFILE``, ``AZURE_CONFIG_DIR``, every ``PINCER_*``).
     """
     from pincer.mcp.sandbox import is_blocked_env_key
 

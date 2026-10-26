@@ -86,7 +86,7 @@ def test_sandbox_path_blocks_escape(tmp_path: Path, settings) -> None:
         _sandbox_path("/etc/passwd")
 
 
-# ── Secret env vars are not visible to agent-run code ────────────────────────
+# ── Agent-run code does not inherit secret env vars (defence in depth) ───────
 
 
 def test_scrubbed_env_drops_secrets_keeps_basics(monkeypatch) -> None:
@@ -109,7 +109,7 @@ def test_scrubbed_env_drops_secrets_keeps_basics(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_python_exec_cannot_read_secret_env(monkeypatch) -> None:
+async def test_python_exec_does_not_inherit_secret_env(monkeypatch) -> None:
     from pincer.tools.builtin.python_exec import python_exec
 
     monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", "super-secret-value")
@@ -119,7 +119,7 @@ async def test_python_exec_cannot_read_secret_env(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_shell_exec_cannot_read_secret_env(monkeypatch, settings) -> None:
+async def test_shell_exec_does_not_inherit_secret_env(monkeypatch, settings) -> None:
     from unittest.mock import patch
 
     from pincer.tools.builtin.shell import shell_exec
@@ -129,3 +129,17 @@ async def test_shell_exec_cannot_read_secret_env(monkeypatch, settings) -> None:
         result = await shell_exec('echo "[$PINCER_GOOGLE_TOKEN_JSON]"', workdir="/tmp")
     assert "super-secret-value" not in result
     assert "[]" in result
+
+
+@pytest.mark.asyncio
+async def test_unsandboxed_skill_script_does_not_inherit_secret_env(monkeypatch, tmp_path) -> None:
+    from pincer.tools.builtin.skills_tools import _run_unsandboxed
+
+    script = tmp_path / "show_env.py"
+    script.write_text("import os; print(repr(os.environ.get('PINCER_GOOGLE_TOKEN_JSON')))")
+    monkeypatch.setenv("PINCER_GOOGLE_TOKEN_JSON", "super-secret-value")
+
+    result = await _run_unsandboxed(script, [])
+
+    assert "super-secret-value" not in result
+    assert result == "None"

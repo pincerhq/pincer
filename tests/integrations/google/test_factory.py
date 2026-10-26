@@ -227,3 +227,89 @@ def test_env_token_calendar_only_is_partial(env):
     assert status["status"] == "partial"
     assert status["source"] == "env"
     assert status["enabled_services"] == ["calendar"]
+
+
+def test_token_file_without_credentials_file_works(env):
+    """`pincer google setup` with PINCER_GOOGLE_CREDENTIALS_JSON writes only the token file."""
+    oauth_dir, _ = env
+    _write_files(oauth_dir, ALL_SCOPES)
+    (oauth_dir / "google_credentials.json").unlink()
+
+    factory = get_google_factory()
+
+    assert factory is not None
+    assert factory.auth.source == "file"
+    assert factory.auth.get_credentials().token == "ya29.fake"
+
+
+# ── Refresh must not narrow the token's scopes ────────────────────────────────
+
+
+def test_refresh_with_subset_services_keeps_granted_scopes(env):
+    oauth_dir, cfg = env
+    _write_files(oauth_dir, ALL_SCOPES)
+    token_path = oauth_dir / "google_workspace_token.json"
+    data = json.loads(token_path.read_text())
+    data["expiry"] = "2000-01-01T00:00:00Z"
+    token_path.write_text(json.dumps(data))
+    cfg.services = ["gmail"]
+
+    factory = get_google_factory()
+    assert factory is not None
+
+    def _refresh(self, request):
+        self.token = "ya29.refreshed"
+        self.expiry = None
+
+    with (
+        patch("google.oauth2.credentials.Credentials.refresh", _refresh),
+        patch("google.auth.transport.requests.Request"),
+    ):
+        factory.auth.get_credentials()
+
+    saved = json.loads(token_path.read_text())
+    assert saved["token"] == "ya29.refreshed"
+    assert saved["scopes"] == ALL_SCOPES
+
+    cfg.services = list(SERVICE_SCOPES)  # user widens the config later
+    assert google_status()["status"] == "active"
+
+
+# ── Standalone MCP server ─────────────────────────────────────────────────────
+
+
+def test_server_auth_limited_to_granted_services(env):
+    from pincer.integrations.google.server import _build_fastmcp, _resolve_server_auth
+
+    oauth_dir, _ = env
+    _write_files(oauth_dir, [_CALENDAR], token_name="google_token.json")
+
+    auth = _resolve_server_auth()
+    assert auth.services == ["calendar"]
+    assert auth.missing_scopes() == []
+
+    fmcp = _build_fastmcp(auth)
+    names = {t.name for t in fmcp._tool_manager.list_tools()}
+    assert names
+    assert all(n.startswith("google__") for n in names)
+    assert "google__send_email" not in names
+
+
+def test_server_auth_exits_without_token(env, capsys):
+    from pincer.integrations.google.server import _resolve_server_auth
+
+    with pytest.raises(SystemExit) as exc:
+        _resolve_server_auth()
+    assert exc.value.code == 1
+    assert "pincer google setup" in capsys.readouterr().err
+
+
+# ── Re-auth hints ─────────────────────────────────────────────────────────────
+
+
+def test_legacy_token_hint_does_not_say_delete(tmp_path):
+    from pincer.integrations.google.auth import GoogleAuth
+
+    hint = GoogleAuth(token_path=str(tmp_path / "google_token.json"))._reauth_hint()
+    assert "Delete" not in hint
+    assert "keep google_token.json" in hint

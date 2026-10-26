@@ -138,7 +138,7 @@ class GoogleAuth:
         if self._credentials.expired and self._credentials.refresh_token:
             try:
                 self._credentials.refresh(Request())
-                self._save_token()
+                self._save_token(keep_granted_scopes=True)
                 logger.debug("Google Workspace token refreshed")
                 return self._credentials
             except Exception as exc:
@@ -149,15 +149,16 @@ class GoogleAuth:
     def _load_from_file(self) -> None:
         from google.oauth2.credentials import Credentials
 
-        if not self._credentials_path.exists():
-            raise FileNotFoundError(
-                f"Google OAuth credentials not found at {self._credentials_path}. "
-                "Download from Google Cloud Console → APIs & Services → Credentials "
-                "→ OAuth 2.0 Client IDs → Download JSON, then save it there. "
-                "Run 'pincer google setup' to complete setup."
-            )
-
+        # The token JSON carries client_id / client_secret, so the client
+        # credentials file is only needed by the consent flow, not here.
         if not self._token_path.exists():
+            if not self._credentials_path.exists():
+                raise FileNotFoundError(
+                    f"Google Workspace token not found at {self._token_path} and no OAuth client at "
+                    f"{self._credentials_path}. Download it from Google Cloud Console → APIs & Services → "
+                    "Credentials → OAuth 2.0 Client IDs → Download JSON, save it there, then run "
+                    "'pincer google setup'."
+                )
             raise FileNotFoundError("Google Workspace token not found. Run 'pincer google setup' to authenticate.")
 
         self._credentials = Credentials.from_authorized_user_file(  # type: ignore[no-untyped-call]
@@ -184,7 +185,10 @@ class GoogleAuth:
     def _reauth_hint(self) -> str:
         if self._token_info is not None:
             return f"Run 'pincer google setup --print-env' and update {TOKEN_ENV}"
-        return f"Delete {self._token_path} and run 'pincer google setup'"
+        if self._token_path.name == "google_token.json":
+            # Legacy calendar token — the built-in calendar_* tools still use it, don't delete it.
+            return "Run 'pincer google setup' (creates google_workspace_token.json; keep google_token.json)"
+        return f"Run 'pincer google setup' (re-authorises and replaces {self._token_path})"
 
     def run_auth_flow(
         self,
@@ -222,12 +226,24 @@ class GoogleAuth:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _save_token(self) -> None:
+    def _save_token(self, keep_granted_scopes: bool = False) -> None:
+        """Write the credentials to *token_path* (no-op in env mode).
+
+        With *keep_granted_scopes* (after a refresh) the ``scopes`` already in the
+        file are kept: ``to_json()`` writes the scopes this instance requested,
+        which may be a subset of what the refresh token covers — saving those
+        would make later ``granted_services()`` calls under-report.
+        """
         if self._token_info is not None:
             return  # env mode — refreshed access tokens stay in memory
+        data = json.loads(self._credentials.to_json())
+        if keep_granted_scopes:
+            granted = self._token_scopes()
+            if granted:
+                data["scopes"] = granted
         self._token_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._token_path, "w") as fh:
-            fh.write(self._credentials.to_json())
+            fh.write(json.dumps(data))
         os.chmod(self._token_path, 0o600)
 
     @property

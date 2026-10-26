@@ -573,3 +573,29 @@ def test_google_export_token_rejects_token_without_refresh_token(monkeypatch: py
 
     assert result.exit_code == 1
     assert "no refresh token" in " ".join(result.output.split())
+
+
+def test_google_setup_uses_env_client_config_without_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import json
+
+    from pydantic import SecretStr
+
+    client = {"installed": {"client_id": "cid", "client_secret": "cs"}}
+    mock_settings = MagicMock()
+    mock_settings.google_oauth_dir.return_value = tmp_path  # no google_credentials.json
+    mock_settings.google_credentials_json = SecretStr(json.dumps(client))
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
+
+    mock_creds = MagicMock()
+    mock_creds.refresh_token = "rt"
+    mock_auth_instance = MagicMock()
+    mock_auth_instance.run_auth_flow.return_value = mock_creds
+    monkeypatch.setattr(
+        "pincer.integrations.google.auth.GoogleAuth",
+        lambda credentials_path, token_path: mock_auth_instance,
+    )
+
+    result = runner.invoke(app, ["google", "setup"])
+
+    assert result.exit_code == 0, result.output
+    mock_auth_instance.run_auth_flow.assert_called_once_with(open_browser=True, save=True, client_config=client)
