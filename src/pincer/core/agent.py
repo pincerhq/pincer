@@ -201,6 +201,15 @@ class StreamChunk:
     content: str
 
 
+@dataclass(frozen=True, slots=True)
+class _Onboarding:
+    """One turn's onboarding decision, taken before its user message is appended."""
+
+    state: Session  # the user's main session on the channel, where onboarding is recorded
+    prompt: bool  # append the question to this turn's reply
+    ingest: bool  # this message is the reply to the question
+
+
 @dataclass
 class AgentResponse:
     """What the agent returns to the channel."""
@@ -401,20 +410,13 @@ class Agent:
                 (e.g. voice live-call rules in the call language).
             session_key: Exact session key, overriding ``channel:user_id``
                 (voice: one session per call, see ``stream_voice_turn``; web
-                chat: one per conversation). Such a session is not onboarded: the
-                user's main conversation on the channel is where that happens.
+                chat: one per conversation). Onboarding is still recorded on the
+                user's main session for the channel, see ``_onboarding_for_turn``.
         """
         self._last_active = (user_id, channel_name or channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
-
-        # Snapshot onboarding state BEFORE the user message is appended.
-        # Nobody onboards mid-phone-call — and with a session per call, every
-        # call's first blocking turn would otherwise look like a fresh user.
-        # The same goes for any other exact-key session (a web chat conversation).
-        onboarding = (channel_name or channel) != "voice" and session_key is None
-        was_fresh = onboarding and session.is_fresh()
-        awaiting_onboarding_reply = (
-            onboarding and session.onboarding_prompt_already_sent() and not session.is_onboarded()
+        onboarding = await self._onboarding_for_turn(
+            session, user_id, channel, channel_name=channel_name, session_key=session_key
         )
 
         # Build user message
@@ -436,7 +438,7 @@ class Agent:
 
         # Build system prompt with relevant memories — inject the onboarding
         # followup instruction only on the turn that handles the user's reply.
-        extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if awaiting_onboarding_reply else []
+        extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if onboarding and onboarding.ingest else []
         if extra_system:
             extra_parts.append(extra_system)
         system_prompt = await self._build_system_prompt(user_id, text, extra_system="\n\n".join(extra_parts) or None)
@@ -592,10 +594,8 @@ class Agent:
             )
 
         # ── Onboarding: append warm question on a fresh session ────────────
-        if was_fresh and not session.is_onboarded() and not session.onboarding_prompt_already_sent() and final_text:
+        if final_text and await self._claim_onboarding_prompt(onboarding, session, user_id, channel):
             final_text = final_text.rstrip() + "\n\n" + ONBOARDING_QUESTION_EN
-            session.mark_onboarding_prompt_sent()
-            logger.info("onboarding.prompt_sent user=%s channel=%s", user_id, channel)
 
         # Save final assistant message
         if final_text:
@@ -603,8 +603,8 @@ class Agent:
             await self._sessions.add_message(session, final_msg)
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
-        if awaiting_onboarding_reply:
-            await self._ingest_onboarding_reply(session, text, user_id, channel)
+        if onboarding and onboarding.ingest:
+            await self._ingest_onboarding_reply(onboarding.state, text, user_id, channel)
 
         # Store the final exchange as a memory for future retrieval
         if self._memory and final_text:
@@ -768,11 +768,8 @@ class Agent:
         """
         self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
-
-        onboarding = session_key is None
-        was_fresh = onboarding and session.is_fresh()
-        awaiting_onboarding_reply = (
-            onboarding and session.onboarding_prompt_already_sent() and not session.is_onboarded()
+        onboarding = await self._onboarding_for_turn(
+            session, user_id, channel, channel_name=None, session_key=session_key
         )
 
         img_contents: list[ImageContent] = []
@@ -790,7 +787,7 @@ class Agent:
         if self._summarizer:
             await self._summarizer.maybe_summarize(session)
 
-        extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if awaiting_onboarding_reply else None
+        extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding and onboarding.ingest else None
         system_prompt = await self._build_system_prompt(user_id, text, extra_system=extra_system)
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
         logger.debug(
@@ -910,11 +907,9 @@ class Agent:
                 full_text = response.content if response else ""
 
         # ── Onboarding: append warm question on a fresh session ────────────
-        if was_fresh and not session.is_onboarded() and not session.onboarding_prompt_already_sent() and full_text:
+        if full_text and await self._claim_onboarding_prompt(onboarding, session, user_id, channel):
             tail = "\n\n" + ONBOARDING_QUESTION_EN
             full_text = full_text.rstrip() + tail
-            session.mark_onboarding_prompt_sent()
-            logger.info("onboarding.prompt_sent user=%s channel=%s", user_id, channel)
             yield StreamChunk(StreamEventType.TEXT, tail)
 
         if full_text:
@@ -922,8 +917,8 @@ class Agent:
             await self._sessions.add_message(session, final_msg)
 
         # ── Onboarding: parse the user's reply and close the gate ─────────
-        if awaiting_onboarding_reply:
-            await self._ingest_onboarding_reply(session, text, user_id, channel)
+        if onboarding and onboarding.ingest:
+            await self._ingest_onboarding_reply(onboarding.state, text, user_id, channel)
 
         yield StreamChunk(StreamEventType.DONE, full_text)
 
@@ -1274,6 +1269,62 @@ class Agent:
         if not memories:
             return _with_extra(base_prompt)
         return _with_extra(f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}")
+
+    async def _onboarding_for_turn(
+        self,
+        session: Session,
+        user_id: str,
+        channel: str,
+        *,
+        channel_name: str | None,
+        session_key: str | None,
+    ) -> _Onboarding | None:
+        """Decide this turn's onboarding, before its user message is appended.
+
+        The state lives on the user's main session for the channel, whichever
+        session the turn runs in: a web chat conversation (``session_key``)
+        asks a brand-new user and takes the reply like the main chat does.
+        Channels that split sessions through ``channel`` itself (Slack and
+        Teams threads) have each thread as its own main session.
+
+        None for voice: nobody onboards mid-phone-call, and with a session per
+        call every call's first turn would otherwise look like a fresh user.
+        """
+        if (channel_name or channel) == "voice":
+            return None
+        main = session if session_key is None else await self._sessions.get_or_create(user_id, channel)
+        asked = main.onboarding_prompt_already_sent()
+        done = main.is_onboarded()
+        return _Onboarding(
+            state=main,
+            # A user with history anywhere is not new; one whose first message
+            # opens a conversation is.
+            prompt=main.is_fresh() and session.is_fresh() and not asked and not done,
+            ingest=asked and not done,
+        )
+
+    async def _claim_onboarding_prompt(
+        self,
+        onboarding: _Onboarding | None,
+        session: Session,
+        user_id: str,
+        channel: str,
+    ) -> bool:
+        """Record that this turn's reply asks the onboarding question.
+
+        True when the caller should append it. A main session other than the
+        turn's is persisted here; the turn's own is persisted with the reply.
+        """
+        if onboarding is None or not onboarding.prompt:
+            return False
+        main = onboarding.state
+        if main.is_onboarded() or main.onboarding_prompt_already_sent():
+            return False
+        main.mark_onboarding_prompt_sent()
+        if main is not session:
+            await self._sessions._persist(main)  # noqa: SLF001
+        logger.info("onboarding.prompt_sent user=%s channel=%s", user_id, channel)
+        return True
 
     async def _ingest_onboarding_reply(
         self,

@@ -1,21 +1,24 @@
 """Tests for first-session onboarding."""
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 
-from pincer.core.agent import Agent
-from pincer.core.onboarding import ONBOARDING_QUESTION_EN
+from pincer.core.agent import Agent, StreamEventType
+from pincer.core.onboarding import ONBOARDING_FOLLOWUP_INSTRUCTION, ONBOARDING_QUESTION_EN
 from pincer.core.session import (
     ONBOARDING_COMPLETE_KEY,
     ONBOARDING_PROMPT_SENT_KEY,
     PROFILE_LANGUAGE_KEY,
     PROFILE_NAME_KEY,
     PROFILE_USE_CASE_KEY,
+    SessionManager,
+    conversation_key,
 )
-from pincer.llm.base import LLMResponse
+from pincer.llm.base import LLMMessage, LLMResponse, MessageRole
 from pincer.memory.store import MemoryStore
 
 
@@ -50,24 +53,125 @@ async def test_fresh_session_appends_question(settings, mock_llm, session_manage
     assert session.metadata.get(ONBOARDING_COMPLETE_KEY) != "true"
 
 
-@pytest.mark.asyncio
-async def test_exact_key_session_is_separate_and_never_prompts(
-    settings, mock_llm, session_manager, cost_tracker, tool_registry
+def _streams(llm: AsyncMock, text: str) -> None:
+    """Give the mock LLM a stream that yields ``text``, as a provider would."""
+
+    async def stream(**_: object) -> AsyncIterator[str]:
+        yield text
+
+    llm.stream = stream
+
+
+async def _reply(
+    agent: Agent,
+    path: str,
+    user_id: str,
+    channel: str,
+    text: str,
+    *,
+    session_key: str | None = None,
+    channel_name: str | None = None,
+) -> str:
+    """One turn on the blocking or the streaming path; the reply the user sees."""
+    if path == "blocking":
+        result = await agent.handle_message(user_id, channel, text, channel_name=channel_name, session_key=session_key)
+        return result.text
+    chunks = [c async for c in agent.handle_message_stream(user_id, channel, text, session_key=session_key)]
+    return [c.content for c in chunks if c.type == StreamEventType.DONE][-1]
+
+
+@pytest.mark.parametrize("path", ["blocking", "stream"])
+async def test_first_message_in_conversation_prompts_and_marks_main(
+    path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):
-    """A web chat conversation is its own session, and onboarding stays in the
-    user's main one: "New chat" must not ask who they are again."""
+    """A new user whose very first message is in a conversation is asked, and
+    the question is recorded on their main session, in the database."""
+    _streams(mock_llm, "Hello! I'm Pincer.")
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
-    await agent.handle_message("user-t", "web", "Remember the code word.")
+    key = conversation_key("user-new", "web", "conv-1")
 
-    result = await agent.handle_message("user-t", "web", "Hi!", session_key="web:user-t:thread-1")
-    assert not result.text.endswith(ONBOARDING_QUESTION_EN)
-    chunks = [c async for c in agent.handle_message_stream("user-t", "web", "Hi!", session_key="web:user-t:thread-2")]
-    assert not any(ONBOARDING_QUESTION_EN in c.content for c in chunks)
+    reply = await _reply(agent, path, "user-new", "web", "Hi!", session_key=key)
 
-    thread = await session_manager.get_or_create("user-t", "web", session_key="web:user-t:thread-1")
-    assert [m.content for m in thread.messages if m.role.value == "user"] == ["Hi!"]
+    assert reply.endswith(ONBOARDING_QUESTION_EN)
+    conversation = await session_manager.get_or_create("user-new", "web", session_key=key)
+    assert [m.content for m in conversation.messages if m.role == MessageRole.USER] == ["Hi!"]
+    stored = SessionManager(tmp_path / "test.db")
+    await stored.initialize()
+    try:
+        main = await stored.get_or_create("user-new", "web")
+        assert main.metadata.get(ONBOARDING_PROMPT_SENT_KEY) == "true"
+        assert main.messages == []
+    finally:
+        await stored.close()
+
+
+@pytest.mark.parametrize("path", ["blocking", "stream"])
+async def test_reply_in_new_conversation_onboards_main(path, settings, session_manager, cost_tracker, tool_registry):
+    """Asked in the main chat, answered in a new one: the answer is ingested
+    there, and the next main-chat message is not taken for it."""
+    llm = AsyncMock()
+    llm.complete.side_effect = [
+        _llm_text("Hello!"),
+        _llm_text("Nice to meet you, Bob."),
+        _llm_text('{"name": "Bob", "use_case": "accounting", "language": "en"}'),
+        _llm_text("Here is your summary."),
+    ]
+    _streams(llm, "Streamed reply.")
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry)
+
+    await _reply(agent, path, "user-b", "web", "Hi!")
+    await _reply(
+        agent, path, "user-b", "web", "I'm Bob, accountant", session_key=conversation_key("user-b", "web", "x")
+    )
+
+    main = await session_manager.get_or_create("user-b", "web")
+    assert main.metadata.get(ONBOARDING_COMPLETE_KEY) == "true"
+    assert main.metadata.get(PROFILE_NAME_KEY) == "Bob"
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION in llm.complete.call_args_list[1].kwargs["system"]
+
+    await _reply(agent, path, "user-b", "web", "summarize my emails")
+
+    assert llm.complete.call_count == 4
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION not in llm.complete.call_args_list[3].kwargs["system"]
+
+
+@pytest.mark.parametrize("path", ["blocking", "stream"])
+async def test_existing_user_new_conversation_is_separate_and_not_prompted(
+    path, settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """A web chat conversation is its own session, and a user with history in
+    their main one is not asked who they are when they open "New chat"."""
+    _streams(mock_llm, "Hello! I'm Pincer.")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    session = await session_manager.get_or_create("user-t", "web")
+    await session_manager.add_message(session, LLMMessage(role=MessageRole.USER, content="Remember the code word."))
+    await session_manager.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content="Noted."))
+    key = conversation_key("user-t", "web", "thread-1")
+
+    reply = await _reply(agent, path, "user-t", "web", "Hi!", session_key=key)
+
+    assert ONBOARDING_QUESTION_EN not in reply
+    thread = await session_manager.get_or_create("user-t", "web", session_key=key)
+    assert [m.content for m in thread.messages if m.role == MessageRole.USER] == ["Hi!"]
     main = await session_manager.get_or_create("user-t", "web")
-    assert [m.content for m in main.messages if m.role.value == "user"] == ["Remember the code word."]
+    assert [m.content for m in main.messages if m.role == MessageRole.USER] == ["Remember the code word."]
+    assert ONBOARDING_PROMPT_SENT_KEY not in main.metadata
+
+
+@pytest.mark.parametrize("session_key", [None, "voice:CA123"], ids=["no_key", "call_key"])
+@pytest.mark.parametrize("path", ["blocking", "stream"])
+async def test_voice_never_onboarded(
+    path, session_key, settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """Nobody onboards mid-phone-call, with or without a per-call session."""
+    _streams(mock_llm, "Hello! I'm Pincer.")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    reply = await _reply(agent, path, "+15550100", "voice", "Hi!", session_key=session_key, channel_name="voice")
+
+    assert reply == "Hello! I'm Pincer."
+    main = await session_manager.get_or_create("+15550100", "voice")
+    assert ONBOARDING_PROMPT_SENT_KEY not in main.metadata
 
 
 @pytest.mark.asyncio
