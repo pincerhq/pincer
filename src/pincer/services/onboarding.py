@@ -71,10 +71,13 @@ class OnboardingService(DatabaseService):
                 {"user_id": user_id, "channel": channel, "asked_session_id": session_id, "asked_at": now}
             )
 
-    async def complete(self, user_id: str, channel: str, *, now: float) -> None:
+    async def complete(self, user_id: str, channel: str, *, now: float) -> bool:
+        """Close the gate. True only for the caller that closed it, which is
+        the one to record the answer; False when it was closed already."""
         async with session_scope(self._url) as session:
-            await OnboardingRepository(session).mark_completed(user_id, channel, now)
+            won = await OnboardingRepository(session).mark_completed(user_id, channel, now)
         _remember_completed(self._url, user_id, channel)
+        return won
 
     async def record_empty_reply(self, user_id: str, channel: str, *, max_empty: int, now: float) -> bool:
         """Count a reply with no answer in it; True when that closed the gate."""

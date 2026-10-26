@@ -1391,8 +1391,8 @@ class Agent:
         """Ask the model whether the message answers the onboarding question,
         and read name / use_case / language from it.
 
-        An answer with a field in it closes the gate and becomes the profile.
-        A message the model says is no answer (a task),
+        An answer with a field in it closes the gate, and the turn that closes
+        it writes the profile. A message the model says is no answer (a task),
         or one with no field, is only counted: the gate closes, empty, at
         `_ONBOARDING_MAX_EMPTY_REPLIES`, and its text is never kept. A failed
         extraction call is not a reply at all and leaves the gate as it was.
@@ -1427,7 +1427,10 @@ class Agent:
             logger.info("onboarding.empty_reply user=%s channel=%s closed=%s", user_id, channel, closed)
             return
 
-        await self._sessions.onboarding.complete(user_id, channel, now=time.time())
+        if not await self._sessions.onboarding.complete(user_id, channel, now=time.time()):
+            # Another turn closed it first and wrote its own profile.
+            logger.info("onboarding.already_completed user=%s channel=%s", user_id, channel)
+            return
         logger.info(
             "onboarding.completed user=%s channel=%s fields=%s",
             user_id,

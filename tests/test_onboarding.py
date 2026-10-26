@@ -1,5 +1,6 @@
 """Tests for first-session onboarding."""
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -395,6 +396,50 @@ async def test_an_answer_with_no_fields_is_an_empty_reply(
 def test_the_extraction_prompt_asks_for_a_judgement_and_never_infers_language():
     assert '"answers_question"' in EXTRACTION_PROMPT_TEMPLATE
     assert "inferable from the language they wrote in" not in EXTRACTION_PROMPT_TEMPLATE
+
+
+@_PATHS
+async def test_concurrent_answers_write_one_profile(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """Two sessions read an answer at once: only the turn that completes
+    onboarding writes the profile."""
+    both_extracting = asyncio.Barrier(2)
+    answer = '{"answers_question": true, "name": "Bob", "use_case": "accounting", "language": "en"}'
+
+    async def complete(**kwargs):
+        if kwargs.get("max_tokens") == 200:  # the extraction call
+            await both_extracting.wait()
+            return _llm_text(answer)
+        return _llm_text("Nice to meet you.")
+
+    llm = AsyncMock()
+    llm.complete.side_effect = complete
+    _streams(llm, "Nice to meet you.")
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+    await _store_history(session_manager, "user-c2", "web", reply=f"Hello!\n\n{ONBOARDING_QUESTION_EN}")
+    assert await session_manager.onboarding.claim_prompt("user-c2", "web", "web:user-c2", now=time.time())
+    writes = []
+    add_profile = memory_store.add_profile
+
+    async def counting_add_profile(**kwargs):
+        writes.append(kwargs["user_id"])
+        return await add_profile(**kwargs)
+
+    memory_store.add_profile = counting_add_profile
+
+    await asyncio.wait_for(
+        asyncio.gather(
+            _reply(agent, path, "user-c2", "web", "I'm Bob"),
+            _reply(
+                agent, path, "user-c2", "web", "Bob, accounting", session_key=conversation_key("user-c2", "web", "b")
+            ),
+        ),
+        timeout=10,
+    )
+
+    assert writes == ["user-c2"]
+    assert len(await memory_store.list_memories(user_id="user-c2", category="profile")) == 1
 
 
 @_PATHS

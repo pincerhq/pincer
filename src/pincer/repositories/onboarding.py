@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import case, func, update
+from sqlalchemy import case, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
@@ -25,18 +25,23 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
         )
         return int(result.rowcount) == 1
 
-    async def mark_completed(self, user_id: str, channel: str, completed_at: float) -> None:
+    async def mark_completed(self, user_id: str, channel: str, completed_at: float) -> bool:
         """Close the gate, creating the row for a user asked before it existed.
-        A row already closed keeps the time it was closed."""
-        await self.session.exec(
+
+        True only for the call that closed it: a row already closed keeps the
+        time it was closed, and this call changes nothing.
+        """
+        result = await self.session.exec(
             upsert(
                 dialect_of(self.session),
                 Onboarding,
                 {"user_id": user_id, "channel": channel, "completed_at": completed_at},
                 index_elements=["user_id", "channel"],
-                set_=lambda excluded: {"completed_at": func.coalesce(_TABLE.c.completed_at, excluded.completed_at)},
+                set_=lambda excluded: {"completed_at": excluded.completed_at},
+                where=_TABLE.c.completed_at.is_(None),
             )
         )
+        return int(result.rowcount) == 1
 
     async def count_empty_reply(self, user_id: str, channel: str, *, max_empty: int, now: float) -> bool:
         """Count a reply that held no answer; the `max_empty`-th one closes the

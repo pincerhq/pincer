@@ -74,12 +74,13 @@ async def test_completing_records_when_and_keeps_the_asking_session(url):
     assert (record.asked_session_id, record.asked_at, record.completed_at) == ("web:u", 10.0, 20.0)
 
 
-async def test_completing_twice_keeps_the_first_time(url):
+async def test_only_the_first_completion_wins(url):
+    """Two turns completing at once: one is told it won, and the time is its."""
     service = OnboardingService(url)
     await service.claim_prompt("u", "web", "web:u", now=10.0)
-    await service.complete("u", "web", now=20.0)
+    assert await service.complete("u", "web", now=20.0) is True
 
-    await service.complete("u", "web", now=30.0)
+    assert await service.complete("u", "web", now=30.0) is False
 
     record = await service.get("u", "web")
     assert record is not None
@@ -116,7 +117,7 @@ async def test_completing_without_a_row_inserts_one(url):
     """A user asked before the table existed: the reply still closes the gate."""
     service = OnboardingService(url)
 
-    await service.complete("u", "web", now=20.0)
+    assert await service.complete("u", "web", now=20.0) is True
 
     record = await service.get("u", "web")
     assert record is not None
