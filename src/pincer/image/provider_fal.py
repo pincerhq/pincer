@@ -34,12 +34,11 @@ class FalImageProvider(BaseImageProvider):
         return _COST_PER_IMAGE * request.num_images
 
     async def generate(self, request: ImageRequest) -> ImageResult:
-        import os
-
         import fal_client
 
-        # fal_client reads FAL_KEY from environment
-        os.environ.setdefault("FAL_KEY", self._api_key)
+        # Pass the key to the client rather than via FAL_KEY in os.environ,
+        # which every agent-run subprocess (shell, python_exec, skills) inherits.
+        client = fal_client.AsyncClient(key=self._api_key)
 
         model = request.model or self._model
 
@@ -60,7 +59,7 @@ class FalImageProvider(BaseImageProvider):
         }
 
         logger.debug("fal generate: model=%s prompt=%r", model, request.prompt[:80])
-        result = await fal_client.run_async(model, arguments=arguments)
+        result = await client.run(model, arguments=arguments)
 
         images: list[GeneratedImage] = []
         for item in result.get("images", []):

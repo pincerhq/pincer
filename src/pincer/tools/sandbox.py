@@ -145,6 +145,8 @@ def scrubbed_env() -> dict[str, str]:
     python_exec, unsandboxed skill scripts), so secrets such as
     PINCER_GOOGLE_TOKEN_JSON are not simply inherited by that code.
 
+    Only the blocked prefixes are removed; any other variable in os.environ
+    (including ``.env`` entries loaded for MCP server configs) is still passed on.
     Defence in depth only, not isolation: the child runs as the same user and
     can still read the parent's start-up environment (``/proc/<ppid>/environ``
     on Linux, ``ps -E`` on macOS). Real isolation needs a separate uid or

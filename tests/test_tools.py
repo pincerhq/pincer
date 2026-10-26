@@ -97,6 +97,7 @@ def test_scrubbed_env_drops_secrets_keeps_basics(monkeypatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
     monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
     monkeypatch.setenv("MY_HARMLESS_VAR", "1")
+    monkeypatch.setenv("GH_TOKEN", "ghp_x")
 
     env = scrubbed_env()
 
@@ -106,6 +107,8 @@ def test_scrubbed_env_drops_secrets_keeps_basics(monkeypatch) -> None:
     assert env["SSH_AUTH_SOCK"] == "/tmp/agent.sock"
     assert env["MY_HARMLESS_VAR"] == "1"
     assert "PATH" in env
+    # Documented limit: only blocked prefixes are removed, other secrets pass through.
+    assert env["GH_TOKEN"] == "ghp_x"
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
+# GoogleAuth per token location, so an env-supplied token's refreshed access
+# token survives between calls (nothing is written back in env mode). Keyed by a
+# hash of the location so no second plaintext copy of the token is kept.
+_auth_cache: tuple[str, Any] | None = None
+
 
 def _get_credentials():  # type: ignore[no-untyped-def]
     """Get or refresh Google OAuth2 credentials for the calendar scope.
@@ -52,12 +57,6 @@ def _get_credentials():  # type: ignore[no-untyped-def]
         return _auth_for(location).get_credentials()
     except (RuntimeError, FileNotFoundError) as e:
         raise FileNotFoundError(f"Google Calendar unavailable: {e}") from e
-
-
-# GoogleAuth per token location, so an env-supplied token's refreshed access
-# token survives between calls (nothing is written back in env mode). Keyed by a
-# hash of the location so no second plaintext copy of the token is kept.
-_auth_cache: tuple[str, Any] | None = None
 
 
 def _auth_for(location: dict[str, Any]) -> Any:

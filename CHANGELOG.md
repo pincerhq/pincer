@@ -144,21 +144,27 @@ own number only matches as a whole number.
 On Telegram, a mention after an emoji is now detected (entity offsets are
 UTF-16), and `/command@<bot username>` counts as a mention.
 
-#### Agent-run code no longer inherits secret environment variables
+#### Agent-run code no longer inherits `PINCER_*` and other blocked env prefixes
 
 `shell_exec`, `python_exec` and unsandboxed skill scripts now start with the
 host environment minus the MCP sandbox block list: `PINCER_*`, `GOOGLE_*`,
 `AWS_*`, `AZURE_*`, `OPENAI_*`, `ANTHROPIC_*`, `DATABASE_*`, `DB_*`, `SECRET_*`,
-`PRIVATE_*` and `GITHUB_TOKEN`. `SSH_*` / `GPG_*` agent sockets are kept.
+`PRIVATE_*` and `GITHUB_TOKEN`. `SSH_*` / `GPG_*` agent sockets are kept. The
+fal.ai image provider now passes its key to the client instead of exporting
+`FAL_KEY` into the process environment.
 
 > **Behaviour change.** Non-secret config under those prefixes is dropped too —
 > e.g. `AWS_PROFILE`, `AZURE_CONFIG_DIR` and every `PINCER_*` setting are no
 > longer visible to shell commands and scripts the agent runs.
 
-This is defence in depth, not isolation: agent code runs as the same user and
-can still read the parent process's start-up environment (`/proc/<ppid>/environ`
-on Linux, `ps -E` on macOS). Isolating secrets from agent code needs a separate
-uid or container.
+Only the listed prefixes are removed. Every other variable in the process
+environment is still inherited — including `.env` entries loaded into
+`os.environ` for MCP server configs, so a secret such as `GH_TOKEN`,
+`TELEGRAM_BOT_TOKEN` or `BRAVE_API_KEY` without a blocked prefix remains
+visible. This is also defence in depth, not isolation: agent code runs as the
+same user and can still read the parent process's start-up environment
+(`/proc/<ppid>/environ` on Linux, `ps -E` on macOS). Isolating secrets from
+agent code needs a separate uid or container.
 
 ### Added
 

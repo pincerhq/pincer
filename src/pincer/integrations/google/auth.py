@@ -230,9 +230,10 @@ class GoogleAuth:
         """Write the credentials to *token_path* (no-op in env mode).
 
         With *keep_granted_scopes* (after a refresh) the ``scopes`` already in the
-        file are kept: ``to_json()`` writes the scopes this instance requested,
-        which may be a subset of what the refresh token covers — saving those
-        would make later ``granted_services()`` calls under-report.
+        file are kept, or left absent if the file had none: ``to_json()`` writes
+        the scopes this instance requested, which may be a subset of what the
+        refresh token covers — saving those would make later
+        ``granted_services()`` calls under-report.
         """
         if self._token_info is not None:
             return  # env mode — refreshed access tokens stay in memory
@@ -241,6 +242,10 @@ class GoogleAuth:
             granted = self._token_scopes()
             if granted:
                 data["scopes"] = granted
+            else:
+                # The token never listed its scopes (treated as granting
+                # everything) — keep it that way instead of writing the subset.
+                data.pop("scopes", None)
         self._token_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._token_path, "w") as fh:
             fh.write(json.dumps(data))

@@ -275,6 +275,37 @@ def test_refresh_with_subset_services_keeps_granted_scopes(env):
     assert google_status()["status"] == "active"
 
 
+def test_refresh_of_scopeless_token_keeps_all_services_granted(env):
+    """Calendar-only GoogleAuth (as calendar_* uses) refreshing a token with no `scopes` field."""
+    from pincer.integrations.google.auth import GoogleAuth
+
+    oauth_dir, _ = env
+    _write_files(oauth_dir, ALL_SCOPES)
+    token_path = oauth_dir / "google_workspace_token.json"
+    data = json.loads(token_path.read_text())
+    del data["scopes"]
+    data["expiry"] = "2000-01-01T00:00:00Z"
+    token_path.write_text(json.dumps(data))
+
+    auth = GoogleAuth(token_path=str(token_path), services=["calendar"])
+    assert auth.granted_services() == list(SERVICE_SCOPES)
+
+    def _refresh(self, request):
+        self.token = "ya29.refreshed"
+        self.expiry = None
+
+    with (
+        patch("google.oauth2.credentials.Credentials.refresh", _refresh),
+        patch("google.auth.transport.requests.Request"),
+    ):
+        auth.get_credentials()
+
+    saved = json.loads(token_path.read_text())
+    assert saved["token"] == "ya29.refreshed"
+    assert "scopes" not in saved
+    assert GoogleAuth(token_path=str(token_path)).granted_services() == list(SERVICE_SCOPES)
+
+
 # ── Standalone MCP server ─────────────────────────────────────────────────────
 
 
