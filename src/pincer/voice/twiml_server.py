@@ -323,11 +323,23 @@ async def voice_transfer_result(request: Request) -> Response:
     No state with the caller still on the line (process restarted while the
     target rang) → re-register the call, resume its new receptionist session in
     TAKE_MESSAGE, and reconnect with the apology.
-    Idempotent: a retried callback for a finalized call finds no state (or a
-    call we tore down since) and only hangs up; a retry for a reconnected call
-    (``DialCallSid`` already handled, including a recovered one) returns the
-    same reconnect TwiML without counting the result or restarting the
-    session's message-taking again."""
+    Idempotent, one delivery per call at a time: a callback for a finalized
+    call, or one Twilio says is no longer in progress, only hangs up; a copy of
+    a result already processed (its ``DialCallSid`` is handled, including a
+    recovered one) counts nothing and leaves the session alone. It replays the
+    reconnect TwiML until the reconnected relay connects, and answers an empty
+    ``<Response/>`` after that or for an earlier dial. A result for a call not
+    being transferred is ignored the same way.
+
+    Why the replay depends on the relay: under Twilio's default connection
+    overrides (ct=5000ms, rt=15000ms, tt=15000ms, rc=1, rp=ct; see
+    https://www.twilio.com/docs/usage/webhooks/webhooks-connection-overrides)
+    Twilio retries only when the TCP connect or TLS handshake failed, so a
+    retry it will execute means the first attempt never reached us and no
+    relay can have connected yet. Once one has, Twilio has executed an answer
+    for that dial and executes no other: any later copy is a replay, and an
+    empty response, which would end a live call if Twilio executed it, reaches
+    no one who acts on it."""
     if await _authenticate(request) is None:
         return _forbidden()
     form = await request.form()
@@ -650,12 +662,23 @@ def _report_language(call_sid: str) -> str:
 
 
 def _already_torn_down(call_sid: str) -> bool:
-    """Whether `end_call` already ran for this call.
+    """Whether the engine tore this call down recently (`was_recently_ended`).
 
-    From that point the post-call pipeline — a background task — owns the final
-    user message, so a status webhook that finds no live state must not send
-    its own generic ending: that consumes the ENDED stage and the real report
-    is dropped.
+    Two callers rely on it:
+
+    - The status and AMD webhooks: from teardown on, the post-call pipeline (a
+      background task) owns the final user message, so a webhook that finds no
+      live state must not send its own generic ending. That consumes the ENDED
+      stage and the real report is dropped.
+    - /transfer-result's lost-state branch: a replayed callback for a call we
+      ended must not re-register it as a phantom INBOUND call that never gets
+      media and holds a capacity slot until the stuck-call reaper pages.
+
+    The record is in memory only: it is lost on restart, forgotten after
+    `_ENDED_CALL_TTL_S` (900 s), and evicted after `_MAX_ENDED_CALLS` (500)
+    newer teardowns. A miss therefore does not mean the call is live; the
+    transfer branch asks Twilio (`fetch_call_status`) before recovering. Narrow
+    this for one caller and the other changes too.
     """
     if _engine is None:
         return False
