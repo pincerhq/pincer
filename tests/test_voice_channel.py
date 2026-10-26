@@ -116,3 +116,52 @@ async def test_a_late_utterance_after_hangup_leaves_no_speech_lock():
 
     assert "CA_late" not in channel._speech_locks
     await channel.stop()
+
+
+SENTENCE = "The appointment is on Monday at ten."
+
+
+@pytest.mark.parametrize(
+    ("heard", "expected"),
+    [
+        (SENTENCE, "freeform"),  # the provider says all of it played
+        ("The appointment is", "interrupted"),  # cut partway
+    ],
+)
+async def test_a_sentence_cancelled_mid_send_is_marked_by_what_the_caller_heard(heard, expected):
+    """ConversationRelay: the interrupt can be handled while the turn is still
+    inside `send_speech` for a sentence Twilio has already played. The line is
+    logged only as the cancelled send unwinds, after `mark_interrupted` ran, so
+    it must be judged by `utteranceUntilInterrupt` too, not assumed cut."""
+    import asyncio
+
+    from voice_harness.fake_engine import FakeVoiceEngine
+    from voice_harness.settings import apply_test_paths
+
+    from pincer.voice.transcript import Speaker
+
+    settings = apply_test_paths(MagicMock())
+    settings.voice_default_language = "en"
+    settings.voice_supported_languages = "en,de"
+    engine = FakeVoiceEngine(settings)
+    channel = VoiceChannel(settings)
+    channel.set_engine(engine)
+    await channel.start(AsyncMock(return_value=""))
+    await engine.on_call_start("CA_cr", "+4930123456", CallDirection.OUTBOUND, language="en")
+    await channel._handle_speech("CA_cr", "When is it?")
+    sm = channel.get_state_machine("CA_cr")
+    assert sm is not None
+
+    engine.speech_blocker = asyncio.Event()
+    turn = asyncio.create_task(channel._say("CA_cr", SENTENCE, last=False, sm=sm))
+    channel._active_turns["CA_cr"] = turn
+    await asyncio.wait_for(engine.speech_waiting.wait(), timeout=2)
+
+    await channel._on_barge_in("CA_cr", heard)
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    lines = [e for e in channel.get_transcript("CA_cr").entries if e.speaker == Speaker.AGENT and e.text == SENTENCE]
+    assert [e.state for e in lines] == [expected]
+    engine.speech_blocker = None  # the shutdown goodbye must not wait on it
+    await channel.stop()

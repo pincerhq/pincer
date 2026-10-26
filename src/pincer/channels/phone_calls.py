@@ -88,6 +88,10 @@ class VoiceChannel(BaseChannel):
         self._transcripts: dict[str, TranscriptLogger] = {}
         self._error_counts: dict[str, int] = {}
         self._active_turns: dict[str, asyncio.Task[None]] = {}
+        # ConversationRelay barge-in: the turn it cancelled, and what Twilio
+        # says the caller heard. A line that turn was still sending is logged
+        # only as it unwinds — after mark_interrupted ran — and is judged here.
+        self._interrupted_turns: dict[str, tuple[asyncio.Task[None], str]] = {}
         # Barge-in: caller utterances are handled off the transport's read loop
         # (see _on_caller_speech). The lock keeps one call's utterances in
         # arrival order; the tasks are held so call end can cancel them.
@@ -869,6 +873,8 @@ class VoiceChannel(BaseChannel):
         """
         cancelled = self._cancel_active_turn(call_sid)
         if heard is not None:
+            if cancelled is not None:
+                self._interrupted_turns[call_sid] = (cancelled, heard)
             transcript = self._transcripts.get(call_sid)
             if transcript is not None:
                 transcript.mark_interrupted(heard)
@@ -880,6 +886,8 @@ class VoiceChannel(BaseChannel):
     def _turn_done(self, call_sid: str, trace: Any, turn: asyncio.Task[None]) -> None:
         if self._active_turns.get(call_sid) is turn:
             self._active_turns.pop(call_sid, None)
+        if self._interrupted_turns.get(call_sid, (None, ""))[0] is turn:
+            self._interrupted_turns.pop(call_sid, None)
         if self._turn_traces.get(call_sid) is trace:
             self._turn_traces.pop(call_sid, None)
         if not turn.cancelled() and turn.exception() is not None:
@@ -1419,8 +1427,19 @@ class VoiceChannel(BaseChannel):
             delivered = await self._engine.send_speech(call_sid, text, last=last)
         except asyncio.CancelledError:
             if text and transcript is not None and self._transcripts.get(call_sid) is transcript:
-                state = "interrupted" if self._speech_was_heard(call_sid) else "undelivered"
-                transcript.log_utterance(Speaker.AGENT, text, state=state, position=mark)
+                interrupted = self._interrupted_turns.get(call_sid)
+                if interrupted is not None and interrupted[0] is asyncio.current_task():
+                    # ConversationRelay said what played: log the line as sent
+                    # and let the same rule as every other line of the reply
+                    # decide whether the caller heard it.
+                    phase = sm or self._state_machines.get(call_sid)
+                    transcript.log_utterance(
+                        Speaker.AGENT, text, state=str(phase.phase) if phase else "", position=mark
+                    )
+                    transcript.mark_interrupted(interrupted[1])
+                else:
+                    state = "interrupted" if self._speech_was_heard(call_sid) else "undelivered"
+                    transcript.log_utterance(Speaker.AGENT, text, state=state, position=mark)
             raise
         transcript = self._transcripts.get(call_sid)
         if transcript is not None:
@@ -1565,6 +1584,7 @@ class VoiceChannel(BaseChannel):
 
             get_monitor_hub().end(call_sid)
         self._error_counts.pop(call_sid, None)
+        self._interrupted_turns.pop(call_sid, None)
         self._cancel_hangup(call_sid)
         self._farewell_turns.discard(call_sid)
         # Sprint 11: a hangup while a `user` approval card is open cancels the
