@@ -22,6 +22,9 @@ class FakeVoiceEngine(VoiceEngine):
         self.dtmf: dict[str, list[str]] = {}
         self.ended: list[str] = []
         self.transfers: dict[str, list[dict[str, Any]]] = {}  # Sprint 12: <Dial> redirects
+        # what Twilio reports for a call (fetch_call_status); an exception is raised
+        self.call_status: str | Exception = "in-progress"
+        self.status_fetches: list[str] = []
         self.wait_for_turns = True
         #: When set, send_speech holds the agent "mid-sentence" until released;
         #: `speech_waiting` fires once something is held.
@@ -104,6 +107,12 @@ class FakeVoiceEngine(VoiceEngine):
     async def _twilio_update(self, call_sid: str, **update: Any) -> None:
         if getattr(self, "transfer_raises", False):
             raise RuntimeError("dial failed")
+
+    async def fetch_call_status(self, call_sid: str) -> str:
+        self.status_fetches.append(call_sid)
+        if isinstance(self.call_status, Exception):
+            raise self.call_status
+        return self.call_status
 
     async def end_call(self, call_sid: str) -> None:
         if call_sid in self.ended:

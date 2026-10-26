@@ -230,6 +230,37 @@ async def test_twilio_updates_run_off_the_event_loop(mock_settings, engine_cls, 
     assert threads and all(t != threading.get_ident() for t in threads)
 
 
+@pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
+async def test_fetch_call_status_runs_off_the_event_loop(mock_settings, engine_cls):
+    """The status check sits on a webhook's response path: blocking Twilio HTTP
+    must not run on the loop, and the status comes back as Twilio spells it."""
+    import threading
+
+    engine = engine_cls(mock_settings)
+    threads: list[int] = []
+
+    def fetch():
+        threads.append(threading.get_ident())
+        return MagicMock(status="in-progress")
+
+    with patch("twilio.rest.Client") as client_cls:
+        client_cls.return_value.calls.return_value.fetch.side_effect = fetch
+        assert await engine.fetch_call_status("CAx") == "in-progress"
+    client_cls.return_value.calls.assert_called_once_with("CAx")
+    assert threads and threads[0] != threading.get_ident()
+
+
+async def test_fetch_call_status_bounds_the_request(mock_settings):
+    """Twilio waits ~15 s for the webhook that asks; the SDK's own default is no timeout."""
+    from pincer.voice.engine import CALL_STATUS_FETCH_TIMEOUT_S
+
+    engine = ConversationRelayEngine(mock_settings)
+    with patch("twilio.rest.Client") as client_cls:
+        client_cls.return_value.calls.return_value.fetch.return_value = MagicMock(status="completed")
+        assert await engine.fetch_call_status("CAx") == "completed"
+    assert client_cls.call_args.kwargs["http_client"].timeout == CALL_STATUS_FETCH_TIMEOUT_S == 5.0
+
+
 async def test_transfer_call_without_http_base_has_no_status_callback(mock_settings):
     mock_settings.voice_webhook_base_url = ""
     engine = ConversationRelayEngine(mock_settings)

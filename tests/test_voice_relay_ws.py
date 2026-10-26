@@ -73,6 +73,9 @@ class FakeEngine:
     def get_active_calls(self) -> dict[str, CallState]:
         return dict(self.states)
 
+    async def fetch_call_status(self, call_sid: str) -> str:
+        return "in-progress"
+
     # the real implementation, not a copy that can drift from it
     end_transfer = VoiceEngine.end_transfer
 

@@ -88,6 +88,10 @@ BARGE_IN_CONFIRM_WINDOW_MS = 1500
 _ENDED_CALL_TTL_S = 900.0
 _MAX_ENDED_CALLS = 500
 
+# Bound on the Twilio call-status fetch (the SDK's own default is no timeout).
+# It runs on the response path of a webhook Twilio waits ~15 s for.
+CALL_STATUS_FETCH_TIMEOUT_S = 5.0
+
 
 @dataclass
 class CallState:
@@ -321,6 +325,24 @@ class VoiceEngine(ABC):
             client.calls(call_sid).update(**update)
 
         await asyncio.to_thread(_update)
+
+    async def fetch_call_status(self, call_sid: str) -> str:
+        """Twilio's current status of the call (``in-progress``, ``completed``,
+        …), off the event loop like `_twilio_update`, and bounded by
+        ``CALL_STATUS_FETCH_TIMEOUT_S``. Raises on any Twilio or network error;
+        the caller decides what an unknown status means."""
+        from twilio.http.http_client import TwilioHttpClient
+        from twilio.rest import Client
+
+        def _fetch() -> str:
+            client = Client(
+                self._settings.twilio_account_sid,
+                self._settings.twilio_auth_token.get_secret_value(),
+                http_client=TwilioHttpClient(timeout=CALL_STATUS_FETCH_TIMEOUT_S),
+            )
+            return str(client.calls(call_sid).fetch().status or "").lower()
+
+        return await asyncio.to_thread(_fetch)
 
     async def end_call(self, call_sid: str) -> None:
         try:

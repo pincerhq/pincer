@@ -1056,6 +1056,7 @@ def test_transfer_result_without_state_reconnects_live_caller():
     engine = AsyncMock()
     engine.get_call_state = MagicMock(return_value=None)
     engine.was_recently_ended = MagicMock(return_value=False)
+    engine.fetch_call_status = AsyncMock(return_value="in-progress")
     twiml_server.set_transfer_session_resolver(None)
     client = _webhook_client(settings, engine)
     live = client.post(
@@ -1231,6 +1232,51 @@ async def test_lost_transfer_state_unregistered_failure_closes_the_trace(monkeyp
     assert twiml_server._active_inbound_count() == 0
     assert finalized == []
     assert closed == [(LOST_CALL, "failed", "transfer_recovery_failed")]
+
+
+@pytest.mark.parametrize("twilio_status", ["completed", "busy", "no-answer", "canceled", "failed"])
+async def test_lost_state_replay_for_a_call_twilio_ended_hangs_up(twilio_status):
+    """No state and no in-memory ended record (restart, 15 min later, or 500
+    other calls since), but Twilio says the call is over: a replay still
+    claiming `in-progress` must not re-register a phantom call."""
+    h = await _start(settings=_transfer_settings())
+    await _without_other_calls(h)
+    h.engine.call_status = twilio_status
+    async with _async_client(h) as client:
+        response = await client.post("/api/apps/twilio/transfer-result", data=_lost_state_callback())
+    assert response.text == "<Response><Hangup/></Response>"
+    assert h.engine.status_fetches == [LOST_CALL]
+    assert h.engine.get_active_calls() == {}
+
+
+async def test_lost_state_status_check_failure_hangs_up():
+    """Twilio cannot be asked: fail safe. Hang up rather than register a call
+    that may hold a capacity slot until the stuck-call reaper pages."""
+    h = await _start(settings=_transfer_settings())
+    await _without_other_calls(h)
+    h.engine.call_status = RuntimeError("twilio unreachable")
+    async with _async_client(h) as client:
+        response = await client.post("/api/apps/twilio/transfer-result", data=_lost_state_callback())
+    assert response.status_code == 200
+    assert response.text == "<Response><Hangup/></Response>"
+    assert h.engine.status_fetches == [LOST_CALL]
+    assert h.engine.get_active_calls() == {}
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_lost_state_recently_ended_skips_status_check():
+    """A call we tore down moments ago is answered from memory: no Twilio round trip."""
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+    await h.engine.finish_remote_ended(CALL, reason="provider_completed")
+    async with _async_client(h) as client:
+        response = await client.post(
+            "/api/apps/twilio/transfer-result",
+            data={"CallSid": CALL, "From": CALLER, "DialCallStatus": "busy", "CallStatus": "in-progress"},
+        )
+    assert response.text == "<Response><Hangup/></Response>"
+    assert h.engine.was_recently_ended(CALL)
+    assert h.engine.status_fetches == []
 
 
 def _count_transfer_results(monkeypatch) -> list[str]:

@@ -337,6 +337,19 @@ async def voice_transfer_result(request: Request) -> Response:
             # capacity slot until the stuck-call reaper pages.
             logger.info("Transfer result [%s] for a call already torn down — nothing to do", call_sid)
             return hangup
+        # The in-memory record above is gone after a restart, after
+        # _ENDED_CALL_TTL_S, or after _MAX_ENDED_CALLS other calls: Twilio is
+        # the authority on whether the caller is still on the line.
+        try:
+            twilio_status = await _engine.fetch_call_status(call_sid)
+        except Exception:
+            # Fail safe: a registered call that never gets media holds a slot
+            # until the stuck-call reaper pages.
+            logger.exception("Transfer result [%s]: Twilio status check failed — not recovering", call_sid)
+            return hangup
+        if twilio_status != "in-progress":
+            logger.info("Transfer result [%s] for a call Twilio reports %r — nothing to do", call_sid, twilio_status)
+            return hangup
         # Call state lost (restart/redeploy while the target rang), but the
         # caller is still on the line: fall back to message-taking.
         logger.warning("Transfer result [%s] with no call state — reconnecting the caller", call_sid)
