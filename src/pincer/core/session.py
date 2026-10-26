@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pincer.llm.base import LLMMessage, MessageRole
+from pincer.services.onboarding import OnboardingService
 from pincer.services.sessions import SessionService
 
 if TYPE_CHECKING:
@@ -36,12 +37,10 @@ def conversation_key(user_id: str, channel: str, conversation_id: str) -> str:
     return f"{_session_key(user_id, channel)}:{conversation_id}"
 
 
-# Metadata keys used by the first-session onboarding flow.
+# Session metadata the onboarding flow wrote before `pincer_onboarding`; now
+# only read, for a user with no row there.
 ONBOARDING_COMPLETE_KEY = "onboarding_complete"
 ONBOARDING_PROMPT_SENT_KEY = "onboarding_prompt_sent"
-PROFILE_NAME_KEY = "name"
-PROFILE_USE_CASE_KEY = "use_case"
-PROFILE_LANGUAGE_KEY = "language"
 
 
 @dataclass
@@ -60,7 +59,7 @@ class Session:
     # eviction can skip a session that has not changed.
     _saved_hash: int | None = field(default=None, init=False, repr=False, compare=False)
 
-    # ── Onboarding helpers ──────────────────────────────
+    # ── Onboarding (legacy flags, see ONBOARDING_COMPLETE_KEY) ──────────
 
     def is_fresh(self) -> bool:
         """True when the session has no non-system messages yet."""
@@ -72,24 +71,6 @@ class Session:
     def onboarding_prompt_already_sent(self) -> bool:
         return self.metadata.get(ONBOARDING_PROMPT_SENT_KEY) == "true"
 
-    def mark_onboarding_prompt_sent(self) -> None:
-        self.metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"
-
-    def mark_onboarded(
-        self,
-        *,
-        name: str | None = None,
-        use_case: str | None = None,
-        language: str | None = None,
-    ) -> None:
-        self.metadata[ONBOARDING_COMPLETE_KEY] = "true"
-        if name:
-            self.metadata[PROFILE_NAME_KEY] = name.strip()[:100]
-        if use_case:
-            self.metadata[PROFILE_USE_CASE_KEY] = use_case.strip()[:300]
-        if language:
-            self.metadata[PROFILE_LANGUAGE_KEY] = language.strip()[:20]
-
 
 class SessionManager:
     """Async SQLite-backed session store."""
@@ -99,6 +80,7 @@ class SessionManager:
         self._max_messages = max_messages
         self._max_cached = max_cached
         self._service: SessionService | None = None
+        self._onboarding: OnboardingService | None = None
         self._cache: OrderedDict[str, Session] = OrderedDict()
 
     async def initialize(self) -> None:
@@ -110,6 +92,7 @@ class SessionManager:
         a lock rather than failing. Schema DDL lives in the Alembic migrations.
         """
         self._service = await SessionService.for_path(self._db_path)
+        self._onboarding = await OnboardingService.for_path(self._db_path)
 
     async def close(self) -> None:
         for session in list(self._cache.values()):
@@ -117,12 +100,24 @@ class SessionManager:
         self._cache.clear()
         # The engine is shared; the process disposes it at shutdown.
         self._service = None
+        self._onboarding = None
 
     @property
     def _store(self) -> SessionService:
         if self._service is None:
             raise RuntimeError("SessionManager not initialized")
         return self._service
+
+    @property
+    def onboarding(self) -> OnboardingService:
+        """Each user's onboarding state per channel, in the same database."""
+        if self._onboarding is None:
+            raise RuntimeError("SessionManager not initialized")
+        return self._onboarding
+
+    async def has_stored_sessions(self, user_id: str, channel: str) -> bool:
+        """True when the user has any session stored on the channel, conversations included."""
+        return await self._store.has_any(user_id, channel)
 
     async def get_or_create(
         self,

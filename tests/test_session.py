@@ -65,7 +65,7 @@ async def test_a_recently_used_session_survives(capped: SessionManager):
 async def test_an_evicted_session_reloads_with_its_messages_and_metadata(capped: SessionManager):
     a = await capped.get_or_create("a", "web")
     await capped.add_message(a, LLMMessage(role=MessageRole.USER, content="remember me"))
-    a.mark_onboarding_prompt_sent()  # in memory only: no add_message after it
+    a.metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"  # in memory only: no add_message after it
     await capped.get_or_create("b", "web")
     await capped.get_or_create("c", "web")
     assert "web:a" not in capped._cache
@@ -81,7 +81,7 @@ async def test_close_persists_every_cached_session(tmp_path: Path):
     sm = SessionManager(tmp_path / "test.db", max_cached=2)
     await sm.initialize()
     for user in ("a", "b"):
-        (await sm.get_or_create(user, "web")).mark_onboarding_prompt_sent()
+        (await sm.get_or_create(user, "web")).metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"
     await sm.close()
 
     again = SessionManager(tmp_path / "test.db", max_cached=2)
@@ -111,7 +111,7 @@ async def test_close_survives_a_cache_hit_during_its_save(tmp_path: Path):
     sm = SessionManager(tmp_path / "test.db")
     await sm.initialize()
     for user in ("a", "b"):
-        (await sm.get_or_create(user, "web")).mark_onboarding_prompt_sent()
+        (await sm.get_or_create(user, "web")).metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"
     hit = []
 
     async def hit_it_again(session_id: str) -> None:
@@ -137,7 +137,7 @@ async def test_a_hit_during_the_eviction_save_keeps_the_session_cached(capped: S
     """A request for the session being evicted, while its save is awaited,
     gets the cached object, not the row as it was before the write."""
     a = await capped.get_or_create("a", "web")
-    a.mark_onboarding_prompt_sent()  # in memory only, until the eviction saves it
+    a.metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"  # in memory only, until the eviction saves it
     await capped.get_or_create("b", "web")
     hits = []
 
@@ -157,7 +157,7 @@ async def test_a_failed_eviction_save_keeps_the_session_and_fails_nothing(
     capped: SessionManager, caplog: pytest.LogCaptureFixture
 ):
     a = await capped.get_or_create("a", "web")
-    a.mark_onboarding_prompt_sent()
+    a.metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"
     await capped.get_or_create("b", "web")
     failures = []
 
