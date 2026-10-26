@@ -6,8 +6,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from voice_harness.strict_async import FAIL_ON_UNAWAITED_COROUTINE
 
 from pincer.voice.twiml_server import init_voice_routes, twilio_router, voice_router
+
+# A bare AsyncMock engine answers every attribute with a coroutine function: an
+# unstubbed sync call (e.g. `was_recently_ended`) must fail, not pass as truthy.
+pytestmark = FAIL_ON_UNAWAITED_COROUTINE
 
 
 @pytest.fixture
@@ -15,6 +20,7 @@ def mock_engine():
     engine = AsyncMock()
     engine.get_active_calls = MagicMock(return_value={})
     engine.get_call_state = MagicMock(return_value=None)
+    engine.was_recently_ended = MagicMock(return_value=False)
     engine.on_call_start = AsyncMock()
     engine.on_speech_input = AsyncMock()
     engine.interrupt_speech = AsyncMock()
