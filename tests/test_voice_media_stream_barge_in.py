@@ -56,12 +56,12 @@ def _instant_playout(monkeypatch):
     monkeypatch.setattr(MediaStreamEngine, "wait_for_playout", _no_wait_for_playout)
 
 
-def _engine(tts: FakeTTS, trigger: str = "vad") -> MediaStreamEngine:
+def _engine(tts: FakeTTS, trigger: str = "vad", min_words: int = 1) -> MediaStreamEngine:
     settings = _settings()
     settings.voice_stt_endpointing_ms = 0
     settings.voice_stt_utterance_end_ms = 0
     settings.voice_barge_in_trigger = trigger
-    settings.voice_barge_in_min_words = 1
+    settings.voice_barge_in_min_words = min_words
     engine = MediaStreamEngine(settings)
     engine._stt_provider = FakeSTT()
     engine._tts_provider = tts
@@ -100,10 +100,10 @@ async def _fed(stt: FakeSTTStream, *transcripts: Transcript) -> None:
     await asyncio.wait_for(stt.queue.join(), timeout=2)
 
 
-async def _agent_mid_reply(trigger: str = "vad", *, armed: bool = True):
+async def _agent_mid_reply(trigger: str = "vad", *, armed: bool = True, min_words: int = 1):
     """A call whose reply has played its first sentence (2 s of audio still
     queued at Twilio) and whose LLM is stalled before the second."""
-    engine = _engine(FakeTTS(), trigger)
+    engine = _engine(FakeTTS(), trigger, min_words)
     channel, agent = await _channel_for(engine, [text_chunks(f"{OLD_FIRST} ", OLD_NEVER), text_chunks(NEW_REPLY)])
     sock, stt = await _call(engine, "CA_ms")
     agent.pause_after = 1
@@ -296,6 +296,46 @@ class TestDetection:
         await _fed(stt, Transcript(text="Die"))  # echo of its first syllable
 
         assert len(sock.events("clear")) == clears
+        assert engine.metrics_registry.get("CA_ms").barge_in_reactions_ms == []
+        await channel.stop()
+
+    async def test_an_onset_whose_utterance_ended_does_not_confirm_a_later_word(self):
+        """A cough: SpeechStarted, then UtteranceEnd (an empty final) with no
+        words, all while we are still talking. One stray word in the same
+        stretch of audio is below min_words; the finished cough's onset must
+        not confirm it. Only the pop on the final stands between them: the
+        onset is newer than this playout's start."""
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply(min_words=2)
+
+        await _fed(stt, SPEECH_STARTED)
+        assert state.metadata.get("vad_onset_ns"), "precondition: the onset was taken as a candidate"
+        await _fed(stt, Transcript(text="", is_final=True))  # UtteranceEnd: the cough is over
+        await _fed(stt, Transcript(text="Ja"))
+
+        assert sock.events("clear") == []
+        assert "CA_ms" in channel._active_turns
+        await channel.stop()
+
+    async def test_an_onset_from_before_this_stretch_of_audio_does_not_confirm(self):
+        """The onset came during the first sentence and no final ever came
+        (noise, never transcribed). The reply drained while the LLM stalled,
+        then its next sentence began a new stretch of audio. The echo of that
+        sentence's first syllable must not confirm the old onset. Only the
+        playout-start guard stands between them: no final popped the onset."""
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply()
+
+        await _fed(stt, SPEECH_STARTED)
+        onset = state.metadata.get("vad_onset_ns")
+        assert onset, "precondition: the onset was taken as a candidate"
+        state.metadata["playout_until_ns"] = 0  # the first sentence played out
+        agent.resume.set()
+        await channel.wait_for_turn("CA_ms")  # the second sentence is at Twilio
+        assert state.metadata["playout_started_ns"] > onset, "precondition: a new stretch of audio"
+        assert state.metadata.get("vad_onset_ns") == onset, "precondition: nothing consumed the onset"
+
+        await _fed(stt, Transcript(text="Die"))  # echo of its first syllable
+
+        assert sock.events("clear") == []
         assert engine.metrics_registry.get("CA_ms").barge_in_reactions_ms == []
         await channel.stop()
 
