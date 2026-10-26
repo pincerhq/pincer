@@ -104,6 +104,36 @@ class TestGracefulShutdown:
         await asyncio.wait([task], timeout=1)  # let the cancellation land
         assert task.cancelled()
 
+    async def test_drain_timeout_records_shutdown_for_the_rest(self, monkeypatch):
+        """A drain that runs out of time force-ends the remaining calls; the
+        deploy is still their cause, not `unknown`."""
+        import asyncio
+
+        from pincer.observability.failure_codes import FailureCode
+        from pincer.voice.engine import END_CODE_KEY
+
+        monkeypatch.setattr("pincer.channels.phone_calls.SHUTDOWN_DRAIN_TIMEOUT_S", 0.05)
+        channel, engine = await _live_call("en", call_sid="CA_slow")
+        await engine.on_call_start("CA_ringing", "+4930123457", CallDirection.OUTBOUND, language="en")
+
+        async def _hung_speech(call_sid, text_or_audio, *, last=True):
+            await asyncio.sleep(3600)
+
+        engine.send_speech = _hung_speech
+        codes: dict[str, str] = {}
+        end_call = engine.end_call
+
+        async def _recording_end_call(call_sid):
+            state = engine.get_call_state(call_sid)
+            if state is not None:
+                codes[call_sid] = str(state.metadata.get(END_CODE_KEY) or "")
+            await end_call(call_sid)
+
+        engine.end_call = _recording_end_call
+        await asyncio.wait_for(channel.stop(), timeout=5)
+
+        assert codes == {"CA_slow": str(FailureCode.SHUTDOWN), "CA_ringing": str(FailureCode.SHUTDOWN)}
+
     async def test_stop_without_active_calls_is_clean(self):
         from voice_harness.fake_engine import FakeVoiceEngine
 

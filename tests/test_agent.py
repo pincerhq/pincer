@@ -2,13 +2,15 @@
 
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pincer.core.agent import Agent, AgentResponse
+from pincer.core.agent import Agent, AgentResponse, StreamEventType
 from pincer.exceptions import BudgetExceededError, LLMError
 from pincer.llm.base import LLMResponse, ToolCall
+from pincer.memory.mcp import MCPMemoryBackend
+from pincer.memory.summarizer import Summarizer
 from pincer.tools.builtin import files
 from pincer.tools.registry import ToolRegistry
 
@@ -565,3 +567,49 @@ async def test_an_mcp_server_list_that_fails_to_render_warns_once_and_never_reco
     assert _outage_log(
         caplog, "Failed to fetch MCP server list for prompt", "Fetching the MCP server list for prompt recovered"
     ) == [("WARNING", True), ("DEBUG", True), ("DEBUG", True)]
+
+
+def _mcp_memory_failing_store() -> MCPMemoryBackend:
+    """An MCP memory backend whose memory_store returns a fastmcp tool error."""
+
+    async def call_tool(name: str, args: dict) -> MagicMock:
+        if name == "memory_store":
+            err = [MagicMock(text="Error calling tool 'memory_store': embedding failed")]
+            return MagicMock(content=err, isError=True, structuredContent=None)
+        return MagicMock(content=[], isError=False, structuredContent=None)
+
+    session = AsyncMock()
+    session.call_tool.side_effect = call_tool
+    manager = AsyncMock()
+    manager.get_session.return_value = session
+    backend = MCPMemoryBackend(server_name="memory-test")
+    backend.set_mcp_manager(manager)
+    return backend
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_summarization_memory_error_does_not_fail_the_turn(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, caplog, streaming
+):
+    """A memory_store tool error during summarization is logged; the user still gets a reply."""
+    memory = _mcp_memory_failing_store()
+    summarizer = Summarizer(mock_llm, memory, session_manager, threshold=2)
+    agent = Agent(
+        settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory, summarizer=summarizer
+    )
+
+    async def turn(text: str) -> None:
+        if not streaming:
+            result = await agent.handle_message("user1", "test", text)
+            assert "Hello! I'm Pincer." in result.text
+            return
+        chunks = [c async for c in agent.handle_message_stream(user_id="user1", channel="test", text=text)]
+        assert chunks[-1].type == StreamEventType.DONE
+
+    await turn("first")
+    with caplog.at_level(logging.WARNING, logger="pincer.core.agent"):
+        await turn("second")  # 3 non-system messages >= threshold → summarize
+
+    warnings = [r for r in caplog.records if r.getMessage() == "Session summarization failed"]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None

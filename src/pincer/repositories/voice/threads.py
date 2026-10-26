@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import update
+from sqlalchemy import func, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
@@ -88,7 +88,12 @@ class ThreadMemberRepository(BaseRepository[CallThreadMember, str]):
         return (await self.session.exec(stmt)).first()
 
     async def attach(self, values: dict[str, Any]) -> None:
-        """Attach a call to a thread; re-attaching moves it."""
+        """Attach a call to a thread; re-attaching moves it.
+
+        A re-attach also fills in the call's date and direction when it now
+        knows them (the call may have had no row at its first attach), but
+        never blanks what the member row already holds.
+        """
         await self.session.exec(
             upsert(
                 dialect_of(self.session),
@@ -99,6 +104,8 @@ class ThreadMemberRepository(BaseRepository[CallThreadMember, str]):
                     "thread_id": excluded.thread_id,
                     "attach_kind": excluded.attach_kind,
                     "attached_at": excluded.attached_at,
+                    "call_started_at": func.coalesce(excluded.call_started_at, CallThreadMember.call_started_at),
+                    "direction": func.coalesce(func.nullif(excluded.direction, ""), CallThreadMember.direction),
                 },
             )
         )
@@ -106,14 +113,17 @@ class ThreadMemberRepository(BaseRepository[CallThreadMember, str]):
     async def detach(self, call_sid: str) -> int:
         return await self.delete_where(col(CallThreadMember.call_sid) == call_sid)
 
-    async def backfill_call_facts(self, call_sid: str, *, call_started_at: str, direction: str) -> int:
+    async def backfill_call_facts(
+        self, call_sid: str, *, call_started_at: str | None = None, direction: str | None = None
+    ) -> int:
         """Copy the call's date and direction onto its member row, which
-        survives the call."""
-        stmt = (
-            update(CallThreadMember)
-            .where(col(CallThreadMember.call_sid) == call_sid)
-            .values(call_started_at=call_started_at, direction=direction)
-        )
+        survives the call. A fact passed as None or "" is left as stored."""
+        facts = {
+            name: value for name, value in (("call_started_at", call_started_at), ("direction", direction)) if value
+        }
+        if not facts:
+            return 0
+        stmt = update(CallThreadMember).where(col(CallThreadMember.call_sid) == call_sid).values(**facts)
         return int((await self.session.exec(stmt)).rowcount)
 
     async def set_outcome(self, call_sid: str, *, outcome_code: str, task_result: str) -> int:

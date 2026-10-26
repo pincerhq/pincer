@@ -358,7 +358,7 @@ List extracted entities. Types: `person`, `place`, `project`, `organization`.
 
 ### `GET /api/skills`
 
-List discovered `SKILL.md` skills — bundled (shipped inside the package at `src/pincer/skills/`) and user (`~/.pincer/skills/`), listed uniformly. Read-only — there is no install/scan/delete API; skills are added by placing a directory under `~/.pincer/skills/` and restarting. See the [Skills Guide](../guides/skills-guide.md).
+List discovered `SKILL.md` skills — bundled (shipped inside the package at `src/pincer/skills/`) and user (`skills_dir`: `~/.pincer/skills/` or an `s3://` / `az://` / `gs://` prefix), listed uniformly. There is no install/delete API; add a skill directory to the user root, then call `POST /api/skills/rebuild` (or `pincer skills rebuild`). See the [Skills Guide](../guides/skills-guide.md).
 
 ```json
 {
@@ -368,9 +368,32 @@ List discovered `SKILL.md` skills — bundled (shipped inside the package at `sr
       "description": "How to write a new Pincer skill as a SKILL.md directory...",
       "status": "active",
       "source": "file",
-      "root": "bundled"
+      "root": "bundled",
+      "dir": "skill-authoring"
     }
   ]
+}
+```
+
+### `POST /api/skills/rebuild`
+
+Rebuild the skill index — the API counterpart of `pincer skills rebuild`. Query parameter `keep_cache` (default `false`) keeps cloudpathlib's cached copies of remote skill files instead of re-fetching them.
+
+1. Rebuilds the index of the process serving the request first, so the agent and dashboard it serves already see the result when the response returns.
+2. Queues one `rebuild_skill_index` background job carrying the new `generation`.
+
+The job is consumed by **one** process: with `task_broker=redis` that is any `pincer run tasks` worker, or the main `pincer run` itself, where it is a no-op. Workers that share the main process's data volume (the default `docker-compose.yml` setup) also follow the generation stamp the rebuild wrote; the job is what reaches a worker that doesn't. The job is idempotent and never moves a process to an older generation: a process already at that generation (or a newer one) skips it. The job carries the sender's disk ID (a file in `skills_cache_dir`), so a worker on the same data volume only catches up with the stamp instead of clearing the shared cache a second time.
+
+A failed enqueue doesn't fail the request — the in-app rebuild has already happened — and is reported in `job`. If a skill root can't be listed (an outage, expired credentials) the response is `503`, and nothing changes: the index keeps its previous skills and no generation is announced. A single skill whose SKILL.md can't be read doesn't fail the rebuild: it's skipped (local root), or keeps its previous version (cloud root), with a warning in the log. Any other failed rebuild is a `500`.
+
+`generation` is opaque, but it sorts by creation time: it has the form `<time_ns, 20 digits>-<uuid hex>`. A process never moves to a generation that sorts before its current one.
+
+```json
+{
+  "generation": "01760000000000000000-3f1c9e4a7b2d4e0f9a8c6b5d4e3f2a1b",
+  "cache_cleared": true,
+  "skills": [{"name": "skill-authoring", "root": "bundled", "dir": "skill-authoring", "...": "..."}],
+  "job": {"queued": true, "topic": "rebuild_skill_index"}
 }
 ```
 
@@ -398,6 +421,113 @@ List the agent's built-in tools, configured Google Workspace / Slack integration
   ]
 }
 ```
+
+---
+
+## Storage
+
+Browse and manage files under the **storage root**: `PINCER_STORAGE_ROOT` (a local path or an `s3://` / `az://` / `gs://` URI). When it is unset and `skills_dir` is a cloud URI, the root is that bucket or container; otherwise it is `<data_dir>/storage`. Cloud roots use the same `PINCER_STORAGE_*` credentials as remote skill roots. A local root that contains the data dir (`PINCER_STORAGE_ROOT=/app` with the data dir in `/app/data`) is refused with `503` on every route, since the data dir holds the JWT secret and the database; `pincer doctor` flags it too.
+
+Keys are POSIX paths relative to the root (`reports/q1.pdf`; `""` is the root). Absolute keys, `~`, `..` segments and scheme-qualified keys are refused with `400`.
+
+**Protected prefixes.** When the skills dir lies under the root, its prefix is protected: deleting or moving it, anything inside it, or any of its parent folders is a `403`, and so is moving something into it. Files inside it can still be read, uploaded and edited. On a local root the check follows the folder on disk, not the key: a different-case key on a case-insensitive filesystem, a Unicode variant of a name, or a symlink leading into the skills dir is refused the same way. A symlink that points into it can itself be deleted or moved; that leaves the skills dir alone.
+
+Every route except `/api/storage/signed/{token}` needs a bearer token. Reading needs any authenticated identity. The routes that change something (`PUT /text`, `POST /upload`, `POST /folders`, `POST /move`, `DELETE /object`) need a signed-in session: an API key gets `403` there. With `PINCER_AUTH_DISABLED`, reads need no token, but the routes that change something still need a signed-in session (`401` without one).
+
+| Status | Meaning |
+|---|---|
+| `400` | Invalid key (traversal, absolute path, scheme), or a folder moved into itself |
+| `403` | Protected prefix, an API key on a route that changes files, or an invalid signed link |
+| `404` | No such file or folder |
+| `409` | Already exists (upload, move, mkdir without `overwrite`), the same name twice in one upload, a file where a folder is needed, a move onto a folder that contains the source, or the file changed since it was read (`PUT /text` with a stale `etag`) |
+| `410` | The signed link has expired |
+| `413` | Text larger than 2 MB, or an upload larger than `PINCER_STORAGE_UPLOAD_FILE_MAX_SIZE` |
+| `415` | Not a UTF-8 text file |
+| `503` | Storage unreachable or misconfigured; the detail names the `PINCER_STORAGE_*` settings to check |
+
+### `GET /api/storage`
+
+```json
+{"backend": "s3", "root": "s3://acme/", "protected": ["team/skills"], "presign_ttl": 900, "max_text_bytes": 2097152,
+ "max_upload_bytes": 20971520}
+```
+
+`backend` is `file`, `s3`, `az` or `gs`.
+
+### `GET /api/storage/list?prefix=reports&limit=50&cursor=…`
+
+One page of the folders and files directly inside `prefix`: folders first, then files, each sorted by name (case-insensitive). `limit` is the page size, 50 by default and at most 100 (more is a `422`). Pass the response's `next_cursor` as `cursor` to get the next page; it is `null` on the last one. A cursor names the last entry served, not a position, so entries added or deleted between pages are neither repeated nor skipped. A cursor that cannot be read is a `400`.
+
+A folder with more than 100,000 entries can only be paged through up to that point; `truncated` is then `true`. Empty folders on object stores are a zero-byte `.keep` marker, which is not listed.
+
+```json
+{
+  "prefix": "reports",
+  "folders": [{"key": "reports/2026", "name": "2026", "protected": false}],
+  "files": [
+    {"key": "reports/q1.pdf", "name": "q1.pdf", "size": 48213, "last_modified": "2026-10-01T09:12:00+00:00",
+     "content_type": "application/pdf", "protected": false}
+  ],
+  "next_cursor": "WzEsInExLnBkZiJd",
+  "truncated": false
+}
+```
+
+### `GET /api/storage/presign?key=…&disposition=inline|attachment`
+
+A link that serves the file without a bearer token, valid for `PINCER_STORAGE_PRESIGN_TTL` seconds (default 900; 60 to 604800, i.e. 1 minute to 7 days), for `<img src>`, downloads and "open in new tab".
+
+```json
+{"url": "https://acme.s3.amazonaws.com/reports/q1.pdf?X-Amz-Expires=900&…", "expires_at": "2026-10-18T16:23:36+00:00"}
+```
+
+Cloud roots return the provider's presigned URL; S3 links also carry the requested `Content-Disposition`, but only files that are safe to show there are served inline: raster images, PDF, plain text, Markdown, CSV, audio and video. Anything else, HTML, SVG and every XML type (`*+xml`, `*/xml`) included, always downloads (`attachment`), because the provider serves it without the headers below, from the bucket's origin. Azure and GCS links are served with the content type the object was stored with. Local roots return a path on this API, `/api/storage/signed/<token>`, which the client resolves against the API's base URL.
+
+### `GET /api/storage/signed/{token}`
+
+Public. Serves a file of a **local** root from a link minted by `/presign`. The token is an HMAC over the key, the expiry and the disposition, keyed with the JWT secret. A tampered token is `403`, an expired one `410`. Cloud roots answer `404` here: their links point at the provider.
+
+### `GET /api/storage/download?key=…`
+
+The file as an attachment, with the bearer token. A fallback for clients that cannot use `/presign`.
+
+Files served by this API (here and through `/signed/` links) carry `X-Content-Type-Options: nosniff` and a sandboxing `Content-Security-Policy`, so an uploaded HTML or SVG file cannot run script on the API's origin. A cloud root's presigned links are served by the provider instead; see `/presign`.
+
+### `GET /api/storage/text?key=…`
+
+A UTF-8 text file of at most 2 MB, for the editor. The `etag` is a hash of the content.
+
+```json
+{"key": "notes/plan.md", "content": "# Plan\n…", "etag": "8a5d8b28d66ae90b5876fe0337b963d9", "size": 812}
+```
+
+### `PUT /api/storage/text`
+
+```json
+{"key": "notes/plan.md", "content": "# Plan v2\n…", "etag": "8a5d8b28d66ae90b5876fe0337b963d9"}
+```
+
+Saves the file and returns `{"key", "etag", "size"}`. With `etag`, the save is refused with `409` if the file changed (or was deleted) since it was read. Omit `etag` to overwrite unconditionally, or to create a new file.
+
+Two saves with the same `etag` cannot both succeed. On S3, Azure and GCS the write is conditional on the version that was checked (`If-Match` / generation match), so this holds across replicas. On a local root, saves of one file are serialised within the Pincer process. An S3-compatible server that rejects conditional writes (`501 NotImplemented`) is logged once; from then on each save or create-only upload checks the object (`HEAD`) before writing, which is serialised within the process only. A server that silently ignores the headers gets no protection across replicas either.
+
+### `POST /api/storage/upload?prefix=…&overwrite=false`
+
+Multipart form with one or more `files` parts. A file name may carry subfolders (`2026/q1.pdf`, from a folder pick); they are created. Returns `{"files": [<file entry>, …]}`.
+
+Every file is checked before any is written, so a refusal stores none of them: a bad name (`400`); an existing file without `overwrite=true`, the same name twice, or a file where a folder is needed — an existing file (`a.txt/b.txt` when `a.txt` is a file) or another file of the same upload (`x` and `x/y`) — (`409`); or a file over `PINCER_STORAGE_UPLOAD_FILE_MAX_SIZE` (default 20 MB; `413`). On S3 roots the limit is at most 5 GiB, the most one PUT can store; `GET /api/storage` reports the limit in force as `max_upload_bytes`. Without `overwrite`, the write itself only creates: a file someone else stores under the same name in the meantime is a `409`, not overwritten. Only a failure while writing (that `409`, or an unavailable store) can leave earlier files of the request stored; the error's detail then names them.
+
+### `POST /api/storage/folders`
+
+`{"prefix": "reports/2026"}` → `201` with the folder entry. `409` if it exists.
+
+### `POST /api/storage/move`
+
+`{"from": "reports/q1.pdf", "to": "archive/q1.pdf", "overwrite": false}` moves or renames a file or a folder. Object stores copy and then delete, object by object. `409` if the target exists and `overwrite` is `false`, or if the target is a folder that contains the source (replacing `a` with `a/b` would delete `a/b` too); `403` if either side is protected. On a case-insensitive disk, a rename that only changes case (`readme.md` → `README.md`) is a rename, with or without `overwrite`.
+
+### `DELETE /api/storage/object?key=…` / `?prefix=…`
+
+Deletes a file (`key`) or a folder and everything in it (`prefix`). Pass exactly one. Returns `{"key": "reports", "kind": "folder"}`.
 
 ---
 

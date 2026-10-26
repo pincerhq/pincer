@@ -20,7 +20,9 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
+from pincer.observability.failure_codes import FailureCode, classify_failure
 from pincer.voice import call_end
+from pincer.voice.engine import END_CODE_KEY, PROVIDER_STATUS_KEY, CallDirection, set_end_cause
 from pincer.voice.metrics import VoiceMetricsRegistry
 from pincer.voice.state_machine import CallPhase, CallStateMachine
 from pincer.voice.transcript import Speaker, TranscriptLogger
@@ -161,7 +163,6 @@ class VoiceChannel(BaseChannel):
         is decided by ``build_context`` from PINCER_THREAD_INBOUND_CONTEXT,
         and in the default `off` mode that is nothing at all.
         """
-        from pincer.voice.engine import CallDirection
         from pincer.voice.threads import KIND_INBOUND_MATCHED, ThreadError, get_thread_manager
 
         manager = get_thread_manager(self._settings)
@@ -215,6 +216,13 @@ class VoiceChannel(BaseChannel):
             except TimeoutError:
                 logger.error("Shutdown drain exceeded %.0fs — force-ending remaining calls", SHUTDOWN_DRAIN_TIMEOUT_S)
                 for call_sid in list(self._engine.get_active_calls()):
+                    # The deploy cut these too. A terminal state machine is the
+                    # call whose goodbye finished before the deadline: it keeps
+                    # the outcome `_speak_shutdown_ending` gave it.
+                    sm = self._state_machines.get(call_sid)
+                    state = self._engine.get_call_state(call_sid)
+                    if state is not None and (sm is None or not sm.is_terminal):
+                        set_end_cause(state, FailureCode.SHUTDOWN)
                     with contextlib.suppress(Exception):
                         await self._engine.end_call(call_sid)
         # The drained calls' failure reports are user-facing (the initiator
@@ -253,6 +261,13 @@ class VoiceChannel(BaseChannel):
             phase = sm.phase
             terminal = CallPhase.COMPLETED if phase in _BENIGN_TIMEOUT_PHASES else CallPhase.FAILED
             sm.force_terminal(terminal, reason=f"shutdown_{phase.value}")
+        state = self._engine.get_call_state(call_sid) if self._engine else None
+        if state is not None and (sm is None or state.metadata.get("answered_at") is None):
+            # Still ringing (state machines are created at answer, but keyed on
+            # `answered_at` so a call tracked early is covered too), or no state
+            # machine to carry the reason: the deploy is recorded as the cause.
+
+            set_end_cause(state, FailureCode.SHUTDOWN)
 
     async def send(self, user_id: str, text: str, **kwargs: Any) -> None:
         """Send a text response to the active voice call for this user.
@@ -281,8 +296,6 @@ class VoiceChannel(BaseChannel):
         """Lazily create the state machine, transcript, and metrics for a call."""
         sm = self._state_machines.get(call_sid)
         if sm is None:
-            from pincer.voice.engine import CallDirection
-
             sm = CallStateMachine(call_sid, is_outbound=state.direction == CallDirection.OUTBOUND)
             sm.start_call()
             self._state_machines[call_sid] = sm
@@ -310,7 +323,6 @@ class VoiceChannel(BaseChannel):
         return sm
 
     def _receptionist_call(self, state: CallState) -> bool:
-        from pincer.voice.engine import CallDirection
         from pincer.voice.receptionist.profile import receptionist_active
 
         return state.direction == CallDirection.INBOUND and receptionist_active(self._settings)
@@ -449,6 +461,11 @@ class VoiceChannel(BaseChannel):
                 entry.get("duration_seconds"),
                 entry.get("over_by_seconds"),
             )
+            # Recorded on the call itself: a stuck call that was never answered
+            # has no state machine whose reason would say so.
+            state = self._engine.get_call_state(call_sid)
+            if state is not None:
+                set_end_cause(state, FailureCode.STUCK)
             sm = self._state_machines.get(call_sid)
             if sm is not None and not sm.is_terminal:
                 sm.force_terminal(CallPhase.FAILED, reason="stuck_max_duration_exceeded")
@@ -1312,16 +1329,33 @@ class VoiceChannel(BaseChannel):
             with contextlib.suppress(Exception):
                 await self._stream_agent.end_voice_session(self._session_key(state))
 
+        # Whoever learned WHY the call ended (a webhook, shutdown, the reaper)
+        # recorded it as `end_code`; that beats anything inferred from the phase.
+        end_code = str(state.metadata.get(END_CODE_KEY) or "")
+        answered = state.metadata.get("answered_at") is not None
+        never_answered_outbound = state.direction == CallDirection.OUTBOUND and not answered
+
         completed = True
-        if sm is not None:
+        if end_code and end_code != FailureCode.NONE:
+            completed = False
+            if sm is not None and not sm.is_terminal:
+                # Keeps the state machine, the trace's termination reason and
+                # the failure code in agreement.
+                sm.force_terminal(CallPhase.FAILED, reason=end_code)
+        elif sm is not None:
             if not sm.is_terminal:
                 # Hangup before a clean ENDING: in conversation phases that's a
                 # NORMAL ending ("thanks, bye" + click) — only a hangup during
                 # an action (VERIFY/EXECUTE), an error state, or before any
                 # conversation (greeting phases) counts as failed.
-                terminal = CallPhase.COMPLETED if sm.phase in _BENIGN_HANGUP_PHASES else CallPhase.FAILED
+                benign = sm.phase in _BENIGN_HANGUP_PHASES and not never_answered_outbound
+                terminal = CallPhase.COMPLETED if benign else CallPhase.FAILED
                 sm.force_terminal(terminal, reason="call_end_cleanup")
             completed = sm.phase == CallPhase.COMPLETED
+        if never_answered_outbound:
+            # No human was ever on the line: never a success, whatever phase
+            # a state machine reached.
+            completed = False
 
         unverified: list[str] = []
         if transcript:
@@ -1332,7 +1366,7 @@ class VoiceChannel(BaseChannel):
         # Sprint 9 (T9.3): one stable failure code per terminated call, derived
         # from the state machine's own terminal reason so the code in the
         # database, the metric label, and the digest are always the same value.
-        failure_code = self._classify_call_failure(sm, transcript, completed)
+        failure_code = self._classify_call_failure(sm, transcript, completed, state)
         state.metadata["failure_code"] = str(failure_code)
 
         logger.info(
@@ -1363,9 +1397,14 @@ class VoiceChannel(BaseChannel):
         from pincer.voice.status_notify import notify_ended
 
         outcome = f"{'completed' if completed else 'did not complete'} ({state.duration_seconds}s)"
-        end_reason = str(state.metadata.get("end_reason") or "")
-        if end_reason:
-            outcome = f"{end_reason} ({state.duration_seconds}s)"
+        if end_code:
+            from pincer.voice.outcome import not_connected_reason
+            from pincer.voice.status_notify import get_call_language
+
+            reason = not_connected_reason(
+                end_code, get_call_language(call_sid), str(state.metadata.get(PROVIDER_STATUS_KEY) or "")
+            )
+            outcome = f"{reason} ({state.duration_seconds}s)"
         if unverified:
             outcome += " — note: the agent made a completion claim I could not verify against tool results"
         with contextlib.suppress(Exception):
@@ -1386,15 +1425,18 @@ class VoiceChannel(BaseChannel):
         so the row is always closed with whatever is known.
         """
         from pincer.voice.telemetry import hooks as telemetry
+        from pincer.voice.telemetry.outcomes import STATUS_COMPLETED, STATUS_FAILED
 
         self._close_turn_trace(call_sid)
-        reason = str(state.metadata.get("end_reason") or "")
+
+        # A code, not display text: the column is read by machines.
+        reason = str(state.metadata.get(END_CODE_KEY) or "")
         if not reason and sm is not None and sm.state.transitions:
             reason = str(sm.state.transitions[-1].reason or "")
         with contextlib.suppress(Exception):
             await telemetry.call_ended(
                 call_sid,
-                status="completed" if completed else "failed",
+                status=STATUS_COMPLETED if completed else STATUS_FAILED,
                 failure_code=str(failure_code),
                 termination_reason=reason,
                 duration_s=float(state.duration_seconds),
@@ -1407,20 +1449,41 @@ class VoiceChannel(BaseChannel):
         sm: CallStateMachine | None,
         transcript: TranscriptLogger | None,
         completed: bool,
+        state: CallState | None = None,
     ) -> Any:
         """Map this call's terminal reason onto the stable taxonomy (T9.3).
+
+        Precedence: an explicit `end_code` on the call (the webhook's word beats
+        inference), then the silent-agent check, then `completed`, then an
+        unanswered outbound call with no recorded cause, then the state
+        machine's last reason.
 
         A completed call whose agent turns never reached the caller is NOT a
         success: that is the Hotfix-3 "silent agent" shape, where transcripts
         look healthy and the callee heard nothing. It is reclassified as
         `no_audio` so the failure is visible instead of scoring as a win.
         """
-        from pincer.observability.failure_codes import FailureCode, classify_failure
 
+        if state is not None:
+            end_code = str(state.metadata.get(END_CODE_KEY) or "")
+            if end_code and end_code != FailureCode.NONE:
+                try:
+                    return FailureCode(end_code)
+                except ValueError:
+                    logger.warning("Unknown end_code %r [%s] — classifying without it", end_code, state.call_sid)
         if transcript is not None and self._call_was_silent(transcript):
             return FailureCode.NO_AUDIO
         if completed:
             return FailureCode.NONE
+        if (
+            state is not None
+            and state.direction == CallDirection.OUTBOUND
+            and state.metadata.get("answered_at") is None
+        ):
+            # Ours until proven otherwise: the warning names the path that
+            # still ends an unanswered call without saying why.
+            logger.warning("outbound call %s ended unanswered with no recorded cause", state.call_sid)
+            return FailureCode.UNKNOWN
 
         reason = ""
         if sm is not None:

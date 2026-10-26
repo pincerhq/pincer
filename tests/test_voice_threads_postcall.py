@@ -8,6 +8,7 @@ report last.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import aiosqlite
@@ -76,7 +77,7 @@ def _settings(tmp_path):
 
 
 def _state() -> CallState:
-    return CallState(
+    state = CallState(
         call_sid=CALL_SID,
         direction=CallDirection.OUTBOUND,
         caller_number="+4915212345678",
@@ -85,6 +86,10 @@ def _state() -> CallState:
         purpose="Termin bei Dr. Müller",
         language="de",
     )
+    # Answered, as the engine stamps it: an outbound call without it never
+    # connected and gets the not-connected report.
+    state.metadata["answered_at"] = datetime.now(UTC)
+    return state
 
 
 def _transcript() -> TranscriptLogger:

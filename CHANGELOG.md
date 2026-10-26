@@ -111,7 +111,228 @@ silently open.
   API access; `pincer identity revoke <name>` does (password, API key and
   sessions).
 
+#### Group triggers: comma-separated lists, whole-word matching
+
+`PINCER_TELEGRAM_GROUP_TRIGGER` and `PINCER_WHATSAPP_GROUP_TRIGGER` now take a
+comma-separated list of words or phrases, e.g.
+`pincer,hey pincer,@3Days Pincer`. Each entry matches case-insensitively as a
+whole word or phrase; the words of a phrase may be separated by any whitespace
+(spaces, tabs, newlines, non-breaking spaces), and an entry starting with `@`
+only matches when the `@` is typed. Entries cannot contain commas.
+
+> **Behaviour change.** Triggers no longer match as substrings: `pincer` no
+> longer fires on "pincers" or "@pincer_bot", and a partial trigger such as
+> `pinc` stops matching "pincer". Use the full word instead.
+>
+> - A comma now always separates entries. An existing value such as
+>   `hey, pincer` becomes two triggers, `hey` and `pincer`, and fires on any
+>   "hey". Remove the comma (`hey pincer`) to keep it a single phrase.
+> - Scripts written without spaces between words (Chinese, Japanese, Korean,
+>   Thai, Lao, Khmer, Myanmar) keep substring-style matching: `钳子` still
+>   matches "请钳子帮忙". Word boundaries only apply against letters of
+>   space-separated scripts such as Latin or Cyrillic.
+
+On WhatsApp, picking the bot in the @-picker inserts its phone number, or its
+LID in LID-addressed groups. Both are detected through the mentioned JID
+without any trigger entry (the LID once the bot has seen one of the owner's own
+messages); a literal `@pincer` entry only helps when someone types it by hand.
+Group mentions and triggers in image and document captions are now detected
+too (video has no content path, so video captions still don't trigger), and a
+document's caption is now passed to the agent along with the file. The bot's
+own number only matches as a whole number.
+
+On Telegram, a mention after an emoji is now detected (entity offsets are
+UTF-16), and `/command@<bot username>` counts as a mention.
+
+#### Agent-run code no longer inherits `PINCER_*` and other blocked env prefixes
+
+`shell_exec`, `python_exec` and unsandboxed skill scripts now start with the
+host environment minus the MCP sandbox block list: `PINCER_*`, `GOOGLE_*`,
+`AWS_*`, `AZURE_*`, `OPENAI_*`, `ANTHROPIC_*`, `DATABASE_*`, `DB_*`, `SECRET_*`,
+`PRIVATE_*` and `GITHUB_TOKEN`. `SSH_*` / `GPG_*` agent sockets are kept. The
+fal.ai image provider now passes its key to the client instead of exporting
+`FAL_KEY` into the process environment.
+
+> **Behaviour change.** Non-secret config under those prefixes is dropped too —
+> e.g. `AWS_PROFILE`, `AZURE_CONFIG_DIR` and every `PINCER_*` setting are no
+> longer visible to shell commands and scripts the agent runs.
+
+Only the listed prefixes are removed. Every other variable in the process
+environment is still inherited — including `.env` entries loaded into
+`os.environ` for MCP server configs, so a secret such as `GH_TOKEN`,
+`TELEGRAM_BOT_TOKEN` or `BRAVE_API_KEY` without a blocked prefix remains
+visible. This is also defence in depth, not isolation: agent code runs as the
+same user and can still read the parent process's start-up environment
+(`/proc/<ppid>/environ` on Linux, `ps -E` on macOS). Isolating secrets from
+agent code needs a separate uid or container.
+
 ### Added
+
+#### Google OAuth token from `PINCER_GOOGLE_TOKEN_JSON` (#268)
+
+The Google token no longer has to live in the data volume. Set
+`PINCER_GOOGLE_TOKEN_JSON` (token JSON, raw or base64) and it overrides
+`google_workspace_token.json` / `google_token.json` for the Workspace tools,
+the built-in `calendar_*` tools and the standalone Google MCP server. Refreshed
+access tokens stay in memory; nothing is written back. Generate the value with
+`pincer google setup --print-env`, or convert an existing token file with
+`pincer google export-token`. `PINCER_GOOGLE_CREDENTIALS_JSON` optionally holds
+the OAuth client for the consent flow. `/api/integrations` reports
+`token_source` (`env` / `file`).
+
+If Google revokes the refresh token (consent screen left in "Testing" expires it
+after 7 days), re-run `pincer google setup --print-env`, update the secret and
+restart.
+
+#### `pincer telephony reclassify`
+
+Corrects the failure code of historical outbound calls that never reached a
+person, from the `call.provider_status` / `call.amd_verdict` events on their
+telemetry timeline. Dry run by default (`--since 30d`, `--json`); `--apply`
+updates `voice_calls` and the telemetry call row in one transaction and writes
+a `telephony.reclassify` audit row. Idempotent. Only calls inside the telemetry
+retention window (`PINCER_TELEPHONY_TELEMETRY_RETENTION_DAYS`) can be corrected.
+
+#### Storage browser API: `/api/storage`
+
+Browse, preview, edit, upload and manage files in local or cloud storage from
+the dashboard, built on cloudpathlib. See
+[REST API → Storage](docs/reference/rest-api.md#storage).
+
+- New `PINCER_STORAGE_ROOT` (a local path or an `s3://`, `az://` or `gs://`
+  URI). Unset, it falls back to the bucket / container of a cloud
+  `skills_dir`, else to `<data_dir>/storage`. Cloud roots use the existing
+  `PINCER_STORAGE_*` credentials.
+- List folders a page at a time (`limit` 50 by default, at most 100, with a
+  `next_cursor`), upload (multipart, `409` unless `overwrite`), download,
+  create folders, move / rename and delete files or folders.
+- Reading needs any authenticated identity; changing files needs a signed-in
+  session (an API key gets `403`).
+- Uploads are limited by `PINCER_STORAGE_UPLOAD_FILE_MAX_SIZE` (bytes or a size
+  like `20MB`; default 20 MB). Every file of a request is checked first: one
+  that is too large (`413`) or already exists (`409`) stores none of them.
+- Read and save UTF-8 text files up to 2 MB, with an `etag` so a save cannot
+  silently overwrite someone else's edit (`409`). Cloud roots make the save a
+  conditional write, so this holds across replicas.
+- Presigned links for previews and downloads, valid for
+  `PINCER_STORAGE_PRESIGN_TTL` seconds (default 900; 60 to 604800 allowed): the
+  provider's own for cloud roots, HMAC-signed `/api/storage/signed/{token}`
+  links for local roots.
+- The skills dir is protected when it lies under the storage root: it, its
+  contents and its parent folders cannot be deleted or moved, and nothing can
+  be moved into it (`403`). On local roots this follows the folder on disk, so
+  case variants and symlinks are refused too.
+- A local storage root that contains the data dir is refused; `pincer doctor`
+  checks for it (`storage_root`).
+- The shared cloud client code moved to `pincer.storage.clients`.
+  `pincer.tools.skills.storage` no longer re-exports `is_remote_uri`; import it
+  from `pincer.storage.clients`.
+- `cloudpathlib` in the `remote-skills` extra is now capped below 0.27.
+
+#### Remote skill roots: S3, Azure Blob Storage and Google Cloud Storage
+
+`PINCER_SKILLS_DIR` now also accepts `s3://bucket/prefix`, `az://container/prefix`
+or `gs://bucket/prefix`, so teams can share skills from object storage instead of
+mounting a directory. Install the new `remote-skills` extra
+(`pip install "pincer-agent[remote-skills]"`, built on cloudpathlib). See
+[Skills Guide → Remote Skill Roots](docs/guides/skills-guide.md#remote-skill-roots).
+
+- Discovery, `load_skill`, `load_skill_reference` and the dashboard's `/api/skills`
+  work unchanged on remote roots; blocking storage I/O runs off the event loop.
+- Remote files are cached only by cloudpathlib, under `skills_cache_dir/objects/`
+  (default `<data_dir>/cache/skills`; always a local directory, a URI is
+  rejected at startup); each read checks the bucket for a newer
+  object. `run_skill_script` brings a remote skill's cached folder up to date,
+  then runs it from there through the usual approval gate and sandbox, so
+  script-only edits take effect on the next run.
+- Credentials: optional `PINCER_STORAGE_S3_*`, `PINCER_STORAGE_AZURE_*` and
+  `PINCER_STORAGE_GCS_*` settings; unset ones fall back to each SDK's default chain.
+- A remote `skills_dir` must be usable at startup. `pincer run`, `pincer run tasks`,
+  `pincer mcp serve` and `pincer skills rebuild` exit 1 if the extra is missing,
+  the storage client can't be built, or listing the root fails (credentials,
+  bucket, endpoint). The error names the `PINCER_STORAGE_*` settings to
+  configure. SDK default credentials count as configured (for Azure, via
+  `DefaultAzureCredential` once `storage_azure_account_url` is set).
+- An outage after startup never empties the index. Rescans keep the unreachable
+  root's previous skills and announce nothing; `pincer skills rebuild` and
+  `POST /api/skills/rebuild` fail (exit 1, or HTTP 503) and change nothing.
+- The `remote-skills` extra requires cloudpathlib >= 0.25 (whose cache refuses
+  object keys that would land outside it) and adds `azure-identity`.
+- New `pincer skills rebuild [--keep-cache]`: clears cached remote files, rescans
+  and announces the change through a generation stamp in `skills_cache_dir`. A
+  running `pincer run` reloads without a restart: a background watcher checks the
+  stamp every `skills_index_watch_interval_seconds` (default 300; `0` disables it)
+  and rescans off the request path, and the dashboard checks it on every request.
+- New `POST /api/skills/rebuild[?keep_cache=true]`: rebuilds the serving process's
+  index, then queues a `rebuild_skill_index` background job with the new
+  generation for the task workers (consumed by one process; idempotent). Returns
+  the rebuilt skill list and whether the job was queued.
+- One skill index per process, owned by `pincer.services.skills.SkillService` and
+  shared by the agent, its skill tools, the dashboard API and the CLI.
+- `/api/skills` rescans when its index is older than `skills_index_cache_ttl_seconds`
+  (default 60, maximum 60, `0` = every request), and immediately after any index
+  change in any process.
+- `pincer doctor` checks that a remote root is reachable.
+
+### Fixed
+
+- Google Workspace tools were all disabled when the token lacked any scope: a
+  legacy calendar-only `google_token.json` or a token minted before the Meet
+  scopes left only the 3 built-in calendar tools, while `/api/integrations`
+  still showed Google as active. Services the token covers are now enabled
+  individually, `[integrations.google].services` / `enabled` are honoured, and
+  the status is `active` / `partial` / `disabled` with `missing_scopes` and a
+  re-auth hint. `google_credentials.json` is no longer required at runtime (the
+  token carries the client id/secret). Onboarding accepts the Workspace token,
+  and the non-existent `pincer setup-google` hint now reads
+  `pincer google setup` (#268).
+- Outbound calls that were busy, unanswered, failed, cancelled or reached
+  voicemail were recorded as completed (or, for late voicemail, as callee
+  hang-ups). They now get their own failure codes, which inflated success
+  rate, SLO and GA-gate numbers before. `pincer telephony reclassify` corrects
+  history within the telemetry retention window. The user's report for such a
+  call now says plainly that it did not connect and why, in their language
+  (en/de/uk), without a transcript link — including calls still ringing when
+  the assistant was restarted, reaped by the watchdog, or ended without a
+  recorded cause.
+- `pincer doctor` and `GET /api/doctor` now check the configured `skills_dir`;
+  they always looked at `~/.pincer/skills` before.
+
+### Added
+
+#### Daemon mode: `pincer run -d`, `logs`, `status`, `stop`, `restart`
+
+Pincer can run in the background without `nohup` or Docker, scoped to its data
+directory. See [CLI Reference → Background mode](docs/reference/cli.md#background-mode-daemon).
+
+- **`pincer run -d`** starts Pincer in its own session (it outlives the terminal),
+  from the caller's working directory and environment, so it loads the same `.env`.
+  It shows the startup log and returns once every channel is up:
+  `Pincer started (pid 4182) — channels: telegram, signal  'pincer logs -f' to follow`.
+  A crash before that prints the last 20 log lines and exits 1. A start slower than
+  `--wait-timeout` (default 60 s) exits 1 and leaves Pincer starting. A second
+  `run -d` reports the running one and exits 0. While a foreground Pincer holds the
+  port, `run -d` refuses.
+- **`pincer logs`** prints `<data_dir>/logs/pincer.log` raw, so it pipes cleanly.
+  `-n/--tail N` limits it to the last N lines. `-f` follows from the last 50 and
+  ends by itself once Pincer has exited. Each start rotates the previous log to
+  `pincer.log.1` and keeps 5 previous sessions. When Pincer isn't running, `logs`
+  shows the last session's log.
+- **`pincer status`** prints one line: running, starting or not running, with
+  the pid, uptime, port, channels, version and the directory the daemon was started
+  from.
+- **`pincer stop`** shuts Pincer down the same graceful way as Ctrl+C (calls drain
+  with their spoken ending). It waits up to `--timeout` (default 90 s, sized to the
+  60 s call drain) and never kills on its own. `--force` kills it.
+- **`pincer restart`** stops it with the same rules, then starts a new one from
+  the current directory and environment. It doesn't start a new one while the old
+  one is still shutting down. It has no `--force`.
+- **Plain `pincer run` while a daemon is up attaches** to it: it follows the log
+  instead of starting a second instance. Ctrl+C stops the daemon gracefully. A
+  second Ctrl+C, or closing the terminal, only detaches.
+- Not supported on Windows (use a service manager) or inside a container (use
+  `docker compose up -d`). `pincer run tasks -d` is refused, because the task worker
+  runs in the foreground.
 
 #### Telephony telemetry and the internal Telephony dashboard
 
@@ -252,6 +473,14 @@ retried callbacks.
 
 ### Fixed
 
+- **SIGTERM (`docker stop`, `pincer stop`) now finishes the graceful shutdown.**
+  uvicorn re-raised the signal when the API server exited. That cancelled the
+  shutdown at the trigger manager, so channels never drained their calls.
+- **`pincer run tasks` shuts down gracefully on SIGTERM**, the same way as on
+  Ctrl+C. Before, it was killed at once.
+- The "port already in use" error no longer suggests `pkill -f 'pincer run'`,
+  which also killed task workers. It points to `pincer stop` or the foreground
+  terminal instead.
 - **Turn telemetry and per-call rows could be written out of order.** Background
   call-row writes are now chained per call, so a late "answered" write can no
   longer resurrect a stale status on a call that has already ended, and a turn's

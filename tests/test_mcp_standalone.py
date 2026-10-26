@@ -187,3 +187,22 @@ def test_core_none_before_start():
     cfg = _make_config()
     shell = StandaloneMCPShell(mcp_config=cfg)
     assert shell.core is None
+
+
+def test_unusable_remote_skills_root_stops_the_standalone_server():
+    """Skill tools are otherwise best-effort here, but an unusable remote skills root
+    must refuse to start (SkillLoadError), not serve without the configured skills."""
+    from pincer.exceptions import SkillLoadError
+
+    shell = StandaloneMCPShell(mcp_config=_make_config())
+    shell._core = MagicMock()
+    with (
+        patch(
+            "pincer.services.skills.open_usable_skills_root",
+            side_effect=SkillLoadError("Skills root s3://b/t is not usable. Configure PINCER_STORAGE_S3_X"),
+        ),
+        patch("pincer.config.get_settings_relaxed", return_value=MagicMock(skills_dir="s3://b/t")),
+        pytest.raises(SkillLoadError, match="PINCER_STORAGE_S3_X"),
+    ):
+        shell._register_standalone_tools()
+    shell._core.register_tool.assert_not_called()

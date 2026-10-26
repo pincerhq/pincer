@@ -234,3 +234,140 @@ class TestCalendarCreate:
 
             result = await calendar_create("Test", "not-a-date")
             assert "Invalid" in result or "Error" in result
+
+
+class TestEnvTokenCredentials:
+    """PINCER_GOOGLE_TOKEN_JSON — credentials come from memory, nothing is written."""
+
+    def _settings(self, tmp_path, token):
+        from pydantic import SecretStr
+
+        from pincer.integrations.google.token_source import encode_json_blob
+
+        settings = MagicMock()
+        settings.google_oauth_dir.return_value = tmp_path
+        settings.google_token_json = SecretStr(encode_json_blob(token))
+        return settings
+
+    def test_env_token_used_without_files(self, tmp_path):
+        import pincer.tools.builtin.calendar_tool as cal
+
+        token = {
+            "token": "ya29.env",
+            "refresh_token": "1//rt",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "client_id": "cid",
+            "client_secret": "cs",
+            "scopes": ["https://www.googleapis.com/auth/calendar"],
+            "expiry": "2000-01-01T00:00:00Z",
+        }
+
+        def _refresh(self, request):
+            self.token = "ya29.refreshed"
+            self.expiry = None
+
+        cal._auth_cache = None
+        with (
+            patch("pincer.tools.builtin.calendar_tool.get_settings", return_value=self._settings(tmp_path, token)),
+            patch("google.oauth2.credentials.Credentials.refresh", _refresh),
+            patch("google.auth.transport.requests.Request"),
+        ):
+            creds = cal._get_credentials()
+            assert cal._get_credentials() is creds  # refreshed token cached in memory
+        cal._auth_cache = None
+
+        assert creds.token == "ya29.refreshed"
+        assert list(tmp_path.iterdir()) == []
+
+    def test_env_token_refresh_failure_raises_file_not_found(self, tmp_path):
+        import pincer.tools.builtin.calendar_tool as cal
+
+        token = {"refresh_token": "1//rt", "client_id": "cid", "client_secret": "cs", "expiry": "2000-01-01T00:00:00Z"}
+        cal._auth_cache = None
+        with (
+            patch("pincer.tools.builtin.calendar_tool.get_settings", return_value=self._settings(tmp_path, token)),
+            patch("google.oauth2.credentials.Credentials.refresh", side_effect=Exception("invalid_grant")),
+            patch("google.auth.transport.requests.Request"),
+            pytest.raises(FileNotFoundError, match="PINCER_GOOGLE_TOKEN_JSON"),
+        ):
+            cal._get_credentials()
+        cal._auth_cache = None
+
+    def test_cache_key_does_not_hold_plaintext_token(self, tmp_path):
+        import pincer.tools.builtin.calendar_tool as cal
+
+        token = {"token": "ya29.env", "refresh_token": "1//plaintext-rt", "client_id": "c", "client_secret": "s"}
+        cal._auth_cache = None
+        auth = cal._auth_for({"token_info": token})
+        assert cal._auth_for({"token_info": dict(token)}) is auth  # same token → cached instance
+        assert "plaintext-rt" not in cal._auth_cache[0]
+        assert cal._auth_for({"token_info": {**token, "refresh_token": "other"}}) is not auth
+        cal._auth_cache = None
+
+
+class TestFileTokenCredentials:
+    """File mode goes through locate_token() too: workspace token first, then the legacy one."""
+
+    def _write(self, path, scopes, token="ya29.file"):
+        import json
+
+        path.write_text(
+            json.dumps(
+                {
+                    "token": token,
+                    "refresh_token": "1//rt",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                    "client_id": "cid",
+                    "client_secret": "cs",
+                    "scopes": scopes,
+                    "expiry": "2099-01-01T00:00:00Z",
+                }
+            )
+        )
+
+    def _settings(self, tmp_path):
+        settings = MagicMock()
+        settings.google_oauth_dir.return_value = tmp_path
+        return settings
+
+    def test_prefers_workspace_token_over_legacy(self, tmp_path):
+        import pincer.tools.builtin.calendar_tool as cal
+        from pincer.integrations.google.auth import ALL_SCOPES
+
+        self._write(tmp_path / "google_token.json", cal.SCOPES, token="ya29.legacy")
+        self._write(tmp_path / "google_workspace_token.json", ALL_SCOPES, token="ya29.workspace")
+        cal._auth_cache = None
+        with patch("pincer.tools.builtin.calendar_tool.get_settings", return_value=self._settings(tmp_path)):
+            assert cal._get_credentials().token == "ya29.workspace"
+        cal._auth_cache = None
+
+    def test_legacy_token_without_credentials_file(self, tmp_path):
+        import pincer.tools.builtin.calendar_tool as cal
+
+        self._write(tmp_path / "google_token.json", cal.SCOPES, token="ya29.legacy")
+        cal._auth_cache = None
+        with patch("pincer.tools.builtin.calendar_tool.get_settings", return_value=self._settings(tmp_path)):
+            assert cal._get_credentials().token == "ya29.legacy"
+        cal._auth_cache = None
+
+    def test_no_token_raises_setup_required(self, tmp_path):
+        import pincer.tools.builtin.calendar_tool as cal
+
+        cal._auth_cache = None
+        with (
+            patch("pincer.tools.builtin.calendar_tool.get_settings", return_value=self._settings(tmp_path)),
+            pytest.raises(FileNotFoundError, match="pincer google setup"),
+        ):
+            cal._get_credentials()
+
+    def test_token_without_calendar_scope_raises_file_not_found(self, tmp_path):
+        import pincer.tools.builtin.calendar_tool as cal
+
+        self._write(tmp_path / "google_workspace_token.json", ["https://www.googleapis.com/auth/gmail.send"])
+        cal._auth_cache = None
+        with (
+            patch("pincer.tools.builtin.calendar_tool.get_settings", return_value=self._settings(tmp_path)),
+            pytest.raises(FileNotFoundError, match="missing required scopes"),
+        ):
+            cal._get_credentials()
+        cal._auth_cache = None

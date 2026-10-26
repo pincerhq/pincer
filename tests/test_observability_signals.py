@@ -187,6 +187,20 @@ async def test_attempt_success_excludes_unreachable_and_policy(settings):
     assert signal.detail["excluded_callee_or_policy"] == 4
 
 
+async def test_slo_signals_with_new_codes(settings):
+    """Outbound calls that reached nobody are not successes, and not SLO failures either."""
+    await _seed_calls(settings, ["none", "none", "busy", "no_answer", "voicemail", "ws_drop"])
+
+    success = await call_success_rate(settings)
+    assert success.detail["completed"] == 2
+    assert success.detail["terminated"] == 6
+
+    attempt = await call_attempt_success_rate(settings, window_hours=24)
+    assert attempt.detail["excluded_callee_or_policy"] == 3
+    assert attempt.sample_size == 3
+    assert attempt.value == pytest.approx(2 / 3)
+
+
 # ── Booking success rate ─────────────────────────────────────────────
 
 

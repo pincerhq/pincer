@@ -1,7 +1,7 @@
 """
 Google Workspace FastMCP server.
 
-Registers all 85 Google Workspace tools on a FastMCP instance.
+Registers the Google Workspace tools the token covers on a FastMCP instance.
 Can run in two modes:
 
   - stdio (for Claude Desktop / MCP clients that spawn a subprocess):
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 def _build_fastmcp(auth: GoogleAuth) -> Any:
-    """Build a FastMCP instance with all 85 Google Workspace tools registered."""
+    """Build a FastMCP instance with the Google Workspace tools for ``auth.services``."""
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:
@@ -119,12 +119,31 @@ class GoogleWorkspaceMCPServer:
         return f"http://{self._host}:{self._port}{self._path}"
 
 
+def _resolve_server_auth() -> GoogleAuth:
+    """Auth for the standalone server, limited to the services the token covers.
+
+    Uses the same resolution as the agent (``get_google_factory``), so a
+    calendar-only or Meet-less token serves the tools it can instead of every
+    call failing the scope check. Exits when no usable token is configured.
+    """
+    import sys
+
+    from pincer.integrations.google import get_google_factory
+
+    factory = get_google_factory()
+    if factory is None:
+        print(
+            "Google Workspace is not configured, disabled, or the token covers none of the "
+            "configured services. Run 'pincer google setup' (or set PINCER_GOOGLE_TOKEN_JSON).",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return factory.auth
+
+
 def main() -> None:
     """CLI entry point: ``python -m pincer.integrations.google.server [stdio|http]``."""
     import argparse
-
-    from pincer.config import get_settings_relaxed
-    from pincer.integrations.google.auth import GoogleAuth
 
     parser = argparse.ArgumentParser(description="Google Workspace MCP Server")
     parser.add_argument("mode", choices=["stdio", "http"], default="stdio", nargs="?")
@@ -133,14 +152,7 @@ def main() -> None:
     parser.add_argument("--path", default="/mcp")
     args = parser.parse_args()
 
-    settings = get_settings_relaxed()
-    oauth_dir = settings.google_oauth_dir()
-    auth = GoogleAuth(
-        credentials_path=str(oauth_dir / "google_credentials.json"),
-        token_path=str(oauth_dir / "google_workspace_token.json"),
-    )
-
-    fmcp = _build_fastmcp(auth)
+    fmcp = _build_fastmcp(_resolve_server_auth())
 
     if args.mode == "stdio":
         asyncio.run(fmcp.run_stdio_async())

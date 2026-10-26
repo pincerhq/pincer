@@ -48,6 +48,7 @@ PUBLIC_PATHS = (
 SELF_AUTHENTICATED_PREFIXES = (
     "/api/apps/teams/",  # Teams HMAC
     "/api/apps/twilio/",  # X-Twilio-Signature (voice/webhook_auth.py)
+    "/api/storage/signed/",  # HMAC-signed, expiring download links (api/storage.py)
 )
 
 _LOCALHOST_ORIGINS = (

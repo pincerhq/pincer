@@ -502,7 +502,7 @@ enables random failover.
 | Variable | Purpose |
 |----------|---------|
 | `PINCER_TELEGRAM_GUESTS_ALLOWED` | Once `PINCER_IDENTITY_MAP` is configured, allow unmapped senders through as disposable guests (default `false`; no-op if no identity map is configured) |
-| `PINCER_TELEGRAM_GROUP_TRIGGER` | In group chats, only reply when @mentioned, replied to, or this word appears (default: `pincer`) |
+| `PINCER_TELEGRAM_GROUP_TRIGGER` | In group chats, only reply when @mentioned, replied to, or a trigger appears. Comma-separated words/phrases, whole-word and case-insensitive; `@name` entries require the `@` (default: `pincer`) |
 
 ### Optional — WhatsApp
 
@@ -510,7 +510,7 @@ enables random failover.
 |----------|---------|
 | `PINCER_WHATSAPP_ENABLED` | Enable WhatsApp channel (`true`/`false`) |
 | `PINCER_WHATSAPP_GUESTS_ALLOWED` | Once `PINCER_IDENTITY_MAP` is configured, allow unmapped senders through as disposable guests (default `false`). No-op if no identity map is configured for group mentions; for DMs, unlike Telegram/Signal, this is NOT a no-op — DMs are rejected by default with no identity map configured, and this flag overrides that |
-| `PINCER_WHATSAPP_GROUP_TRIGGER` | Trigger word for group messages (default: `pincer`) |
+| `PINCER_WHATSAPP_GROUP_TRIGGER` | Comma-separated trigger words/phrases for group messages, whole-word and case-insensitive (default: `pincer`). Picking the bot in WhatsApp's @-picker (phone number or LID) is detected without a trigger; a literal `@pincer` entry only helps when typed by hand |
 
 ### Optional — Email & Calendar
 

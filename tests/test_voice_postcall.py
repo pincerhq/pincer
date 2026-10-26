@@ -4,6 +4,7 @@ report → follow-up proposals, plus the /transcript retrieval tool."""
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import aiosqlite
@@ -69,6 +70,9 @@ def _state() -> CallState:
         purpose="Zahnarzttermin bestätigen",
         language="de",
     )
+    # Answered, as the engine stamps it: an outbound call without it never
+    # connected and gets the not-connected report.
+    state.metadata["answered_at"] = datetime.now(UTC)
     return state
 
 

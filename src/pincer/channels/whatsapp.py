@@ -12,8 +12,10 @@ Features:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import io
 import logging
+import re
 import threading
 import time
 from collections import deque
@@ -55,6 +57,7 @@ from pincer.channels.base import (
     IncomingMessage,
     MessageHandler,
 )
+from pincer.channels.group_trigger import matches_group_trigger
 
 if TYPE_CHECKING:
     from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
@@ -65,6 +68,15 @@ if TYPE_CHECKING:
     from pincer.core.identity import IdentityResolver
 
 logger = logging.getLogger(__name__)
+
+# The group whose message is being handled in this task: (sender_phone,
+# (group user, server)). Set by _on_message around the handler, so approval
+# prompts and progress for that message go back to the group, while sends from
+# other tasks (scheduler, notifications, the sender's concurrent DM) don't.
+# A task the handler itself spawns inherits it.
+_active_group: contextvars.ContextVar[tuple[str, tuple[str, str]] | None] = contextvars.ContextVar(
+    "whatsapp_active_group", default=None
+)
 
 MAX_WHATSAPP_MESSAGE_LENGTH = 4096
 
@@ -166,8 +178,15 @@ class WhatsAppChannel(BaseChannel):
         # Reply targets learned from inbound messages: sender_phone → (user, server).
         # Needed because sender_phone may be a LID user part that only resolves on
         # the "@lid" server — `build_jid(lid_user)` defaults to "@s.whatsapp.net"
-        # and the WA server rejects it with "no LID found".
+        # and the WA server rejects it with "no LID found". Never a group: a
+        # proactive send (reminder, notification) must not land in a group.
         self._reply_targets: dict[str, tuple[str, str]] = {}
+        # Bare ids whatsmeow's store doesn't know as a LID (see _jid_for).
+        self._not_lids: set[str] = set()
+        # LID senders whose phone placeholder was looked up and promoted this
+        # run (see _promote_sender), and the lookups still in flight.
+        self._lids_checked: set[str] = set()
+        self._lid_checks: dict[str, asyncio.Task[None]] = {}
 
         # Echo prevention: skip processing messages Pincer just sent.
         self._recent_sent_ids: set[str] = set()
@@ -181,20 +200,24 @@ class WhatsAppChannel(BaseChannel):
     async def resolve_internal_user_id(self, identifier: str) -> str:
         """Resolve a WhatsApp phone JID (without +) to the account's internal LID.
 
-        Only the bot owner's own phone can be resolved this way: the LID is
-        learned from the first is_from_me message after connection.  For any
-        other phone number the LID is unknown until that contact sends a message,
-        so the identifier is returned unchanged.
+        whatsmeow only knows the LID of a phone it has seen a message from. For
+        any other phone number the identifier is returned unchanged and stored
+        as a placeholder; the contact's first LID-addressed message reveals
+        their phone (see `_sender_pn`), and `_on_message` swaps the placeholder
+        for the LID via `IdentityResolver.promote_channel_id`. A failed lookup
+        raises, so the identity layer leaves the pair out instead of storing a
+        guess.
         """
         identifier = identifier.removeprefix("+").removeprefix("@")
         from neonize.utils.jid import build_jid
 
-        try:
-            _jid = build_jid(identifier)
-            lid_jid = await self._client.get_lid_from_pn(_jid)
+        lid_jid = await self._client.get_lid_from_pn(build_jid(identifier))
+        if lid_jid.User:
             return lid_jid.User
-        except Exception:
-            logger.error("Whatsapp: could not resolve identifier %r to user_id", identifier)
+        # whatsmeow answers an unknown phone→LID mapping with an empty JID
+        # rather than an error; that "" must never become a channel ID, or
+        # every not-yet-seen contact would share one identity.
+        logger.debug("Whatsapp: no LID known yet for %r, keeping the phone number", identifier)
         return identifier
 
     # ── Interactive prompts (approval / ask_user) ────
@@ -313,7 +336,7 @@ class WhatsAppChannel(BaseChannel):
             from pincer.exceptions import ChannelNotConnectedError
 
             raise ChannelNotConnectedError("WhatsApp client not connected")
-        jid = self._jid_for(user_id)
+        jid = await self._jid_for(user_id)
         last_id: str | None = None
         for chunk in _split_whatsapp_message(text or ""):
             result = await self._client.send_message(jid, chunk)
@@ -344,7 +367,7 @@ class WhatsAppChannel(BaseChannel):
         """
         if not self._client:
             return
-        jid = self._jid_for(user_id)
+        jid = await self._jid_for(user_id)
         try:
             await self._client.send_chat_presence(
                 jid,
@@ -508,25 +531,43 @@ class WhatsAppChannel(BaseChannel):
             await asyncio.sleep(0.2)
         logger.info("WhatsApp channel stopped")
 
-    def _jid_for(self, user_id: str) -> Any:
+    async def _jid_for(self, user_id: str) -> Any:
         """Build a JID to send to.
 
         Honors, in order:
           1. An explicit "user@server" in user_id (e.g. "207855026221128@lid").
-          2. A server learned from an inbound message for this user.
-          3. The neonize default server (s.whatsapp.net).
+          2. The group whose message from this user the current task is
+             handling (see _active_group).
+          3. A server learned from an inbound message from this user.
+          4. "@lid", when whatsmeow's store maps user_id as a LID to a phone.
+          5. The neonize default server (s.whatsapp.net).
 
-        Step 2 is load-bearing for LID-based self-chats: the sender's User part
-        is a LID that only resolves on "@lid", so build_jid(lid_user) defaults
-        to "@s.whatsapp.net" and WA returns "no LID found".
+        Steps 3 and 4 are load-bearing for LIDs: a LID only resolves on "@lid",
+        so build_jid(lid_user) defaults to "@s.whatsapp.net" and WA returns
+        "no LID found". Step 4 covers sends with no inbound message this run
+        (scheduler, notifications) to an identity stored under its LID.
         """
         if "@" in user_id:
             user, server = user_id.split("@", 1)
             return build_jid(user, server)
-        target = self._reply_targets.get(user_id)
+        active = _active_group.get()
+        target = active[1] if active is not None and active[0] == user_id else self._reply_targets.get(user_id)
         if target is not None:
             user, server = target
             return build_jid(user, server)
+        if self._client is not None and user_id not in self._not_lids:
+            try:
+                pn = await self._pn_for_lid(self._client, build_jid(user_id, "lid"))
+            except Exception:
+                # Not cached: the next send looks it up again.
+                logger.debug("WA get_pn_from_lid failed for %s", user_id, exc_info=True)
+                return build_jid(user_id)
+            if pn:
+                self._reply_targets[user_id] = (user_id, "lid")
+                return build_jid(user_id, "lid")
+            # A LID the store learns later arrives with a message (DM or
+            # group), which sets step 3 and clears this.
+            self._not_lids.add(user_id)
         return build_jid(user_id)
 
     async def send(self, user_id: str, text: str, **kwargs: Any) -> None:
@@ -535,7 +576,7 @@ class WhatsAppChannel(BaseChannel):
 
             raise ChannelNotConnectedError("WhatsApp client not connected")
 
-        jid = self._jid_for(user_id)
+        jid = await self._jid_for(user_id)
         for chunk in _split_whatsapp_message(text or ""):
             await self._client.send_message(jid, chunk)
         logger.debug("WhatsApp message sent to %s (%d chars)", user_id, len(text))
@@ -546,7 +587,7 @@ class WhatsAppChannel(BaseChannel):
             from pincer.exceptions import ChannelNotConnectedError
 
             raise ChannelNotConnectedError("WhatsApp client not connected")
-        jid = self._jid_for(user_id)
+        jid = await self._jid_for(user_id)
         await self._client.send_image(jid, url, caption=caption or None)
 
     async def send_photo_from_bytes(
@@ -561,7 +602,7 @@ class WhatsAppChannel(BaseChannel):
             from pincer.exceptions import ChannelNotConnectedError
 
             raise ChannelNotConnectedError("WhatsApp client not connected")
-        jid = self._jid_for(user_id)
+        jid = await self._jid_for(user_id)
         await self._client.send_image(jid, data, caption=caption or None)
 
     async def send_file(self, user_id: str, file_path: str, caption: str = "") -> None:
@@ -576,7 +617,7 @@ class WhatsAppChannel(BaseChannel):
         p = Path(file_path)
         filename = p.name
         mime, _ = mimetypes.guess_type(filename)
-        jid = self._jid_for(user_id)
+        jid = await self._jid_for(user_id)
         await self._client.send_document(
             jid,
             file_path,
@@ -591,7 +632,7 @@ class WhatsAppChannel(BaseChannel):
             from pincer.exceptions import ChannelNotConnectedError
 
             raise ChannelNotConnectedError("WhatsApp client not connected")
-        jid = self._jid_for(user_id)
+        jid = await self._jid_for(user_id)
         try:
             await self._client.send_video(
                 jid,
@@ -717,6 +758,68 @@ class WhatsAppChannel(BaseChannel):
                 return False
         return True
 
+    @staticmethod
+    async def _pn_for_lid(client: NewAClient, lid_jid: Any) -> str | None:
+        """The phone number whatsmeow's store maps this LID JID to, or None.
+
+        None means the store has no mapping. A failed lookup (store error,
+        client not connected) raises, so callers can retry it.
+        """
+        pn = await client.get_pn_from_lid(lid_jid)
+        user = getattr(pn, "User", "")
+        return str(user) if user else None
+
+    async def _sender_pn(self, client: NewAClient, source: Any) -> str | None:
+        """The phone number behind a LID sender, or None when it is unknown.
+
+        whatsmeow puts the PN JID in SenderAlt for LID-addressed messages, and
+        stores the LID↔PN mapping on receive; the store is the fallback.
+        """
+        alt = source.SenderAlt
+        if alt.User and alt.Server == "s.whatsapp.net":
+            return str(alt.User)
+        return await self._pn_for_lid(client, source.Sender)
+
+    async def _promote_sender(self, client: NewAClient, source: Any) -> None:
+        """Swap a contact's phone placeholder for their LID, once per run.
+
+        A contact seeded by phone before whatsmeow knew their LID is stored
+        under the phone; this runs before the guest gate so that it and
+        IdentityMiddleware find them by LID. SenderAlt is the sender's own
+        phone, in groups too, never the group JID. The phone is not offered as
+        an alt_user_id: the middleware would link it back.
+
+        Concurrent first messages share one lookup. A LID is only marked done
+        once its phone was found and promotion ran, so a message without
+        SenderAlt, a store miss, or a failure is retried on the next message.
+        """
+        lid = source.Sender.User
+        if self._identity is None or source.Sender.Server != "lid" or not lid or lid in self._lids_checked:
+            return
+        check = self._lid_checks.get(lid)
+        if check is None:
+            check = asyncio.ensure_future(self._check_lid(client, source, lid))
+            self._lid_checks[lid] = check
+            check.add_done_callback(lambda _t: self._lid_checks.pop(lid, None))
+        await asyncio.shield(check)
+
+    async def _check_lid(self, client: NewAClient, source: Any, lid: str) -> None:
+        try:
+            pn = await self._sender_pn(client, source)
+        except Exception:
+            # Retried on the sender's next message; this one is still routed.
+            logger.debug("WA get_pn_from_lid failed for %s", lid, exc_info=True)
+            return
+        if not pn or self._identity is None:
+            return
+        try:
+            await self._identity.promote_channel_id(ChannelType.WHATSAPP, lid, [pn])
+        except Exception:
+            # Retried on the sender's next message; this one is still routed.
+            logger.exception("WA: promoting %s to its LID failed", pn)
+            return
+        self._lids_checked.add(lid)
+
     async def _on_message(self, client: NewAClient, event: MessageEv) -> None:
         """Route incoming WhatsApp messages to the handler callback."""
         try:
@@ -751,10 +854,17 @@ class WhatsAppChannel(BaseChannel):
 
             # Remember where to reply to this sender. Mirrors what the handler-
             # reply path at the bottom of this function uses (chat JID), so
-            # approval/input prompts route to the same place.
+            # approval/input prompts route to the same place. A group is never
+            # remembered: it only applies while its message is handled (see
+            # _active_group). A LID sender's own DM address is learned from
+            # group messages too, so a contact who only writes in groups still
+            # gets reminders on "@lid".
             chat_server = source.Chat.Server
-            if sender_phone and chat_user and chat_server:
+            if sender_phone and chat_user and chat_server and not is_group:
                 self._reply_targets[sender_phone] = (chat_user, chat_server)
+            elif not is_from_me and source.Sender.Server == "lid" and sender_phone:
+                self._reply_targets[sender_phone] = (sender_phone, "lid")
+                self._not_lids.discard(sender_phone)
 
             msg_type = getattr(info, "Type", None) or "unknown"
             logger.info(
@@ -803,6 +913,7 @@ class WhatsAppChannel(BaseChannel):
                     # exists to vet other senders, not the owner.
                     logger.info("WA routing: group mention (from owner's own number)")
                 else:
+                    await self._promote_sender(client, source)
                     # Rule 4a: Guest gate, keyed on the sender (not the chat/group).
                     # whatsapp_self_chat_only is deliberately not consulted here —
                     # its docstring says group mentions work regardless of that flag.
@@ -826,6 +937,7 @@ class WhatsAppChannel(BaseChannel):
                 if self._settings.whatsapp_self_chat_only:
                     logger.info("WA skip: incoming DM from %s (self-chat-only mode)", sender_phone)
                     return
+                await self._promote_sender(client, source)
                 if not self._settings.whatsapp_guests_allowed:
                     if self._identity is None or not self._identity.has_config:
                         # Unlike Telegram/Signal, WhatsApp DMs fail CLOSED without a
@@ -905,8 +1017,13 @@ class WhatsAppChannel(BaseChannel):
             )
 
             if self._handler:
-                response = await self._handler(incoming)
-                await self._finalize_progress(sender_phone)
+                token = _active_group.set((sender_phone, (chat_user, chat_server))) if is_group else None
+                try:
+                    response = await self._handler(incoming)
+                    await self._finalize_progress(sender_phone)
+                finally:
+                    if token is not None:
+                        _active_group.reset(token)
                 if response:
                     reply_jid = build_jid(chat_user, source.Chat.Server)
                     for chunk in _split_whatsapp_message(response):
@@ -1053,10 +1170,12 @@ class WhatsAppChannel(BaseChannel):
             doc_data = await client.download_any(msg)
             filename = msg.documentMessage.fileName or "document"
             mime = msg.documentMessage.mimetype or "application/octet-stream"
+            caption = msg.documentMessage.caption or ""
+            label = f"[Document: {filename}]"
             return IncomingMessage(
                 user_id=sender_phone,
                 channel="whatsapp",
-                text=f"[Document: {filename}]",
+                text=f"{caption}\n\n{label}" if caption else label,
                 files=[(doc_data, mime, filename)],
                 channel_type=ChannelType.WHATSAPP,
                 media_type="document",
@@ -1092,21 +1211,37 @@ class WhatsAppChannel(BaseChannel):
     # ── Group Mention Detection ──────────────────
 
     def _is_mentioned_in_group(self, msg: WAMessage, client: NewAClient) -> bool:
-        own_jid = self._own_jid
+        # The @-picker inserts the phone number in classic groups and the LID
+        # in LID-addressed groups, so accept either of our own identifiers.
+        own_ids = {own_id for own_id in (self._own_jid, self._own_lid) if own_id}
 
-        if msg.HasField("extendedTextMessage") and msg.extendedTextMessage.HasField("contextInfo"):
-            ctx = msg.extendedTextMessage.contextInfo
-            if ctx.mentionedJID:
-                for jid in ctx.mentionedJID:
-                    if own_jid and own_jid in str(jid):
-                        return True
-
+        # Text-bearing payloads: plain text, and captioned media the extract
+        # path forwards to the agent (image and document captions). Video has
+        # no content path, so its caption must not pass the gate.
         text = msg.conversation or ""
+        ctx = None
         if msg.HasField("extendedTextMessage"):
             text = msg.extendedTextMessage.text or ""
+            if msg.extendedTextMessage.HasField("contextInfo"):
+                ctx = msg.extendedTextMessage.contextInfo
+        else:
+            for field in ("imageMessage", "documentMessage"):
+                if msg.HasField(field):
+                    media = getattr(msg, field)
+                    text = media.caption or ""
+                    if media.HasField("contextInfo"):
+                        ctx = media.contextInfo
+                    break
 
-        if own_jid and own_jid in text:
-            return True
+        if ctx is not None and ctx.mentionedJID:
+            for jid in ctx.mentionedJID:
+                # Compare the user part exactly: a substring test also fires on
+                # any longer number that happens to contain ours.
+                if str(jid).split("@", 1)[0].split(":", 1)[0] in own_ids:
+                    return True
 
-        trigger = self._settings.whatsapp_group_trigger
-        return bool(trigger and trigger.lower() in text.lower())
+        for own_id in own_ids:
+            if re.search(rf"(?<!\d){re.escape(own_id)}(?!\d)", text):
+                return True
+
+        return matches_group_trigger(text, self._settings.whatsapp_group_trigger)

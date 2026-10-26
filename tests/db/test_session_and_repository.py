@@ -238,6 +238,16 @@ async def test_iso_text_keeps_the_instant_across_offsets(url):
     assert datetime.fromisoformat(stamped) == datetime(2026, 9, 19, 10, 0, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+async def test_iso_text_takes_a_blank_string_as_no_timestamp(url, blank):
+    """`""` is "unknown" all over the code base; it is NULL on both dialects
+    (Postgres' `TIMESTAMP` could not take it at all)."""
+    async with session_scope(url) as session:
+        await WidgetRepository(session).add(Widget(name="a", stamped_at=blank))
+    async with session_scope(url) as session:
+        assert (await WidgetRepository(session).list())[0].stamped_at is None
+
+
 async def test_json_text_is_stored_as_text_and_reads_empty_as_none(url):
     async with session_scope(url) as session:
         # Raw, so the empty string reaches the column untouched by JSONText.

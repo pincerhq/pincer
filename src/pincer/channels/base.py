@@ -148,6 +148,8 @@ class BaseChannel(ABC):
         Returns the internal ID string on success, or the original identifier
         if the channel does not support this resolution or cannot translate it
         yet (e.g. because the session hasn't received the necessary data).
+        Raises when the lookup itself fails; the identity layer then leaves
+        the pair out of the identity map rather than storing a guess.
 
         Override in channel subclasses that can perform the translation.
         """

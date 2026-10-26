@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
+    from pincer.security.audit import AuditEntry
+
 logger = logging.getLogger(__name__)
 
 #: Longest input/output summary stored, in characters.
@@ -38,7 +40,7 @@ class AuditService(DatabaseService):
         rows = []
         for entry in entries:
             try:
-                rows.append(_to_row(entry))
+                rows.append(to_row(entry))
             except Exception:
                 # `getattr`: the entry that failed may be the one without an
                 # `action`, and re-raising here would fail the whole batch.
@@ -124,9 +126,11 @@ def _as_dict(row: AuditLog) -> dict[str, Any]:
     return {name: getattr(row, name) for name in AuditLog.model_fields}
 
 
-def _to_row(entry: Any) -> AuditLog:
+def to_row(entry: AuditEntry) -> AuditLog:
     """An `AuditEntry` as its stored row: enum to value, summaries capped,
-    booleans as the 0/1 the column holds, metadata as JSON text."""
+    booleans as the 0/1 the column holds, metadata as JSON text.
+
+    Public for writers that audit inside their own transaction."""
     action = getattr(entry.action, "value", entry.action)
     return AuditLog(
         timestamp=entry.timestamp,

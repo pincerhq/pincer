@@ -140,6 +140,33 @@ async def test_single_thread_rule(manager):
     assert [c.call_sid for c in await manager.calls(first.thread_id)] == []
 
 
+async def test_attach_before_the_call_row_exists_stores_no_start_time(manager, tmp_path, monkeypatch):
+    """An outbound call is attached right after dialling, before its
+    voice_calls row exists: the member row gets NULL, not '' (which Postgres'
+    TIMESTAMP column cannot take).
+
+    Asserted on what reaches the store as well as on the row: `IsoText` also
+    turns '' into NULL, so the row alone would not notice the caller regress."""
+    thread = await manager.create("Matter")
+    store = await manager._store()
+    attached = []
+    original = store.attach
+
+    async def spy(values, **kwargs):
+        attached.append(values)
+        return await original(values, **kwargs)
+
+    monkeypatch.setattr(store, "attach", spy)
+    await manager.attach("CA1", thread.thread_id, KIND_ORIGIN)
+
+    assert [values["call_started_at"] for values in attached] == [None]
+
+    async with aiosqlite.connect(str(tmp_path / "pincer.db")) as db:
+        cursor = await db.execute("SELECT call_started_at FROM pincer_call_thread_members WHERE call_sid = 'CA1'")
+        assert await cursor.fetchone() == (None,)
+    assert [c.call_sid for c in await manager.calls(thread.thread_id)] == ["CA1"]
+
+
 async def test_attach_rejects_unknown_kind_and_thread(manager):
     thread = await manager.create("Matter")
     with pytest.raises(ThreadError, match="Unknown attach kind"):

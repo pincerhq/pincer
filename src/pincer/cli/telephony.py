@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import asyncio
 import json as json_lib
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 import typer
 from rich.table import Table
 
 from pincer.cli._shared import console
+
+if TYPE_CHECKING:
+    from pincer.voice.telemetry.reclassify import Plan
 
 telephony_app = typer.Typer(name="telephony", help="Telephony telemetry: latency baselines and call diagnosis")
 
@@ -200,6 +204,107 @@ def call_detail(
         "On conversation_relay the clock starts at transcript arrival instead, so the real "
         "figure is larger by the endpointing wait.[/dim]"
     )
+
+
+def _parse_since(value: str, now: datetime) -> datetime:
+    """The start of a `--since` window: `30d` / `12h` back from `now`, or an
+    ISO date/time (UTC when it has no offset), always normalised to UTC so it
+    compares correctly against the `+00:00` text SQLite stores. ValueError for
+    anything else."""
+    if value[-1:] in ("d", "h") and value[:-1].isdigit():
+        amount = int(value[:-1])
+        return now - (timedelta(days=amount) if value.endswith("d") else timedelta(hours=amount))
+    start = datetime.fromisoformat(value)
+    return start.astimezone(UTC) if start.tzinfo is not None else start.replace(tzinfo=UTC)
+
+
+def _retention_note(start: datetime, now: datetime, retention_days: int) -> str:
+    """Why calls before the telemetry retention cut-off cannot be corrected; "" inside it."""
+    if not retention_days or start >= now - timedelta(days=retention_days):
+        return ""
+    return (
+        f"Telemetry is kept for {retention_days} days: calls before "
+        f"{(now - timedelta(days=retention_days)).date()} have no events left and cannot be corrected."
+    )
+
+
+def _render_plan(result: Plan, *, applied: bool, retention_note: str) -> None:
+    if result.telemetry_missing:
+        console.print("[yellow]Telemetry tables are missing — run `pincer db upgrade`.[/yellow]")
+        return
+    if retention_note:
+        console.print(f"[yellow]{retention_note}[/yellow]")
+
+    if result.changes:
+        table = Table(show_header=True, header_style="bold")
+        for column in ("CallSid", "started", "change", "evidence"):
+            table.add_column(column)
+        for c in result.changes:
+            table.add_row(c.call_sid, c.started_at, f"{c.old or '—'} → {c.new}", c.evidence)
+        console.print(table)
+    if result.undetermined:
+        console.print(f"\n[bold]Could not determine[/bold] ({len(result.undetermined)}, left unchanged):")
+        for call_sid, started, code in result.undetermined:
+            console.print(f"  {call_sid}  {started}  {code or '—'}")
+
+    def _pct(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.1%}"
+
+    before, after = result.rates.get("before", {}), result.rates.get("after", {})
+    if before:
+        console.print("\n[bold]Over the window[/bold] (before → after):")
+        for key, label in (("call_success_rate", "call success"), ("call_attempt_success_rate", "call-attempt SLI")):
+            console.print(f"  {label}: {_pct(before.get(key))} → {_pct(after.get(key))}")
+
+    if not result.changes:
+        console.print("\nNothing to reclassify.")
+    elif applied:
+        console.print(f"\n[green]Reclassified {len(result.changes)} call(s).[/green]")
+    else:
+        console.print(f"\n[yellow]Dry run: {len(result.changes)} call(s) would change. Re-run with --apply.[/yellow]")
+
+
+@telephony_app.command(name="reclassify")
+def reclassify(
+    since: str = typer.Option("30d", "--since", help="Window: e.g. 30d or 12h, or an ISO date/time (UTC if no offset)"),
+    apply: bool = typer.Option(False, "--apply", help="Write the corrections (default: dry run)"),
+    output_json: bool = typer.Option(False, "--json", help="Output as JSON"),
+) -> None:
+    """Correct the failure code of outbound calls that never reached a person.
+
+    Busy / no-answer / failed / canceled calls and voicemail used to be recorded
+    as completed (late voicemail as a callee hang-up). The provider events on
+    each call's telemetry timeline say what really happened; this re-derives the
+    code from them. Dry run unless `--apply`, which updates `voice_calls` and the
+    telemetry row in one transaction and writes an audit row. Idempotent.
+    """
+    from pathlib import Path
+
+    from pincer.db.engine import get_database_url
+    from pincer.voice.telemetry import reclassify as rc
+
+    now = datetime.now(UTC)
+    try:
+        start = _parse_since(since, now)
+    except (ValueError, OverflowError):
+        console.print(f"[red]--since must look like 30d, 12h or an ISO date/time, got {since!r}[/red]")
+        raise typer.Exit(2) from None
+
+    settings = _settings()
+    url = get_database_url(Path(str(settings.db_path)))
+
+    async def _run() -> rc.Plan:
+        result = await rc.plan(url, start.isoformat())
+        if apply:
+            await rc.apply(url, result)
+        return result
+
+    result = asyncio.run(_run())
+    retention_note = _retention_note(start, now, int(getattr(settings, "telephony_telemetry_retention_days", 30) or 0))
+    if output_json:
+        console.print_json(json_lib.dumps({**result.to_dict(), "applied": apply, "retention_note": retention_note}))
+        return
+    _render_plan(result, applied=apply, retention_note=retention_note)
 
 
 @telephony_app.command(name="health")

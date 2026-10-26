@@ -367,7 +367,7 @@ def test_google_setup_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None
 
     assert result.exit_code == 0
     assert "Google Workspace authenticated!" in result.output
-    mock_auth_instance.run_auth_flow.assert_called_once_with(open_browser=True)
+    mock_auth_instance.run_auth_flow.assert_called_once_with(open_browser=True, save=True, client_config=None)
 
 
 def test_google_setup_reports_missing_oauthlib(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -493,3 +493,109 @@ def test_google_auth_falls_back_to_manual_flow(monkeypatch: pytest.MonkeyPatch, 
     assert result.exit_code == 0
     assert "Browser not available" in result.output
     assert "Google Calendar authorized!" in result.output
+
+
+def test_google_setup_print_env_does_not_save(monkeypatch: pytest.MonkeyPatch, tmp_path, capsys) -> None:  # type: ignore[no-untyped-def]
+    import base64
+    import json
+
+    (tmp_path / "google_credentials.json").write_text("{}")
+    mock_settings = MagicMock()
+    mock_settings.google_oauth_dir.return_value = tmp_path
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
+
+    mock_creds = MagicMock()
+    mock_creds.refresh_token = "rt"
+    mock_creds.to_json.return_value = json.dumps({"refresh_token": "rt", "client_id": "cid"})
+    mock_auth_instance = MagicMock()
+    mock_auth_instance.run_auth_flow.return_value = mock_creds
+    monkeypatch.setattr(
+        "pincer.integrations.google.auth.GoogleAuth",
+        lambda credentials_path, token_path: mock_auth_instance,
+    )
+
+    result = runner.invoke(app, ["google", "setup", "--print-env"])
+
+    assert result.exit_code == 0
+    mock_auth_instance.run_auth_flow.assert_called_once_with(open_browser=True, save=False, client_config=None)
+    line = next(ln for ln in result.output.splitlines() if ln.startswith("PINCER_GOOGLE_TOKEN_JSON="))
+    assert json.loads(base64.b64decode(line.split("=", 1)[1]))["refresh_token"] == "rt"
+
+
+def test_google_export_token_prints_env_line(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import json
+
+    from pincer.integrations.google.token_source import decode_json_blob
+
+    token = {"refresh_token": "rt", "client_id": "cid", "client_secret": "s", "scopes": ["x"]}
+    (tmp_path / "google_workspace_token.json").write_text(json.dumps(token))
+    mock_settings = MagicMock()
+    mock_settings.google_oauth_dir.return_value = tmp_path
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
+
+    result = runner.invoke(app, ["google", "export-token"])
+
+    assert result.exit_code == 0
+    line = next(ln for ln in result.output.splitlines() if ln.startswith("PINCER_GOOGLE_TOKEN_JSON="))
+    assert decode_json_blob(line.split("=", 1)[1]) == token
+
+
+def test_google_export_token_falls_back_to_legacy_token(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / "google_token.json").write_text('{"refresh_token": "rt"}')
+    mock_settings = MagicMock()
+    mock_settings.google_oauth_dir.return_value = tmp_path
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
+
+    result = runner.invoke(app, ["google", "export-token"])
+
+    assert result.exit_code == 0
+    assert "google_token.json" in result.output
+
+
+def test_google_export_token_without_token_fails(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    mock_settings = MagicMock()
+    mock_settings.google_oauth_dir.return_value = tmp_path
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
+
+    result = runner.invoke(app, ["google", "export-token"])
+
+    assert result.exit_code == 1
+    assert "No Google token found" in " ".join(result.output.split())
+
+
+def test_google_export_token_rejects_token_without_refresh_token(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    (tmp_path / "google_workspace_token.json").write_text('{"token": "ya29"}')
+    mock_settings = MagicMock()
+    mock_settings.google_oauth_dir.return_value = tmp_path
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
+
+    result = runner.invoke(app, ["google", "export-token"])
+
+    assert result.exit_code == 1
+    assert "no refresh token" in " ".join(result.output.split())
+
+
+def test_google_setup_uses_env_client_config_without_file(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    import json
+
+    from pydantic import SecretStr
+
+    client = {"installed": {"client_id": "cid", "client_secret": "cs"}}
+    mock_settings = MagicMock()
+    mock_settings.google_oauth_dir.return_value = tmp_path  # no google_credentials.json
+    mock_settings.google_credentials_json = SecretStr(json.dumps(client))
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: mock_settings)
+
+    mock_creds = MagicMock()
+    mock_creds.refresh_token = "rt"
+    mock_auth_instance = MagicMock()
+    mock_auth_instance.run_auth_flow.return_value = mock_creds
+    monkeypatch.setattr(
+        "pincer.integrations.google.auth.GoogleAuth",
+        lambda credentials_path, token_path: mock_auth_instance,
+    )
+
+    result = runner.invoke(app, ["google", "setup"])
+
+    assert result.exit_code == 0, result.output
+    mock_auth_instance.run_auth_flow.assert_called_once_with(open_browser=True, save=True, client_config=client)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -31,6 +32,7 @@ from pincer.api.ops import router as ops_router
 from pincer.api.public_demo import router as public_demo_router
 from pincer.api.schedules import router as schedules_router
 from pincer.api.skills import router as skills_router
+from pincer.api.storage import router as storage_router
 from pincer.api.telephony import router as telephony_router
 from pincer.api.voice import router as voice_api_router
 from pincer.config import get_settings_relaxed
@@ -242,6 +244,7 @@ def create_app() -> FastAPI:
     app.include_router(identity_router)
     app.include_router(schedules_router)
     app.include_router(skills_router)
+    app.include_router(storage_router)
     app.include_router(integrations_router)
     app.include_router(chat_router)
     app.include_router(voice_api_router)
@@ -281,8 +284,11 @@ def create_app() -> FastAPI:
     async def run_doctor() -> dict[str, object]:
         from pincer.security.doctor import SecurityDoctor
 
-        doc = SecurityDoctor()
-        return doc.run_all().to_dict()
+        doc = SecurityDoctor(skills_dir=get_settings_relaxed().skills_dir)
+        # Some checks block (git, file scans, a remote skills root's network call):
+        # keep them off the event loop that serves every other request.
+        report = await asyncio.to_thread(doc.run_all)
+        return report.to_dict()
 
     dist = _dashboard_dist()
     if dist.is_dir():

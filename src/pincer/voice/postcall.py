@@ -22,10 +22,13 @@ from pincer.services.voice import CallsService
 from pincer.voice import analytics as an
 from pincer.voice import scheduling, status_notify, threads
 from pincer.voice.briefing import briefing_from_state, report_adherence
+from pincer.voice.engine import END_CODE_KEY, PROVIDER_STATUS_KEY, CallDirection
 from pincer.voice.outcome import (
     CallOutcome,
     extract_outcome,
+    not_connected_reason,
     render_fallback_report,
+    render_not_connected_report,
     render_report,
 )
 from pincer.voice.transcript import Speaker
@@ -95,13 +98,29 @@ class PostCallProcessor:
         if isinstance(state.metadata, dict) and state.metadata.get("receptionist") is True:
             return await self._process_receptionist(call_sid, state, transcript, completed)
 
+        failure_code = str(state.metadata.get("failure_code") or "")
+        conversational = an.was_conversational(failure_code=failure_code)
+        never_connected = self._never_connected(state, conversational)
+
         # Talk time is closed BEFORE extraction so the sentiment pass can see
         # it: long silences and a lopsided ratio are signals about how the call
         # went, and the extractor gets them as context rather than guessing.
-        call_analytics = self._finalize_analytics(state, completed)
+        # A call nobody answered has nothing to measure, whatever its code says.
+        call_analytics = self._finalize_analytics(state, completed, conversed=conversational and not never_connected)
 
+        # Nobody was ever on the line: there is nothing to extract, nothing to
+        # remember, and no transcript to link.
+        if never_connected:
+            return await self._process_not_connected(
+                call_sid, state, transcript, call_analytics, target_label, failure_code, language
+            )
+
+        # Answered by a machine (voicemail detected after pickup): the
+        # transcript is our greeting and its greeting, so an extracted outcome
+        # would be made up. No outcome means no memory notes and the fallback
+        # report, which still gets the reason line below.
         outcome: CallOutcome | None = None
-        if transcript is not None and self._llm is not None:
+        if conversational and transcript is not None and self._llm is not None:
             transcript_text = transcript.get_full_transcript()
             actions_text = "\n".join(
                 f"{action.tool_name or action.action_type}: {action.output_summary[:200]}"
@@ -149,31 +168,15 @@ class PostCallProcessor:
         else:
             report = render_fallback_report(target_label, state.duration_seconds, call_sid, completed, language)
 
-        # Voicemail/not-connected endings stash their reason in metadata
-        # instead of pre-empting the ENDED stage (which would drop this report)
-        end_reason = str(state.metadata.get("end_reason") or "")
-        if end_reason:
-            report = f"{report}\nℹ️ {end_reason}"
+        # An answered call that still ended without a conversation (voicemail
+        # detected after pickup) says so, in the report language.
+        end_code = str(state.metadata.get(END_CODE_KEY) or "")
+        if end_code and not an.was_conversational(failure_code=end_code):
+            report = f"{report}\nℹ️ {not_connected_reason(end_code, language)}"
 
-        # Sprint 6: appointment scheduling calls get their post-call chain —
-        # confirmed slot → idempotent calendar write + invitations; every
-        # failure path lands in the report honestly, never silently.
-        appointment_task = scheduling.get_appointment(call_sid)
-        if appointment_task is not None:
-            try:
-                note = await scheduling.finalize_appointment(
-                    self._tools, self._settings, appointment_task, call_sid, language
-                )
-            except Exception:
-                logger.exception("Appointment finalization crashed [%s]", call_sid)
-                note = (
-                    "⚠️ Die Terminverarbeitung nach dem Anruf ist fehlgeschlagen — bitte Kalender manuell prüfen."
-                    if language.startswith("de")
-                    else "⚠️ Post-call appointment processing failed — please check the calendar manually."
-                )
-            if note:
-                report = f"{report}\n{note}"
-            scheduling.clear_appointment(call_sid)
+        note = await self._appointment_note(call_sid, language)
+        if note:
+            report = f"{report}\n{note}"
 
         if opt_out_note:
             report = f"{report}\n{opt_out_note}"
@@ -216,6 +219,77 @@ class PostCallProcessor:
         if negative_line:
             report = f"{report}\n{negative_line}"
 
+        return await self._deliver(call_sid, report, thread_update, language)
+
+    @staticmethod
+    def _never_connected(state: CallState, conversational: bool) -> bool:
+        """Nobody was ever on the line.
+
+        An OUTBOUND call that was never answered did not connect, whatever
+        ended it — busy, a deploy drain (`shutdown`), the watchdog (`stuck`) or
+        an unrecorded cause (`unknown`). The failure code alone cannot decide
+        this: `shutdown` on a 4-minute call is a cut conversation, `shutdown`
+        on a ringing call is a call that never happened. Inbound calls are
+        answered by definition (`_register_call` stamps `answered_at`), so for
+        them only a code that rules out a conversation counts.
+        """
+        if state.metadata.get("answered_at") is not None:
+            return False
+        return state.direction == CallDirection.OUTBOUND or not conversational
+
+    async def _process_not_connected(
+        self,
+        call_sid: str,
+        state: CallState,
+        transcript: TranscriptLogger | None,
+        call_analytics: an.CallAnalytics,
+        target_label: str,
+        failure_code: str,
+        language: str,
+    ) -> str:
+        """A call that reached nobody (busy, no answer, voicemail, not placed).
+
+        No outcome extraction — an LLM asked about an empty transcript invents
+        one — and no memory notes. The call row, analytics and thread
+        bookkeeping still happen: they are what the success numbers read.
+        """
+        provider_status = str(state.metadata.get(PROVIDER_STATUS_KEY) or "")
+        report = render_not_connected_report(target_label, call_sid, failure_code, language, provider_status)
+        persisted = await self._persist(call_sid, state, transcript)
+        opt_out_note, thread_update = await self._run_shared_pipeline(
+            call_sid, state, transcript, None, call_analytics, language
+        )
+        # Retries were already scheduled by handle_call_not_connected; this
+        # only reports what happened to the appointment.
+        note = await self._appointment_note(call_sid, language)
+        if note:
+            report = f"{report}\n{note}"
+        if opt_out_note:
+            report = f"{report}\n{opt_out_note}"
+        if not persisted:
+            report = f"{report}\n{self._persist_failure_note(language)}"
+        return await self._deliver(call_sid, report, thread_update, language)
+
+    async def _appointment_note(self, call_sid: str, language: str) -> str:
+        """Sprint 6: appointment scheduling calls get their post-call chain —
+        confirmed slot → idempotent calendar write + invitations; every failure
+        path lands in the report honestly, never silently."""
+        appointment_task = scheduling.get_appointment(call_sid)
+        if appointment_task is None:
+            return ""
+        try:
+            note = await scheduling.finalize_appointment(
+                self._tools, self._settings, appointment_task, call_sid, language
+            )
+        except Exception:
+            logger.exception("Appointment finalization crashed [%s]", call_sid)
+            from pincer.voice.prompts import get_prompt
+
+            note = str(get_prompt("APPOINTMENT_POSTCALL_FAILED", language))
+        scheduling.clear_appointment(call_sid)
+        return str(note or "")
+
+    async def _deliver(self, call_sid: str, report: str, thread_update: Any, language: str) -> str:
         # Sprint 13 §10: which matter this call belongs to, what is still
         # open, and whether the matter is now settled — wrapped around the
         # Sprint 3 report rather than replacing any of it.
@@ -235,15 +309,15 @@ class PostCallProcessor:
 
     # ── Conversation analytics ────────────────────────────
 
-    def _finalize_analytics(self, state: CallState, completed: bool) -> an.CallAnalytics:
+    def _finalize_analytics(self, state: CallState, completed: bool, *, conversed: bool) -> an.CallAnalytics:
         """Close the talk-time books for this call.
 
-        A call nobody had a conversation on (voicemail, no answer) still gets a
-        row — with null speech fields, saying "nothing to measure" rather than
-        leaving the UI to guess whether zero means silent or unmeasured.
+        A call nobody had a conversation on (voicemail, no answer, or never
+        answered) still gets a row — with null speech fields, saying "nothing
+        to measure" rather than leaving the UI to guess whether zero means
+        silent or unmeasured.
         """
         accumulator = an.get_accumulator(state)
-        conversed = an.was_conversational(failure_code=str(state.metadata.get("failure_code", "") or ""))
         if accumulator is None:
             return an.CallAnalytics(
                 method=an.METHOD_ESTIMATED,
@@ -387,7 +461,11 @@ class PostCallProcessor:
 
         # Talk time is closed before extraction, same as the outbound path, so
         # the sentiment pass sees the ratio rather than guessing at it.
-        call_analytics = self._finalize_analytics(state, completed)
+        call_analytics = self._finalize_analytics(
+            state,
+            completed,
+            conversed=an.was_conversational(failure_code=str(state.metadata.get("failure_code") or "")),
+        )
 
         # Abuse flag from the extractor (best effort; a failed extraction is simply "not abusive")
         outcome: CallOutcome | None = None

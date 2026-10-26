@@ -70,6 +70,29 @@ You should see:
 
 Open Telegram, find your bot, and send a message. That's it.
 
+### Or run it in the background
+
+To keep Pincer running after you close the terminal, start it with `-d`. It returns once every
+channel is up:
+
+```console
+$ pincer run -d
+Pincer started (pid 4182) — channels: telegram  'pincer logs -f' to follow
+```
+
+Then:
+
+- `pincer logs -f` follows the log. It is written to `~/.pincer/logs/pincer.log`.
+- `pincer status` shows whether Pincer is running.
+- `pincer restart` applies changes to `.env` or `pincer.toml`.
+- `pincer stop` shuts it down gracefully.
+
+Running plain `pincer run` while it's in the background attaches to it. Ctrl+C then stops it; a
+second Ctrl+C, or closing the terminal, only detaches.
+
+Daemon mode isn't available on Windows or inside Docker, where `docker compose up -d` does the
+job. See [Background mode](../reference/cli.md#background-mode-daemon).
+
 ---
 
 ## Step 4: Try These Commands

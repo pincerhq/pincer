@@ -2,7 +2,9 @@
 Google Calendar tools — OAuth2 integration.
 
 Provides calendar_today(), calendar_week(), calendar_create().
-Authentication via InstalledAppFlow; tokens stored at data/google_token.json.
+Uses the same token as the Workspace integration (see
+``pincer.integrations.google.token_source.locate_token``): PINCER_GOOGLE_TOKEN_JSON,
+else data/google_workspace_token.json, else the legacy data/google_token.json.
 
 Tools are registered in cli.py via tools.register().
 
@@ -27,56 +29,47 @@ logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
+# GoogleAuth per token location, so an env-supplied token's refreshed access
+# token survives between calls (nothing is written back in env mode). Keyed by a
+# hash of the location so no second plaintext copy of the token is kept.
+_auth_cache: tuple[str, Any] | None = None
+
 
 def _get_credentials():  # type: ignore[no-untyped-def]
-    """Get or refresh Google OAuth2 credentials.
+    """Get or refresh Google OAuth2 credentials for the calendar scope.
 
-    Never attempts the interactive browser consent flow — that belongs
-    in the ``pincer google auth`` CLI command.  This function only loads
-    an existing token and refreshes it if possible.
+    The token is located like the Workspace integration does it
+    (``locate_token``): ``PINCER_GOOGLE_TOKEN_JSON`` first, then
+    ``google_workspace_token.json``, then the legacy ``google_token.json``.
+    Never attempts the interactive browser consent flow — that belongs in
+    ``pincer google setup``. Raises ``FileNotFoundError`` when no usable token
+    is available.
     """
-    from google.auth.transport.requests import Request
-    from google.oauth2.credentials import Credentials
+    from pincer.integrations.google.token_source import locate_token
 
-    settings = get_settings()
-    oauth_dir = settings.google_oauth_dir()
-    token_path = oauth_dir / "google_token.json"
-    credentials_path = oauth_dir / "google_credentials.json"
-
-    if not credentials_path.exists():
+    location = locate_token(get_settings())
+    if location is None:
         raise FileNotFoundError(
-            "SETUP REQUIRED: Google OAuth client credentials not found at "
-            f"{credentials_path}. Download the JSON from Google Cloud Console "
-            "-> APIs & Services -> Credentials -> OAuth 2.0 Client IDs, "
-            f"then save it as {credentials_path} or in ~/.pincer/"
+            "SETUP REQUIRED: No Google token found. Run the one-time OAuth consent flow first:  "
+            "pincer google setup  (or set PINCER_GOOGLE_TOKEN_JSON)"
         )
+    try:
+        return _auth_for(location).get_credentials()
+    except (RuntimeError, FileNotFoundError) as e:
+        raise FileNotFoundError(f"Google Calendar unavailable: {e}") from e
 
-    if not token_path.exists():
-        raise FileNotFoundError(
-            "SETUP REQUIRED: No Google token found. Run the one-time OAuth consent flow first:  pincer google auth"
-        )
 
-    creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+def _auth_for(location: dict[str, Any]) -> Any:
+    global _auth_cache
+    import hashlib
+    import json
 
-    if creds and creds.valid:
-        return creds
+    from pincer.integrations.google.auth import GoogleAuth
 
-    if creds and creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(Request())
-            with open(token_path, "w") as f:
-                f.write(creds.to_json())
-            logger.info("Google OAuth token refreshed successfully")
-            return creds
-        except Exception as e:
-            raise FileNotFoundError(
-                f"Google token refresh failed: {e}. Delete {token_path} and re-authorize with: pincer google auth"
-            ) from e
-
-    raise FileNotFoundError(
-        "Google token exists but is invalid (no refresh token). "
-        f"Delete {token_path} and re-authorize with: pincer google auth"
-    )
+    key = hashlib.sha256(json.dumps(location, sort_keys=True).encode()).hexdigest()
+    if _auth_cache is None or _auth_cache[0] != key:
+        _auth_cache = (key, GoogleAuth(**location, services=["calendar"]))
+    return _auth_cache[1]
 
 
 def _get_service():  # type: ignore[no-untyped-def]

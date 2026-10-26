@@ -133,6 +133,13 @@ class ChannelIdentityRepository(BaseRepository[ChannelIdentity, tuple[str, str]]
         stmt = select(ChannelIdentity.channel, ChannelIdentity.channel_user_id)
         return [(channel, cid) for channel, cid in (await self.session.exec(stmt)).all()]
 
+    async def owners_on(self, channel: str) -> Sequence[tuple[str, str]]:
+        """(channel user id, owning identity) of every link on one channel."""
+        stmt = select(ChannelIdentity.channel_user_id, ChannelIdentity.pincer_user_id).where(
+            col(ChannelIdentity.channel) == channel
+        )
+        return [(cid, uid) for cid, uid in (await self.session.exec(stmt)).all()]
+
     async def channels_for(self, pincer_user_id: str) -> Sequence[tuple[str, str]]:
         """This identity's channels, oldest link first."""
         stmt = (

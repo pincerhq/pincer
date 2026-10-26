@@ -95,7 +95,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
 
     # ── Internal ──────────────────────────────────────────
 
-    async def _call(self, tool_name: str, args: dict[str, Any]) -> str:
+    async def _call_result(self, tool_name: str, args: dict[str, Any]) -> Any:
         if not self._mcp_manager:
             raise RuntimeError(
                 "MCPMemoryBackend: MCP manager not set. Call set_mcp_manager() after MCP servers have started."
@@ -105,13 +105,33 @@ class MCPMemoryBackend(BaseMemoryBackend):
         except ValueError as e:
             raise RuntimeError(f"MCPMemoryBackend: memory server '{self._server_name}' is not connected") from e
         result = await session.call_tool(tool_name, args)
-        content = getattr(result, "content", [])
-        return content[0].text if content else ""
+        if getattr(result, "isError", False):
+            raise RuntimeError(f"MCPMemoryBackend: {tool_name} failed: {self._first_text(result)}")
+        return result
+
+    @staticmethod
+    def _first_text(result: Any) -> str:
+        content = getattr(result, "content", None) or []
+        return str(getattr(content[0], "text", "")) if content else ""
+
+    async def _call(self, tool_name: str, args: dict[str, Any]) -> str:
+        return self._first_text(await self._call_result(tool_name, args))
 
     async def _call_json(self, tool_name: str, args: dict[str, Any]) -> Any:
-        logger.info(args)
-        raw = await self._call(tool_name, args)
+        result = await self._call_result(tool_name, args)
+        # fastmcp wraps return values as structuredContent={"result": ...}; prefer it over parsing text.
+        structured = getattr(result, "structuredContent", None)
+        if isinstance(structured, dict) and "result" in structured:
+            return structured["result"]
+        raw = self._first_text(result)
+        # fastmcp serialises an empty list result as no content items at all.
+        if not raw.strip():
+            return None
         return json.loads(raw)
+
+    async def _call_list(self, tool_name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = await self._call_json(tool_name, args) or []
+        return rows
 
     # ── Core CRUD ─────────────────────────────────────────
 
@@ -163,7 +183,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
             if match_all_tags or len(filter_tags) > 1:
                 args["match_all_tags"] = True
 
-        rows = await self._call_json("memory_list", args)
+        rows = await self._call_list("memory_list", args)
         return [_row_to_memory(r) for r in rows]
 
     async def update_memory(
@@ -187,7 +207,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
 
     async def delete_user_memories(self, user_id: str) -> int:
         tag = f"{PINCER_MEMORY_USER_TAG_PREFIX}:{user_id}"
-        rows = await self._call_json("memory_list", {"limit": PINCER_MEMORY_COUNT_FETCH_LIMIT, "tags": tag})
+        rows = await self._call_list("memory_list", {"limit": PINCER_MEMORY_COUNT_FETCH_LIMIT, "tags": tag})
         deleted = 0
         for r in rows:
             try:
@@ -216,7 +236,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
             args["tags"] = filter_tags
             if match_all_tags or len(filter_tags) > 1:
                 args["match_all_tags"] = True
-        rows = await self._call_json("memory_list", args)
+        rows = await self._call_list("memory_list", args)
         return len(rows)
 
     # ── Search ────────────────────────────────────────────
@@ -238,5 +258,5 @@ class MCPMemoryBackend(BaseMemoryBackend):
             filter_tags.extend(tags)
         if filter_tags:
             args["tags"] = filter_tags
-        rows = await self._call_json("memory_search", args)
+        rows = await self._call_list("memory_search", args)
         return [_row_to_memory(r, score=max(0.0, 1.0 - r.get("distance", 0.0))) for r in rows]

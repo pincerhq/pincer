@@ -219,6 +219,11 @@ def run_migrations_online() -> None:
                     version_table=VERSION_TABLE,
                 )
                 with context.begin_transaction():
+                    if connection.dialect.name == "postgresql":
+                        # As the runtime engine does (`pincer.db.engine`), so a
+                        # revision's `CURRENT_TIMESTAMP` lands in UTC too. LOCAL:
+                        # it must not outlive the transaction behind a pooler.
+                        connection.exec_driver_sql("SET LOCAL TIME ZONE 'UTC'")
                     context.run_migrations()
     finally:
         connectable.dispose()

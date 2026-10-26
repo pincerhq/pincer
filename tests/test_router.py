@@ -50,12 +50,15 @@ class FakeProvider(BaseLLMProvider):
         self.closed = True
 
 
-def _router_with_pool(default, failovers, pool, *, summary_provider=None):
+def _router_with_pool(default, failovers, pool, *, summary_provider=None, summary_model="summary-model"):
     r = LLMRouter.__new__(LLMRouter)
     r._settings = SimpleNamespace(
         default_provider=default,
         fallback_providers=failovers,
         summary_provider=summary_provider,
+        summary_model=summary_model,
+        openai_compatible_provider="",
+        anthropic_compatible_provider="",
     )
     r._pool = pool
     return r
@@ -172,7 +175,7 @@ def test_get_summarizer_defaults_to_primary():
     fb = FakeProvider("fb")
     r = _router_with_pool("primary", ["fb"], {"primary": primary, "fb": fb})
 
-    assert r.get_summarizer() is primary
+    assert r.get_summarizer() == (primary, "summary-model")
 
 
 def test_get_summarizer_uses_configured_provider():
@@ -180,14 +183,14 @@ def test_get_summarizer_uses_configured_provider():
     fb = FakeProvider("fb")
     r = _router_with_pool("primary", ["fb"], {"primary": primary, "fb": fb}, summary_provider="fb")
 
-    assert r.get_summarizer() is fb
+    assert r.get_summarizer() == (fb, "summary-model")
 
 
-def test_get_summarizer_not_in_pool_raises():
+def test_get_summarizer_unbuildable_provider_raises():
     primary = FakeProvider("primary")
     r = _router_with_pool("primary", [], {"primary": primary}, summary_provider="ghost")
 
-    with pytest.raises(ValueError, match="not in active pool"):
+    with pytest.raises(ValueError, match="could not be built"):
         r.get_summarizer()
 
 
@@ -323,3 +326,104 @@ def test_is_free():
     assert router.is_free("ollama") is True  # compatible endpoint, no key
     assert router.is_free("paid-proxy") is False  # compatible endpoint, has key
     assert router.is_free("unknown") is False
+
+
+# ── summary provider/model resolution (real Settings) ───────────────────────────
+
+
+def test_summarizer_drops_claude_model_on_openai_default(caplog):
+    from pincer.llm.openai_common import OpenAICompatibleProvider
+
+    settings = _settings(default_provider="openai", openai_api_key="sk-oai", default_model="gpt-5-mini")
+    assert settings.summary_model.startswith("claude")
+    oai, ant = _patched_clients()
+    with oai, ant, patch("pincer.llm.router.get_settings", return_value=settings), caplog.at_level("WARNING"):
+        router = LLMRouter()
+        provider, model = router.get_summarizer()
+
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider is router._build_pool()["openai"]
+    assert model is None
+    assert "Anthropic model id" in caplog.text
+
+
+def test_summarizer_provider_prefix_builds_on_demand():
+    from pincer.llm.anthropic_common import AnthropicCompatibleProvider
+
+    settings = _settings(
+        default_provider="openai",
+        openai_api_key="sk-oai",
+        default_model="gpt-5-mini",
+        summary_model="anthropic:claude-haiku-4-5",
+    )
+    oai, ant = _patched_clients()
+    with oai, ant, patch("pincer.llm.router.get_settings", return_value=settings):
+        router = LLMRouter()
+        assert "anthropic" not in router._build_pool()
+        provider, model = router.get_summarizer()
+
+    assert isinstance(provider, AnthropicCompatibleProvider)
+    assert model == "claude-haiku-4-5"
+
+
+def test_summary_provider_outside_pool_builds_on_demand():
+    from pincer.llm.anthropic_common import AnthropicCompatibleProvider
+
+    settings = _settings(
+        default_provider="openai",
+        openai_api_key="sk-oai",
+        default_model="gpt-5-mini",
+        summary_provider="anthropic",
+        summary_model="claude-haiku-4-5",
+    )
+    oai, ant = _patched_clients()
+    with oai, ant, patch("pincer.llm.router.get_settings", return_value=settings):
+        provider, model = LLMRouter().get_summarizer()
+
+    assert isinstance(provider, AnthropicCompatibleProvider)
+    assert model == "claude-haiku-4-5"
+
+
+def test_summary_provider_without_credentials_raises():
+    settings = _settings(
+        default_provider="openai",
+        openai_api_key="sk-oai",
+        anthropic_api_key="",
+        default_model="gpt-5-mini",
+        summary_provider="my-claude",
+    )
+    oai, ant = _patched_clients()
+    with oai, ant, patch("pincer.llm.router.get_settings", return_value=settings), pytest.raises(ValueError):
+        LLMRouter().get_summarizer()
+
+
+def test_summary_model_with_colon_is_not_a_provider_prefix():
+    settings = _settings(
+        default_provider="ollama",
+        openai_compatible_provider="ollama",
+        openai_compatible_base_url="http://localhost:11434/v1",
+        openai_compatible_model="llama3:8b",
+        summary_model="llama3:8b",
+    )
+    oai, ant = _patched_clients()
+    with oai, ant, patch("pincer.llm.router.get_settings", return_value=settings):
+        router = LLMRouter()
+        provider, model = router.get_summarizer()
+
+    assert provider is router._build_pool()["ollama"]
+    assert model == "llama3:8b"
+
+
+def test_vendor_prefixed_claude_id_is_kept_on_openai_wire():
+    settings = _settings(
+        default_provider="openrouter",
+        openai_compatible_provider="openrouter",
+        openai_compatible_base_url="https://openrouter.ai/api/v1",
+        openai_compatible_model="openai/gpt-5-mini",
+        summary_model="anthropic/claude-haiku-4.5",
+    )
+    oai, ant = _patched_clients()
+    with oai, ant, patch("pincer.llm.router.get_settings", return_value=settings):
+        _, model = LLMRouter().get_summarizer()
+
+    assert model == "anthropic/claude-haiku-4.5"

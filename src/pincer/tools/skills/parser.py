@@ -17,7 +17,7 @@ import yaml
 from pincer.exceptions import SkillLoadError
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from pincer.tools.skills.storage import SkillPath
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?\n)---\s*\n?(.*)\Z", re.DOTALL)
 
@@ -38,12 +38,12 @@ class ParsedSkill:
     name: str
     description: str
     body: str
-    path: Path
+    path: SkillPath
     source_root: Literal["bundled", "user"]
     extra: dict[str, Any] = field(default_factory=dict)
 
 
-def _parse_frontmatter(raw: str, source: Path) -> tuple[SkillFrontmatter, str]:
+def _parse_frontmatter(raw: str, source: SkillPath) -> tuple[SkillFrontmatter, str]:
     match = _FRONTMATTER_RE.match(raw)
     if not match:
         raise SkillLoadError(
@@ -69,14 +69,33 @@ def _parse_frontmatter(raw: str, source: Path) -> tuple[SkillFrontmatter, str]:
     return SkillFrontmatter(name=name, description=description, extra=data), body.strip()
 
 
-def parse_skill_md(path: Path, source_root: Literal["bundled", "user"] = "user") -> ParsedSkill:
-    """Parse a SKILL.md file into a ParsedSkill. Raises SkillLoadError on problems."""
+def read_skill_md(path: SkillPath) -> bytes:
+    """Read a SKILL.md file (local or cloud). Raises SkillLoadError if it can't be read."""
     try:
-        raw = path.read_text(encoding="utf-8")
-    except OSError as e:
-        raise SkillLoadError(f"Cannot read {path}: {e}") from e
+        return path.read_bytes()
+    except Exception as e:
+        # OSError for local files; cloudpathlib / provider SDK errors for remote ones.
+        raise SkillLoadError(f"Cannot read {path}: {type(e).__name__}: {e}") from e
 
-    frontmatter, body = _parse_frontmatter(raw, path)
+
+def parse_skill_md(
+    path: SkillPath,
+    source_root: Literal["bundled", "user"] = "user",
+    raw: bytes | None = None,
+) -> ParsedSkill:
+    """Parse a SKILL.md file into a ParsedSkill. Raises SkillLoadError on problems.
+
+    Pass `raw` when the caller already holds the file's bytes, to skip a second
+    read (each one is several requests on a cloud root).
+    """
+    if raw is None:
+        raw = read_skill_md(path)
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise SkillLoadError(f"Cannot read {path}: not valid UTF-8 ({e})") from e
+
+    frontmatter, body = _parse_frontmatter(text, path)
 
     return ParsedSkill(
         name=frontmatter.name,

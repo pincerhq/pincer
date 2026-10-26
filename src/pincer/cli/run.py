@@ -6,10 +6,11 @@ import asyncio
 import contextlib
 import logging
 import os
+import sys
 import uuid
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import typer
 
@@ -20,13 +21,23 @@ from pincer.cli._attachments import (
     _safe_upload_path,
 )
 from pincer.cli._shared import _create_memory_backend, _port_in_use, _print_voice_webhook_urls, _setup_logging, console
+from pincer.cli.daemon import (
+    WAIT_TIMEOUT,
+    attach_daemon,
+    refuse_a_start_in_progress,
+    refuse_unless_a_known_daemon,
+    start_daemon,
+)
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterator
+
     from pincer.channels.base import BaseChannel, IncomingMessage
     from pincer.channels.microsoft_teams import MicrosoftTeamsChannel
     from pincer.config import Settings
     from pincer.core.agent import Agent
     from pincer.core.session import SessionManager
+    from pincer.daemon import DaemonLease
     from pincer.llm.base import BaseLLMProvider
     from pincer.llm.cost_tracker import CostTracker
     from pincer.llm.router import LLMRouter
@@ -35,8 +46,8 @@ if TYPE_CHECKING:
     from pincer.memory.summarizer import Summarizer
     from pincer.security.audit import AuditLogger
     from pincer.security.rate_limiter import RateLimiter
+    from pincer.services.skills import SkillService
     from pincer.tools.registry import ToolRegistry
-    from pincer.tools.skills.index import SkillIndex
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +66,13 @@ async def run(
             "'tasks': background task worker only (requires PINCER_TASK_BROKER=redis)."
         ),
     ),
+    detach: bool = typer.Option(
+        False, "-d", "--detach", help="Start in the background and return once all channels are up."
+    ),
+    wait_timeout: float = typer.Option(
+        WAIT_TIMEOUT, "--wait-timeout", help="With -d: seconds to wait for startup (a slow start is never killed)."
+    ),
+    daemon_child: bool = typer.Option(False, "--daemon-child", hidden=True),
 ) -> None:
     """Start the Pincer agent, or a single component of it (see COMPONENT)."""
     from pincer.config import get_settings
@@ -64,6 +82,31 @@ async def run(
     except Exception as e:
         console.print(f"[red]Configuration error:[/red] {e}")
         raise typer.Exit(1) from e
+
+    if detach:
+        if component is not None:
+            console.print(
+                "[red]Daemon mode applies to the full agent only — run 'pincer run tasks' in the foreground.[/red]",
+                soft_wrap=True,
+            )
+            raise typer.Exit(1)
+        start_daemon(settings, wait_timeout)
+        return
+
+    # A daemon of this data directory is up: follow it instead of starting a second agent. Not
+    # for a task worker (it runs alongside the agent), never for the daemon itself, and not on
+    # Windows, where no daemon can exist (and the lifecycle module's `fcntl` doesn't).
+    if component is None and not daemon_child and sys.platform != "win32":
+        from pincer.daemon import DaemonState, read_state
+
+        running = read_state(settings.data_dir)
+        if running is not None and not isinstance(running, DaemonState):
+            refuse_unless_a_known_daemon(settings, running)
+        if running is None:
+            refuse_a_start_in_progress(settings.data_dir)
+        if running is not None:
+            attach_daemon(settings, running)
+            return
 
     _setup_logging(settings.log_level.value)
 
@@ -105,7 +148,14 @@ async def run(
     console.print(f"   Skills dir: {settings.skills_dir}")
     console.print()
 
-    await _run_agent(settings)
+    if not daemon_child:
+        await _run_agent(settings)
+        return
+    # Spawned by `pincer run -d`: hold the daemon lease for the whole run.
+    from pincer.daemon import DaemonLease
+
+    with DaemonLease(settings.data_dir, port=settings.dashboard_port) as lease:
+        await _run_agent(settings, lease)
 
 
 @dataclass
@@ -126,7 +176,7 @@ class CoreComponents:
     memory_store: BaseMemoryBackend | None
     summarizer: Summarizer | None
     tools: ToolRegistry
-    skill_index: SkillIndex
+    skill_service: SkillService
     mcp_manager: MCPClientManager | None
     agent: Agent
 
@@ -179,11 +229,12 @@ async def _build_core(settings: Settings) -> CoreComponents:
     if settings.memory_enabled:
         memory_store = _create_memory_backend(settings)
         await memory_store.initialize()
+        summary_llm, summary_model = llm_router.get_summarizer()
         summarizer = Summarizer(
-            llm=llm_router.get_summarizer(),
+            llm=summary_llm,
             memory_store=memory_store,
             session_manager=session_mgr,
-            summary_model=settings.summary_model,
+            summary_model=summary_model,
             threshold=settings.summary_threshold,
         )
         console.print("[green]Memory system enabled[/green]")
@@ -456,17 +507,21 @@ async def _build_core(settings: Settings) -> CoreComponents:
             )
 
     # Skills: SKILL.md-based discovery, coexists unconditionally with MCP.
+    from pincer.exceptions import SkillLoadError
+    from pincer.services.skills import get_skill_service
     from pincer.tools.builtin.skills_tools import make_skills_tools
-    from pincer.tools.skills.index import BUNDLED_SKILLS_DIR, SkillIndex
 
-    skill_index = SkillIndex(
-        bundled_dir=BUNDLED_SKILLS_DIR,
-        user_dir=settings.skills_dir,
-        max_per_root=settings.skills_max_loaded_per_root,
-    )
-    skill_index.discover()
+    # The process-wide service: the dashboard API served from this process reads
+    # the same index. A remote skills root that can't be used refuses to start
+    # (shared by `pincer run` and `pincer run tasks`), naming what to configure.
+    try:
+        skill_service = get_skill_service(settings, require_usable_root=True)
+    except SkillLoadError as e:
+        console.print(f"[red]Skills: {e}[/red]", soft_wrap=True)
+        raise typer.Exit(1) from e
+    skill_index = skill_service.ensure_current()
 
-    skill_tools = make_skills_tools(skill_index, sandbox_disabled=settings.skill_sandbox_disabled)
+    skill_tools = make_skills_tools(skill_service, sandbox_disabled=settings.skill_sandbox_disabled)
     tools.register(
         name="load_skill",
         description="Load a skill's full instructions by name (see Available Skills in the system prompt).",
@@ -571,7 +626,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
         memory_store=memory_store,
         summarizer=summarizer,
     )
-    agent.skill_index = skill_index
+    agent.skill_service = skill_service
     if mcp_manager:
         agent.mcp_manager = mcp_manager
         from pincer.memory.mcp import MCPMemoryBackend
@@ -589,7 +644,7 @@ async def _build_core(settings: Settings) -> CoreComponents:
         memory_store=memory_store,
         summarizer=summarizer,
         tools=tools,
-        skill_index=skill_index,
+        skill_service=skill_service,
         mcp_manager=mcp_manager,
         agent=agent,
     )
@@ -763,7 +818,44 @@ async def _ensure_ops_schedules(scheduler: Any, settings: Any) -> None:
             console.print(f"[yellow]Could not schedule {name}: {e}[/yellow]")
 
 
-async def _run_agent(settings: Settings) -> None:
+def _cancel_on_first_sigterm() -> None:
+    """Route SIGTERM into the calling task's graceful path, the way Ctrl+C goes: cancel it, once.
+
+    Only the first SIGTERM cancels; one sent again during the shutdown (a repeated `pincer stop`,
+    an impatient supervisor) is ignored, as the `finally` ignores a second Ctrl+C. Cancelling
+    again would abort the shutdown midway, before the channels drain their calls. `--force` is
+    the way to cut it short.
+    """
+    import signal as _signal
+
+    task = asyncio.current_task()
+
+    def _on_sigterm() -> None:
+        if task and not task.done() and not task.cancelling():
+            task.cancel()
+
+    with contextlib.suppress(NotImplementedError, RuntimeError):  # Windows / nested loops
+        asyncio.get_running_loop().add_signal_handler(_signal.SIGTERM, _on_sigterm)
+
+
+def _embedded_api_server(config: Any) -> Any:
+    """A uvicorn server for the dashboard API that leaves SIGTERM and SIGINT to the agent.
+
+    A stock `uvicorn.Server` installs its own handlers while it serves and re-raises whatever
+    it caught when it exits — early in the agent's shutdown, where a second SIGTERM would cancel
+    the shutdown itself. The agent cancels the server through `should_exit` instead.
+    """
+    import uvicorn
+
+    class _Server(uvicorn.Server):
+        @contextlib.contextmanager
+        def capture_signals(self) -> Iterator[None]:
+            yield
+
+    return _Server(config)
+
+
+async def _run_agent(settings: Settings, lease: DaemonLease | None = None) -> None:
     # Single-instance guard: a second `pincer run` used to keep running with
     # the API port taken — Telegram polling then fights between instances
     # (TelegramConflictError) and Twilio webhooks land on the other process
@@ -774,12 +866,136 @@ async def _run_agent(settings: Settings) -> None:
         console.print(
             f"[bold red]Port {settings.dashboard_host}:{settings.dashboard_port} is already in use — "
             "another Pincer instance appears to be running.[/bold red]\n"
-            "[yellow]Stop it first (e.g. `pkill -f 'pincer run'`) or set PINCER_DASHBOARD_PORT "
-            "if something else owns the port.[/yellow]"
+            "[yellow]Stop a background one with `pincer stop`, a foreground one with Ctrl+C in its terminal, "
+            "or set PINCER_DASHBOARD_PORT if something else owns the port.[/yellow]"
         )
         raise typer.Exit(1)
 
+    # T7.2: `docker stop` / a deploy sends SIGTERM. Without a handler Python
+    # dies mid-call (no spoken ending, no report). Route it into the same
+    # graceful path as Ctrl+C: cancel the main task -> shutdown -> channel.stop()
+    # drains active calls with a spoken ending. Installed before startup, so a stop
+    # while channels are still connecting shuts down whatever has started.
+    _cancel_on_first_sigterm()
+    shutdown = _Shutdown()
+    try:
+        serving = await _start_agent(settings, lease, shutdown)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        console.print("\n[yellow]Shutting down...[/yellow]")
+        await _shut_down_agent(shutdown, lease)
+    if not serving:
+        return
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        console.print("\n[yellow]Shutting down...[/yellow]")
+    finally:
+        await _shut_down_agent(shutdown, lease)
+
+
+class _Shutdown:
+    """The agent's stop actions, registered as each part comes up and run in reverse.
+
+    Shutdown so stops exactly what started, last started first. Each action runs even when an
+    earlier one failed; a failure is logged with the action's name and kept in `failed`.
+    """
+
+    def __init__(self) -> None:
+        self._stack = contextlib.AsyncExitStack()
+        self.failed: list[str] = []
+
+    def on_stop(self, name: str, action: Callable[[], Awaitable[object]]) -> None:
+        self._stack.push_async_callback(self.run_step, name, action)
+
+    async def run_step(self, name: str, action: Callable[[], Awaitable[object]]) -> None:
+        try:
+            await action()
+        except Exception:
+            logger.exception("Shutdown step failed: %s", name)
+            self.failed.append(name)
+
+    async def run(self) -> None:
+        await self._stack.aclose()
+
+
+def _stop_core_on_shutdown(shutdown: _Shutdown, core: CoreComponents) -> None:
+    """Register what `_build_core` started, plus the process-wide pieces, to stop last of all.
+
+    Registered before anything else, so it all runs after the channels have drained their calls:
+    the MCP clients (tools a draining call may still use), the browser, telephony telemetry (to
+    flush the calls just ended), the stores, and the database engines everything shares.
+    """
+    from pincer.db.engine import dispose_engines
+
+    shutdown.on_stop("database engines", dispose_engines)
+    if core.audit_logger:
+        shutdown.on_stop("audit log", core.audit_logger.shutdown)
+    if core.memory_store:
+        shutdown.on_stop("memory store", core.memory_store.close)
+    shutdown.on_stop("cost tracker", core.cost_tracker.close)
+    shutdown.on_stop("sessions", core.session_mgr.close)
+    shutdown.on_stop("LLM client", core.llm.close)
+
+    async def shut_down_telephony_telemetry() -> None:
+        # Imported here, so any import failure but a missing voice extra is the step's to report.
+        try:
+            from pincer.voice.telemetry import runtime as telephony_telemetry
+        except ImportError:  # the voice extra isn't installed: nothing was started
+            return
+        await telephony_telemetry.shutdown()
+
+    shutdown.on_stop("telephony telemetry", shut_down_telephony_telemetry)
+
+    async def close_browser_if_installed() -> None:
+        try:
+            from pincer.tools.builtin import browser
+        except ImportError:
+            return
+        await browser.close_browser()
+
+    shutdown.on_stop("browser", close_browser_if_installed)
+    if core.mcp_manager:
+        shutdown.on_stop("MCP clients", core.mcp_manager.stop)
+
+
+def _reserve_stop(shutdown: _Shutdown, name: str) -> Callable[[Callable[[], Awaitable[object]]], None]:
+    """Register now, at this place in the order, the stop of something that starts later; returns
+    how to arm it once it has started. Unarmed, it does nothing."""
+    armed: list[Callable[[], Awaitable[object]]] = []
+
+    async def stop() -> None:
+        for action in armed:
+            await action()
+
+    shutdown.on_stop(name, stop)
+    return armed.append
+
+
+def _stop_channels_on_shutdown(shutdown: _Shutdown, router: Any) -> None:
+    """Register stopping every channel the router holds by then, each its own step: the channels
+    drain their calls (a spoken ending, a report)."""
+
+    async def stop_channels() -> None:
+        for channel in router.channels.values():
+            await shutdown.run_step(f"channel {channel.name}", channel.stop)
+
+    shutdown.on_stop("channels", stop_channels)
+
+
+async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: _Shutdown) -> bool:
+    """Bring the agent up, registering each part's stop with `shutdown` as soon as it is up; False
+    if there is nothing to serve (no channel configured)."""
     core = await _build_core(settings)
+    _stop_core_on_shutdown(shutdown, core)
+    if settings.skills_index_watch_interval_seconds > 0:
+        # Applies `pincer skills rebuild` (or any other process's index change) in the
+        # background, so agent turns and skill tools never wait on a rescan.
+        from pincer.services.skills import SkillIndexWatcher
+
+        skill_watcher = SkillIndexWatcher(core.skill_service, interval=settings.skills_index_watch_interval_seconds)
+        await skill_watcher.start()
+        shutdown.on_stop("skill index watcher", skill_watcher.stop)
     session_mgr, cost_tracker, audit_logger, rate_limiter = (
         core.session_mgr,
         core.cost_tracker,
@@ -1066,6 +1282,10 @@ async def _run_agent(settings: Settings) -> None:
     from pincer.channels.router import ChannelRouter
 
     router = ChannelRouter(identity)
+    # The MCP server starts later, but must stop after the channels have drained their calls (a
+    # draining call may use the tools it exposes): reserve its place before theirs.
+    arm_mcp_server_stop = _reserve_stop(shutdown, "MCP server")
+    _stop_channels_on_shutdown(shutdown, router)
 
     # Start channels
     from pincer.channels.base import ChannelType
@@ -1435,7 +1655,7 @@ async def _run_agent(settings: Settings) -> None:
 
     if not router.channels:
         console.print("[yellow]No channels configured. Set PINCER_TELEGRAM_BOT_TOKEN.[/yellow]")
-        return
+        return False
 
     # normalize identity map in through router
     await router.rebuild_identity_map()
@@ -1454,6 +1674,7 @@ async def _run_agent(settings: Settings) -> None:
 
     proactive = ProactiveAgent(settings.db_path, agent=agent)
     await proactive.ensure_table()
+    shutdown.on_stop("proactive agent", proactive.close)
 
     scheduler = CronScheduler(settings.db_path)
     await scheduler.ensure_table()
@@ -1519,6 +1740,7 @@ async def _run_agent(settings: Settings) -> None:
     # Sprint 3: Event triggers
     triggers = EventTriggerManager(settings.db_path, deliverer)
     await triggers.start()
+    shutdown.on_stop("triggers", triggers.stop)
 
     # Sprint 6: Background task execution (repid) — actors run scheduled and
     # on-request work durably/retryably; the dispatcher below keeps the SQLite
@@ -1531,6 +1753,7 @@ async def _run_agent(settings: Settings) -> None:
     register_default_server()
     task_connection = task_app.servers.default.connection()
     await task_connection.__aenter__()
+    shutdown.on_stop("task broker connection", lambda: task_connection.__aexit__(None, None, None))
     task_worker = asyncio.create_task(
         # register_signals=[] — repid defaults to installing its own SIGINT/SIGTERM
         # handlers via loop.add_signal_handler(), which replaces Python's default
@@ -1540,11 +1763,14 @@ async def _run_agent(settings: Settings) -> None:
         task_app.run_worker(graceful_shutdown_time=10.0, register_signals=[]),
         name="pincer-task-worker",
     )
+    shutdown.on_stop("task worker", lambda: _cancel_task_worker(task_worker))
     dispatcher = ScheduleDispatcher(scheduler, task_app, interval=settings.task_poll_interval)
     await dispatcher.start()
+    shutdown.on_stop("schedule dispatcher", dispatcher.stop)
 
     result_relay = ResultRelay(delivery_backend, router)
     await result_relay.start()
+    shutdown.on_stop("result relay", result_relay.stop)
 
     console.print(f"[green]Task worker started (broker={settings.task_broker})[/green]")
 
@@ -1587,6 +1813,7 @@ async def _run_agent(settings: Settings) -> None:
             )
             agent.mcp_server = mcp_server
             await mcp_server.start()
+            arm_mcp_server_stop(mcp_server.stop)
             console.print(
                 f"[green]MCP server started at {mcp_server.endpoint} ({mcp_server.exposed_tool_count} tool(s))[/green]"
             )
@@ -1622,8 +1849,9 @@ async def _run_agent(settings: Settings) -> None:
                 port=settings.dashboard_port,
                 log_level="warning",
             )
-            api_server = uvicorn.Server(api_config)
+            api_server = _embedded_api_server(api_config)
             api_task = asyncio.create_task(api_server.serve())
+            shutdown.on_stop("API server", lambda: _stop_api_server(api_server, api_task))
             console.print(
                 f"[green]API server started on http://{settings.dashboard_host}:{settings.dashboard_port}[/green]"
             )
@@ -1636,6 +1864,7 @@ async def _run_agent(settings: Settings) -> None:
                     target_port=settings.dashboard_port,
                 )
                 public_url = await tunnel.start()
+                shutdown.on_stop("tunnel", tunnel.stop)
                 if public_url:
                     console.print(f"[green]Ngrok tunnel: {public_url}[/green]")
         except Exception as e:
@@ -1649,83 +1878,51 @@ async def _run_agent(settings: Settings) -> None:
         f"\n[bold green]{settings.agent_name} is running![/bold green] "
         f"Channels: {', '.join(active)}. Press Ctrl+C to stop.\n"
     )
+    if lease is not None:
+        lease.mark_ready(active)
+    return True
 
-    # T7.2: `docker stop` / a deploy sends SIGTERM. Without a handler Python
-    # dies mid-call (no spoken ending, no report). Route it into the same
-    # graceful path as Ctrl+C: cancel the main task -> finally block ->
-    # channel.stop() drains active calls with a spoken ending.
-    import signal as _sigterm_mod
 
-    _main_task = asyncio.current_task()
-    with contextlib.suppress(NotImplementedError, RuntimeError):  # Windows / nested loops
-        asyncio.get_running_loop().add_signal_handler(
-            _sigterm_mod.SIGTERM,
-            lambda: _main_task.cancel() if _main_task and not _main_task.done() else None,
-        )
+async def _cancel_task_worker(task_worker: asyncio.Task[Any]) -> None:
+    # repid's own worker logs CRITICAL + a full traceback on CancelledError
+    # (by design — see repid/_worker.py, it re-raises after logging). That's
+    # expected noise here since this cancel() is our own intentional shutdown,
+    # not an unexpected failure — silence it for this one call.
+    logging.getLogger("repid").setLevel(logging.CRITICAL + 1)
+    task_worker.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task_worker
 
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        console.print("\n[yellow]Shutting down...[/yellow]")
-    finally:
-        import signal as _signal
 
-        _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
-        if tunnel is not None:
-            await tunnel.stop()
-        if api_server:
-            api_server.should_exit = True
-            if api_task:
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(api_task, timeout=3.0)
-        if mcp_manager:
-            await mcp_manager.stop()
-        if mcp_server:
-            await mcp_server.stop()
-        await triggers.stop()
-        await dispatcher.stop()
-        await result_relay.stop()
-        # repid's own worker logs CRITICAL + a full traceback on CancelledError
-        # (by design — see repid/_worker.py, it re-raises after logging). That's
-        # expected noise here since this cancel() is our own intentional shutdown,
-        # not an unexpected failure — silence it for this one call.
-        logging.getLogger("repid").setLevel(logging.CRITICAL + 1)
-        task_worker.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task_worker
-        await task_connection.__aexit__(None, None, None)
-        await proactive.close()
-        with contextlib.suppress(Exception):
-            from pincer.voice.telemetry import runtime as telephony_telemetry
+async def _stop_api_server(api_server: Any, api_task: asyncio.Task[Any]) -> None:
+    api_server.should_exit = True
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(api_task, timeout=3.0)
 
-            await telephony_telemetry.shutdown()
-        for ch in router.channels.values():
-            await ch.stop()
-        try:
-            from pincer.tools.builtin.browser import close_browser
 
-            await close_browser()
-        except ImportError:
-            pass
-        await llm.close()
-        await session_mgr.close()
-        await cost_tracker.close()
-        if memory_store:
-            await memory_store.close()
-        if audit_logger:
-            await audit_logger.shutdown()
-        # Last: every store above has finished with the shared engines.
-        from pincer.db.engine import dispose_engines
+async def _shut_down_agent(shutdown: _Shutdown, lease: DaemonLease | None) -> NoReturn:
+    """Run every registered stop action (last started first), then end the process.
 
-        await dispose_engines()
+    The process exits 1 if any action failed, 0 otherwise. (`pincer stop` doesn't read the code;
+    it waits for the lease. The code is for whoever ran the process: a supervisor, a shell.)
+    """
+    import signal as _signal
+
+    _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+    await shutdown.run()
+    if shutdown.failed:
+        console.print(f"[yellow]Shutdown complete, with errors in: {', '.join(shutdown.failed)}[/yellow]")
+    else:
         console.print("[green]Shutdown complete[/green]")
-        # Cancel any lingering asyncio tasks (e.g. in-flight LLM calls from
-        # channel update handlers) before exiting so the process doesn't hang.
-        _pending = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
-        for _t in _pending:
-            _t.cancel()
-        os._exit(0)
+    # Cancel any lingering asyncio tasks (e.g. in-flight LLM calls from
+    # channel update handlers) before exiting so the process doesn't hang.
+    _pending = {t for t in asyncio.all_tasks() if t is not asyncio.current_task()}
+    for _t in _pending:
+        _t.cancel()
+    # os._exit never leaves the daemon child's `with DaemonLease`; its lock goes with the process.
+    if lease is not None:
+        lease.remove_record()
+    os._exit(1 if shutdown.failed else 0)
 
 
 async def _run_tasks_worker(settings: Settings) -> None:
@@ -1777,6 +1974,10 @@ async def _run_tasks_worker(settings: Settings) -> None:
         f"[green]Task worker running (channel={TASK_CHANNEL}, results relayed via {TASK_RESULTS_CHANNEL})[/green]"
     )
     console.print("\n[bold green]Tasks worker is running![/bold green] Press Ctrl+C to stop.\n")
+
+    # `docker stop` on the pincer-tasks container sends SIGTERM; without this the
+    # worker dies on the spot, skipping the finally below.
+    _cancel_on_first_sigterm()
 
     try:
         while True:

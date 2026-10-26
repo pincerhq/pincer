@@ -561,6 +561,26 @@ Record how long it took. An untimed restore procedure is not a recovery plan.
 
 ---
 
+## Reclassify historical outcomes {#reclassify}
+
+Outbound calls that never reached a person used to be stored as completed. To
+correct rows still inside the telemetry retention window:
+
+```bash
+scripts/backup-db.sh                           # snapshot first: --apply writes production data
+pincer telephony reclassify --since 30d        # dry run: old → new code, evidence, rates before → after
+pincer telephony reclassify --since 30d --apply
+pincer voice ops ga-gate                        # re-run, and record before/after on the issue
+```
+
+A row is changed only when its timeline proves the cause: a `busy` /
+`no-answer` / `failed` / `canceled` provider status, or an AMD `machine*` /
+`fax` verdict on a call with no turns. Everything else is listed under
+"Could not determine" and left alone. In particular, a voicemail whose greeting
+was transcribed has a turn, so it can't be told apart from an ignored AMD false
+positive. `--apply` writes one transaction and one `telephony.reclassify` audit
+row; running it again reports nothing to change.
+
 ## Keeping this page honest
 
 Every runbook entry above is reachable from an alert (each alert carries its own

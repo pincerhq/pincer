@@ -37,6 +37,22 @@ Everything else is ours: transport, media, model, tools, our own bugs.
 **Error budget.** 1% of eligible attempts. Over a month with 1,000 eligible
 attempts, 10 may fail before the SLO is missed.
 
+**Numbers before October 2026 were inflated.** Until the outbound-outcome fix,
+busy, no-answer, failed and cancelled calls, and voicemail detected before
+pickup, were recorded as `none` (completed), and voicemail detected after
+pickup as `callee_hangup`. So `call_success_rate` read high, and so did the
+call-attempt SLI, which counted the `none` rows as successes. After the fix, busy,
+no-answer and voicemail calls (early or late) leave the SLI denominator, so late
+voicemail stops burning budget. Failed and cancelled calls are `call_setup`,
+which is ours, so they now count against the SLI and burn budget. Expect
+`call_success_rate` to drop by the share of calls that never connected. The SLI
+goes down with the failed / cancelled calls and up with each late voicemail that
+leaves the denominator; `reclassify` prints the net before → after. That is the
+number becoming true, not a regression.
+Correct the stored history with `pincer telephony reclassify`
+([runbook](runbook.md#reclassify)). Rows older than the telemetry retention
+window keep their old codes.
+
 ### 2. Latency p95 — ≤ 2.0 s
 
 **Definition.** 95% of conversational turns complete within 2.0 s from the

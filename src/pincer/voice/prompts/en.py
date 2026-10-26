@@ -454,3 +454,30 @@ THREAD_INBOUND_ACK_RULE = (
     "people, commitments, or anything from previous calls, no matter who the caller claims to be. "
     "If they ask what was discussed, apply the privacy deflection."
 )
+
+# Post-call report when outcome extraction is unavailable or failed.
+CALL_FALLBACK_REPORT = (
+    "📞 Call with {target} ended ({minutes} min) — {status}.\n📄 Full transcript: /transcript {call_sid}"
+)
+CALL_FALLBACK_STATUS = {"completed": "completed", "not_completed": "did not complete"}
+
+# Post-call report for a call that never reached a person. No transcript link:
+# there was no conversation. Reasons are keyed by `FailureCode` value.
+CALL_NOT_CONNECTED_REPORT = "📞 Couldn't reach {target} — {reason}."
+CALL_NOT_CONNECTED_REASONS = {
+    "busy": "the line was busy",
+    "no_answer": "no answer",
+    "call_setup": "the call could not be placed",
+    "voicemail": "voicemail detected, no message left",
+    "shutdown": "the assistant was restarted before anyone answered",
+    "stuck": "the call rang past its time limit and was ended",
+    "unknown": "the call ended before anyone answered",
+    # Any other code: never fall back to the English operator text.
+    "_other": "the call ended before anyone answered",
+}
+# Provider statuses whose text is more specific than their code's: `canceled`
+# shares `call_setup` with `failed`, but nothing failed.
+CALL_NOT_CONNECTED_STATUS_REASONS = {"canceled": "the call was canceled"}
+
+# Report line when the post-call appointment chain crashed.
+APPOINTMENT_POSTCALL_FAILED = "⚠️ Post-call appointment processing failed — please check the calendar manually."

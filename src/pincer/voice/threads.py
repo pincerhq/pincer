@@ -675,7 +675,7 @@ class ThreadManager:
                 "thread_id": thread_id,
                 "attach_kind": kind,
                 "attached_at": stamp,
-                "call_started_at": str((call or {}).get("started_at") or ""),
+                "call_started_at": (call or {}).get("started_at") or None,
                 "direction": str((call or {}).get("direction") or ""),
             },
             touched_at=stamp,

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,7 @@ from pincer.config.database import DatabaseSettings
 from pincer.db.engine import (
     SQLITE_BUSY_TIMEOUT_MS,
     _asyncpg_connect_args,
+    build_config,
     dispose_engines,
     get_database_url,
     get_engine,
@@ -151,6 +154,65 @@ async def test_a_sslmode_url_opens_an_engine_that_reaches_the_socket():
         async with engine.connect():
             pass
     await dispose_engines()
+
+
+@contextlib.contextmanager
+def _server_default_timezone(url: str, zone: str) -> Iterator[None]:
+    """Give the scratch database a non-UTC default zone for the duration."""
+    import sqlalchemy as sa
+
+    admin = sa.create_engine(url, isolation_level="AUTOCOMMIT")
+    database = sa.engine.make_url(url).database
+    with admin.connect() as conn:
+        conn.execute(sa.text(f"ALTER DATABASE \"{database}\" SET timezone TO '{zone}'"))
+    try:
+        yield
+    finally:
+        with admin.connect() as conn:
+            conn.execute(sa.text(f'ALTER DATABASE "{database}" RESET timezone'))
+        admin.dispose()
+
+
+@pytest.mark.parametrize("query", [{}, {"application_name": "pincer-test"}])
+async def test_postgres_sessions_run_in_utc_whatever_the_server_default(postgres_scratch_url, query):
+    """The timestamp columns have no zone, so a `CURRENT_TIMESTAMP` default is
+    stored in the session's zone; `IsoText` reads every value back as UTC."""
+    import sqlalchemy as sa
+
+    # Through the URL API: the scratch URL keeps `PINCER_TEST_PG_URL`'s own
+    # query string, which a second `?` would fold into its last value.
+    url = sa.engine.make_url(postgres_scratch_url).update_query_dict(query)
+    with _server_default_timezone(postgres_scratch_url, "Europe/Berlin"):
+        engine = get_engine(to_async_url(url.render_as_string(hide_password=False)))
+        async with engine.connect() as conn:
+            assert (await conn.execute(text("SHOW timezone"))).scalar() == "UTC"
+            if query:
+                assert (await conn.execute(text("SHOW application_name"))).scalar() == "pincer-test"
+        await dispose_engines()
+
+
+def test_postgres_migrations_run_in_utc_whatever_the_server_default(migration_url, monkeypatch, tmp_path):
+    """A revision's `CURRENT_TIMESTAMP` default must land in UTC as the
+    runtime's does, so the zone is checked inside the migration transaction."""
+    if not migration_url.startswith("postgresql"):
+        pytest.skip("SQLite has no session time zone")
+    from alembic import command
+    from alembic.runtime.environment import EnvironmentContext
+
+    zones = []
+    run_migrations = EnvironmentContext.run_migrations
+
+    def spy(self, **kwargs):
+        zones.append(self.get_bind().exec_driver_sql("SHOW timezone").scalar())
+        return run_migrations(self, **kwargs)
+
+    monkeypatch.setattr(EnvironmentContext, "run_migrations", spy)
+    cfg = build_config(tmp_path / "unused.db")
+    cfg.set_main_option("sqlalchemy.url", migration_url)
+    with _server_default_timezone(migration_url, "Europe/Berlin"):
+        command.upgrade(cfg, "head")
+
+    assert zones == ["UTC"]
 
 
 def test_the_migration_lock_sits_next_to_the_database_the_url_names(monkeypatch, tmp_path: Path):

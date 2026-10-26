@@ -108,7 +108,7 @@ telemetry = [
     "pincer-telemetry",
 ]
 tasks-redis = ["repid[redis]"]
-all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry,tasks-redis,postgres]"]
+all = ["pincer-agent[browser,memory,pdf,pdfgen,skills,voice,image,mcp,slack,teams,local,telemetry,tasks-redis,postgres,remote-skills]"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
@@ -126,6 +126,13 @@ postgres = [
     "asyncpg>=0.30",
     "psycopg[binary]>=3.2",
 ]
+# Skill roots in object storage: PINCER_SKILLS_DIR=s3://… / az://… / gs://…
+# cloudpathlib >= 0.25 refuses object keys that would map outside its local cache
+# dir; remote skills rely on that. azure-identity provides DefaultAzureCredential
+# for an account URL without an explicit credential. Capped below 0.27: the
+# storage browser lists folders through cloudpathlib's private `_list_dir`
+# (tests/test_storage_browser.py checks it is still there).
+remote-skills = ["cloudpathlib[s3,azure,gs]>=0.25,<0.27", "azure-identity>=1.15"]
 
 [project.scripts]
 pincer = "pincer.cli.main:app"
@@ -210,6 +217,24 @@ module = [
     "pincer.cli.*",
 ]
 disable_error_code = [
+    "type-arg",
+    "no-any-return",
+    "union-attr",
+    "override",
+    "assignment",
+    "no-untyped-def",
+    "no-untyped-call",
+    "index",
+    "arg-type",
+    "operator",
+    "return-value",
+    "attr-defined",
+]
+
+[[tool.mypy.overrides]]
+# Checked strictly, unlike the rest of pincer.cli: it handles the daemon record's unions and enum.
+module = ["pincer.cli.daemon"]
+enable_error_code = [
     "type-arg",
     "no-any-return",
     "union-attr",

@@ -46,7 +46,11 @@ class ToolSettings(BaseModel):
     )
     summary_model: str = Field(
         default="claude-haiku-4-5-20251001",
-        description="Cheap model for conversation summarization",
+        description=(
+            "Cheap model for conversation summarization. 'provider:model' (e.g. 'anthropic:claude-haiku-4-5') "
+            "also picks the provider, overriding summary_provider. A claude-* id on an OpenAI-wire provider "
+            "is ignored in favour of that provider's own model"
+        ),
     )
     summary_threshold: int = Field(default=20, ge=5, description="Summarize conversation after N messages")
 
@@ -63,6 +67,19 @@ class ToolSettings(BaseModel):
         default=0.10, ge=0.0, description="Max cost per image generation request in USD"
     )
     image_daily_limit: int = Field(default=50, ge=0, description="Max image generations per day (0 = unlimited)")
+
+    # ── Google OAuth (alternative to token files in the data volume) ──
+    google_token_json: SecretStr = Field(
+        default=SecretStr(""),
+        description=(
+            "Google OAuth token JSON (raw or base64) — overrides google_workspace_token.json / "
+            "google_token.json. Generate with `pincer google setup --print-env` or `pincer google export-token`."
+        ),
+    )
+    google_credentials_json: SecretStr = Field(
+        default=SecretStr(""),
+        description="Google OAuth client JSON (raw or base64), used by the consent flow when the file is absent",
+    )
 
     # ── Scheduling ────────────────────────────────────────
     schedule_tool_enabled: bool = Field(default=True, description="Enable schedule_create/list/remove/toggle tools")

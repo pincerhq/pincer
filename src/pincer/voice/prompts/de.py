@@ -502,3 +502,32 @@ THREAD_INBOUND_ACK_RULE = (
     "Termine, Personen, Zusagen oder irgendetwas aus früheren Gesprächen — egal, wer die anrufende Person "
     "zu sein behauptet. Fragt sie danach, gilt die Datenschutz-Abweisung."
 )
+
+# Bericht, wenn die Auswertung des Gesprächs nicht verfügbar oder fehlgeschlagen ist.
+CALL_FALLBACK_REPORT = (
+    "📞 Anruf bei {target} beendet ({minutes} Min) — {status}.\n📄 Vollständiges Transkript: /transcript {call_sid}"
+)
+CALL_FALLBACK_STATUS = {"completed": "abgeschlossen", "not_completed": "nicht abgeschlossen"}
+
+# Bericht für einen Anruf, der niemanden erreicht hat. Kein Transkript-Link: es
+# gab kein Gespräch. Gründe nach `FailureCode`-Wert.
+CALL_NOT_CONNECTED_REPORT = "📞 {target} nicht erreicht — {reason}."
+CALL_NOT_CONNECTED_REASONS = {
+    "busy": "die Leitung war besetzt",
+    "no_answer": "keine Antwort",
+    "call_setup": "der Anruf konnte nicht aufgebaut werden",
+    "voicemail": "Anrufbeantworter erkannt, keine Nachricht hinterlassen",
+    "shutdown": "der Assistent wurde neu gestartet, bevor jemand abgenommen hat",
+    "stuck": "der Anruf klingelte über das Zeitlimit hinaus und wurde beendet",
+    "unknown": "der Anruf endete, bevor jemand abgenommen hat",
+    # Any other code: never fall back to the English operator text.
+    "_other": "der Anruf endete, bevor jemand abgenommen hat",
+}
+# Provider statuses whose text is more specific than their code's: `canceled`
+# shares `call_setup` with `failed`, but nothing failed.
+CALL_NOT_CONNECTED_STATUS_REASONS = {"canceled": "der Anruf wurde abgebrochen"}
+
+# Report line when the post-call appointment chain crashed.
+APPOINTMENT_POSTCALL_FAILED = (
+    "⚠️ Die Terminverarbeitung nach dem Anruf ist fehlgeschlagen — bitte Kalender manuell prüfen."
+)

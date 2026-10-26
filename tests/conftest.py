@@ -54,6 +54,17 @@ def _isolate_dotenv(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _reset_skill_service() -> Iterator[None]:
+    """The SkillService is a per-process singleton built from the first settings
+    that ask for it; a test's mocked settings must not leak into the next test."""
+    from pincer.services.skills import reset_skill_service
+
+    reset_skill_service()
+    yield
+    reset_skill_service()
+
+
+@pytest.fixture(autouse=True)
 def _reset_onboarding_cache() -> Iterator[None]:
     """The completed-onboarding cache is process-wide; a test must not see
     another test's users as onboarded (Postgres tests share one database)."""
@@ -537,3 +548,115 @@ async def migrated_url(migration_url: str, tmp_path: Path):
     await asyncio.to_thread(command.upgrade, config, "head")
     yield to_async_url(migration_url)
     await dispose_engines()
+
+
+# ── Skill roots (local + offline cloud mocks) ────────────────────────
+
+# A dummy connection string: cloudpathlib's Azure mock refuses anonymous
+# clients but never connects anywhere.
+_FAKE_AZURE_CONNECTION_STRING = (
+    "DefaultEndpointsProtocol=https;AccountName=pincertest;AccountKey=dGVzdA==;EndpointSuffix=core.windows.net"
+)
+
+
+class SkillRoots:
+    """What the `skill_root` fixture returns: `roots("bundled")` gives a root.
+
+    `roots.external("bundled")` is the same location reached through a second
+    client that shares the simulated bucket but has its own file cache — a write
+    there changes the object *behind* the first client's cache, like an upload
+    from another machine. (A write through the first client also updates its own
+    cached copy, so it can't show whether a cache refresh happened.) For local
+    roots both are the same directory.
+    """
+
+    def __init__(self, make: Callable[[str], Any], make_external: Callable[[str], Any]) -> None:
+        self._make = make
+        self._make_external = make_external
+
+    def __call__(self, name: str) -> Any:
+        return self._make(name)
+
+    def external(self, name: str) -> Any:
+        return self._make_external(name)
+
+
+@pytest.fixture
+def mock_cloud_client(tmp_path: Path) -> Callable[..., Any]:
+    """Factory for cloudpathlib's offline mock clients: `mock_cloud_client("s3")`.
+
+    The simulated bucket of a backend lives in `<tmp_path>/<backend>-storage`
+    and is shared by every client made for it; `cache` names each client's own
+    file cache (`<tmp_path>/<backend>-<cache>`). Extra keyword arguments go to
+    the client (e.g. `file_cache_mode`).
+    """
+
+    def make(backend: str, cache: str = "cache", **kwargs: Any) -> Any:
+        local = pytest.importorskip("cloudpathlib.local")
+        common = {
+            "local_storage_dir": tmp_path / f"{backend}-storage",
+            "local_cache_dir": tmp_path / f"{backend}-{cache}",
+            **kwargs,
+        }
+        if backend == "s3":
+            return local.LocalS3Client(**common)
+        if backend == "azure":
+            return local.LocalAzureBlobClient(connection_string=_FAKE_AZURE_CONNECTION_STRING, **common)
+        return local.LocalGSClient(**common)
+
+    return make
+
+
+@pytest.fixture(params=["local", "s3", "azure", "gs"])
+def skill_root(request: pytest.FixtureRequest, tmp_path: Path, mock_cloud_client: Callable[..., Any]) -> SkillRoots:
+    """Factory for skill roots on every storage backend: `skill_root("bundled")`.
+
+    `local` returns a plain directory under tmp_path; the cloud params return
+    CloudPaths from cloudpathlib's offline mock clients, whose simulated bucket
+    and file cache also live under tmp_path, so nothing is shared between
+    tests and no network is touched. Write skills through the path API
+    (`write_text`, `unlink`), which works the same on every backend. See
+    `SkillRoots.external` for changing objects behind the cache.
+    """
+    backend = request.param
+    if backend == "local":
+        return SkillRoots(lambda name: tmp_path / name, lambda name: tmp_path / name)
+
+    prefix = {"s3": "s3://skills-bucket", "azure": "az://skills-container", "gs": "gs://skills-bucket"}[backend]
+    client = mock_cloud_client(backend)
+    external_client = mock_cloud_client(backend, "external-cache")
+    return SkillRoots(
+        lambda name: client.CloudPath(f"{prefix}/{name}"),
+        lambda name: external_client.CloudPath(f"{prefix}/{name}"),
+    )
+
+
+# ── Real Pincer processes (daemon, `pincer run`) ─────────────────────
+
+
+@pytest.fixture
+def signal_stub() -> Iterator[str]:
+    """Answers the Signal channel's health check and polls (with 404s, which it only warns about)."""
+    import http.server
+    import threading
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture
+def redis_url() -> str:
+    """A Redis for the task worker's broker, if one is configured.
+
+    Opt-in, like `PINCER_TEST_PG_URL`; locally, e.g.
+    `docker run -d --rm --name pincer-tasks-redis-test -p 127.0.0.1:16389:6379 redis:7-alpine` and
+    `PINCER_TEST_REDIS_URL=redis://127.0.0.1:16389/0`.
+    """
+    url = os.environ.get("PINCER_TEST_REDIS_URL")
+    if not url:
+        pytest.skip("PINCER_TEST_REDIS_URL not set")
+    return url

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from datetime import UTC, datetime, timedelta
 
 import aiosqlite
@@ -84,7 +85,9 @@ async def test_signals_reflect_seeded_calls(client, tmp_path):
 # ── Alerts ───────────────────────────────────────────────────────────
 
 
-def test_alerts_endpoint_is_quiet_on_a_healthy_system(client):
+def test_alerts_endpoint_is_quiet_on_a_healthy_system(client, monkeypatch):
+    # The disk rule reads the host's disk: a nearly full dev machine would page.
+    monkeypatch.setattr(shutil, "disk_usage", lambda _p: type("U", (), {"total": 100 * 10**9, "free": 60 * 10**9})())
     assert client.get("/api/ops/alerts").json() == []
 
 

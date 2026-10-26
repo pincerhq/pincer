@@ -3,9 +3,11 @@ FROM python:3.12-slim
 # opencv-python (non-headless) needs libgl1/libglib2.0-0/libsm6/libxext6 on a slim
 # base; ffmpeg covers pypdfium2/opencv's optional codec paths; curl is for the
 # healthcheck. Mirrors doctr's own reference api/Dockerfile's system deps, minus
-# git/make (not needed once installing python-doctr from a released PyPI wheel).
+# make (not needed once installing python-doctr from a released PyPI wheel). git
+# stays: the `telemetry` extra is pincer-telemetry from GitHub, and uv must fetch
+# it to resolve the project (there is no lockfile here), like the other MCP images.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libgl1 libglib2.0-0 libsm6 libxext6 ffmpeg curl \
+        libgl1 libglib2.0-0 libsm6 libxext6 ffmpeg curl git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
@@ -21,9 +23,11 @@ WORKDIR /app
 # resolves src/doctr-mcp/pyproject.toml as a standalone project, not as a
 # workspace member — this is why that file carries its own duplicate
 # `[[tool.uv.index]]` block (see the comment there for why).
+# `--extra telemetry`, not `--all-extras` as in the other MCP images: here `dev`
+# (pytest) is an extra too, and does not belong in the image.
 COPY pyproject.toml ./
 COPY doctr_mcp ./doctr_mcp
-RUN uv sync --no-cache --no-dev
+RUN uv sync --no-cache --no-dev --extra telemetry
 
 # Pre-bake a curated set of lightweight architectures into the image so that
 # switching DOCTR_DEFAULT_DET_ARCH/DOCTR_DEFAULT_RECO_ARCH via env var at runtime
