@@ -684,12 +684,13 @@ async def test_a_dial_that_ended_before_it_was_confirmed_is_not_a_success(teleme
 
     hooks.dial_requested("pending-eee", to_number="+4930111", engine="conversation_relay", language="de")
     with pytest.raises(outbound._DialEnded):
-        await outbound._recover_timed_out_dial(
+        await outbound._recover_unconfirmed_dial(
             Dialer(),
             SimpleNamespace(twilio_phone_number="+4930999"),
             "+4930111",
             datetime.now(UTC),
             trace_key="pending-eee",
+            error="TimeoutError: dial outcome unknown",
         )
     await _settle()
 

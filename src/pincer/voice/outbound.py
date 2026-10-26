@@ -15,6 +15,7 @@ from uuid import uuid4
 
 from pincer.voice.briefing import BriefingError, CallBriefing, log_briefing_bound
 from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, truncate
+from pincer.voice.twilio_rest import DialOutcomeUnknown
 
 logger = logging.getLogger(__name__)
 
@@ -209,15 +210,16 @@ class _DialEnded(Exception):
         self.status = status
 
 
-async def _recover_timed_out_dial(
+async def _recover_unconfirmed_dial(
     dialer: Any,
     settings: Any,
     to_number: str,
     dialed_at: datetime,
     *,
     trace_key: str,
+    error: str,
 ) -> str:
-    """The CallSid of a timed-out dial that is still live, or "" when unknown.
+    """The CallSid of an unconfirmed dial that is still live, or "" when unknown.
 
     Looks the call up at Twilio. Raises _DialEnded when the call was placed
     but is already over.
@@ -230,17 +232,17 @@ async def _recover_timed_out_dial(
     try:
         call = await dialer.find_call(to=to_number, from_=settings.twilio_phone_number, since=dialed_at)
     except Exception:
-        logger.exception("Lookup of a timed-out dial to %s failed", to_number)
+        logger.exception("Lookup of an unconfirmed dial to %s failed", to_number)
     if call is None:
-        await telemetry.dial_unknown(trace_key, error="TimeoutError: dial outcome unknown")
-        logger.warning("Outbound dial to %s timed out with no call found; outcome unknown", to_number)
+        await telemetry.dial_unknown(trace_key, error=error)
+        logger.warning("Outbound dial to %s unconfirmed (%s) with no call found; outcome unknown", to_number, error)
         return ""
     call_sid = str(call.sid)
     status = str(getattr(call, "status", "") or "").lower()
     if status in LIVE_CALL_STATUSES:
-        logger.warning("Outbound dial to %s timed out but Twilio placed it as %s (%s)", to_number, call_sid, status)
+        logger.warning("Outbound dial to %s unconfirmed but Twilio placed it as %s (%s)", to_number, call_sid, status)
         return call_sid
-    logger.warning("Outbound dial to %s timed out; placed as %s but already ended (%s)", to_number, call_sid, status)
+    logger.warning("Outbound dial to %s unconfirmed; placed as %s but already ended (%s)", to_number, call_sid, status)
     telemetry.dial_accepted(trace_key, call_sid)
     # Twilio's status is not ours: `completed` here means a call nobody was
     # briefed for, never a success. busy / no-answer / failed / canceled have
@@ -450,22 +452,25 @@ async def make_phone_call(
             try:
                 call = await dialer.create_call(**call_kwargs)
                 call_sid = str(call.sid)
-            except TimeoutError:
-                # A timeout is not a rejection: Twilio may have accepted the
-                # POST and the phone may already be ringing — or answered, in
-                # which case the relay setup has claimed the pending state by
-                # callee number (engine.claim_pending_outbound) and the SID is
-                # already known here.
+            except DialOutcomeUnknown as unknown:
+                # A timeout or a connection dropped mid-response is not a
+                # rejection: Twilio may have accepted the POST and the phone
+                # may already be ringing — or answered, in which case the
+                # relay setup has claimed the pending state by callee number
+                # (engine.claim_pending_outbound) and the SID is known here.
                 if engine is not None and pre_state is not None and engine.get_call_state(pre_state.call_sid):
                     call_sid = pre_state.call_sid
-                    logger.warning("Outbound dial to %s timed out after the relay bound it as %s", validated, call_sid)
+                    logger.warning(
+                        "Outbound dial to %s unconfirmed (%s); the relay bound it as %s", validated, unknown, call_sid
+                    )
                 else:
-                    call_sid = await _recover_timed_out_dial(
+                    call_sid = await _recover_unconfirmed_dial(
                         dialer,
                         settings,
                         validated,
                         dialed_at,
                         trace_key=trace_key,
+                        error=str(unknown),
                     )
                 if not call_sid:
                     # Outcome unknown, or the call already ended. It still
@@ -479,7 +484,7 @@ async def make_phone_call(
                     _increment_daily_count(user_id)
                     await record_outbound_call(settings, validated, user_id=user_id, channel=ctx.get("channel", ""))
                     return (
-                        f"Error: Twilio did not confirm the call to {validated} in time, and it may still "
+                        f"Error: Twilio did not confirm the call to {validated}, and it may still "
                         "be ringing. Do not call again right away; check the call log first."
                     )
             finally:

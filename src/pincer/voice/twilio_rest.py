@@ -27,6 +27,26 @@ logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT_S = 10.0
 
 
+class DialOutcomeUnknown(Exception):
+    """`create_call` failed after the POST may have reached Twilio: a timeout,
+    or the connection dropped while the response was on its way. The call may
+    have been placed. A Twilio error response (`TwilioRestException`) or a
+    connection that was never made is a definite "not placed" and is raised
+    as itself."""
+
+
+def _outcome_unknown(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    try:
+        import aiohttp
+    except ImportError:  # pragma: no cover — aiohttp ships with the voice extra
+        return isinstance(exc, ConnectionError)
+    if isinstance(exc, aiohttp.ClientConnectorError):
+        return False  # never connected: nothing was sent
+    return isinstance(exc, (aiohttp.ClientError, ConnectionError))
+
+
 def _setting(settings: Any, name: str) -> str | None:
     value = getattr(settings, name, "")
     return (value.strip() or None) if isinstance(value, str) else None
@@ -67,8 +87,14 @@ class TwilioRest:
         return await asyncio.wait_for(client.calls(call_sid).update_async(**kwargs), REQUEST_TIMEOUT_S)
 
     async def create_call(self, **kwargs: Any) -> Any:
+        """Raises `DialOutcomeUnknown` when Twilio may have placed the call anyway."""
         client = await self._get()
-        return await asyncio.wait_for(client.calls.create_async(**kwargs), REQUEST_TIMEOUT_S)
+        try:
+            return await asyncio.wait_for(client.calls.create_async(**kwargs), REQUEST_TIMEOUT_S)
+        except Exception as exc:
+            if _outcome_unknown(exc):
+                raise DialOutcomeUnknown(f"{type(exc).__name__}: dial outcome unknown") from exc
+            raise
 
     async def find_call(self, *, to: str, from_: str, since: datetime) -> Any | None:
         """The newest call from `from_` to `to` created at or after `since`, or None.

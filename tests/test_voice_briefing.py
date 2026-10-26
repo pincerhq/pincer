@@ -475,6 +475,84 @@ async def test_timed_out_dial_whose_lookup_fails_is_recorded_as_unknown(voice, d
     assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
 
 
+async def test_dial_cut_off_after_the_relay_bound_it_is_a_placed_call(voice, dial_outcomes):
+    """The callee answers at 2 s and the setup claims the dial; then the REST
+    response dies. The call is live and briefed, so it is a placed call — not
+    "Error placing call", which invites a redial of the person already talking."""
+    import aiohttp
+
+    class AnsweredThenDisconnected:
+        async def create_async(self, **kwargs: Any) -> Any:
+            await voice.server._resolve_setup_state("CA_live", "+1000", "outbound-api", to=TARGET)
+            raise aiohttp.ServerDisconnectedError()
+
+        async def list_async(self, **kwargs: Any) -> list[Any]:
+            raise AssertionError("the relay already bound the call; no lookup needed")
+
+    voice.server._engine = voice.engine
+    voice.engine._rest._client = types.SimpleNamespace(calls=AnsweredThenDisconnected())
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert "Call SID: CA_live" in result
+    state = voice.engine.get_call_state("CA_live")
+    assert state is not None and state.purpose == TASK
+    assert status_notify.get_call_info("CA_live") is not None
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+    assert dial_outcomes == {"rejected": [], "unknown": []}
+
+
+async def test_dial_cut_off_with_no_call_found_is_unknown_and_counts(voice, dial_outcomes):
+    """A reset while reading the response: the POST went out, so Twilio may
+    have placed the call. Counted, and recorded as unknown."""
+    import aiohttp
+
+    class Disconnected(_TimedOutCalls):
+        async def create_async(self, **kwargs: Any) -> Any:
+            raise aiohttp.ServerDisconnectedError()
+
+    voice.engine._rest._client = types.SimpleNamespace(calls=Disconnected([]))
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert "may still be ringing" in result
+    assert dial_outcomes == {"rejected": [], "unknown": ["ServerDisconnectedError: dial outcome unknown"]}
+    assert voice.engine._pending_outbound == {}
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+async def test_twilio_refusing_the_dial_is_still_a_rejection(voice, dial_outcomes):
+    """Twilio answered with an error: nothing was placed, nothing is counted."""
+    from twilio.base.exceptions import TwilioRestException
+
+    class Refused(_TimedOutCalls):
+        async def create_async(self, **kwargs: Any) -> Any:
+            raise TwilioRestException(400, "/Calls.json", msg="Invalid 'To' number", code=21211)
+
+    voice.engine._rest._client = types.SimpleNamespace(calls=Refused([]))
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert result.startswith("Error placing call")
+    assert len(dial_outcomes["rejected"]) == 1 and dial_outcomes["unknown"] == []
+    assert voice.engine._pending_outbound == {}
+    assert sum(outbound._daily_outbound_counts.get("u1", {}).values()) == 0
+
+
+async def test_dial_that_never_connected_is_still_a_rejection(voice, dial_outcomes):
+    """No connection to Twilio at all: the POST was never sent."""
+    import aiohttp
+
+    class Unreachable(_TimedOutCalls):
+        async def create_async(self, **kwargs: Any) -> Any:
+            key = types.SimpleNamespace(host="api.twilio.com", port=443, ssl=True)
+            raise aiohttp.ClientConnectorError(key, OSError(61, "Connection refused"))
+
+    voice.engine._rest._client = types.SimpleNamespace(calls=Unreachable([]))
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert result.startswith("Error placing call")
+    assert len(dial_outcomes["rejected"]) == 1 and dial_outcomes["unknown"] == []
+    assert sum(outbound._daily_outbound_counts.get("u1", {}).values()) == 0
+
+
 async def test_timed_out_dial_that_already_ended_is_not_promoted(voice):
     """The lookup finds the call, but it is over (declined, busy, hung up):
     promoting it would park a dead state in _active_calls that no status
