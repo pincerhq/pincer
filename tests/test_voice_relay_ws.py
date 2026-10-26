@@ -13,6 +13,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from voice_harness.strict_async import FAIL_ON_UNAWAITED_COROUTINE
 
 from pincer.channels.phone_calls import VoiceChannel
 from pincer.voice import scheduling, twiml_server
@@ -21,6 +22,8 @@ from pincer.voice.transcript import Speaker, TranscriptLogger
 from pincer.voice import twiml_server
 from pincer.voice.engine import CallDirection, CallState, VoiceEngine
 from pincer.voice.webhook_auth import WS_RELAY_PATH, WS_STREAM_PATH, signed_ws_query, ws_token
+
+pytestmark = FAIL_ON_UNAWAITED_COROUTINE
 
 
 class FakeEngine:

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from voice_harness.settings import apply_test_paths
+from voice_harness.strict_async import FAIL_ON_UNAWAITED_COROUTINE
 
 from pincer.channels.phone_calls import MAX_CONSECUTIVE_ERRORS, VoiceChannel
 from pincer.voice import status_notify
@@ -25,6 +26,8 @@ from pincer.voice.state_machine import (
 )
 from pincer.voice.transcript import Speaker, TranscriptLogger
 from pincer.voice.twiml_server import init_voice_routes, twilio_router
+
+pytestmark = FAIL_ON_UNAWAITED_COROUTINE
 
 
 @pytest.fixture(autouse=True)

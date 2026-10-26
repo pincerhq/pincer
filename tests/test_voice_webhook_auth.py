@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from voice_harness.strict_async import FAIL_ON_UNAWAITED_COROUTINE
 
 from pincer.voice import twiml_server
 from pincer.voice.engine import CallDirection, CallState
@@ -27,6 +28,7 @@ from pincer.voice.webhook_auth import (
     ws_token,
 )
 
+pytestmark = FAIL_ON_UNAWAITED_COROUTINE
 AUTH_TOKEN = "test-twilio-auth-token"
 
 

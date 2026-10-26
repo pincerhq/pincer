@@ -43,7 +43,9 @@ from .personas_de import (
     InboundThreadProbePersonaDe,
 )
 from .settings import apply_in_call_tool_defaults, apply_test_paths
+from .strict_async import FAIL_ON_UNAWAITED_COROUTINE
 
+pytestmark = FAIL_ON_UNAWAITED_COROUTINE
 BERLIN = ZoneInfo("Europe/Berlin")
 CALL = "CA_inbound"
 # A call whose state was lost while its transfer target rang (restart/redeploy)
@@ -1048,6 +1050,7 @@ def test_transfer_result_without_state_reconnects_live_caller():
     settings.cr_tts_provider = ""
     engine = AsyncMock()
     engine.get_call_state = MagicMock(return_value=None)
+    engine.was_recently_ended = MagicMock(return_value=False)
     twiml_server.set_transfer_session_resolver(None)
     client = _webhook_client(settings, engine)
     live = client.post(

@@ -9,6 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 from voice_harness.fake_engine import FakeVoiceEngine
 from voice_harness.settings import apply_in_call_tool_defaults, apply_test_paths
+from voice_harness.strict_async import FAIL_ON_UNAWAITED_COROUTINE
 
 from pincer.channels.phone_calls import VoiceChannel
 from pincer.core.agent import StreamEventType
@@ -16,6 +17,7 @@ from pincer.voice import call_end, status_notify
 from pincer.voice.engine import CallDirection
 from pincer.voice.state_machine import CallPhase
 
+pytestmark = FAIL_ON_UNAWAITED_COROUTINE
 CALL = "CA_end"
 _REAL_ESTIMATE = call_end.estimate_speech_seconds  # the autouse fixture below zeroes the module attribute
 

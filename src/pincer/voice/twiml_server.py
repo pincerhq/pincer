@@ -567,12 +567,10 @@ def _already_torn_down(call_sid: str) -> bool:
     user message, so a status webhook that finds no live state must not send
     its own generic ending: that consumes the ENDED stage and the real report
     is dropped.
-
-    `is True` on purpose: MagicMock engines in tests answer every attribute.
     """
     if _engine is None:
         return False
-    return getattr(_engine, "was_recently_ended", lambda _sid: False)(call_sid) is True
+    return bool(getattr(_engine, "was_recently_ended", lambda _sid: False)(call_sid))
 
 
 async def _handle_amd_verdict(call_sid: str, answered_by: str, user_lang: str) -> bool:
