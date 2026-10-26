@@ -266,6 +266,13 @@ mounting a directory. Install the new `remote-skills` extra
     telemetry records `call.dial_unknown` (outcome and termination
     `dial_unknown`, still `twilio_api`), not `dial_rejected`. A Twilio error
     response, or no connection at all, stays a rejection.
+  - A callee who answers before the dial request returns is bound by the relay
+    `setup` itself, by callee number — but only when that setup's WebSocket
+    token or Twilio signature was actually verified. With
+    `PINCER_VOICE_WS_AUTH_REQUIRED=false`, `PINCER_VOICE_WEBHOOK_VALIDATE=false`
+    or no auth token, `callSid` and `to` are socket-supplied, and anyone who
+    knew the callee's number could otherwise take the briefing of a dial in
+    flight; such a setup waits for the dial to return instead.
 - Outbound calls that were busy, unanswered, failed, cancelled or reached
   voicemail were recorded as completed (or, for late voicemail, as callee
   hang-ups). They now get their own failure codes, which inflated success

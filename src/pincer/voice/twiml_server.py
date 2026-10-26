@@ -7,6 +7,7 @@ Media Streams WebSocket connections, and fallback error handling.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -45,6 +46,11 @@ SETUP_STATE_WAIT_S = 3.0
 # blocked. It does NOT attribute blame; it only says the audio stopped arriving.
 MEDIA_GAP_THRESHOLD_MS = 120.0
 
+# Set on `request.state` / `websocket.state` once the Twilio signature or our
+# WS token was actually checked and passed. A request let through with auth
+# off (or no auth token) never carries it.
+VERIFIED_STATE_ATTR = "twilio_verified"
+
 twilio_router = APIRouter(prefix="/api/apps/twilio", tags=["apps", "twilio"])
 voice_router = APIRouter(prefix="/voice", tags=["voice"])
 
@@ -74,11 +80,22 @@ async def _authenticate(request: Request) -> bytes | None:
     """
     body = await request.body()
     try:
-        await verify_http_request(request, body, _settings)
+        verified = await verify_http_request(request, body, _settings)
     except WebhookAuthError as e:
         await audit_rejection(f"twilio_webhook:{request.url.path}", client_ip(request), e.reason)
         return None
+    _mark_verified(request, verified)
     return body
+
+
+def _mark_verified(conn: Request | WebSocket, verified: bool) -> None:
+    with contextlib.suppress(AttributeError):
+        setattr(conn.state, VERIFIED_STATE_ATTR, verified)
+
+
+def _was_verified(conn: Any) -> bool:
+    """Did THIS request pass a real signature / token check (not merely auth off)?"""
+    return getattr(getattr(conn, "state", None), VERIFIED_STATE_ATTR, False) is True
 
 
 def _forbidden() -> Response:
@@ -88,11 +105,12 @@ def _forbidden() -> Response:
 async def _authenticate_ws(websocket: WebSocket, surface: str, path: str) -> bool:
     """Verify a WS upgrade BEFORE accept(); closes the handshake with 403 on failure."""
     try:
-        verify_ws_upgrade(websocket, _settings, path)
+        verified = verify_ws_upgrade(websocket, _settings, path)
     except WebhookAuthError as e:
         await audit_rejection(surface, client_ip(websocket), e.reason)
         await websocket.close(code=1008, reason="Unauthorized")
         return False
+    _mark_verified(websocket, verified)
     return True
 
 
@@ -614,6 +632,7 @@ async def relay_ws(websocket: WebSocket) -> None:
                         str(msg.get("direction", "")),
                         client=client_ip(websocket),
                         to=str(msg.get("to", "")),
+                        verified=_was_verified(websocket),
                     )
                     if state is None:
                         # Outbound with no retrievable briefing (terminated,
@@ -679,7 +698,9 @@ async def relay_ws(websocket: WebSocket) -> None:
             await _media_closed(call_sid)
 
 
-async def _resolve_setup_state(call_sid: str, caller: str, direction: str = "", client: str = "", to: str = "") -> Any:
+async def _resolve_setup_state(
+    call_sid: str, caller: str, direction: str = "", client: str = "", to: str = "", *, verified: bool = False
+) -> Any:
     """The call state a `setup` message belongs to, or None to refuse the call.
 
     Order matters, and each step exists because the previous one can lose a
@@ -688,7 +709,10 @@ async def _resolve_setup_state(call_sid: str, caller: str, direction: str = "", 
     1. The state registered before the dial (the normal outbound path).
     2. The pending dial to this `to` number, claimed by the setup itself —
        Twilio can connect the callee before the REST dial has returned, and
-       the dial's request timeout (10 s) is longer than any wait here.
+       the dial's request timeout (10 s) is longer than any wait here. Only
+       for a `verified` setup: `to` and `callSid` are socket-supplied, and
+       with auth off anyone who knows the callee's number could take the
+       briefing of a dial in flight. Unverified setups skip to step 3.
     3. A short wait — the promotion may be milliseconds away.
     4. The status_notify record, which also carries purpose and language.
     5. Give up. If Twilio told us this is an outbound API call, we return None
@@ -715,7 +739,7 @@ async def _resolve_setup_state(call_sid: str, caller: str, direction: str = "", 
         return state
 
     if is_outbound:
-        state = await _engine.claim_pending_outbound(call_sid, to)
+        state = await _engine.claim_pending_outbound(call_sid, to) if verified else None
         if state is None:
             state = await _engine.await_call_state(call_sid, timeout=SETUP_STATE_WAIT_S)
         if state is not None:
@@ -889,6 +913,7 @@ async def relay_webhook(request: Request) -> Response:
                 str(body.get("direction", "")),
                 client=client_ip(request),
                 to=str(body.get("to", body.get("To", ""))),
+                verified=_was_verified(request),
             )
         if call_sid:
             await _engine.mark_call_answered(call_sid)

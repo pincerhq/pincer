@@ -164,8 +164,11 @@ def validation_enabled(settings: Settings | None) -> bool:
     return bool(settings is not None and getattr(settings, "voice_webhook_validate", True))
 
 
-async def verify_http_request(request: Request, body: bytes, settings: Settings | None) -> None:
+async def verify_http_request(request: Request, body: bytes, settings: Settings | None) -> bool:
     """Authenticate a Twilio HTTP webhook. Raises `WebhookAuthError` on failure.
+
+    Returns whether the signature was actually checked: False means the
+    request was let through unverified (validation off, no auth token).
 
     Skipped only when validation is explicitly disabled or no Twilio auth token
     is configured (a dev box with no Twilio account cannot receive real
@@ -176,11 +179,11 @@ async def verify_http_request(request: Request, body: bytes, settings: Settings 
     if settings is None:
         raise WebhookAuthError("voice settings not initialized")
     if not validation_enabled(settings):
-        return
+        return False
     token = _auth_token(settings)
     if not token:
         logger.warning("Twilio signature validation skipped for %s — no auth token configured", request.url.path)
-        return
+        return False
 
     params: dict[str, str] = {}
     content_type = request.headers.get("content-type", "")
@@ -200,6 +203,7 @@ async def verify_http_request(request: Request, body: bytes, settings: Settings 
     replay_params = dict(params)
     replay_params.update({k: v for k, v in request.query_params.items() if k not in replay_params})
     check_replay(replay_params, int(getattr(settings, "voice_signature_max_age_s", 300) or 300))
+    return True
 
 
 # ── WebSocket upgrade token ──────────────────────────────────────────
@@ -241,21 +245,22 @@ def signed_ws_query(settings: Settings | None, path: str, now: int | None = None
     return "?" + urlencode({"t": str(ts), "s": ws_token(secret, path, ts)})
 
 
-def verify_ws_upgrade(websocket: WebSocket, settings: Settings | None, path: str | None = None) -> None:
+def verify_ws_upgrade(websocket: WebSocket, settings: Settings | None, path: str | None = None) -> bool:
     """Authenticate a WS upgrade before `accept()`. Raises `WebhookAuthError`.
 
     Accepts either our signed `?t=&s=` token or a valid `X-Twilio-Signature`
     on the upgrade request (Twilio adds one on some integrations). Like the
-    HTTP check, `settings=None` fails closed.
+    HTTP check, `settings=None` fails closed. Returns whether the upgrade was
+    actually verified: False means auth is off or there is no secret.
     """
     if settings is None:
         raise WebhookAuthError("voice settings not initialized")
     if not getattr(settings, "voice_ws_auth_required", True):
-        return
+        return False
     secret = _ws_secret(settings)
     if not secret:
         logger.warning("Voice WebSocket auth skipped — no Twilio auth token configured")
-        return
+        return False
 
     target_path = path or websocket.url.path
     params = dict(websocket.query_params)
@@ -264,7 +269,7 @@ def verify_ws_upgrade(websocket: WebSocket, settings: Settings | None, path: str
     signature = websocket.headers.get("X-Twilio-Signature", "")
     if signature and signature_matches(secret, candidate_urls(websocket, settings), {}, signature):
         check_replay(params, max_age)
-        return
+        return True
 
     supplied = params.get("s", "")
     raw_ts = params.get("t", "")
@@ -277,6 +282,7 @@ def verify_ws_upgrade(websocket: WebSocket, settings: Settings | None, path: str
     if not hmac.compare_digest(ws_token(secret, target_path, ts), supplied):
         raise WebhookAuthError("invalid WebSocket auth token")
     check_replay(params, max_age)
+    return True
 
 
 # ── Audit trail ──────────────────────────────────────────────────────

@@ -18,7 +18,7 @@ import aiosqlite
 import pytest
 from voice_harness.fake_engine import FakeVoiceEngine
 from voice_harness.settings import apply_in_call_tool_defaults, apply_test_paths
-from voice_harness.transport_fakes import install_fake_twilio
+from voice_harness.transport_fakes import FakeSocket, install_fake_twilio
 
 from pincer.channels.phone_calls import VoiceChannel
 from pincer.voice import briefing as bf
@@ -483,7 +483,7 @@ async def test_dial_cut_off_after_the_relay_bound_it_is_a_placed_call(voice, dia
 
     class AnsweredThenDisconnected:
         async def create_async(self, **kwargs: Any) -> Any:
-            await voice.server._resolve_setup_state("CA_live", "+1000", "outbound-api", to=TARGET)
+            await voice.server._resolve_setup_state("CA_live", "+1000", "outbound-api", to=TARGET, verified=True)
             raise aiohttp.ServerDisconnectedError()
 
         async def list_async(self, **kwargs: Any) -> list[Any]:
@@ -590,7 +590,7 @@ async def test_setup_during_a_slow_dial_claims_the_pending_state_by_number(voice
             await asyncio.sleep(0)
 
     async with asyncio.timeout(1):  # well under SETUP_STATE_WAIT_S: no polling involved
-        state = await voice.server._resolve_setup_state("CA_claim", "+1000", "outbound-api", to=TARGET)
+        state = await voice.server._resolve_setup_state("CA_claim", "+1000", "outbound-api", to=TARGET, verified=True)
 
     assert state is not None and state.purpose == TASK
     assert voice.engine.get_call_state("CA_claim") is state
@@ -607,7 +607,7 @@ async def test_timed_out_dial_already_bound_by_the_relay_needs_no_lookup(voice):
 
     class AnsweredThenTimedOut:
         async def create_async(self, **kwargs: Any) -> Any:
-            await voice.server._resolve_setup_state("CA_bound", "+1000", "outbound-api", to=TARGET)
+            await voice.server._resolve_setup_state("CA_bound", "+1000", "outbound-api", to=TARGET, verified=True)
             raise TimeoutError
 
         async def list_async(self, **kwargs: Any) -> list[Any]:
@@ -631,6 +631,114 @@ async def test_setup_without_a_to_number_does_not_claim(voice):
     assert await voice.engine.claim_pending_outbound("CA_x", "") is None
     assert await voice.engine.claim_pending_outbound("CA_x", "+4930999999") is None
     assert voice.engine._pending_outbound == {pre.call_sid: pre}
+
+
+class _UpgradeSocket(FakeSocket):
+    """A relay socket the real `_authenticate_ws` can inspect."""
+
+    def __init__(self, query: dict[str, str]) -> None:
+        super().__init__()
+        self.headers: dict[str, str] = {}
+        self.query_params = query
+        self.url = types.SimpleNamespace(path="/api/apps/twilio/relay", query="")
+        self.client = None
+        self.state = types.SimpleNamespace()
+
+
+FORGED_SID = "CA" + "f" * 32
+
+
+async def _forged_setup(voice, sock: _UpgradeSocket) -> Any:
+    """Connect through the real auth gate, send a setup naming the callee, and
+    return the call state the setup was bound to (before the socket closes and
+    ends the call)."""
+    relay = asyncio.create_task(voice.server.relay_ws(sock))
+    sock.push(type="setup", callSid=FORGED_SID, direction="outbound-api", to=TARGET, **{"from": "+15550000000"})
+    handled = asyncio.ensure_future(sock.inbox.join())
+    await asyncio.wait([relay, handled], timeout=2, return_when=asyncio.FIRST_COMPLETED)
+    handled.cancel()
+    bound = voice.engine.get_call_state(FORGED_SID)
+    sock.hang_up()
+    await asyncio.wait_for(relay, timeout=2)
+    return bound
+
+
+@pytest.mark.parametrize("why", ["auth_off", "no_token"])
+async def test_an_unverified_setup_cannot_claim_a_pending_dial(voice, monkeypatch, why):
+    """WS auth off, or no token to check against: `callSid` and `to` are
+    whatever the socket says, so naming the callee of a dial in flight must not
+    hand over its briefing."""
+    monkeypatch.setattr(voice.server, "SETUP_STATE_WAIT_S", 0.05)
+    voice.server._engine = voice.engine
+    voice.settings.voice_ws_auth_required = why != "auth_off"
+    if why == "no_token":
+        voice.settings.twilio_auth_token.get_secret_value.return_value = ""
+    pre = await voice.engine.register_pending_outbound(CallBriefing.create(TASK), TARGET, language="en")
+
+    assert await _forged_setup(voice, _UpgradeSocket({})) is None
+    assert voice.engine._pending_outbound == {pre.call_sid: pre}, "the briefing stays with the real dial"
+
+
+async def test_a_verified_setup_still_claims_its_pending_dial(voice):
+    """The same setup over a socket that passed the signed-token check."""
+    from urllib.parse import parse_qsl
+
+    from pincer.voice.webhook_auth import WS_RELAY_PATH, signed_ws_query
+
+    voice.server._engine = voice.engine
+    voice.settings.voice_ws_auth_required = True
+    query = dict(parse_qsl(signed_ws_query(voice.settings, WS_RELAY_PATH).lstrip("?")))
+    await voice.engine.register_pending_outbound(CallBriefing.create(TASK), TARGET, language="en")
+
+    state = await _forged_setup(voice, _UpgradeSocket(query))
+    assert state is not None and state.purpose == TASK
+    assert voice.engine._pending_outbound == {}
+
+
+async def _relay_webhook_setup(voice, *, signed: bool) -> int:
+    import hashlib
+
+    import httpx
+    from fastapi import FastAPI
+
+    from pincer.voice.webhook_auth import compute_signature
+
+    app = FastAPI()
+    app.include_router(voice.server.twilio_router)
+    body = json.dumps(
+        {"type": "setup", "callSid": "CA" + "e" * 32, "direction": "outbound-api", "to": TARGET, "from": "+1555"}
+    ).encode()
+    url = f"http://test/api/apps/twilio/relay-webhook?bodySHA256={hashlib.sha256(body).hexdigest()}"
+    headers = {"content-type": "application/json"}
+    if signed:
+        headers["X-Twilio-Signature"] = compute_signature("token", url, {})
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(url, content=body, headers=headers)
+    return response.status_code
+
+
+@pytest.mark.parametrize("why", ["validation_off", "no_token"])
+async def test_an_unverified_relay_webhook_setup_cannot_claim(voice, monkeypatch, why):
+    monkeypatch.setattr(voice.server, "SETUP_STATE_WAIT_S", 0.05)
+    voice.server._engine = voice.engine
+    voice.settings.voice_webhook_validate = why != "validation_off"
+    if why == "no_token":
+        voice.settings.twilio_auth_token.get_secret_value.return_value = ""
+    pre = await voice.engine.register_pending_outbound(CallBriefing.create(TASK), TARGET, language="en")
+
+    assert await _relay_webhook_setup(voice, signed=False) == 200
+    assert voice.engine.get_call_state("CA" + "e" * 32) is None
+    assert voice.engine._pending_outbound == {pre.call_sid: pre}
+
+
+async def test_a_signed_relay_webhook_setup_still_claims(voice):
+    voice.server._engine = voice.engine
+    voice.settings.voice_webhook_validate = True
+    await voice.engine.register_pending_outbound(CallBriefing.create(TASK), TARGET, language="en")
+
+    assert await _relay_webhook_setup(voice, signed=True) == 200
+    state = voice.engine.get_call_state("CA" + "e" * 32)
+    assert state is not None and state.purpose == TASK
 
 
 async def test_promote_pending_is_idempotent(voice):
