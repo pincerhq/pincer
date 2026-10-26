@@ -10,6 +10,7 @@ from sqlmodel import col, select
 from pincer.db.dialect import dialect_of, upsert
 from pincer.models.onboarding import Onboarding
 from pincer.repositories.base import BaseRepository
+from pincer.repositories.sessions import rekeyed_session_id
 
 _TABLE = Onboarding.__table__  # type: ignore[attr-defined]
 
@@ -66,7 +67,8 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
         return row.one() is not None
 
     async def reassign_user(self, old_user_id: str, new_user_id: str) -> None:
-        """Move a renamed identity's rows, and the id inside their asking session.
+        """Move a renamed identity's rows, and re-key their asking session as
+        the session itself is (`rekeyed_session_id`).
 
         Where both ids have a row for the channel (a merge), a completed one
         wins; when both or neither are, the new id's row is kept.
@@ -81,11 +83,13 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
         )
         taken = select(Onboarding.channel).where(col(Onboarding.user_id) == new_user_id)
         await self.delete_where(col(Onboarding.user_id) == old_user_id, col(Onboarding.channel).in_(taken))
-        await self.session.exec(
-            update(Onboarding)
-            .where(col(Onboarding.user_id) == old_user_id)
-            .values(
-                user_id=new_user_id,
-                asked_session_id=func.replace(col(Onboarding.asked_session_id), old_user_id, new_user_id),
-            )
+        rows = await self.session.exec(
+            select(Onboarding.channel, Onboarding.asked_session_id).where(col(Onboarding.user_id) == old_user_id)
         )
+        for channel, asked in rows.all():
+            moved = None if asked is None else rekeyed_session_id(asked, old_user_id, new_user_id)
+            await self.session.exec(
+                update(Onboarding)
+                .where(col(Onboarding.user_id) == old_user_id, col(Onboarding.channel) == channel)
+                .values(user_id=new_user_id, asked_session_id=moved or asked)
+            )

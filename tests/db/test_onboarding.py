@@ -158,6 +158,28 @@ async def test_renaming_moves_onboarding_and_its_asking_session(url):
     assert record.asked_session_id == f"web:alice:{_CONVERSATION}"
 
 
+@pytest.mark.parametrize(
+    ("asked", "moved"),
+    [
+        (f"web:e:{_CONVERSATION}", f"web:alice:{_CONVERSATION}"),
+        ("web:e", "web:alice"),
+        ("slack-thread-e:e", "slack-thread-e:alice"),
+    ],
+)
+async def test_renaming_rekeys_the_asking_session_like_the_session_itself(url, asked, moved):
+    """The id is replaced as a whole segment, as the session's own key is."""
+    identities = IdentityService(url)
+    await identities.create_identity("e", channel="web", channel_user_id="123")
+    onboarding = OnboardingService(url)
+    await onboarding.claim_prompt("e", "web", asked, now=10.0)
+
+    await identities.rename_identity("e", "alice")
+
+    record = await onboarding.get("alice", "web")
+    assert record is not None
+    assert record.asked_session_id == moved
+
+
 async def test_merging_keeps_the_source_s_completed_onboarding(url):
     """The source answered, the target was only asked: the answer survives."""
     identities = IdentityService(url)

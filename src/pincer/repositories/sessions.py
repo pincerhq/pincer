@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, update
+from sqlalchemy import func, or_, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
@@ -17,6 +18,34 @@ from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+
+def rekeyed_session_id(session_id: str, old_user_id: str, new_user_id: str) -> str | None:
+    """The key a session moves to when its user is renamed, or None if it stays.
+
+    Session keys are `<prefix>:<user_id>`, where the prefix is a channel, a
+    Slack or Teams conversation, or `unified`, or a web chat conversation
+    nested under one of those: `<prefix>:<user_id>:<conversation uuid>`. The
+    id must be a whole segment, exactly the old id; a key that only contains
+    it does not move. `voice:` keys belong to a call, not a user, and never do.
+    """
+    if session_id.startswith("voice:"):
+        return None
+    suffix = f":{old_user_id}"
+    if session_id.endswith(suffix):
+        return f"{session_id.removesuffix(suffix)}:{new_user_id}"
+    head, _, conversation = session_id.rpartition(":")
+    if head.endswith(suffix) and _is_conversation_id(conversation):
+        return f"{head.removesuffix(suffix)}:{new_user_id}:{conversation}"
+    return None
+
+
+def _is_conversation_id(segment: str) -> bool:
+    """A web chat conversation id: a canonical lowercase UUID (see `api/chat.py`)."""
+    try:
+        return str(uuid.UUID(segment)) == segment
+    except ValueError:
+        return False
 
 
 class SessionRepository(BaseRepository[ChatSession, str]):
@@ -72,25 +101,28 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         return int((await self.session.exec(stmt)).rowcount)
 
     async def rewrite_session_ids(self, old_user_id: str, new_user_id: str) -> int:
-        """Re-key the old id's sessions to the new id.
+        """Re-key the old id's sessions to the new id (`rekeyed_session_id`).
 
-        Session keys are `<prefix>:<user_id>`, where the prefix is a channel,
-        a Slack or Teams conversation, or `unified`. A key moves when its last
-        segment is exactly the old id; a key that only contains it does not.
-        `voice:<call_sid>` keys belong to a call, not a user, and never move.
         When a merge finds the target key taken, the more recently updated
         conversation is kept (the target's on a tie) and the other dropped.
         Returns the number of rows changed or removed.
         """
         suffix = f":{old_user_id}"
         keys = select(ChatSession.session_id).where(
-            col(ChatSession.session_id).endswith(suffix, autoescape=True),
+            or_(
+                col(ChatSession.session_id).endswith(suffix, autoescape=True),
+                col(ChatSession.session_id).contains(f"{suffix}:", autoescape=True),
+            ),
             ~col(ChatSession.session_id).startswith("voice:", autoescape=True),
         )
-        old_keys = (await self.session.exec(keys)).all()
-        if not old_keys:
+        candidates = (await self.session.exec(keys)).all()
+        moves = {
+            key: new_key
+            for key in candidates
+            if (new_key := rekeyed_session_id(key, old_user_id, new_user_id)) is not None
+        }
+        if not moves:
             return 0
-        moves = {key: f"{key.removesuffix(suffix)}:{new_user_id}" for key in old_keys}
         # Plain columns, not ORM objects: re-keying a row the session holds
         # would leave its identity map pointing at the old key.
         stmt = select(ChatSession.session_id, ChatSession.updated_at).where(

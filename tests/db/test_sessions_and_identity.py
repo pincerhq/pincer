@@ -22,7 +22,7 @@ from pincer.repositories.identity import (
     IdentityCredentialRepository,
     IdentityProfileRepository,
 )
-from pincer.repositories.sessions import SessionRepository
+from pincer.repositories.sessions import SessionRepository, rekeyed_session_id
 from pincer.services.identity import IdentityService, SeedEntry
 from pincer.services.sessions import SessionService
 
@@ -268,6 +268,77 @@ async def test_renaming_moves_only_keys_ending_in_the_identity(url):
     await service.rename_identity("usr_hash", "alice")
 
     assert await _session_ids(url) == set(moved.values()) | untouched
+
+
+@pytest.mark.parametrize(
+    ("session_id", "moved"),
+    [
+        ("web:usr_ha", "web:bob"),
+        (f"web:usr_ha:{_CONVERSATION}", f"web:bob:{_CONVERSATION}"),
+        ("teams-chat-19:abc@thread.v2:usr_ha", "teams-chat-19:abc@thread.v2:bob"),
+        ("web:usr_hash", None),
+        (f"web:usr_hash:{_CONVERSATION}", None),
+        (f"web:xusr_ha:{_CONVERSATION}", None),
+        # The id appears as a whole segment, but not as the user's: the prefix holds it.
+        (f"teams:usr_ha:usr_hash:{_CONVERSATION}", None),
+        ("web:usr_ha:not-a-conversation", None),
+        ("web:usr_ha:2222AAAA-2222-4222-8222-222222222222", None),  # not the canonical spelling
+        ("voice:usr_ha", None),
+        (f"voice:usr_ha:{_CONVERSATION}", None),
+    ],
+)
+def test_a_rename_moves_a_key_only_where_the_id_is_its_user_segment(session_id, moved):
+    assert rekeyed_session_id(session_id, "usr_ha", "bob") == moved
+
+
+async def test_renaming_moves_conversations_nested_under_the_identity(url):
+    """A web chat conversation (`web:<id>:<conversation>`) follows its user."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="web", channel_user_id="12345")
+    await _store_session(url, "web:usr_hash", user_id="usr_hash", channel="web")
+    await _store_session(url, f"web:usr_hash:{_CONVERSATION}", user_id="usr_hash", channel="web")
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert await _session_ids(url) == {"web:alice", f"web:alice:{_CONVERSATION}"}
+
+
+@pytest.mark.parametrize(("source_at", "kept"), [(200.0, '["source"]'), (100.0, '["target"]')])
+async def test_merging_keeps_the_more_recent_nested_conversation(url, source_at, kept):
+    """Both ids hold the same conversation: the newer survives, the target on a tie."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="web", channel_user_id="12345")
+    await service.create_identity("alice", channel="telegram", channel_user_id="4930111")
+    await _store_session(
+        url, f"web:usr_hash:{_CONVERSATION}", user_id="usr_hash", channel="web", at=source_at, messages='["source"]'
+    )
+    await _store_session(
+        url, f"web:alice:{_CONVERSATION}", user_id="alice", channel="web", at=100.0, messages='["target"]'
+    )
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert await _session_ids(url) == {f"web:alice:{_CONVERSATION}"}
+    assert await _messages(url, f"web:alice:{_CONVERSATION}") == kept
+
+
+async def test_renaming_moves_nested_conversations_only_for_the_whole_id(url):
+    """`usr_ha` is not `usr_hash`, and only a conversation id makes a key nested."""
+    service = IdentityService(url)
+    await service.create_identity("usr_ha", channel="web", channel_user_id="12345")
+    untouched = {
+        f"web:usr_hash:{_CONVERSATION}",
+        f"web:xusr_ha:{_CONVERSATION}",
+        "web:usr_ha:not-a-conversation",
+        f"voice:usr_ha:{_CONVERSATION}",
+    }
+    for session_id in untouched:
+        await _store_session(url, session_id, user_id="usr_hash", channel="web")
+    await _store_session(url, f"web:usr_ha:{_CONVERSATION}", user_id="usr_ha", channel="web")
+
+    await service.rename_identity("usr_ha", "bob")
+
+    assert await _session_ids(url) == untouched | {f"web:bob:{_CONVERSATION}"}
 
 
 async def test_touch_active_channel_records_when(url):
