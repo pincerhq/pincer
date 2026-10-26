@@ -172,11 +172,33 @@ async def test_transfer_call_sets_status_callback(mock_settings, engine_cls):
     update = client_cls.return_value.calls.return_value.update
     update.assert_called_once()
     kwargs = update.call_args.kwargs
-    assert 'timeLimit="3600"' in kwargs["twiml"] and 'action="https://example.com/tr"' in kwargs["twiml"]
+    dial_id = state.metadata["dial_id"]
+    assert (
+        'timeLimit="3600"' in kwargs["twiml"] and f'action="https://example.com/tr?dial={dial_id}"' in kwargs["twiml"]
+    )
     assert kwargs["status_callback"] == "https://example.com/api/apps/twilio/status"
     assert kwargs["status_callback_method"] == "POST"
     assert state.metadata["transferring"] is True
     assert state.metadata["transfer"]["target"] == "+4930123"
+    assert state.metadata["transfer"]["dial_id"] == dial_id
+
+
+@pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
+async def test_each_dial_gets_its_own_token(mock_settings, engine_cls):
+    """The token names the dial its result belongs to, and survives a redirect
+    that raised (Twilio may have applied it anyway)."""
+    engine = engine_cls(mock_settings)
+    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls:
+        await engine.transfer_call("CAx", "+4930123", action_url="https://example.com/tr?x=1")
+        first = state.metadata["dial_id"]
+        twiml = client_cls.return_value.calls.return_value.update.call_args.kwargs["twiml"]
+        assert f'action="https://example.com/tr?x=1&amp;dial={first}"' in twiml
+        client_cls.return_value.calls.return_value.update.side_effect = TimeoutError("read timeout")
+        with pytest.raises(TimeoutError):
+            await engine.transfer_call("CAx", "+4930123", action_url="https://example.com/tr")
+    assert state.metadata["dial_id"] not in ("", first)
+    assert "transferring" not in state.metadata and "transfer" not in state.metadata
 
 
 async def test_transfer_call_redirect_runs_off_the_event_loop(mock_settings):

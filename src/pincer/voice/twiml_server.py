@@ -70,8 +70,13 @@ class _CallLock:
 
 
 # CallSid -> the lock /transfer-result holds while it handles that call's dial
-# result; an entry lives only while a request for the call is in flight.
-_transfer_result_locks: dict[str, _CallLock] = {}
+# result, and /status while it finalizes the call; an entry lives only while a
+# request for the call is in flight.
+_call_update_locks: dict[str, _CallLock] = {}
+
+# Metadata key for the dial results a call has had (see `_dial_key`), across
+# transfers: `transfer_call` replaces the `transfer` record per dial.
+HANDLED_DIALS_KEY = "handled_dials"
 
 
 def init_voice_routes(engine: VoiceEngine, settings: Settings) -> None:
@@ -322,14 +327,17 @@ async def voice_transfer_result(request: Request) -> Response:
     guessed at: the call is finalized and the report says the transfer started.
     No state with the caller still on the line (process restarted while the
     target rang) → re-register the call, resume its new receptionist session in
-    TAKE_MESSAGE, and reconnect with the apology.
+    TAKE_MESSAGE, and reconnect with the apology. If Twilio cannot be asked
+    whether the caller is still there, the callback's own CallStatus decides.
     Idempotent, one delivery per call at a time: a callback for a finalized
     call, or one Twilio says is no longer in progress, only hangs up; a copy of
-    a result already processed (its ``DialCallSid`` is handled, including a
-    recovered one) counts nothing and leaves the session alone. It replays the
-    reconnect TwiML until the reconnected relay connects, and answers an empty
-    ``<Response/>`` after that or for an earlier dial. A result for a call not
-    being transferred is ignored the same way.
+    a result already processed (keyed by the ``dial`` token `transfer_call` puts
+    in the action URL, else by ``DialCallSid``; see `_dial_key`) counts nothing
+    and leaves the session alone. It replays the reconnect TwiML until the
+    reconnected relay connects, and answers an empty ``<Response/>`` after that
+    or for an earlier dial. The current dial's result is handled even when the
+    call is not marked transferring: the redirect can raise after Twilio
+    applied it, and then Twilio is waiting on this answer.
 
     Why the replay depends on the relay: under Twilio's default connection
     overrides (ct=5000ms, rt=15000ms, tt=15000ms, rc=1, rp=ct; see
@@ -346,13 +354,13 @@ async def voice_transfer_result(request: Request) -> Response:
     # One delivery of a call's dial result at a time: a copy arriving while the
     # first is still awaiting (Twilio's status, the call's registration, the
     # session) waits, then finds that work done and replays its answer.
-    async with _one_transfer_result_at_a_time(str(form.get("CallSid", ""))):
-        return await _handle_transfer_result(form)
+    async with _one_call_update_at_a_time(str(form.get("CallSid", ""))):
+        return await _handle_transfer_result(form, str(request.query_params.get("dial", "")))
 
 
 @asynccontextmanager
-async def _one_transfer_result_at_a_time(call_sid: str) -> AsyncIterator[None]:
-    entry = _transfer_result_locks.setdefault(call_sid, _CallLock())
+async def _one_call_update_at_a_time(call_sid: str) -> AsyncIterator[None]:
+    entry = _call_update_locks.setdefault(call_sid, _CallLock())
     entry.users += 1
     try:
         async with entry.lock:
@@ -360,10 +368,12 @@ async def _one_transfer_result_at_a_time(call_sid: str) -> AsyncIterator[None]:
     finally:
         entry.users -= 1
         if not entry.users:
-            _transfer_result_locks.pop(call_sid, None)
+            _call_update_locks.pop(call_sid, None)
 
 
-async def _handle_transfer_result(form: Any) -> Response:
+async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
+    from pincer.voice.engine import DIAL_ID_KEY
+
     call_sid = str(form.get("CallSid", ""))
     dial_status = str(form.get("DialCallStatus", "")).lower()
     call_status = str(form.get("CallStatus", "")).lower()
@@ -392,10 +402,12 @@ async def _handle_transfer_result(form: Any) -> Response:
         try:
             twilio_status = await _engine.fetch_call_status(call_sid)
         except Exception:
-            # Fail safe: a registered call that never gets media holds a slot
-            # until the stuck-call reaper pages.
-            logger.exception("Transfer result [%s]: Twilio status check failed — not recovering", call_sid)
-            return hangup
+            # Twilio cannot be asked: go by the callback itself, which says the
+            # caller is on the line. Hanging up would drop a live caller with no
+            # trace or report; a phantom call (a replay during a Twilio outage)
+            # is the lesser risk, and the stuck-call reaper bounds it.
+            logger.exception("Transfer result [%s]: Twilio status check failed — trusting the callback", call_sid)
+            twilio_status = "in-progress"
         if twilio_status != "in-progress":
             logger.info("Transfer result [%s] for a call Twilio reports %r — nothing to do", call_sid, twilio_status)
             return hangup
@@ -410,9 +422,9 @@ async def _handle_transfer_result(form: Any) -> Response:
         profile = get_profile() if receptionist_active(_settings) else None
         language = resolve_call_language(_settings, profile.default_language if profile else "")
         caller = str(form.get("From", ""))
-        # Register the call as /webhook does (this request is signature-verified
-        # too): the relay `setup` for an unknown SID is refused, so without this
-        # the caller would hear the apology and then be dropped.
+        # Register the call here (this request is signature-verified, like
+        # /webhook): the relay `setup` for an unknown SID is refused, so without
+        # this the caller would hear the apology and then be dropped.
         telemetry.inbound_webhook(
             call_sid,
             from_number=caller,
@@ -431,6 +443,7 @@ async def _handle_transfer_result(form: Any) -> Response:
             dial_call_sid = str(form.get("DialCallSid", ""))
             transfer: dict[str, Any] = {
                 "recovered": True,
+                "dial_id": dial_id,
                 "dial_status": dial_status,
                 "dial_call_sid": dial_call_sid,
                 "dial_duration_s": dial_duration,
@@ -439,8 +452,10 @@ async def _handle_transfer_result(form: Any) -> Response:
             metadata = getattr(recovered, "metadata", None)
             if isinstance(metadata, dict):
                 metadata["transfer"] = transfer
-                if dial_call_sid:
-                    metadata.setdefault("handled_dial_sids", set()).add(dial_call_sid)
+                if dial_id:
+                    metadata[DIAL_ID_KEY] = dial_id
+                if key := _dial_key(dial_id, dial_call_sid):
+                    metadata.setdefault(HANDLED_DIALS_KEY, set()).add(key)
             # Once, on the trace just opened: a retry replays the reconnect below
             # the state check and records nothing.
             telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)
@@ -462,42 +477,65 @@ async def _handle_transfer_result(form: Any) -> Response:
     from pincer.voice.telemetry import hooks as telemetry
 
     dial_call_sid = str(form.get("DialCallSid", ""))
+    key = _dial_key(dial_id, dial_call_sid)
     # Every dial result this call has had, across transfers: `transfer_call`
     # replaces the `transfer` record per dial, so it only knows the latest one.
-    handled = state.metadata.setdefault("handled_dial_sids", set())
+    handled = state.metadata.setdefault(HANDLED_DIALS_KEY, set())
     latest = state.metadata.get("transfer")
-    # The latest dial's result is in (an empty DialCallSid only matches here).
-    is_latest = isinstance(latest, dict) and "dial_status" in latest and latest.get("dial_call_sid") == dial_call_sid
+    # The latest dial's result is in (a result with neither a dial token nor a
+    # DialCallSid only matches here).
+    is_latest = (
+        isinstance(latest, dict)
+        and "dial_status" in latest
+        and _dial_key(str(latest.get("dial_id", "") or ""), str(latest.get("dial_call_sid", "") or "")) == key
+    )
     transferring = bool(state.metadata.get("transferring"))
-    if dial_call_sid in handled or (is_latest and not transferring):
+    language = str(getattr(state, "language", "") or "en")
+    if (key and key in handled) or (is_latest and not transferring):
         # A retry or replay of a result we already processed: count nothing
         # twice and leave the session alone.
-        language = str(getattr(state, "language", "") or "en")
         if is_latest and isinstance(latest, dict) and not latest.get("reconnected"):
             # Answered with a reconnect that no relay has connected for yet, so
             # Twilio may be executing this copy (by default it retries only
             # when it never reached us): answer the same way.
-            logger.info("Transfer result [%s] already handled (dial %s) — replaying reconnect", call_sid, dial_call_sid)
+            logger.info("Transfer result [%s] already handled (dial %s) — replaying reconnect", call_sid, key)
             greeting = str(latest.get("reconnect_greeting", "") or _transfer_failed_line(language))
             return _reconnect_after_transfer(call_sid, language, greeting)
         # The reconnected relay is up (Twilio executed our answer and will
         # execute no other for this dial), or an earlier dial's: the call has
         # moved on. Re-issuing <Connect> would replace the live relay socket.
-        logger.info("Transfer result [%s] for dial %s already acted on — ignored", call_sid, dial_call_sid)
+        logger.info("Transfer result [%s] for dial %s already acted on — ignored", call_sid, key)
+        return no_op
+    if dial_id and dial_id != state.metadata.get(DIAL_ID_KEY):
+        # A later dial replaced this one, which needs the call back from this
+        # dial first: Twilio is not waiting on this answer.
+        handled.add(key)
+        logger.info("Transfer result [%s] for an earlier dial %s — ignored", call_sid, key)
         return no_op
     if not transferring:
-        # No <Dial> in flight, so Twilio is not waiting on this answer: the
-        # call is in a conversation and must not be hung up. Also the case
-        # when transfer_call's redirect raised although Twilio applied it.
-        logger.warning("Transfer result [%s] for a call not being transferred — ignored", call_sid)
-        return no_op
-    if dial_call_sid:
-        handled.add(dial_call_sid)
+        if not dial_id:
+            # No dial token (an action URL from before tokens): this may be a
+            # stray copy, or the result Twilio is waiting on after a redirect
+            # that raised although Twilio applied it. Answer so that both are
+            # safe: Twilio executes the answer only in the second case, where
+            # the caller needs it. Count nothing and leave the session alone.
+            logger.warning("Transfer result [%s] without a dial token for a call not being transferred", call_sid)
+            if bridged:
+                return hangup
+            return _reconnect_after_transfer(call_sid, language, _transfer_failed_line(language))
+        # The current dial's own result, yet the call is not marked
+        # transferring: transfer_call's redirect raised although Twilio
+        # applied it. Twilio is waiting on this answer: handle it as the
+        # dial's result. An empty answer would end the call.
+        logger.warning("Transfer result [%s] for dial %s whose redirect reported failure — handling it", call_sid, key)
+    if key:
+        handled.add(key)
     transfer = state.metadata.setdefault("transfer", {})
     telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)
     if isinstance(transfer, dict):
         transfer.update(
             {
+                "dial_id": dial_id,
                 "dial_status": dial_status,
                 "dial_call_sid": dial_call_sid,
                 "dial_duration_s": dial_duration,
@@ -529,11 +567,17 @@ async def _handle_transfer_result(form: Any) -> Response:
         # Not bridged and the caller is still on the line: whatever the status
         # means, nobody took the call, so it is a failed transfer.
         logger.warning("Transfer result [%s]: unknown DialCallStatus %r — treating as failed", call_sid, dial_status)
-    language = str(getattr(state, "language", "") or "en")
     greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
     if isinstance(transfer, dict):
         transfer["reconnect_greeting"] = greeting  # what a retried callback replays
     return response
+
+
+def _dial_key(dial_id: str, dial_call_sid: str) -> str:
+    """What identifies a dial result: our own dial token (from the action URL)
+    when there is one, else Twilio's DialCallSid, which is empty when the dial
+    never created a call (an invalid or unreachable number)."""
+    return f"dial:{dial_id}" if dial_id else dial_call_sid
 
 
 async def _resume_failed_transfer(call_sid: str, session: Any, dial_status: str, language: str) -> tuple[str, Response]:
@@ -811,56 +855,62 @@ async def voice_status(request: Request) -> PlainTextResponse:
     if await _handle_amd_verdict(call_sid, answered_by, user_lang):
         return PlainTextResponse("OK")
 
-    if status == "in-progress":
-        # Callee (a human) picked up
-        await notify_connected(call_sid)
+    # A terminal status waits for a /transfer-result in flight for the call: one
+    # recovering the call from lost state checks Twilio's status first, and a
+    # hang-up landing between that check and the registration must find the
+    # registered call and finalize it, not miss it and leave a phantom.
+    terminal = status in ("busy", "no-answer", "failed", "canceled", "completed")
+    async with _one_call_update_at_a_time(call_sid) if terminal else contextlib.nullcontext():
+        if status == "in-progress":
+            # Callee (a human) picked up
+            await notify_connected(call_sid)
 
-    elif status in ("busy", "no-answer", "failed", "canceled"):
-        # Call never connected — the user still gets a final status (T1.3/T1.5)
-        from pincer.observability.failure_codes import NOT_CONNECTED_STATUS
-        from pincer.voice.engine import END_CODE_KEY, PROVIDER_STATUS_KEY, set_end_cause
-        from pincer.voice.outcome import not_connected_reason
+        elif status in ("busy", "no-answer", "failed", "canceled"):
+            # Call never connected — the user still gets a final status (T1.3/T1.5)
+            from pincer.observability.failure_codes import NOT_CONNECTED_STATUS
+            from pincer.voice.engine import END_CODE_KEY, PROVIDER_STATUS_KEY, set_end_cause
+            from pincer.voice.outcome import not_connected_reason
 
-        end_code = NOT_CONNECTED_STATUS[status]
-        # Appointment calls (Sprint 6): busy/no-answer/failed triggers the retry policy
-        if _settings is not None:
-            from pincer.voice.scheduling import handle_call_not_connected
+            end_code = NOT_CONNECTED_STATUS[status]
+            # Appointment calls (Sprint 6): busy/no-answer/failed triggers the retry policy
+            if _settings is not None:
+                from pincer.voice.scheduling import handle_call_not_connected
 
-            await handle_call_not_connected(call_sid, status, _settings)
-        nc_state = _engine.get_call_state(call_sid) if _engine else None
-        if _engine is not None and nc_state is not None:
-            # Conversation state exists (e.g. a late failure) -> the post-call
-            # pipeline sends the final report; pre-empting it here would
-            # consume the ENDED stage and drop that report. Only the code is
-            # stored; the report renders it in the report language.
-            if END_CODE_KEY not in nc_state.metadata:
-                # Only when this status is the cause: first writer wins.
-                nc_state.metadata[PROVIDER_STATUS_KEY] = status
-            set_end_cause(nc_state, end_code)
-            await _engine.end_call(call_sid)
-        elif _already_torn_down(call_sid):
-            logger.info("Status '%s' [%s] — call already torn down, pipeline owns the report", status, call_sid)
-        else:
-            # The call never had state, so no pipeline will run
-            await notify_ended(call_sid, not_connected_reason(end_code, user_lang, status))
+                await handle_call_not_connected(call_sid, status, _settings)
+            nc_state = _engine.get_call_state(call_sid) if _engine else None
+            if _engine is not None and nc_state is not None:
+                # Conversation state exists (e.g. a late failure) -> the post-call
+                # pipeline sends the final report; pre-empting it here would
+                # consume the ENDED stage and drop that report. Only the code is
+                # stored; the report renders it in the report language.
+                if END_CODE_KEY not in nc_state.metadata:
+                    # Only when this status is the cause: first writer wins.
+                    nc_state.metadata[PROVIDER_STATUS_KEY] = status
+                set_end_cause(nc_state, end_code)
+                await _engine.end_call(call_sid)
+            elif _already_torn_down(call_sid):
+                logger.info("Status '%s' [%s] — call already torn down, pipeline owns the report", status, call_sid)
+            else:
+                # The call never had state, so no pipeline will run
+                await notify_ended(call_sid, not_connected_reason(end_code, user_lang, status))
 
-    elif status == "completed" and _engine:
-        state = _engine.get_call_state(call_sid)
-        if state:
-            # Twilio has already ended the call: finalize without a REST
-            # hangup, which could only fail.
-            await _engine.finish_remote_ended(call_sid, reason="provider_completed")
-        elif _already_torn_down(call_sid):
-            # Race: end_call (AMD hangup, caller hangup, shutdown) popped the
-            # state and handed the final message to its post-call pipeline,
-            # which runs as a background task. Sending the generic ending here
-            # consumes the ENDED stage first, and the real report — the
-            # voicemail outcome, the summary — is then silently dropped.
-            logger.info("Status 'completed' [%s] — call already torn down, pipeline owns the report", call_sid)
-        else:
-            # Ended before any conversation state existed (e.g. hangup during AMD)
-            ended_texts = {"en": "call ended", "de": "Anruf beendet", "uk": "дзвінок завершено"}
-            await notify_ended(call_sid, ended_texts[user_lang])
+        elif status == "completed" and _engine:
+            state = _engine.get_call_state(call_sid)
+            if state:
+                # Twilio has already ended the call: finalize without a REST
+                # hangup, which could only fail.
+                await _engine.finish_remote_ended(call_sid, reason="provider_completed")
+            elif _already_torn_down(call_sid):
+                # Race: end_call (AMD hangup, caller hangup, shutdown) popped the
+                # state and handed the final message to its post-call pipeline,
+                # which runs as a background task. Sending the generic ending here
+                # consumes the ENDED stage first, and the real report — the
+                # voicemail outcome, the summary — is then silently dropped.
+                logger.info("Status 'completed' [%s] — call already torn down, pipeline owns the report", call_sid)
+            else:
+                # Ended before any conversation state existed (e.g. hangup during AMD)
+                ended_texts = {"en": "call ended", "de": "Anruf beendet", "uk": "дзвінок завершено"}
+                await notify_ended(call_sid, ended_texts[user_lang])
 
     return PlainTextResponse("OK")
 

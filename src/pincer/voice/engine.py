@@ -13,11 +13,13 @@ import contextlib
 import json
 import logging
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode
 
 from pincer.voice.audio import MULAW_BYTES_PER_SECOND
 from pincer.voice.twilio_rest import TwilioRest
@@ -62,6 +64,11 @@ END_CODE_KEY = "end_code"
 #: Metadata key for the provider status that set `end_code`, when one did: the
 #: report wording can be more specific than the code (`canceled` vs `failed`).
 PROVIDER_STATUS_KEY = "provider_status"
+#: Metadata key for the token of the call's latest <Dial>. `transfer_call` puts it
+#: in the action URL (`?dial=…`, covered by the Twilio signature), so a dial
+#: result names the dial it belongs to even when Twilio sends no DialCallSid.
+#: Unlike the `transfer` record it survives a redirect that raised.
+DIAL_ID_KEY = "dial_id"
 #: Metadata key on a pending outbound state: the CallSid a relay `setup`
 #: claimed it as (see `claim_pending_outbound`). The dialer branches on this,
 #: not on a live lookup — a claimed call may already be over.
@@ -274,15 +281,24 @@ class VoiceEngine(ABC):
         The bridged call is no longer ours to time, so we attach a status
         callback: inbound calls get none by default, and without it nothing
         would tell us when the caller and the human hang up. ``timeLimit`` is
-        the ceiling for the bridge."""
+        the ceiling for the bridge.
+
+        Each dial gets a token (`DIAL_ID_KEY`) appended to ``action_url``, so
+        /transfer-result can tell this dial's result from a late copy of an
+        earlier one's."""
+        dial_id = uuid.uuid4().hex
+        if action_url:
+            action_url = f"{action_url}{'&' if '?' in action_url else '?'}{urlencode({'dial': dial_id})}"
         # the media socket closes on the <Dial> redirect; that is not a hangup
         live = self._active_calls.get(call_sid)
         if live is not None:
             live.metadata["transferring"] = True
+            live.metadata[DIAL_ID_KEY] = dial_id
             live.metadata["transfer"] = {
                 "target": target_number,
                 "started_mono": time.monotonic(),
                 "dial_timeout_s": timeout_s,
+                "dial_id": dial_id,
             }
         try:
             twiml = build_dial_twiml(
@@ -302,7 +318,9 @@ class VoiceEngine(ABC):
             logger.info("Call %s transferred to %s", call_sid, target_number)
         except Exception:
             logger.exception("Transfer failed for call %s", call_sid)
-            # the redirect never happened: the call is still ours
+            # the redirect never happened: the call is still ours. DIAL_ID_KEY
+            # stays: a timeout can raise after Twilio applied the redirect, and
+            # then this dial's result still arrives and must be recognised.
             if live is not None:
                 live.metadata.pop("transferring", None)
                 live.metadata.pop("transfer", None)
