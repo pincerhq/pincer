@@ -361,6 +361,9 @@ async def voice_transfer_result(request: Request) -> Response:
             # No capacity, allowlist or blocklist check, on purpose: this caller
             # was already admitted by /webhook before the transfer started.
             recovered = await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=language)
+            # Once, on the trace just opened: a retry replays the reconnect below
+            # the state check and records nothing.
+            telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)
             # The channel started a fresh receptionist session (RECEPTION_INTENT);
             # resume it in TAKE_MESSAGE, as a failed transfer does, so the first
             # turn asks for the name instead of greeting the caller again.

@@ -1278,7 +1278,7 @@ async def test_lost_transfer_state_retry_replays_reconnect(monkeypatch):
         retry = await client.post("/api/apps/twilio/transfer-result", data=data)
     assert retry.text == first.text
     assert failed_again == []
-    assert results == []  # the lost-state path never had a trace to count on; the retry adds none
+    assert results == ["no-answer"]  # recorded once on the recovered call's new trace; the retry adds none
     transfer = h.engine.get_call_state(lost).metadata["transfer"]
     assert transfer["recovered"] is True and transfer["dial_call_sid"] == "CAdial"
     assert len(h.engine.get_active_calls()) == 2  # CALL + the one recovered call, not a third
