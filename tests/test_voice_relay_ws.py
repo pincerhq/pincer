@@ -183,6 +183,31 @@ class TestRelayWebSocket:
         assert engine2.media_closed == []
         assert "CA_xfer2" in engine2.states
 
+    def test_relay_setup_after_failed_transfer_marks_reconnected(self):
+        """Twilio executed the reconnect TwiML: from here a replayed dial result
+        must not re-issue <Connect>. An ordinary setup (no transfer) adds nothing."""
+        engine = FakeEngine()
+        back = _register(engine, "CA_back")
+        back.metadata["transfer"] = {"dial_call_sid": "CAdial", "dial_status": "busy"}
+        plain = _register(engine, "CA_plain")
+        client = _app_with_engine(engine)
+        for call_sid in ("CA_back", "CA_plain"):
+            with client.websocket_connect(_signed("/api/apps/twilio/relay")) as ws:
+                ws.send_text(json.dumps({"type": "setup", "callSid": call_sid, "from": "+1"}))
+                ws.send_text(json.dumps({"type": "prompt", "voicePrompt": "hi"}))
+        assert back.metadata["transfer"]["reconnected"] is True
+        assert "transfer" not in plain.metadata
+
+    def test_stream_start_after_failed_transfer_marks_reconnected(self):
+        engine = FakeEngine()
+        back = _register(engine, "CA_back")
+        back.metadata["transfer"] = {"dial_call_sid": "CAdial", "dial_status": "busy"}
+        client = _app_with_engine(engine)
+        with client.websocket_connect(_signed("/api/apps/twilio/stream/CA_back", WS_STREAM_PATH)) as ws:
+            ws.send_text(json.dumps({"event": "start", "streamSid": "MZ1"}))
+            ws.send_text(json.dumps({"event": "stop"}))
+        assert back.metadata["transfer"]["reconnected"] is True
+
     def test_setup_attaches_websocket_to_existing_state(self):
         engine = FakeEngine()
         state = CallState(call_sid="CA_known", direction=CallDirection.INBOUND, caller_number="+1")

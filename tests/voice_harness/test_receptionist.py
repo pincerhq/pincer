@@ -1393,10 +1393,12 @@ def _count_transfer_results(monkeypatch) -> list[str]:
 
 
 @pytest.mark.usefixtures("_no_transfer_resolver")
-async def test_transfer_result_retry_replays_reconnect_without_rerunning_session(monkeypatch):
-    """Twilio retries the action callback (slow response): the second delivery
-    must answer the same TwiML, count the result once, and not restart the
-    message-taking the caller is already in the middle of."""
+async def test_transfer_result_retry_after_the_relay_connected_is_a_no_op(monkeypatch):
+    """A copy of the dial result arriving after the reconnected relay connected
+    (Twilio executed the first answer, so it executes no other): it must count
+    the result once, not restart the message-taking the caller is in the middle
+    of, and answer an empty <Response/>. Re-issuing <Connect> would ask for the
+    name again and replace the live relay socket."""
     h = await _start(settings=_transfer_settings())
     await _transferred(h)
     results = _count_transfer_results(monkeypatch)
@@ -1404,6 +1406,8 @@ async def test_transfer_result_retry_replays_reconnect_without_rerunning_session
     async with _async_client(h) as client:
         first = await client.post("/api/apps/twilio/transfer-result", data=data)
         assert "ConversationRelay" in first.text
+        setup = await client.post("/api/apps/twilio/relay-webhook", json={"type": "setup", "CallSid": CALL})
+        assert setup.status_code == 200
         failed_again: list[str] = []
         original = h.session.on_transfer_failed
         monkeypatch.setattr(h.session, "on_transfer_failed", lambda r: (failed_again.append(r), original(r))[1])
@@ -1411,11 +1415,28 @@ async def test_transfer_result_retry_replays_reconnect_without_rerunning_session
         step, name = h.session.step, h.session.slots.caller_name
         assert step != "name" and name
         retry = await client.post("/api/apps/twilio/transfer-result", data=data)
-    assert retry.text == first.text
+    assert retry.text == "<Response/>"
     assert failed_again == []
     assert results == ["busy"]
     assert (h.session.step, h.session.slots.caller_name) == (step, name)
     assert h.sm.phase == CallPhase.TAKE_MESSAGE
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_transfer_result_retry_before_the_relay_connects_replays_reconnect(monkeypatch):
+    """No relay has connected since the reconnect, so Twilio may be executing
+    this copy (the first never reached it): answer the same reconnect, still
+    without counting the result twice."""
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+    results = _count_transfer_results(monkeypatch)
+    data = {"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial", "CallStatus": "in-progress"}
+    async with _async_client(h) as client:
+        first = await client.post("/api/apps/twilio/transfer-result", data=data)
+        retry = await client.post("/api/apps/twilio/transfer-result", data=data)
+    assert "ConversationRelay" in first.text
+    assert retry.text == first.text
+    assert results == ["busy"]
 
 
 @pytest.mark.usefixtures("_no_transfer_resolver")

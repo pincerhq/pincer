@@ -461,13 +461,17 @@ async def _handle_transfer_result(form: Any) -> Response:
         # A retry or replay of a result we already processed: count nothing
         # twice and leave the session alone.
         language = str(getattr(state, "language", "") or "en")
-        if is_latest and isinstance(latest, dict):
-            # Answered with a reconnect: answer the same way.
+        if is_latest and isinstance(latest, dict) and not latest.get("reconnected"):
+            # Answered with a reconnect that no relay has connected for yet, so
+            # Twilio may be executing this copy (by default it retries only
+            # when it never reached us): answer the same way.
             logger.info("Transfer result [%s] already handled (dial %s) — replaying reconnect", call_sid, dial_call_sid)
             greeting = str(latest.get("reconnect_greeting", "") or _transfer_failed_line(language))
             return _reconnect_after_transfer(call_sid, language, greeting)
-        # An earlier dial's: the call has moved on (another dial may be ringing).
-        logger.info("Transfer result [%s] for an earlier dial %s — ignored", call_sid, dial_call_sid)
+        # The reconnected relay is up (Twilio executed our answer and will
+        # execute no other for this dial), or an earlier dial's: the call has
+        # moved on. Re-issuing <Connect> would replace the live relay socket.
+        logger.info("Transfer result [%s] for dial %s already acted on — ignored", call_sid, dial_call_sid)
         return no_op
     if not transferring:
         # No <Dial> in flight, so Twilio is not waiting on this answer: the
@@ -541,6 +545,16 @@ async def _resume_failed_transfer(call_sid: str, session: Any, dial_status: str,
         # and the reaper would apply the long transfer allowance.
         await _engine.end_transfer(call_sid)
     return greeting, _reconnect_after_transfer(call_sid, language, greeting)
+
+
+def _note_reconnected(state: Any) -> None:
+    """Media connected for a call that has a transfer record: Twilio executed the
+    reconnect after a failed dial (the record only exists from `transfer_call`
+    on, and the next dial replaces it). A replay of that dial's result must
+    no longer answer with <Connect>."""
+    transfer = getattr(state, "metadata", {}).get("transfer") if state is not None else None
+    if isinstance(transfer, dict):
+        transfer["reconnected"] = True
 
 
 def _transfer_failed_line(language: str) -> str:
@@ -938,6 +952,7 @@ async def relay_ws(websocket: WebSocket) -> None:
                 from pincer.voice.telemetry import hooks as telemetry
 
                 telemetry.media_open(call_sid, engine="conversation_relay")
+                _note_reconnected(state)
                 # `setup` is Twilio's "the callee picked up". Every clock in
                 # the call starts from here — an outbound state exists from
                 # before the dial, so registration is NOT an answer.
@@ -1195,6 +1210,7 @@ async def relay_webhook(request: Request) -> Response:
                 verified=_was_verified(request),
             )
         if call_sid:
+            _note_reconnected(_engine.get_call_state(call_sid))
             await _engine.mark_call_answered(call_sid)
 
     elif event_type == "interrupt":
@@ -1283,6 +1299,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
                 logger.info("Stream started: %s (stream=%s)", call_sid, stream_sid)
                 # back from a <Dial> transfer: the call is ours again
                 await _engine.end_transfer(call_sid)
+                _note_reconnected(state)
 
             elif event == "media":
                 payload = msg.get("media", {}).get("payload", "")
