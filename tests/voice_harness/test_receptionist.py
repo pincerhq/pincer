@@ -1284,6 +1284,24 @@ async def test_lost_transfer_state_retry_replays_reconnect(monkeypatch):
     assert len(h.engine.get_active_calls()) == 2  # CALL + the one recovered call, not a third
 
 
+# (greeting, the attribute value as XML-escaped in the TwiML)
+@pytest.mark.parametrize(("greeting", "attribute"), [(r"Nr. 12\3", r"Nr. 12\3"), (r"\g<0>", r"\g&lt;0&gt;")])
+def test_reconnect_greeting_is_inserted_literally(greeting, attribute):
+    """A profile line with a backslash is text, not a regex replacement
+    template: no `bad escape` 500 and no group reference expanded."""
+    from pincer.voice import twiml_server
+    from pincer.voice.twiml_builder import build_connect_twiml
+
+    settings = _transfer_settings()
+    twiml_server.init_voice_routes(MagicMock(), settings)
+    # the greeting replaces an existing attribute (the regex path), not an inserted one
+    assert "welcomeGreeting=" in build_connect_twiml(settings, call_sid=CALL, direction="inbound", language="de")
+    response = twiml_server._reconnect_after_transfer(CALL, "de", greeting)
+    body = response.body.decode()
+    assert f'welcomeGreeting="{attribute}"' in body
+    assert body.count("welcomeGreeting=") == 1
+
+
 @pytest.mark.usefixtures("_no_transfer_resolver")
 async def test_transfer_result_replay_after_teardown_does_not_recreate_the_call():
     """A replayed callback still claiming the caller is on the line, for a call

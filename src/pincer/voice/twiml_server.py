@@ -516,7 +516,8 @@ def _reconnect_after_transfer(call_sid: str, language: str, greeting: str) -> Re
 
         escaped = escape(greeting, {'"': "&quot;"})
         if "welcomeGreeting=" in twiml:
-            twiml = _re.sub(r'welcomeGreeting="[^"]*"', f'welcomeGreeting="{escaped}"', twiml, count=1)
+            # A function, not a template: a `\` in the greeting stays text
+            twiml = _re.sub(r'welcomeGreeting="[^"]*"', lambda _m: f'welcomeGreeting="{escaped}"', twiml, count=1)
         else:
             twiml = twiml.replace("<ConversationRelay ", f'<ConversationRelay welcomeGreeting="{escaped}" ', 1)
     return _twiml_response(twiml)
