@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 # Sessions held in memory at once; past it the least recently used is
 # persisted and dropped, and reloads from the database on its next turn.
 _DEFAULT_MAX_CACHED_SESSIONS = 1024
+# Eviction tries this many sessions beyond the overflow per request, so a few
+# that cannot be saved are stepped over without one request retrying them all.
+_EVICTION_SPARE_ATTEMPTS = 2
 
 
 def _session_key(user_id: str, channel: str) -> str:
@@ -58,6 +61,9 @@ class Session:
     # Hash of the messages and metadata as last saved (or loaded), so an
     # eviction can skip a session that has not changed.
     _saved_hash: int | None = field(default=None, init=False, repr=False, compare=False)
+    # Set once an eviction's save has failed and been warned about, so a
+    # session that keeps failing is not logged with a traceback every request.
+    _eviction_failed: bool = field(default=False, init=False, repr=False, compare=False)
 
     # ── Onboarding (legacy flags, see ONBOARDING_COMPLETE_KEY) ──────────
 
@@ -168,7 +174,7 @@ class SessionManager:
 
         session._saved_hash = hash(_serialized(session))
         self._cache[key] = session
-        await self._evict_overflow()
+        await self._evict_overflow(keep=key)
         return session
 
     async def add_message(self, session: Session, message: LLMMessage) -> None:
@@ -216,26 +222,39 @@ class SessionManager:
         if self._cache.get(key) is session:
             del self._cache[key]
 
-    async def _evict_overflow(self) -> None:
+    async def _evict_overflow(self, keep: str) -> None:
         """Persist and drop least recently used sessions past the cap.
 
-        Runs inside a request for another key, so a failed save is logged and
-        the session kept: the cache stays over the cap until a later eviction
-        succeeds, and the request goes on. A session hit or replaced while its
-        save was awaited is kept, and the next one in line is tried.
+        Runs inside the request for `keep`, which is never evicted here. A
+        session whose save fails is logged and kept, moved to the recent end
+        so the next one in line is tried; the request goes on, and the cache
+        stays over the cap until later evictions succeed. A session hit or
+        replaced while its save was awaited is kept too. At most the overflow
+        plus `_EVICTION_SPARE_ATTEMPTS` sessions are tried per request.
         """
         # Known race: a turn still holding a session evicted after its save
         # keeps writing that object while the next request loads a second
         # copy, and the last write wins. It takes more than `max_cached`
         # other keys within one turn, so only a client minting new
         # conversation ids gets near it.
-        while len(self._cache) > self._max_cached:
+        attempts = len(self._cache) - self._max_cached + _EVICTION_SPARE_ATTEMPTS
+        while len(self._cache) > self._max_cached and attempts > 0:
+            attempts -= 1
             key, session = next(iter(self._cache.items()))
+            if key == keep:
+                return  # everything older was tried
             try:
                 await self._persist(session, only_if_changed=True)
             except Exception:
-                logger.warning("Could not save session %s to evict it; keeping it cached", key, exc_info=True)
-                return
+                if session._eviction_failed:
+                    logger.debug("Session %s still cannot be saved to evict it", key)
+                else:
+                    logger.warning("Could not save session %s to evict it; keeping it cached", key, exc_info=True)
+                    session._eviction_failed = True
+                if self._cache.get(key) is session:
+                    self._cache.move_to_end(key)
+                continue
+            session._eviction_failed = False
             if next(iter(self._cache), None) == key and self._cache[key] is session and not _changed(session):
                 del self._cache[key]
 

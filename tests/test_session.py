@@ -170,14 +170,16 @@ async def test_a_failed_eviction_save_keeps_the_session_and_fails_nothing(
     c = await capped.get_or_create("c", "web")  # the request for c still succeeds
 
     assert c.session_id == "web:c"
-    assert list(capped._cache) == ["web:a", "web:b", "web:c"]  # over the cap, a kept
+    assert list(capped._cache) == ["web:c", "web:a"]  # a kept and moved up; b went instead
     assert capped._cache["web:a"] is a
     assert "web:a" in caplog.text
 
-    await capped.get_or_create("d", "web")  # a later eviction succeeds
+    await capped.get_or_create("d", "web")  # drops c
+    await capped.get_or_create("e", "web")  # a is the oldest again, and its save now succeeds
+    assert "web:a" not in capped._cache
 
-    assert len(capped._cache) == 2
     reloaded = await capped.get_or_create("a", "web")
+    assert reloaded is not a
     assert reloaded.metadata.get(ONBOARDING_PROMPT_SENT_KEY) == "true"
 
 
@@ -207,3 +209,87 @@ async def test_close_leaves_no_row_for_an_unchanged_session(tmp_path: Path):
     await sm.close()
 
     assert await _stored(tmp_path, "web:a") is None
+
+
+def _always_fail(*keys: str):
+    """A save hook that fails for `failing` every time, counting the attempts.
+    Clear `failing` before the manager closes, or close() fails too."""
+    attempts: list[str] = []
+    failing = set(keys)
+
+    async def hook(session_id: str) -> None:
+        attempts.append(session_id)
+        if session_id in failing:
+            raise OSError("database is locked")
+
+    return hook, attempts, failing
+
+
+async def test_a_session_that_cannot_be_saved_does_not_block_eviction(capped: SessionManager):
+    a = await capped.get_or_create("a", "web")
+    a.metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"
+    await capped.get_or_create("b", "web")
+    hook, _, failing = _always_fail("web:a")
+    _on_save(capped, hook)
+    try:
+        c = await capped.get_or_create("c", "web")
+
+        assert c.session_id == "web:c"
+        assert list(capped._cache) == ["web:c", "web:a"]  # b evicted in a's place
+        assert capped._cache["web:a"] is a
+    finally:
+        failing.clear()
+
+
+async def test_eviction_attempts_are_bounded_per_request(tmp_path: Path):
+    """Four sessions that cannot be saved, one over the cap: the request
+    tries one plus two spare, not all four, and still gets its session."""
+    sm = SessionManager(tmp_path / "test.db", max_cached=4)
+    await sm.initialize()
+    for user in ("a", "b", "c", "e"):
+        (await sm.get_or_create(user, "web")).metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"
+    hook, attempts, failing = _always_fail("web:a", "web:b", "web:c", "web:e")
+    _on_save(sm, hook)
+    try:
+        d = await sm.get_or_create("d", "web")
+
+        assert attempts == ["web:a", "web:b", "web:c"]
+        assert sm._cache.get("web:d") is d
+    finally:
+        failing.clear()
+        await sm.close()
+
+
+async def test_a_repeatedly_failing_session_is_warned_about_once(
+    capped: SessionManager, caplog: pytest.LogCaptureFixture
+):
+    a = await capped.get_or_create("a", "web")
+    a.metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"
+    await capped.get_or_create("b", "web")
+    hook, attempts, failing = _always_fail("web:a")
+    _on_save(capped, hook)
+    try:
+        for user in ("c", "d", "e"):  # a is the oldest again on c and on e
+            await capped.get_or_create(user, "web")
+
+        assert attempts.count("web:a") == 2
+        warnings = [r for r in caplog.records if r.levelname == "WARNING" and "web:a" in r.getMessage()]
+        assert len(warnings) == 1
+    finally:
+        failing.clear()
+
+
+async def test_the_requested_session_is_never_the_one_evicted(capped: SessionManager):
+    """Both older sessions fail and move up, leaving the new key oldest: it
+    stays cached, rather than being dropped while its request uses it."""
+    for user in ("a", "b"):
+        (await capped.get_or_create(user, "web")).metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"
+    hook, attempts, failing = _always_fail("web:a", "web:b")
+    _on_save(capped, hook)
+    try:
+        c = await capped.get_or_create("c", "web")
+
+        assert attempts == ["web:a", "web:b"]
+        assert capped._cache.get("web:c") is c
+    finally:
+        failing.clear()
