@@ -308,6 +308,11 @@ mounting a directory. Install the new `remote-skills` extra
   - A hangup mid-reply cancels the turn instead of letting it stream into a
     closed socket.
   - The unused `voice/bargein.py` energy-VAD controller is removed.
+  - A deploy silences each call's queued reply before its goodbye, and on
+    Media Streams hangs up only after the goodbye has played. All calls are
+    drained side by side, so the whole drain takes about one goodbye, not one
+    per call: one after another, a deploy at load ran out of
+    `SHUTDOWN_DRAIN_TIMEOUT_S` and force-ended the last calls with no goodbye.
 
 ### Added
 

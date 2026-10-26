@@ -114,6 +114,67 @@ class TestGracefulShutdown:
         await asyncio.wait([task], timeout=1)  # let the cancellation land
         assert task.cancelled()
 
+    async def test_every_call_hears_its_goodbye_in_about_one_goodbye_of_time(self, monkeypatch):
+        """Each goodbye has to PLAY before its hangup (Media Streams), so they
+        are spoken side by side: one after another, a deploy at load ran out of
+        drain time and force-ended the tail calls with no goodbye at all."""
+        import asyncio
+        import time
+
+        playout_s, calls = 0.3, 8
+        # Serially, 8 × 0.3 s cannot fit; side by side it is one goodbye.
+        monkeypatch.setattr("pincer.channels.phone_calls.SHUTDOWN_DRAIN_TIMEOUT_S", 1.0)
+        channel, engine = await _live_call("en", call_sid="CA_0")
+        for n in range(1, calls):
+            await engine.on_call_start(f"CA_{n}", "+4930123456", CallDirection.OUTBOUND, language="en")
+            await engine.on_speech_input(f"CA_{n}", "Guten Tag?")
+            await channel.wait_for_turn(f"CA_{n}")
+
+        hung_up_before_playout: list[str] = []
+        played: set[str] = set()
+
+        async def _wait_for_playout(call_sid: str) -> None:
+            await asyncio.sleep(playout_s)
+            played.add(call_sid)
+
+        end_call = engine.end_call
+
+        async def _end_call(call_sid: str) -> None:
+            if call_sid not in played:
+                hung_up_before_playout.append(call_sid)
+            await end_call(call_sid)
+
+        engine.wait_for_playout = _wait_for_playout
+        engine.end_call = _end_call
+
+        started = time.monotonic()
+        await asyncio.wait_for(channel.stop(), timeout=5)
+        elapsed = time.monotonic() - started
+
+        goodbye = en_pack.PHASE_TIMEOUT_MESSAGES["error_recovery"]
+        sids = [f"CA_{n}" for n in range(calls)]
+        assert [sid for sid in sids if engine.spoken[sid][-1:] != [goodbye]] == []
+        assert hung_up_before_playout == []
+        assert sorted(engine.ended) == sorted(sids)
+        assert elapsed < 2 * playout_s, f"{elapsed:.2f}s for {calls} goodbyes"
+
+    async def test_one_failing_drain_does_not_stop_the_others(self, caplog):
+        channel, engine = await _live_call("en", call_sid="CA_ok")
+        await engine.on_call_start("CA_bad", "+4930123457", CallDirection.OUTBOUND, language="en")
+        speak = channel._speak_shutdown_ending
+
+        async def _speak(call_sid: str) -> None:
+            if call_sid == "CA_bad":
+                raise RuntimeError("tts gone")
+            await speak(call_sid)
+
+        channel._speak_shutdown_ending = _speak
+        await channel.stop()
+
+        assert engine.spoken["CA_ok"][-1] == en_pack.PHASE_TIMEOUT_MESSAGES["error_recovery"]
+        assert "CA_ok" in engine.ended
+        assert "Shutdown drain failed for CA_bad" in caplog.text
+
     async def test_drain_timeout_records_shutdown_for_the_rest(self, monkeypatch):
         """A drain that runs out of time force-ends the remaining calls; the
         deploy is still their cause, not `unknown`."""

@@ -220,12 +220,14 @@ class VoiceChannel(BaseChannel):
         if self._engine:
             try:
                 async with asyncio.timeout(SHUTDOWN_DRAIN_TIMEOUT_S):
-                    for call_sid in list(self._engine.get_active_calls()):
-                        await self._speak_shutdown_ending(call_sid)
-                        try:
-                            await self._engine.end_call(call_sid)
-                        except Exception:
-                            logger.exception("Error ending call %s during shutdown", call_sid)
+                    # Side by side, not one after another: each goodbye has to
+                    # play out before its hangup, so a serial drain spent a
+                    # goodbye's length per call and ran out of time at load.
+                    calls = list(self._engine.get_active_calls())
+                    results = await asyncio.gather(*(self._drain_call(sid) for sid in calls), return_exceptions=True)
+                    for call_sid, result in zip(calls, results, strict=True):
+                        if isinstance(result, Exception):
+                            logger.error("Shutdown drain failed for %s", call_sid, exc_info=result)
             except TimeoutError:
                 logger.error("Shutdown drain exceeded %.0fs — force-ending remaining calls", SHUTDOWN_DRAIN_TIMEOUT_S)
                 for call_sid in list(self._engine.get_active_calls()):
@@ -252,6 +254,15 @@ class VoiceChannel(BaseChannel):
                 logger.warning("Post-call report did not finish before shutdown — cancelling: %s", task.get_name())
                 task.cancel()
         logger.info("Voice channel stopped")
+
+    async def _drain_call(self, call_sid: str) -> None:
+        """Goodbye, then hangup, for one call of a shutdown drain."""
+        assert self._engine is not None
+        await self._speak_shutdown_ending(call_sid)
+        try:
+            await self._engine.end_call(call_sid)
+        except Exception:
+            logger.exception("Error ending call %s during shutdown", call_sid)
 
     async def _speak_shutdown_ending(self, call_sid: str) -> None:
         """Polite spoken exit for a call interrupted by shutdown (Sprint 1
