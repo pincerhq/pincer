@@ -123,13 +123,23 @@ only matches when the `@` is typed. Entries cannot contain commas.
 > **Behaviour change.** Triggers no longer match as substrings: `pincer` no
 > longer fires on "pincers" or "@pincer_bot", and a partial trigger such as
 > `pinc` stops matching "pincer". Use the full word instead.
+>
+> - A comma now always separates entries. An existing value such as
+>   `hey, pincer` becomes two triggers, `hey` and `pincer`, and fires on any
+>   "hey". Remove the comma (`hey pincer`) to keep it a single phrase.
+> - Scripts written without spaces between words (Chinese, Japanese, Korean,
+>   Thai, Lao, Khmer, Myanmar) keep substring-style matching: `钳子` still
+>   matches "请钳子帮忙". Word boundaries only apply against letters of
+>   space-separated scripts such as Latin or Cyrillic.
 
 On WhatsApp, picking the bot in the @-picker inserts its phone number, or its
 LID in LID-addressed groups. Both are detected through the mentioned JID
 without any trigger entry (the LID once the bot has seen one of the owner's own
 messages); a literal `@pincer` entry only helps when someone types it by hand.
-Group mentions and triggers in image, video and document captions are now
-detected too, and the bot's own number only matches as a whole number.
+Group mentions and triggers in image and document captions are now detected
+too (video has no content path, so video captions still don't trigger), and a
+document's caption is now passed to the agent along with the file. The bot's
+own number only matches as a whole number.
 
 On Telegram, a mention after an emoji is now detected (entity offsets are
 UTF-16), and `/command@<bot username>` counts as a mention.

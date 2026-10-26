@@ -1057,10 +1057,12 @@ class WhatsAppChannel(BaseChannel):
             doc_data = await client.download_any(msg)
             filename = msg.documentMessage.fileName or "document"
             mime = msg.documentMessage.mimetype or "application/octet-stream"
+            caption = msg.documentMessage.caption or ""
+            label = f"[Document: {filename}]"
             return IncomingMessage(
                 user_id=sender_phone,
                 channel="whatsapp",
-                text=f"[Document: {filename}]",
+                text=f"{caption}\n\n{label}" if caption else label,
                 files=[(doc_data, mime, filename)],
                 channel_type=ChannelType.WHATSAPP,
                 media_type="document",
@@ -1100,8 +1102,9 @@ class WhatsAppChannel(BaseChannel):
         # in LID-addressed groups, so accept either of our own identifiers.
         own_ids = {own_id for own_id in (self._own_jid, self._own_lid) if own_id}
 
-        # Text-bearing payloads: plain text, and captioned media (the extract
-        # path turns an image caption into the message text, so gate on it too).
+        # Text-bearing payloads: plain text, and captioned media the extract
+        # path forwards to the agent (image and document captions). Video has
+        # no content path, so its caption must not pass the gate.
         text = msg.conversation or ""
         ctx = None
         if msg.HasField("extendedTextMessage"):
@@ -1109,7 +1112,7 @@ class WhatsAppChannel(BaseChannel):
             if msg.extendedTextMessage.HasField("contextInfo"):
                 ctx = msg.extendedTextMessage.contextInfo
         else:
-            for field in ("imageMessage", "videoMessage", "documentMessage"):
+            for field in ("imageMessage", "documentMessage"):
                 if msg.HasField(field):
                     media = getattr(msg, field)
                     text = media.caption or ""

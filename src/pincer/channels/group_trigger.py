@@ -8,6 +8,9 @@ matches as a whole token/phrase, case-insensitively:
 - ``@pincer`` requires the ``@``: it matches "hey @pincer" but not "hey pincer".
 - Words in a phrase may be separated by any whitespace, so ``hey pincer``
   matches "Hey   Pincer" and "hey\\npincer".
+- Scripts written without spaces between words (CJK, kana, Hangul, Thai,
+  Lao, Khmer, Myanmar) don't count as word characters for the boundary
+  check, so ``钳子`` still matches inside "请钳子帮忙".
 
 Entries cannot contain commas. An empty setting disables trigger matching.
 """
@@ -23,13 +26,35 @@ def parse_group_triggers(raw: str) -> tuple[str, ...]:
     return tuple(entry for part in raw.split(",") if (entry := part.strip()))
 
 
+# Letters of scripts written without spaces between words. Python's Unicode
+# ``\w`` includes them, so a plain ``(?<!\w)`` boundary would never match a
+# trigger embedded in such text.
+_NO_SPACE_SCRIPTS = (
+    "\u0e00-\u0eff"  # Thai, Lao
+    "\u1000-\u109f"  # Myanmar
+    "\u1100-\u11ff"  # Hangul Jamo
+    "\u1780-\u17ff"  # Khmer
+    "\u2e80-\u2fdf"  # CJK radicals, Kangxi radicals
+    "\u3040-\u31ff"  # Hiragana, Katakana, Bopomofo, Hangul compatibility Jamo
+    "\u3400-\u4dbf"  # CJK Extension A
+    "\u4e00-\u9fff"  # CJK Unified Ideographs
+    "\uac00-\ud7af"  # Hangul syllables
+    "\uf900-\ufaff"  # CJK compatibility ideographs
+    "\uff66-\uff9f"  # Halfwidth Katakana
+    "\U00020000-\U0003134f"  # CJK Extensions B-H
+)
+# A word character of a space-separated script (\w minus the scripts above).
+_SPACED_WORD_CHAR = rf"[^\W{_NO_SPACE_SCRIPTS}]"
+
+
 @lru_cache(maxsize=32)
 def _compile_group_triggers(raw: str) -> re.Pattern[str] | None:
     """Compile all entries into one alternation so a message is scanned once."""
     bodies = [r"\s+".join(re.escape(word) for word in entry.split()) for entry in parse_group_triggers(raw)]
     if not bodies:
         return None
-    return re.compile(rf"(?<!\w)(?:{'|'.join(bodies)})(?!\w)", re.IGNORECASE)
+    alternation = "|".join(bodies)
+    return re.compile(rf"(?<!{_SPACED_WORD_CHAR})(?:{alternation})(?!{_SPACED_WORD_CHAR})", re.IGNORECASE)
 
 
 def matches_group_trigger(text: str, raw: str) -> bool:

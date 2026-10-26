@@ -154,21 +154,65 @@ class TestWhatsAppChannel:
         msg = self._ext_msg_with_mentions("@207855026221128 help", ["207855026221128@lid"])
         assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
 
-    def test_mentioned_jid_with_longer_number_does_not_match(self, wa_channel):
+    def test_mention_in_media_caption_context(self, wa_channel):
         wa_channel._own_jid = "491234567890"
-        msg = self._ext_msg_with_mentions("@Bob hi", ["14912345678901@s.whatsapp.net"])
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
-
-    def test_trigger_in_image_caption(self, wa_channel):
-        wa_channel._own_jid = "491234567890"
+        wa_channel._settings.whatsapp_group_trigger = ""
         image = MagicMock()
-        image.caption = "pincer, what is this?"
-        image.HasField = MagicMock(return_value=False)
+        image.caption = "@Pincer what is this?"
+        image.contextInfo.mentionedJID = ["491234567890@s.whatsapp.net"]
+        image.HasField = MagicMock(side_effect=lambda f: f == "contextInfo")
         msg = MagicMock()
         msg.conversation = ""
         msg.imageMessage = image
         msg.HasField = MagicMock(side_effect=lambda f: f == "imageMessage")
         assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+
+    def test_mentioned_jid_with_longer_number_does_not_match(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        msg = self._ext_msg_with_mentions("@Bob hi", ["14912345678901@s.whatsapp.net"])
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+
+    @pytest.mark.parametrize(
+        ("field", "expected"),
+        [
+            ("imageMessage", True),
+            ("documentMessage", True),
+            # No content path handles video, so its caption must not pass the gate.
+            ("videoMessage", False),
+        ],
+    )
+    def test_trigger_in_media_caption(self, wa_channel, field, expected):
+        wa_channel._own_jid = "491234567890"
+        media = MagicMock()
+        media.caption = "pincer, what is this?"
+        media.HasField = MagicMock(return_value=False)
+        msg = MagicMock()
+        msg.conversation = ""
+        setattr(msg, field, media)
+        msg.HasField = MagicMock(side_effect=lambda f: f == field)
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("caption", "expected_text"),
+        [
+            ("pincer translate this", "pincer translate this\n\n[Document: report.pdf]"),
+            ("", "[Document: report.pdf]"),
+        ],
+    )
+    async def test_document_caption_reaches_agent(self, wa_channel, caption, expected_text):
+        msg = MagicMock()
+        msg.conversation = ""
+        msg.documentMessage.mimetype = "application/pdf"
+        msg.documentMessage.fileName = "report.pdf"
+        msg.documentMessage.caption = caption
+        msg.HasField = MagicMock(side_effect=lambda f: f == "documentMessage")
+        client = MagicMock()
+        client.download_any = AsyncMock(return_value=b"%PDF")
+        incoming = await wa_channel._extract_message(client, MagicMock(), "491111111111", "chat", msg)
+        assert incoming is not None
+        assert incoming.text == expected_text
+        assert incoming.files == [(b"%PDF", "application/pdf", "report.pdf")]
 
     def test_trigger_partial_word_does_not_match(self, wa_channel):
         wa_channel._own_jid = "491234567890"

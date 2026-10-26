@@ -61,6 +61,17 @@ def test_parse_group_triggers(raw: str, expected: tuple[str, ...]) -> None:
         ("@3Days Pincer", "3Days Pincer", False),
         ("@3Days Pincer", "@3Days Pincers", False),
         ("@3Days Pincer", "@3DaysPincer", False),
+        # Scripts without spaces between words: boundaries only apply against
+        # letters of space-separated scripts
+        ("钳子", "请钳子帮忙", True),
+        ("ペンチ", "ペンチさん、手伝って", True),
+        ("คีม", "ช่วยด้วยคีมหน่อย", True),
+        ("핀서", "핀서야 도와줘", True),
+        ("pincer", "请pincer帮忙", True),
+        ("pincer", "请pincers帮忙", False),
+        # Space-separated non-Latin scripts keep whole-word matching
+        ("пінсер", "привіт, пінсер!", True),
+        ("пінсер", "пінсери", False),
         # Case-insensitivity
         ("PINCER", "hey pincer", True),
         ("pincer", "HEY PINCER", True),
@@ -73,6 +84,8 @@ def test_parse_group_triggers(raw: str, expected: tuple[str, ...]) -> None:
         ("", "hey pincer", False),
         (" , ", "hey pincer", False),
         ("pincer", "", False),
+        # A comma always separates entries, even inside a former phrase
+        ("hey, pincer", "hey everyone", True),
     ],
 )
 def test_matches_group_trigger(raw: str, text: str, expected: bool) -> None:
