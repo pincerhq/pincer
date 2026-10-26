@@ -1,8 +1,9 @@
 """Add `pincer_onboarding` (PR #244).
 
 Onboarding state per user and channel, out of the session metadata: which
-session asked the onboarding question, when, and when it was answered. A user
-with no row falls back to the flags their sessions carried before this.
+session asked the onboarding question, when, how many replies held no answer,
+and when it was closed. A user with no row falls back to the flags their
+sessions carried before this.
 
 Revision ID: 0023
 Revises: 0022
@@ -30,6 +31,7 @@ def upgrade() -> None:
         sa.Column("asked_session_id", sa.Text(), nullable=True),
         sa.Column("asked_at", Real(), nullable=True),
         sa.Column("completed_at", Real(), nullable=True),
+        sa.Column("attempts", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.PrimaryKeyConstraint("user_id", "channel"),
     )
 

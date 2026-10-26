@@ -2085,6 +2085,7 @@ def test_0023_onboarding_is_keyed_by_user_and_channel_and_round_trips(migration_
             "asked_session_id": True,
             "asked_at": True,
             "completed_at": True,
+            "attempts": False,
         }
         assert inspector.get_pk_constraint("pincer_onboarding")["constrained_columns"] == ["user_id", "channel"]
 
