@@ -502,6 +502,35 @@ class TestRelayBargeIn:
         await asyncio.wait_for(loop, timeout=2)
         await channel.stop()
 
+    async def test_an_interrupt_over_the_http_webhook_cancels_the_paused_turn(self, relay_call):
+        """The relay's HTTP transport gets the same barge-in as its socket."""
+        import httpx
+        from fastapi import FastAPI
+
+        engine, channel, agent, sock, loop, traces = await relay_call(_scripts())
+        engine._settings.voice_webhook_validate = False
+        agent.pause_after = 1
+        sock.push(type="prompt", voicePrompt="Erste Frage?", last=True)
+        await asyncio.wait_for(agent.paused.wait(), timeout=2)
+        agent.pause_after = None
+
+        app = FastAPI()
+        app.include_router(twiml_server.twilio_router)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/apps/twilio/relay-webhook",
+                json={"type": "interrupt", "callSid": "CA_cr", "utteranceUntilInterrupt": "Der erste Satz"},
+            )
+        assert response.status_code == 200
+
+        assert traces[0].cancelled_with == "barge_in"
+        assert "CA_cr" not in channel._active_turns
+        old_line = next(e for e in channel.get_transcript("CA_cr").entries if e.text == OLD_FIRST)
+        assert old_line.state == "interrupted"
+        sock.hang_up()
+        await asyncio.wait_for(loop, timeout=2)
+        await channel.stop()
+
     async def test_the_closing_line_of_a_reply_ends_its_utterance(self, relay_call):
         engine, channel, agent, sock, loop, _traces = await relay_call([_scripts()[1]])
         sock.push(type="prompt", voicePrompt="Erste Frage?", last=True)

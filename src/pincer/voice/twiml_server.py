@@ -919,8 +919,11 @@ async def relay_webhook(request: Request) -> Response:
             await _engine.mark_call_answered(call_sid)
 
     elif event_type == "interrupt":
+        # The same barge-in as the relay socket: cancel the turn still writing
+        # tokens and re-mark what the caller never heard, not just the audio.
         if call_sid:
-            await _engine.interrupt_speech(call_sid)
+            heard = body.get("utteranceUntilInterrupt")
+            await _engine.on_caller_barge_in(call_sid, str(heard) if heard is not None else None)
 
     elif event_type == "error":
         logger.error("ConversationRelay error: %s", body)

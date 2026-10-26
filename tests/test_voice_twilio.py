@@ -183,15 +183,18 @@ class TestRelayWebhook:
         )
 
     def test_interrupt_event(self, client, mock_engine):
+        """Same path as the relay socket: the turn is cancelled, not just the audio."""
         response = client.post(
             "/api/apps/twilio/relay-webhook",
             json={
                 "type": "interrupt",
                 "CallSid": "CA123",
+                "utteranceUntilInterrupt": "Der erste Satz",
             },
         )
         assert response.status_code == 200
-        mock_engine.interrupt_speech.assert_called_once_with("CA123")
+        mock_engine.on_caller_barge_in.assert_called_once_with("CA123", "Der erste Satz")
+        mock_engine.interrupt_speech.assert_not_called()
 
 
 # ── Deprecated /voice/* aliases ───────────────────────────────────────────────
@@ -242,4 +245,4 @@ class TestLegacyVoiceAliases:
             json={"type": "interrupt", "CallSid": "CA999"},
         )
         assert response.status_code == 200
-        mock_engine.interrupt_speech.assert_called_with("CA999")
+        mock_engine.on_caller_barge_in.assert_called_with("CA999", None)
