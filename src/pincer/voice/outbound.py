@@ -222,7 +222,9 @@ async def _recover_timed_out_dial(
     Looks the call up at Twilio. Raises _DialEnded when the call was placed
     but is already over.
     """
+    from pincer.observability.failure_codes import NOT_CONNECTED_STATUS, FailureCode
     from pincer.voice.telemetry import hooks as telemetry
+    from pincer.voice.telemetry.outcomes import STATUS_FAILED
 
     call = None
     try:
@@ -240,7 +242,15 @@ async def _recover_timed_out_dial(
         return call_sid
     logger.warning("Outbound dial to %s timed out; placed as %s but already ended (%s)", to_number, call_sid, status)
     telemetry.dial_accepted(trace_key, call_sid)
-    await telemetry.call_ended(call_sid, status=status or "unknown", termination_reason="ended_before_confirmed")
+    # Twilio's status is not ours: `completed` here means a call nobody was
+    # briefed for, never a success. busy / no-answer / failed / canceled have
+    # their codes; anything else is unknown.
+    await telemetry.call_ended(
+        call_sid,
+        status=STATUS_FAILED,
+        failure_code=str(NOT_CONNECTED_STATUS.get(status, FailureCode.UNKNOWN)),
+        termination_reason="ended_before_confirmed",
+    )
     raise _DialEnded(call_sid, status or "unknown")
 
 
