@@ -1574,6 +1574,86 @@ async def test_late_copy_of_an_earlier_dial_without_dial_call_sid_is_ignored(mon
     assert "transferring" not in h.state.metadata
 
 
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_each_dial_keeps_its_own_record(monkeypatch):
+    """A second dial starts its own record next to the first one's, which keeps
+    its result and its answer: `transfer` is only the current dial's view."""
+    from pincer.voice.engine import DIAL_ID_KEY, DIALS_KEY
+
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+    first_dial = h.state.metadata[DIAL_ID_KEY]
+    data = {"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial1", "CallStatus": "in-progress"}
+    async with _async_client(h) as client:
+        first = await client.post(f"/api/apps/twilio/transfer-result?dial={first_dial}", data=data)
+    await h.engine.transfer_call(CALL, "+4952233344455")  # dial #2
+    second_dial = h.state.metadata[DIAL_ID_KEY]
+    dials = h.state.metadata[DIALS_KEY]
+    assert set(dials) == {f"dial:{first_dial}", f"dial:{second_dial}"}
+    assert dials[f"dial:{first_dial}"]["dial_status"] == "busy"
+    assert dials[f"dial:{first_dial}"]["answer_twiml"] == first.text
+    assert "dial_status" not in dials[f"dial:{second_dial}"]
+    assert h.state.metadata["transfer"] is dials[f"dial:{second_dial}"]
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_result_with_an_unknown_dial_token_is_ignored(monkeypatch):
+    """A result naming a dial this call never had a record for (not the one in
+    flight, never processed) must not be taken for the ringing dial's result."""
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+    results = _count_transfer_results(monkeypatch)
+    data = {"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAother", "CallStatus": "in-progress"}
+    async with _async_client(h) as client:
+        response = await client.post("/api/apps/twilio/transfer-result?dial=notours", data=data)
+    assert response.text == "<Response/>"
+    assert results == []
+    assert h.state.metadata.get("transferring") is True
+    assert h.sm.phase == CallPhase.TRANSFERRING
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_replay_returns_the_recorded_answer_verbatim(monkeypatch):
+    """A copy is answered from the dial's record, not by building the TwiML again."""
+    from pincer.voice import twiml_server
+    from pincer.voice.engine import DIAL_ID_KEY
+
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+    url = f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}"
+    data = {"CallSid": CALL, "DialCallStatus": "no-answer", "DialCallSid": "CAdial", "CallStatus": "in-progress"}
+    async with _async_client(h) as client:
+        first = await client.post(url, data=data)
+
+        def rebuilt(*_args, **_kwargs):
+            raise AssertionError("the replay rebuilt the reconnect TwiML")
+
+        monkeypatch.setattr(twiml_server, "_reconnect_after_transfer", rebuilt)
+        retry = await client.post(url, data=data)
+    assert "ConversationRelay" in first.text
+    assert retry.text == first.text
+
+
+async def test_recovered_and_processed_dial_results_record_the_same_fields():
+    """The lost-state branch and the main path write a dial's result through
+    one helper: the replay rules read the same fields from either record."""
+    from pincer.voice.engine import DIAL_ID_KEY
+
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+    url = f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}"
+    data = {"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial1", "CallStatus": "in-progress"}
+    async with _async_client(h) as client:
+        await client.post(url, data=data)
+        await client.post("/api/apps/twilio/transfer-result?dial=lostdial", data=_lost_state_callback())
+    processed = h.state.metadata["transfer"]
+    recovered = h.engine.get_call_state(LOST_CALL).metadata["transfer"]
+    result_fields = {"dial_id", "dial_status", "dial_call_sid", "dial_duration_s", "dial_bridged", "answer_twiml"}
+    assert result_fields <= set(processed)
+    assert result_fields <= set(recovered)
+    assert recovered["recovered"] is True and "recovered" not in processed
+
+
 async def test_lost_transfer_state_retry_replays_reconnect(monkeypatch):
     """The recovered call has state now, so a retried callback would take the
     main path: it must replay the reconnect instead of re-running the session's

@@ -74,10 +74,6 @@ class _CallLock:
 # request for the call is in flight.
 _call_update_locks: dict[str, _CallLock] = {}
 
-# Metadata key for the dial results a call has had (see `_dial_key`), across
-# transfers: `transfer_call` replaces the `transfer` record per dial.
-HANDLED_DIALS_KEY = "handled_dials"
-
 
 def init_voice_routes(engine: VoiceEngine, settings: Settings) -> None:
     """Wire up the voice engine and settings for route handlers."""
@@ -331,11 +327,12 @@ async def voice_transfer_result(request: Request) -> Response:
     whether the caller is still there, the callback's own CallStatus decides.
     Idempotent, one delivery per call at a time: a callback for a finalized
     call, or one Twilio says is no longer in progress, only hangs up; a copy of
-    a result already processed (keyed by the ``dial`` token `transfer_call` puts
-    in the action URL, else by ``DialCallSid``; see `_dial_key`) counts nothing
-    and leaves the session alone. It replays the reconnect TwiML until the
-    reconnected relay connects, and answers an empty ``<Response/>`` after that
-    or for an earlier dial. The current dial's result is handled even when the
+    a result already processed counts nothing, leaves the session alone, and
+    is answered from its dial's record (one per dial in ``DIALS_KEY``, keyed by
+    the ``dial`` token `transfer_call` puts in the action URL, else by
+    ``DialCallSid``; see `dial_key`): the recorded reconnect TwiML until the
+    reconnected relay connects, an empty ``<Response/>`` after that or for an
+    earlier dial (`_answer_copy`). The current dial's result is handled even when the
     call is not marked transferring: the redirect can raise after Twilio
     applied it, and then Twilio is waiting on this answer.
 
@@ -372,14 +369,23 @@ async def _one_call_update_at_a_time(call_sid: str) -> AsyncIterator[None]:
 
 
 async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
-    from pincer.voice.engine import DIAL_ID_KEY
+    from pincer.voice.engine import DIAL_ID_KEY, dial_key
 
     call_sid = str(form.get("CallSid", ""))
     dial_status = str(form.get("DialCallStatus", "")).lower()
     call_status = str(form.get("CallStatus", "")).lower()
+    dial_call_sid = str(form.get("DialCallSid", ""))
     dial_duration = _int_or_none(form.get("DialCallDuration"))
     dial_bridged = str(form.get("DialBridged", "")).lower() == "true"
     bridged = dial_status in ("completed", "answered") or dial_bridged
+    # The dial's result as its record keeps it (`_record_dial_result`).
+    result: dict[str, Any] = {
+        "dial_id": dial_id,
+        "dial_status": dial_status,
+        "dial_call_sid": dial_call_sid,
+        "dial_duration_s": dial_duration,
+        "dial_bridged": dial_bridged,
+    }
     logger.info("Transfer result [%s]: %s (call %s)", call_sid, dial_status or "-", call_status or "-")
     hangup = _twiml_response("<Response><Hangup/></Response>")
     no_op = _twiml_response("<Response/>")
@@ -436,26 +442,16 @@ async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
             # No capacity, allowlist or blocklist check, on purpose: this caller
             # was already admitted by /webhook before the transfer started.
             recovered = await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=language)
-            # Mark the dial result as handled on the recovered state before the
-            # next await, so a retry of this callback replays the reconnect
-            # instead of taking the main path. (The per-call lock already keeps
-            # a concurrent copy out until this request is done.)
-            dial_call_sid = str(form.get("DialCallSid", ""))
-            transfer: dict[str, Any] = {
-                "recovered": True,
-                "dial_id": dial_id,
-                "dial_status": dial_status,
-                "dial_call_sid": dial_call_sid,
-                "dial_duration_s": dial_duration,
-                "dial_bridged": dial_bridged,
-            }
-            metadata = getattr(recovered, "metadata", None)
-            if isinstance(metadata, dict):
-                metadata["transfer"] = transfer
+            # Record the dial result on the recovered state before the next
+            # await, so a retry of this callback replays the reconnect instead
+            # of taking the main path. (The per-call lock already keeps a
+            # concurrent copy out until this request is done.)
+            record: dict[str, Any] = {}
+            if isinstance(getattr(recovered, "metadata", None), dict):
+                record = _record_dial_result(recovered, dial_key(dial_id, dial_call_sid), result)
                 if dial_id:
-                    metadata[DIAL_ID_KEY] = dial_id
-                if key := _dial_key(dial_id, dial_call_sid):
-                    metadata.setdefault(HANDLED_DIALS_KEY, set()).add(key)
+                    recovered.metadata[DIAL_ID_KEY] = dial_id
+            record["recovered"] = True
             # Once, on the trace just opened: a retry replays the reconnect below
             # the state check and records nothing.
             telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)
@@ -463,8 +459,8 @@ async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
             # resume it in TAKE_MESSAGE, as a failed transfer does, so the first
             # turn asks for the name instead of greeting the caller again.
             session = _transfer_session_lookup(call_sid)
-            greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
-            transfer["reconnect_greeting"] = greeting  # what a retried callback replays
+            _greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
+            record["answer_twiml"] = bytes(response.body).decode()  # what a retried callback replays
             return response
         except Exception:
             # Twilio drops the caller if we answer 500, and a registered call
@@ -476,40 +472,17 @@ async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
 
     from pincer.voice.telemetry import hooks as telemetry
 
-    dial_call_sid = str(form.get("DialCallSid", ""))
-    key = _dial_key(dial_id, dial_call_sid)
-    # Every dial result this call has had, across transfers: `transfer_call`
-    # replaces the `transfer` record per dial, so it only knows the latest one.
-    handled = state.metadata.setdefault(HANDLED_DIALS_KEY, set())
-    latest = state.metadata.get("transfer")
-    # The latest dial's result is in (a result with neither a dial token nor a
-    # DialCallSid only matches here).
-    is_latest = (
-        isinstance(latest, dict)
-        and "dial_status" in latest
-        and _dial_key(str(latest.get("dial_id", "") or ""), str(latest.get("dial_call_sid", "") or "")) == key
-    )
-    transferring = bool(state.metadata.get("transferring"))
     language = str(getattr(state, "language", "") or "en")
-    if (key and key in handled) or (is_latest and not transferring):
-        # A retry or replay of a result we already processed: count nothing
-        # twice and leave the session alone.
-        if is_latest and isinstance(latest, dict) and not latest.get("reconnected"):
-            # Answered with a reconnect that no relay has connected for yet, so
-            # Twilio may be executing this copy (by default it retries only
-            # when it never reached us): answer the same way.
-            logger.info("Transfer result [%s] already handled (dial %s) — replaying reconnect", call_sid, key)
-            greeting = str(latest.get("reconnect_greeting", "") or _transfer_failed_line(language))
-            return _reconnect_after_transfer(call_sid, language, greeting)
-        # The reconnected relay is up (Twilio executed our answer and will
-        # execute no other for this dial), or an earlier dial's: the call has
-        # moved on. Re-issuing <Connect> would replace the live relay socket.
-        logger.info("Transfer result [%s] for dial %s already acted on — ignored", call_sid, key)
-        return no_op
+    key, record = _dial_record_for(state, dial_id, dial_call_sid)
+    if record is not None and "dial_status" in record:
+        # A copy of a result we already processed: count nothing twice, leave
+        # the session alone, and answer from the dial's record.
+        is_current = record is state.metadata.get("transfer")
+        return _answer_copy(call_sid, key, record, is_current=is_current, language=language)
+    transferring = bool(state.metadata.get("transferring"))
     if dial_id and dial_id != state.metadata.get(DIAL_ID_KEY):
         # A later dial replaced this one, which needs the call back from this
         # dial first: Twilio is not waiting on this answer.
-        handled.add(key)
         logger.info("Transfer result [%s] for an earlier dial %s — ignored", call_sid, key)
         return no_op
     if not transferring:
@@ -528,20 +501,8 @@ async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
         # applied it. Twilio is waiting on this answer: handle it as the
         # dial's result. An empty answer would end the call.
         logger.warning("Transfer result [%s] for dial %s whose redirect reported failure — handling it", call_sid, key)
-    if key:
-        handled.add(key)
-    transfer = state.metadata.setdefault("transfer", {})
+    record = _record_dial_result(state, key, result)
     telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)
-    if isinstance(transfer, dict):
-        transfer.update(
-            {
-                "dial_id": dial_id,
-                "dial_status": dial_status,
-                "dial_call_sid": dial_call_sid,
-                "dial_duration_s": dial_duration,
-                "dial_bridged": dial_bridged,
-            }
-        )
     session = _transfer_session_lookup(call_sid)
 
     if bridged:
@@ -567,17 +528,66 @@ async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
         # Not bridged and the caller is still on the line: whatever the status
         # means, nobody took the call, so it is a failed transfer.
         logger.warning("Transfer result [%s]: unknown DialCallStatus %r — treating as failed", call_sid, dial_status)
-    greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
-    if isinstance(transfer, dict):
-        transfer["reconnect_greeting"] = greeting  # what a retried callback replays
+    _greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
+    record["answer_twiml"] = bytes(response.body).decode()  # what a retried callback replays
     return response
 
 
-def _dial_key(dial_id: str, dial_call_sid: str) -> str:
-    """What identifies a dial result: our own dial token (from the action URL)
-    when there is one, else Twilio's DialCallSid, which is empty when the dial
-    never created a call (an invalid or unreachable number)."""
-    return f"dial:{dial_id}" if dial_id else dial_call_sid
+def _dial_record_for(state: Any, dial_id: str, dial_call_sid: str) -> tuple[str, dict[str, Any] | None]:
+    """The key and the record (if any) a dial result belongs to.
+
+    With a dial token, the token's record. Without one (an action URL from
+    before tokens): a recorded result with the same DialCallSid, else, while a
+    <Dial> is in flight, the current dial's record."""
+    from pincer.voice.engine import DIAL_ID_KEY, DIALS_KEY, dial_key
+
+    dials: dict[str, dict[str, Any]] = state.metadata.setdefault(DIALS_KEY, {})
+    if dial_id:
+        key = dial_key(dial_id, "")
+        return key, dials.get(key)
+    current = state.metadata.get("transfer")
+    for key, record in dials.items():
+        # an empty DialCallSid only matches the current dial's result
+        recorded = "dial_status" in record and record.get("dial_call_sid") == dial_call_sid
+        if recorded and (dial_call_sid or record is current):
+            return key, record
+    current_id = str(state.metadata.get(DIAL_ID_KEY, "") or "")
+    if state.metadata.get("transferring") and current_id and isinstance(current, dict):
+        return dial_key(current_id, ""), current
+    return dial_call_sid, None
+
+
+def _record_dial_result(state: Any, key: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Write a dial's result into its record (creating one for a dial we have
+    none for: lost state, or no dial token) and make it the current dial's
+    `transfer` view. The one place both the lost-state branch and the main path
+    record a result, so the replay rules read the same fields from either."""
+    from pincer.voice.engine import DIALS_KEY
+
+    record: dict[str, Any] = state.metadata.setdefault(DIALS_KEY, {}).setdefault(key, {})
+    record.update(result)
+    state.metadata["transfer"] = record
+    return record
+
+
+def _answer_copy(call_sid: str, key: str, record: dict[str, Any], *, is_current: bool, language: str) -> Response:
+    """The answer to a copy of a dial result we already processed.
+
+    The recorded reconnect, verbatim, while it is the current dial's and no
+    relay has connected for it: Twilio may be executing this copy. An empty
+    ``<Response/>`` once the relay connected, or for an earlier dial: Twilio
+    has already executed an answer for that <Dial> and executes at most one
+    per <Dial>. No TwiML would be harmless here if it were executed: any of it
+    replaces the live relay."""
+    if is_current and not record.get("reconnected"):
+        logger.info("Transfer result [%s] already handled (dial %s) — replaying reconnect", call_sid, key)
+        answer = record.get("answer_twiml")
+        if answer:
+            return _twiml_response(str(answer))
+        # the first delivery raised before its answer was recorded
+        return _reconnect_after_transfer(call_sid, language, _transfer_failed_line(language))
+    logger.info("Transfer result [%s] for dial %s already acted on — ignored", call_sid, key)
+    return _twiml_response("<Response/>")
 
 
 async def _resume_failed_transfer(call_sid: str, session: Any, dial_status: str, language: str) -> tuple[str, Response]:

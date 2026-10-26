@@ -322,6 +322,23 @@ async def test_transfer_call_failure_leaves_call_ours(mock_settings):
     assert "transferring" not in state.metadata
 
 
+async def test_redirect_failure_keeps_the_dial_record(mock_settings):
+    """The redirect can raise after Twilio applied it, and then this dial's
+    result still arrives: its record stays, marked, while the call is ours again."""
+    from pincer.voice.engine import DIAL_ID_KEY, DIALS_KEY
+
+    engine = ConversationRelayEngine(mock_settings)
+    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls:
+        client_cls.return_value.calls.return_value.update.side_effect = RuntimeError("read timeout")
+        with pytest.raises(RuntimeError):
+            await engine.transfer_call("CAx", "+4930123")
+    record = state.metadata[DIALS_KEY][f"dial:{state.metadata[DIAL_ID_KEY]}"]
+    assert record["redirect_failed"] is True
+    assert record["target"] == "+4930123"
+    assert "transfer" not in state.metadata
+
+
 async def test_finish_remote_ended_is_idempotent_and_never_hangs_up(mock_settings):
     engine = ConversationRelayEngine(mock_settings)
     on_end = AsyncMock()

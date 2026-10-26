@@ -69,6 +69,11 @@ PROVIDER_STATUS_KEY = "provider_status"
 #: result names the dial it belongs to even when Twilio sends no DialCallSid.
 #: Unlike the `transfer` record it survives a redirect that raised.
 DIAL_ID_KEY = "dial_id"
+#: Metadata key for one record per <Dial> the call has had, keyed by
+#: `dial_key()`. `transfer_call` creates a dial's record and nothing replaces
+#: it; /transfer-result writes the dial's result and answer into it. The
+#: `transfer` key is the current dial's record (the same dict), not a copy.
+DIALS_KEY = "dials"
 #: Metadata key on a pending outbound state: the CallSid a relay `setup`
 #: claimed it as (see `claim_pending_outbound`). The dialer branches on this,
 #: not on a live lookup — a claimed call may already be over.
@@ -294,15 +299,17 @@ class VoiceEngine(ABC):
             action_url = f"{action_url}{'&' if '?' in action_url else '?'}{urlencode({'dial': dial_id})}"
         # the media socket closes on the <Dial> redirect; that is not a hangup
         live = self._active_calls.get(call_sid)
+        record: dict[str, Any] = {
+            "target": target_number,
+            "started_mono": time.monotonic(),
+            "dial_timeout_s": timeout_s,
+            "dial_id": dial_id,
+        }
         if live is not None:
             live.metadata["transferring"] = True
             live.metadata[DIAL_ID_KEY] = dial_id
-            live.metadata["transfer"] = {
-                "target": target_number,
-                "started_mono": time.monotonic(),
-                "dial_timeout_s": timeout_s,
-                "dial_id": dial_id,
-            }
+            live.metadata.setdefault(DIALS_KEY, {})[dial_key(dial_id, "")] = record
+            live.metadata["transfer"] = record
         try:
             twiml = build_dial_twiml(
                 target_number,
@@ -322,8 +329,10 @@ class VoiceEngine(ABC):
         except Exception:
             logger.exception("Transfer failed for call %s", call_sid)
             # the redirect never happened: the call is still ours. DIAL_ID_KEY
-            # stays: a timeout can raise after Twilio applied the redirect, and
-            # then this dial's result still arrives and must be recognised.
+            # and the dial's record stay: a timeout can raise after Twilio
+            # applied the redirect, and then this dial's result still arrives
+            # and must be recognised.
+            record["redirect_failed"] = True
             if live is not None:
                 live.metadata.pop("transferring", None)
                 live.metadata.pop("transfer", None)
@@ -750,6 +759,13 @@ class VoiceEngine(ABC):
     # ConversationRelay hands audio to Twilio and never reports playout, so
     # its numbers can only ever be estimates from character counts.
     analytics_method: str = "estimated"
+
+
+def dial_key(dial_id: str, dial_call_sid: str) -> str:
+    """What identifies a dial and its result in `DIALS_KEY`: our own dial token
+    (from the action URL) when there is one, else Twilio's DialCallSid, which is
+    empty when the dial never created a call (an invalid or unreachable number)."""
+    return f"dial:{dial_id}" if dial_id else dial_call_sid
 
 
 def build_dial_twiml(
