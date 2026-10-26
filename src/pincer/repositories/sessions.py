@@ -38,6 +38,15 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         stmt = stmt.order_by(col(ChatSession.updated_at).desc()).limit(1)
         return (await self.session.exec(stmt)).first()
 
+    async def exists_for(self, user_id: str, channel: str) -> bool:
+        """True when the channel user has any stored session, conversations included."""
+        stmt = (
+            select(ChatSession.session_id)
+            .where(col(ChatSession.user_id) == user_id, col(ChatSession.channel) == channel)
+            .limit(1)
+        )
+        return (await self.session.exec(stmt)).first() is not None
+
     async def save(self, values: dict[str, Any]) -> None:
         """Insert the session, or update the parts that change.
 

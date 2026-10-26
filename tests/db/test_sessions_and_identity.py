@@ -11,6 +11,7 @@ import pytest
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityProfile
+from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import ChatSession
 from pincer.repositories.identity import (
     AuthSessionRepository,
@@ -26,6 +27,7 @@ _TABLES = [
     IdentityCredential.__table__,
     AuthSession.__table__,
     ChatSession.__table__,
+    Onboarding.__table__,
 ]
 
 _NOW = "2026-10-10T12:00:00+00:00"
