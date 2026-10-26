@@ -7,9 +7,12 @@ Media Streams WebSocket connections, and fallback error handling.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import logging
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -31,6 +34,8 @@ from pincer.voice.webhook_auth import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from pincer.config import Settings
     from pincer.voice.engine import VoiceEngine
 
@@ -56,6 +61,17 @@ voice_router = APIRouter(prefix="/voice", tags=["voice"])
 
 _engine: VoiceEngine | None = None
 _settings: Settings | None = None
+
+
+@dataclass
+class _CallLock:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    users: int = 0
+
+
+# CallSid -> the lock /transfer-result holds while it handles that call's dial
+# result; an entry lives only while a request for the call is in flight.
+_transfer_result_locks: dict[str, _CallLock] = {}
 
 
 def init_voice_routes(engine: VoiceEngine, settings: Settings) -> None:
@@ -315,6 +331,27 @@ async def voice_transfer_result(request: Request) -> Response:
     if await _authenticate(request) is None:
         return _forbidden()
     form = await request.form()
+    # One delivery of a call's dial result at a time: a copy arriving while the
+    # first is still awaiting (Twilio's status, the call's registration, the
+    # session) waits, then finds that work done and replays its answer.
+    async with _one_transfer_result_at_a_time(str(form.get("CallSid", ""))):
+        return await _handle_transfer_result(form)
+
+
+@asynccontextmanager
+async def _one_transfer_result_at_a_time(call_sid: str) -> AsyncIterator[None]:
+    entry = _transfer_result_locks.setdefault(call_sid, _CallLock())
+    entry.users += 1
+    try:
+        async with entry.lock:
+            yield
+    finally:
+        entry.users -= 1
+        if not entry.users:
+            _transfer_result_locks.pop(call_sid, None)
+
+
+async def _handle_transfer_result(form: Any) -> Response:
     call_sid = str(form.get("CallSid", ""))
     dial_status = str(form.get("DialCallStatus", "")).lower()
     call_status = str(form.get("CallStatus", "")).lower()
@@ -375,6 +412,23 @@ async def voice_transfer_result(request: Request) -> Response:
             # No capacity, allowlist or blocklist check, on purpose: this caller
             # was already admitted by /webhook before the transfer started.
             recovered = await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=language)
+            # Mark the dial result as handled on the recovered state before the
+            # next await, so a retry of this callback replays the reconnect
+            # instead of taking the main path. (The per-call lock already keeps
+            # a concurrent copy out until this request is done.)
+            dial_call_sid = str(form.get("DialCallSid", ""))
+            transfer: dict[str, Any] = {
+                "recovered": True,
+                "dial_status": dial_status,
+                "dial_call_sid": dial_call_sid,
+                "dial_duration_s": dial_duration,
+                "dial_bridged": dial_bridged,
+            }
+            metadata = getattr(recovered, "metadata", None)
+            if isinstance(metadata, dict):
+                metadata["transfer"] = transfer
+                if dial_call_sid:
+                    metadata.setdefault("handled_dial_sids", set()).add(dial_call_sid)
             # Once, on the trace just opened: a retry replays the reconnect below
             # the state check and records nothing.
             telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)
@@ -383,18 +437,7 @@ async def voice_transfer_result(request: Request) -> Response:
             # turn asks for the name instead of greeting the caller again.
             session = _transfer_session_lookup(call_sid)
             greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
-            # Mark the dial result as handled on the recovered state, so a retry of
-            # this callback replays the reconnect instead of taking the main path.
-            metadata = getattr(recovered, "metadata", None)
-            if isinstance(metadata, dict):
-                metadata["transfer"] = {
-                    "recovered": True,
-                    "dial_status": dial_status,
-                    "dial_call_sid": str(form.get("DialCallSid", "")),
-                    "dial_duration_s": dial_duration,
-                    "dial_bridged": dial_bridged,
-                    "reconnect_greeting": greeting,
-                }
+            transfer["reconnect_greeting"] = greeting  # what a retried callback replays
             return response
         except Exception:
             # Twilio drops the caller if we answer 500, and a registered call

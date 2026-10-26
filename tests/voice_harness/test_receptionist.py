@@ -1279,6 +1279,110 @@ async def test_lost_state_recently_ended_skips_status_check():
     assert h.engine.status_fetches == []
 
 
+async def _release_after_others_ran(gate: asyncio.Event) -> None:
+    """Let every other task run up to its next real wait, then open the gate."""
+    for _ in range(50):
+        await asyncio.sleep(0)
+    gate.set()
+
+
+async def test_lost_state_duplicate_during_registration_fails_transfer_once(monkeypatch):
+    """Two copies of the lost-state callback arrive together; the second while
+    the first is still in the channel's call-start setup (the call is already
+    registered, the transfer not yet marked handled). One failed-transfer step,
+    one count, and both copies answered with the same reconnect."""
+    from pincer.voice import twiml_server
+
+    h = await _start(settings=_transfer_settings())
+    await _without_other_calls(h)
+    results = _count_transfer_results(monkeypatch)
+    failed: list[str] = []
+    original_failed = sess.ReceptionSession.on_transfer_failed
+
+    async def counting(self, result="failed"):
+        failed.append(result)
+        return await original_failed(self, result)
+
+    monkeypatch.setattr(sess.ReceptionSession, "on_transfer_failed", counting)
+    gate = asyncio.Event()
+    original_start = h.engine._on_call_start_callback
+
+    async def gated(call_sid, state):
+        await gate.wait()
+        await original_start(call_sid, state)
+
+    h.engine.set_on_call_start(gated)
+    async with _async_client(h) as client:
+        data = {**_lost_state_callback(), "DialCallSid": "CAdial"}
+        first, second, _ = await asyncio.gather(
+            client.post("/api/apps/twilio/transfer-result", data=data),
+            client.post("/api/apps/twilio/transfer-result", data=data),
+            _release_after_others_ran(gate),
+        )
+    assert "ConversationRelay" in first.text
+    assert second.text == first.text
+    assert failed == ["no_answer"]
+    assert results == ["no-answer"]
+    assert list(h.engine.get_active_calls()) == [LOST_CALL]
+    assert twiml_server._transfer_result_locks == {}
+
+
+async def test_lost_state_duplicate_during_status_check_registers_once(monkeypatch):
+    """The second copy arrives while the first waits for Twilio's call status:
+    both found no state, but the call is registered once, not twice."""
+    from pincer.voice import twiml_server
+
+    h = await _start(settings=_transfer_settings())
+    await _without_other_calls(h)
+    registered: list[str] = []
+    original_start = h.engine._on_call_start_callback
+
+    async def counting(call_sid, state):
+        registered.append(call_sid)
+        await original_start(call_sid, state)
+
+    h.engine.set_on_call_start(counting)
+    gate = asyncio.Event()
+    original_fetch = h.engine.fetch_call_status
+
+    async def slow_fetch(call_sid):
+        await gate.wait()
+        return await original_fetch(call_sid)
+
+    monkeypatch.setattr(h.engine, "fetch_call_status", slow_fetch)
+    async with _async_client(h) as client:
+        data = {**_lost_state_callback(), "DialCallSid": "CAdial"}
+        first, second, _ = await asyncio.gather(
+            client.post("/api/apps/twilio/transfer-result", data=data),
+            client.post("/api/apps/twilio/transfer-result", data=data),
+            _release_after_others_ran(gate),
+        )
+    assert registered == [LOST_CALL]
+    assert second.text == first.text
+    assert "ConversationRelay" in first.text
+    assert twiml_server._transfer_result_locks == {}
+
+
+async def test_transfer_result_lock_is_released_when_the_handler_raises(monkeypatch):
+    """The per-call lock entry goes away however the handler ends."""
+    from pincer.voice import twiml_server
+
+    h = await _start(settings=_transfer_settings())
+    await _transferred(h)
+
+    async def broken(call_sid, session, dial_status, language):
+        raise RuntimeError("reconnect failed")
+
+    monkeypatch.setattr(twiml_server, "_resume_failed_transfer", broken)
+    async with _async_client(h) as client:
+        with pytest.raises(RuntimeError):
+            await client.post(
+                "/api/apps/twilio/transfer-result",
+                data={"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial", "CallStatus": "in-progress"},
+            )
+    assert twiml_server._transfer_result_locks == {}
+
+
 def _count_transfer_results(monkeypatch) -> list[str]:
     """Count telemetry.transfer_result calls (the dial-result metric)."""
     from pincer.voice.telemetry import hooks
