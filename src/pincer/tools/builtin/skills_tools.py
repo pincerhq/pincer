@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from pincer.tools.sandbox import SandboxConfig, execute_script
+from pincer.tools.sandbox import SandboxConfig, execute_script, scrubbed_env
 from pincer.tools.skills.storage import confine_skill_path, localize_skill_dir
 
 if TYPE_CHECKING:
@@ -45,6 +45,7 @@ async def _run_unsandboxed(script_path: Path, args: list[str]) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(script_path.parent),
+            env=scrubbed_env(),
         )
         stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=_UNSANDBOXED_TIMEOUT)
     except TimeoutError:

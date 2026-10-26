@@ -49,6 +49,15 @@ BLOCKED_ENV_PREFIXES: tuple[str, ...] = (
 # Specific full-name keys that are also blocked regardless of prefix.
 _BLOCKED_ENV_EXACT: frozenset[str] = frozenset({"GITHUB_TOKEN"})
 
+
+def is_blocked_env_key(key: str) -> bool:
+    """Return True if this env var key holds secrets that must not reach a subprocess."""
+    upper = key.upper()
+    if upper in _BLOCKED_ENV_EXACT:
+        return True
+    return any(upper.startswith(prefix) for prefix in BLOCKED_ENV_PREFIXES)
+
+
 # How long to wait for SIGTERM before escalating to SIGKILL.
 _SIGTERM_WAIT_SECONDS = 5
 
@@ -270,10 +279,7 @@ class MCPSandbox:
     @staticmethod
     def _is_blocked(key: str) -> bool:
         """Return True if this env var key should not be passed to the sandbox."""
-        upper = key.upper()
-        if upper in _BLOCKED_ENV_EXACT:
-            return True
-        return any(upper.startswith(prefix) for prefix in BLOCKED_ENV_PREFIXES)
+        return is_blocked_env_key(key)
 
     @staticmethod
     def _apply_resource_limits(memory_limit_mb: int) -> None:

@@ -15,6 +15,7 @@ import re
 
 from pincer.config import get_settings
 from pincer.exceptions import ShellBlockedError
+from pincer.tools.sandbox import scrubbed_env
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ async def shell_exec(command: str, workdir: str = "~") -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=expanded_workdir,
+            env=scrubbed_env(),
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except TimeoutError:

@@ -19,8 +19,8 @@ from fastapi.testclient import TestClient
 
 from pincer.api.integrations import (
     _builtin_entries,
-    _google_active,
     _google_categories,
+    _google_status,
     _integration_entries,
     _load_category,
     _mcp_skill_entries,
@@ -109,46 +109,46 @@ def test_load_category_returns_empty_when_register_fn_raises() -> None:
     assert result == []
 
 
-# ── _google_active ────────────────────────────────────────────────────────────
+# ── _google_status ────────────────────────────────────────────────────────────
 
 
-def test_google_active_true_with_workspace_token(tmp_path: Path) -> None:
+def test_google_status_active_with_workspace_token(tmp_path: Path) -> None:
     (tmp_path / "google_credentials.json").write_text("{}")
     (tmp_path / "google_workspace_token.json").write_text("{}")
     settings = MagicMock()
     settings.google_oauth_dir.return_value = tmp_path
     with patch("pincer.config.get_settings_relaxed", return_value=settings):
-        assert _google_active() is True
+        assert _google_status()["status"] == "active"
 
 
-def test_google_active_true_with_legacy_token(tmp_path: Path) -> None:
+def test_google_status_active_with_legacy_token(tmp_path: Path) -> None:
     (tmp_path / "google_credentials.json").write_text("{}")
     (tmp_path / "google_token.json").write_text("{}")  # legacy path
     settings = MagicMock()
     settings.google_oauth_dir.return_value = tmp_path
     with patch("pincer.config.get_settings_relaxed", return_value=settings):
-        assert _google_active() is True
+        assert _google_status()["status"] == "active"
 
 
-def test_google_active_false_when_token_missing(tmp_path: Path) -> None:
+def test_google_status_disabled_when_token_missing(tmp_path: Path) -> None:
     (tmp_path / "google_credentials.json").write_text("{}")
     # No token file
     settings = MagicMock()
     settings.google_oauth_dir.return_value = tmp_path
     with patch("pincer.config.get_settings_relaxed", return_value=settings):
-        assert _google_active() is False
+        assert _google_status()["status"] == "disabled"
 
 
-def test_google_active_false_when_creds_missing(tmp_path: Path) -> None:
+def test_google_status_disabled_when_creds_missing(tmp_path: Path) -> None:
     settings = MagicMock()
     settings.google_oauth_dir.return_value = tmp_path
     with patch("pincer.config.get_settings_relaxed", return_value=settings):
-        assert _google_active() is False
+        assert _google_status()["status"] == "disabled"
 
 
-def test_google_active_false_on_exception() -> None:
+def test_google_status_disabled_on_exception() -> None:
     with patch("pincer.config.get_settings_relaxed", side_effect=RuntimeError("boom")):
-        assert _google_active() is False
+        assert _google_status()["status"] == "disabled"
 
 
 # ── _slack_active ─────────────────────────────────────────────────────────────
@@ -341,6 +341,23 @@ def test_integration_entries_google_active_when_creds_exist(tmp_path: Path) -> N
     assert google["status"] == "active"
 
 
+def test_integration_entries_google_partial_with_calendar_only_token(tmp_path: Path) -> None:
+    import json
+
+    (tmp_path / "google_credentials.json").write_text("{}")
+    (tmp_path / "google_token.json").write_text(json.dumps({"scopes": ["https://www.googleapis.com/auth/calendar"]}))
+    settings = MagicMock()
+    settings.google_oauth_dir.return_value = tmp_path
+    with patch("pincer.config.get_settings_relaxed", return_value=settings):
+        entries = _integration_entries()
+    google = next(e for e in entries if "Google" in e["name"])
+    assert google["status"] == "partial"
+    assert google["enabled_services"] == ["calendar"]
+    assert "https://www.googleapis.com/auth/gmail.modify" in google["missing_scopes"]
+    assert "https://www.googleapis.com/auth/calendar" not in google["missing_scopes"]
+    assert google["reauth_hint"] == "pincer google setup"
+
+
 def test_integration_entries_google_disabled_without_creds(tmp_path: Path) -> None:
     settings = MagicMock()
     settings.google_oauth_dir.return_value = tmp_path
@@ -437,3 +454,36 @@ def test_get_integration_tool_usage_filtered_by_prefix(client: TestClient) -> No
     assert usage["total_calls"] == 10
     assert "google__send_email" in usage["by_tool"]
     assert "slack__post_message" not in usage["by_tool"]
+
+
+def test_get_integration_shows_partial_status_and_missing_scopes(client: TestClient, tmp_path: Path) -> None:
+    import json
+
+    (tmp_path / "google_credentials.json").write_text("{}")
+    (tmp_path / "google_token.json").write_text(json.dumps({"scopes": ["https://www.googleapis.com/auth/calendar"]}))
+    settings = MagicMock()
+    settings.google_oauth_dir.return_value = tmp_path
+    with patch("pincer.config.get_settings_relaxed", return_value=settings):
+        data = client.get("/api/integrations/google").json()
+    assert data["status"] == "partial"
+    assert data["enabled_services"] == ["calendar"]
+    assert data["missing_scopes"]
+    assert data["reauth_hint"] == "pincer google setup"
+
+
+def test_integration_entries_google_env_token(tmp_path: Path) -> None:
+    import json
+
+    from pydantic import SecretStr
+
+    settings = MagicMock()
+    settings.google_oauth_dir.return_value = tmp_path  # no files at all
+    settings.google_token_json = SecretStr(
+        json.dumps({"refresh_token": "rt", "scopes": ["https://www.googleapis.com/auth/calendar"]})
+    )
+    with patch("pincer.config.get_settings_relaxed", return_value=settings):
+        entries = _integration_entries()
+    google = next(e for e in entries if "Google" in e["name"])
+    assert google["status"] == "partial"
+    assert google["token_source"] == "env"
+    assert "PINCER_GOOGLE_TOKEN_JSON" in google["reauth_hint"]

@@ -393,3 +393,42 @@ async def test_export_surfaces_names_for_human_review(settings):
     fixture = await export_persona_fixture(settings, "CAname")
     assert "Schneider" in fixture["review_required"]["possible_names"]
     assert "placeholder" in fixture["review_required"]["instruction"].lower()
+
+
+def test_calendar_check_accepts_workspace_token(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from pincer.onboarding import _check_calendar
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    oauth_dir = tmp_path / "oauth"
+    oauth_dir.mkdir()
+    settings = SimpleNamespace(data_dir=tmp_path / "data", google_oauth_dir=lambda: oauth_dir)
+
+    status, message = _check_calendar(settings)
+    assert status is StepStatus.MISSING
+    assert "pincer google setup" in message
+
+    (oauth_dir / "google_workspace_token.json").write_text("{}")
+    status, _ = _check_calendar(settings)
+    assert status is StepStatus.READY
+
+
+def test_calendar_check_accepts_env_token(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from pydantic import SecretStr
+
+    from pincer.onboarding import _check_calendar
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    settings = SimpleNamespace(
+        data_dir=tmp_path / "data",
+        google_oauth_dir=lambda: tmp_path,
+        google_token_json=SecretStr(json.dumps({"refresh_token": "rt"})),
+    )
+
+    status, message = _check_calendar(settings)
+    assert status is StepStatus.READY
+    assert "PINCER_GOOGLE_TOKEN_JSON" in message

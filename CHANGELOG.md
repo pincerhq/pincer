@@ -152,7 +152,45 @@ own number only matches as a whole number.
 On Telegram, a mention after an emoji is now detected (entity offsets are
 UTF-16), and `/command@<bot username>` counts as a mention.
 
+#### Agent-run code no longer inherits `PINCER_*` and other blocked env prefixes
+
+`shell_exec`, `python_exec` and unsandboxed skill scripts now start with the
+host environment minus the MCP sandbox block list: `PINCER_*`, `GOOGLE_*`,
+`AWS_*`, `AZURE_*`, `OPENAI_*`, `ANTHROPIC_*`, `DATABASE_*`, `DB_*`, `SECRET_*`,
+`PRIVATE_*` and `GITHUB_TOKEN`. `SSH_*` / `GPG_*` agent sockets are kept. The
+fal.ai image provider now passes its key to the client instead of exporting
+`FAL_KEY` into the process environment.
+
+> **Behaviour change.** Non-secret config under those prefixes is dropped too —
+> e.g. `AWS_PROFILE`, `AZURE_CONFIG_DIR` and every `PINCER_*` setting are no
+> longer visible to shell commands and scripts the agent runs.
+
+Only the listed prefixes are removed. Every other variable in the process
+environment is still inherited — including `.env` entries loaded into
+`os.environ` for MCP server configs, so a secret such as `GH_TOKEN`,
+`TELEGRAM_BOT_TOKEN` or `BRAVE_API_KEY` without a blocked prefix remains
+visible. This is also defence in depth, not isolation: agent code runs as the
+same user and can still read the parent process's start-up environment
+(`/proc/<ppid>/environ` on Linux, `ps -E` on macOS). Isolating secrets from
+agent code needs a separate uid or container.
+
 ### Added
+
+#### Google OAuth token from `PINCER_GOOGLE_TOKEN_JSON` (#268)
+
+The Google token no longer has to live in the data volume. Set
+`PINCER_GOOGLE_TOKEN_JSON` (token JSON, raw or base64) and it overrides
+`google_workspace_token.json` / `google_token.json` for the Workspace tools,
+the built-in `calendar_*` tools and the standalone Google MCP server. Refreshed
+access tokens stay in memory; nothing is written back. Generate the value with
+`pincer google setup --print-env`, or convert an existing token file with
+`pincer google export-token`. `PINCER_GOOGLE_CREDENTIALS_JSON` optionally holds
+the OAuth client for the consent flow. `/api/integrations` reports
+`token_source` (`env` / `file`).
+
+If Google revokes the refresh token (consent screen left in "Testing" expires it
+after 7 days), re-run `pincer google setup --print-env`, update the secret and
+restart.
 
 #### `pincer telephony reclassify`
 
@@ -273,6 +311,16 @@ mounting a directory. Install the new `remote-skills` extra
     or no auth token, `callSid` and `to` are socket-supplied, and anyone who
     knew the callee's number could otherwise take the briefing of a dial in
     flight; such a setup waits for the dial to return instead.
+- Google Workspace tools were all disabled when the token lacked any scope: a
+  legacy calendar-only `google_token.json` or a token minted before the Meet
+  scopes left only the 3 built-in calendar tools, while `/api/integrations`
+  still showed Google as active. Services the token covers are now enabled
+  individually, `[integrations.google].services` / `enabled` are honoured, and
+  the status is `active` / `partial` / `disabled` with `missing_scopes` and a
+  re-auth hint. `google_credentials.json` is no longer required at runtime (the
+  token carries the client id/secret). Onboarding accepts the Workspace token,
+  and the non-existent `pincer setup-google` hint now reads
+  `pincer google setup` (#268).
 - Outbound calls that were busy, unanswered, failed, cancelled or reached
   voicemail were recorded as completed (or, for late voicemail, as callee
   hang-ups). They now get their own failure codes, which inflated success

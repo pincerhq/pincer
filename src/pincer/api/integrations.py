@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
+_GOOGLE_REAUTH_HINT = "pincer google setup"
+_GOOGLE_ENV_REAUTH_HINT = "pincer google setup --print-env, then update PINCER_GOOGLE_TOKEN_JSON"
+
 # ── List integrations ────────────────────────────────────────────
 
 
@@ -51,18 +54,7 @@ def _integration_entries() -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
 
     # ── Google Workspace ─────────────────────────────────────────────────────
-    try:
-        from pincer.config import get_settings_relaxed
-
-        settings = get_settings_relaxed()
-        oauth_dir = settings.google_oauth_dir()
-        creds = oauth_dir / "google_credentials.json"
-        token = oauth_dir / "google_workspace_token.json"
-        legacy = oauth_dir / "google_token.json"
-        google_active = creds.exists() and (token.exists() or legacy.exists())
-    except Exception:
-        google_active = False
-
+    google = _google_status()
     entries.append(
         {
             "name": "Google Workspace",
@@ -70,9 +62,13 @@ def _integration_entries() -> list[dict[str, Any]]:
             "description": "Gmail · Calendar · Drive · Docs · Sheets · Slides · Tasks · Contacts · Meet",
             "author": "Google",
             "safety_score": 100,
-            "status": "active" if google_active else "disabled",
+            "status": google["status"],
             "permissions": [],
             "tools": ["gmail", "calendar", "drive", "docs", "sheets", "slides", "tasks", "contacts", "meet"],
+            "enabled_services": google["enabled_services"],
+            "missing_scopes": google["missing_scopes"],
+            "token_source": google["source"],
+            "reauth_hint": _reauth_hint(google),
             "source": "integration",
             "slug": "google",
         }
@@ -207,17 +203,21 @@ def _slack_categories() -> list[dict[str, Any]]:
     return [{"name": n, "tools": t} for n, m, f in specs if (t := _load_category(pkg, m, f))]
 
 
-def _google_active() -> bool:
+def _google_status() -> dict[str, Any]:
+    """Google status from the token's actual scopes: active / partial / disabled."""
     try:
-        from pincer.config import get_settings_relaxed
+        from pincer.integrations.google import google_status
 
-        settings = get_settings_relaxed()
-        d = settings.google_oauth_dir()
-        return (d / "google_credentials.json").exists() and (
-            (d / "google_workspace_token.json").exists() or (d / "google_token.json").exists()
-        )
+        return google_status()
     except Exception:
-        return False
+        logger.debug("Could not determine Google Workspace status", exc_info=True)
+        return {"status": "disabled", "enabled_services": [], "missing_scopes": [], "source": None}
+
+
+def _reauth_hint(state: dict[str, Any]) -> str:
+    if state.get("source") == "env":
+        return _GOOGLE_ENV_REAUTH_HINT
+    return _GOOGLE_REAUTH_HINT
 
 
 def _slack_active() -> bool:
@@ -229,6 +229,10 @@ def _slack_active() -> bool:
         return False
 
 
+def _slack_status() -> dict[str, Any]:
+    return {"status": "active" if _slack_active() else "disabled"}
+
+
 _CATALOG: dict[str, dict[str, Any]] = {
     "google": {
         "name": "Google Workspace",
@@ -236,7 +240,7 @@ _CATALOG: dict[str, dict[str, Any]] = {
         "description": "Gmail · Calendar · Drive · Docs · Sheets · Slides · Tasks · Contacts · Meet",
         "prefix": "google__",
         "categories_fn": _google_categories,
-        "active_fn": _google_active,
+        "status_fn": _google_status,
     },
     "slack": {
         "name": "Slack",
@@ -244,7 +248,7 @@ _CATALOG: dict[str, dict[str, Any]] = {
         "description": "Channels · Messages · Files · Users · Reactions · Reminders",
         "prefix": "slack__",
         "categories_fn": _slack_categories,
-        "active_fn": _slack_active,
+        "status_fn": _slack_status,
     },
 }
 
@@ -269,13 +273,23 @@ async def get_integration(slug: str) -> dict[str, Any]:
     meta = _CATALOG[slug]
     categories = meta["categories_fn"]()
     usage = await _tool_usage(meta["prefix"])
+    state = meta["status_fn"]()
+    extra: dict[str, Any] = {}
+    if "missing_scopes" in state:
+        extra = {
+            "enabled_services": state["enabled_services"],
+            "missing_scopes": state["missing_scopes"],
+            "token_source": state["source"],
+            "reauth_hint": _reauth_hint(state),
+        }
 
     return {
         "slug": slug,
         "name": meta["name"],
         "author": meta["author"],
         "description": meta["description"],
-        "status": "active" if meta["active_fn"]() else "disabled",
+        "status": state["status"],
+        **extra,
         "tool_count": sum(len(c["tools"]) for c in categories),
         "categories": categories,
         "usage": {

@@ -17,6 +17,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from pincer.tools.sandbox import scrubbed_env
+
 logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_LENGTH = 8000
@@ -93,10 +95,8 @@ async def python_exec(code: str = "", timeout: int = 30) -> str:
         with open(script_path, "w") as f:
             f.write(full_code)
 
-        env = os.environ.copy()
+        env = scrubbed_env()
         env["_PINCER_PLOT_DIR"] = plot_dir
-        env.pop("AWS_ACCESS_KEY_ID", None)
-        env.pop("AWS_SECRET_ACCESS_KEY", None)
 
         try:
             proc = await asyncio.create_subprocess_exec(

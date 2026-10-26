@@ -119,16 +119,23 @@ def _check_webhook(settings: Settings | Any) -> tuple[StepStatus, str]:
 
 def _check_calendar(settings: Settings | Any) -> tuple[StepStatus, str]:
     """Google Calendar OAuth — appointment scheduling is dead without it."""
+    import contextlib
     from pathlib import Path
 
-    token_paths = [
-        Path.home() / ".pincer" / "google_token.json",
-        Path(str(getattr(settings, "data_dir", "data"))) / "google_token.json",
-    ]
-    for path in token_paths:
-        if path.exists():
-            return StepStatus.READY, f"OAuth token present ({path})"
-    return StepStatus.MISSING, "no Google OAuth token found — run `pincer setup-google`"
+    from pincer.integrations.google.token_source import TOKEN_ENV, env_token_info
+
+    if env_token_info(settings) is not None:
+        return StepStatus.READY, f"OAuth token from {TOKEN_ENV}"
+
+    dirs = [Path.home() / ".pincer", Path(str(getattr(settings, "data_dir", "data")))]
+    with contextlib.suppress(Exception):
+        dirs.insert(0, Path(settings.google_oauth_dir()))
+    for directory in dirs:
+        for name in ("google_workspace_token.json", "google_token.json"):
+            path = directory / name
+            if path.exists():
+                return StepStatus.READY, f"OAuth token present ({path})"
+    return StepStatus.MISSING, "no Google OAuth token found — run `pincer google setup`"
 
 
 def _check_voice(settings: Settings | Any) -> tuple[StepStatus, str]:
@@ -268,7 +275,7 @@ STEPS: tuple[OnboardingStep, ...] = (
         title="Google Calendar OAuth completed",
         minutes=10,
         automated=False,
-        detail="`pincer setup-google`, customer signs in with their business account",
+        detail="`pincer google setup`, customer signs in with their business account",
         automation_note="Cannot be fully automated (the customer must consent), but the consent URL can be "
         "emailed ahead of the session instead of walked through live.",
         check=_check_calendar,
