@@ -322,6 +322,20 @@ async def test_transfer_call_failure_leaves_call_ours(mock_settings):
     assert "transferring" not in state.metadata
 
 
+async def test_transfer_call_refuses_a_connection_override_fragment(mock_settings):
+    """`#rp=…`/`#rt=…` on the action URL would let Twilio execute a copy of a
+    dial result after it executed the first (the replay answers assume it
+    never does), and the dial token appended after a fragment never reaches us."""
+    engine = ConversationRelayEngine(mock_settings)
+    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls, pytest.raises(ValueError, match="connection override"):
+        await engine.transfer_call(
+            "CAx", "+4930123", action_url="https://example.com/api/apps/twilio/transfer-result#rp=all"
+        )
+    client_cls.return_value.calls.return_value.update.assert_not_called()
+    assert "transferring" not in state.metadata
+
+
 async def test_redirect_failure_keeps_the_dial_record(mock_settings):
     """The redirect can raise after Twilio applied it, and then this dial's
     result still arrives: its record stays, marked, while the call is ours again."""

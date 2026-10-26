@@ -336,15 +336,19 @@ async def voice_transfer_result(request: Request) -> Response:
     call is not marked transferring: the redirect can raise after Twilio
     applied it, and then Twilio is waiting on this answer.
 
-    Why the replay depends on the relay: under Twilio's default connection
-    overrides (ct=5000ms, rt=15000ms, tt=15000ms, rc=1, rp=ct; see
+    Why an empty answer is safe there: Twilio executes at most one action
+    response per <Dial>. The empty answer is given only when this dial's
+    reconnected relay has connected (proof that Twilio executed our answer for
+    it) or a later dial exists (which needed that answer executed first), so
+    Twilio will not execute it. No other TwiML would be safer: if executed, any
+    of it would replace the live relay. A retry that Twilio does execute comes
+    before any relay connected, and the per-call lock puts it behind the first
+    delivery, so it gets the recorded reconnect. That holds under Twilio's
+    default connection overrides (ct=5000ms, rt=15000ms, tt=15000ms, rc=1,
+    rp=ct: a retry only after a failed TCP connect or TLS handshake; see
     https://www.twilio.com/docs/usage/webhooks/webhooks-connection-overrides)
-    Twilio retries only when the TCP connect or TLS handshake failed, so a
-    retry it will execute means the first attempt never reached us and no
-    relay can have connected yet. Once one has, Twilio has executed an answer
-    for that dial and executes no other: any later copy is a replay, and an
-    empty response, which would end a live call if Twilio executed it, reaches
-    no one who acts on it."""
+    and under read-timeout retries or a proxy that re-sends the POST alike.
+    `transfer_call` still refuses an action URL with overrides (``#…``)."""
     if await _authenticate(request) is None:
         return _forbidden()
     form = await request.form()

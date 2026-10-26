@@ -927,6 +927,18 @@ The tool executed but returned an error. Check logs for the exact cause:
 
 4. **Twilio Debugger** — Check Twilio Console > Monitor > Logs for call attempts and any webhook or API errors.
 
+### Transfer to a human fails at once with "connection override"
+
+`PINCER_VOICE_WEBHOOK_BASE_URL` must not carry a `#` fragment, so no Twilio
+[connection overrides](https://www.twilio.com/docs/usage/webhooks/webhooks-connection-overrides)
+(`#rc=…`, `#rt=…`, `#rp=…`). The receptionist's `<Dial>` result URL is built
+from it, and the transfer is refused (the caller is offered message-taking
+instead) when that URL has a fragment: the dial token Pincer appends would sit
+inside the fragment, which Twilio never sends, and read-timeout retries would
+break how `/api/apps/twilio/transfer-result` answers repeated deliveries of a
+dial result. Twilio's defaults (retry once, only when the connection itself
+failed) are what that endpoint is built for.
+
 ---
 
 ## Database Tables

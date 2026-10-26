@@ -293,7 +293,15 @@ class VoiceEngine(ABC):
 
         Each dial gets a token (`DIAL_ID_KEY`) appended to ``action_url``, so
         /transfer-result can tell this dial's result from a late copy of an
-        earlier one's."""
+        earlier one's.
+
+        Raises ValueError for an ``action_url`` with a ``#`` fragment, before
+        anything is marked: that is where Twilio connection overrides go, and
+        read-timeout retries (``#rp=all``, ``#rt=…``) would let Twilio execute a
+        copy of a dial result after the first, which /transfer-result's replay
+        answers rule out. The dial token appended after it would be lost too."""
+        if "#" in action_url:
+            raise ValueError(f"transfer action_url must not carry a '#' connection override: {action_url!r}")
         dial_id = uuid.uuid4().hex
         if action_url:
             action_url = f"{action_url}{'&' if '?' in action_url else '?'}{urlencode({'dial': dial_id})}"
