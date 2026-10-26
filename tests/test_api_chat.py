@@ -172,9 +172,28 @@ def test_a_conversation_under_an_api_key_belongs_to_the_visitor():
     assert _session_key(client) == f"web:{UUID}:{CONVERSATION}"
 
 
+def test_conversation_id_case_does_not_split_the_session(authed_app):
+    """Upper- and lower-case spellings of one id are one conversation."""
+    client = _authed_client(authed_app)
+    upper = "2222AAAA-2222-4222-8222-222222222222"
+    keys = []
+    for conversation_id in (upper, upper.lower()):
+        body = {"text": "hi", "conversation_id": conversation_id}
+        assert client.post("/api/chat/message", json=body, headers=authed_app.jwt_headers).status_code == 200
+        keys.append(_session_key(client))
+        with client.stream("POST", "/api/chat/stream", json=body, headers=authed_app.jwt_headers) as r:
+            assert r.status_code == 200
+            b"".join(r.iter_raw())
+        keys.append(client.app.state.agent.stream_calls[-1][1]["session_key"])
+    assert len(keys) == 4
+    assert set(keys) == {"web:alice:2222aaaa-2222-4222-8222-222222222222"}
+
+
 def test_a_malformed_conversation_id_is_rejected():
+    """Only the bare hyphenated form is accepted; the braced and urn
+    spellings `uuid.UUID` would also parse are not."""
     client = _make_client()
-    for conversation_id in ("not-a-uuid", f"{CONVERSATION}:x", ""):
+    for conversation_id in ("not-a-uuid", f"{CONVERSATION}:x", "", f"{{{CONVERSATION}}}", f"urn:uuid:{CONVERSATION}"):
         r = client.post(
             "/api/chat/message",
             json={"text": "hi", "conversation_id": conversation_id},

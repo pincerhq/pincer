@@ -26,6 +26,11 @@ def _session_key(user_id: str, channel: str) -> str:
     return f"{channel}:{user_id}"
 
 
+def conversation_key(user_id: str, channel: str, conversation_id: str) -> str:
+    """One conversation of a user's, nested under their channel session."""
+    return f"{_session_key(user_id, channel)}:{conversation_id}"
+
+
 # Metadata keys used by the first-session onboarding flow.
 ONBOARDING_COMPLETE_KEY = "onboarding_complete"
 ONBOARDING_PROMPT_SENT_KEY = "onboarding_prompt_sent"
