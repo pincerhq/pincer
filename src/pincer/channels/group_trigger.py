@@ -20,12 +20,6 @@ from __future__ import annotations
 import re
 from functools import lru_cache
 
-
-def parse_group_triggers(raw: str) -> tuple[str, ...]:
-    """Split a comma-separated trigger setting into trimmed, non-empty entries."""
-    return tuple(entry for part in raw.split(",") if (entry := part.strip()))
-
-
 # Letters of scripts written without spaces between words. Python's Unicode
 # ``\w`` includes them, so a plain ``(?<!\w)`` boundary would never match a
 # trigger embedded in such text.
@@ -35,16 +29,24 @@ _NO_SPACE_SCRIPTS = (
     "\u1100-\u11ff"  # Hangul Jamo
     "\u1780-\u17ff"  # Khmer
     "\u2e80-\u2fdf"  # CJK radicals, Kangxi radicals
+    "\u3005-\u3007"  # Iteration and closing marks, ideographic zero (々 〆 〇)
+    "\u303b-\u303c"  # Vertical ideographic iteration mark, masu mark (〻 〼)
     "\u3040-\u31ff"  # Hiragana, Katakana, Bopomofo, Hangul compatibility Jamo
     "\u3400-\u4dbf"  # CJK Extension A
     "\u4e00-\u9fff"  # CJK Unified Ideographs
-    "\uac00-\ud7af"  # Hangul syllables
+    "\ua960-\ua97f"  # Hangul Jamo Extended-A
+    "\uac00-\ud7ff"  # Hangul syllables, Hangul Jamo Extended-B
     "\uf900-\ufaff"  # CJK compatibility ideographs
-    "\uff66-\uff9f"  # Halfwidth Katakana
-    "\U00020000-\U0003134f"  # CJK Extensions B-H
+    "\uff66-\uffdc"  # Halfwidth Katakana, halfwidth Hangul
+    "\U00020000-\U000323af"  # CJK Extensions B-H
 )
 # A word character of a space-separated script (\w minus the scripts above).
 _SPACED_WORD_CHAR = rf"[^\W{_NO_SPACE_SCRIPTS}]"
+
+
+def parse_group_triggers(raw: str) -> tuple[str, ...]:
+    """Split a comma-separated trigger setting into trimmed, non-empty entries."""
+    return tuple(entry for part in raw.split(",") if (entry := part.strip()))
 
 
 @lru_cache(maxsize=32)

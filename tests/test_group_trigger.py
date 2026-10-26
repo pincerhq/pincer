@@ -65,6 +65,11 @@ def test_parse_group_triggers(raw: str, expected: tuple[str, ...]) -> None:
         # letters of space-separated scripts
         ("钳子", "请钳子帮忙", True),
         ("ペンチ", "ペンチさん、手伝って", True),
+        ("ペンチ", "時々ペンチに聞いて", True),
+        ("pincer", "我々pincerに聞く", True),
+        ("钳子", "\U00031350钳子", True),
+        ("핀서", "\ua960핀서", True),
+        ("핀서", "\uffa0핀서", True),
         ("คีม", "ช่วยด้วยคีมหน่อย", True),
         ("핀서", "핀서야 도와줘", True),
         ("pincer", "请pincer帮忙", True),
