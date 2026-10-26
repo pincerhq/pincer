@@ -27,12 +27,14 @@ class SessionRepository(BaseRepository[ChatSession, str]):
 
         The fallback lookup for a session stored under the old
         `channel:user_id` key, before cross-channel identities existed.
-        Sessions whose id starts with `exclude_prefix` (matched literally,
-        `_` and `%` included) are skipped.
+        Sessions whose id starts with `exclude_prefix` are skipped. The
+        prefix is compared exactly, case included, on both dialects: a
+        `substr` equality rather than LIKE, which has wildcards and on SQLite
+        folds ASCII case.
         """
         stmt = select(ChatSession).where(col(ChatSession.user_id) == user_id, col(ChatSession.channel) == channel)
         if exclude_prefix is not None:
-            stmt = stmt.where(~col(ChatSession.session_id).startswith(exclude_prefix, autoescape=True))
+            stmt = stmt.where(func.substr(col(ChatSession.session_id), 1, len(exclude_prefix)) != exclude_prefix)
         stmt = stmt.order_by(col(ChatSession.updated_at).desc()).limit(1)
         return (await self.session.exec(stmt)).first()
 

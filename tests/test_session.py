@@ -8,6 +8,7 @@ import pytest
 
 from pincer.core.session import ONBOARDING_PROMPT_SENT_KEY, SessionManager, conversation_key
 from pincer.llm.base import LLMMessage, MessageRole
+from pincer.services.sessions import SessionService
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -91,3 +92,118 @@ async def test_close_persists_every_cached_session(tmp_path: Path):
             assert reloaded.metadata.get(ONBOARDING_PROMPT_SENT_KEY) == "true", user
     finally:
         await again.close()
+
+
+def _on_save(sm: SessionManager, hook):
+    """Run `hook(session_id)` inside the store's save, before the write,
+    to stand in for a request that lands while a save is awaited."""
+    store = sm._store
+    real_save = store.save
+
+    async def save(**values):
+        await hook(values["session_id"])
+        await real_save(**values)
+
+    store.save = save  # type: ignore[method-assign]
+
+
+async def test_close_survives_a_cache_hit_during_its_save(tmp_path: Path):
+    sm = SessionManager(tmp_path / "test.db")
+    await sm.initialize()
+    for user in ("a", "b"):
+        (await sm.get_or_create(user, "web")).mark_onboarding_prompt_sent()
+    hit = []
+
+    async def hit_it_again(session_id: str) -> None:
+        # The first save is web:a's; a hit moves it behind web:b.
+        if not hit:
+            hit.append(session_id)
+            await sm.get_or_create(session_id.removeprefix("web:"), "web")
+
+    _on_save(sm, hit_it_again)
+    await sm.close()
+
+    again = SessionManager(tmp_path / "test.db")
+    await again.initialize()
+    try:
+        for user in ("a", "b"):
+            reloaded = await again.get_or_create(user, "web")
+            assert reloaded.metadata.get(ONBOARDING_PROMPT_SENT_KEY) == "true", user
+    finally:
+        await again.close()
+
+
+async def test_a_hit_during_the_eviction_save_keeps_the_session_cached(capped: SessionManager):
+    """A request for the session being evicted, while its save is awaited,
+    gets the cached object, not the row as it was before the write."""
+    a = await capped.get_or_create("a", "web")
+    a.mark_onboarding_prompt_sent()  # in memory only, until the eviction saves it
+    await capped.get_or_create("b", "web")
+    hits = []
+
+    async def hit_a(session_id: str) -> None:
+        if session_id == "web:a" and not hits:
+            hits.append(await capped.get_or_create("a", "web"))
+
+    _on_save(capped, hit_a)
+    await capped.get_or_create("c", "web")
+
+    assert hits[0] is a, "the hit during the save loaded a second copy of web:a"
+    assert capped._cache.get("web:a") is a
+    assert list(capped._cache) == ["web:c", "web:a"]
+
+
+async def test_a_failed_eviction_save_keeps_the_session_and_fails_nothing(
+    capped: SessionManager, caplog: pytest.LogCaptureFixture
+):
+    a = await capped.get_or_create("a", "web")
+    a.mark_onboarding_prompt_sent()
+    await capped.get_or_create("b", "web")
+    failures = []
+
+    async def fail_a_once(session_id: str) -> None:
+        if session_id == "web:a" and not failures:
+            failures.append(session_id)
+            raise OSError("database is locked")
+
+    _on_save(capped, fail_a_once)
+    c = await capped.get_or_create("c", "web")  # the request for c still succeeds
+
+    assert c.session_id == "web:c"
+    assert list(capped._cache) == ["web:a", "web:b", "web:c"]  # over the cap, a kept
+    assert capped._cache["web:a"] is a
+    assert "web:a" in caplog.text
+
+    await capped.get_or_create("d", "web")  # a later eviction succeeds
+
+    assert len(capped._cache) == 2
+    reloaded = await capped.get_or_create("a", "web")
+    assert reloaded.metadata.get(ONBOARDING_PROMPT_SENT_KEY) == "true"
+
+
+async def _stored(tmp_path: Path, session_id: str):
+    service = await SessionService.for_path(tmp_path / "test.db")
+    return await service.load(session_id, user_id="", channel="", legacy_fallback=False)
+
+
+async def test_an_unchanged_session_leaves_no_row_when_evicted(tmp_path: Path):
+    """Loaded for a look and never changed: evicting it writes nothing."""
+    sm = SessionManager(tmp_path / "test.db", max_cached=1)
+    await sm.initialize()
+    try:
+        await sm.get_or_create("a", "web")
+        await sm.get_or_create("b", "web")
+        assert "web:a" not in sm._cache
+
+        assert await _stored(tmp_path, "web:a") is None
+    finally:
+        await sm.close()
+
+
+async def test_close_leaves_no_row_for_an_unchanged_session(tmp_path: Path):
+    sm = SessionManager(tmp_path / "test.db")
+    await sm.initialize()
+    await sm.get_or_create("a", "web")
+    await sm.close()
+
+    assert await _stored(tmp_path, "web:a") is None

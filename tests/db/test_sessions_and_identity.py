@@ -137,6 +137,17 @@ async def test_the_nested_exclusion_escapes_like_wildcards(url):
     assert row["session_id"] == "web:uX1:thread"
 
 
+@pytest.mark.parametrize("spelling", ["WEB:U", "web:U"])
+async def test_the_nested_exclusion_is_case_sensitive(url, spelling):
+    """Only `web:u:` itself is a conversation of `web:u`; a prefix that
+    differs in case is not, on either dialect (SQLite's LIKE folds case)."""
+    await _store_session(url, f"{spelling}:{_CONVERSATION}", user_id="u", channel="web")
+
+    row = await SessionService(url).load("web:u", user_id="u", channel="web")
+    assert row is not None, f"{spelling}:… was excluded as if it were web:u:…"
+    assert row["session_id"] == f"{spelling}:{_CONVERSATION}"
+
+
 async def test_an_unknown_session_is_none(url):
     assert await SessionService(url).load("unified:nobody", user_id="nobody", channel="telegram") is None
 
