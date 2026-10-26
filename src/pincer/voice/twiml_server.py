@@ -381,7 +381,13 @@ async def voice_transfer_result(request: Request) -> Response:
             # The call is registered but will never get media if we answer 500
             # (Twilio drops the caller): finalize it so it does not hold a
             # capacity slot until the stuck-call reaper pages.
+            # Recorded as failed with its own code: the session sits in a benign
+            # phase, so finalizing alone would count the hang-up as a completed call.
+            from pincer.observability.failure_codes import FailureCode
+            from pincer.voice.engine import set_end_cause
+
             logger.exception("Transfer result [%s]: recovery failed — finalizing the recovered call", call_sid)
+            set_end_cause(recovered, FailureCode.TRANSFER_RECOVERY_FAILED)
             await _engine.finish_remote_ended(call_sid, reason="transfer_recovery_failed")
             return hangup
 

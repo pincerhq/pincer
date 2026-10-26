@@ -65,6 +65,9 @@ class FailureCode(StrEnum):
     # ── Operational ────────────────────────────────────────────────
     SHUTDOWN = "shutdown"
     STUCK = "stuck"
+    # A caller back from a failed transfer whose call state was lost (restart
+    # while the target rang) could not be reconnected and was hung up.
+    TRANSFER_RECOVERY_FAILED = "transfer_recovery_failed"
     INTERNAL = "internal"
     UNKNOWN = "unknown"
 
@@ -159,6 +162,7 @@ DESCRIPTIONS: dict[FailureCode, str] = {
     FailureCode.BUSY_CAPACITY: "Inbound call declined: concurrent-call capacity reached",
     FailureCode.SHUTDOWN: "Call ended by a deploy/restart drain",
     FailureCode.STUCK: "Call exceeded max duration and had to be reaped",
+    FailureCode.TRANSFER_RECOVERY_FAILED: "Caller back from a failed transfer could not be reconnected (state lost)",
     FailureCode.INTERNAL: "Unhandled internal error",
     FailureCode.UNKNOWN: "Failed for a reason we do not yet classify",
 }

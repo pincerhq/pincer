@@ -46,6 +46,8 @@ from .settings import apply_in_call_tool_defaults, apply_test_paths
 
 BERLIN = ZoneInfo("Europe/Berlin")
 CALL = "CA_inbound"
+# A call whose state was lost while its transfer target rang (restart/redeploy)
+LOST_CALL = "CAlost"
 CALLER = "+4917212345678"
 OWNER = "777"
 # A Monday 09:00 local, inside hours (profile below)
@@ -1121,6 +1123,72 @@ async def test_lost_transfer_state_resumes_session_in_take_message():
         'welcomeGreeting="Leider ist gerade niemand erreichbar. Ich nehme gern eine Nachricht auf. Wie ist Ihr Name?"'
         in response.text
     )
+
+
+def _lost_state_callback() -> dict[str, str]:
+    """A lost-state dial callback with the caller still on the line."""
+    return {"CallSid": LOST_CALL, "From": CALLER, "DialCallStatus": "no-answer", "CallStatus": "in-progress"}
+
+
+def _finalized_states(h: Harness) -> list:
+    """The CallState of every call the channel finalizes from here on."""
+    finalized: list = []
+    original = h.engine._on_call_end_callback
+
+    async def recording(call_sid, state):
+        await original(call_sid, state)
+        finalized.append(state)
+
+    h.engine.set_on_call_end(recording)
+    return finalized
+
+
+def _closed_traces(monkeypatch) -> list[tuple[str, str, str]]:
+    """Record each telemetry.call_ended (the trace close) as (call_sid, status, failure_code)."""
+    from pincer.voice.telemetry import hooks
+
+    closed: list[tuple[str, str, str]] = []
+
+    async def record(call_sid, *, status, failure_code="", **_):
+        closed.append((call_sid, status, failure_code))
+
+    monkeypatch.setattr(hooks, "call_ended", record)
+    return closed
+
+
+async def _without_other_calls(h: Harness) -> list:
+    """End the harness call, so the capacity count starts at 0, then track finalized calls."""
+    await h.engine.finish_remote_ended(CALL)
+    return _finalized_states(h)
+
+
+def _break_failed_transfer_step(monkeypatch) -> None:
+    async def broken(self, result):
+        raise KeyError("transfer_failed")
+
+    monkeypatch.setattr(sess.ReceptionSession, "on_transfer_failed", broken)
+
+
+async def test_lost_transfer_state_recovery_failure_frees_the_call_as_failed(monkeypatch):
+    """Restart while the target rang, then the recovered session's failed-transfer
+    step raises: the caller is hung up, the call is gone, its slot is free, and it
+    is recorded as a failed call, not as a clean completed one."""
+    from pincer.voice import twiml_server
+
+    h = await _start(settings=_transfer_settings())
+    finalized = await _without_other_calls(h)
+    closed = _closed_traces(monkeypatch)
+    _break_failed_transfer_step(monkeypatch)
+    async with _async_client(h) as client:
+        assert twiml_server._active_inbound_count() == 0
+        response = await client.post("/api/apps/twilio/transfer-result", data=_lost_state_callback())
+    assert response.status_code == 200
+    assert response.text == "<Response><Hangup/></Response>"
+    assert h.engine.get_call_state(LOST_CALL) is None
+    assert twiml_server._active_inbound_count() == 0
+    # the recovered call was registered and then finalized: the zeros above are not vacuous
+    assert [(s.call_sid, s.metadata["failure_code"]) for s in finalized] == [(LOST_CALL, "transfer_recovery_failed")]
+    assert closed == [(LOST_CALL, "failed", "transfer_recovery_failed")]
 
 
 def _count_transfer_results(monkeypatch) -> list[str]:

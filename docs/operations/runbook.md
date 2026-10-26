@@ -316,6 +316,10 @@ docker compose -f docker-compose.prod.yml logs pincer | grep <call_sid> | grep -
   hit the `timeLimit`; raise it if staff calls legitimately run longer.
 - `busy` / `no-answer` / `failed` is expected to fall back to message-taking;
   the caller should have heard the apology.
+- `failure_code=transfer_recovery_failed`: the dial result arrived after a
+  restart lost the call's state, and re-registering the caller for
+  message-taking failed, so they were hung up with no message taken. Ours to
+  fix: the `recovery failed` exception in the log for that `call_sid` says why.
 
 ---
 
