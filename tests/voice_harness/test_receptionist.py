@@ -1069,40 +1069,6 @@ def test_transfer_result_without_state_reconnects_live_caller():
     engine.on_call_start.assert_not_called()
 
 
-def test_transfer_result_without_state_recovery_failure_finalizes_registered_call():
-    """The call is registered before steps that can raise: if the session's
-    transfer handling fails, the just-registered call must be finalized (not
-    left in _active_calls with no media, holding a capacity slot) and the
-    caller hung up cleanly instead of a 500."""
-    from unittest.mock import AsyncMock
-
-    from pincer.voice import twiml_server
-
-    settings = _settings()
-    settings.voice_webhook_validate = False
-    settings.voice_engine = "conversation_relay"
-    settings.twilio_auth_token = MagicMock()
-    settings.twilio_auth_token.get_secret_value.return_value = ""
-    engine = AsyncMock()
-    engine.get_call_state = MagicMock(return_value=None)
-    engine.was_recently_ended = MagicMock(return_value=False)
-    broken = MagicMock()
-    broken.on_transfer_failed = AsyncMock(side_effect=KeyError("transfer_failed"))
-    twiml_server.set_transfer_session_resolver(lambda _sid: broken)
-    try:
-        client = _webhook_client(settings, engine)
-        response = client.post(
-            "/api/apps/twilio/transfer-result",
-            data={"CallSid": "CAt", "DialCallStatus": "busy", "CallStatus": "in-progress", "From": CALLER},
-        )
-    finally:
-        twiml_server.set_transfer_session_resolver(None)
-    assert response.status_code == 200
-    assert response.text == "<Response><Hangup/></Response>"
-    engine.on_call_start.assert_awaited_once()
-    engine.finish_remote_ended.assert_awaited_once_with("CAt", reason="transfer_recovery_failed")
-
-
 async def test_lost_transfer_state_resumes_session_in_take_message():
     """Restart while the target rang: the recovered call's new session must
     pick up message-taking (name question), not greet the caller again."""
@@ -1188,6 +1154,74 @@ async def test_lost_transfer_state_recovery_failure_frees_the_call_as_failed(mon
     assert twiml_server._active_inbound_count() == 0
     # the recovered call was registered and then finalized: the zeros above are not vacuous
     assert [(s.call_sid, s.metadata["failure_code"]) for s in finalized] == [(LOST_CALL, "transfer_recovery_failed")]
+    assert closed == [(LOST_CALL, "failed", "transfer_recovery_failed")]
+
+
+async def test_lost_transfer_state_registration_failure_finalizes_the_call(monkeypatch):
+    """Registration itself raises after the call was added to the active calls:
+    the caller gets a clean hang-up (not a 500), and the half-registered call is
+    finalized as failed instead of holding a slot until the reaper pages."""
+    from pincer.voice import analytics, twiml_server
+
+    def broken(state, method):
+        raise RuntimeError("accumulator unavailable")
+
+    h = await _start(settings=_transfer_settings())
+    finalized = await _without_other_calls(h)
+    closed = _closed_traces(monkeypatch)
+    monkeypatch.setattr(analytics, "ensure_accumulator", broken)
+    async with _async_client(h) as client:
+        assert twiml_server._active_inbound_count() == 0
+        response = await client.post("/api/apps/twilio/transfer-result", data=_lost_state_callback())
+    assert response.status_code == 200
+    assert response.text == "<Response><Hangup/></Response>"
+    assert h.engine.get_call_state(LOST_CALL) is None
+    assert twiml_server._active_inbound_count() == 0
+    assert [(s.call_sid, s.metadata["failure_code"]) for s in finalized] == [(LOST_CALL, "transfer_recovery_failed")]
+    assert closed == [(LOST_CALL, "failed", "transfer_recovery_failed")]
+
+
+async def test_lost_transfer_state_finalize_failure_still_hangs_up(monkeypatch):
+    """Finalizing the failed recovery raises too: the handler still answers with
+    a hang-up, not a 500, and the call's trace is closed as failed."""
+    from pincer.voice import twiml_server
+
+    async def broken_finish(call_sid, reason=""):
+        raise RuntimeError("end-of-call callback failed")
+
+    h = await _start(settings=_transfer_settings())
+    await _without_other_calls(h)
+    closed = _closed_traces(monkeypatch)
+    _break_failed_transfer_step(monkeypatch)
+    monkeypatch.setattr(h.engine, "finish_remote_ended", broken_finish)
+    async with _async_client(h) as client:
+        response = await client.post("/api/apps/twilio/transfer-result", data=_lost_state_callback())
+        # registered before it failed: the stuck-call reaper is the backstop
+        assert twiml_server._active_inbound_count() == 1
+    assert response.status_code == 200
+    assert response.text == "<Response><Hangup/></Response>"
+    assert closed == [(LOST_CALL, "failed", "transfer_recovery_failed")]
+
+
+async def test_lost_transfer_state_unregistered_failure_closes_the_trace(monkeypatch):
+    """Registration raises before anything was registered: nothing to finalize,
+    but the trace opened for the call is still closed as failed."""
+    from pincer.voice import twiml_server
+
+    async def broken_start(*args, **kwargs):
+        raise RuntimeError("registration failed")
+
+    h = await _start(settings=_transfer_settings())
+    finalized = await _without_other_calls(h)
+    closed = _closed_traces(monkeypatch)
+    monkeypatch.setattr(h.engine, "on_call_start", broken_start)
+    async with _async_client(h) as client:
+        assert twiml_server._active_inbound_count() == 0
+        response = await client.post("/api/apps/twilio/transfer-result", data=_lost_state_callback())
+    assert response.status_code == 200
+    assert response.text == "<Response><Hangup/></Response>"
+    assert twiml_server._active_inbound_count() == 0
+    assert finalized == []
     assert closed == [(LOST_CALL, "failed", "transfer_recovery_failed")]
 
 

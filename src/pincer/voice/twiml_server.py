@@ -357,8 +357,10 @@ async def voice_transfer_result(request: Request) -> Response:
             engine=str(getattr(_settings, "voice_engine", "") or ""),
             language=language,
         )
-        recovered = await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=language)
         try:
+            # No capacity, allowlist or blocklist check, on purpose: this caller
+            # was already admitted by /webhook before the transfer started.
+            recovered = await _engine.on_call_start(call_sid, caller, CallDirection.INBOUND, language=language)
             # The channel started a fresh receptionist session (RECEPTION_INTENT);
             # resume it in TAKE_MESSAGE, as a failed transfer does, so the first
             # turn asks for the name instead of greeting the caller again.
@@ -378,17 +380,11 @@ async def voice_transfer_result(request: Request) -> Response:
                 }
             return response
         except Exception:
-            # The call is registered but will never get media if we answer 500
-            # (Twilio drops the caller): finalize it so it does not hold a
-            # capacity slot until the stuck-call reaper pages.
-            # Recorded as failed with its own code: the session sits in a benign
-            # phase, so finalizing alone would count the hang-up as a completed call.
-            from pincer.observability.failure_codes import FailureCode
-            from pincer.voice.engine import set_end_cause
-
+            # Twilio drops the caller if we answer 500, and a registered call
+            # that never gets media holds a capacity slot until the stuck-call
+            # reaper pages: hang up and finalize whatever got registered.
             logger.exception("Transfer result [%s]: recovery failed — finalizing the recovered call", call_sid)
-            set_end_cause(recovered, FailureCode.TRANSFER_RECOVERY_FAILED)
-            await _engine.finish_remote_ended(call_sid, reason="transfer_recovery_failed")
+            await _finalize_failed_recovery(call_sid)
             return hangup
 
     from pincer.voice.telemetry import hooks as telemetry
@@ -475,6 +471,32 @@ async def _resume_failed_transfer(call_sid: str, session: Any, dial_status: str,
         # and the reaper would apply the long transfer allowance.
         await _engine.end_transfer(call_sid)
     return greeting, _reconnect_after_transfer(call_sid, language, greeting)
+
+
+async def _finalize_failed_recovery(call_sid: str) -> None:
+    """A lost-state call whose recovery raised: finalize it as a failed call
+    with its own code (its session sits in a benign phase, so a plain finalize
+    would count the hang-up as a completed call). Never raises, so the handler
+    still answers with a hang-up. The trace opened by `inbound_webhook` is
+    closed here when the end-of-call path did not close it: nothing was
+    registered, or finalizing raised."""
+    from pincer.observability.failure_codes import FailureCode
+    from pincer.voice.engine import set_end_cause
+    from pincer.voice.telemetry import hooks as telemetry
+    from pincer.voice.telemetry.outcomes import STATUS_FAILED
+
+    assert _engine is not None
+    code = FailureCode.TRANSFER_RECOVERY_FAILED
+    state = _engine.get_call_state(call_sid)
+    if state is not None:
+        set_end_cause(state, code)
+        try:
+            await _engine.finish_remote_ended(call_sid, reason=str(code))
+            return
+        except Exception:
+            # The call may stay registered: the stuck-call reaper is the backstop.
+            logger.exception("Transfer result [%s]: finalizing the failed recovery failed", call_sid)
+    await telemetry.call_ended(call_sid, status=STATUS_FAILED, failure_code=str(code), termination_reason=str(code))
 
 
 def _reconnect_after_transfer(call_sid: str, language: str, greeting: str) -> Response:
