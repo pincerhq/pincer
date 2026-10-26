@@ -98,6 +98,9 @@ _MAX_ENDED_CALLS = 500
 # Bound on the Twilio call-status fetch (the SDK's own default is no timeout).
 # It runs on the response path of a webhook Twilio waits ~15 s for.
 CALL_STATUS_FETCH_TIMEOUT_S = 5.0
+# Bound on every Twilio REST write (hangup, redirect, DTMF, TTS fallback): they
+# take 1-3 s, and an unbounded one holds a to_thread worker until it returns.
+TWILIO_UPDATE_TIMEOUT_S = 10.0
 
 
 @dataclass
@@ -329,18 +332,27 @@ class VoiceEngine(ABC):
 
         telemetry.transfer_started(call_sid, target=target_number, dial_timeout_s=timeout_s)
 
+    def _twilio_client(self, timeout: float) -> Any:
+        """The one place a Twilio REST client is built (credentials, and any
+        future region/edge settings). ``timeout`` bounds each request: the SDK's
+        own default is none."""
+        from twilio.http.http_client import TwilioHttpClient
+        from twilio.rest import Client
+
+        return Client(
+            self._settings.twilio_account_sid,
+            self._settings.twilio_auth_token.get_secret_value(),
+            http_client=TwilioHttpClient(timeout=timeout),
+        )
+
     async def _twilio_update(self, call_sid: str, **update: Any) -> None:
         """``client.calls(call_sid).update(**update)`` off the event loop: the
         Twilio SDK is blocking HTTP, and 1–3s on the loop stalls every other
-        call's media, websockets and the watchdog."""
-        from twilio.rest import Client
+        call's media, websockets and the watchdog. Bounded by
+        ``TWILIO_UPDATE_TIMEOUT_S``."""
 
         def _update() -> None:
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-            )
-            client.calls(call_sid).update(**update)
+            self._twilio_client(TWILIO_UPDATE_TIMEOUT_S).calls(call_sid).update(**update)
 
         await asyncio.to_thread(_update)
 
@@ -349,15 +361,9 @@ class VoiceEngine(ABC):
         …), off the event loop like `_twilio_update`, and bounded by
         ``CALL_STATUS_FETCH_TIMEOUT_S``. Raises on any Twilio or network error;
         the caller decides what an unknown status means."""
-        from twilio.http.http_client import TwilioHttpClient
-        from twilio.rest import Client
 
         def _fetch() -> str:
-            client = Client(
-                self._settings.twilio_account_sid,
-                self._settings.twilio_auth_token.get_secret_value(),
-                http_client=TwilioHttpClient(timeout=CALL_STATUS_FETCH_TIMEOUT_S),
-            )
+            client = self._twilio_client(CALL_STATUS_FETCH_TIMEOUT_S)
             return str(client.calls(call_sid).fetch().status or "").lower()
 
         return await asyncio.to_thread(_fetch)

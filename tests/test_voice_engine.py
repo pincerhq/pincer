@@ -253,6 +253,25 @@ async def test_twilio_updates_run_off_the_event_loop(mock_settings, engine_cls, 
 
 
 @pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
+@pytest.mark.parametrize("action", ["end_call", "send_dtmf", "fallback_and_end", "transfer_call"])
+async def test_twilio_updates_bound_the_request(mock_settings, engine_cls, action):
+    """The SDK's default is no timeout: a hung Twilio connection would hold a
+    worker thread forever, and enough of them stall every other to_thread user."""
+    from pincer.voice.engine import TWILIO_UPDATE_TIMEOUT_S
+
+    engine = engine_cls(mock_settings)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls:
+        if action == "send_dtmf":
+            await engine.send_dtmf("CAx", "1")
+        elif action == "transfer_call":
+            await engine.transfer_call("CAx", "+4930123")
+        else:
+            await getattr(engine, action)("CAx")
+    assert client_cls.call_args.kwargs["http_client"].timeout == TWILIO_UPDATE_TIMEOUT_S == 10.0
+
+
+@pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
 async def test_fetch_call_status_runs_off_the_event_loop(mock_settings, engine_cls):
     """The status check sits on a webhook's response path: blocking Twilio HTTP
     must not run on the loop, and the status comes back as Twilio spells it."""
