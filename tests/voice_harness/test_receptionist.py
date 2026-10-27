@@ -1635,6 +1635,33 @@ async def test_cr_redirect_never_applied_apologizes_on_the_live_relay(monkeypatc
     assert "transferring" not in h.state.metadata
 
 
+async def test_caller_hangup_during_the_not_applied_apology_finalizes_the_call(monkeypatch):
+    """The caller hangs up while the apology for a redirect that never applied
+    is being spoken: the closed socket must end the call, not be ignored as a
+    transfer's (the call is ours again before the apology starts)."""
+    import json
+
+    from pincer.voice import engine as engine_module
+
+    monkeypatch.setattr(engine_module, "UNCONFIRMED_REDIRECT_SETTLE_S", 0)
+    h = await _start(settings=_transfer_settings(), engine_cls=_RelayEngineWithoutTwilio)
+    ws = _open_socket()
+    apology = "Leider ist gerade niemand erreichbar. Ich nehme gern eine Nachricht auf. Wie ist Ihr Name?"
+
+    async def send_text(message):
+        if json.loads(message).get("token") == apology:
+            # the caller hangs up: the relay closes, and its handler reports it
+            h.state.metadata.pop("websocket", None)
+            await h.engine.on_media_closed(CALL)
+
+    ws.send_text.side_effect = send_text
+    h.state.metadata["websocket"] = ws
+    await h.say(HUMAN_PLEASE)
+    await _settled(h)
+    assert h.engine.get_call_state(CALL) is None
+    assert h.engine.get_active_calls() == {}
+
+
 @pytest.mark.usefixtures("_no_transfer_resolver")
 async def test_unconfirmed_dial_emits_transfer_started_when_its_result_arrives(monkeypatch):
     """No socket evidence either way: no start is recorded until the dial's own

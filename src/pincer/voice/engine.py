@@ -417,14 +417,16 @@ class VoiceEngine(ABC):
                     note_transfer_started(call_sid, record)
                 elif outcome == "not_applied":
                     record["redirect_failed"] = True
+                    # The call is ours again BEFORE the apology is spoken: a
+                    # caller hanging up during it must end the call, not be
+                    # ignored as a transfer's closing socket.
+                    await self.end_transfer(call_sid)
                 if self._on_transfer_settled_callback is not None:
                     try:
                         await self._on_transfer_settled_callback(call_sid, outcome)
                     except Exception:
                         logger.exception("transfer-settled callback failed [%s]", call_sid)
-                if outcome == "not_applied":
-                    await self.end_transfer(call_sid)
-                elif outcome == "hung_up":
+                if outcome == "hung_up":
                     await self.finish_remote_ended(call_sid, reason="caller_hangup_during_transfer")
         except asyncio.CancelledError:
             raise
