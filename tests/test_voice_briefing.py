@@ -511,7 +511,60 @@ async def test_a_dial_cancelled_mid_request_leaves_nothing_pending(voice, dial_o
     assert recorded == [TARGET]
 
 
-async def test_dial_cut_off_after_the_relay_bound_it_is_a_placed_call(voice, dial_outcomes):
+@pytest.fixture
+def dialing_notices(monkeypatch):
+    """Call SIDs the user was told are ringing."""
+    seen: list[str] = []
+
+    async def _notify(call_sid: str) -> None:
+        seen.append(call_sid)
+
+    monkeypatch.setattr(status_notify, "notify_dialing", _notify)
+    return seen
+
+
+async def test_a_claimed_call_that_ended_before_the_timeout_is_a_placed_call(voice, dialing_notices):
+    """Answered, talked, hung up — all inside the 10 s request window. The
+    relay claimed it, so it is a call that happened, not "already ended"."""
+    from datetime import UTC, datetime
+
+    class ClaimedEndedThenTimedOut:
+        async def create_async(self, **kwargs: Any) -> Any:
+            await voice.server._resolve_setup_state("CA_done", "+1000", "outbound-api", to=TARGET, verified=True)
+            await voice.engine.end_call("CA_done")
+            raise TimeoutError
+
+        async def list_async(self, **kwargs: Any) -> list[Any]:
+            return [types.SimpleNamespace(sid="CA_done", status="completed", date_created=datetime.now(UTC))]
+
+    voice.server._engine = voice.engine
+    voice.engine._rest._client = types.SimpleNamespace(calls=ClaimedEndedThenTimedOut())
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert result.startswith("Call placed and already finished.\nCall SID: CA_done\n"), result
+    assert status_notify.get_call_info("CA_done") is not None
+    assert dialing_notices == [], "no 'ringing' notice for a call that is over"
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+
+
+async def test_no_ringing_notice_for_a_claimed_call_that_already_ended(voice, dialing_notices):
+    """Same, but the REST POST returns normally after the call is over."""
+
+    class ClaimedEndedThenReturned:
+        async def create_async(self, **kwargs: Any) -> Any:
+            await voice.server._resolve_setup_state("CA_done", "+1000", "outbound-api", to=TARGET, verified=True)
+            await voice.engine.end_call("CA_done")
+            return types.SimpleNamespace(sid="CA_done")
+
+    voice.server._engine = voice.engine
+    voice.engine._rest._client = types.SimpleNamespace(calls=ClaimedEndedThenReturned())
+
+    result = await outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"})
+    assert result.startswith("Call placed and already finished.\nCall SID: CA_done\n"), result
+    assert dialing_notices == []
+
+
+async def test_dial_cut_off_after_the_relay_bound_it_is_a_placed_call(voice, dialing_notices, dial_outcomes):
     """The callee answers at 2 s and the setup claims the dial; then the REST
     response dies. The call is live and briefed, so it is a placed call — not
     "Error placing call", which invites a redial of the person already talking."""

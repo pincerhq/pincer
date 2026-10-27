@@ -62,6 +62,10 @@ END_CODE_KEY = "end_code"
 #: Metadata key for the provider status that set `end_code`, when one did: the
 #: report wording can be more specific than the code (`canceled` vs `failed`).
 PROVIDER_STATUS_KEY = "provider_status"
+#: Metadata key on a pending outbound state: the CallSid a relay `setup`
+#: claimed it as (see `claim_pending_outbound`). The dialer branches on this,
+#: not on a live lookup — a claimed call may already be over.
+CLAIMED_SID_KEY = "claimed_sid"
 
 _ULAW_NS_PER_BYTE = 1_000_000_000 // MULAW_BYTES_PER_SECOND
 
@@ -503,6 +507,7 @@ class VoiceEngine(ABC):
             return None
         pending = matches[0]
         pending_key = pending.call_sid
+        pending.metadata[CLAIMED_SID_KEY] = call_sid
         state = await self.promote_pending(pending, call_sid)
         if state is not None:
             from pincer.voice.telemetry import hooks as telemetry

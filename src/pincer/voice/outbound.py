@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from pincer.voice.briefing import BriefingError, CallBriefing, log_briefing_bound
+from pincer.voice.engine import CLAIMED_SID_KEY
 from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, truncate
 from pincer.voice.twilio_rest import DialOutcomeUnknown
 
@@ -473,8 +474,11 @@ async def make_phone_call(
                 # may already be ringing — or answered, in which case the
                 # relay setup has claimed the pending state by callee number
                 # (engine.claim_pending_outbound) and the SID is known here.
-                if engine is not None and pre_state is not None and engine.get_call_state(pre_state.call_sid):
-                    call_sid = pre_state.call_sid
+                claimed = str(pre_state.metadata.get(CLAIMED_SID_KEY) or "") if pre_state is not None else ""
+                if claimed:
+                    # Claimed, so placed — even if the call is already over,
+                    # which a live lookup would mistake for "never bound".
+                    call_sid = claimed
                     logger.warning(
                         "Outbound dial to %s unconfirmed (%s); the relay bound it as %s", validated, unknown, call_sid
                     )
@@ -525,6 +529,10 @@ async def make_phone_call(
         telemetry.dial_accepted(trace_key, call_sid)
         if engine is not None and pre_state is not None:
             await engine.promote_pending(pre_state, call_sid)
+        # A dial the relay claimed can be over before the REST call returns:
+        # answered, talked and hung up inside the request window. It happened,
+        # so it is recorded and threaded, but nobody is told it is ringing.
+        finished = engine is not None and engine.get_call_state(call_sid) is None
         log_briefing_bound(call_sid, briefing)
 
         _increment_daily_count(user_id)
@@ -563,6 +571,9 @@ async def make_phone_call(
             target_name=str(target_name or "").strip(),
             instructions=str(instructions or "").strip(),
         )
+        if finished:
+            logger.info("Outbound call placed and already finished: %s -> %s", call_sid, validated)
+            return f"Call placed and already finished.\nCall SID: {call_sid}\nTo: {validated}\nThe call report follows."
         await notify_dialing(call_sid)
 
         logger.info(
