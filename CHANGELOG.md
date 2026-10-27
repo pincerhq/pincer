@@ -373,6 +373,11 @@ mounting a directory. Install the new `remote-skills` extra
   stuck-call page (they still count toward `inbound_max_concurrent`, since a
   failed transfer reconnects them to the agent), and a `completed` status
   callback no longer issues a REST hangup on a call Twilio already ended.
+- A receptionist call whose ConversationRelay events arrive over the deprecated
+  HTTP `/relay-webhook` is never transferred to a human: with no media socket,
+  a redirect Twilio did not apply could not be detected and the caller would
+  wait in silence. The caller hears the failed-transfer apology and leaves a
+  message instead; no transfer is recorded.
 
 ### Added
 

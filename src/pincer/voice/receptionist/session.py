@@ -557,6 +557,12 @@ class ReceptionSession:
                 self._start_message("message")
                 await self.speak(f"{self.line('human_disabled')} {self.line('ask_name')}")
                 return "", True
+            if self._transfer_refused():
+                # Refused, not failed: no dial is attempted, so nothing records
+                # a transfer; the caller hears the same apology as a failed one.
+                self._start_message("message")
+                await self.speak(f"{self.line('transfer_failed')} {self.line('ask_name')}")
+                return "", True
             await self._transfer()
             return "", True
         # unknown
@@ -1042,6 +1048,16 @@ class ReceptionSession:
         return parse_freebusy_output(str(getattr(result, "raw", "") or ""))
 
     # ── TRANSFERRING (§8.4) ───────────────────────────────
+
+    def _transfer_refused(self) -> bool:
+        """No human transfer for a call on the deprecated HTTP /relay-webhook
+        (RELAY_WEBHOOK_KEY): without a media socket a redirect that Twilio did
+        not apply could never be detected, and the caller would wait in silence."""
+        from pincer.voice.engine import RELAY_WEBHOOK_KEY
+
+        state = self.engine.get_call_state(self.call_sid) if self.engine is not None else None
+        metadata = getattr(state, "metadata", None)
+        return isinstance(metadata, dict) and bool(metadata.get(RELAY_WEBHOOK_KEY))
 
     async def _transfer(self) -> None:
         self.transfer_attempted = True

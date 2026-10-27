@@ -74,6 +74,10 @@ DIAL_ID_KEY = "dial_id"
 #: it; /transfer-result writes the dial's result and answer into it. The
 #: `transfer` key is the current dial's record (the same dict), not a copy.
 DIALS_KEY = "dials"
+#: Metadata key set on a call whose ConversationRelay events reach the
+#: deprecated HTTP /relay-webhook: it has no media socket, so a transfer
+#: redirect could never be told applied or not. Such a call is never transferred.
+RELAY_WEBHOOK_KEY = "relay_webhook"
 #: Metadata key on a pending outbound state: the CallSid a relay `setup`
 #: claimed it as (see `claim_pending_outbound`). The dialer branches on this,
 #: not on a live lookup — a claimed call may already be over.

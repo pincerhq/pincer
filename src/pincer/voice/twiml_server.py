@@ -611,6 +611,16 @@ async def _resume_failed_transfer(call_sid: str, session: Any, dial_status: str,
     return greeting, _reconnect_after_transfer(call_sid, language, greeting)
 
 
+def _mark_relay_webhook(call_sid: str) -> None:
+    """The call's events come over the deprecated HTTP relay: see RELAY_WEBHOOK_KEY."""
+    from pincer.voice.engine import RELAY_WEBHOOK_KEY
+
+    state = _engine.get_call_state(call_sid) if _engine and call_sid else None
+    metadata = getattr(state, "metadata", None)
+    if isinstance(metadata, dict):
+        metadata[RELAY_WEBHOOK_KEY] = True
+
+
 def _note_reconnected(state: Any) -> None:
     """Media connected for a call that has a transfer record: Twilio executed the
     reconnect after a failed dial. The `transfer` view only exists from
@@ -1272,6 +1282,7 @@ async def relay_webhook(request: Request) -> Response:
 
     call_sid = str(body.get("CallSid", body.get("callSid", "")))
     event_type = str(body.get("type", ""))
+    _mark_relay_webhook(call_sid)
 
     if event_type == "prompt":
         text = str(body.get("voicePrompt", ""))
@@ -1292,6 +1303,7 @@ async def relay_webhook(request: Request) -> Response:
                 verified=_was_verified(request),
             )
         if call_sid:
+            _mark_relay_webhook(call_sid)  # registered just now
             _note_reconnected(_engine.get_call_state(call_sid))
             await _engine.mark_call_answered(call_sid)
 

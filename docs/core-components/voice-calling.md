@@ -939,6 +939,9 @@ break how `/api/apps/twilio/transfer-result` answers repeated deliveries of a
 dial result. Twilio's defaults (retry once, only when the connection itself
 failed) are what that endpoint is built for.
 
+Calls whose ConversationRelay events arrive over the deprecated HTTP
+`/relay-webhook` never get a human transfer; the receptionist takes a message instead.
+
 ---
 
 ## Database Tables

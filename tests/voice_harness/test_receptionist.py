@@ -861,6 +861,23 @@ async def test_human_transfer_busy_fallback():
     assert text == "Leider ist gerade niemand erreichbar. Ich nehme gern eine Nachricht auf. Wie ist Ihr Name?"
 
 
+async def test_relay_webhook_call_asking_for_a_human_gets_message_taking():
+    """A call whose ConversationRelay events reach the deprecated HTTP
+    /relay-webhook has no media socket, so a redirect could never be told
+    applied or not: no transfer is attempted. The caller hears the failed-transfer
+    apology and is asked for their name; nothing records a transfer."""
+    h = await _start(settings=_transfer_settings())
+    async with _async_client(h) as client:
+        setup = await client.post("/api/apps/twilio/relay-webhook", json={"type": "setup", "CallSid": CALL})
+    assert setup.status_code == 200
+    await h.say("Ich möchte bitte mit einem Menschen sprechen.")
+    assert h.last() == "Leider ist gerade niemand erreichbar. Ich nehme gern eine Nachricht auf. Wie ist Ihr Name?"
+    assert (h.sm.phase, h.session.step) == (CallPhase.TAKE_MESSAGE, "name")
+    assert h.engine.transfers.get(CALL, []) == []
+    assert "transferring" not in h.state.metadata
+    assert h.session.transfer_attempted is False
+
+
 async def test_transfer_refused_for_an_override_base_url_speaks_the_apology():
     """transfer_call refuses an action URL with `#` connection overrides before
     any redirect: the caller must hear the apology and be asked for their name,
