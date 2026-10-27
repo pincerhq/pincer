@@ -25,7 +25,7 @@ from pincer.voice.audio import MULAW_BYTES_PER_SECOND
 from pincer.voice.twilio_rest import TwilioRest, outcome_unknown
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Coroutine
 
     from pincer.config import Settings
     from pincer.observability.failure_codes import FailureCode
@@ -261,8 +261,9 @@ class VoiceEngine(ABC):
         self._on_transfer_settled_callback = callback
 
     def pending_transfer_settle(self, call_sid: str) -> asyncio.Task[None] | None:
-        """The settle still pending for this call's unconfirmed redirect, if any."""
-        return self._transfer_settles.get(call_sid)
+        """The transfer check (settle or re-checks) still running for this call, if any."""
+        task = self._transfer_settles.get(call_sid)
+        return task if task is not None and not task.done() else None
 
     @abstractmethod
     async def on_call_start(
@@ -377,11 +378,7 @@ class VoiceEngine(ABC):
                 reason = type(exc).__name__
                 logger.warning("Transfer redirect for call %s unconfirmed (%s) — settling", call_sid, reason)
                 record["redirect_unconfirmed"] = True
-                task = asyncio.create_task(
-                    self._settle_unconfirmed_redirect(call_sid, record, media_before),
-                    name=f"voice-transfer-settle-{call_sid}",
-                )
-                self._transfer_settles[call_sid] = task
+                self._track_transfer_task(call_sid, self._settle_unconfirmed_redirect(call_sid, record, media_before))
                 return
             logger.exception("Transfer failed for call %s", call_sid)
             # the redirect did not happen: a definite error, or the media
@@ -455,9 +452,6 @@ class VoiceEngine(ABC):
             raise
         except Exception:
             logger.exception("Settling the transfer redirect failed [%s]", call_sid)
-        finally:
-            if self._transfer_settles.get(call_sid) is asyncio.current_task():
-                self._transfer_settles.pop(call_sid, None)
 
     async def _confirm_transfer(self, call_sid: str, record: dict[str, Any]) -> None:
         """Re-check Twilio's call status for a transfer the evidence could not
@@ -507,8 +501,14 @@ class VoiceEngine(ABC):
                     logger.exception("transfer-settled callback failed [%s]", call_sid)
             await self.finish_remote_ended(call_sid, reason=reason)
 
-    def _start_transfer_confirm(self, call_sid: str, record: dict[str, Any]) -> None:
-        task = asyncio.create_task(self._confirm_transfer(call_sid, record), name=f"voice-transfer-confirm-{call_sid}")
+    def _track_transfer_task(self, call_sid: str, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
+        """Run one of the call's transfer checks (the settle, the re-checks) as
+        its only one: a previous one still running is cancelled, the task leaves
+        the slot when it ends, and ending the call cancels it (_unregister_call)."""
+        previous = self._transfer_settles.get(call_sid)
+        if previous is not None and previous is not asyncio.current_task() and not previous.done():
+            previous.cancel()
+        task = asyncio.create_task(coro, name=f"voice-transfer-{call_sid}")
         self._transfer_settles[call_sid] = task
 
         def _forget(done: asyncio.Task[None]) -> None:
@@ -516,6 +516,7 @@ class VoiceEngine(ABC):
                 self._transfer_settles.pop(call_sid, None)
 
         task.add_done_callback(_forget)
+        return task
 
     def _unsettled_dial(self, call_sid: str, record: dict[str, Any]) -> CallState | None:
         """The live call, if ``record`` is still its current dial, in flight and
@@ -664,7 +665,7 @@ class VoiceEngine(ABC):
                     await self._on_transfer_settled_callback(call_sid, "applied_late")
                 except Exception:
                     logger.exception("transfer-settled callback failed [%s]", call_sid)
-        self._start_transfer_confirm(call_sid, record)
+        self._track_transfer_task(call_sid, self._confirm_transfer(call_sid, record))
 
     async def finish_remote_ended(self, call_sid: str, reason: str = "") -> bool:
         """Twilio says the call is over: close media, unregister, run the

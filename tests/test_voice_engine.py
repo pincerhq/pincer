@@ -594,6 +594,25 @@ async def test_transfer_settle_is_cancelled_when_the_call_ends(mock_settings, mo
     assert outcomes == []
 
 
+async def test_a_new_transfer_task_cancels_the_previous_one(mock_settings):
+    """One transfer check per call: a new one cancels one still running (a
+    settle still apologizing when the media closes), and ending the call
+    cancels the last, leaving nothing behind."""
+    engine = ConversationRelayEngine(mock_settings)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    first = engine._track_transfer_task("CAx", asyncio.sleep(3600))
+    second = engine._track_transfer_task("CAx", asyncio.sleep(3600))
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(first, timeout=2)
+    assert first.cancelled()
+    assert engine.pending_transfer_settle("CAx") is second
+    await engine.finish_remote_ended("CAx", reason="provider_completed")
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(second, timeout=2)
+    assert second.cancelled()
+    assert engine.pending_transfer_settle("CAx") is None
+
+
 async def test_transfer_call_refuses_a_connection_override_fragment(mock_settings):
     """`#rp=…`/`#rt=…` on the action URL would let Twilio execute a copy of a
     dial result after it executed the first (the replay answers assume it
