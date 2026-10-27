@@ -483,25 +483,33 @@ class VoiceEngine(ABC):
         POST: the dial is still awaited in make_phone_call, the CallSid is not
         known on our side, and promote_pending() cannot run yet. The `to` of
         the setup message is the one key both sides share before that, so the
-        setup claims the oldest pending dial to that number and promotes it
-        itself. The later REST return (or lookup) then finds the promotion
+        setup claims the pending dial to that number and promotes it itself —
+        only when exactly one is pending; with several it cannot tell them
+        apart. The later REST return (or lookup) then finds the promotion
         already done. Telemetry is re-keyed here for the same reason: the
         answer/media events for the real SID follow immediately.
         """
         number = str(target_number or "").strip()
         if not call_sid or not number:
             return None
-        for pending in self._pending_outbound.values():  # insertion order: oldest dial first
-            if pending.target_number == number:
-                pending_key = pending.call_sid
-                state = await self.promote_pending(pending, call_sid)
-                if state is not None:
-                    from pincer.voice.telemetry import hooks as telemetry
+        matches = [pending for pending in self._pending_outbound.values() if pending.target_number == number]
+        if len(matches) != 1:
+            if matches:
+                # Two dials to one callee (a double request, a retry next to a
+                # chat request): the number cannot say which this setup is,
+                # and a wrong guess runs each call with the other's task. The
+                # REST return binds each one by its own SID instead.
+                logger.warning("%d pending dials to %s — setup %s not claimed", len(matches), number, call_sid)
+            return None
+        pending = matches[0]
+        pending_key = pending.call_sid
+        state = await self.promote_pending(pending, call_sid)
+        if state is not None:
+            from pincer.voice.telemetry import hooks as telemetry
 
-                    telemetry.dial_accepted(pending_key, call_sid)
-                    logger.info("Relay setup claimed pending outbound %s as %s", pending_key, call_sid)
-                return state
-        return None
+            telemetry.dial_accepted(pending_key, call_sid)
+            logger.info("Relay setup claimed pending outbound %s as %s", pending_key, call_sid)
+        return state
 
     def discard_pending(self, pre_state: CallState) -> None:
         """Drop a pre-registration whose dial never happened (Twilio raised)."""

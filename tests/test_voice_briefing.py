@@ -669,6 +669,36 @@ async def test_setup_without_a_to_number_does_not_claim(voice):
     assert voice.engine._pending_outbound == {pre.call_sid: pre}
 
 
+OTHER_TASK = "Ask whether the parcel for order 4711 can be picked up tomorrow morning."
+
+
+async def test_two_pending_dials_to_one_number_are_not_claimed(voice):
+    """The number cannot tell two dials to the same callee apart."""
+    first = await voice.engine.register_pending_outbound(CallBriefing.create(TASK), TARGET, language="en")
+    second = await voice.engine.register_pending_outbound(CallBriefing.create(OTHER_TASK), TARGET, language="en")
+
+    assert await voice.engine.claim_pending_outbound("CA_x", TARGET) is None
+    assert voice.engine._pending_outbound == {first.call_sid: first, second.call_sid: second}
+
+
+async def test_two_pending_dials_each_bind_to_their_own_sid(voice, monkeypatch):
+    """Dial B's callee connects first. Its setup must not take dial A's
+    briefing; it waits for B's own REST return to bind it by SID."""
+    monkeypatch.setattr(voice.server, "SETUP_STATE_WAIT_S", 2.0)
+    voice.server._engine = voice.engine
+    await voice.engine.register_pending_outbound(CallBriefing.create(TASK), TARGET, language="en")
+    second = await voice.engine.register_pending_outbound(CallBriefing.create(OTHER_TASK), TARGET, language="en")
+
+    setup = asyncio.create_task(
+        voice.server._resolve_setup_state("CA_B", "+1000", "outbound-api", to=TARGET, verified=True)
+    )
+    await asyncio.sleep(0)
+    await voice.engine.promote_pending(second, "CA_B")  # B's REST return
+    state = await asyncio.wait_for(setup, timeout=3)
+
+    assert state is not None and state.purpose == OTHER_TASK
+
+
 class _UpgradeSocket(FakeSocket):
     """A relay socket the real `_authenticate_ws` can inspect."""
 
