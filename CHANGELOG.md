@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### WhatsApp: group @-mentions behind `PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION`
+
+Picking Pincer in WhatsApp's @-picker in a group (the mention carries its
+phone number, or its LID in LID-addressed groups) now triggers it only when
+`PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION=true`. `PINCER_WHATSAPP_GROUP_TRIGGER`
+words work regardless of the flag; with both set, either one triggers. The
+bot's own LID is now read at connect, so LID mentions match right after a
+restart instead of only after the owner has sent a message.
+
+> **Behaviour change.** The flag defaults to `false`, so @-picker mentions no
+> longer trigger Pincer in groups unless a trigger word is also present. Set
+> `PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION=true` to restore the old behaviour.
+
 #### Voice (Media Streams): caller audio goes to Deepgram as μ-law 8 kHz
 
 Each 20 ms frame was decoded and upsampled to 16 kHz PCM in pure Python on the

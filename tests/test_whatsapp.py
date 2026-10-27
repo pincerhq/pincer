@@ -82,6 +82,7 @@ def wa_channel():
     settings = MagicMock()
     settings.whatsapp_self_chat_only = False
     settings.whatsapp_group_trigger = "pincer"
+    settings.whatsapp_group_trigger_on_mention = True
     settings.data_dir = "/tmp/test"
     settings.openai_api_key.get_secret_value.return_value = "test-key"
     yield WhatsAppChannel(settings)
@@ -171,6 +172,45 @@ class TestWhatsAppChannel:
         wa_channel._own_jid = "491234567890"
         msg = self._ext_msg_with_mentions("@Bob hi", ["14912345678901@s.whatsapp.net"])
         assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+
+    def test_mention_ignored_when_on_mention_disabled(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        wa_channel._own_lid = "207855026221128"
+        wa_channel._settings.whatsapp_group_trigger_on_mention = False
+        msg = self._ext_msg_with_mentions("@207855026221128 help", ["207855026221128@lid"])
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+
+    def test_jid_in_text_ignored_when_on_mention_disabled(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        wa_channel._settings.whatsapp_group_trigger_on_mention = False
+        msg = MagicMock()
+        msg.conversation = "hey @491234567890 what's up?"
+        msg.HasField = MagicMock(return_value=False)
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+
+    def test_trigger_works_when_on_mention_disabled(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        wa_channel._settings.whatsapp_group_trigger_on_mention = False
+        msg = self._ext_msg_with_mentions("@Bob ask pincer", ["14912345678901@s.whatsapp.net"])
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+
+    def test_mention_without_trigger_list(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        wa_channel._own_lid = "207855026221128"
+        wa_channel._settings.whatsapp_group_trigger = ""
+        msg = self._ext_msg_with_mentions("@207855026221128 help", ["207855026221128@lid"])
+        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+
+    @pytest.mark.asyncio
+    async def test_on_connected_seeds_own_lid(self, wa_channel):
+        me = MagicMock()
+        me.JID.User = "491234567890"
+        me.HasField = MagicMock(side_effect=lambda f: f == "LID")
+        me.LID.User = "207855026221128"
+        client = MagicMock()
+        client.get_me = AsyncMock(return_value=me)
+        await wa_channel._on_connected(client, MagicMock())
+        assert wa_channel._own_lid == "207855026221128"
 
     @pytest.mark.parametrize(
         ("field", "expected"),

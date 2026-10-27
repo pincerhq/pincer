@@ -53,6 +53,13 @@ class ChannelSettings(BaseModel):
             "(whole-word, case-insensitive; `@name` requires the @)"
         ),
     )
+    whatsapp_group_trigger_on_mention: bool = Field(
+        default=False,
+        description=(
+            "In group chats, also reply when the bot is picked in WhatsApp's @-picker "
+            "(phone number or LID). Trigger words from whatsapp_group_trigger apply either way."
+        ),
+    )
     whatsapp_show_progress: bool = Field(
         default=True,
         description="Edit an in-place status message while tools run (and show typing indicator).",

@@ -510,7 +510,8 @@ enables random failover.
 |----------|---------|
 | `PINCER_WHATSAPP_ENABLED` | Enable WhatsApp channel (`true`/`false`) |
 | `PINCER_WHATSAPP_GUESTS_ALLOWED` | Once `PINCER_IDENTITY_MAP` is configured, allow unmapped senders through as disposable guests (default `false`). No-op if no identity map is configured for group mentions; for DMs, unlike Telegram/Signal, this is NOT a no-op — DMs are rejected by default with no identity map configured, and this flag overrides that |
-| `PINCER_WHATSAPP_GROUP_TRIGGER` | Comma-separated trigger words/phrases for group messages, whole-word and case-insensitive (default: `pincer`). Picking the bot in WhatsApp's @-picker (phone number or LID) is detected without a trigger; a literal `@pincer` entry only helps when typed by hand |
+| `PINCER_WHATSAPP_GROUP_TRIGGER` | Comma-separated trigger words/phrases for group messages, whole-word and case-insensitive (default: `pincer`). A literal `@pincer` entry only helps when typed by hand |
+| `PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION` | Also reply in groups when the bot is picked in WhatsApp's @-picker (phone number or LID); trigger words keep working either way (default: `false`) |
 
 ### Optional — Email & Calendar
 

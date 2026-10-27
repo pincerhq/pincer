@@ -76,10 +76,12 @@ TOM_LID = "207855026221128"
 def _make_settings(
     whatsapp_self_chat_only: bool = True,
     whatsapp_group_trigger: str = "pincer",
+    whatsapp_group_trigger_on_mention: bool = True,
 ):
     settings = MagicMock()
     settings.whatsapp_self_chat_only = whatsapp_self_chat_only
     settings.whatsapp_group_trigger = whatsapp_group_trigger
+    settings.whatsapp_group_trigger_on_mention = whatsapp_group_trigger_on_mention
     settings.data_dir = "/tmp/test"
     settings.openai_api_key.get_secret_value.return_value = "test-key"
     return settings

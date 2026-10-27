@@ -677,11 +677,16 @@ class WhatsAppChannel(BaseChannel):
         me = await client.get_me()
         self._own_jid = me.JID.User
         self._own_jid_full = Jid2String(me.JID)
+        # Known up front so @-picker mentions in LID-addressed groups match
+        # before the owner has sent anything; outgoing messages stay a fallback.
+        if me.HasField("LID") and me.LID.User:
+            self._own_lid = me.LID.User
         self._connected.set()
         logger.info(
-            "WhatsApp connected — own_jid=%r  full_jid=%s",
+            "WhatsApp connected — own_jid=%r  full_jid=%s  own_lid=%r",
             self._own_jid,
             self._own_jid_full,
+            self._own_lid,
         )
 
     async def _on_pair_status(self, _client: NewAClient, event: PairStatusEv) -> None:
@@ -900,7 +905,8 @@ class WhatsAppChannel(BaseChannel):
                 logger.debug("WA skip: outgoing message to %s → ignoring", chat_jid)
                 return
             elif is_group:
-                # Rule 4: Group — only process if @mentioned or trigger word used.
+                # Rule 4: Group — only process if a trigger word is used, or the
+                # bot is @mentioned and whatsapp_group_trigger_on_mention is on.
                 # This also covers the owner's own messages when Pincer is linked
                 # to the owner's own WhatsApp number (is_from_me=True): previously
                 # Rule 3 dropped these unconditionally, so the owner could never
@@ -1211,10 +1217,6 @@ class WhatsAppChannel(BaseChannel):
     # ── Group Mention Detection ──────────────────
 
     def _is_mentioned_in_group(self, msg: WAMessage, client: NewAClient) -> bool:
-        # The @-picker inserts the phone number in classic groups and the LID
-        # in LID-addressed groups, so accept either of our own identifiers.
-        own_ids = {own_id for own_id in (self._own_jid, self._own_lid) if own_id}
-
         # Text-bearing payloads: plain text, and captioned media the extract
         # path forwards to the agent (image and document captions). Video has
         # no content path, so its caption must not pass the gate.
@@ -1233,6 +1235,16 @@ class WhatsAppChannel(BaseChannel):
                         ctx = media.contextInfo
                     break
 
+        # Mentions are opt-in; trigger words apply either way.
+        if self._settings.whatsapp_group_trigger_on_mention and self._mentions_self(text, ctx):
+            return True
+        return matches_group_trigger(text, self._settings.whatsapp_group_trigger)
+
+    def _mentions_self(self, text: str, ctx: Any) -> bool:
+        # The @-picker inserts the phone number in classic groups and the LID
+        # in LID-addressed groups, so accept either of our own identifiers.
+        own_ids = {own_id for own_id in (self._own_jid, self._own_lid) if own_id}
+
         if ctx is not None and ctx.mentionedJID:
             for jid in ctx.mentionedJID:
                 # Compare the user part exactly: a substring test also fires on
@@ -1240,8 +1252,4 @@ class WhatsAppChannel(BaseChannel):
                 if str(jid).split("@", 1)[0].split(":", 1)[0] in own_ids:
                     return True
 
-        for own_id in own_ids:
-            if re.search(rf"(?<!\d){re.escape(own_id)}(?!\d)", text):
-                return True
-
-        return matches_group_trigger(text, self._settings.whatsapp_group_trigger)
+        return any(re.search(rf"(?<!\d){re.escape(own_id)}(?!\d)", text) for own_id in own_ids)
