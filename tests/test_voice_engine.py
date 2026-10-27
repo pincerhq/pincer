@@ -331,6 +331,114 @@ async def test_transfer_call_failure_leaves_call_ours(mock_settings):
     assert "transferring" not in state.metadata
 
 
+def _redirect_errors_as_requests_raises_them() -> list[tuple[str, Exception, bool]]:
+    """(id, error, may Twilio have applied it) — each built the way the installed
+    requests builds it (requests/adapters.py `send`, requests/models.py `iter_content`)."""
+    import http.client
+
+    import requests
+    from twilio.base.exceptions import TwilioRestException
+    from urllib3.exceptions import (
+        ConnectTimeoutError,
+        MaxRetryError,
+        NewConnectionError,
+        ProtocolError,
+        ReadTimeoutError,
+    )
+
+    aborted = ProtocolError("Connection aborted.", http.client.RemoteDisconnected("closed without response"))
+    return [
+        ("read_timeout", requests.exceptions.ReadTimeout(ReadTimeoutError(None, "/", "Read timed out.")), True),
+        (
+            "body_read_timeout",
+            requests.exceptions.ConnectionError(ReadTimeoutError(None, "/", "Read timed out.")),
+            True,
+        ),
+        ("aborted_after_send", requests.exceptions.ConnectionError(aborted), True),
+        ("chunked_encoding", requests.exceptions.ChunkedEncodingError(ProtocolError("incomplete read")), True),
+        ("connect_timeout", requests.exceptions.ConnectTimeout(MaxRetryError(None, "/", ConnectTimeoutError())), False),
+        (
+            "refused_or_dns",
+            requests.exceptions.ConnectionError(MaxRetryError(None, "/", NewConnectionError(None, "refused"))),
+            False,
+        ),
+        ("twilio_error", TwilioRestException(503, "/Calls/CAx"), False),
+        ("other", RuntimeError("cannot schedule new futures after shutdown"), False),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("error", "may_have_applied"),
+    [(e, applied) for _, e, applied in _redirect_errors_as_requests_raises_them()],
+    ids=[name for name, _, _ in _redirect_errors_as_requests_raises_them()],
+)
+def test_redirect_error_classification(error, may_have_applied):
+    """Uncertain only when the request may have reached Twilio and its answer
+    was lost; definite when it never left (connect timeout, refused, DNS) or
+    Twilio answered with an error."""
+    from pincer.voice.engine import redirect_may_have_applied
+
+    assert redirect_may_have_applied(error) is may_have_applied
+
+
+def _local_server(behaviour: str):
+    """A local HTTP server misbehaving in one way; returns (url, stop)."""
+    import socket
+    import threading
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    port = srv.getsockname()[1]
+    if behaviour == "refused":
+        srv.close()
+        return f"http://127.0.0.1:{port}/", lambda: None
+    srv.listen(4)
+    held: list[socket.socket] = []
+
+    def serve() -> None:
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            return
+        held.append(conn)
+        if behaviour == "silent":
+            return  # read the request? never answer
+        conn.recv(65536)
+        if behaviour == "close_after_request":
+            conn.close()
+        elif behaviour == "stall_body":
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{")
+
+    threading.Thread(target=serve, daemon=True).start()
+
+    def stop() -> None:
+        for conn in held:
+            conn.close()
+        srv.close()
+
+    return f"http://127.0.0.1:{port}/", stop
+
+
+@pytest.mark.parametrize(
+    ("behaviour", "may_have_applied"),
+    [("silent", True), ("close_after_request", True), ("stall_body", True), ("refused", False)],
+)
+def test_redirect_error_classification_against_real_sockets(behaviour, may_have_applied):
+    """The installed twilio + requests + urllib3 stack, end to end through the
+    TwilioHttpClient the engine builds, against a local server."""
+    from twilio.http.http_client import TwilioHttpClient
+
+    from pincer.voice.engine import redirect_may_have_applied
+
+    url, stop = _local_server(behaviour)
+    try:
+        with pytest.raises(Exception) as raised:
+            TwilioHttpClient(timeout=0.3).request("POST", url, data={"Twiml": "<Response/>"})
+    finally:
+        stop()
+    assert redirect_may_have_applied(raised.value) is may_have_applied, repr(raised.value)
+
+
 def _definite_redirect_errors() -> list[Exception]:
     import requests
     from twilio.base.exceptions import TwilioException
@@ -382,7 +490,9 @@ def _connected_socket() -> MagicMock:
     return ws
 
 
-async def _timed_out_transfer(mock_settings, monkeypatch, *, socket=None, twilio_status="in-progress", settle_s=0):
+async def _timed_out_transfer(
+    mock_settings, monkeypatch, *, socket=None, twilio_status="in-progress", settle_s=0, error=None
+):
     """A transfer whose redirect timed out, settled at once: (engine, state, outcomes, started)."""
     import requests
 
@@ -407,7 +517,7 @@ async def _timed_out_transfer(mock_settings, monkeypatch, *, socket=None, twilio
     else:
         engine.fetch_call_status = AsyncMock(return_value=twilio_status)
     with patch("twilio.rest.Client") as client_cls:
-        client_cls.return_value.calls.return_value.update.side_effect = requests.exceptions.ReadTimeout("read")
+        client_cls.return_value.calls.return_value.update.side_effect = error or requests.exceptions.ReadTimeout("read")
         await engine.transfer_call("CAx", "+4930123")  # returns: the turn must end for CR to see the close
     return engine, state, outcomes, started
 
@@ -426,6 +536,17 @@ async def test_transfer_redirect_timeout_unknown_socket_stays_unconfirmed(mock_s
     assert state.metadata["transferring"] is True
     assert state.metadata["transfer"] is record
     assert started == []
+
+
+@pytest.mark.parametrize("name", ["body_read_timeout", "aborted_after_send", "chunked_encoding"])
+async def test_transfer_redirect_lost_answer_stays_unconfirmed(mock_settings, monkeypatch, name):
+    """requests reports these as ConnectionError/ChunkedEncodingError, yet the
+    request reached Twilio: the redirect may be live, so no rollback."""
+    error = {n: e for n, e, _ in _redirect_errors_as_requests_raises_them()}[name]
+    engine, state, outcomes, started = await _timed_out_transfer(mock_settings, monkeypatch, error=error)
+    assert state.metadata["transferring"] is True
+    assert state.metadata["transfer"]["redirect_unconfirmed"] is True
+    assert engine.pending_transfer_settle("CAx") is not None
 
 
 async def test_transfer_redirect_timeout_fetch_error_stays_unconfirmed(mock_settings, monkeypatch):

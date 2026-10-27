@@ -359,15 +359,7 @@ class VoiceEngine(ABC):
             await self._twilio_update(call_sid, **update)
             logger.info("Call %s transferred to %s", call_sid, target_number)
         except Exception as exc:
-            import requests  # type: ignore[import-untyped]  # requests is a transitive dep (twilio)
-
-            # Only a read timeout leaves open whether Twilio applied the update:
-            # the request went out and no answer came back. Every other error
-            # (a Twilio error response, a connect timeout or refused/unresolved
-            # connection, missing credentials, a shut-down executor) means no
-            # <Dial> exists. The SDK passes requests' exceptions through
-            # unwrapped (twilio/http/http_client.py `session.send`).
-            if isinstance(exc, requests.exceptions.ReadTimeout) and live is not None:
+            if redirect_may_have_applied(exc) and live is not None:
                 # Twilio may have applied it. Keep the call in flight and settle
                 # it later, from evidence: not here, because on ConversationRelay
                 # this runs inside the caller's turn, which holds the relay
@@ -870,6 +862,35 @@ class VoiceEngine(ABC):
     # ConversationRelay hands audio to Twilio and never reports playout, so
     # its numbers can only ever be estimates from character counts.
     analytics_method: str = "estimated"
+
+
+def redirect_may_have_applied(exc: BaseException) -> bool:
+    """Whether a failed Twilio update may still have been applied: the request
+    went out and only its answer was lost. The SDK passes requests' exceptions
+    through unwrapped (twilio/http/http_client.py `session.send`), and requests
+    raises (requests/adapters.py `send`, requests/models.py `iter_content`):
+
+    - ReadTimeout: no answer within the read timeout;
+    - ConnectionError(ReadTimeoutError): the answer's body stalled;
+    - ConnectionError(ProtocolError): the connection dropped after the request
+      was sent ("Connection aborted", RemoteDisconnected);
+    - ChunkedEncodingError: the answer's body broke off.
+
+    Definite (no <Dial> can exist): ConnectTimeout and
+    ConnectionError(MaxRetryError(NewConnectionError)) never sent the request
+    (refused, DNS), a TwilioRestException is Twilio's own error answer, and
+    anything else never reached the HTTP layer."""
+    import requests  # type: ignore[import-untyped]  # requests is a transitive dep (twilio)
+    from urllib3.exceptions import ProtocolError, ReadTimeoutError
+
+    if isinstance(exc, requests.exceptions.ReadTimeout | requests.exceptions.ChunkedEncodingError):
+        return True
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return False
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        cause = exc.args[0] if exc.args else None
+        return isinstance(cause, ReadTimeoutError | ProtocolError)
+    return False
 
 
 def note_transfer_started(call_sid: str, record: dict[str, Any]) -> None:
