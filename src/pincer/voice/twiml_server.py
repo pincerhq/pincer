@@ -628,9 +628,10 @@ async def _resume_failed_transfer(call_sid: str, session: Any, dial_status: str,
 
 def _note_reconnected(state: Any) -> None:
     """Media connected for a call that has a transfer record: Twilio executed the
-    reconnect after a failed dial (the record only exists from `transfer_call`
-    on, and the next dial replaces it). A replay of that dial's result must
-    no longer answer with <Connect>."""
+    reconnect after a failed dial. The `transfer` view only exists from
+    `transfer_call` on, and moves to the next dial's own record, so this marks
+    the current dial's. A replay of that dial's result must no longer answer
+    with <Connect>."""
     transfer = getattr(state, "metadata", {}).get("transfer") if state is not None else None
     if isinstance(transfer, dict):
         transfer["reconnected"] = True
