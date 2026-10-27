@@ -475,6 +475,42 @@ async def test_timed_out_dial_whose_lookup_fails_is_recorded_as_unknown(voice, d
     assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
 
 
+async def test_a_dial_cancelled_mid_request_leaves_nothing_pending(voice, dial_outcomes, monkeypatch):
+    """The turn that issued the tool is cancelled (a barge-in) while the POST
+    is in flight. Twilio may still place the call, so it is an unknown
+    outcome: counted, cooled down, its trace closed — and its pending entry
+    gone, or a later setup to that number could claim the stale briefing."""
+    from pincer.voice import safety_gates
+
+    recorded: list[str] = []
+
+    async def _record(settings: Any, number: str, **kwargs: Any) -> None:
+        recorded.append(number)
+
+    monkeypatch.setattr(safety_gates, "record_outbound_call", _record)
+    released = asyncio.Event()
+
+    class StuckCalls:
+        async def create_async(self, **kwargs: Any) -> Any:
+            await released.wait()
+            return types.SimpleNamespace(sid="CA_never")
+
+    voice.engine._rest._client = types.SimpleNamespace(calls=StuckCalls())
+
+    dial = asyncio.create_task(outbound.make_phone_call(TARGET, TASK, context={"user_id": "u1"}))
+    async with asyncio.timeout(2):
+        while not voice.engine._pending_outbound:
+            await asyncio.sleep(0)
+    dial.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await dial
+
+    assert voice.engine._pending_outbound == {}
+    assert dial_outcomes == {"rejected": [], "unknown": ["CancelledError: dial outcome unknown"]}
+    assert sum(outbound._daily_outbound_counts["u1"].values()) == 1
+    assert recorded == [TARGET]
+
+
 async def test_dial_cut_off_after_the_relay_bound_it_is_a_placed_call(voice, dial_outcomes):
     """The callee answers at 2 s and the setup claims the dial; then the REST
     response dies. The call is live and briefed, so it is a placed call — not

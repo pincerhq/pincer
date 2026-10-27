@@ -7,6 +7,7 @@ the call to the voice gateway.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import UTC, datetime
@@ -452,6 +453,20 @@ async def make_phone_call(
             try:
                 call = await dialer.create_call(**call_kwargs)
                 call_sid = str(call.sid)
+            except asyncio.CancelledError:
+                # The turn that called the tool was cancelled mid-POST. Twilio
+                # may still place the call: an unknown outcome, counted like
+                # one. The pending entry goes, or a later setup to this number
+                # could claim its stale briefing. Shielded: a second cancel
+                # must not skip the cooldown write.
+                if engine is not None and pre_state is not None:
+                    engine.discard_pending(pre_state)
+                _increment_daily_count(user_id)
+                await asyncio.shield(telemetry.dial_unknown(trace_key, error="CancelledError: dial outcome unknown"))
+                await asyncio.shield(
+                    record_outbound_call(settings, validated, user_id=user_id, channel=ctx.get("channel", ""))
+                )
+                raise
             except DialOutcomeUnknown as unknown:
                 # A timeout or a connection dropped mid-response is not a
                 # rejection: Twilio may have accepted the POST and the phone
