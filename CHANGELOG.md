@@ -305,7 +305,9 @@ mounting a directory. Install the new `remote-skills` extra
     `dial_unknown`, still `twilio_api`), not `dial_rejected`. A Twilio error
     response, or no connection at all, stays a rejection.
   - A callee who answers before the dial request returns is bound by the relay
-    `setup` itself, by callee number — but only when that setup's WebSocket
+    `setup` itself, by callee number — but only when it is the only pending
+    dial to that number (two dials to one callee bind by their own CallSid
+    once the request returns), and only when that setup's WebSocket
     token or Twilio signature was actually verified. With
     `PINCER_VOICE_WS_AUTH_REQUIRED=false`, `PINCER_VOICE_WEBHOOK_VALIDATE=false`
     or no auth token, `callSid` and `to` are socket-supplied, and anyone who
