@@ -337,7 +337,7 @@ class VoiceEngine(ABC):
             await self._twilio_update(call_sid, **update)
             logger.info("Call %s transferred to %s", call_sid, target_number)
         except Exception as exc:
-            import requests
+            import requests  # type: ignore[import-untyped]  # requests is a transitive dep (twilio)
 
             # Only a read timeout leaves open whether Twilio applied the update:
             # the request went out and no answer came back. Every other error
