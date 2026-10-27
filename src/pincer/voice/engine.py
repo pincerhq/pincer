@@ -470,6 +470,11 @@ class VoiceEngine(ABC):
                     continue
                 if self._unsettled_dial(call_sid, record) is None:
                     return
+                if status in _ENDED_CALL_STATUSES and record.get("close_unexplained"):
+                    # the media closed and Twilio could not say why at the time
+                    logger.info("Transfer for call %s: Twilio reports %r — the call ended", call_sid, status)
+                    await self.finish_remote_ended(call_sid)
+                    return
                 if status in _ENDED_CALL_STATUSES:
                     logger.info("Transfer for call %s: Twilio reports %r — the caller is gone", call_sid, status)
                     if self._on_transfer_settled_callback is not None:
@@ -582,17 +587,55 @@ class VoiceEngine(ABC):
         if state is None or state.metadata.get("transferring"):
             return
         record = state.metadata.get("transfer")
-        if (
-            isinstance(record, dict)
+        if isinstance(record, dict) and self._possibly_live(state, record):
+            await self._media_closed_while_possibly_live(call_sid, record)
+            return
+        logger.info("Media session closed by Twilio [%s] — ending call", call_sid)
+        await self.finish_remote_ended(call_sid)
+
+    @staticmethod
+    def _possibly_live(state: CallState, record: Any) -> bool:
+        """A redirect settled as not applied that could still go live: its
+        dial has no result and its dial timeout plus margin has not passed."""
+        return (
+            not state.metadata.get("transferring")
+            and isinstance(record, dict)
             and "dial_status" not in record
             and float(record.get("possibly_live_until") or 0) > time.monotonic()
-        ):
-            # A redirect settled as not applied, and now the media closes: it
-            # went live late (the caller is in the <Dial>), or the caller hung
-            # up. Either way not ours to end yet: back to transferring (and the
-            # untimed phase, so no watchdog hangs up a bridged call), and let
-            # the dial's result or Twilio's call status decide.
-            logger.warning("Media closed [%s] for a transfer given up as not applied — asking Twilio", call_sid)
+        )
+
+    async def _media_closed_while_possibly_live(self, call_sid: str, record: dict[str, Any]) -> None:
+        """The media closed for a call whose redirect was settled as not
+        applied: the caller hung up, or the redirect went live late (the caller
+        is in the <Dial>). Ask Twilio once, now, under the call's lock:
+
+        - the call is over: a plain remote end (no transfer outcome recorded);
+        - in progress: a late apply. Back to transferring (and the untimed
+          phase, so no watchdog hangs up a bridged call); the dial's result or
+          the re-checks decide;
+        - Twilio cannot be asked: held the same way, but a terminal status a
+          re-check finds later is still the plain hang-up it most likely was."""
+        from pincer.voice.call_locks import one_call_update_at_a_time
+
+        async with one_call_update_at_a_time(call_sid):
+            state = self._active_calls.get(call_sid)
+            if state is None or state.metadata.get("transfer") is not record or not self._possibly_live(state, record):
+                return  # ended, or decided, while waiting for the lock
+            try:
+                status: str | None = await self.fetch_call_status(call_sid)
+            except Exception:
+                logger.warning("Media closed [%s] in a possibly live transfer: Twilio status check failed", call_sid)
+                status = None
+            state = self._active_calls.get(call_sid)
+            if state is None or not self._possibly_live(state, record):
+                return
+            if status in _ENDED_CALL_STATUSES:
+                logger.info("Media session closed by Twilio [%s] — ending call", call_sid)
+                await self.finish_remote_ended(call_sid)
+                return
+            if status != "in-progress":
+                record["close_unexplained"] = True
+            logger.warning("Media closed [%s] for a transfer given up as not applied — held as a late apply", call_sid)
             state.metadata["transferring"] = True
             record["applied_late"] = True
             if self._on_transfer_settled_callback is not None:
@@ -600,10 +643,7 @@ class VoiceEngine(ABC):
                     await self._on_transfer_settled_callback(call_sid, "applied_late")
                 except Exception:
                     logger.exception("transfer-settled callback failed [%s]", call_sid)
-            self._start_transfer_confirm(call_sid, record)
-            return
-        logger.info("Media session closed by Twilio [%s] — ending call", call_sid)
-        await self.finish_remote_ended(call_sid)
+        self._start_transfer_confirm(call_sid, record)
 
     async def finish_remote_ended(self, call_sid: str, reason: str = "") -> bool:
         """Twilio says the call is over: close media, unregister, run the
