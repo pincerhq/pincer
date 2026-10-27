@@ -463,8 +463,8 @@ async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
             # resume it in TAKE_MESSAGE, as a failed transfer does, so the first
             # turn asks for the name instead of greeting the caller again.
             session = _transfer_session_lookup(call_sid)
-            _greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
-            record["answer_twiml"] = bytes(response.body).decode()  # what a retried callback replays
+            greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
+            _record_reconnect(record, greeting, language)
             return response
         except Exception:
             # Twilio drops the caller if we answer 500, and a registered call
@@ -532,8 +532,8 @@ async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
         # Not bridged and the caller is still on the line: whatever the status
         # means, nobody took the call, so it is a failed transfer.
         logger.warning("Transfer result [%s]: unknown DialCallStatus %r — treating as failed", call_sid, dial_status)
-    _greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
-    record["answer_twiml"] = bytes(response.body).decode()  # what a retried callback replays
+    greeting, response = await _resume_failed_transfer(call_sid, session, dial_status, language)
+    _record_reconnect(record, greeting, language)
     return response
 
 
@@ -574,10 +574,19 @@ def _record_dial_result(state: Any, key: str, result: dict[str, Any]) -> dict[st
     return record
 
 
+def _record_reconnect(record: dict[str, Any], greeting: str, language: str) -> None:
+    """What a copy of this result is answered with: the reconnect is rebuilt
+    from these, not stored as TwiML, because its relay URL carries a signed
+    token that expires (`voice_signature_max_age_s`)."""
+    record["reconnect_greeting"] = greeting
+    record["reconnect_language"] = language
+
+
 def _answer_copy(call_sid: str, key: str, record: dict[str, Any], *, is_current: bool, language: str) -> Response:
     """The answer to a copy of a dial result we already processed.
 
-    The recorded reconnect, verbatim, while it is the current dial's and no
+    The recorded reconnect, rendered again (a fresh signed relay URL: the first
+    answer's token may be stale by now), while it is the current dial's and no
     relay has connected for it: Twilio may be executing this copy. An empty
     ``<Response/>`` once the relay connected, or for an earlier dial: Twilio
     has already executed an answer for that <Dial> and executes at most one
@@ -585,9 +594,9 @@ def _answer_copy(call_sid: str, key: str, record: dict[str, Any], *, is_current:
     replaces the live relay."""
     if is_current and not record.get("reconnected"):
         logger.info("Transfer result [%s] already handled (dial %s) — replaying reconnect", call_sid, key)
-        answer = record.get("answer_twiml")
-        if answer:
-            return _twiml_response(str(answer))
+        if "reconnect_greeting" in record:
+            language = str(record.get("reconnect_language", "") or language)
+            return _reconnect_after_transfer(call_sid, language, str(record["reconnect_greeting"]))
         # the first delivery raised before its answer was recorded
         return _reconnect_after_transfer(call_sid, language, _transfer_failed_line(language))
     logger.info("Transfer result [%s] for dial %s already acted on — ignored", call_sid, key)

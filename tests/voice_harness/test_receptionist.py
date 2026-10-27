@@ -1604,7 +1604,7 @@ async def test_each_dial_keeps_its_own_record(monkeypatch):
     dials = h.state.metadata[DIALS_KEY]
     assert set(dials) == {f"dial:{first_dial}", f"dial:{second_dial}"}
     assert dials[f"dial:{first_dial}"]["dial_status"] == "busy"
-    assert dials[f"dial:{first_dial}"]["answer_twiml"] == first.text
+    assert dials[f"dial:{first_dial}"]["reconnect_greeting"] in first.text
     assert "dial_status" not in dials[f"dial:{second_dial}"]
     assert h.state.metadata["transfer"] is dials[f"dial:{second_dial}"]
 
@@ -1626,25 +1626,43 @@ async def test_result_with_an_unknown_dial_token_is_ignored(monkeypatch):
 
 
 @pytest.mark.usefixtures("_no_transfer_resolver")
-async def test_replay_returns_the_recorded_answer_verbatim(monkeypatch):
-    """A copy is answered from the dial's record, not by building the TwiML again."""
-    from pincer.voice import twiml_server
+async def test_replay_signs_the_relay_url_afresh(monkeypatch):
+    """A copy Twilio executes minutes after the first answer gets the same
+    greeting with a freshly signed relay URL: the first answer's token is
+    stale by then and the relay upgrade would be refused."""
+    import re
+    from types import SimpleNamespace
+
+    from pincer.voice import webhook_auth
     from pincer.voice.engine import DIAL_ID_KEY
 
-    h = await _start(settings=_transfer_settings())
+    settings = _transfer_settings()
+    settings.twilio_auth_token.get_secret_value.return_value = "test-auth-token"
+    settings.voice_ws_auth_required = True
+    clock = [1_800_000_000.0]
+    monkeypatch.setattr(webhook_auth, "time", SimpleNamespace(time=lambda: clock[0]))
+    h = await _start(settings=settings)
     await _transferred(h)
     url = f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}"
     data = {"CallSid": CALL, "DialCallStatus": "no-answer", "DialCallSid": "CAdial", "CallStatus": "in-progress"}
     async with _async_client(h) as client:
         first = await client.post(url, data=data)
-
-        def rebuilt(*_args, **_kwargs):
-            raise AssertionError("the replay rebuilt the reconnect TwiML")
-
-        monkeypatch.setattr(twiml_server, "_reconnect_after_transfer", rebuilt)
+        clock[0] += settings.voice_signature_max_age_s + 1
         retry = await client.post(url, data=data)
-    assert "ConversationRelay" in first.text
-    assert retry.text == first.text
+
+    def relay_token(twiml: str) -> tuple[str, str]:
+        match = re.search(r"/relay\?t=(\d+)&amp;s=([\w-]+)", twiml)
+        assert match, twiml
+        return match.group(1), match.group(2)
+
+    def greeting(twiml: str) -> str:
+        return re.search(r'welcomeGreeting="([^"]*)"', twiml).group(1)
+
+    assert greeting(retry.text) == greeting(first.text) != ""
+    ts, sig = relay_token(retry.text)
+    assert ts != relay_token(first.text)[0]
+    assert int(ts) == int(clock[0])
+    assert sig == webhook_auth.ws_token("test-auth-token", webhook_auth.WS_RELAY_PATH, int(ts))
 
 
 async def test_recovered_and_processed_dial_results_record_the_same_fields():
@@ -1661,7 +1679,8 @@ async def test_recovered_and_processed_dial_results_record_the_same_fields():
         await client.post("/api/apps/twilio/transfer-result?dial=lostdial", data=_lost_state_callback())
     processed = h.state.metadata["transfer"]
     recovered = h.engine.get_call_state(LOST_CALL).metadata["transfer"]
-    result_fields = {"dial_id", "dial_status", "dial_call_sid", "dial_duration_s", "dial_bridged", "answer_twiml"}
+    result_fields = {"dial_id", "dial_status", "dial_call_sid", "dial_duration_s", "dial_bridged"}
+    result_fields |= {"reconnect_greeting", "reconnect_language"}
     assert result_fields <= set(processed)
     assert result_fields <= set(recovered)
     assert recovered["recovered"] is True and "recovered" not in processed
