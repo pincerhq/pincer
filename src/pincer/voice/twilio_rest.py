@@ -35,7 +35,10 @@ class DialOutcomeUnknown(Exception):
     as itself."""
 
 
-def _outcome_unknown(exc: BaseException) -> bool:
+def outcome_unknown(exc: BaseException) -> bool:
+    """Whether a failed request may still have been acted on by Twilio: it went
+    out (or may have) and only the answer was lost. Shared by the dial
+    (`create_call`) and the transfer redirect (`VoiceEngine.transfer_call`)."""
     if isinstance(exc, TimeoutError):
         return True
     try:
@@ -77,14 +80,32 @@ class TwilioRest:
                     )
         return self._client
 
-    async def update_call(self, call_sid: str, *, twiml: str | None = None, status: str | None = None) -> Any:
+    async def update_call(
+        self,
+        call_sid: str,
+        *,
+        twiml: str | None = None,
+        status: str | None = None,
+        status_callback: str | None = None,
+        status_callback_method: str | None = None,
+    ) -> Any:
         client = await self._get()
         kwargs: dict[str, Any] = {}
         if twiml is not None:
             kwargs["twiml"] = twiml
         if status is not None:
             kwargs["status"] = status
+        if status_callback is not None:
+            kwargs["status_callback"] = status_callback
+        if status_callback_method is not None:
+            kwargs["status_callback_method"] = status_callback_method
         return await asyncio.wait_for(client.calls(call_sid).update_async(**kwargs), REQUEST_TIMEOUT_S)
+
+    async def fetch_call_status(self, call_sid: str, *, timeout: float = REQUEST_TIMEOUT_S) -> str:
+        """Twilio's current status of the call (``in-progress``, ``completed``, …)."""
+        client = await self._get()
+        call = await asyncio.wait_for(client.calls(call_sid).fetch_async(), timeout)
+        return str(getattr(call, "status", "") or "").lower()
 
     async def create_call(self, **kwargs: Any) -> Any:
         """Raises `DialOutcomeUnknown` when Twilio may have placed the call anyway."""
@@ -92,7 +113,7 @@ class TwilioRest:
         try:
             return await asyncio.wait_for(client.calls.create_async(**kwargs), REQUEST_TIMEOUT_S)
         except Exception as exc:
-            if _outcome_unknown(exc):
+            if outcome_unknown(exc):
                 raise DialOutcomeUnknown(f"{type(exc).__name__}: dial outcome unknown") from exc
             raise
 

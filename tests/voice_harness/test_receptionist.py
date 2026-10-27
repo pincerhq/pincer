@@ -1461,14 +1461,12 @@ async def test_caller_hangup_while_the_redirect_times_out_finalizes_the_call(mon
     """The socket closes during the update (the caller hung up) and the update
     times out: Twilio says the call is over, so it is finalized as a hang-up
     during the transfer, not held in untimed TRANSFERRING for an hour."""
-    import requests
-
     _fast_transfer_checks(monkeypatch, settle_s=0)
     started = _count_transfer_starts(monkeypatch)
     h = await _start(settings=_transfer_settings())
     h.state.metadata["websocket"] = _open_socket()
     h.engine.redirect_hook = lambda call_sid: h.state.metadata.pop("websocket", None)
-    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    h.engine.transfer_raises = TimeoutError()  # no answer in time: the redirect may have applied
     h.engine.call_status = "completed"
     session = h.session
     await h.say(HUMAN_PLEASE)
@@ -1486,8 +1484,6 @@ async def test_settle_and_a_dial_result_for_the_same_dial_do_not_both_act(monkey
     the same dial (the caller hung up while the target rang): only one of them
     may record the hang-up. The settle runs under the call's lock and re-checks
     after its await."""
-    import requests
-
     from pincer.voice.engine import DIAL_ID_KEY
 
     _fast_transfer_checks(monkeypatch, settle_s=0)
@@ -1500,7 +1496,7 @@ async def test_settle_and_a_dial_result_for_the_same_dial_do_not_both_act(monkey
 
     monkeypatch.setattr(sess.ReceptionSession, "on_transfer_abandoned", counting)
     h = await _start(settings=_transfer_settings())
-    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    h.engine.transfer_raises = TimeoutError()  # no answer in time: the redirect may have applied
     gate = asyncio.Event()
 
     async def slow_fetch(call_sid):
@@ -1531,8 +1527,6 @@ async def test_dial_result_waits_for_a_settle_in_progress(monkeypatch):
     """A dial result arriving while the settle is still acting on the same dial
     (here: apologizing for a redirect it found not applied) is handled after
     it, never interleaved with it."""
-    import requests
-
     from pincer.voice.engine import DIAL_ID_KEY
     from pincer.voice.telemetry import hooks
 
@@ -1541,7 +1535,7 @@ async def test_dial_result_waits_for_a_settle_in_progress(monkeypatch):
     monkeypatch.setattr(hooks, "transfer_result", lambda call_sid, dial_status, **_: order.append("dial result"))
     h = await _start(settings=_transfer_settings())
     h.state.metadata["websocket"] = _open_socket()
-    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    h.engine.transfer_raises = TimeoutError()  # no answer in time: the redirect may have applied
     gate = asyncio.Event()
     settled = h.engine._on_transfer_settled_callback
 
@@ -1566,13 +1560,10 @@ async def test_dial_result_waits_for_a_settle_in_progress(monkeypatch):
 @pytest.mark.usefixtures("_no_transfer_resolver")
 async def test_cr_redirect_applied_after_the_timeout_is_seen_once_the_turn_returns(monkeypatch):
     """Twilio applies the redirect at ~10.2 s, just after our update timed out,
-    with the socket still up. On ConversationRelay the transfer runs inside the
-    caller's turn, which holds the relay's receive loop, so the close is only
-    seen once the turn returns: settling inside the turn would read "socket
-    open, not applied" and roll back a bridged call. Settled afterwards, the
-    call stays transferred and its dial result is handled normally."""
-    import requests
-
+    with the socket still up: its close reaches us only after transfer_call has
+    returned. Deciding inside transfer_call would read "socket open, not
+    applied" and roll back a bridged call. Settled afterwards, the call stays
+    transferred and its dial result is handled normally."""
     from pincer.voice.engine import DIAL_ID_KEY
 
     _fast_transfer_checks(monkeypatch, settle_s=0.05)
@@ -1580,7 +1571,7 @@ async def test_cr_redirect_applied_after_the_timeout_is_seen_once_the_turn_retur
     results = _count_transfer_results(monkeypatch)
     h = await _start(settings=_transfer_settings())
     h.state.metadata["websocket"] = _open_socket()
-    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    h.engine.transfer_raises = TimeoutError()  # no answer in time: the redirect may have applied
     await h.say(HUMAN_PLEASE)
     assert h.engine.pending_transfer_settle(CALL) is not None  # not settled inside the turn
     h.state.metadata.pop("websocket")  # the relay loop is free again and sees Twilio's close
@@ -1596,16 +1587,25 @@ async def test_cr_redirect_applied_after_the_timeout_is_seen_once_the_turn_retur
     assert (started, results) == ([CALL], ["busy"])
 
 
+class _TimingOutRedirect:
+    """TwilioRest whose redirect gets no answer in time (what wait_for raises)."""
+
+    async def update_call(self, call_sid, **params):
+        raise TimeoutError
+
+    async def aclose(self):
+        pass
+
+
 class _RelayEngineWithoutTwilio(ConversationRelayEngine):
     """ConversationRelayEngine with Twilio's REST API faked: the redirect times
     out, and speech goes out on the call's (fake) relay socket, as in production."""
 
-    async def _twilio_update(self, call_sid, **update):
-        import requests
-
-        raise requests.exceptions.ReadTimeout("read")
-
     call_status = "in-progress"
+
+    def __init__(self, settings):
+        super().__init__(settings)
+        self._rest = _TimingOutRedirect()
 
     async def fetch_call_status(self, call_sid):
         return self.call_status
@@ -1623,6 +1623,7 @@ async def test_cr_redirect_never_applied_apologizes_on_the_live_relay(monkeypatc
     ws = _open_socket()
     h.state.metadata["websocket"] = ws
     await h.say(HUMAN_PLEASE)
+    await h.channel.wait_for_turn(CALL)  # a real engine hands the turn to a task
     await _settled(h)
     apology = "Leider ist gerade niemand erreichbar. Ich nehme gern eine Nachricht auf. Wie ist Ihr Name?"
     tokens = [json.loads(call.args[0]).get("token") for call in ws.send_text.await_args_list]
@@ -1654,6 +1655,7 @@ async def test_caller_hangup_during_the_not_applied_apology_finalizes_the_call(m
     ws.send_text.side_effect = send_text
     h.state.metadata["websocket"] = ws
     await h.say(HUMAN_PLEASE)
+    await h.channel.wait_for_turn(CALL)  # a real engine hands the turn to a task
     await _settled(h)
     assert h.engine.get_call_state(CALL) is None
     assert h.engine.get_active_calls() == {}
@@ -1688,14 +1690,12 @@ async def test_late_apply_after_not_applied_keeps_the_caller(monkeypatch):
     not be finalized: it goes back to transferring (and its untimed phase, so
     the watchdog cannot hang up a bridged call), and the dial's own result
     later reconnects the caller."""
-    import requests
-
     from pincer.voice.engine import DIAL_ID_KEY
 
     _fast_transfer_checks(monkeypatch)
     h = await _start(settings=_transfer_settings())
     h.state.metadata["websocket"] = _open_socket()
-    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    h.engine.transfer_raises = TimeoutError()  # no answer in time: the redirect may have applied
     _twilio_reports(h, "in-progress")
     await h.say(HUMAN_PLEASE)
     await _settled(h)
@@ -1722,11 +1722,9 @@ async def test_failing_status_checks_are_retried_until_twilio_answers(monkeypatc
     """Twilio cannot be asked at the settle (it was slow enough to time out the
     update): the check is retried, and the caller's hang-up it then reports
     ends the call instead of leaving it to the hour-long reaper."""
-    import requests
-
     _fast_transfer_checks(monkeypatch)
     h = await _start(settings=_transfer_settings())
-    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    h.engine.transfer_raises = TimeoutError()  # no answer in time: the redirect may have applied
     _twilio_reports(h, RuntimeError("timeout"), RuntimeError("timeout"), "completed")
     session = h.session
     await h.say(HUMAN_PLEASE)
@@ -1741,13 +1739,11 @@ async def test_hangup_just_before_the_settle_with_lagging_status_is_not_a_transf
     is gone at the T=15 settle while Twilio still reports in-progress. That is
     not proof of a transfer: no start is recorded, and the re-check that sees
     the call completed ends it."""
-    import requests
-
     _fast_transfer_checks(monkeypatch, settle_s=0.05)
     started = _count_transfer_starts(monkeypatch)
     h = await _start(settings=_transfer_settings())
     h.state.metadata["websocket"] = _open_socket()
-    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    h.engine.transfer_raises = TimeoutError()  # no answer in time: the redirect may have applied
     _twilio_reports(h, "in-progress", "completed")
     session = h.session
     await h.say(HUMAN_PLEASE)
@@ -1775,14 +1771,12 @@ async def test_result_before_the_redirect_answer_records_the_transfer_start(monk
     """T=1 Twilio applies the redirect but its answer is slow; T=4 the busy
     result arrives; T=10 the update times out. The result is proof the <Dial>
     ran: one start, then the result, and the later timeout changes nothing."""
-    import requests
-
     from pincer.voice.engine import DIAL_ID_KEY
 
     _fast_transfer_checks(monkeypatch)
     events = _transfer_events(monkeypatch)
     h = await _start(settings=_transfer_settings())
-    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    h.engine.transfer_raises = TimeoutError()  # no answer in time: the redirect may have applied
     h.engine.redirect_gate = asyncio.Event()
     turn = asyncio.create_task(h.say(HUMAN_PLEASE))
     for _ in range(50):
@@ -1833,8 +1827,6 @@ async def test_result_after_a_redirect_that_raised_records_the_transfer_start(mo
 async def test_unconfirmed_dial_emits_transfer_started_when_its_result_arrives(monkeypatch):
     """No socket evidence either way: no start is recorded until the dial's own
     result confirms the redirect applied; then exactly one, before the result."""
-    import requests
-
     from pincer.voice.engine import DIAL_ID_KEY
     from pincer.voice.telemetry import hooks
 
@@ -1843,7 +1835,7 @@ async def test_unconfirmed_dial_emits_transfer_started_when_its_result_arrives(m
     monkeypatch.setattr(hooks, "transfer_started", lambda call_sid, **_: events.append("started"))
     monkeypatch.setattr(hooks, "transfer_result", lambda call_sid, dial_status, **_: events.append(dial_status))
     h = await _start(settings=_transfer_settings())
-    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    h.engine.transfer_raises = TimeoutError()  # no answer in time: the redirect may have applied
     await h.say(HUMAN_PLEASE)
     await _settled(h)
     assert events == []

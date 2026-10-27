@@ -33,6 +33,9 @@ class FakeVoiceEngine(VoiceEngine):
         self.redirect_hook: Callable[[str], None] | None = None
         # set: the update waits for it (Twilio slow to answer)
         self.redirect_gate: asyncio.Event | None = None
+        # The <Dial> redirect obeys the hooks above; every other REST call goes
+        # to the engine's own TwilioRest (a test's fake, when it installs one).
+        self._rest = _HookedRedirect(self, self._rest)
         self.wait_for_turns = True
         #: When set, send_speech holds the agent "mid-sentence" until released;
         #: `speech_waiting` fires once something is held.
@@ -112,19 +115,6 @@ class FakeVoiceEngine(VoiceEngine):
             call_sid, target_number, timeout_s=timeout_s, action_url=action_url, announce=announce, language=language
         )
 
-    async def _twilio_update(self, call_sid: str, **update: Any) -> None:
-        if self.redirect_hook is not None:
-            self.redirect_hook(call_sid)
-        if self.redirect_gate is not None:
-            await self.redirect_gate.wait()
-        if isinstance(self.transfer_raises, BaseException):
-            raise self.transfer_raises
-        if self.transfer_raises:
-            from twilio.base.exceptions import TwilioRestException
-
-            # a definite Twilio error: the redirect was not applied
-            raise TwilioRestException(500, f"/Calls/{call_sid}", "dial failed")
-
     async def fetch_call_status(self, call_sid: str) -> str:
         self.status_fetches.append(call_sid)
         if isinstance(self.call_status, Exception):
@@ -144,3 +134,33 @@ class FakeVoiceEngine(VoiceEngine):
 
     async def close_media_stream(self, call_sid: str) -> None:
         pass
+
+
+class _HookedRedirect:
+    """The engine's TwilioRest with its call update (the <Dial> redirect; the
+    fake ends calls and sends DTMF itself) driven by the fake engine's
+    `transfer_raises` / `redirect_hook` / `redirect_gate`."""
+
+    def __init__(self, engine: FakeVoiceEngine, rest: Any) -> None:
+        object.__setattr__(self, "_engine", engine)
+        object.__setattr__(self, "_rest", rest)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._rest, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        setattr(self._rest, name, value)  # e.g. a test swapping in its Twilio client
+
+    async def update_call(self, call_sid: str, **_params: Any) -> None:
+        engine = self._engine
+        if engine.redirect_hook is not None:
+            engine.redirect_hook(call_sid)
+        if engine.redirect_gate is not None:
+            await engine.redirect_gate.wait()
+        if isinstance(engine.transfer_raises, BaseException):
+            raise engine.transfer_raises
+        if engine.transfer_raises:
+            from twilio.base.exceptions import TwilioRestException
+
+            # a definite Twilio error: the redirect was not applied
+            raise TwilioRestException(500, f"/Calls/{call_sid}", "dial failed")

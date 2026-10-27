@@ -176,6 +176,10 @@ agent code needs a separate uid or container.
 
 ### Added
 
+- `PINCER_VOICE_TRANSFER_MAX_DURATION_S` (default 3600): ceiling for a call
+  transferred to a human (`<Dial timeLimit>`), and the metric
+  `pincer.voice.receptionist.transfers{result=…}`.
+
 #### Google OAuth token from `PINCER_GOOGLE_TOKEN_JSON` (#268)
 
 The Google token no longer has to live in the data volume. Set
@@ -200,9 +204,6 @@ telemetry timeline. Dry run by default (`--since 30d`, `--json`); `--apply`
 updates `voice_calls` and the telemetry call row in one transaction and writes
 a `telephony.reclassify` audit row. Idempotent. Only calls inside the telemetry
 retention window (`PINCER_TELEPHONY_TELEMETRY_RETENTION_DAYS`) can be corrected.
-- `PINCER_VOICE_TRANSFER_MAX_DURATION_S` (default 3600): ceiling for a call
-  transferred to a human (`<Dial timeLimit>`), and the metric
-  `pincer.voice.receptionist.transfers{result=…}`.
 
 #### Storage browser API: `/api/storage`
 

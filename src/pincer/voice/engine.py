@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlencode
 
 from pincer.voice.audio import MULAW_BYTES_PER_SECOND
-from pincer.voice.twilio_rest import TwilioRest
+from pincer.voice.twilio_rest import TwilioRest, outcome_unknown
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -100,12 +100,9 @@ BARGE_IN_CONFIRM_WINDOW_MS = 1500
 _ENDED_CALL_TTL_S = 900.0
 _MAX_ENDED_CALLS = 500
 
-# Bound on the Twilio call-status fetch (the SDK's own default is no timeout).
-# It runs on the response path of a webhook Twilio waits ~15 s for.
+# Bound on the Twilio call-status fetch, tighter than twilio_rest's 10 s: it
+# runs on the response path of a webhook Twilio waits ~15 s for.
 CALL_STATUS_FETCH_TIMEOUT_S = 5.0
-# Bound on every Twilio REST write (hangup, redirect, DTMF, TTS fallback): they
-# take 1-3 s, and an unbounded one holds a to_thread worker until it returns.
-TWILIO_UPDATE_TIMEOUT_S = 10.0
 # How long after a timed-out transfer redirect the evidence is read: an update
 # Twilio applies just after our timeout has closed the call's media socket by then.
 UNCONFIRMED_REDIRECT_SETTLE_S = 5.0
@@ -248,6 +245,7 @@ class VoiceEngine(ABC):
             await self._on_barge_in_callback(call_sid, heard)
         else:
             await self.interrupt_speech(call_sid)
+
     def set_on_transfer_end(self, callback: Callable) -> None:
         self._on_transfer_end_callback = callback
 
@@ -364,15 +362,16 @@ class VoiceEngine(ABC):
             live.metadata.setdefault(DIALS_KEY, {})[dial_key(dial_id, "")] = record
             live.metadata["transfer"] = record
         try:
-            await self._twilio_update(call_sid, **update)
+            await self._rest.update_call(call_sid, **update)
             logger.info("Call %s transferred to %s", call_sid, target_number)
         except Exception as exc:
-            if redirect_may_have_applied(exc) and live is not None:
-                # Twilio may have applied it. Keep the call in flight and settle
-                # it later, from evidence: not here, because on ConversationRelay
-                # this runs inside the caller's turn, which holds the relay
-                # socket's receive loop, so its close could not be seen yet.
-                logger.warning("Transfer redirect for call %s unconfirmed (read timeout) — settling", call_sid)
+            if outcome_unknown(exc) and live is not None:
+                # Twilio may have applied it (the same rule as a dial whose
+                # outcome is unknown). Keep the call in flight and settle it
+                # from evidence once the turn that asked for it has returned:
+                # the media socket's close needs the transport loop to see it.
+                reason = type(exc).__name__
+                logger.warning("Transfer redirect for call %s unconfirmed (%s) — settling", call_sid, reason)
                 record["redirect_unconfirmed"] = True
                 task = asyncio.create_task(
                     self._settle_unconfirmed_redirect(call_sid, record, media_before),
@@ -515,41 +514,12 @@ class VoiceEngine(ABC):
             return "applied"
         return "unknown"
 
-    def _twilio_client(self, timeout: float) -> Any:
-        """The one place a Twilio REST client is built (credentials, and any
-        future region/edge settings). ``timeout`` bounds each request: the SDK's
-        own default is none."""
-        from twilio.http.http_client import TwilioHttpClient
-        from twilio.rest import Client
-
-        return Client(
-            self._settings.twilio_account_sid,
-            self._settings.twilio_auth_token.get_secret_value(),
-            http_client=TwilioHttpClient(timeout=timeout),
-        )
-
-    async def _twilio_update(self, call_sid: str, **update: Any) -> None:
-        """``client.calls(call_sid).update(**update)`` off the event loop: the
-        Twilio SDK is blocking HTTP, and 1–3s on the loop stalls every other
-        call's media, websockets and the watchdog. Bounded by
-        ``TWILIO_UPDATE_TIMEOUT_S``."""
-
-        def _update() -> None:
-            self._twilio_client(TWILIO_UPDATE_TIMEOUT_S).calls(call_sid).update(**update)
-
-        await asyncio.to_thread(_update)
-
     async def fetch_call_status(self, call_sid: str) -> str:
         """Twilio's current status of the call (``in-progress``, ``completed``,
-        …), off the event loop like `_twilio_update`, and bounded by
+        …), through the engine's async REST session and bounded by
         ``CALL_STATUS_FETCH_TIMEOUT_S``. Raises on any Twilio or network error;
         the caller decides what an unknown status means."""
-
-        def _fetch() -> str:
-            client = self._twilio_client(CALL_STATUS_FETCH_TIMEOUT_S)
-            return str(client.calls(call_sid).fetch().status or "").lower()
-
-        return await asyncio.to_thread(_fetch)
+        return await self._rest.fetch_call_status(call_sid, timeout=CALL_STATUS_FETCH_TIMEOUT_S)
 
     async def end_call(self, call_sid: str) -> None:
         try:
@@ -957,35 +927,6 @@ class VoiceEngine(ABC):
     # ConversationRelay hands audio to Twilio and never reports playout, so
     # its numbers can only ever be estimates from character counts.
     analytics_method: str = "estimated"
-
-
-def redirect_may_have_applied(exc: BaseException) -> bool:
-    """Whether a failed Twilio update may still have been applied: the request
-    went out and only its answer was lost. The SDK passes requests' exceptions
-    through unwrapped (twilio/http/http_client.py `session.send`), and requests
-    raises (requests/adapters.py `send`, requests/models.py `iter_content`):
-
-    - ReadTimeout: no answer within the read timeout;
-    - ConnectionError(ReadTimeoutError): the answer's body stalled;
-    - ConnectionError(ProtocolError): the connection dropped after the request
-      was sent ("Connection aborted", RemoteDisconnected);
-    - ChunkedEncodingError: the answer's body broke off.
-
-    Definite (no <Dial> can exist): ConnectTimeout and
-    ConnectionError(MaxRetryError(NewConnectionError)) never sent the request
-    (refused, DNS), a TwilioRestException is Twilio's own error answer, and
-    anything else never reached the HTTP layer."""
-    import requests  # type: ignore[import-untyped]  # requests is a transitive dep (twilio)
-    from urllib3.exceptions import ProtocolError, ReadTimeoutError
-
-    if isinstance(exc, requests.exceptions.ReadTimeout | requests.exceptions.ChunkedEncodingError):
-        return True
-    if isinstance(exc, requests.exceptions.ConnectTimeout):
-        return False
-    if isinstance(exc, requests.exceptions.ConnectionError):
-        cause = exc.args[0] if exc.args else None
-        return isinstance(cause, ReadTimeoutError | ProtocolError)
-    return False
 
 
 def note_transfer_started(call_sid: str, record: dict[str, Any]) -> None:

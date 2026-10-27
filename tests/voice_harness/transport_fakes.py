@@ -109,7 +109,10 @@ class _FakeTwilioCalls:
         self._client = client
 
     def __call__(self, sid: str) -> Any:
-        return SimpleNamespace(update_async=lambda **params: self._client.request("update", {"sid": sid, **params}))
+        return SimpleNamespace(
+            update_async=lambda **params: self._client.request("update", {"sid": sid, **params}),
+            fetch_async=lambda: self._client.request("fetch", {"sid": sid}),
+        )
 
     def create_async(self, **params: Any) -> Any:
         return self._client.request("create", params)
@@ -125,7 +128,11 @@ class FakeTwilioRest:
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self.creates: list[dict[str, Any]] = []
         self.hold: asyncio.Event | None = None  # when set, every call awaits it first
-        self.raise_on: set[str] = set()  # {"update_call", "create_call"}
+        self.raise_on: set[str] = set()  # {"update_call", "create_call", "fetch_call_status"}
+        # raised as is instead of the generic failure, e.g. a timeout
+        self.errors: dict[str, BaseException] = {}
+        self.call_status = "in-progress"  # what fetch_call_status answers
+        self.fetches: list[tuple[str, float]] = []  # (call_sid, timeout)
         self.in_flight = 0
         self.next_sid = "CA_fake"
         self.closed = False
@@ -137,13 +144,31 @@ class FakeTwilioRest:
                 await self.hold.wait()
         finally:
             self.in_flight -= 1
+        if name in self.errors:
+            raise self.errors[name]
         if name in self.raise_on:
             raise RuntimeError(f"fake twilio {name} failed")
 
-    async def update_call(self, call_sid: str, *, twiml: str | None = None, status: str | None = None) -> Any:
+    async def update_call(
+        self,
+        call_sid: str,
+        *,
+        twiml: str | None = None,
+        status: str | None = None,
+        status_callback: str | None = None,
+        status_callback_method: str | None = None,
+    ) -> Any:
         await self._gate("update_call")
-        self.updates.append((call_sid, {"twiml": twiml, "status": status}))
+        params: dict[str, Any] = {"twiml": twiml, "status": status}
+        if status_callback is not None:
+            params.update(status_callback=status_callback, status_callback_method=status_callback_method)
+        self.updates.append((call_sid, params))
         return SimpleNamespace(sid=call_sid)
+
+    async def fetch_call_status(self, call_sid: str, *, timeout: float = 10.0) -> str:
+        self.fetches.append((call_sid, timeout))
+        await self._gate("fetch_call_status")
+        return self.call_status
 
     async def create_call(self, **kwargs: Any) -> Any:
         await self._gate("create_call")

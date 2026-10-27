@@ -163,23 +163,30 @@ def test_dial_twiml_time_limit():
     assert "timeLimit" not in build_dial_twiml("+4930123", timeout_s=20)
 
 
+def _fake_rest(engine):
+    """The engine's TwilioRest replaced by the recording fake (no SDK, no HTTP)."""
+    from voice_harness.transport_fakes import FakeTwilioRest
+
+    engine._rest = FakeTwilioRest()
+    return engine._rest
+
+
 @pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
 async def test_transfer_call_sets_status_callback(mock_settings, engine_cls):
     """Inbound calls get no status callback by default: without one, nothing
     tells us when the bridged caller and the human hang up."""
     engine = engine_cls(mock_settings)
+    rest = _fake_rest(engine)
     state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    with patch("twilio.rest.Client") as client_cls:
-        await engine.transfer_call("CAx", "+4930123", timeout_s=20, action_url="https://example.com/tr")
-    update = client_cls.return_value.calls.return_value.update
-    update.assert_called_once()
-    kwargs = update.call_args.kwargs
+    await engine.transfer_call("CAx", "+4930123", timeout_s=20, action_url="https://example.com/tr")
+    [(call_sid, params)] = rest.updates
     dial_id = state.metadata["dial_id"]
+    assert call_sid == "CAx"
     assert (
-        'timeLimit="3600"' in kwargs["twiml"] and f'action="https://example.com/tr?dial={dial_id}"' in kwargs["twiml"]
+        'timeLimit="3600"' in params["twiml"] and f'action="https://example.com/tr?dial={dial_id}"' in params["twiml"]
     )
-    assert kwargs["status_callback"] == "https://example.com/api/apps/twilio/status"
-    assert kwargs["status_callback_method"] == "POST"
+    assert params["status_callback"] == "https://example.com/api/apps/twilio/status"
+    assert params["status_callback_method"] == "POST"
     assert state.metadata["transferring"] is True
     assert state.metadata["transfer"]["target"] == "+4930123"
     assert state.metadata["transfer"]["dial_id"] == dial_id
@@ -192,34 +199,18 @@ async def test_each_dial_gets_its_own_token(mock_settings, engine_cls):
     from twilio.base.exceptions import TwilioRestException
 
     engine = engine_cls(mock_settings)
+    rest = _fake_rest(engine)
     state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    with patch("twilio.rest.Client") as client_cls:
-        await engine.transfer_call("CAx", "+4930123", action_url="https://example.com/tr?x=1")
-        first = state.metadata["dial_id"]
-        twiml = client_cls.return_value.calls.return_value.update.call_args.kwargs["twiml"]
-        assert f'action="https://example.com/tr?x=1&amp;dial={first}"' in twiml
-        # a definite Twilio error rolls the call back; a timeout with the media
-        # gone would keep it in flight (see the redirect-timeout tests)
-        client_cls.return_value.calls.return_value.update.side_effect = TwilioRestException(502, "/Calls/CAx")
-        with pytest.raises(TwilioRestException):
-            await engine.transfer_call("CAx", "+4930123", action_url="https://example.com/tr")
+    await engine.transfer_call("CAx", "+4930123", action_url="https://example.com/tr?x=1")
+    first = state.metadata["dial_id"]
+    assert f'action="https://example.com/tr?x=1&amp;dial={first}"' in rest.updates[0][1]["twiml"]
+    # a definite Twilio error rolls the call back; a lost answer would keep it
+    # in flight (see the redirect-timeout tests)
+    rest.errors["update_call"] = TwilioRestException(502, "/Calls/CAx")
+    with pytest.raises(TwilioRestException):
+        await engine.transfer_call("CAx", "+4930123", action_url="https://example.com/tr")
     assert state.metadata["dial_id"] not in ("", first)
     assert "transferring" not in state.metadata and "transfer" not in state.metadata
-
-
-async def test_transfer_call_redirect_runs_off_the_event_loop(mock_settings):
-    """The Twilio REST call blocks for 1–3 s; on the loop it stalls every other call's media."""
-    import threading
-
-    engine = ConversationRelayEngine(mock_settings)
-    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    threads: list[int] = []
-    with patch("twilio.rest.Client") as client_cls:
-        client_cls.return_value.calls.return_value.update.side_effect = lambda **_: threads.append(
-            threading.get_ident()
-        )
-        await engine.transfer_call("CAx", "+4930123")
-    assert threads and threads[0] != threading.get_ident()
 
 
 async def test_end_transfer_notifies_channel_only_when_a_transfer_ends(mock_settings):
@@ -239,83 +230,89 @@ async def test_end_transfer_notifies_channel_only_when_a_transfer_ends(mock_sett
 
 
 @pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
-@pytest.mark.parametrize("action", ["end_call", "send_dtmf", "fallback_and_end"])
-async def test_twilio_updates_run_off_the_event_loop(mock_settings, engine_cls, action):
-    """Every Twilio REST update (hangup, DTMF, TTS fallback), not only the transfer."""
-    import threading
+async def test_fetch_call_status_asks_twilio_on_the_shared_session(mock_settings, engine_cls, monkeypatch):
+    """The status check goes through the engine's async TwilioRest (one Client,
+    no thread) and comes back as Twilio spells it."""
+    from types import SimpleNamespace
 
+    from voice_harness.transport_fakes import FakeTwilio, install_fake_twilio
+
+    clients: list[FakeTwilio] = []
+
+    class Twilio(FakeTwilio):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            clients.append(self)
+
+        async def request(self, op, params):
+            await super().request(op, params)
+            return SimpleNamespace(status="In-Progress")
+
+    install_fake_twilio(monkeypatch, Twilio)
     engine = engine_cls(mock_settings)
-    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    threads: list[int] = []
-    with patch("twilio.rest.Client") as client_cls:
-        client_cls.return_value.calls.return_value.update.side_effect = lambda **_: threads.append(
-            threading.get_ident()
-        )
-        if action == "send_dtmf":
-            await engine.send_dtmf("CAx", "1")
-        else:
-            await getattr(engine, action)("CAx")
-    assert threads and all(t != threading.get_ident() for t in threads)
+    assert await engine.fetch_call_status("CAx") == "in-progress"
+    await engine.fetch_call_status("CAx")
+    assert len(clients) == 1
+    assert clients[0].requests == [("fetch", {"sid": "CAx"}), ("fetch", {"sid": "CAx"})]
 
 
-@pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
-@pytest.mark.parametrize("action", ["end_call", "send_dtmf", "fallback_and_end", "transfer_call"])
-async def test_twilio_updates_bound_the_request(mock_settings, engine_cls, action):
-    """The SDK's default is no timeout: a hung Twilio connection would hold a
-    worker thread forever, and enough of them stall every other to_thread user."""
-    from pincer.voice.engine import TWILIO_UPDATE_TIMEOUT_S
+async def test_fetch_call_status_is_bounded_tighter_than_other_requests(mock_settings, monkeypatch):
+    """Twilio waits ~15 s for the webhook that asks: the check gives up after
+    CALL_STATUS_FETCH_TIMEOUT_S, not twilio_rest's 10 s."""
+    from voice_harness.transport_fakes import FakeTwilio, install_fake_twilio
 
-    engine = engine_cls(mock_settings)
-    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    with patch("twilio.rest.Client") as client_cls:
-        if action == "send_dtmf":
-            await engine.send_dtmf("CAx", "1")
-        elif action == "transfer_call":
-            await engine.transfer_call("CAx", "+4930123")
-        else:
-            await getattr(engine, action)("CAx")
-    assert client_cls.call_args.kwargs["http_client"].timeout == TWILIO_UPDATE_TIMEOUT_S == 10.0
+    from pincer.voice import engine as engine_module
 
+    held: list[FakeTwilio] = []
 
-@pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
-async def test_fetch_call_status_runs_off_the_event_loop(mock_settings, engine_cls):
-    """The status check sits on a webhook's response path: blocking Twilio HTTP
-    must not run on the loop, and the status comes back as Twilio spells it."""
-    import threading
+    class Hung(FakeTwilio):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.release.clear()  # Twilio never answers
+            held.append(self)
 
-    engine = engine_cls(mock_settings)
-    threads: list[int] = []
-
-    def fetch():
-        threads.append(threading.get_ident())
-        return MagicMock(status="in-progress")
-
-    with patch("twilio.rest.Client") as client_cls:
-        client_cls.return_value.calls.return_value.fetch.side_effect = fetch
-        assert await engine.fetch_call_status("CAx") == "in-progress"
-    client_cls.return_value.calls.assert_called_once_with("CAx")
-    assert threads and threads[0] != threading.get_ident()
-
-
-async def test_fetch_call_status_bounds_the_request(mock_settings):
-    """Twilio waits ~15 s for the webhook that asks; the SDK's own default is no timeout."""
-    from pincer.voice.engine import CALL_STATUS_FETCH_TIMEOUT_S
-
+    install_fake_twilio(monkeypatch, Hung)
+    assert engine_module.CALL_STATUS_FETCH_TIMEOUT_S == 5.0
+    monkeypatch.setattr(engine_module, "CALL_STATUS_FETCH_TIMEOUT_S", 0.05)
     engine = ConversationRelayEngine(mock_settings)
-    with patch("twilio.rest.Client") as client_cls:
-        client_cls.return_value.calls.return_value.fetch.return_value = MagicMock(status="completed")
-        assert await engine.fetch_call_status("CAx") == "completed"
-    assert client_cls.call_args.kwargs["http_client"].timeout == CALL_STATUS_FETCH_TIMEOUT_S == 5.0
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(engine.fetch_call_status("CAx"), timeout=2)
+    assert loop.time() - started < 1.0  # its own bound, not the 2 s guard
+    held[0].release.set()
+
+
+async def test_transfer_redirect_reaches_twilio_with_its_status_callback(mock_settings, monkeypatch):
+    """Through the real TwilioRest: the redirect's TwiML and status callback
+    reach Twilio's call update."""
+    from voice_harness.transport_fakes import FakeTwilio, install_fake_twilio
+
+    clients: list[FakeTwilio] = []
+
+    class Twilio(FakeTwilio):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            clients.append(self)
+
+    install_fake_twilio(monkeypatch, Twilio)
+    engine = ConversationRelayEngine(mock_settings)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    await engine.transfer_call("CAx", "+4930123", action_url="https://example.com/tr")
+    [(op, params)] = clients[0].requests
+    assert op == "update" and params["sid"] == "CAx" and "<Dial" in params["twiml"]
+    assert params["status_callback"] == "https://example.com/api/apps/twilio/status"
+    assert params["status_callback_method"] == "POST"
 
 
 async def test_transfer_call_without_http_base_has_no_status_callback(mock_settings):
     mock_settings.voice_webhook_base_url = ""
     engine = ConversationRelayEngine(mock_settings)
+    rest = _fake_rest(engine)
     await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    with patch("twilio.rest.Client") as client_cls:
-        await engine.transfer_call("CAx", "+4930123")
-    kwargs = client_cls.return_value.calls.return_value.update.call_args.kwargs
-    assert set(kwargs) == {"twiml"}
+    await engine.transfer_call("CAx", "+4930123")
+    [(_sid, params)] = rest.updates
+    assert "status_callback" not in params and params["twiml"]
 
 
 async def test_transfer_call_failure_leaves_call_ours(mock_settings):
@@ -323,62 +320,45 @@ async def test_transfer_call_failure_leaves_call_ours(mock_settings):
     from twilio.base.exceptions import TwilioRestException
 
     engine = ConversationRelayEngine(mock_settings)
+    rest = _fake_rest(engine)
     state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    with patch("twilio.rest.Client") as client_cls:
-        client_cls.return_value.calls.return_value.update.side_effect = TwilioRestException(503, "/Calls/CAx")
-        with pytest.raises(TwilioRestException):
-            await engine.transfer_call("CAx", "+4930123")
+    rest.errors["update_call"] = TwilioRestException(503, "/Calls/CAx")
+    with pytest.raises(TwilioRestException):
+        await engine.transfer_call("CAx", "+4930123")
     assert "transferring" not in state.metadata
 
 
-def _redirect_errors_as_requests_raises_them() -> list[tuple[str, Exception, bool]]:
-    """(id, error, may Twilio have applied it) — each built the way the installed
-    requests builds it (requests/adapters.py `send`, requests/models.py `iter_content`)."""
-    import http.client
+def _redirect_errors() -> list[tuple[str, BaseException, bool]]:
+    """(id, error, may Twilio have applied it) for the async REST path
+    (twilio_rest.outcome_unknown, shared with the dial)."""
+    import aiohttp
+    from twilio.base.exceptions import TwilioException, TwilioRestException
 
-    import requests
-    from twilio.base.exceptions import TwilioRestException
-    from urllib3.exceptions import (
-        ConnectTimeoutError,
-        MaxRetryError,
-        NewConnectionError,
-        ProtocolError,
-        ReadTimeoutError,
-    )
-
-    aborted = ProtocolError("Connection aborted.", http.client.RemoteDisconnected("closed without response"))
+    refused = aiohttp.ClientConnectorError(MagicMock(), ConnectionRefusedError(111, "Connection refused"))
     return [
-        ("read_timeout", requests.exceptions.ReadTimeout(ReadTimeoutError(None, "/", "Read timed out.")), True),
-        (
-            "body_read_timeout",
-            requests.exceptions.ConnectionError(ReadTimeoutError(None, "/", "Read timed out.")),
-            True,
-        ),
-        ("aborted_after_send", requests.exceptions.ConnectionError(aborted), True),
-        ("chunked_encoding", requests.exceptions.ChunkedEncodingError(ProtocolError("incomplete read")), True),
-        ("connect_timeout", requests.exceptions.ConnectTimeout(MaxRetryError(None, "/", ConnectTimeoutError())), False),
-        (
-            "refused_or_dns",
-            requests.exceptions.ConnectionError(MaxRetryError(None, "/", NewConnectionError(None, "refused"))),
-            False,
-        ),
+        ("timeout", TimeoutError(), True),
+        ("server_disconnected", aiohttp.ServerDisconnectedError(), True),
+        ("payload_broken_off", aiohttp.ClientPayloadError("Response payload is not completed"), True),
+        ("connection_reset_after_send", aiohttp.ClientOSError(104, "Connection reset by peer"), True),
+        ("never_connected", refused, False),
         ("twilio_error", TwilioRestException(503, "/Calls/CAx"), False),
+        ("no_credentials", TwilioException("no credentials"), False),
         ("other", RuntimeError("cannot schedule new futures after shutdown"), False),
     ]
 
 
 @pytest.mark.parametrize(
     ("error", "may_have_applied"),
-    [(e, applied) for _, e, applied in _redirect_errors_as_requests_raises_them()],
-    ids=[name for name, _, _ in _redirect_errors_as_requests_raises_them()],
+    [(e, applied) for _, e, applied in _redirect_errors()],
+    ids=[name for name, _, _ in _redirect_errors()],
 )
 def test_redirect_error_classification(error, may_have_applied):
     """Uncertain only when the request may have reached Twilio and its answer
-    was lost; definite when it never left (connect timeout, refused, DNS) or
-    Twilio answered with an error."""
-    from pincer.voice.engine import redirect_may_have_applied
+    was lost; definite when the connection was never made or Twilio answered
+    with an error."""
+    from pincer.voice.twilio_rest import outcome_unknown
 
-    assert redirect_may_have_applied(error) is may_have_applied
+    assert outcome_unknown(error) is may_have_applied
 
 
 def _local_server(behaviour: str):
@@ -402,12 +382,12 @@ def _local_server(behaviour: str):
             return
         held.append(conn)
         if behaviour == "silent":
-            return  # read the request? never answer
+            return  # never answer
         conn.recv(65536)
         if behaviour == "close_after_request":
             conn.close()
         elif behaviour == "stall_body":
-            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{")
+            conn.sendall(b"HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: 100\\r\\n\\r\\n{")
 
     threading.Thread(target=serve, daemon=True).start()
 
@@ -420,48 +400,45 @@ def _local_server(behaviour: str):
 
 
 @pytest.mark.parametrize(
-    ("behaviour", "may_have_applied"),
-    [("silent", True), ("close_after_request", True), ("stall_body", True), ("refused", False)],
+    ("behaviour", "raised", "may_have_applied"),
+    [
+        ("silent", "TimeoutError", True),
+        ("close_after_request", "ServerDisconnectedError", True),
+        ("stall_body", "TimeoutError", True),
+        ("refused", "ClientConnectorError", False),
+    ],
 )
-def test_redirect_error_classification_against_real_sockets(behaviour, may_have_applied):
-    """The installed twilio + requests + urllib3 stack, end to end through the
-    TwilioHttpClient the engine builds, against a local server."""
-    from twilio.http.http_client import TwilioHttpClient
+async def test_redirect_error_classification_against_real_sockets(behaviour, raised, may_have_applied):
+    """The installed twilio AsyncTwilioHttpClient + aiohttp, bounded the way
+    TwilioRest bounds a request, against a local server."""
+    from twilio.http.async_http_client import AsyncTwilioHttpClient
 
-    from pincer.voice.engine import redirect_may_have_applied
+    from pincer.voice.twilio_rest import outcome_unknown
 
     url, stop = _local_server(behaviour)
+    client = AsyncTwilioHttpClient()
     try:
-        with pytest.raises(Exception) as raised:
-            TwilioHttpClient(timeout=0.3).request("POST", url, data={"Twiml": "<Response/>"})
+        with pytest.raises(Exception) as caught:
+            await asyncio.wait_for(client.request("POST", url, data={"Twiml": "<Response/>"}), 0.3)
     finally:
         stop()
-    assert redirect_may_have_applied(raised.value) is may_have_applied, repr(raised.value)
+        if client.session is not None:
+            await client.session.close()
+    assert type(caught.value).__name__ == raised, repr(caught.value)
+    assert outcome_unknown(caught.value) is may_have_applied
 
 
-def _definite_redirect_errors() -> list[Exception]:
-    import requests
-    from twilio.base.exceptions import TwilioException
-
-    return [
-        requests.exceptions.ConnectTimeout("connect"),
-        requests.exceptions.ConnectionError("dns"),
-        TwilioException("no credentials"),
-        RuntimeError("cannot schedule new futures after shutdown"),
-    ]
-
-
-@pytest.mark.parametrize("error", _definite_redirect_errors(), ids=lambda e: type(e).__name__)
-async def test_transfer_redirect_definite_errors_roll_back(mock_settings, error):
-    """Only a read timeout leaves open whether Twilio applied the redirect.
-    These never reached Twilio (or never got a request out), so no <Dial> can
-    exist: roll back and raise, socket or not."""
+@pytest.mark.parametrize("name", ["never_connected", "twilio_error", "no_credentials", "other"], ids=lambda name: name)
+async def test_transfer_redirect_definite_errors_roll_back(mock_settings, name):
+    """No connection was made, or Twilio answered with an error: no <Dial> can
+    exist, so roll back and raise, socket or not."""
+    error = {n: e for n, e, _ in _redirect_errors()}[name]
     engine = ConversationRelayEngine(mock_settings)
+    rest = _fake_rest(engine)
     state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    with patch("twilio.rest.Client") as client_cls:
-        client_cls.return_value.calls.return_value.update.side_effect = error
-        with pytest.raises(type(error)):
-            await engine.transfer_call("CAx", "+4930123")
+    rest.errors["update_call"] = error
+    with pytest.raises(type(error)):
+        await engine.transfer_call("CAx", "+4930123")
     assert "transferring" not in state.metadata
     assert "transfer" not in state.metadata
 
@@ -475,10 +452,11 @@ async def test_transfer_dial_twiml_failure_marks_nothing(mock_settings, monkeypa
 
     monkeypatch.setattr(engine_module, "build_dial_twiml", broken)
     engine = ConversationRelayEngine(mock_settings)
+    rest = _fake_rest(engine)
     state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    with patch("twilio.rest.Client") as client_cls, pytest.raises(ValueError, match="bad target"):
+    with pytest.raises(ValueError, match="bad target"):
         await engine.transfer_call("CAx", "+4930123")
-    client_cls.return_value.calls.return_value.update.assert_not_called()
+    assert rest.updates == []
     assert not {"transferring", "transfer", engine_module.DIALS_KEY, engine_module.DIAL_ID_KEY} & set(state.metadata)
 
 
@@ -493,9 +471,8 @@ def _connected_socket() -> MagicMock:
 async def _timed_out_transfer(
     mock_settings, monkeypatch, *, socket=None, twilio_status="in-progress", settle_s=0, error=None
 ):
-    """A transfer whose redirect timed out, settled at once: (engine, state, outcomes, started)."""
-    import requests
-
+    """A transfer whose redirect got no answer in time, settled at once:
+    (engine, state, outcomes, started)."""
     from pincer.voice import engine as engine_module
     from pincer.voice.telemetry import hooks
 
@@ -504,6 +481,7 @@ async def _timed_out_transfer(
     started: list[str] = []
     monkeypatch.setattr(hooks, "transfer_started", lambda call_sid, **_: started.append(call_sid))
     engine = ConversationRelayEngine(mock_settings)
+    rest = _fake_rest(engine)
     state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
     if socket is not None:
         state.metadata["websocket"] = socket
@@ -517,9 +495,8 @@ async def _timed_out_transfer(
         engine.fetch_call_status = AsyncMock(side_effect=twilio_status)
     else:
         engine.fetch_call_status = AsyncMock(return_value=twilio_status)
-    with patch("twilio.rest.Client") as client_cls:
-        client_cls.return_value.calls.return_value.update.side_effect = error or requests.exceptions.ReadTimeout("read")
-        await engine.transfer_call("CAx", "+4930123")  # returns: the turn must end for CR to see the close
+    rest.errors["update_call"] = error or TimeoutError()
+    await engine.transfer_call("CAx", "+4930123")  # returns: the settle needs the turn to end
     return engine, state, outcomes, started
 
 
@@ -539,11 +516,11 @@ async def test_transfer_redirect_timeout_unknown_socket_stays_unconfirmed(mock_s
     assert started == []
 
 
-@pytest.mark.parametrize("name", ["body_read_timeout", "aborted_after_send", "chunked_encoding"])
+@pytest.mark.parametrize("name", ["server_disconnected", "payload_broken_off", "connection_reset_after_send"])
 async def test_transfer_redirect_lost_answer_stays_unconfirmed(mock_settings, monkeypatch, name):
-    """requests reports these as ConnectionError/ChunkedEncodingError, yet the
-    request reached Twilio: the redirect may be live, so no rollback."""
-    error = {n: e for n, e, _ in _redirect_errors_as_requests_raises_them()}[name]
+    """aiohttp reports these as client errors, yet the request reached Twilio:
+    the redirect may be live, so no rollback."""
+    error = {n: e for n, e, _ in _redirect_errors()}[name]
     engine, state, outcomes, started = await _timed_out_transfer(mock_settings, monkeypatch, error=error)
     assert state.metadata["transferring"] is True
     assert state.metadata["transfer"]["redirect_unconfirmed"] is True
@@ -622,12 +599,13 @@ async def test_transfer_call_refuses_a_connection_override_fragment(mock_setting
     dial result after it executed the first (the replay answers assume it
     never does), and the dial token appended after a fragment never reaches us."""
     engine = ConversationRelayEngine(mock_settings)
+    rest = _fake_rest(engine)
     state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    with patch("twilio.rest.Client") as client_cls, pytest.raises(ValueError, match="connection override"):
+    with pytest.raises(ValueError, match="connection override"):
         await engine.transfer_call(
             "CAx", "+4930123", action_url="https://example.com/api/apps/twilio/transfer-result#rp=all"
         )
-    client_cls.return_value.calls.return_value.update.assert_not_called()
+    assert rest.updates == []
     assert "transferring" not in state.metadata
 
 
@@ -639,11 +617,11 @@ async def test_redirect_failure_keeps_the_dial_record(mock_settings):
     from pincer.voice.engine import DIAL_ID_KEY, DIALS_KEY
 
     engine = ConversationRelayEngine(mock_settings)
+    rest = _fake_rest(engine)
     state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    with patch("twilio.rest.Client") as client_cls:
-        client_cls.return_value.calls.return_value.update.side_effect = TwilioRestException(500, "/Calls/CAx")
-        with pytest.raises(TwilioRestException):
-            await engine.transfer_call("CAx", "+4930123")
+    rest.errors["update_call"] = TwilioRestException(500, "/Calls/CAx")
+    with pytest.raises(TwilioRestException):
+        await engine.transfer_call("CAx", "+4930123")
     record = state.metadata[DIALS_KEY][f"dial:{state.metadata[DIAL_ID_KEY]}"]
     assert record["redirect_failed"] is True
     assert record["target"] == "+4930123"
@@ -708,13 +686,13 @@ async def test_fallback_and_end_says_goodbye_then_finalizes_once(mock_settings):
     engine = ConversationRelayEngine(mock_settings)
     on_end = AsyncMock()
     engine.set_on_call_end(on_end)
+    rest = _fake_rest(engine)
     await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    with patch("twilio.rest.Client") as client_cls, patch.object(engine, "end_call") as end_call:
+    with patch.object(engine, "end_call") as end_call:
         await engine.fallback_and_end("CAx")
         await engine.fallback_and_end("CAx")  # already finalized: no-op
-    update = client_cls.return_value.calls.return_value.update
-    update.assert_called_once()
-    assert "<Say" in update.call_args.kwargs["twiml"] and "<Hangup/>" in update.call_args.kwargs["twiml"]
+    [(_sid, params)] = rest.updates
+    assert "<Say" in params["twiml"] and "<Hangup/>" in params["twiml"]
     end_call.assert_not_called()
     on_end.assert_awaited_once()
     assert engine.get_call_state("CAx") is None
