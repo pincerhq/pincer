@@ -9,6 +9,7 @@ a fake registry whose free/busy can be flipped mid-call (race test).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
@@ -1673,12 +1674,13 @@ async def test_caller_hangup_during_the_not_applied_apology_finalizes_the_call(m
     assert metrics == ["failed"]
 
 
-def _fast_transfer_checks(monkeypatch, settle_s=0.0, backoff_s=0.0):
+def _fast_transfer_checks(monkeypatch, settle_s=0.0, backoff_s=0.0, grace_s=0.0):
     """Settle and re-check timed-out transfer redirects with short delays."""
     from pincer.voice import engine as engine_module
 
     monkeypatch.setattr(engine_module, "UNCONFIRMED_REDIRECT_SETTLE_S", settle_s)
     monkeypatch.setattr(engine_module, "TRANSFER_CONFIRM_BACKOFF_S", (backoff_s,) * 3)
+    monkeypatch.setattr(engine_module, "TERMINAL_STATUS_GRACE_S", grace_s)
 
 
 def _transfer_metrics(monkeypatch) -> list[str]:
@@ -1815,25 +1817,123 @@ async def test_unexplained_close_with_twilio_unreachable_ends_as_a_hangup_once_t
 
 async def test_failing_status_checks_are_retried_until_twilio_answers(monkeypatch):
     """Twilio cannot be asked at the settle (it was slow enough to time out the
-    update): the check is retried, and the caller's hang-up it then reports
-    ends the call instead of leaving it to the hour-long reaper."""
+    update): the check is retried, and the end of the call it then reports
+    finishes it instead of leaving it to the hour-long reaper. A re-check's
+    terminal status does not say how the call ended: a neutral reason."""
     _fast_transfer_checks(monkeypatch)
     h = await _start(settings=_transfer_settings())
     h.engine.transfer_raises = TimeoutError()  # no answer in time: the redirect may have applied
     _twilio_reports(h, RuntimeError("timeout"), RuntimeError("timeout"), "completed")
     session = h.session
     await h.say(HUMAN_PLEASE)
+    finalized = _finalized_states(h)
     await _settled(h)
     assert h.engine.status_fetches == [CALL, CALL, CALL]
     assert h.engine.get_call_state(CALL) is None
-    assert session.end_reason == "caller_hangup_during_transfer"
+    assert session.end_reason != "caller_hangup_during_transfer"
+    assert [s.metadata["remote_end_reason"] for s in finalized] == ["transfer_outcome_unknown"]
+
+
+def _twilio_reports_then_signals(h: Harness, *statuses):
+    """Like _twilio_reports; the returned event is set once the last answer was given."""
+    answers = list(statuses)
+    given = asyncio.Event()
+
+    async def fetch(call_sid):
+        h.engine.status_fetches.append(call_sid)
+        answer = answers.pop(0)
+        if not answers:
+            given.set()
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    h.engine.fetch_call_status = fetch
+    return given
+
+
+async def _bridged_result_during_the_grace(h: Harness, given: asyncio.Event):
+    """The bridged dial result Twilio posts right before the final status."""
+    from pincer.voice.engine import DIAL_ID_KEY
+
+    await asyncio.wait_for(given.wait(), timeout=5)
+    data = {
+        "CallSid": CALL,
+        "DialCallStatus": "completed",
+        "DialCallSid": "CAdial",
+        "DialCallDuration": "42",
+        "CallStatus": "completed",
+    }
+    async with _async_client(h) as client:
+        return await client.post(f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}", data=data)
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_bridged_result_queued_behind_a_terminal_recheck_wins(monkeypatch):
+    """A re-check sees the call completed while the bridged dial result is on
+    its way: the result decides (a completed transfer), not the re-check."""
+    _fast_transfer_checks(monkeypatch, grace_s=0.3)
+    abandoned = []
+    monkeypatch.setattr(sess.ReceptionSession, "on_transfer_abandoned", lambda self: abandoned.append(1))
+    h = await _start(settings=_transfer_settings())
+    h.engine.transfer_raises = TimeoutError()
+    given = _twilio_reports_then_signals(h, "in-progress", "completed")
+    session = h.session
+    finalized = _finalized_states(h)
+    await h.say(HUMAN_PLEASE)
+    settle = h.engine.pending_transfer_settle(CALL)
+    await _bridged_result_during_the_grace(h, given)
+    with contextlib.suppress(asyncio.CancelledError):  # the result ended the call: the check is dropped
+        await asyncio.wait_for(settle, timeout=5)
+    assert session.transfer_completed is True
+    assert [s.metadata["remote_end_reason"] for s in finalized] == ["transferred"]
+    assert abandoned == []
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_terminal_recheck_without_a_result_ends_with_a_neutral_reason(monkeypatch):
+    abandoned = []
+    _fast_transfer_checks(monkeypatch, grace_s=0.01)
+    monkeypatch.setattr(sess.ReceptionSession, "on_transfer_abandoned", lambda self: abandoned.append(1))
+    h = await _start(settings=_transfer_settings())
+    h.engine.transfer_raises = TimeoutError()
+    _twilio_reports(h, "in-progress", "completed")
+    finalized = _finalized_states(h)
+    await h.say(HUMAN_PLEASE)
+    await _settled(h)
+    assert [s.metadata["remote_end_reason"] for s in finalized] == ["transfer_outcome_unknown"]
+    assert abandoned == []
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_bridged_result_queued_behind_the_settles_hangup_check_wins(monkeypatch):
+    """The settle itself sees the call completed (T≈15 s) just as a bridged
+    result arrives: the result decides, the call is not reported abandoned."""
+    _fast_transfer_checks(monkeypatch, grace_s=0.3)
+    abandoned = []
+    monkeypatch.setattr(sess.ReceptionSession, "on_transfer_abandoned", lambda self: abandoned.append(1))
+    h = await _start(settings=_transfer_settings())
+    h.state.metadata["websocket"] = _open_socket()
+    h.engine.redirect_hook = lambda call_sid: h.state.metadata.pop("websocket", None)
+    h.engine.transfer_raises = TimeoutError()
+    given = _twilio_reports_then_signals(h, "completed")
+    session = h.session
+    finalized = _finalized_states(h)
+    await h.say(HUMAN_PLEASE)
+    settle = h.engine.pending_transfer_settle(CALL)
+    await _bridged_result_during_the_grace(h, given)
+    with contextlib.suppress(asyncio.CancelledError):  # the result ended the call: the check is dropped
+        await asyncio.wait_for(settle, timeout=5)
+    assert session.transfer_completed is True
+    assert [s.metadata["remote_end_reason"] for s in finalized] == ["transferred"]
+    assert abandoned == []
 
 
 async def test_hangup_just_before_the_settle_with_lagging_status_is_not_a_transfer(monkeypatch):
     """The redirect never applied; the caller hangs up at T=14.8, so the socket
     is gone at the T=15 settle while Twilio still reports in-progress. That is
     not proof of a transfer: no start is recorded, and the re-check that sees
-    the call completed ends it."""
+    the call completed ends it (with a neutral reason: it cannot say how)."""
     _fast_transfer_checks(monkeypatch, settle_s=0.05)
     started = _count_transfer_starts(monkeypatch)
     h = await _start(settings=_transfer_settings())
@@ -1845,7 +1945,7 @@ async def test_hangup_just_before_the_settle_with_lagging_status_is_not_a_transf
     h.state.metadata.pop("websocket")  # T=14.8: the caller hangs up
     await _settled(h)
     assert h.engine.get_call_state(CALL) is None
-    assert session.end_reason == "caller_hangup_during_transfer"
+    assert session.end_reason != "caller_hangup_during_transfer"
     assert started == []
 
 

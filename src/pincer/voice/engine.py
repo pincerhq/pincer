@@ -114,6 +114,10 @@ POSSIBLY_LIVE_MARGIN_S = 30.0
 # unreachable, or the socket gone while Twilio still says in-progress): re-check
 # Twilio's call status after these delays, and finalize on a terminal one.
 TRANSFER_CONFIRM_BACKOFF_S: tuple[float, ...] = (10.0, 30.0, 60.0)
+# A terminal call status says the call is over, not how. Twilio posts a dial's
+# action (/transfer-result) before the call's final status, so wait this long
+# for one already on its way to decide before finalizing on the status alone.
+TERMINAL_STATUS_GRACE_S = 2.0
 # Call statuses after which nobody is on the line any more.
 _ENDED_CALL_STATUSES = frozenset({"completed", "canceled", "failed", "busy", "no-answer"})
 
@@ -410,6 +414,7 @@ class VoiceEngine(ABC):
         the wait is swallowed (the phase is TRANSFERRING)."""
         from pincer.voice.call_locks import one_call_update_at_a_time
 
+        hung_up = False
         try:
             await asyncio.sleep(UNCONFIRMED_REDIRECT_SETTLE_S)
             async with one_call_update_at_a_time(call_sid):
@@ -420,7 +425,9 @@ class VoiceEngine(ABC):
                 if self._unsettled_dial(call_sid, record) is None:
                     return  # decided while Twilio was asked
                 logger.info("Unconfirmed transfer redirect for call %s settled: %s", call_sid, outcome)
-                if outcome == "not_applied":
+                if outcome == "hung_up":
+                    hung_up = True
+                elif outcome == "not_applied":
                     record["redirect_failed"] = True
                     dial_timeout_s = float(record.get("dial_timeout_s") or 0)
                     record["possibly_live_until"] = time.monotonic() + dial_timeout_s + POSSIBLY_LIVE_MARGIN_S
@@ -428,16 +435,18 @@ class VoiceEngine(ABC):
                     # caller hanging up during it must end the call, not be
                     # ignored as a transfer's closing socket.
                     await self.end_transfer(call_sid)
-                if self._on_transfer_settled_callback is not None:
+                if outcome != "hung_up" and self._on_transfer_settled_callback is not None:
                     try:
                         await self._on_transfer_settled_callback(call_sid, outcome)
                     except Exception:
                         logger.exception("transfer-settled callback failed [%s]", call_sid)
-                if outcome == "hung_up":
-                    await self.finish_remote_ended(call_sid, reason="caller_hangup_during_transfer")
-                    return
                 if outcome == "not_applied":
                     return
+            if hung_up:
+                # the caller hung up before any <Dial>: unless a dial result
+                # on its way says otherwise
+                await self._finish_after_grace(call_sid, record, reason="caller_hangup_during_transfer", abandoned=True)
+                return
             # "applied" (the socket is gone while Twilio says in-progress: a
             # transfer, or a hang-up Twilio has not reported yet) and "unknown"
             # are not decided: ask Twilio again.
@@ -470,21 +479,33 @@ class VoiceEngine(ABC):
                     continue
                 if self._unsettled_dial(call_sid, record) is None:
                     return
-                if status in _ENDED_CALL_STATUSES and record.get("close_unexplained"):
-                    # the media closed and Twilio could not say why at the time
-                    logger.info("Transfer for call %s: Twilio reports %r — the call ended", call_sid, status)
-                    await self.finish_remote_ended(call_sid)
-                    return
-                if status in _ENDED_CALL_STATUSES:
-                    logger.info("Transfer for call %s: Twilio reports %r — the caller is gone", call_sid, status)
-                    if self._on_transfer_settled_callback is not None:
-                        try:
-                            await self._on_transfer_settled_callback(call_sid, "hung_up")
-                        except Exception:
-                            logger.exception("transfer-settled callback failed [%s]", call_sid)
-                    await self.finish_remote_ended(call_sid, reason="caller_hangup_during_transfer")
-                    return
+            if status not in _ENDED_CALL_STATUSES:
+                continue
+            logger.info("Transfer for call %s: Twilio reports %r — the call is over", call_sid, status)
+            # A terminal status does not say how it ended: a plain hang-up for a
+            # close Twilio could not explain at the time, else neutral.
+            reason = "" if record.get("close_unexplained") else "transfer_outcome_unknown"
+            await self._finish_after_grace(call_sid, record, reason=reason, abandoned=False)
+            return
         logger.warning("Transfer for call %s still unconfirmed after the re-checks — left in flight", call_sid)
+
+    async def _finish_after_grace(self, call_sid: str, record: dict[str, Any], *, reason: str, abandoned: bool) -> None:
+        """Twilio says the call is over. Give a dial result already on its way
+        (Twilio posts the dial's action before the call's final status)
+        TERMINAL_STATUS_GRACE_S to decide first; if none did, finalize with
+        ``reason``, recording the transfer as abandoned only when ``abandoned``."""
+        from pincer.voice.call_locks import one_call_update_at_a_time
+
+        await asyncio.sleep(TERMINAL_STATUS_GRACE_S)
+        async with one_call_update_at_a_time(call_sid):
+            if self._unsettled_dial(call_sid, record) is None:
+                return  # a dial result decided
+            if abandoned and self._on_transfer_settled_callback is not None:
+                try:
+                    await self._on_transfer_settled_callback(call_sid, "hung_up")
+                except Exception:
+                    logger.exception("transfer-settled callback failed [%s]", call_sid)
+            await self.finish_remote_ended(call_sid, reason=reason)
 
     def _start_transfer_confirm(self, call_sid: str, record: dict[str, Any]) -> None:
         task = asyncio.create_task(self._confirm_transfer(call_sid, record), name=f"voice-transfer-confirm-{call_sid}")
