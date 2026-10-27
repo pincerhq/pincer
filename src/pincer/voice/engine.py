@@ -924,15 +924,23 @@ class MediaStreamEngine(VoiceEngine):
             stt_started = int(state.metadata.get("stt_started_ns", 0))
             return all(started <= stt_started + word.start * 1_000_000_000 < window_end for word in words)
 
-        def _vad_onset_confirmed() -> bool:
-            # An onset from before this stretch of audio began belongs to an
-            # earlier reply (a "ja" over our last syllable whose words arrived
-            # after playout ended); confirming it here would let the echo of
-            # the new reply's first syllable cut that reply off.
-            onset = int(state.metadata.pop("vad_onset_ns", 0))
-            if onset < int(state.metadata.get("playout_started_ns", 0)):
+        def _vad_onset_confirmed(transcript: Any) -> bool:
+            # The onset lives for one reply: a final pops it, and so does the
+            # next reply's first chunk (see _stream_tts). Within the reply it
+            # survives a new stretch of audio — a caller who said "Stop" during
+            # sentence 1 still stops sentence 2. What it must not confirm is
+            # the echo of that new stretch's first syllable: such an interim
+            # leaves the onset in place for the caller's real words.
+            onset = int(state.metadata.get("vad_onset_ns", 0))
+            if not onset:
                 return False
-            return bool(onset) and (_mono_ns() - onset) <= BARGE_IN_CONFIRM_WINDOW_MS * 1_000_000
+            if (_mono_ns() - onset) > BARGE_IN_CONFIRM_WINDOW_MS * 1_000_000:
+                state.metadata.pop("vad_onset_ns", None)
+                return False
+            if _echo_of_our_onset(transcript):
+                return False
+            state.metadata.pop("vad_onset_ns", None)
+            return True
 
         async def _cancel_reask() -> None:
             task = state.metadata.pop("aux_speech_task", None)
@@ -1051,7 +1059,7 @@ class MediaStreamEngine(VoiceEngine):
                             state.metadata["vad_onset_ns"] = _mono_ns()
                         continue
                     if transcript.text and trigger != "off" and _agent_audible():
-                        if _vad_onset_confirmed():
+                        if _vad_onset_confirmed(transcript):
                             # VAD already placed the onset; any recognised word
                             # confirms it, so min_words deliberately does not apply.
                             await _barge_in(transcript, "vad")
@@ -1063,6 +1071,9 @@ class MediaStreamEngine(VoiceEngine):
                         # The utterance the onset belonged to is over (UtteranceEnd
                         # arrives as an empty final); it must not confirm a later one.
                         state.metadata.pop("vad_onset_ns", None)
+                        if transcript.text:
+                            # Whatever we say next is a new reply to it.
+                            state.metadata["new_reply_pending"] = True
                         await _handle_final_transcript(transcript)
                     elif transcript.text and "first_partial_ns" not in state.metadata:
                         # Interim results are not acted on, but the FIRST one
@@ -1360,6 +1371,10 @@ class MediaStreamEngine(VoiceEngine):
                                 turn.first_audio(kind="audio", engine="media_streams")
                             progress.wrote_audio = True
                             state.metadata["audio_since_clear"] = True
+                            if state.metadata.pop("new_reply_pending", False):
+                                # A new reply's first audio: an onset taken
+                                # before it belongs to the old reply.
+                                state.metadata.pop("vad_onset_ns", None)
                             # Twilio plays out in real time; the end of what it
                             # holds is what barge-in detection checks against.
                             now_ns = _mono_ns()

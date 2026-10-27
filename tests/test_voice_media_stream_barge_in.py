@@ -320,8 +320,10 @@ class TestDetection:
         """The onset came during the first sentence and no final ever came
         (noise, never transcribed). The reply drained while the LLM stalled,
         then its next sentence began a new stretch of audio. The echo of that
-        sentence's first syllable must not confirm the old onset. Only the
-        playout-start guard stands between them: no final popped the onset."""
+        sentence's first syllable must not confirm the old onset. The onset is
+        still this reply's (no final popped it), so what stands between them is
+        the echo check on VAD confirmation: an untimed interim inside the new
+        stretch's arm window is our own audio, not the caller."""
         engine, channel, agent, sock, stt, state = await _agent_mid_reply()
 
         await _fed(stt, SPEECH_STARTED)
@@ -336,6 +338,55 @@ class TestDetection:
         await _fed(stt, Transcript(text="Die"))  # echo of its first syllable
 
         assert sock.events("clear") == []
+        assert engine.metrics_registry.get("CA_ms").barge_in_reactions_ms == []
+        await channel.stop()
+
+    async def test_an_onset_from_earlier_in_the_same_reply_still_confirms(self):
+        """The caller says "Stop" during sentence 1; the armed SpeechStarted is
+        the onset. Sentence 2 starts a new stretch of audio after a short TTS
+        gap, and only then does the word arrive. It is the same reply, so the
+        onset still confirms it — with min_words 2, one word would not."""
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply(min_words=2)
+
+        await _fed(stt, SPEECH_STARTED)
+        onset = state.metadata.get("vad_onset_ns")
+        assert onset, "precondition: the onset was taken as a candidate"
+        state.metadata["playout_until_ns"] = 0  # sentence 1 played out before sentence 2 was ready
+        agent.resume.set()
+        await channel.wait_for_turn("CA_ms")
+        assert state.metadata["playout_started_ns"] > onset, "precondition: a new stretch of audio"
+
+        spoken_at = (onset - int(state.metadata["stt_started_ns"])) / 1_000_000_000
+        await _fed(stt, Transcript(text="Stop", words=[TranscriptWord("Stop", start=spoken_at, end=spoken_at + 0.3)]))
+
+        assert len(sock.events("clear")) == 1
+        assert len(engine.metrics_registry.get("CA_ms").barge_in_reactions_ms) == 1
+        await channel.stop()
+
+    async def test_an_onset_from_before_a_new_reply_does_not_confirm_in_it(self):
+        """The old reply is fully generated and still playing. The caller says
+        "Mhm" (one word: no barge-in), and while the new reply is being
+        generated a SpeechStarted lands on the old audio's tail. Once the new
+        reply's first chunk is written, that onset is the old reply's: one
+        stray word in the new reply must not confirm it."""
+        engine, channel, agent, sock, stt, state = await _agent_mid_reply(min_words=2)
+        agent.resume.set()
+        await channel.wait_for_turn("CA_ms")  # the old reply is all at Twilio, still playing
+        agent.resume, agent.paused = asyncio.Event(), asyncio.Event()
+        agent.pause_after = 0  # the new reply stalls before its first chunk
+
+        await _fed(stt, _final("Mhm"))
+        await asyncio.wait_for(agent.paused.wait(), timeout=2)
+        await _fed(stt, SPEECH_STARTED)
+        assert state.metadata.get("vad_onset_ns"), "precondition: the onset was taken as a candidate"
+        clears = len(sock.events("clear"))
+        agent.pause_after = None
+        agent.resume.set()
+        await channel.wait_for_turn("CA_ms")  # the new reply's audio is at Twilio
+
+        await _fed(stt, Transcript(text="Die"))
+
+        assert len(sock.events("clear")) == clears
         assert engine.metrics_registry.get("CA_ms").barge_in_reactions_ms == []
         await channel.stop()
 
