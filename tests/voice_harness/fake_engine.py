@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 from pincer.voice.engine import CallDirection, CallState, VoiceEngine
@@ -25,6 +26,11 @@ class FakeVoiceEngine(VoiceEngine):
         # what Twilio reports for a call (fetch_call_status); an exception is raised
         self.call_status: str | Exception = "in-progress"
         self.status_fetches: list[str] = []
+        # the <Dial> redirect: transfer_raises=True is a definite Twilio error,
+        # an exception instance is raised as is; redirect_hook(call_sid) runs
+        # while the update is "in flight" (e.g. the caller hangs up)
+        self.transfer_raises: bool | BaseException = False
+        self.redirect_hook: Callable[[str], None] | None = None
         self.wait_for_turns = True
         #: When set, send_speech holds the agent "mid-sentence" until released;
         #: `speech_waiting` fires once something is held.
@@ -105,7 +111,11 @@ class FakeVoiceEngine(VoiceEngine):
         )
 
     async def _twilio_update(self, call_sid: str, **update: Any) -> None:
-        if getattr(self, "transfer_raises", False):
+        if self.redirect_hook is not None:
+            self.redirect_hook(call_sid)
+        if isinstance(self.transfer_raises, BaseException):
+            raise self.transfer_raises
+        if self.transfer_raises:
             from twilio.base.exceptions import TwilioRestException
 
             # a definite Twilio error: the redirect was not applied

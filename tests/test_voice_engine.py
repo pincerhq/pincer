@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -372,38 +374,99 @@ async def test_transfer_dial_twiml_failure_marks_nothing(mock_settings, monkeypa
     assert not {"transferring", "transfer", engine_module.DIALS_KEY, engine_module.DIAL_ID_KEY} & set(state.metadata)
 
 
-async def test_transfer_redirect_timeout_without_media_keeps_the_transfer_in_flight(mock_settings):
-    """The update timed out and the media socket is gone: applying the redirect
-    is what closes it, so the call is in the <Dial>. Rolling back would put a
-    bridged call back on the AI's timers; /transfer-result or /status decides."""
+def _connected_socket() -> MagicMock:
+    from starlette.websockets import WebSocketState
+
+    ws = MagicMock()
+    ws.client_state = WebSocketState.CONNECTED
+    return ws
+
+
+async def _timed_out_transfer(mock_settings, monkeypatch, *, socket=None, twilio_status="in-progress", settle_s=0):
+    """A transfer whose redirect timed out, settled at once: (engine, state, outcomes, started)."""
     import requests
 
+    from pincer.voice import engine as engine_module
+    from pincer.voice.telemetry import hooks
+
+    monkeypatch.setattr(engine_module, "UNCONFIRMED_REDIRECT_SETTLE_S", settle_s)
+    started: list[str] = []
+    monkeypatch.setattr(hooks, "transfer_started", lambda call_sid, **_: started.append(call_sid))
+    engine = ConversationRelayEngine(mock_settings)
+    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    if socket is not None:
+        state.metadata["websocket"] = socket
+    outcomes: list[tuple[str, str]] = []
+
+    async def settled(call_sid, outcome):
+        outcomes.append((call_sid, outcome))
+
+    engine.set_on_transfer_settled(settled)
+    if isinstance(twilio_status, Exception):
+        engine.fetch_call_status = AsyncMock(side_effect=twilio_status)
+    else:
+        engine.fetch_call_status = AsyncMock(return_value=twilio_status)
+    with patch("twilio.rest.Client") as client_cls:
+        client_cls.return_value.calls.return_value.update.side_effect = requests.exceptions.ReadTimeout("read")
+        await engine.transfer_call("CAx", "+4930123")  # returns: the turn must end for CR to see the close
+    return engine, state, outcomes, started
+
+
+async def test_transfer_redirect_timeout_unknown_socket_stays_unconfirmed(mock_settings, monkeypatch):
+    """No socket was known before the update (the HTTP relay mode): nothing tells
+    whether the redirect applied. The call stays in flight, and no transfer is
+    recorded as started until a dial result confirms it."""
     from pincer.voice.engine import DIAL_ID_KEY, DIALS_KEY
 
-    engine = ConversationRelayEngine(mock_settings)
-    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    with patch("twilio.rest.Client") as client_cls:
-        client_cls.return_value.calls.return_value.update.side_effect = requests.exceptions.ReadTimeout("read")
-        await engine.transfer_call("CAx", "+4930123")
-    assert state.metadata["transferring"] is True
+    engine, state, outcomes, started = await _timed_out_transfer(mock_settings, monkeypatch)
     record = state.metadata[DIALS_KEY][f"dial:{state.metadata[DIAL_ID_KEY]}"]
     assert record["redirect_unconfirmed"] is True
+    await engine.pending_transfer_settle("CAx")
+    assert outcomes == [("CAx", "unknown")]
+    assert state.metadata["transferring"] is True
     assert state.metadata["transfer"] is record
+    assert started == []
 
 
-async def test_transfer_redirect_timeout_with_media_up_rolls_back(mock_settings):
-    """The update timed out but the media socket is still open: Twilio did not
-    apply the redirect, so the call is still ours."""
-    import requests
+async def test_transfer_redirect_timeout_fetch_error_stays_unconfirmed(mock_settings, monkeypatch):
+    engine, state, outcomes, started = await _timed_out_transfer(
+        mock_settings, monkeypatch, twilio_status=RuntimeError("twilio unreachable")
+    )
+    await engine.pending_transfer_settle("CAx")
+    engine.fetch_call_status.assert_awaited_once_with("CAx")
+    assert outcomes == [("CAx", "unknown")]
+    assert state.metadata["transferring"] is True
+    assert started == []
 
-    engine = ConversationRelayEngine(mock_settings)
-    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    state.metadata["websocket"] = MagicMock()
-    with patch("twilio.rest.Client") as client_cls:
-        client_cls.return_value.calls.return_value.update.side_effect = requests.exceptions.ReadTimeout("read")
-        with pytest.raises(requests.exceptions.ReadTimeout):
-            await engine.transfer_call("CAx", "+4930123")
+
+async def test_transfer_redirect_timeout_with_media_up_is_not_applied(mock_settings, monkeypatch):
+    """Once the turn is over, the call's own socket is still open: Twilio did not
+    apply the redirect (applying it ends the <Connect>). The channel is told, and
+    the call is ours again."""
+    from pincer.voice.engine import DIAL_ID_KEY, DIALS_KEY
+
+    engine, state, outcomes, started = await _timed_out_transfer(mock_settings, monkeypatch, socket=_connected_socket())
+    assert state.metadata["transferring"] is True  # unsettled until the turn has returned
+    await engine.pending_transfer_settle("CAx")
+    assert outcomes == [("CAx", "not_applied")]
     assert "transferring" not in state.metadata
+    assert state.metadata[DIALS_KEY][f"dial:{state.metadata[DIAL_ID_KEY]}"]["redirect_failed"] is True
+    engine.fetch_call_status.assert_not_awaited()
+    assert started == []
+
+
+async def test_transfer_settle_is_cancelled_when_the_call_ends(mock_settings, monkeypatch):
+    """The call ends before the settle fires: the check is dropped, with no
+    callback and no error."""
+    engine, state, outcomes, started = await _timed_out_transfer(mock_settings, monkeypatch, settle_s=3600)
+    task = engine.pending_transfer_settle("CAx")
+    assert task is not None
+    await engine.finish_remote_ended("CAx", reason="provider_completed")
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2)  # a settle left running would sleep for an hour
+    assert task.cancelled()
+    assert engine.pending_transfer_settle("CAx") is None
+    assert outcomes == []
 
 
 async def test_transfer_call_refuses_a_connection_override_fragment(mock_settings):

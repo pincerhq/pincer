@@ -20,7 +20,7 @@ from pincer.channels.phone_calls import VoiceChannel
 from pincer.core.agent import StreamChunk, StreamEventType
 from pincer.tools.registry import ToolRegistry
 from pincer.voice import approvals, status_notify
-from pincer.voice.engine import CallDirection
+from pincer.voice.engine import CallDirection, ConversationRelayEngine
 from pincer.voice.prompts import get_prompt
 from pincer.voice.receptionist import profile as prof
 from pincer.voice.receptionist import session as sess
@@ -273,7 +273,9 @@ class Harness:
         return self.spoken[-1] if self.spoken else ""
 
 
-async def _start(*, language="de", now=OPEN_NOW, settings=None, calendar=None, profile_changes=None) -> Harness:
+async def _start(
+    *, language="de", now=OPEN_NOW, settings=None, calendar=None, profile_changes=None, engine_cls=FakeVoiceEngine
+) -> Harness:
     if profile_changes:
         data = copy.deepcopy(PROFILE)
         for dotted, value in profile_changes.items():
@@ -285,7 +287,7 @@ async def _start(*, language="de", now=OPEN_NOW, settings=None, calendar=None, p
         prof.set_profile(parse_business_profile(data))
     settings = settings or _settings()
     calendar = calendar or FakeCalendar()
-    engine = FakeVoiceEngine(settings)
+    engine = engine_cls(settings)
     channel = VoiceChannel(settings)
     channel.set_engine(engine)
     channel.set_tool_registry(calendar.registry())
@@ -1421,6 +1423,161 @@ async def test_transfer_result_lock_is_released_when_the_handler_raises(monkeypa
                 data={"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial", "CallStatus": "in-progress"},
             )
     assert twiml_server._call_update_locks == {}
+
+
+def _count_transfer_starts(monkeypatch) -> list[str]:
+    """Count telemetry.transfer_started calls (the call.transfer_started event)."""
+    from pincer.voice.telemetry import hooks
+
+    seen: list[str] = []
+    monkeypatch.setattr(hooks, "transfer_started", lambda call_sid, **_: seen.append(call_sid))
+    return seen
+
+
+def _open_socket():
+    """A media WebSocket that is still connected, recording what is sent on it."""
+    from unittest.mock import AsyncMock
+
+    from starlette.websockets import WebSocketState
+
+    ws = MagicMock()
+    ws.client_state = WebSocketState.CONNECTED
+    ws.send_text = AsyncMock()
+    return ws
+
+
+async def _settled(h: Harness) -> None:
+    """Wait for the call's unconfirmed transfer redirect to be settled."""
+    task = h.engine.pending_transfer_settle(CALL)
+    if task is not None:
+        await asyncio.wait_for(task, timeout=5)
+
+
+HUMAN_PLEASE = "Ich möchte bitte mit einem Menschen sprechen."
+
+
+async def test_caller_hangup_while_the_redirect_times_out_finalizes_the_call(monkeypatch):
+    """The socket closes during the update (the caller hung up) and the update
+    times out: Twilio says the call is over, so it is finalized as a hang-up
+    during the transfer, not held in untimed TRANSFERRING for an hour."""
+    import requests
+
+    from pincer.voice import engine as engine_module
+
+    monkeypatch.setattr(engine_module, "UNCONFIRMED_REDIRECT_SETTLE_S", 0)
+    started = _count_transfer_starts(monkeypatch)
+    h = await _start(settings=_transfer_settings())
+    h.state.metadata["websocket"] = _open_socket()
+    h.engine.redirect_hook = lambda call_sid: h.state.metadata.pop("websocket", None)
+    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    h.engine.call_status = "completed"
+    session = h.session
+    await h.say(HUMAN_PLEASE)
+    await _settled(h)
+    assert h.engine.status_fetches == [CALL]
+    assert h.engine.get_call_state(CALL) is None
+    assert h.engine.get_active_calls() == {}
+    assert session.end_reason == "caller_hangup_during_transfer"
+    assert started == []
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_cr_redirect_applied_after_the_timeout_is_seen_once_the_turn_returns(monkeypatch):
+    """Twilio applies the redirect at ~10.2 s, just after our update timed out,
+    with the socket still up. On ConversationRelay the transfer runs inside the
+    caller's turn, which holds the relay's receive loop, so the close is only
+    seen once the turn returns: settling inside the turn would read "socket
+    open, not applied" and roll back a bridged call. Settled afterwards, the
+    call stays transferred and its dial result is handled normally."""
+    import requests
+
+    from pincer.voice import engine as engine_module
+    from pincer.voice.engine import DIAL_ID_KEY
+
+    monkeypatch.setattr(engine_module, "UNCONFIRMED_REDIRECT_SETTLE_S", 0.05)
+    started = _count_transfer_starts(monkeypatch)
+    results = _count_transfer_results(monkeypatch)
+    h = await _start(settings=_transfer_settings())
+    h.state.metadata["websocket"] = _open_socket()
+    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    await h.say(HUMAN_PLEASE)
+    assert h.engine.pending_transfer_settle(CALL) is not None  # not settled inside the turn
+    h.state.metadata.pop("websocket")  # the relay loop is free again and sees Twilio's close
+    await _settled(h)
+    assert h.state.metadata.get("transferring") is True
+    assert h.sm.phase == CallPhase.TRANSFERRING
+    assert started == [CALL]
+    data = {"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial", "CallStatus": "in-progress"}
+    url = f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}"
+    async with _async_client(h) as client:
+        response = await client.post(url, data=data)
+    assert 'welcomeGreeting="Leider ist gerade niemand erreichbar.' in response.text
+    assert (started, results) == ([CALL], ["busy"])
+
+
+class _RelayEngineWithoutTwilio(ConversationRelayEngine):
+    """ConversationRelayEngine with Twilio's REST API faked: the redirect times
+    out, and speech goes out on the call's (fake) relay socket, as in production."""
+
+    async def _twilio_update(self, call_sid, **update):
+        import requests
+
+        raise requests.exceptions.ReadTimeout("read")
+
+    async def fetch_call_status(self, call_sid):
+        return "in-progress"
+
+
+async def test_cr_redirect_never_applied_apologizes_on_the_live_relay(monkeypatch):
+    """The update timed out and, once the turn is over, the relay socket is
+    still open: Twilio never applied the redirect. The caller must not wait in
+    silence: the apology goes out on the relay and into the transcript, and the
+    receptionist asks for the name."""
+    import json
+
+    from pincer.voice import engine as engine_module
+
+    monkeypatch.setattr(engine_module, "UNCONFIRMED_REDIRECT_SETTLE_S", 0)
+    h = await _start(settings=_transfer_settings(), engine_cls=_RelayEngineWithoutTwilio)
+    ws = _open_socket()
+    h.state.metadata["websocket"] = ws
+    await h.say(HUMAN_PLEASE)
+    await _settled(h)
+    apology = "Leider ist gerade niemand erreichbar. Ich nehme gern eine Nachricht auf. Wie ist Ihr Name?"
+    tokens = [json.loads(call.args[0]).get("token") for call in ws.send_text.await_args_list]
+    assert apology in tokens
+    transcript = h.channel._transcripts[CALL]
+    assert any(e.speaker == Speaker.AGENT and e.text == apology for e in transcript.entries)
+    assert (h.sm.phase, h.session.step) == (CallPhase.TAKE_MESSAGE, "name")
+    assert "transferring" not in h.state.metadata
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_unconfirmed_dial_emits_transfer_started_when_its_result_arrives(monkeypatch):
+    """No socket evidence either way: no start is recorded until the dial's own
+    result confirms the redirect applied; then exactly one, before the result."""
+    import requests
+
+    from pincer.voice import engine as engine_module
+    from pincer.voice.engine import DIAL_ID_KEY
+    from pincer.voice.telemetry import hooks
+
+    monkeypatch.setattr(engine_module, "UNCONFIRMED_REDIRECT_SETTLE_S", 0)
+    events: list[str] = []
+    monkeypatch.setattr(hooks, "transfer_started", lambda call_sid, **_: events.append("started"))
+    monkeypatch.setattr(hooks, "transfer_result", lambda call_sid, dial_status, **_: events.append(dial_status))
+    h = await _start(settings=_transfer_settings())
+    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    await h.say(HUMAN_PLEASE)
+    await _settled(h)
+    assert events == []
+    assert h.state.metadata.get("transferring") is True
+    data = {"CallSid": CALL, "DialCallStatus": "no-answer", "DialCallSid": "CAdial", "CallStatus": "in-progress"}
+    url = f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}"
+    async with _async_client(h) as client:
+        await client.post(url, data=data)
+        await client.post(url, data=data)  # a copy: nothing more
+    assert events == ["started", "no-answer"]
 
 
 def _count_transfer_results(monkeypatch) -> list[str]:

@@ -106,6 +106,11 @@ CALL_STATUS_FETCH_TIMEOUT_S = 5.0
 # Bound on every Twilio REST write (hangup, redirect, DTMF, TTS fallback): they
 # take 1-3 s, and an unbounded one holds a to_thread worker until it returns.
 TWILIO_UPDATE_TIMEOUT_S = 10.0
+# How long after a timed-out transfer redirect the evidence is read: an update
+# Twilio applies just after our timeout has closed the call's media socket by then.
+UNCONFIRMED_REDIRECT_SETTLE_S = 5.0
+# Call statuses after which nobody is on the line any more.
+_ENDED_CALL_STATUSES = frozenset({"completed", "canceled", "failed", "busy", "no-answer"})
 
 
 @dataclass
@@ -195,6 +200,11 @@ class VoiceEngine(ABC):
         # The channel owns the call's phase: it moves it out of TRANSFERRING
         # when end_transfer hands the call back, so flag and phase agree.
         self._on_transfer_end_callback: Callable | None = None
+        # Told how a timed-out transfer redirect settled (see
+        # _settle_unconfirmed_redirect): the channel speaks or records it.
+        self._on_transfer_settled_callback: Callable | None = None
+        # call_sid -> the pending settle of its unconfirmed transfer redirect
+        self._transfer_settles: dict[str, asyncio.Task[None]] = {}
         # Outbound calls briefed and registered BEFORE the Twilio REST dial,
         # keyed by a temporary id until the real CallSid comes back. See
         # register_pending_outbound().
@@ -232,6 +242,17 @@ class VoiceEngine(ABC):
             await self.interrupt_speech(call_sid)
     def set_on_transfer_end(self, callback: Callable) -> None:
         self._on_transfer_end_callback = callback
+
+    def set_on_transfer_settled(self, callback: Callable) -> None:
+        """``callback(call_sid, outcome)`` once a timed-out transfer redirect is
+        settled: ``not_applied`` (the caller is still with us and needs the
+        apology), ``hung_up`` (record the abandonment; the engine finalizes the
+        call afterwards), ``applied`` or ``unknown``."""
+        self._on_transfer_settled_callback = callback
+
+    def pending_transfer_settle(self, call_sid: str) -> asyncio.Task[None] | None:
+        """The settle still pending for this call's unconfirmed redirect, if any."""
+        return self._transfer_settles.get(call_sid)
 
     @abstractmethod
     async def on_call_start(
@@ -322,6 +343,7 @@ class VoiceEngine(ABC):
             update["status_callback_method"] = "POST"
         # the media socket closes on the <Dial> redirect; that is not a hangup
         live = self._active_calls.get(call_sid)
+        media_before = live.metadata.get("websocket") if live is not None else None
         record: dict[str, Any] = {
             "target": target_number,
             "started_mono": time.monotonic(),
@@ -345,20 +367,18 @@ class VoiceEngine(ABC):
             # connection, missing credentials, a shut-down executor) means no
             # <Dial> exists. The SDK passes requests' exceptions through
             # unwrapped (twilio/http/http_client.py `session.send`).
-            uncertain = isinstance(exc, requests.exceptions.ReadTimeout)
-            if uncertain and live is not None and "websocket" not in live.metadata:
-                # No answer from Twilio (a read timeout), and
-                # the media socket is gone: applying the redirect is what ends
-                # the <Connect>/<Stream>, so the call is in the <Dial>. The call
-                # status cannot tell (it is in-progress either way). Keep it in
-                # flight: /transfer-result or /status decides. If the socket
-                # closed for another reason (the caller hung up), /status
-                # finalizes the call.
-                logger.warning("Transfer redirect for call %s unconfirmed (%r) — media gone, in flight", call_sid, exc)
+            if isinstance(exc, requests.exceptions.ReadTimeout) and live is not None:
+                # Twilio may have applied it. Keep the call in flight and settle
+                # it later, from evidence: not here, because on ConversationRelay
+                # this runs inside the caller's turn, which holds the relay
+                # socket's receive loop, so its close could not be seen yet.
+                logger.warning("Transfer redirect for call %s unconfirmed (read timeout) — settling", call_sid)
                 record["redirect_unconfirmed"] = True
-                from pincer.voice.telemetry import hooks as telemetry
-
-                telemetry.transfer_started(call_sid, target=target_number, dial_timeout_s=timeout_s)
+                task = asyncio.create_task(
+                    self._settle_unconfirmed_redirect(call_sid, record, media_before),
+                    name=f"voice-transfer-settle-{call_sid}",
+                )
+                self._transfer_settles[call_sid] = task
                 return
             logger.exception("Transfer failed for call %s", call_sid)
             # the redirect did not happen: a definite error, or the media
@@ -370,9 +390,64 @@ class VoiceEngine(ABC):
                 live.metadata.pop("transferring", None)
                 live.metadata.pop("transfer", None)
             raise
-        from pincer.voice.telemetry import hooks as telemetry
+        note_transfer_started(call_sid, record)
 
-        telemetry.transfer_started(call_sid, target=target_number, dial_timeout_s=timeout_s)
+    async def _settle_unconfirmed_redirect(self, call_sid: str, record: dict[str, Any], media_before: Any) -> None:
+        """Decide a timed-out transfer redirect once the turn that asked for it
+        has returned, from evidence (the call status alone cannot tell: it is
+        ``in-progress`` whether or not the redirect applied):
+
+        - the call's own media socket is still open: not applied, since applying
+          it ends the <Connect>/<Stream>. The call is ours again;
+        - Twilio reports the call over: the caller hung up. Finalized;
+        - Twilio reports it in progress and the socket we had is gone: applied;
+        - anything else (no socket was known, Twilio cannot be asked): unknown.
+          /transfer-result or /status decides, the stuck-call reaper bounds it.
+
+        A dial result that arrived meanwhile has decided already. A caller turn
+        during the wait is swallowed (the phase is TRANSFERRING)."""
+        try:
+            await asyncio.sleep(UNCONFIRMED_REDIRECT_SETTLE_S)
+            live = self._active_calls.get(call_sid)
+            if live is None or not live.metadata.get("transferring") or live.metadata.get("transfer") is not record:
+                return
+            outcome = await self._unconfirmed_redirect_outcome(call_sid, live, media_before)
+            logger.info("Unconfirmed transfer redirect for call %s settled: %s", call_sid, outcome)
+            if outcome == "applied":
+                note_transfer_started(call_sid, record)
+            elif outcome == "not_applied":
+                record["redirect_failed"] = True
+            if self._on_transfer_settled_callback is not None:
+                try:
+                    await self._on_transfer_settled_callback(call_sid, outcome)
+                except Exception:
+                    logger.exception("transfer-settled callback failed [%s]", call_sid)
+            if outcome == "not_applied":
+                await self.end_transfer(call_sid)
+            elif outcome == "hung_up":
+                await self.finish_remote_ended(call_sid, reason="caller_hangup_during_transfer")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Settling the transfer redirect failed [%s]", call_sid)
+        finally:
+            if self._transfer_settles.get(call_sid) is asyncio.current_task():
+                self._transfer_settles.pop(call_sid, None)
+
+    async def _unconfirmed_redirect_outcome(self, call_sid: str, live: CallState, media_before: Any) -> str:
+        media_now = live.metadata.get("websocket")
+        if media_before is not None and media_now is media_before and _socket_open(media_now):
+            return "not_applied"
+        try:
+            status = await self.fetch_call_status(call_sid)
+        except Exception:
+            logger.warning("Transfer redirect for call %s: Twilio status check failed", call_sid, exc_info=True)
+            return "unknown"
+        if status in _ENDED_CALL_STATUSES:
+            return "hung_up"
+        if status == "in-progress" and media_before is not None and media_now is None:
+            return "applied"
+        return "unknown"
 
     def _twilio_client(self, timeout: float) -> Any:
         """The one place a Twilio REST client is built (credentials, and any
@@ -747,6 +822,9 @@ class VoiceEngine(ABC):
 
     async def _unregister_call(self, call_sid: str) -> CallState | None:
         state = self._active_calls.pop(call_sid, None)
+        settle = self._transfer_settles.pop(call_sid, None)
+        if settle is not None and settle is not asyncio.current_task():
+            settle.cancel()  # the call is over: nothing left to settle
         if state:
             state.ended_at = datetime.now(UTC)
             self._remember_ended(call_sid)
@@ -792,6 +870,23 @@ class VoiceEngine(ABC):
     # ConversationRelay hands audio to Twilio and never reports playout, so
     # its numbers can only ever be estimates from character counts.
     analytics_method: str = "estimated"
+
+
+def note_transfer_started(call_sid: str, record: dict[str, Any]) -> None:
+    """Record the transfer start once its redirect is confirmed, once per dial."""
+    if record.get("started_emitted"):
+        return
+    record["started_emitted"] = True
+    from pincer.voice.telemetry import hooks as telemetry
+
+    telemetry.transfer_started(
+        call_sid, target=str(record.get("target", "")), dial_timeout_s=record.get("dial_timeout_s")
+    )
+
+
+def _socket_open(ws: Any) -> bool:
+    """Whether a media WebSocket is still connected (Starlette's client state)."""
+    return getattr(getattr(ws, "client_state", None), "name", "") == "CONNECTED"
 
 
 def dial_key(dial_id: str, dial_call_sid: str) -> str:

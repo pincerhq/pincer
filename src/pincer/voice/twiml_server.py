@@ -506,6 +506,11 @@ async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
         # dial's result. An empty answer would end the call.
         logger.warning("Transfer result [%s] for dial %s whose redirect reported failure — handling it", call_sid, key)
     record = _record_dial_result(state, key, result)
+    if record.get("redirect_unconfirmed"):
+        # The dial's own result is the confirmation its timed-out redirect applied.
+        from pincer.voice.engine import note_transfer_started
+
+        note_transfer_started(call_sid, record)
     telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)
     session = _transfer_session_lookup(call_sid)
 

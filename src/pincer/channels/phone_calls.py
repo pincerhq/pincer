@@ -135,6 +135,8 @@ class VoiceChannel(BaseChannel):
             engine.set_on_call_start(self._handle_call_start)
         if hasattr(engine, "set_on_transfer_end"):
             engine.set_on_transfer_end(self._handle_transfer_end)
+        if hasattr(engine, "set_on_transfer_settled"):
+            engine.set_on_transfer_settled(self._handle_transfer_settled)
         engine.metrics_registry = self.metrics
 
     def set_tool_registry(self, tools: Any) -> None:
@@ -149,6 +151,21 @@ class VoiceChannel(BaseChannel):
         sm = self._state_machines.get(call_sid)
         if sm is not None and sm.phase == CallPhase.TRANSFERRING:
             sm.transition(CallPhase.TAKE_MESSAGE, "transfer_ended")
+
+    async def _handle_transfer_settled(self, call_sid: str, outcome: str) -> None:
+        """A timed-out transfer redirect was settled outside any turn (see
+        VoiceEngine._settle_unconfirmed_redirect). ``not_applied``: the caller
+        is still in the relay, waiting in silence, so the receptionist apologizes
+        and takes a message; it speaks through its gate, which logs the line in
+        the transcript like any other agent line. ``hung_up``: the caller left
+        before any <Dial>; record that before the engine finalizes the call."""
+        session = self._reception_sessions.get(call_sid)
+        if session is None:
+            return
+        if outcome == "not_applied":
+            await session.speak(await session.on_transfer_failed())
+        elif outcome == "hung_up":
+            session.on_transfer_abandoned()
 
     async def _handle_call_start(self, call_sid: str, state: CallState) -> None:
         """Engine registered a call: start tracking now (silence rule, receptionist greeting)."""
