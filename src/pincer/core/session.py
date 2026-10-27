@@ -10,10 +10,12 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pincer.llm.base import LLMMessage, MessageRole
+from pincer.services.onboarding import OnboardingService
 from pincer.services.sessions import SessionService
 
 if TYPE_CHECKING:
@@ -21,17 +23,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Sessions held in memory at once; past it the least recently used is
+# persisted and dropped, and reloads from the database on its next turn.
+_DEFAULT_MAX_CACHED_SESSIONS = 1024
+# Eviction tries this many sessions beyond the overflow per request, so a few
+# that cannot be saved are stepped over without one request retrying them all.
+_EVICTION_SPARE_ATTEMPTS = 2
+
 
 def _session_key(user_id: str, channel: str) -> str:
     return f"{channel}:{user_id}"
 
 
-# Metadata keys used by the first-session onboarding flow.
+def conversation_key(user_id: str, channel: str, conversation_id: str) -> str:
+    """One conversation of a user's, nested under their channel session."""
+    return f"{_session_key(user_id, channel)}:{conversation_id}"
+
+
+# Session metadata the onboarding flow wrote before `pincer_onboarding`; now
+# only read, for a user with no row there.
 ONBOARDING_COMPLETE_KEY = "onboarding_complete"
 ONBOARDING_PROMPT_SENT_KEY = "onboarding_prompt_sent"
-PROFILE_NAME_KEY = "name"
-PROFILE_USE_CASE_KEY = "use_case"
-PROFILE_LANGUAGE_KEY = "language"
 
 
 @dataclass
@@ -46,8 +58,14 @@ class Session:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     pincer_user_id: str = ""
+    # Hash of the messages and metadata as last saved (or loaded), so an
+    # eviction can skip a session that has not changed.
+    _saved_hash: int | None = field(default=None, init=False, repr=False, compare=False)
+    # Set once an eviction's save has failed and been warned about, so a
+    # session that keeps failing is not logged with a traceback every request.
+    _eviction_failed: bool = field(default=False, init=False, repr=False, compare=False)
 
-    # ── Onboarding helpers ──────────────────────────────
+    # ── Onboarding (legacy flags, see ONBOARDING_COMPLETE_KEY) ──────────
 
     def is_fresh(self) -> bool:
         """True when the session has no non-system messages yet."""
@@ -59,33 +77,17 @@ class Session:
     def onboarding_prompt_already_sent(self) -> bool:
         return self.metadata.get(ONBOARDING_PROMPT_SENT_KEY) == "true"
 
-    def mark_onboarding_prompt_sent(self) -> None:
-        self.metadata[ONBOARDING_PROMPT_SENT_KEY] = "true"
-
-    def mark_onboarded(
-        self,
-        *,
-        name: str | None = None,
-        use_case: str | None = None,
-        language: str | None = None,
-    ) -> None:
-        self.metadata[ONBOARDING_COMPLETE_KEY] = "true"
-        if name:
-            self.metadata[PROFILE_NAME_KEY] = name.strip()[:100]
-        if use_case:
-            self.metadata[PROFILE_USE_CASE_KEY] = use_case.strip()[:300]
-        if language:
-            self.metadata[PROFILE_LANGUAGE_KEY] = language.strip()[:20]
-
 
 class SessionManager:
     """Async SQLite-backed session store."""
 
-    def __init__(self, db_path: Path, max_messages: int = 50) -> None:
+    def __init__(self, db_path: Path, max_messages: int = 50, max_cached: int = _DEFAULT_MAX_CACHED_SESSIONS) -> None:
         self._db_path = db_path
         self._max_messages = max_messages
+        self._max_cached = max_cached
         self._service: SessionService | None = None
-        self._cache: dict[str, Session] = {}
+        self._onboarding: OnboardingService | None = None
+        self._cache: OrderedDict[str, Session] = OrderedDict()
 
     async def initialize(self) -> None:
         """Bring the database to head and attach the store.
@@ -96,19 +98,32 @@ class SessionManager:
         a lock rather than failing. Schema DDL lives in the Alembic migrations.
         """
         self._service = await SessionService.for_path(self._db_path)
+        self._onboarding = await OnboardingService.for_path(self._db_path)
 
     async def close(self) -> None:
-        for session in self._cache.values():
-            await self._persist(session)
+        for session in list(self._cache.values()):
+            await self._persist(session, only_if_changed=True)
         self._cache.clear()
         # The engine is shared; the process disposes it at shutdown.
         self._service = None
+        self._onboarding = None
 
     @property
     def _store(self) -> SessionService:
         if self._service is None:
             raise RuntimeError("SessionManager not initialized")
         return self._service
+
+    @property
+    def onboarding(self) -> OnboardingService:
+        """Each user's onboarding state per channel, in the same database."""
+        if self._onboarding is None:
+            raise RuntimeError("SessionManager not initialized")
+        return self._onboarding
+
+    async def has_stored_sessions(self, user_id: str, channel: str) -> bool:
+        """True when the user has any session stored on the channel, conversations included."""
+        return await self._store.has_any(user_id, channel)
 
     async def get_or_create(
         self,
@@ -132,6 +147,7 @@ class SessionManager:
             key = _session_key(user_id, channel)
 
         if key in self._cache:
+            self._cache.move_to_end(key)
             return self._cache[key]
 
         row = await self._store.load(key, user_id=user_id, channel=channel, legacy_fallback=not session_key)
@@ -156,7 +172,9 @@ class SessionManager:
                 pincer_user_id=pincer_user_id,
             )
 
+        session._saved_hash = hash(_serialized(session))
         self._cache[key] = session
+        await self._evict_overflow(keep=key)
         return session
 
     async def add_message(self, session: Session, message: LLMMessage) -> None:
@@ -192,19 +210,77 @@ class SessionManager:
 
     async def evict(self, key: str) -> None:
         """Persist and drop one session from the cache (a phone call's, at
-        hangup — a key per call would otherwise grow the cache forever)."""
-        session = self._cache.pop(key, None)
-        if session is not None:
-            await self._persist(session)
+        hangup — a key per call would otherwise grow the cache forever).
 
-    async def _persist(self, session: Session) -> None:
-        """Write the session out."""
+        The session stays cached until its save lands, so a request for it
+        meanwhile gets this object rather than the row as it was before.
+        """
+        session = self._cache.get(key)
+        if session is None:
+            return
+        await self._persist(session, only_if_changed=True)
+        if self._cache.get(key) is session:
+            del self._cache[key]
+
+    async def _evict_overflow(self, keep: str) -> None:
+        """Persist and drop least recently used sessions past the cap.
+
+        Runs inside the request for `keep`, which is never evicted here. A
+        session whose save fails is logged and kept, moved to the recent end
+        so the next one in line is tried; the request goes on, and the cache
+        stays over the cap until later evictions succeed. A session hit or
+        replaced while its save was awaited is kept too. At most the overflow
+        plus `_EVICTION_SPARE_ATTEMPTS` sessions are tried per request.
+        """
+        # Known race: a turn still holding a session evicted after its save
+        # keeps writing that object while the next request loads a second
+        # copy, and the last write wins. It takes more than `max_cached`
+        # other keys within one turn, so only a client minting new
+        # conversation ids gets near it.
+        attempts = len(self._cache) - self._max_cached + _EVICTION_SPARE_ATTEMPTS
+        while len(self._cache) > self._max_cached and attempts > 0:
+            attempts -= 1
+            key, session = next(iter(self._cache.items()))
+            if key == keep:
+                return  # everything older was tried
+            try:
+                await self._persist(session, only_if_changed=True)
+            except Exception:
+                if session._eviction_failed:
+                    logger.debug("Session %s still cannot be saved to evict it", key)
+                else:
+                    logger.warning("Could not save session %s to evict it; keeping it cached", key, exc_info=True)
+                    session._eviction_failed = True
+                if self._cache.get(key) is session:
+                    self._cache.move_to_end(key)
+                continue
+            session._eviction_failed = False
+            if next(iter(self._cache), None) == key and self._cache[key] is session and not _changed(session):
+                del self._cache[key]
+
+    async def _persist(self, session: Session, *, only_if_changed: bool = False) -> None:
+        """Write the session out (with ``only_if_changed``, only when its
+        messages or metadata differ from what was last saved or loaded)."""
+        state = _serialized(session)
+        if only_if_changed and hash(state) == session._saved_hash:
+            return
+        messages, metadata = state
         await self._store.save(
             session_id=session.session_id,
             user_id=session.user_id,
             channel=session.channel,
-            messages=json.dumps([m.to_dict() for m in session.messages]),
-            metadata=json.dumps(session.metadata),
+            messages=messages,
+            metadata=metadata,
             created_at=session.created_at,
             updated_at=session.updated_at,
         )
+        session._saved_hash = hash(state)
+
+
+def _serialized(session: Session) -> tuple[str, str]:
+    """The session's messages and metadata as they are stored."""
+    return json.dumps([m.to_dict() for m in session.messages]), json.dumps(session.metadata)
+
+
+def _changed(session: Session) -> bool:
+    return hash(_serialized(session)) != session._saved_hash

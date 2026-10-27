@@ -21,14 +21,21 @@ class SessionService(DatabaseService):
 
         Before cross-channel identities, a session was keyed `channel:user_id`.
         A user whose session predates that keeps it, rather than starting over.
-        An exact key (``legacy_fallback=False``) never inherits another session.
+        An exact key (``legacy_fallback=False``) never inherits another session,
+        and the fallback never adopts one nested under this key
+        (``<session_id>:<conversation>``): that is a separate conversation.
         """
         async with session_scope(self._url) as session:
             repo = SessionRepository(session)
             row = await repo.get(session_id)
             if row is None and legacy_fallback:
-                row = await repo.newest_for(user_id, channel)
+                row = await repo.newest_for(user_id, channel, exclude_prefix=f"{session_id}:")
             return None if row is None else _as_dict(row)
+
+    async def has_any(self, user_id: str, channel: str) -> bool:
+        """True when the channel user has any stored session, conversations included."""
+        async with session_scope(self._url) as session:
+            return await SessionRepository(session).exists_for(user_id, channel)
 
     async def save(
         self,

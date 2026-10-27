@@ -66,6 +66,17 @@ def _reset_skill_service() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_onboarding_cache() -> Iterator[None]:
+    """The completed-onboarding cache is process-wide; a test must not see
+    another test's users as onboarded (Postgres tests share one database)."""
+    from pincer.services import onboarding
+
+    onboarding._reset_for_tests()
+    yield
+    onboarding._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _reset_thread_manager() -> None:
     """Sprint 13: the ThreadManager is a process-wide singleton keyed to one
     database. Without a reset between tests, the first tmp_path's DB would be

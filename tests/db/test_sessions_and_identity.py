@@ -15,13 +15,14 @@ from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
 from pincer.llm.base import LLMMessage, MessageRole
 from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityProfile
+from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import ChatSession
 from pincer.repositories.identity import (
     AuthSessionRepository,
     IdentityCredentialRepository,
     IdentityProfileRepository,
 )
-from pincer.repositories.sessions import SessionRepository
+from pincer.repositories.sessions import SessionRepository, rekeyed_session_id
 from pincer.services.identity import IdentityService, SeedEntry
 from pincer.services.sessions import SessionService
 
@@ -31,9 +32,11 @@ _TABLES = [
     IdentityCredential.__table__,
     AuthSession.__table__,
     ChatSession.__table__,
+    Onboarding.__table__,
 ]
 
 _NOW = "2026-10-10T12:00:00+00:00"
+_CONVERSATION = "22222222-2222-4222-8222-222222222222"
 
 
 @pytest.fixture
@@ -108,6 +111,50 @@ async def test_a_session_stored_under_the_old_key_is_still_found(url):
 
     row = await SessionService(url).load("unified:usr_a", user_id="12345", channel="telegram")
     assert row["session_id"] == "telegram:12345"  # the most recently updated one
+
+
+async def test_the_legacy_fallback_never_adopts_a_conversation_nested_under_the_key(url):
+    """A user whose web traffic has all gone through conversations has no
+    main session yet; the main session must start empty, not continue one
+    of the conversations."""
+    await _store_session(url, f"web:u:{_CONVERSATION}", user_id="u", channel="web")
+
+    row = await SessionService(url).load("web:u", user_id="u", channel="web")
+    assert row is None, f"adopted {row['session_id']}"
+
+
+async def test_the_legacy_fallback_still_finds_a_legacy_row_beside_newer_conversations(url):
+    """Only the requested key's own conversations are skipped: a session left
+    under an older key (here an identity merged into `u`) is still the main
+    session, even when a conversation was updated after it."""
+    await _store_session(url, "web:old", user_id="u", channel="web", at=5.0)
+    await _store_session(url, f"web:u:{_CONVERSATION}", user_id="u", channel="web", at=10.0)
+
+    row = await SessionService(url).load("web:u", user_id="u", channel="web")
+    assert row is not None
+    assert row["session_id"] == "web:old"
+
+
+async def test_the_nested_exclusion_escapes_like_wildcards(url):
+    """`_` in a user id is a literal, not LIKE's any-character: a session
+    that only matches `web:u_1:` as a wildcard is not one of u_1's
+    conversations, so the fallback still finds it."""
+    await _store_session(url, "web:uX1:thread", user_id="u_1", channel="web")
+
+    row = await SessionService(url).load("web:u_1", user_id="u_1", channel="web")
+    assert row is not None, "web:uX1:thread was excluded as if `_` were a wildcard"
+    assert row["session_id"] == "web:uX1:thread"
+
+
+@pytest.mark.parametrize("spelling", ["WEB:U", "web:U"])
+async def test_the_nested_exclusion_is_case_sensitive(url, spelling):
+    """Only `web:u:` itself is a conversation of `web:u`; a prefix that
+    differs in case is not, on either dialect (SQLite's LIKE folds case)."""
+    await _store_session(url, f"{spelling}:{_CONVERSATION}", user_id="u", channel="web")
+
+    row = await SessionService(url).load("web:u", user_id="u", channel="web")
+    assert row is not None, f"{spelling}:… was excluded as if it were web:u:…"
+    assert row["session_id"] == f"{spelling}:{_CONVERSATION}"
 
 
 async def test_an_unknown_session_is_none(url):
@@ -221,6 +268,77 @@ async def test_renaming_moves_only_keys_ending_in_the_identity(url):
     await service.rename_identity("usr_hash", "alice")
 
     assert await _session_ids(url) == set(moved.values()) | untouched
+
+
+@pytest.mark.parametrize(
+    ("session_id", "moved"),
+    [
+        ("web:usr_ha", "web:bob"),
+        (f"web:usr_ha:{_CONVERSATION}", f"web:bob:{_CONVERSATION}"),
+        ("teams-chat-19:abc@thread.v2:usr_ha", "teams-chat-19:abc@thread.v2:bob"),
+        ("web:usr_hash", None),
+        (f"web:usr_hash:{_CONVERSATION}", None),
+        (f"web:xusr_ha:{_CONVERSATION}", None),
+        # The id appears as a whole segment, but not as the user's: the prefix holds it.
+        (f"teams:usr_ha:usr_hash:{_CONVERSATION}", None),
+        ("web:usr_ha:not-a-conversation", None),
+        ("web:usr_ha:2222AAAA-2222-4222-8222-222222222222", None),  # not the canonical spelling
+        ("voice:usr_ha", None),
+        (f"voice:usr_ha:{_CONVERSATION}", None),
+    ],
+)
+def test_a_rename_moves_a_key_only_where_the_id_is_its_user_segment(session_id, moved):
+    assert rekeyed_session_id(session_id, "usr_ha", "bob") == moved
+
+
+async def test_renaming_moves_conversations_nested_under_the_identity(url):
+    """A web chat conversation (`web:<id>:<conversation>`) follows its user."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="web", channel_user_id="12345")
+    await _store_session(url, "web:usr_hash", user_id="usr_hash", channel="web")
+    await _store_session(url, f"web:usr_hash:{_CONVERSATION}", user_id="usr_hash", channel="web")
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert await _session_ids(url) == {"web:alice", f"web:alice:{_CONVERSATION}"}
+
+
+@pytest.mark.parametrize(("source_at", "kept"), [(200.0, '["source"]'), (100.0, '["target"]')])
+async def test_merging_keeps_the_more_recent_nested_conversation(url, source_at, kept):
+    """Both ids hold the same conversation: the newer survives, the target on a tie."""
+    service = IdentityService(url)
+    await service.create_identity("usr_hash", channel="web", channel_user_id="12345")
+    await service.create_identity("alice", channel="telegram", channel_user_id="4930111")
+    await _store_session(
+        url, f"web:usr_hash:{_CONVERSATION}", user_id="usr_hash", channel="web", at=source_at, messages='["source"]'
+    )
+    await _store_session(
+        url, f"web:alice:{_CONVERSATION}", user_id="alice", channel="web", at=100.0, messages='["target"]'
+    )
+
+    await service.rename_identity("usr_hash", "alice")
+
+    assert await _session_ids(url) == {f"web:alice:{_CONVERSATION}"}
+    assert await _messages(url, f"web:alice:{_CONVERSATION}") == kept
+
+
+async def test_renaming_moves_nested_conversations_only_for_the_whole_id(url):
+    """`usr_ha` is not `usr_hash`, and only a conversation id makes a key nested."""
+    service = IdentityService(url)
+    await service.create_identity("usr_ha", channel="web", channel_user_id="12345")
+    untouched = {
+        f"web:usr_hash:{_CONVERSATION}",
+        f"web:xusr_ha:{_CONVERSATION}",
+        "web:usr_ha:not-a-conversation",
+        f"voice:usr_ha:{_CONVERSATION}",
+    }
+    for session_id in untouched:
+        await _store_session(url, session_id, user_id="usr_hash", channel="web")
+    await _store_session(url, f"web:usr_ha:{_CONVERSATION}", user_id="usr_ha", channel="web")
+
+    await service.rename_identity("usr_ha", "bob")
+
+    assert await _session_ids(url) == untouched | {f"web:bob:{_CONVERSATION}"}
 
 
 async def test_touch_active_channel_records_when(url):

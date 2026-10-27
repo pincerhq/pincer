@@ -16,6 +16,7 @@ from pincer.api.server import create_app  # noqa: E402
 from pincer.core.agent import AgentResponse, StreamChunk, StreamEventType  # noqa: E402
 
 UUID = "11111111-1111-4111-8111-111111111111"
+CONVERSATION = "22222222-2222-4222-8222-222222222222"
 
 
 def _make_client() -> TestClient:
@@ -48,11 +49,13 @@ def _mock_agent() -> MagicMock:
     agent = MagicMock()
     agent.handle_message = AsyncMock(return_value=AgentResponse(text="hi back", cost_usd=0.01, model="test-model"))
 
-    async def _stream(*_args, **_kwargs):
+    async def _stream(*args, **kwargs):
+        agent.stream_calls.append((args, kwargs))
         yield StreamChunk(StreamEventType.TEXT, "hi ")
         yield StreamChunk(StreamEventType.TEXT, "back")
         yield StreamChunk(StreamEventType.DONE, "hi back")
 
+    agent.stream_calls = []
     agent.handle_message_stream = _stream
     return agent
 
@@ -126,6 +129,78 @@ def test_an_api_key_keeps_the_header_as_the_visitor_session(authed_app):
         headers={**authed_app.api_key_headers, "X-Pincer-User": "not-a-uuid"},
     )
     assert malformed.status_code == 400
+
+
+def _session_key(client: TestClient) -> str | None:
+    """The exact session the agent was handed (None: the user's main one)."""
+    return client.app.state.agent.handle_message.call_args.kwargs["session_key"]
+
+
+def test_a_conversation_id_is_a_conversation_of_the_signed_in_identity(authed_app):
+    """New chat: a conversation id opens a fresh model context, scoped under
+    the identity whatever else the request names."""
+    client = _authed_client(authed_app)
+    headers = {**authed_app.jwt_headers, "X-Pincer-User": UUID}
+
+    assert client.post("/api/chat/message", json={"text": "hi"}, headers=headers).status_code == 200
+    assert _session_key(client) is None
+
+    r = client.post("/api/chat/message", json={"text": "hi", "conversation_id": CONVERSATION}, headers=headers)
+    assert r.status_code == 200
+    assert _chat_user(client) == "alice"
+    assert _session_key(client) == f"web:alice:{CONVERSATION}"
+
+
+def test_a_conversation_id_on_the_stream(authed_app):
+    client = _authed_client(authed_app)
+    with client.stream(
+        "POST", "/api/chat/stream", json={"text": "hi", "conversation_id": CONVERSATION}, headers=authed_app.jwt_headers
+    ) as r:
+        assert r.status_code == 200
+        b"".join(r.iter_raw())
+    args, kwargs = client.app.state.agent.stream_calls[-1]
+    assert args[0] == "alice"
+    assert kwargs["session_key"] == f"web:alice:{CONVERSATION}"
+
+
+def test_a_conversation_under_an_api_key_belongs_to_the_visitor():
+    client = _make_client()
+    r = client.post(
+        "/api/chat/message", json={"text": "hi", "conversation_id": CONVERSATION}, headers={"X-Pincer-User": UUID}
+    )
+    assert r.status_code == 200
+    assert _session_key(client) == f"web:{UUID}:{CONVERSATION}"
+
+
+def test_conversation_id_case_does_not_split_the_session(authed_app):
+    """Upper- and lower-case spellings of one id are one conversation."""
+    client = _authed_client(authed_app)
+    upper = "2222AAAA-2222-4222-8222-222222222222"
+    keys = []
+    for conversation_id in (upper, upper.lower()):
+        body = {"text": "hi", "conversation_id": conversation_id}
+        assert client.post("/api/chat/message", json=body, headers=authed_app.jwt_headers).status_code == 200
+        keys.append(_session_key(client))
+        with client.stream("POST", "/api/chat/stream", json=body, headers=authed_app.jwt_headers) as r:
+            assert r.status_code == 200
+            b"".join(r.iter_raw())
+        keys.append(client.app.state.agent.stream_calls[-1][1]["session_key"])
+    assert len(keys) == 4
+    assert set(keys) == {"web:alice:2222aaaa-2222-4222-8222-222222222222"}
+
+
+def test_a_malformed_conversation_id_is_rejected():
+    """Only the bare hyphenated form is accepted; the braced and urn
+    spellings `uuid.UUID` would also parse are not."""
+    client = _make_client()
+    for conversation_id in ("not-a-uuid", f"{CONVERSATION}:x", "", f"{{{CONVERSATION}}}", f"urn:uuid:{CONVERSATION}"):
+        r = client.post(
+            "/api/chat/message",
+            json={"text": "hi", "conversation_id": conversation_id},
+            headers={"X-Pincer-User": UUID},
+        )
+        assert r.status_code == 422, conversation_id
+    client.app.state.agent.handle_message.assert_not_called()
 
 
 def test_chat_message_requires_user_header():

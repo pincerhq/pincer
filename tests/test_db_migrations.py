@@ -32,6 +32,7 @@ EXPECTED_TABLES = {
     "pincer_channel_identities",
     "pincer_identity_credentials",
     "pincer_auth_sessions",
+    "pincer_onboarding",
     "pincer_audit_logs",
     "pincer_schedules",
     "pincer_event_triggers",
@@ -2064,5 +2065,33 @@ def test_0022_auth_sessions_belong_to_credentials_and_round_trip(migration_url, 
         assert "pincer_identity_credentials" in tables
         command.upgrade(cfg, "head")
         assert "pincer_auth_sessions" in sa.inspect(engine_).get_table_names()
+    finally:
+        engine_.dispose()
+
+
+# ── 0023: onboarding ───────────────────────────────────────────────────
+
+
+def test_0023_onboarding_is_keyed_by_user_and_channel_and_round_trips(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "head")
+    engine_ = sa.create_engine(migration_url)
+    try:
+        inspector = sa.inspect(engine_)
+        columns = {column["name"]: column["nullable"] for column in inspector.get_columns("pincer_onboarding")}
+        assert columns == {
+            "user_id": False,
+            "channel": False,
+            "asked_session_id": True,
+            "asked_at": True,
+            "completed_at": True,
+            "attempts": False,
+        }
+        assert inspector.get_pk_constraint("pincer_onboarding")["constrained_columns"] == ["user_id", "channel"]
+
+        command.downgrade(cfg, "0022")
+        assert "pincer_onboarding" not in sa.inspect(engine_).get_table_names()
+        command.upgrade(cfg, "head")
+        assert "pincer_onboarding" in sa.inspect(engine_).get_table_names()
     finally:
         engine_.dispose()
