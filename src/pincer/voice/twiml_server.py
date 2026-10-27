@@ -1427,7 +1427,10 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
     finally:
         if _engine and hasattr(_engine, "close_media_stream"):
             await _engine.close_media_stream(call_sid)
-        if state:
+        # Only this socket's own entry: if a new socket took over the call,
+        # clearing it (or ending the call) would read as "media gone" while the
+        # caller is still streaming, as the relay handler already guards.
+        if state is not None and state.metadata.get("websocket") is websocket:
             state.metadata.pop("websocket", None)
             state.metadata.pop("stream_sid", None)
             telemetry.media_closed(call_sid, reason="media_socket_closed")

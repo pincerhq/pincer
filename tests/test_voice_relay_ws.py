@@ -208,6 +208,24 @@ class TestRelayWebSocket:
             ws.send_text(json.dumps({"event": "stop"}))
         assert back.metadata["transfer"]["reconnected"] is True
 
+    def test_stream_finally_leaves_a_replacing_socket_alone(self):
+        """A stream socket that was replaced (a new one took over the call)
+        must not clear the new socket's entry when it closes, nor end the call:
+        a transfer would read "media gone" while the caller is still streaming."""
+        engine = FakeEngine()
+        state = _register(engine, "CA_swap")
+        replacing = object()
+        client = _app_with_engine(engine)
+        with client.websocket_connect(_signed("/api/apps/twilio/stream/CA_swap", WS_STREAM_PATH)) as ws:
+            ws.send_text(json.dumps({"event": "media", "media": {"payload": "AAAA"}}))
+            deadline = time.monotonic() + 5
+            while not engine.speech_inputs and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert engine.speech_inputs, "the stream never attached"
+            state.metadata["websocket"] = replacing  # a new socket took over the call
+        assert state.metadata.get("websocket") is replacing
+        assert engine.media_closed == []
+
     def test_setup_attaches_websocket_to_existing_state(self):
         engine = FakeEngine()
         state = CallState(call_sid="CA_known", direction=CallDirection.INBOUND, caller_number="+1")
