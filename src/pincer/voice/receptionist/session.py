@@ -1067,7 +1067,9 @@ class ReceptionSession:
             self._log_action("transfer", self.profile.transfer.target)
         except Exception:
             logger.exception("Receptionist transfer failed [%s]", self.call_sid)
-            await self.on_transfer_failed()
+            # No <Dial> happened, so there is no reconnect to carry the apology
+            # as its greeting: say it on the live call.
+            await self.speak(await self.on_transfer_failed())
 
     def on_transfer_completed(self, duration_s: int | None) -> None:
         """The caller talked to the human (DialCallStatus completed/answered, or

@@ -858,6 +858,19 @@ async def test_human_transfer_busy_fallback():
     assert text == "Leider ist gerade niemand erreichbar. Ich nehme gern eine Nachricht auf. Wie ist Ihr Name?"
 
 
+async def test_transfer_refused_for_an_override_base_url_speaks_the_apology():
+    """transfer_call refuses an action URL with `#` connection overrides before
+    any redirect: the caller must hear the apology and be asked for their name,
+    not sit in silence in TAKE_MESSAGE."""
+    settings = _transfer_settings()
+    settings.voice_webhook_base_url = "https://voice.example.com#rp=all"
+    h = await _start(settings=settings)
+    await h.say("Ich möchte bitte mit einem Menschen sprechen.")
+    assert h.last() == "Leider ist gerade niemand erreichbar. Ich nehme gern eine Nachricht auf. Wie ist Ihr Name?"
+    assert (h.sm.phase, h.session.step) == (CallPhase.TAKE_MESSAGE, "name")
+    assert "transferring" not in h.state.metadata
+
+
 @pytest.mark.parametrize(
     ("outcome", "result"),
     [
