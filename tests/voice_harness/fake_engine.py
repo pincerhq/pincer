@@ -106,7 +106,10 @@ class FakeVoiceEngine(VoiceEngine):
 
     async def _twilio_update(self, call_sid: str, **update: Any) -> None:
         if getattr(self, "transfer_raises", False):
-            raise RuntimeError("dial failed")
+            from twilio.base.exceptions import TwilioRestException
+
+            # a definite Twilio error: the redirect was not applied
+            raise TwilioRestException(500, f"/Calls/{call_sid}", "dial failed")
 
     async def fetch_call_status(self, call_sid: str) -> str:
         self.status_fetches.append(call_sid)

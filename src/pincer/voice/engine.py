@@ -334,12 +334,28 @@ class VoiceEngine(ABC):
                 update["status_callback_method"] = "POST"
             await self._twilio_update(call_sid, **update)
             logger.info("Call %s transferred to %s", call_sid, target_number)
-        except Exception:
+        except Exception as exc:
+            from twilio.base.exceptions import TwilioRestException
+
+            if not isinstance(exc, TwilioRestException) and live is not None and "websocket" not in live.metadata:
+                # No answer from Twilio (a timeout, a dropped connection), and
+                # the media socket is gone: applying the redirect is what ends
+                # the <Connect>/<Stream>, so the call is in the <Dial>. The call
+                # status cannot tell (it is in-progress either way). Keep it in
+                # flight: /transfer-result or /status decides. If the socket
+                # closed for another reason (the caller hung up), /status
+                # finalizes the call.
+                logger.warning("Transfer redirect for call %s unconfirmed (%r) — media gone, in flight", call_sid, exc)
+                record["redirect_unconfirmed"] = True
+                from pincer.voice.telemetry import hooks as telemetry
+
+                telemetry.transfer_started(call_sid, target=target_number, dial_timeout_s=timeout_s)
+                return
             logger.exception("Transfer failed for call %s", call_sid)
-            # the redirect never happened: the call is still ours. DIAL_ID_KEY
-            # and the dial's record stay: a timeout can raise after Twilio
-            # applied the redirect, and then this dial's result still arrives
-            # and must be recognised.
+            # the redirect did not happen: a Twilio error, or the media socket
+            # is still up. The call is still ours. DIAL_ID_KEY and the dial's
+            # record stay: a redirect can raise although Twilio applied it,
+            # and then this dial's result still arrives and must be recognised.
             record["redirect_failed"] = True
             if live is not None:
                 live.metadata.pop("transferring", None)
