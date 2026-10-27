@@ -1758,6 +1758,77 @@ async def test_hangup_just_before_the_settle_with_lagging_status_is_not_a_transf
     assert started == []
 
 
+def _transfer_events(monkeypatch) -> list[str]:
+    """call.transfer_started / call.transfer_result, in order."""
+    from pincer.voice.telemetry import hooks
+
+    events: list[str] = []
+    monkeypatch.setattr(hooks, "transfer_started", lambda call_sid, **_: events.append(f"started {call_sid}"))
+    monkeypatch.setattr(
+        hooks, "transfer_result", lambda call_sid, dial_status, **_: events.append(f"{dial_status} {call_sid}")
+    )
+    return events
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_result_before_the_redirect_answer_records_the_transfer_start(monkeypatch):
+    """T=1 Twilio applies the redirect but its answer is slow; T=4 the busy
+    result arrives; T=10 the update times out. The result is proof the <Dial>
+    ran: one start, then the result, and the later timeout changes nothing."""
+    import requests
+
+    from pincer.voice.engine import DIAL_ID_KEY
+
+    _fast_transfer_checks(monkeypatch)
+    events = _transfer_events(monkeypatch)
+    h = await _start(settings=_transfer_settings())
+    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    h.engine.redirect_gate = asyncio.Event()
+    turn = asyncio.create_task(h.say(HUMAN_PLEASE))
+    for _ in range(50):
+        if DIAL_ID_KEY in h.state.metadata:
+            break
+        await asyncio.sleep(0)
+    data = {"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial", "CallStatus": "in-progress"}
+    async with _async_client(h) as client:
+        response = await client.post(
+            f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}", data=data
+        )
+    assert "ConversationRelay" in response.text
+    h.engine.redirect_gate.set()  # T=10: the update's read timeout
+    await asyncio.wait_for(turn, timeout=5)
+    await _settled(h)
+    assert events == [f"started {CALL}", f"busy {CALL}"]
+    assert "transferring" not in h.state.metadata
+
+
+async def test_lost_state_recovery_records_the_transfer_start(monkeypatch):
+    """The recovered call's trace gets the start its dial result proves."""
+    events = _transfer_events(monkeypatch)
+    h = await _start(settings=_transfer_settings())
+    async with _async_client(h) as client:
+        await client.post("/api/apps/twilio/transfer-result", data=_lost_state_callback())
+        await client.post("/api/apps/twilio/transfer-result", data=_lost_state_callback())  # a copy
+    assert events == [f"started {LOST_CALL}", f"no-answer {LOST_CALL}"]
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_result_after_a_redirect_that_raised_records_the_transfer_start(monkeypatch):
+    """The redirect raised although Twilio applied it: no start was recorded
+    then, so its result records one."""
+    from pincer.voice.engine import DIAL_ID_KEY
+
+    events = _transfer_events(monkeypatch)
+    h = await _start(settings=_transfer_settings())
+    h.engine.transfer_raises = True
+    await h.say(HUMAN_PLEASE)
+    assert events == []
+    data = {"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial", "CallStatus": "in-progress"}
+    async with _async_client(h) as client:
+        await client.post(f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}", data=data)
+    assert events == [f"started {CALL}", f"busy {CALL}"]
+
+
 @pytest.mark.usefixtures("_no_transfer_resolver")
 async def test_unconfirmed_dial_emits_transfer_started_when_its_result_arrives(monkeypatch):
     """No socket evidence either way: no start is recorded until the dial's own

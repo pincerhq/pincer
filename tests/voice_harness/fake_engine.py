@@ -31,6 +31,8 @@ class FakeVoiceEngine(VoiceEngine):
         # while the update is "in flight" (e.g. the caller hangs up)
         self.transfer_raises: bool | BaseException = False
         self.redirect_hook: Callable[[str], None] | None = None
+        # set: the update waits for it (Twilio slow to answer)
+        self.redirect_gate: asyncio.Event | None = None
         self.wait_for_turns = True
         #: When set, send_speech holds the agent "mid-sentence" until released;
         #: `speech_waiting` fires once something is held.
@@ -113,6 +115,8 @@ class FakeVoiceEngine(VoiceEngine):
     async def _twilio_update(self, call_sid: str, **update: Any) -> None:
         if self.redirect_hook is not None:
             self.redirect_hook(call_sid)
+        if self.redirect_gate is not None:
+            await self.redirect_gate.wait()
         if isinstance(self.transfer_raises, BaseException):
             raise self.transfer_raises
         if self.transfer_raises:

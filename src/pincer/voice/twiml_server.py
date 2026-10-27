@@ -477,11 +477,6 @@ async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
         # dial's result. An empty answer would end the call.
         logger.warning("Transfer result [%s] for dial %s whose redirect reported failure — handling it", call_sid, key)
     record = _record_dial_result(state, key, result)
-    if record.get("redirect_unconfirmed"):
-        # The dial's own result is the confirmation its timed-out redirect applied.
-        from pincer.voice.engine import note_transfer_started
-
-        note_transfer_started(call_sid, record)
     telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)
     session = _transfer_session_lookup(call_sid)
 
@@ -541,12 +536,17 @@ def _record_dial_result(state: Any, key: str, result: dict[str, Any]) -> dict[st
     """Write a dial's result into its record (creating one for a dial we have
     none for: lost state, or no dial token) and make it the current dial's
     `transfer` view. The one place both the lost-state branch and the main path
-    record a result, so the replay rules read the same fields from either."""
-    from pincer.voice.engine import DIALS_KEY
+    record a result, so the replay rules read the same fields from either.
+
+    A result is proof its <Dial> ran, so the dial's start is recorded here when
+    nothing confirmed it before (a slow or failed redirect answer, lost state);
+    `note_transfer_started` records it once per dial."""
+    from pincer.voice.engine import DIALS_KEY, note_transfer_started
 
     record: dict[str, Any] = state.metadata.setdefault(DIALS_KEY, {}).setdefault(key, {})
     record.update(result)
     state.metadata["transfer"] = record
+    note_transfer_started(str(state.call_sid), record)
     return record
 
 
