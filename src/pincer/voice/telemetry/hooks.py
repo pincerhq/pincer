@@ -273,11 +273,19 @@ def amd_verdict(call_sid: str, answered_by: str) -> None:
         _safe(tracer.event, EventName.AMD_VERDICT, answered_by=answered_by)
 
 
-def transfer_started(call_sid: str, *, target: str, dial_timeout_s: int) -> None:
-    """The call was redirected into <Dial>: from here it is bridged, not ours."""
+def transfer_started(call_sid: str, *, target: str, dial_timeout_s: int, recovered: bool = False) -> None:
+    """The call was redirected into <Dial>: from here it is bridged, not ours.
+    ``recovered``: the dial was lost to a restart and is known only from its
+    result; target and dial timeout are then the receptionist's own."""
     tracer = runtime.tracer_for(call_sid)
     if tracer is not None:
-        _safe(tracer.event, EventName.TRANSFER_STARTED, target=target, dial_timeout_s=dial_timeout_s)
+        _safe(
+            tracer.event,
+            EventName.TRANSFER_STARTED,
+            target=target,
+            dial_timeout_s=dial_timeout_s,
+            recovered=recovered,
+        )
 
 
 def transfer_result(call_sid: str, dial_status: str, *, dial_duration_s: Any = None) -> None:

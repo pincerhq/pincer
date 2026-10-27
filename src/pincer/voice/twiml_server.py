@@ -421,12 +421,21 @@ async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
             # await, so a retry of this callback replays the reconnect instead
             # of taking the main path. (The per-call lock already keeps a
             # concurrent copy out until this request is done.)
-            record: dict[str, Any] = {}
+            from pincer.voice.receptionist.session import TRANSFER_DIAL_TIMEOUT_S
+
+            # The lost dial was the receptionist's: its target and dial timeout
+            # are the profile's and the session's, so its start can name them.
+            result = {
+                **result,
+                "target": str(profile.transfer.target if profile is not None else ""),
+                "dial_timeout_s": TRANSFER_DIAL_TIMEOUT_S,
+                "recovered": True,
+            }
+            record: dict[str, Any] = dict(result)
             if isinstance(getattr(recovered, "metadata", None), dict):
                 record = _record_dial_result(recovered, dial_key(dial_id, dial_call_sid), result)
                 if dial_id:
                     recovered.metadata[DIAL_ID_KEY] = dial_id
-            record["recovered"] = True
             # Once, on the trace just opened: a retry replays the reconnect below
             # the state check and records nothing.
             telemetry.transfer_result(call_sid, dial_status, dial_duration_s=dial_duration)

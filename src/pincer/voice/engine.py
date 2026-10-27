@@ -999,7 +999,10 @@ def note_transfer_started(call_sid: str, record: dict[str, Any]) -> None:
     from pincer.voice.telemetry import hooks as telemetry
 
     telemetry.transfer_started(
-        call_sid, target=str(record.get("target", "")), dial_timeout_s=record.get("dial_timeout_s")
+        call_sid,
+        target=str(record.get("target", "")),
+        dial_timeout_s=record.get("dial_timeout_s"),
+        recovered=bool(record.get("recovered")),
     )
 
 

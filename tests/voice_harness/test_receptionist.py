@@ -2001,6 +2001,21 @@ async def test_lost_state_recovery_records_the_transfer_start(monkeypatch):
     assert events == [f"started {LOST_CALL}", f"no-answer {LOST_CALL}"]
 
 
+async def test_recovered_transfer_start_names_its_target_and_dial_timeout(monkeypatch):
+    """A recovered start carries what the lost dial must have had: the
+    profile's transfer target (the only one the receptionist dials) and the
+    receptionist's dial timeout, and says it was recovered."""
+    from pincer.voice.receptionist.session import TRANSFER_DIAL_TIMEOUT_S
+    from pincer.voice.telemetry import hooks
+
+    starts: list[dict] = []
+    monkeypatch.setattr(hooks, "transfer_started", lambda call_sid, **kwargs: starts.append(kwargs))
+    h = await _start(settings=_transfer_settings())
+    async with _async_client(h) as client:
+        await client.post("/api/apps/twilio/transfer-result", data=_lost_state_callback())
+    assert starts == [{"target": "+4952233344455", "dial_timeout_s": TRANSFER_DIAL_TIMEOUT_S, "recovered": True}]
+
+
 @pytest.mark.usefixtures("_no_transfer_resolver")
 async def test_result_after_a_redirect_that_raised_records_the_transfer_start(monkeypatch):
     """The redirect raised although Twilio applied it: no start was recorded
