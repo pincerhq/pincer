@@ -305,6 +305,21 @@ class VoiceEngine(ABC):
         dial_id = uuid.uuid4().hex
         if action_url:
             action_url = f"{action_url}{'&' if '?' in action_url else '?'}{urlencode({'dial': dial_id})}"
+        # Built before anything is marked: a <Dial> that cannot be built
+        # leaves no trace of a transfer.
+        twiml = build_dial_twiml(
+            target_number,
+            timeout_s=timeout_s,
+            action_url=action_url,
+            announce=announce,
+            language=language,
+            time_limit_s=int(self._settings.voice_transfer_max_duration_s),
+        )
+        update: dict[str, Any] = {"twiml": twiml}
+        base = str(getattr(self._settings, "voice_webhook_base_url", "") or "").strip().rstrip("/")
+        if base.startswith(("http://", "https://")):
+            update["status_callback"] = f"{base}/api/apps/twilio/status"
+            update["status_callback_method"] = "POST"
         # the media socket closes on the <Dial> redirect; that is not a hangup
         live = self._active_calls.get(call_sid)
         record: dict[str, Any] = {
@@ -319,26 +334,20 @@ class VoiceEngine(ABC):
             live.metadata.setdefault(DIALS_KEY, {})[dial_key(dial_id, "")] = record
             live.metadata["transfer"] = record
         try:
-            twiml = build_dial_twiml(
-                target_number,
-                timeout_s=timeout_s,
-                action_url=action_url,
-                announce=announce,
-                language=language,
-                time_limit_s=int(self._settings.voice_transfer_max_duration_s),
-            )
-            update: dict[str, Any] = {"twiml": twiml}
-            base = str(getattr(self._settings, "voice_webhook_base_url", "") or "").strip().rstrip("/")
-            if base.startswith(("http://", "https://")):
-                update["status_callback"] = f"{base}/api/apps/twilio/status"
-                update["status_callback_method"] = "POST"
             await self._twilio_update(call_sid, **update)
             logger.info("Call %s transferred to %s", call_sid, target_number)
         except Exception as exc:
-            from twilio.base.exceptions import TwilioRestException
+            import requests
 
-            if not isinstance(exc, TwilioRestException) and live is not None and "websocket" not in live.metadata:
-                # No answer from Twilio (a timeout, a dropped connection), and
+            # Only a read timeout leaves open whether Twilio applied the update:
+            # the request went out and no answer came back. Every other error
+            # (a Twilio error response, a connect timeout or refused/unresolved
+            # connection, missing credentials, a shut-down executor) means no
+            # <Dial> exists. The SDK passes requests' exceptions through
+            # unwrapped (twilio/http/http_client.py `session.send`).
+            uncertain = isinstance(exc, requests.exceptions.ReadTimeout)
+            if uncertain and live is not None and "websocket" not in live.metadata:
+                # No answer from Twilio (a read timeout), and
                 # the media socket is gone: applying the redirect is what ends
                 # the <Connect>/<Stream>, so the call is in the <Dial>. The call
                 # status cannot tell (it is in-progress either way). Keep it in
@@ -352,8 +361,8 @@ class VoiceEngine(ABC):
                 telemetry.transfer_started(call_sid, target=target_number, dial_timeout_s=timeout_s)
                 return
             logger.exception("Transfer failed for call %s", call_sid)
-            # the redirect did not happen: a Twilio error, or the media socket
-            # is still up. The call is still ours. DIAL_ID_KEY and the dial's
+            # the redirect did not happen: a definite error, or the media
+            # socket is still up. The call is still ours. DIAL_ID_KEY and the dial's
             # record stay: a redirect can raise although Twilio applied it,
             # and then this dial's result still arrives and must be recognised.
             record["redirect_failed"] = True

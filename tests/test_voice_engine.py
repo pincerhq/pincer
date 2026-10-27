@@ -329,6 +329,49 @@ async def test_transfer_call_failure_leaves_call_ours(mock_settings):
     assert "transferring" not in state.metadata
 
 
+def _definite_redirect_errors() -> list[Exception]:
+    import requests
+    from twilio.base.exceptions import TwilioException
+
+    return [
+        requests.exceptions.ConnectTimeout("connect"),
+        requests.exceptions.ConnectionError("dns"),
+        TwilioException("no credentials"),
+        RuntimeError("cannot schedule new futures after shutdown"),
+    ]
+
+
+@pytest.mark.parametrize("error", _definite_redirect_errors(), ids=lambda e: type(e).__name__)
+async def test_transfer_redirect_definite_errors_roll_back(mock_settings, error):
+    """Only a read timeout leaves open whether Twilio applied the redirect.
+    These never reached Twilio (or never got a request out), so no <Dial> can
+    exist: roll back and raise, socket or not."""
+    engine = ConversationRelayEngine(mock_settings)
+    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls:
+        client_cls.return_value.calls.return_value.update.side_effect = error
+        with pytest.raises(type(error)):
+            await engine.transfer_call("CAx", "+4930123")
+    assert "transferring" not in state.metadata
+    assert "transfer" not in state.metadata
+
+
+async def test_transfer_dial_twiml_failure_marks_nothing(mock_settings, monkeypatch):
+    """A <Dial> that cannot even be built leaves no trace of a transfer."""
+    from pincer.voice import engine as engine_module
+
+    def broken(*_args, **_kwargs):
+        raise ValueError("bad target")
+
+    monkeypatch.setattr(engine_module, "build_dial_twiml", broken)
+    engine = ConversationRelayEngine(mock_settings)
+    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    with patch("twilio.rest.Client") as client_cls, pytest.raises(ValueError, match="bad target"):
+        await engine.transfer_call("CAx", "+4930123")
+    client_cls.return_value.calls.return_value.update.assert_not_called()
+    assert not {"transferring", "transfer", engine_module.DIALS_KEY, engine_module.DIAL_ID_KEY} & set(state.metadata)
+
+
 async def test_transfer_redirect_timeout_without_media_keeps_the_transfer_in_flight(mock_settings):
     """The update timed out and the media socket is gone: applying the redirect
     is what closes it, so the call is in the <Dial>. Rolling back would put a
