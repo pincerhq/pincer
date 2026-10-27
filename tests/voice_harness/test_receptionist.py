@@ -1718,6 +1718,32 @@ async def test_late_apply_after_not_applied_keeps_the_caller(monkeypatch):
     assert h.sm.phase == CallPhase.TAKE_MESSAGE
 
 
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_watchdog_leaves_a_late_applied_bridge_alone_in_any_phase(monkeypatch):
+    """The receptionist may have moved past message-taking before a redirect it
+    gave up on goes live late. Whatever timed phase the session is in, the
+    phase watchdog must not hang up a call the engine says is transferring."""
+    _fast_transfer_checks(monkeypatch)
+    h = await _start(settings=_transfer_settings())
+    h.state.metadata["websocket"] = _open_socket()
+    h.engine.transfer_raises = TimeoutError()
+    _twilio_reports(h, "in-progress")
+    await h.say(HUMAN_PLEASE)
+    await _settled(h)
+    assert "transferring" not in h.state.metadata  # not applied: message-taking
+    # Set directly: scripting a whole message-taking to get past TAKE_MESSAGE is
+    # long, and the property is about any timed phase, not about how it got there.
+    h.sm._state.phase = CallPhase.RECEPTION_INTENT
+    h.state.metadata.pop("websocket")  # Twilio applies the redirect after all
+    await h.engine.on_media_closed(CALL)
+    assert h.state.metadata.get("transferring") is True
+    h.sm._state.phase_entered_at -= 100_000
+    assert h.sm.check_timeout() is True  # the phase alone would time out
+    await h.channel._enforce_phase_timeouts()
+    assert h.engine.get_call_state(CALL) is h.state
+    assert h.engine.ended == []
+
+
 async def test_failing_status_checks_are_retried_until_twilio_answers(monkeypatch):
     """Twilio cannot be asked at the settle (it was slow enough to time out the
     update): the check is retried, and the caller's hang-up it then reports

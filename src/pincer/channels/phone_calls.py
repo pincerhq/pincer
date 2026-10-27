@@ -496,15 +496,7 @@ class VoiceChannel(BaseChannel):
                 for session in list(self._reception_sessions.values()):
                     with contextlib.suppress(Exception):
                         await session.check_silence()
-                # Per-call guard: one bad call must not stop timeout
-                # enforcement for every other concurrently active call.
-                for call_sid, sm in list(self._state_machines.items()):
-                    if sm.is_terminal or not sm.check_timeout():
-                        continue
-                    try:
-                        await self._handle_phase_timeout(call_sid, sm)
-                    except Exception:
-                        logger.exception("Phase timeout handling failed [%s]", call_sid)
+                await self._enforce_phase_timeouts()
                 try:
                     await self._reap_stuck_calls()
                 except Exception:
@@ -513,6 +505,24 @@ class VoiceChannel(BaseChannel):
             pass
         except Exception:
             logger.exception("Voice watchdog error")
+
+    async def _enforce_phase_timeouts(self) -> None:
+        """One watchdog pass over the phase timeouts. A call the engine marks
+        transferring is bridged to a human (or may be: a late-applied redirect),
+        whatever phase the session got to, so it is not ours to time: the same
+        source of truth the stuck-call reaper uses."""
+        # Per-call guard: one bad call must not stop timeout
+        # enforcement for every other concurrently active call.
+        for call_sid, sm in list(self._state_machines.items()):
+            if sm.is_terminal or not sm.check_timeout():
+                continue
+            state = self._engine.get_call_state(call_sid) if self._engine else None
+            if state is not None and state.metadata.get("transferring"):
+                continue
+            try:
+                await self._handle_phase_timeout(call_sid, sm)
+            except Exception:
+                logger.exception("Phase timeout handling failed [%s]", call_sid)
 
     async def _reap_stuck_calls(self) -> None:
         """Force-end and page on calls past max_duration + grace (T9.2)."""
