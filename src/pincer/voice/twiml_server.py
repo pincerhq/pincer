@@ -7,12 +7,9 @@ Media Streams WebSocket connections, and fallback error handling.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import json
 import logging
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -21,6 +18,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import PlainTextResponse, Response
 from starlette.websockets import WebSocketState
 
+from pincer.voice.call_locks import one_call_update_at_a_time
 from pincer.voice.twiml_builder import CALL_SID_PLACEHOLDER
 from pincer.voice.webhook_auth import (
     WS_MONITOR_PATH,
@@ -34,8 +32,6 @@ from pincer.voice.webhook_auth import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
     from pincer.config import Settings
     from pincer.voice.engine import VoiceEngine
 
@@ -61,18 +57,6 @@ voice_router = APIRouter(prefix="/voice", tags=["voice"])
 
 _engine: VoiceEngine | None = None
 _settings: Settings | None = None
-
-
-@dataclass
-class _CallLock:
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    users: int = 0
-
-
-# CallSid -> the lock /transfer-result holds while it handles that call's dial
-# result, and /status while it finalizes the call; an entry lives only while a
-# request for the call is in flight.
-_call_update_locks: dict[str, _CallLock] = {}
 
 
 def init_voice_routes(engine: VoiceEngine, settings: Settings) -> None:
@@ -355,21 +339,8 @@ async def voice_transfer_result(request: Request) -> Response:
     # One delivery of a call's dial result at a time: a copy arriving while the
     # first is still awaiting (Twilio's status, the call's registration, the
     # session) waits, then finds that work done and replays its answer.
-    async with _one_call_update_at_a_time(str(form.get("CallSid", ""))):
+    async with one_call_update_at_a_time(str(form.get("CallSid", ""))):
         return await _handle_transfer_result(form, str(request.query_params.get("dial", "")))
-
-
-@asynccontextmanager
-async def _one_call_update_at_a_time(call_sid: str) -> AsyncIterator[None]:
-    entry = _call_update_locks.setdefault(call_sid, _CallLock())
-    entry.users += 1
-    try:
-        async with entry.lock:
-            yield
-    finally:
-        entry.users -= 1
-        if not entry.users:
-            _call_update_locks.pop(call_sid, None)
 
 
 async def _handle_transfer_result(form: Any, dial_id: str) -> Response:
@@ -889,7 +860,7 @@ async def voice_status(request: Request) -> PlainTextResponse:
     # hang-up landing between that check and the registration must find the
     # registered call and finalize it, not miss it and leave a phantom.
     terminal = status in ("busy", "no-answer", "failed", "canceled", "completed")
-    async with _one_call_update_at_a_time(call_sid) if terminal else contextlib.nullcontext():
+    async with one_call_update_at_a_time(call_sid) if terminal else contextlib.nullcontext():
         if status == "in-progress":
             # Callee (a human) picked up
             await notify_connected(call_sid)

@@ -19,7 +19,7 @@ import pytest
 from pincer.channels.phone_calls import VoiceChannel
 from pincer.core.agent import StreamChunk, StreamEventType
 from pincer.tools.registry import ToolRegistry
-from pincer.voice import approvals, status_notify
+from pincer.voice import approvals, call_locks, status_notify
 from pincer.voice.engine import CallDirection, ConversationRelayEngine
 from pincer.voice.prompts import get_prompt
 from pincer.voice.receptionist import profile as prof
@@ -1333,7 +1333,6 @@ async def test_lost_state_duplicate_during_registration_fails_transfer_once(monk
     the first is still in the channel's call-start setup (the call is already
     registered, the transfer not yet marked handled). One failed-transfer step,
     one count, and both copies answered with the same reconnect."""
-    from pincer.voice import twiml_server
 
     h = await _start(settings=_transfer_settings())
     await _without_other_calls(h)
@@ -1366,13 +1365,12 @@ async def test_lost_state_duplicate_during_registration_fails_transfer_once(monk
     assert failed == ["no_answer"]
     assert results == ["no-answer"]
     assert list(h.engine.get_active_calls()) == [LOST_CALL]
-    assert twiml_server._call_update_locks == {}
+    assert call_locks.call_update_locks == {}
 
 
 async def test_lost_state_duplicate_during_status_check_registers_once(monkeypatch):
     """The second copy arrives while the first waits for Twilio's call status:
     both found no state, but the call is registered once, not twice."""
-    from pincer.voice import twiml_server
 
     h = await _start(settings=_transfer_settings())
     await _without_other_calls(h)
@@ -1402,7 +1400,7 @@ async def test_lost_state_duplicate_during_status_check_registers_once(monkeypat
     assert registered == [LOST_CALL]
     assert second.text == first.text
     assert "ConversationRelay" in first.text
-    assert twiml_server._call_update_locks == {}
+    assert call_locks.call_update_locks == {}
 
 
 async def test_transfer_result_lock_is_released_when_the_handler_raises(monkeypatch):
@@ -1422,7 +1420,7 @@ async def test_transfer_result_lock_is_released_when_the_handler_raises(monkeypa
                 "/api/apps/twilio/transfer-result",
                 data={"CallSid": CALL, "DialCallStatus": "busy", "DialCallSid": "CAdial", "CallStatus": "in-progress"},
             )
-    assert twiml_server._call_update_locks == {}
+    assert call_locks.call_update_locks == {}
 
 
 def _count_transfer_starts(monkeypatch) -> list[str]:
@@ -1479,6 +1477,91 @@ async def test_caller_hangup_while_the_redirect_times_out_finalizes_the_call(mon
     assert h.engine.get_active_calls() == {}
     assert session.end_reason == "caller_hangup_during_transfer"
     assert started == []
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_settle_and_a_dial_result_for_the_same_dial_do_not_both_act(monkeypatch):
+    """The settle's status check returns while /transfer-result is finalizing
+    the same dial (the caller hung up while the target rang): only one of them
+    may record the hang-up. The settle runs under the call's lock and re-checks
+    after its await."""
+    import requests
+
+    from pincer.voice import engine as engine_module
+    from pincer.voice.engine import DIAL_ID_KEY
+
+    monkeypatch.setattr(engine_module, "UNCONFIRMED_REDIRECT_SETTLE_S", 0)
+    abandoned: list[str] = []
+    original = sess.ReceptionSession.on_transfer_abandoned
+
+    def counting(self):
+        abandoned.append(self.call_sid)
+        original(self)
+
+    monkeypatch.setattr(sess.ReceptionSession, "on_transfer_abandoned", counting)
+    h = await _start(settings=_transfer_settings())
+    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    gate = asyncio.Event()
+
+    async def slow_fetch(call_sid):
+        await gate.wait()
+        return "completed"
+
+    async def closing_media(call_sid):
+        gate.set()  # the status check returns while the dial result finalizes
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr(h.engine, "fetch_call_status", slow_fetch)
+    monkeypatch.setattr(h.engine, "close_media_stream", closing_media)
+    await h.say(HUMAN_PLEASE)
+    for _ in range(5):
+        await asyncio.sleep(0)  # the settle is now waiting on Twilio
+    asyncio.get_running_loop().call_later(0.2, gate.set)  # bound: never wait on the dial result for it
+    data = {"CallSid": CALL, "DialCallStatus": "no-answer", "DialCallSid": "CAdial", "CallStatus": "completed"}
+    async with _async_client(h) as client:
+        await client.post(f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}", data=data)
+    await _settled(h)
+    assert abandoned == [CALL]
+    assert h.engine.get_call_state(CALL) is None
+
+
+@pytest.mark.usefixtures("_no_transfer_resolver")
+async def test_dial_result_waits_for_a_settle_in_progress(monkeypatch):
+    """A dial result arriving while the settle is still acting on the same dial
+    (here: apologizing for a redirect it found not applied) is handled after
+    it, never interleaved with it."""
+    import requests
+
+    from pincer.voice import engine as engine_module
+    from pincer.voice.engine import DIAL_ID_KEY
+    from pincer.voice.telemetry import hooks
+
+    monkeypatch.setattr(engine_module, "UNCONFIRMED_REDIRECT_SETTLE_S", 0)
+    order: list[str] = []
+    monkeypatch.setattr(hooks, "transfer_result", lambda call_sid, dial_status, **_: order.append("dial result"))
+    h = await _start(settings=_transfer_settings())
+    h.state.metadata["websocket"] = _open_socket()
+    h.engine.transfer_raises = requests.exceptions.ReadTimeout("read")
+    gate = asyncio.Event()
+    settled = h.engine._on_transfer_settled_callback
+
+    async def slow_apology(call_sid, outcome):
+        order.append(f"settle {outcome}")
+        await gate.wait()
+        await settled(call_sid, outcome)
+        order.append("settle done")
+
+    h.engine.set_on_transfer_settled(slow_apology)
+    asyncio.get_running_loop().call_later(0.2, gate.set)
+    await h.say(HUMAN_PLEASE)
+    for _ in range(5):
+        await asyncio.sleep(0)  # the settle is now in its apology
+    data = {"CallSid": CALL, "DialCallStatus": "no-answer", "DialCallSid": "CAdial", "CallStatus": "in-progress"}
+    async with _async_client(h) as client:
+        await client.post(f"/api/apps/twilio/transfer-result?dial={h.state.metadata[DIAL_ID_KEY]}", data=data)
+    await _settled(h)
+    assert order == ["settle not_applied", "settle done", "dial result"]
 
 
 @pytest.mark.usefixtures("_no_transfer_resolver")

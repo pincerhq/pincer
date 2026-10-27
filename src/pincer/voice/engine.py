@@ -396,28 +396,36 @@ class VoiceEngine(ABC):
         - anything else (no socket was known, Twilio cannot be asked): unknown.
           /transfer-result or /status decides, the stuck-call reaper bounds it.
 
-        A dial result that arrived meanwhile has decided already. A caller turn
-        during the wait is swallowed (the phase is TRANSFERRING)."""
+        A dial result that arrived meanwhile has decided already. The decision
+        runs under the call's lock (`one_call_update_at_a_time`, shared with
+        /transfer-result and /status) and is re-checked after every await, so
+        it never acts on a dial one of them is deciding. A caller turn during
+        the wait is swallowed (the phase is TRANSFERRING)."""
+        from pincer.voice.call_locks import one_call_update_at_a_time
+
         try:
             await asyncio.sleep(UNCONFIRMED_REDIRECT_SETTLE_S)
-            live = self._active_calls.get(call_sid)
-            if live is None or not live.metadata.get("transferring") or live.metadata.get("transfer") is not record:
-                return
-            outcome = await self._unconfirmed_redirect_outcome(call_sid, live, media_before)
-            logger.info("Unconfirmed transfer redirect for call %s settled: %s", call_sid, outcome)
-            if outcome == "applied":
-                note_transfer_started(call_sid, record)
-            elif outcome == "not_applied":
-                record["redirect_failed"] = True
-            if self._on_transfer_settled_callback is not None:
-                try:
-                    await self._on_transfer_settled_callback(call_sid, outcome)
-                except Exception:
-                    logger.exception("transfer-settled callback failed [%s]", call_sid)
-            if outcome == "not_applied":
-                await self.end_transfer(call_sid)
-            elif outcome == "hung_up":
-                await self.finish_remote_ended(call_sid, reason="caller_hangup_during_transfer")
+            async with one_call_update_at_a_time(call_sid):
+                live = self._unsettled_dial(call_sid, record)
+                if live is None:
+                    return
+                outcome = await self._unconfirmed_redirect_outcome(call_sid, live, media_before)
+                if self._unsettled_dial(call_sid, record) is None:
+                    return  # decided while Twilio was asked
+                logger.info("Unconfirmed transfer redirect for call %s settled: %s", call_sid, outcome)
+                if outcome == "applied":
+                    note_transfer_started(call_sid, record)
+                elif outcome == "not_applied":
+                    record["redirect_failed"] = True
+                if self._on_transfer_settled_callback is not None:
+                    try:
+                        await self._on_transfer_settled_callback(call_sid, outcome)
+                    except Exception:
+                        logger.exception("transfer-settled callback failed [%s]", call_sid)
+                if outcome == "not_applied":
+                    await self.end_transfer(call_sid)
+                elif outcome == "hung_up":
+                    await self.finish_remote_ended(call_sid, reason="caller_hangup_during_transfer")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -425,6 +433,14 @@ class VoiceEngine(ABC):
         finally:
             if self._transfer_settles.get(call_sid) is asyncio.current_task():
                 self._transfer_settles.pop(call_sid, None)
+
+    def _unsettled_dial(self, call_sid: str, record: dict[str, Any]) -> CallState | None:
+        """The live call, if ``record`` is still its current dial, in flight and
+        without a result; else None (ended, or decided by a dial result)."""
+        live = self._active_calls.get(call_sid)
+        if live is None or not live.metadata.get("transferring") or live.metadata.get("transfer") is not record:
+            return None
+        return None if "dial_status" in record else live
 
     async def _unconfirmed_redirect_outcome(self, call_sid: str, live: CallState, media_before: Any) -> str:
         media_now = live.metadata.get("websocket")
