@@ -35,6 +35,7 @@ class FakeEngine:
         self.started: list[tuple[str, str, CallDirection]] = []
         self.fallbacks: list[str] = []
         self.media_closed: list[str] = []
+        self.stt_closed: list[str] = []  # close_media_stream (Media Streams STT)
         self.answered: list[str] = []
         # what VoiceEngine.end_transfer reads
         self._active_calls = self.states
@@ -78,6 +79,9 @@ class FakeEngine:
 
     # the real implementation, not a copy that can drift from it
     end_transfer = VoiceEngine.end_transfer
+
+    async def close_media_stream(self, call_sid: str) -> None:
+        self.stt_closed.append(call_sid)
 
     async def on_media_closed(self, call_sid: str) -> None:
         state = self.states.get(call_sid)
@@ -225,6 +229,7 @@ class TestRelayWebSocket:
             state.metadata["websocket"] = replacing  # a new socket took over the call
         assert state.metadata.get("websocket") is replacing
         assert engine.media_closed == []
+        assert engine.stt_closed == []  # the new socket's STT stays open
 
     def test_setup_attaches_websocket_to_existing_state(self):
         engine = FakeEngine()
@@ -443,6 +448,7 @@ class TestRelayWebSocketAuth:
         with client.websocket_connect(_signed("/api/apps/twilio/stream/CA_sig", WS_STREAM_PATH)) as ws:
             ws.send_text(json.dumps({"event": "connected"}))
             ws.send_text(json.dumps({"event": "stop"}))
+        assert engine.stt_closed == ["CA_sig"]  # its own close does close the STT
 
     def test_start_media_format_is_known_before_stt_setup(self):
         """setup_media_stream_stt checks Twilio's declared format; it has to

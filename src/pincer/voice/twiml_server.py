@@ -1425,12 +1425,13 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
     except Exception:
         logger.exception("Media stream error: %s", call_sid)
     finally:
-        if _engine and hasattr(_engine, "close_media_stream"):
-            await _engine.close_media_stream(call_sid)
-        # Only this socket's own entry: if a new socket took over the call,
-        # clearing it (or ending the call) would read as "media gone" while the
-        # caller is still streaming, as the relay handler already guards.
+        # Only this socket's own media: if a new socket took over the call,
+        # closing the call's STT, clearing its entry, or ending the call would
+        # cut off (or read as "media gone" for) the caller still streaming, as
+        # the relay handler already guards.
         if state is not None and state.metadata.get("websocket") is websocket:
+            if _engine and hasattr(_engine, "close_media_stream"):
+                await _engine.close_media_stream(call_sid)
             state.metadata.pop("websocket", None)
             state.metadata.pop("stream_sid", None)
             telemetry.media_closed(call_sid, reason="media_socket_closed")
