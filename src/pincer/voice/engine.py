@@ -1240,6 +1240,10 @@ class MediaStreamEngine(VoiceEngine):
         state = self._active_calls.get(call_sid)
         if not state or not self._stt_provider:
             return
+        # A stream socket that took over the call starts STT again: close the
+        # previous stream and its consumer, or they run until the provider
+        # times them out (the replaced socket leaves the call's STT alone).
+        await self._close_stt(state)
 
         state.metadata["stream_sid"] = stream_sid
 
@@ -1852,6 +1856,10 @@ class MediaStreamEngine(VoiceEngine):
         state = self._active_calls.get(call_sid)
         if not state:
             return
+        await self._close_stt(state)
+        logger.debug("Media stream STT closed [%s]", call_sid)
+
+    async def _close_stt(self, state: CallState) -> None:
         stt_stream = state.metadata.pop("stt_stream", None)
         task = state.metadata.pop("stt_consumer_task", None)
         reask = state.metadata.pop("aux_speech_task", None)
@@ -1865,7 +1873,6 @@ class MediaStreamEngine(VoiceEngine):
                 await task
         if stt_stream:
             await stt_stream.close()
-        logger.debug("Media stream STT closed [%s]", call_sid)
 
 
 def get_voice_engine(settings: Settings) -> VoiceEngine:

@@ -650,6 +650,46 @@ async def test_redirect_failure_keeps_the_dial_record(mock_settings):
     assert "transfer" not in state.metadata
 
 
+async def test_media_stream_stt_setup_replaces_the_previous_stream(mock_settings):
+    """A new stream socket taking over the call sets up STT again: the old
+    Deepgram stream is closed and its consumer stopped, not leaked until the
+    provider times it out."""
+
+    class _Stream:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def receive_transcripts(self):
+            await asyncio.Event().wait()  # a live stream: transcripts until closed
+            yield  # pragma: no cover
+
+        async def close(self) -> None:
+            self.closed = True
+
+        async def send_audio(self, _chunk) -> None:
+            pass
+
+    streams: list[_Stream] = []
+
+    async def start_stream(_config):
+        streams.append(_Stream())
+        return streams[-1]
+
+    engine = MediaStreamEngine(mock_settings)
+    engine._stt_provider = MagicMock(start_stream=AsyncMock(side_effect=start_stream))
+    state = await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    await engine.setup_media_stream_stt("CAx", "MS1")
+    first_task = state.metadata["stt_consumer_task"]
+    await engine.setup_media_stream_stt("CAx", "MS2")
+    try:
+        assert streams[0].closed is True
+        assert first_task.cancelled() or first_task.done()
+        assert state.metadata["stt_stream"] is streams[1] and not streams[1].closed
+        assert not state.metadata["stt_consumer_task"].done()
+    finally:
+        await asyncio.wait_for(engine.close_media_stream("CAx"), timeout=5)
+
+
 async def test_finish_remote_ended_is_idempotent_and_never_hangs_up(mock_settings):
     engine = ConversationRelayEngine(mock_settings)
     on_end = AsyncMock()
