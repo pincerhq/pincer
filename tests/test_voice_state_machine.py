@@ -166,6 +166,18 @@ class TestUntimedPhases:
         assert sm.check_timeout() is False
         assert sm.get_timeout_remaining() == math.inf
 
+    def test_message_taking_can_go_back_to_a_late_applied_transfer(self):
+        """A redirect given up as not applied can still go live: the call
+        returns from TAKE_MESSAGE to the untimed TRANSFERRING phase."""
+        assert CallPhase.TRANSFERRING in VALID_TRANSITIONS[CallPhase.TAKE_MESSAGE]
+        sm = CallStateMachine("CA123")
+        sm._state.phase = CallPhase.TAKE_MESSAGE
+        sm._state.phase_entered_at = time.monotonic() - (PHASE_TIMEOUTS[CallPhase.TAKE_MESSAGE] + 1)
+        assert sm.check_timeout() is True
+        assert sm.transition(CallPhase.TRANSFERRING, "transfer_applied_late") is True
+        sm._state.phase_entered_at = time.monotonic() - 100_000
+        assert sm.check_timeout() is False
+
     @pytest.mark.parametrize(("phase", "timeout"), sorted(PHASE_TIMEOUTS.items()))
     def test_timed_phases_unchanged(self, phase, timeout):
         sm = CallStateMachine("CA123")

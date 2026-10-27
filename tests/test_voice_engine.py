@@ -500,6 +500,7 @@ async def _timed_out_transfer(
     from pincer.voice.telemetry import hooks
 
     monkeypatch.setattr(engine_module, "UNCONFIRMED_REDIRECT_SETTLE_S", settle_s)
+    monkeypatch.setattr(engine_module, "TRANSFER_CONFIRM_BACKOFF_S", (0.0, 0.0, 0.0))
     started: list[str] = []
     monkeypatch.setattr(hooks, "transfer_started", lambda call_sid, **_: started.append(call_sid))
     engine = ConversationRelayEngine(mock_settings)
@@ -531,7 +532,7 @@ async def test_transfer_redirect_timeout_unknown_socket_stays_unconfirmed(mock_s
     engine, state, outcomes, started = await _timed_out_transfer(mock_settings, monkeypatch)
     record = state.metadata[DIALS_KEY][f"dial:{state.metadata[DIAL_ID_KEY]}"]
     assert record["redirect_unconfirmed"] is True
-    await engine.pending_transfer_settle("CAx")
+    await asyncio.wait_for(engine.pending_transfer_settle("CAx"), timeout=5)
     assert outcomes == [("CAx", "unknown")]
     assert state.metadata["transferring"] is True
     assert state.metadata["transfer"] is record
@@ -553,8 +554,8 @@ async def test_transfer_redirect_timeout_fetch_error_stays_unconfirmed(mock_sett
     engine, state, outcomes, started = await _timed_out_transfer(
         mock_settings, monkeypatch, twilio_status=RuntimeError("twilio unreachable")
     )
-    await engine.pending_transfer_settle("CAx")
-    engine.fetch_call_status.assert_awaited_once_with("CAx")
+    await asyncio.wait_for(engine.pending_transfer_settle("CAx"), timeout=5)
+    assert engine.fetch_call_status.await_count == 4  # the settle + 3 re-checks, all failing
     assert outcomes == [("CAx", "unknown")]
     assert state.metadata["transferring"] is True
     assert started == []
@@ -568,12 +569,38 @@ async def test_transfer_redirect_timeout_with_media_up_is_not_applied(mock_setti
 
     engine, state, outcomes, started = await _timed_out_transfer(mock_settings, monkeypatch, socket=_connected_socket())
     assert state.metadata["transferring"] is True  # unsettled until the turn has returned
-    await engine.pending_transfer_settle("CAx")
+    await asyncio.wait_for(engine.pending_transfer_settle("CAx"), timeout=5)
     assert outcomes == [("CAx", "not_applied")]
     assert "transferring" not in state.metadata
     assert state.metadata[DIALS_KEY][f"dial:{state.metadata[DIAL_ID_KEY]}"]["redirect_failed"] is True
     engine.fetch_call_status.assert_not_awaited()
     assert started == []
+
+
+async def test_transfer_confirm_backoff_is_bounded(mock_settings, monkeypatch, caplog):
+    """No evidence and Twilio says in-progress at every re-check: the call is
+    left in flight after the last one (the stuck-call reaper bounds it)."""
+    from pincer.voice import engine as engine_module
+
+    monkeypatch.setattr(engine_module, "TRANSFER_CONFIRM_BACKOFF_S", (0.0, 0.0, 0.0))
+    engine, state, outcomes, started = await _timed_out_transfer(mock_settings, monkeypatch)
+    await asyncio.wait_for(engine.pending_transfer_settle("CAx"), timeout=5)
+    assert engine.fetch_call_status.await_count == 4  # the settle + 3 re-checks
+    assert state.metadata["transferring"] is True
+    assert outcomes == [("CAx", "unknown")]
+    assert "still unconfirmed" in caplog.text
+
+
+async def test_possibly_live_dial_defers_only_until_its_deadline(mock_settings, monkeypatch):
+    """After a not-applied verdict a closed socket is deferred only while the
+    dial could still produce a result; past that the call ends as usual."""
+    engine, state, outcomes, started = await _timed_out_transfer(mock_settings, monkeypatch, socket=_connected_socket())
+    await asyncio.wait_for(engine.pending_transfer_settle("CAx"), timeout=5)
+    assert state.metadata["transfer"]["possibly_live_until"] > 0
+    state.metadata["transfer"]["possibly_live_until"] = 0.0  # the dial timeout and margin have passed
+    state.metadata.pop("websocket")
+    await engine.on_media_closed("CAx")
+    assert engine.get_call_state("CAx") is None
 
 
 async def test_transfer_settle_is_cancelled_when_the_call_ends(mock_settings, monkeypatch):

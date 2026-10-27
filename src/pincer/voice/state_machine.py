@@ -207,6 +207,8 @@ VALID_TRANSITIONS: dict[CallPhase, set[CallPhase]] = {
         CallPhase.RECEPTION_INTENT,
         CallPhase.ENDING,
         CallPhase.ERROR_RECOVERY,
+        # a transfer redirect given up as not applied that went live late
+        CallPhase.TRANSFERRING,
     },
     CallPhase.INBOUND_BOOKING: {
         CallPhase.VERIFY,

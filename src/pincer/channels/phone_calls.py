@@ -158,7 +158,15 @@ class VoiceChannel(BaseChannel):
         is still in the relay, waiting in silence, so the receptionist apologizes
         and takes a message; it speaks through its gate, which logs the line in
         the transcript like any other agent line. ``hung_up``: the caller left
-        before any <Dial>; record that before the engine finalizes the call."""
+        before any <Dial>; record that before the engine finalizes the call.
+        ``applied_late``: a redirect given up as not applied went live after all."""
+        if outcome == "applied_late":
+            # The redirect went live after all: back to the untimed phase, or
+            # the message-taking timeout would hang up a bridged call.
+            sm = self._state_machines.get(call_sid)
+            if sm is not None and sm.phase == CallPhase.TAKE_MESSAGE:
+                sm.transition(CallPhase.TRANSFERRING, "transfer_applied_late")
+            return
         session = self._reception_sessions.get(call_sid)
         if session is None:
             return
