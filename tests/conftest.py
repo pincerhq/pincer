@@ -4,6 +4,8 @@ import asyncio
 import logging
 import os
 import re
+import threading
+import time
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,23 +151,63 @@ def _isolate_audit_logger(tmp_path: Path) -> None:
 # modules at test-module level, not inside the test coroutine.
 LOOP_STALL_THRESHOLD_S = 0.5
 
-# asyncio's own wakeups, which only resolve a future and run no test or product
-# code: time charged to one is the runner pausing the process (GC, CPU
-# preemption), not something blocking the loop.
-_ASYNCIO_WAKEUP = re.compile(
-    r"Executing <(?:Timer)?Handle (?:when=\S+ )?(?:_release_waiter|_set_result_unless_cancelled)\("
-)
+_HEARTBEAT_TICK_S = 0.02
+
+
+class _Heartbeat(threading.Thread):
+    """Ticks off the loop thread and records the spans it could not run in.
+
+    A stall on the loop thread (a blocking call, file I/O, time.sleep, a CPU
+    loop) leaves this thread running: those release the GIL or switch out of it
+    every few ms. A span this thread lost too was the whole process standing
+    still (a GC pause, the CI runner preempting it), not the loop being blocked.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(name="loop-stall-heartbeat", daemon=True)
+        self._lock = threading.Lock()
+        self._gaps: list[tuple[float, float]] = []
+
+    def run(self) -> None:
+        last = time.monotonic()
+        while True:
+            time.sleep(_HEARTBEAT_TICK_S)
+            now = time.monotonic()
+            if now - last > 5 * _HEARTBEAT_TICK_S:
+                with self._lock:
+                    self._gaps.append((last, now))
+                    del self._gaps[:-1000]
+            last = now
+
+    def frozen_within(self, start: float, end: float) -> float:
+        """Seconds of [start, end] in which the whole process stood still."""
+        with self._lock:
+            return sum(max(0.0, min(end, b) - max(start, a)) for a, b in self._gaps)
+
+
+_heartbeat: _Heartbeat | None = None
+_TOOK = re.compile(r" took (\d+\.\d+) seconds$")
 
 
 class _StallCapture(logging.Handler):
     def __init__(self) -> None:
         super().__init__(logging.WARNING)
-        self.stalls: list[str] = []
+        self.slow: list[tuple[str, float, float]] = []  # message, when it ended, how long it took
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
-        if message.startswith("Executing ") and not _ASYNCIO_WAKEUP.match(message):
-            self.stalls.append(message)
+        took = _TOOK.search(message)
+        if message.startswith("Executing ") and took:
+            self.slow.append((message, time.monotonic(), float(took.group(1))))
+
+    def stalls(self, heartbeat: _Heartbeat) -> list[str]:
+        """The slow callbacks still over the threshold once the time the whole
+        process stood still is taken out of them."""
+        return [
+            message
+            for message, end, took in self.slow
+            if took - heartbeat.frozen_within(end - took, end) >= LOOP_STALL_THRESHOLD_S
+        ]
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -177,6 +219,10 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 
 @pytest_asyncio.fixture
 async def _loop_stall_guard() -> Any:
+    global _heartbeat
+    if _heartbeat is None:
+        _heartbeat = _Heartbeat()
+        _heartbeat.start()
     loop = asyncio.get_running_loop()
     debug, threshold = loop.get_debug(), loop.slow_callback_duration
     loop.set_debug(True)
@@ -189,7 +235,10 @@ async def _loop_stall_guard() -> Any:
         logging.getLogger("asyncio").removeHandler(capture)
         loop.set_debug(debug)
         loop.slow_callback_duration = threshold
-    assert not capture.stalls, "event loop stalled: " + "; ".join(capture.stalls)
+    if capture.slow:
+        await asyncio.sleep(5 * _HEARTBEAT_TICK_S)  # lets the heartbeat record a pause that ended just now
+    stalls = capture.stalls(_heartbeat)
+    assert not stalls, "event loop stalled: " + "; ".join(stalls)
 
 
 @pytest.fixture
