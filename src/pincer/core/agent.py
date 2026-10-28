@@ -70,6 +70,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_CONSECUTIVE_ERRORS = 3
 _MAX_SANITIZE_ATTEMPTS = 2
+_SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please resend your message."
 # Onboarding: a question still unanswered after this long is closed, empty,
 # by the user's next message; and this many replies with no profile in them
 # close it too.
@@ -193,6 +194,14 @@ _GOOGLE_FALLBACK_PATTERNS = [
 ]
 
 
+class _PairRecovery(StrEnum):
+    """What a turn does after a provider rejects its tool pairing."""
+
+    RETRY = "retry"  # the history was repaired; send it again
+    CLEARED = "cleared"  # unrepairable; the session was cleared
+    RAISE = "raise"  # not a tool-pairing error
+
+
 class StreamEventType(StrEnum):
     TEXT = "text"
     TOOL_START = "tool_start"
@@ -280,6 +289,7 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
     Anthropic wants it in the very next turn. So this strips:
     - assistant tool_use without a following tool_result
     - tool_result not directly after its tool_use (or answering it twice)
+    - a repeated tool_use id within one message, past its first occurrence
 
     Returns `messages` itself when nothing needed stripping.
     """
@@ -303,10 +313,18 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
         while end < len(messages) and messages[end].role == MessageRole.TOOL_RESULT:
             end += 1
         results = messages[i + 1 : end]
+        # A repeated call id (a compatible server returning duplicate or empty
+        # ids) keeps only its first call, paired with its first result.
         answered = {r.tool_call_id for r in results}
-        surviving = [tc for tc in msg.tool_calls if tc.id in answered]
-        if len(surviving) != len(msg.tool_calls):
-            orphan_ids = [tc.id for tc in msg.tool_calls if tc.id not in answered]
+        surviving: list[ToolCall] = []
+        orphan_ids: list[str] = []
+        for tc in msg.tool_calls:
+            if tc.id in answered:
+                answered.discard(tc.id)
+                surviving.append(tc)
+            else:
+                orphan_ids.append(tc.id)
+        if orphan_ids:
             logger.warning("Stripping orphaned tool_use(s): %s", orphan_ids)
             changed = True
             if surviving:
@@ -409,8 +427,26 @@ class Agent:
             return False
         logger.info("Repaired orphaned tool pairs (%d -> %d messages)", len(session.messages), len(clean))
         session.messages = clean
-        await self._sessions._persist(session)  # noqa: SLF001
+        await self._sessions.save(session)
         return True
+
+    async def _recover_from_tool_pair_error(self, session: Session, error: LLMError, attempts: int) -> _PairRecovery:
+        """Decide how a turn continues after `error`, given `attempts` retries so far.
+
+        Retries while stripping still changes the history. Once it can't, the
+        same request would fail on every later turn too — e.g. Anthropic's
+        "must define tools" for a history with tool pairs sent with no tools —
+        so the session is cleared instead.
+        """
+        if not _is_tool_pair_error(error):
+            return _PairRecovery.RAISE
+        if attempts < _MAX_SANITIZE_ATTEMPTS and await self._repair_tool_pairs(session):
+            logger.warning("Orphaned tool pair detected, sanitized session (attempt %d)", attempts + 1)
+            return _PairRecovery.RETRY
+        logger.warning("Tool pairing still rejected after %d sanitize attempt(s), clearing session", attempts)
+        session.messages = [m for m in session.messages if m.role == MessageRole.SYSTEM]
+        await self._sessions.save(session)
+        return _PairRecovery.CLEARED
 
     @property
     def tool_registry(self) -> ToolRegistry:
@@ -558,19 +594,13 @@ class Agent:
                 )
                 break
             except LLMError as e:
-                if _is_tool_pair_error(e):
-                    if sanitize_attempts >= _MAX_SANITIZE_ATTEMPTS:
-                        logger.warning("Sanitization failed after %d attempts, clearing session", sanitize_attempts)
-                        session.messages = [m for m in session.messages if m.role == MessageRole.SYSTEM]
-                        await self._sessions._persist(session)  # noqa: SLF001
-                        final_text = "I had a session error and cleared my context. Please resend your message."
-                        break
-                    # Retry only if stripping changed the history: re-sending it
-                    # unchanged would fail the same way.
-                    if await self._repair_tool_pairs(session):
-                        sanitize_attempts += 1
-                        logger.warning("Orphaned tool pair detected, sanitized session (attempt %d)", sanitize_attempts)
-                        continue
+                recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                if recovery is _PairRecovery.RETRY:
+                    sanitize_attempts += 1
+                    continue
+                if recovery is _PairRecovery.CLEARED:
+                    final_text = _SESSION_CLEARED_TEXT
+                    break
                 raise
 
             # Track cost
@@ -883,22 +913,13 @@ class Agent:
                 yield StreamChunk(StreamEventType.DONE, "Daily budget limit reached.")
                 return
             except LLMError as e:
-                if _is_tool_pair_error(e):
-                    if sanitize_attempts >= _MAX_SANITIZE_ATTEMPTS:
-                        logger.warning("Sanitization failed after %d attempts, clearing session", sanitize_attempts)
-                        session.messages = [m for m in session.messages if m.role == MessageRole.SYSTEM]
-                        await self._sessions._persist(session)  # noqa: SLF001
-                        yield StreamChunk(
-                            StreamEventType.DONE,
-                            "I had a session error and cleared my context. Please resend your message.",
-                        )
-                        return
-                    # Retry only if stripping changed the history: re-sending it
-                    # unchanged would fail the same way.
-                    if await self._repair_tool_pairs(session):
-                        sanitize_attempts += 1
-                        logger.warning("Orphaned tool pair detected, sanitized session (attempt %d)", sanitize_attempts)
-                        continue
+                recovery = await self._recover_from_tool_pair_error(session, e, sanitize_attempts)
+                if recovery is _PairRecovery.RETRY:
+                    sanitize_attempts += 1
+                    continue
+                if recovery is _PairRecovery.CLEARED:
+                    yield StreamChunk(StreamEventType.DONE, _SESSION_CLEARED_TEXT)
+                    return
                 raise
 
             if not response.has_tool_calls:
@@ -1137,11 +1158,9 @@ class Agent:
             except LLMError as e:
                 if llm_span is not None:
                     llm_span.close(_SpanStatus.ERROR, error=type(e).__name__)
-                if (
-                    _is_tool_pair_error(e)
-                    and sanitize_attempts < _MAX_SANITIZE_ATTEMPTS
-                    and await self._repair_tool_pairs(session)
-                ):
+                # CLEARED raises too: this utterance fails, but the cleared
+                # session lets the call's next one go through.
+                if await self._recover_from_tool_pair_error(session, e, sanitize_attempts) is _PairRecovery.RETRY:
                     sanitize_attempts += 1
                     continue
                 raise

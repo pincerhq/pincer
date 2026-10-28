@@ -7,9 +7,12 @@ from typing import Any
 import pytest
 
 from pincer.core.agent import Agent, StreamEventType
+from pincer.exceptions import LLMError
 from pincer.llm.base import (
     BaseLLMProvider,
+    LLMMessage,
     LLMResponse,
+    MessageRole,
     StreamTurnEvent,
     ToolCall,
 )
@@ -231,8 +234,6 @@ class TestStreamVoiceTurn:
         assert summary.total_input_tokens == 50
 
     async def test_llm_error_propagates_to_channel(self, settings, session_manager, cost_tracker, tool_registry):
-        from pincer.exceptions import LLMError
-
         class BoomProvider(CompleteOnlyProvider):
             async def stream_turn(self, *a, **k):
                 raise LLMError("boom")
@@ -241,6 +242,40 @@ class TestStreamVoiceTurn:
         agent = Agent(settings, BoomProvider(), session_manager, cost_tracker, tool_registry)
         with pytest.raises(LLMError):
             await _collect(agent, user_id="u1", channel="voice", text="Hallo")
+
+    async def test_tool_pair_error_sanitizes_and_retries(self, settings, session_manager, cost_tracker, tool_registry):
+        """A history that turns bad between the proactive pass and the call is
+        repaired once the provider rejects it; the retry no longer carries the
+        orphan. Stream errors now carry the provider's message, so the voice
+        path can tell a tool-pairing 400 apart."""
+        settings.voice_turn_model = ""
+
+        class RejectsOnceProvider(ScriptedProvider):
+            async def stream_turn(
+                self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None
+            ):
+                if not self.calls:
+                    self.calls.append({"messages": list(messages)})
+                    late = ToolCall(id="late", name="greet", arguments={})
+                    messages.append(LLMMessage(role=MessageRole.ASSISTANT, content="", tool_calls=[late]))
+                    raise LLMError(
+                        "openai stream error: 400 An assistant message with 'tool_calls' must be followed by "
+                        "tool messages responding to each 'tool_call_id'. The following tool_call_ids did not "
+                        "have response messages: late"
+                    )
+                async for event in super().stream_turn(messages, tools, model, max_tokens, temperature, system):
+                    yield event
+
+        provider = RejectsOnceProvider([_text_turn("Gerne.")])
+        agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
+
+        chunks = await _collect(agent, user_id="u1", channel="voice", text="Hallo")
+
+        assert chunks[-1].type == StreamEventType.DONE
+        assert chunks[-1].content == "Gerne."
+        assert len(provider.calls) == 2
+        retried = provider.calls[1]["messages"]
+        assert not any(m.tool_calls for m in retried)
 
 
 class TestCrossProviderVoiceModel:

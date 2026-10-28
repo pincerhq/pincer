@@ -202,6 +202,10 @@ class SessionManager:
 
         await self._persist(session)
 
+    async def save(self, session: Session) -> None:
+        """Write the session out after its messages were changed in place."""
+        await self._persist(session)
+
     async def clear(self, session: Session) -> None:
         """Clear all messages from a session."""
         session.messages.clear()
