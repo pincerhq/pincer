@@ -1063,9 +1063,13 @@ async def test_started_at_is_re_anchored_on_answer(voice):
     dialed = datetime.now(UTC) - timedelta(seconds=18)  # a long but ordinary ring
     state.started_at = dialed
 
+    picked_up = datetime.now(UTC)
     await voice.engine.mark_call_answered("CA_anchor")
 
-    assert state.duration_seconds < 2, "the ring must not be reported or billed as conversation"
+    # Measured against the pickup, not the wall clock: the call-start callback
+    # (thread context, briefing record) runs after the re-anchor and can take
+    # seconds on a loaded CI runner.
+    assert state.started_at >= picked_up, "the ring must not be reported or billed as conversation"
     assert state.metadata["dialed_at"] == dialed, "the dial time stays available for diagnostics"
 
 
