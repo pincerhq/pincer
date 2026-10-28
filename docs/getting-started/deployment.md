@@ -102,7 +102,7 @@ WhatsApp requires a one-time QR pairing before it can receive messages. Unlike T
    docker compose up -d
    ```
 
-5. Test by sending a message to yourself (self-chat) or in a group where you @mention "pincer".
+5. Test by sending a message to yourself (self-chat) or in a group with the trigger word (`pincer` by default). Picking the bot in WhatsApp's @-picker only works with `PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION=true`.
 
 **Troubleshooting:** If you see `WhatsApp failed: neonize is required for WhatsApp support. Install it with: pip install neonize (requires libmagic)`, the Docker image needs `libmagic1`. Rebuild with `docker compose build --no-cache` — the project Dockerfile already includes it.
 

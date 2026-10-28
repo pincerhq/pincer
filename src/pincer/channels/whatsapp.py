@@ -6,7 +6,8 @@ Features:
 - Text messages, voice notes, images, documents
 - Self-chat mode (user messages themselves, agent responds)
 - DM allowlist (only approved phone numbers)
-- Group chat (respond only when @mentioned or trigger word)
+- Group chat (respond only to a trigger word, or to an @-mention when
+  PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION is on)
 """
 
 from __future__ import annotations
@@ -911,8 +912,7 @@ class WhatsAppChannel(BaseChannel):
                 # to the owner's own WhatsApp number (is_from_me=True): previously
                 # Rule 3 dropped these unconditionally, so the owner could never
                 # summon Pincer in a group the way any other member could.
-                if not self._is_mentioned_in_group(msg, client):
-                    logger.debug("WA skip: group message without mention")
+                if not self._is_addressed_in_group(msg):
                     return
                 if is_from_me:
                     # Unambiguously the owner — bypass the guest gate, which
@@ -1214,9 +1214,10 @@ class WhatsAppChannel(BaseChannel):
             logger.error("Transcription failed: %s", e)
             return None
 
-    # ── Group Mention Detection ──────────────────
+    # ── Group Trigger Detection ──────────────────
 
-    def _is_mentioned_in_group(self, msg: WAMessage, client: NewAClient) -> bool:
+    def _is_addressed_in_group(self, msg: WAMessage) -> bool:
+        """True if a group message triggers Pincer; logs why when it doesn't."""
         # Text-bearing payloads: plain text, and captioned media the extract
         # path forwards to the agent (image and document captions). Video has
         # no content path, so its caption must not pass the gate.
@@ -1235,10 +1236,16 @@ class WhatsAppChannel(BaseChannel):
                         ctx = media.contextInfo
                     break
 
-        # Mentions are opt-in; trigger words apply either way.
-        if self._settings.whatsapp_group_trigger_on_mention and self._mentions_self(text, ctx):
+        # Trigger words apply either way; mentions are opt-in.
+        if matches_group_trigger(text, self._settings.whatsapp_group_trigger):
             return True
-        return matches_group_trigger(text, self._settings.whatsapp_group_trigger)
+        if not self._mentions_self(text, ctx):
+            logger.debug("WA skip: group message without trigger word or mention")
+            return False
+        if not self._settings.whatsapp_group_trigger_on_mention:
+            logger.debug("WA skip: group @-mention ignored, PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION is off")
+            return False
+        return True
 
     def _mentions_self(self, text: str, ctx: Any) -> bool:
         # The @-picker inserts the phone number in classic groups and the LID

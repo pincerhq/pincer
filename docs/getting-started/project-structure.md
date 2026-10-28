@@ -37,7 +37,7 @@
 - QR code pairing displayed in terminal on first run
 - Self-chat mode: message yourself → Pincer responds (LID-aware detection)
 - DM allowlist: only approved phone numbers can message the bot
-- Group chat: responds when @mentioned or trigger word used
+- Group chat: responds when a trigger word is used, or when @mentioned if `PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION=true`
 - Supports text, voice notes (auto-transcribed), images, and documents
 - History-sync filter: ignores old messages on reconnect
 - Monkey-patched Go callback error handling for debugging

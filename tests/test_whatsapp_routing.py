@@ -76,7 +76,7 @@ TOM_LID = "207855026221128"
 def _make_settings(
     whatsapp_self_chat_only: bool = True,
     whatsapp_group_trigger: str = "pincer",
-    whatsapp_group_trigger_on_mention: bool = True,
+    whatsapp_group_trigger_on_mention: bool = False,
 ):
     settings = MagicMock()
     settings.whatsapp_self_chat_only = whatsapp_self_chat_only
@@ -496,6 +496,7 @@ class TestWhatsAppRouting:
     async def test_group_with_mention_responds(self, routing_channel):
         """Group message with owner JID in text (mention) → responds."""
         ch = routing_channel
+        ch._settings.whatsapp_group_trigger_on_mention = True
         event, _, _ = _make_message_event(
             from_me=False,
             chat_user="group123",
@@ -507,9 +508,38 @@ class TestWhatsAppRouting:
         ch._handler.assert_called_once()
         ch._extract_message.assert_called_once()
 
+    async def test_group_mention_ignored_by_default(self, routing_channel):
+        """Mention without a trigger word, PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION off → ignored."""
+        ch = routing_channel
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user="group123",
+            sender_user=OTHER_PHONE,
+            is_group=True,
+            mentioned_jid=f"{OWNER_PHONE}@s.whatsapp.net",
+            message_text=f"@{OWNER_PHONE} what's up?",
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_not_called()
+        ch._extract_message.assert_not_called()
+
+    async def test_group_trigger_word_responds_by_default(self, routing_channel):
+        """Trigger word with PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION off → responds."""
+        ch = routing_channel
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user="group123",
+            sender_user=OTHER_PHONE,
+            is_group=True,
+            message_text="pincer, what's up?",
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_called_once()
+        ch._extract_message.assert_called_once()
+
     async def test_group_mention_guest_rejected_when_identity_configured(self):
         """Group mention from a sender not in the identity map, guests not allowed → rejected."""
-        settings = _make_settings(whatsapp_self_chat_only=False)
+        settings = _make_settings(whatsapp_self_chat_only=False, whatsapp_group_trigger_on_mention=True)
         settings.whatsapp_guests_allowed = False
         ch = WhatsAppChannel(settings, identity=AsyncMock())
         ch._identity.is_guest = AsyncMock(return_value=True)
@@ -549,7 +579,7 @@ class TestWhatsAppRouting:
         sender in the group bypass the gate. Simulate that persisted back-link
         (is_guest(group JID) → False) and confirm an unmapped sender is still
         rejected, i.e. the group JID must never be consulted at all."""
-        settings = _make_settings(whatsapp_self_chat_only=False)
+        settings = _make_settings(whatsapp_self_chat_only=False, whatsapp_group_trigger_on_mention=True)
         settings.whatsapp_guests_allowed = False
         ch = WhatsAppChannel(settings, identity=AsyncMock())
 
@@ -589,6 +619,7 @@ class TestWhatsAppRouting:
         IdentityMiddleware back-links unresolved candidates onto whoever matched,
         so leaking the group JID here is what causes the bypass above."""
         ch = routing_channel
+        ch._settings.whatsapp_group_trigger_on_mention = True
         event, _, _ = _make_message_event(
             from_me=False,
             chat_user="group123",
@@ -603,7 +634,7 @@ class TestWhatsAppRouting:
 
     async def test_group_mention_guest_allowed_when_flag_true(self):
         """Group mention from a sender not in the identity map, guests allowed → responds."""
-        settings = _make_settings(whatsapp_self_chat_only=False)
+        settings = _make_settings(whatsapp_self_chat_only=False, whatsapp_group_trigger_on_mention=True)
         settings.whatsapp_guests_allowed = True
         ch = WhatsAppChannel(settings, identity=AsyncMock())
         ch._identity.is_guest = AsyncMock(return_value=True)
@@ -633,7 +664,7 @@ class TestWhatsAppRouting:
         """No IdentityResolver wired in (identity=None) → group-mention guest gate is a
         no-op, unlike DMs. Pre-PR groups had no allowlist at all (just the @mention
         requirement), so no-op-without-map is not a regression for groups."""
-        settings = _make_settings(whatsapp_self_chat_only=False)
+        settings = _make_settings(whatsapp_self_chat_only=False, whatsapp_group_trigger_on_mention=True)
         settings.whatsapp_guests_allowed = False
         ch = WhatsAppChannel(settings)
         assert ch._identity is None
@@ -667,6 +698,7 @@ class TestWhatsAppRouting:
         the owner's own WhatsApp number.
         """
         ch = routing_channel
+        ch._settings.whatsapp_group_trigger_on_mention = True
         event, _, _ = _make_message_event(
             from_me=True,
             chat_user="group123",
@@ -725,7 +757,7 @@ def _pn_client(pn_user: str = "", error: Exception | None = None):
 def _promoting_channel():
     """Guests disallowed; the identity map knows OTHER_PHONE as a placeholder,
     and promote_channel_id swaps in the LID, like the real resolver."""
-    settings = _make_settings(whatsapp_self_chat_only=False)
+    settings = _make_settings(whatsapp_self_chat_only=False, whatsapp_group_trigger_on_mention=True)
     settings.whatsapp_guests_allowed = False
     ch = WhatsAppChannel(settings, identity=AsyncMock())
     ch._identity.has_config = True

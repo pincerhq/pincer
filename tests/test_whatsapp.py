@@ -1,6 +1,7 @@
 """Tests for WhatsApp channel."""
 
 import asyncio
+import logging
 import sys
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
@@ -82,7 +83,7 @@ def wa_channel():
     settings = MagicMock()
     settings.whatsapp_self_chat_only = False
     settings.whatsapp_group_trigger = "pincer"
-    settings.whatsapp_group_trigger_on_mention = True
+    settings.whatsapp_group_trigger_on_mention = False
     settings.data_dir = "/tmp/test"
     settings.openai_api_key.get_secret_value.return_value = "test-key"
     yield WhatsAppChannel(settings)
@@ -100,28 +101,29 @@ class TestWhatsAppChannel:
         msg = MagicMock()
         msg.conversation = "hey @pincer what's up?"
         msg.HasField = MagicMock(return_value=False)
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+        assert wa_channel._is_addressed_in_group(msg) is True
 
     def test_mention_by_jid(self, wa_channel):
+        wa_channel._settings.whatsapp_group_trigger_on_mention = True
         wa_channel._own_jid = "491234567890"
         msg = MagicMock()
         msg.conversation = "hey 491234567890 what's up?"
         msg.HasField = MagicMock(return_value=False)
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+        assert wa_channel._is_addressed_in_group(msg) is True
 
     def test_no_mention(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         msg = MagicMock()
         msg.conversation = "hey everyone, lunch?"
         msg.HasField = MagicMock(return_value=False)
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+        assert wa_channel._is_addressed_in_group(msg) is False
 
     def test_trigger_case_insensitive(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         msg = MagicMock()
         msg.conversation = "Hey PINCER, do this"
         msg.HasField = MagicMock(return_value=False)
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+        assert wa_channel._is_addressed_in_group(msg) is True
 
     def test_trigger_list_phrase(self, wa_channel):
         wa_channel._own_jid = "491234567890"
@@ -129,14 +131,14 @@ class TestWhatsAppChannel:
         msg = MagicMock()
         msg.conversation = "hey\n pincer, do this"
         msg.HasField = MagicMock(return_value=False)
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+        assert wa_channel._is_addressed_in_group(msg) is True
 
     def test_jid_inside_longer_number_does_not_match(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         msg = MagicMock()
         msg.conversation = "order 14912345678901 shipped"
         msg.HasField = MagicMock(return_value=False)
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+        assert wa_channel._is_addressed_in_group(msg) is False
 
     @staticmethod
     def _ext_msg_with_mentions(text: str, mentioned: list[str]) -> MagicMock:
@@ -150,12 +152,14 @@ class TestWhatsAppChannel:
         return msg
 
     def test_mention_by_lid(self, wa_channel):
+        wa_channel._settings.whatsapp_group_trigger_on_mention = True
         wa_channel._own_jid = "491234567890"
         wa_channel._own_lid = "207855026221128"
         msg = self._ext_msg_with_mentions("@207855026221128 help", ["207855026221128@lid"])
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+        assert wa_channel._is_addressed_in_group(msg) is True
 
     def test_mention_in_media_caption_context(self, wa_channel):
+        wa_channel._settings.whatsapp_group_trigger_on_mention = True
         wa_channel._own_jid = "491234567890"
         wa_channel._settings.whatsapp_group_trigger = ""
         image = MagicMock()
@@ -166,19 +170,21 @@ class TestWhatsAppChannel:
         msg.conversation = ""
         msg.imageMessage = image
         msg.HasField = MagicMock(side_effect=lambda f: f == "imageMessage")
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+        assert wa_channel._is_addressed_in_group(msg) is True
 
     def test_mentioned_jid_with_longer_number_does_not_match(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         msg = self._ext_msg_with_mentions("@Bob hi", ["14912345678901@s.whatsapp.net"])
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+        assert wa_channel._is_addressed_in_group(msg) is False
 
-    def test_mention_ignored_when_on_mention_disabled(self, wa_channel):
+    def test_mention_ignored_when_on_mention_disabled(self, wa_channel, caplog):
         wa_channel._own_jid = "491234567890"
         wa_channel._own_lid = "207855026221128"
         wa_channel._settings.whatsapp_group_trigger_on_mention = False
         msg = self._ext_msg_with_mentions("@207855026221128 help", ["207855026221128@lid"])
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+        with caplog.at_level(logging.DEBUG, logger="pincer.channels.whatsapp"):
+            assert wa_channel._is_addressed_in_group(msg) is False
+        assert "PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION is off" in caplog.text
 
     def test_jid_in_text_ignored_when_on_mention_disabled(self, wa_channel):
         wa_channel._own_jid = "491234567890"
@@ -186,20 +192,21 @@ class TestWhatsAppChannel:
         msg = MagicMock()
         msg.conversation = "hey @491234567890 what's up?"
         msg.HasField = MagicMock(return_value=False)
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+        assert wa_channel._is_addressed_in_group(msg) is False
 
     def test_trigger_works_when_on_mention_disabled(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         wa_channel._settings.whatsapp_group_trigger_on_mention = False
         msg = self._ext_msg_with_mentions("@Bob ask pincer", ["14912345678901@s.whatsapp.net"])
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+        assert wa_channel._is_addressed_in_group(msg) is True
 
     def test_mention_without_trigger_list(self, wa_channel):
+        wa_channel._settings.whatsapp_group_trigger_on_mention = True
         wa_channel._own_jid = "491234567890"
         wa_channel._own_lid = "207855026221128"
         wa_channel._settings.whatsapp_group_trigger = ""
         msg = self._ext_msg_with_mentions("@207855026221128 help", ["207855026221128@lid"])
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is True
+        assert wa_channel._is_addressed_in_group(msg) is True
 
     @pytest.mark.asyncio
     async def test_on_connected_seeds_own_lid(self, wa_channel):
@@ -230,7 +237,7 @@ class TestWhatsAppChannel:
         msg.conversation = ""
         setattr(msg, field, media)
         msg.HasField = MagicMock(side_effect=lambda f: f == field)
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is expected
+        assert wa_channel._is_addressed_in_group(msg) is expected
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -259,7 +266,7 @@ class TestWhatsAppChannel:
         msg = MagicMock()
         msg.conversation = "pincers are cool"
         msg.HasField = MagicMock(return_value=False)
-        assert wa_channel._is_mentioned_in_group(msg, MagicMock()) is False
+        assert wa_channel._is_addressed_in_group(msg) is False
 
 
 class TestWhatsAppMediaAndApproval:
