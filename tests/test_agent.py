@@ -6,9 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pincer.core.agent import Agent, AgentResponse, StreamEventType
+from pincer.core.agent import Agent, AgentResponse, StreamEventType, _is_tool_pair_error, _sanitize_tool_pairs
 from pincer.exceptions import BudgetExceededError, LLMError
-from pincer.llm.base import LLMResponse, ToolCall
+from pincer.llm.base import LLMMessage, LLMResponse, MessageRole, ToolCall
 from pincer.memory.mcp import MCPMemoryBackend
 from pincer.memory.summarizer import Summarizer
 from pincer.tools.builtin import files
@@ -613,3 +613,175 @@ async def test_summarization_memory_error_does_not_fail_the_turn(
     warnings = [r for r in caplog.records if r.getMessage() == "Session summarization failed"]
     assert len(warnings) == 1
     assert warnings[0].exc_info is not None
+
+
+def _unpaired_call_ids(messages: list[LLMMessage]) -> set[str]:
+    """IDs of assistant tool calls with no matching tool result."""
+    result_ids = {m.tool_call_id for m in messages if m.role == MessageRole.TOOL_RESULT}
+    return {tc.id for m in messages if m.role == MessageRole.ASSISTANT for tc in m.tool_calls} - result_ids
+
+
+def _recording_complete(sent: list[list[LLMMessage]], *responses: LLMResponse | Exception):
+    """A complete() side effect that snapshots the history each call was sent."""
+    queue = list(responses)
+
+    async def complete(*, messages, **_kwargs):
+        sent.append(list(messages))
+        item = queue.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    return complete
+
+
+_DONE = LLMResponse(content="done", model="test", input_tokens=10, output_tokens=5, stop_reason="end_turn")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content", "tool_calls"),
+    [
+        # One call answered, one not: the message is rewritten, not dropped.
+        ("", [ToolCall(id="ok", name="greet", arguments={}), ToolCall(id="orphan", name="greet", arguments={})]),
+        # Every call orphaned, but the text survives as a plain message.
+        ("Let me check.", [ToolCall(id="orphan", name="greet", arguments={})]),
+    ],
+    ids=["partially-orphaned", "orphaned-with-text"],
+)
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_orphaned_tool_calls_never_reach_the_llm(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, content, tool_calls, streaming
+):
+    """Sanitizing that rewrites a message keeps the history's length, which
+    used to hide the repair — the orphaned calls were sent and OpenAI 400'd."""
+    session = await session_manager.get_or_create("user1", "test")
+    session.messages = [
+        LLMMessage(role=MessageRole.USER, content="hi"),
+        LLMMessage(role=MessageRole.ASSISTANT, content=content, tool_calls=tool_calls),
+    ]
+    if any(tc.id == "ok" for tc in tool_calls):
+        session.messages.append(LLMMessage(role=MessageRole.TOOL_RESULT, content="Hello!", tool_call_id="ok"))
+
+    sent: list[list[LLMMessage]] = []
+    mock_llm.complete.side_effect = _recording_complete(sent, _DONE)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    if streaming:
+        async for _chunk in agent.handle_message_stream(user_id="user1", channel="test", text="again"):
+            pass
+    else:
+        await agent.handle_message("user1", "test", "again")
+
+    assert len(sent) == 1
+    assert _unpaired_call_ids(sent[0]) == set()
+    assert _unpaired_call_ids(session.messages) == set()
+
+
+_OPENAI_UNPAIRED = (
+    "openai API error: 400 An assistant message with 'tool_calls' must be followed by tool messages "
+    "responding to each 'tool_call_id'. The following tool_call_ids did not have response messages: late"
+)
+
+
+def test_sanitize_requires_results_directly_after_their_call():
+    """OpenAI rejects a result that isn't in the run right after its call,
+    so a result separated by another message counts as orphaned, as does a
+    second result for the same call."""
+    messages = [
+        LLMMessage(
+            role=MessageRole.ASSISTANT, content="", tool_calls=[ToolCall(id="late", name="greet", arguments={})]
+        ),
+        LLMMessage(role=MessageRole.USER, content="interrupting"),
+        LLMMessage(role=MessageRole.TOOL_RESULT, content="Hello!", tool_call_id="late"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="", tool_calls=[ToolCall(id="ok", name="greet", arguments={})]),
+        LLMMessage(role=MessageRole.TOOL_RESULT, content="Hello!", tool_call_id="ok"),
+        LLMMessage(role=MessageRole.TOOL_RESULT, content="Hello again!", tool_call_id="ok"),
+    ]
+
+    clean = _sanitize_tool_pairs(messages)
+
+    assert [(m.role, m.tool_call_id) for m in clean] == [
+        (MessageRole.USER, None),
+        (MessageRole.ASSISTANT, None),
+        (MessageRole.TOOL_RESULT, "ok"),
+    ]
+    assert clean[2].content == "Hello!"
+
+
+def test_sanitize_returns_a_clean_history_unchanged():
+    messages = [
+        LLMMessage(role=MessageRole.USER, content="hi"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="", tool_calls=[ToolCall(id="ok", name="greet", arguments={})]),
+        LLMMessage(role=MessageRole.TOOL_RESULT, content="Hello!", tool_call_id="ok"),
+    ]
+    assert _sanitize_tool_pairs(messages) is messages
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (_OPENAI_UNPAIRED, True),
+        (
+            "openai API error: 400 Invalid parameter: messages with role 'tool' must be a response to a "
+            "preceeding message with 'tool_calls'.",
+            True,
+        ),
+        ("Anthropic API error: 400 tool_use ids were found without tool_result blocks", True),
+        ("openai API error: 400 Invalid 'messages[2].tool_calls[0].id': string too long", False),
+        ("openai API error: 400 Invalid 'tool_call_id': expected a string", False),
+    ],
+    ids=["openai-unanswered-call", "openai-stray-result", "anthropic", "openai-bad-id", "openai-bad-tool-call-id"],
+)
+def test_is_tool_pair_error(error, expected):
+    assert _is_tool_pair_error(LLMError(error)) is expected
+
+
+@pytest.mark.asyncio
+async def test_openai_unpaired_tool_call_error_sanitizes_and_retries(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """A history that turns bad between the proactive pass and the call (a
+    concurrent turn writing to the session) is repaired once the provider
+    rejects it, and the retry no longer carries the orphan."""
+    sent: list[list[LLMMessage]] = []
+
+    async def complete(*, messages, **_kwargs):
+        sent.append(list(messages))
+        if len(sent) == 1:
+            messages.append(
+                LLMMessage(
+                    role=MessageRole.ASSISTANT, content="", tool_calls=[ToolCall(id="late", name="greet", arguments={})]
+                )
+            )
+            raise LLMError(_OPENAI_UNPAIRED)
+        return _DONE
+
+    mock_llm.complete.side_effect = complete
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    result = await agent.handle_message("user1", "test", "hi")
+
+    assert result.text.startswith("done")
+    assert len(sent) == 2
+    assert _unpaired_call_ids(sent[1]) == set()
+
+
+@pytest.mark.asyncio
+async def test_unfixable_tool_pair_error_raises_and_keeps_the_history(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """When stripping changes nothing, retrying would fail the same way — the
+    error surfaces instead of the session being cleared."""
+    session = await session_manager.get_or_create("user1", "test")
+    session.messages = [
+        LLMMessage(role=MessageRole.USER, content="earlier"),
+        LLMMessage(role=MessageRole.ASSISTANT, content="earlier reply"),
+    ]
+    mock_llm.complete.side_effect = LLMError(_OPENAI_UNPAIRED)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    with pytest.raises(LLMError):
+        await agent.handle_message("user1", "test", "hi")
+
+    assert mock_llm.complete.call_count == 1
+    assert [m.content for m in session.messages][:2] == ["earlier", "earlier reply"]

@@ -146,7 +146,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             retry_after = float(e.response.headers.get("retry-after", "5"))
             raise LLMRateLimitError(retry_after=retry_after) from e
         except anthropic.APIStatusError as e:
-            raise LLMError(f"Anthropic stream error: {e.status_code}") from e
+            raise LLMError(f"Anthropic stream error: {e.status_code} {e.message}") from e
 
     async def stream_turn(
         self,
@@ -171,7 +171,7 @@ class AnthropicCompatibleProvider(BaseLLMProvider):
             retry_after = float(e.response.headers.get("retry-after", "5"))
             raise LLMRateLimitError(retry_after=retry_after) from e
         except anthropic.APIStatusError as e:
-            raise LLMError(f"Anthropic stream error: {e.status_code}") from e
+            raise LLMError(f"Anthropic stream error: {e.status_code} {e.message}") from e
         except anthropic.APIConnectionError as e:
             raise LLMError(f"Anthropic connection error: {e}") from e
 

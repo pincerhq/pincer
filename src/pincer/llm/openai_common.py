@@ -262,7 +262,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         except openai.RateLimitError as e:
             raise LLMRateLimitError(retry_after=5.0) from e
         except openai.APIStatusError as e:
-            raise LLMError(f"{self._provider_name} stream error: {e.status_code}") from e
+            raise LLMError(f"{self._provider_name} stream error: {e.status_code} {e.message}") from e
 
     async def stream_turn(
         self,
@@ -314,7 +314,7 @@ class OpenAICompatibleProvider(BaseLLMProvider):
         except openai.RateLimitError as e:
             raise LLMRateLimitError(retry_after=5.0) from e
         except openai.APIStatusError as e:
-            raise LLMError(f"{self._provider_name} stream error: {e.status_code}") from e
+            raise LLMError(f"{self._provider_name} stream error: {e.status_code} {e.message}") from e
         except openai.APIConnectionError as e:
             raise LLMError(f"{self._provider_name} connection error: {e}") from e
 
