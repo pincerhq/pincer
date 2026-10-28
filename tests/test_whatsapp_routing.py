@@ -539,7 +539,7 @@ class TestWhatsAppRouting:
 
     async def test_group_mention_guest_rejected_when_identity_configured(self):
         """Group mention from a sender not in the identity map, guests not allowed → rejected."""
-        settings = _make_settings(whatsapp_self_chat_only=False, whatsapp_group_trigger_on_mention=True)
+        settings = _make_settings(whatsapp_self_chat_only=False)
         settings.whatsapp_guests_allowed = False
         ch = WhatsAppChannel(settings, identity=AsyncMock())
         ch._identity.is_guest = AsyncMock(return_value=True)
@@ -559,7 +559,7 @@ class TestWhatsAppRouting:
             chat_user="group123",
             sender_user=OTHER_PHONE,
             is_group=True,
-            message_text=f"hey {OWNER_PHONE} what's up?",
+            message_text="pincer, what's up?",
         )
         await ch._on_message(MagicMock(), event)
         ch._handler.assert_not_called()
@@ -579,7 +579,7 @@ class TestWhatsAppRouting:
         sender in the group bypass the gate. Simulate that persisted back-link
         (is_guest(group JID) → False) and confirm an unmapped sender is still
         rejected, i.e. the group JID must never be consulted at all."""
-        settings = _make_settings(whatsapp_self_chat_only=False, whatsapp_group_trigger_on_mention=True)
+        settings = _make_settings(whatsapp_self_chat_only=False)
         settings.whatsapp_guests_allowed = False
         ch = WhatsAppChannel(settings, identity=AsyncMock())
 
@@ -605,7 +605,7 @@ class TestWhatsAppRouting:
             chat_user="group123",
             sender_user=OTHER_PHONE,
             is_group=True,
-            message_text=f"hey {OWNER_PHONE} what's up?",
+            message_text="pincer, what's up?",
         )
         await ch._on_message(MagicMock(), event)
         ch._handler.assert_not_called()
@@ -619,13 +619,12 @@ class TestWhatsAppRouting:
         IdentityMiddleware back-links unresolved candidates onto whoever matched,
         so leaking the group JID here is what causes the bypass above."""
         ch = routing_channel
-        ch._settings.whatsapp_group_trigger_on_mention = True
         event, _, _ = _make_message_event(
             from_me=False,
             chat_user="group123",
             sender_user=OTHER_PHONE,
             is_group=True,
-            message_text=f"hey {OWNER_PHONE} what's up?",
+            message_text="pincer, what's up?",
         )
         await ch._on_message(MagicMock(), event)
         ch._handler.assert_called_once()
@@ -634,7 +633,7 @@ class TestWhatsAppRouting:
 
     async def test_group_mention_guest_allowed_when_flag_true(self):
         """Group mention from a sender not in the identity map, guests allowed → responds."""
-        settings = _make_settings(whatsapp_self_chat_only=False, whatsapp_group_trigger_on_mention=True)
+        settings = _make_settings(whatsapp_self_chat_only=False)
         settings.whatsapp_guests_allowed = True
         ch = WhatsAppChannel(settings, identity=AsyncMock())
         ch._identity.is_guest = AsyncMock(return_value=True)
@@ -654,7 +653,7 @@ class TestWhatsAppRouting:
             chat_user="group123",
             sender_user=OTHER_PHONE,
             is_group=True,
-            message_text=f"hey {OWNER_PHONE} what's up?",
+            message_text="pincer, what's up?",
         )
         await ch._on_message(MagicMock(), event)
         ch._handler.assert_called_once()
@@ -664,7 +663,7 @@ class TestWhatsAppRouting:
         """No IdentityResolver wired in (identity=None) → group-mention guest gate is a
         no-op, unlike DMs. Pre-PR groups had no allowlist at all (just the @mention
         requirement), so no-op-without-map is not a regression for groups."""
-        settings = _make_settings(whatsapp_self_chat_only=False, whatsapp_group_trigger_on_mention=True)
+        settings = _make_settings(whatsapp_self_chat_only=False)
         settings.whatsapp_guests_allowed = False
         ch = WhatsAppChannel(settings)
         assert ch._identity is None
@@ -684,7 +683,7 @@ class TestWhatsAppRouting:
             chat_user="group123",
             sender_user=OTHER_PHONE,
             is_group=True,
-            message_text=f"hey {OWNER_PHONE} what's up?",
+            message_text="pincer, what's up?",
         )
         await ch._on_message(MagicMock(), event)
         ch._handler.assert_called_once()
@@ -757,7 +756,7 @@ def _pn_client(pn_user: str = "", error: Exception | None = None):
 def _promoting_channel():
     """Guests disallowed; the identity map knows OTHER_PHONE as a placeholder,
     and promote_channel_id swaps in the LID, like the real resolver."""
-    settings = _make_settings(whatsapp_self_chat_only=False, whatsapp_group_trigger_on_mention=True)
+    settings = _make_settings(whatsapp_self_chat_only=False)
     settings.whatsapp_guests_allowed = False
     ch = WhatsAppChannel(settings, identity=AsyncMock())
     ch._identity.has_config = True
@@ -861,7 +860,7 @@ class TestLidPromotion:
             sender_alt_user=OTHER_PHONE,
             sender_alt_server="s.whatsapp.net",
             is_group=True,
-            message_text=f"hey {OWNER_PHONE} what's up?",
+            message_text="pincer, what's up?",
         )
 
         await ch._on_message(client, event)
@@ -987,7 +986,7 @@ class TestGroupReplyTarget:
     """A group is a reply target only while its message is being handled, so a
     later proactive send to the sender never lands in the group."""
 
-    def _group_event(self, text=f"hey {OWNER_PHONE} what's up?"):
+    def _group_event(self, text="pincer, what's up?"):
         event, _, _ = _make_message_event(
             from_me=False,
             chat_user="120363000000000000",
@@ -1039,7 +1038,7 @@ class TestGroupReplyTarget:
 
         ch._handler = AsyncMock(side_effect=handler)
         handling = asyncio.create_task(ch._on_message(ch._client, self._group_event()))
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), 5)
 
         reminder = asyncio.create_task(ch._jid_for(TOM_LID))
         assert await reminder == f"{TOM_LID}@lid"
@@ -1063,7 +1062,7 @@ class TestGroupReplyTarget:
 
         ch._handler = AsyncMock(side_effect=handler)
         group = asyncio.create_task(ch._on_message(ch._client, self._group_event()))
-        await entered.wait()
+        await asyncio.wait_for(entered.wait(), 5)
 
         await ch._on_message(ch._client, _lid_dm())
         assert dm_targets == [f"{TOM_LID}@lid"]
