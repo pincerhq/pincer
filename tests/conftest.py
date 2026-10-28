@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,6 +149,13 @@ def _isolate_audit_logger(tmp_path: Path) -> None:
 # modules at test-module level, not inside the test coroutine.
 LOOP_STALL_THRESHOLD_S = 0.5
 
+# asyncio's own wakeups, which only resolve a future and run no test or product
+# code: time charged to one is the runner pausing the process (GC, CPU
+# preemption), not something blocking the loop.
+_ASYNCIO_WAKEUP = re.compile(
+    r"Executing <(?:Timer)?Handle (?:when=\S+ )?(?:_release_waiter|_set_result_unless_cancelled)\("
+)
+
 
 class _StallCapture(logging.Handler):
     def __init__(self) -> None:
@@ -156,7 +164,7 @@ class _StallCapture(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
-        if message.startswith("Executing "):
+        if message.startswith("Executing ") and not _ASYNCIO_WAKEUP.match(message):
             self.stalls.append(message)
 
 
