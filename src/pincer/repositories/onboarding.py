@@ -25,20 +25,29 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
         )
         return int(result.rowcount) == 1
 
-    async def mark_completed(self, user_id: str, channel: str, completed_at: float) -> bool:
+    async def mark_completed(
+        self, user_id: str, channel: str, completed_at: float, *, max_empty: int | None = None
+    ) -> bool:
         """Close the gate, creating the row for a user asked before it existed.
 
-        True only for the call that closed it: a row already closed keeps the
-        time it was closed, and this call changes nothing.
+        A row closed by the empty-reply limit can still be completed when a
+        real answer was processed concurrently. Once a real answer wins,
+        attempts is reset so later answers cannot reopen the gate.
         """
+        eligible = _TABLE.c.completed_at.is_(None)
+        if max_empty is not None:
+            eligible = eligible | (_TABLE.c.attempts >= max_empty)
         result = await self.session.exec(
             upsert(
                 dialect_of(self.session),
                 Onboarding,
                 {"user_id": user_id, "channel": channel, "completed_at": completed_at},
                 index_elements=["user_id", "channel"],
-                set_=lambda excluded: {"completed_at": excluded.completed_at},
-                where=_TABLE.c.completed_at.is_(None),
+                set_={
+                    "completed_at": completed_at,
+                    "attempts": case((_TABLE.c.completed_at.is_not(None), 0), else_=_TABLE.c.attempts),
+                },
+                where=eligible,
             )
         )
         return int(result.rowcount) == 1
