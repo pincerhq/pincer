@@ -36,7 +36,7 @@ async def test_detect_text_uses_det_arch_in_cache_key(fake_predictor_builder: li
 @pytest.mark.asyncio
 async def test_detect_text_rejects_both_sources(fake_predictor_builder: list[Any], tiny_png_b64: str) -> None:
     from doctr_mcp.server import mcp
-    from pydantic import ValidationError
+    from fastmcp.exceptions import ValidationError  # fastmcp wraps argument validation failures in its own error
 
     with pytest.raises(ValidationError, match="exactly one"):
         await mcp.call_tool(
