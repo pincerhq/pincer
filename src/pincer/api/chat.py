@@ -61,6 +61,10 @@ class ChatIn(BaseModel):
     # model context. Scoped under the chat user, so whatever value is sent it
     # never reaches anyone else's conversation.
     conversation_id: str | None = Field(default=None, pattern=_UUID_RE.pattern)
+    # False for a request that is not the person talking to Pincer (a call
+    # summary, a knowledge-base question): their long-term memory is neither
+    # searched for it nor written with it, and onboarding leaves it alone.
+    memory: bool = True
 
     @field_validator("conversation_id")
     @classmethod
@@ -131,7 +135,11 @@ async def post_message(
     agent = _get_agent(request)
     try:
         resp = await agent.handle_message(
-            user_id, _CHANNEL, body.text, session_key=_conversation_session_key(user_id, body.conversation_id)
+            user_id,
+            _CHANNEL,
+            body.text,
+            session_key=_conversation_session_key(user_id, body.conversation_id),
+            memory=body.memory,
         )
     except BudgetExceededError as e:
         raise HTTPException(402, str(e)) from e
@@ -160,7 +168,11 @@ async def post_stream(
         async def driver() -> None:
             try:
                 async for chunk in agent.handle_message_stream(
-                    user_id, _CHANNEL, body.text, session_key=_conversation_session_key(user_id, body.conversation_id)
+                    user_id,
+                    _CHANNEL,
+                    body.text,
+                    session_key=_conversation_session_key(user_id, body.conversation_id),
+                    memory=body.memory,
                 ):
                     if chunk.type == StreamEventType.TEXT:
                         await queue.put(("chunk", {"delta": chunk.content}))

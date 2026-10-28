@@ -172,6 +172,26 @@ def test_a_conversation_under_an_api_key_belongs_to_the_visitor():
     assert _session_key(client) == f"web:{UUID}:{CONVERSATION}"
 
 
+def test_memory_is_on_unless_the_request_turns_it_off(authed_app):
+    """A call summary or a knowledge-base question sends memory=false, so the
+    person's long-term memory is neither read for it nor written with it."""
+    client = _authed_client(authed_app)
+    agent = client.app.state.agent
+
+    client.post("/api/chat/message", json={"text": "hi"}, headers=authed_app.jwt_headers)
+    assert agent.handle_message.call_args.kwargs["memory"] is True
+
+    body = {"text": "summarize", "conversation_id": CONVERSATION, "memory": False}
+    assert client.post("/api/chat/message", json=body, headers=authed_app.jwt_headers).status_code == 200
+    assert agent.handle_message.call_args.kwargs["memory"] is False
+    assert _chat_user(client) == "alice"
+
+    with client.stream("POST", "/api/chat/stream", json=body, headers=authed_app.jwt_headers) as r:
+        assert r.status_code == 200
+        b"".join(r.iter_raw())
+    assert agent.stream_calls[-1][1]["memory"] is False
+
+
 def test_conversation_id_case_does_not_split_the_session(authed_app):
     """Upper- and lower-case spellings of one id are one conversation."""
     client = _authed_client(authed_app)

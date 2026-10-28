@@ -72,12 +72,17 @@ async def _reply(
     *,
     session_key: str | None = None,
     channel_name: str | None = None,
+    memory: bool = True,
 ) -> str:
     """One turn on the blocking or the streaming path; the reply the user sees."""
     if path == "blocking":
-        result = await agent.handle_message(user_id, channel, text, channel_name=channel_name, session_key=session_key)
+        result = await agent.handle_message(
+            user_id, channel, text, channel_name=channel_name, session_key=session_key, memory=memory
+        )
         return result.text
-    chunks = [c async for c in agent.handle_message_stream(user_id, channel, text, session_key=session_key)]
+    chunks = [
+        c async for c in agent.handle_message_stream(user_id, channel, text, session_key=session_key, memory=memory)
+    ]
     return [c.content for c in chunks if c.type == StreamEventType.DONE][-1]
 
 
@@ -274,6 +279,50 @@ async def test_an_unanswered_question_expires_after_a_day(
     assert record is not None
     assert record.completed_at is not None
     assert await memory_store.list_memories(user_id="user-e", category="profile") == []
+
+
+@_PATHS
+async def test_a_turn_without_memory_is_never_asked(
+    path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """A brand-new user's first request is a call summary: the summary is not
+    followed by the question, and the user is still new for their first chat."""
+    _streams(mock_llm, "The call went well.")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+    key = conversation_key("user-s", "web", "summary-1")
+
+    reply = await _reply(agent, path, "user-s", "web", "Summarize this call", session_key=key, memory=False)
+
+    assert ONBOARDING_QUESTION_EN not in reply
+    assert await _record(tmp_path, "user-s", "web") is None
+
+
+@_PATHS
+async def test_a_turn_without_memory_is_not_read_for_an_answer(
+    path, tmp_path, settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    """Asked, then a call summary arrives before the person answers: the
+    summary prompt is not taken for their profile, and the question stays open."""
+    llm = _scripted_llm("Hello!", "The call went well.")
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+
+    await _reply(agent, path, "user-s", "web", "Hi!")
+    await _reply(
+        agent,
+        path,
+        "user-s",
+        "web",
+        "Summarize this call: I'm Sam, I run a bakery",
+        session_key=conversation_key("user-s", "web", "summary-1"),
+        memory=False,
+    )
+
+    assert llm.complete.call_count == 2  # no extraction call
+    assert ONBOARDING_FOLLOWUP_INSTRUCTION not in llm.complete.call_args.kwargs["system"]
+    record = await _record(tmp_path, "user-s", "web")
+    assert record is not None
+    assert (record.asked_session_id, record.completed_at) == ("web:user-s", None)
+    assert await memory_store.list_memories(user_id="user-s", category="profile") == []
 
 
 @_PATHS

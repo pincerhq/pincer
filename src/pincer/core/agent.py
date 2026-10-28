@@ -487,6 +487,7 @@ class Agent:
         channel_name: str | None = None,
         extra_system: str | None = None,
         session_key: str | None = None,
+        memory: bool = True,
     ) -> AgentResponse:
         """
         Main entry point: process a user message and return agent's response.
@@ -515,10 +516,19 @@ class Agent:
                 (voice: one session per call, see ``stream_voice_turn``; web
                 chat: one per conversation). Onboarding is per user and channel
                 whichever session the turn runs in, see ``_onboarding_for_turn``.
+            memory: False for a request that is not the user talking to Pincer
+                (a call summary, a knowledge-base question): no long-term
+                memory is searched or written (the session is not summarized
+                into one either), and onboarding is neither asked nor read from
+                it. The turn still runs as ``user_id`` in its session.
         """
         self._last_active = (user_id, channel_name or channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
-        onboarding = await self._onboarding_for_turn(session, user_id, channel, channel_name=channel_name)
+        onboarding = (
+            await self._onboarding_for_turn(session, user_id, channel, channel_name=channel_name)
+            if memory
+            else _NO_ONBOARDING
+        )
 
         # Build user message
         img_contents: list[ImageContent] = []
@@ -533,15 +543,18 @@ class Agent:
         )
         await self._sessions.add_message(session, user_msg)
 
-        # Summarize if conversation is getting long
-        await self._maybe_summarize(session)
+        # Summarize if conversation is getting long (the summary is a memory)
+        if memory:
+            await self._maybe_summarize(session)
 
         # Build system prompt with relevant memories — inject the onboarding
         # followup instruction only on the turn that handles the user's reply.
         extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if onboarding.followup else []
         if extra_system:
             extra_parts.append(extra_system)
-        system_prompt = await self._build_system_prompt(user_id, text, extra_system="\n\n".join(extra_parts) or None)
+        system_prompt = await self._build_system_prompt(
+            user_id, text, extra_system="\n\n".join(extra_parts) or None, skip_memory=not memory
+        )
 
         # Get tool schemas. In call context (Sprint 11) the bound in-call gate
         # owns the EXACT tool set — the blocking voice path (guard regeneration,
@@ -705,7 +718,7 @@ class Agent:
             await self._ingest_onboarding_reply(text, user_id, channel)
 
         # Store the final exchange as a memory for future retrieval
-        if self._memory and final_text:
+        if self._memory and memory and final_text:
             try:
                 tag_channel = channel_name or channel
                 extra_tags = [f"user:{tag_channel}:{channel_user_id}"] if channel_user_id else None
@@ -851,6 +864,7 @@ class Agent:
         images: list[tuple[bytes, str]] | None = None,
         channel_user_id: str | None = None,
         session_key: str | None = None,
+        memory: bool = True,
     ) -> AsyncIterator[StreamChunk]:
         """
         Process a user message, yielding StreamChunks as the response is generated.
@@ -861,12 +875,14 @@ class Agent:
         ``channel_user_id``, when given, is the channel-native ID and is
         passed to tool execution so channel-bound tools (``send_file``,
         ``send_image``) address the user's real channel ID instead of the
-        cross-channel canonical ``user_id`` — see ``handle_message``, as is
-        ``session_key``.
+        cross-channel canonical ``user_id`` — see ``handle_message``, as are
+        ``session_key`` and ``memory``.
         """
         self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
-        onboarding = await self._onboarding_for_turn(session, user_id, channel, channel_name=None)
+        onboarding = (
+            await self._onboarding_for_turn(session, user_id, channel, channel_name=None) if memory else _NO_ONBOARDING
+        )
 
         img_contents: list[ImageContent] = []
         if images:
@@ -880,10 +896,13 @@ class Agent:
         )
         await self._sessions.add_message(session, user_msg)
 
-        await self._maybe_summarize(session)
+        if memory:
+            await self._maybe_summarize(session)
 
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
-        system_prompt = await self._build_system_prompt(user_id, text, extra_system=extra_system)
+        system_prompt = await self._build_system_prompt(
+            user_id, text, extra_system=extra_system, skip_memory=not memory
+        )
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
         logger.debug(
             "Tools available: %s",
