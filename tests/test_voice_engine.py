@@ -760,20 +760,39 @@ async def test_end_call_reports_a_failed_hangup_and_still_tears_down(mock_settin
     on_end.assert_awaited_once()
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        lambda: _twilio_error(400, 21220, "Call is not in-progress. Cannot redirect."),
-        lambda: _twilio_error(404, 20404, "The requested resource was not found"),
-    ],
-)
-async def test_end_call_on_a_call_already_over_is_success(mock_settings, error):
+async def test_end_call_on_a_call_already_over_is_success(mock_settings):
     engine = ConversationRelayEngine(mock_settings)
     rest = _fake_rest(engine)
     await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
-    rest.errors["update_call"] = error()
+    rest.errors["update_call"] = _twilio_error(400, 21220, "Call is not in-progress. Cannot redirect.")
     assert await engine.end_call("CAx") is None
     assert engine.get_call_state("CAx") is None
+
+
+async def test_a_404_hangup_is_not_taken_as_over(mock_settings):
+    """Wrong account or subaccount credentials answer 404 for a live call."""
+    engine = ConversationRelayEngine(mock_settings)
+    rest = _fake_rest(engine)
+    rest.errors["update_call"] = _twilio_error(404, 20404, "The requested resource was not found")
+    reason = await engine.hang_up("CAx")
+    assert reason is not None and "20404" in reason
+
+
+@pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
+async def test_media_connect_asks_for_the_status_callback_once_inbound_only(mock_settings, engine_cls):
+    """Not at registration: during /webhook the call is still ringing."""
+    engine = engine_cls(mock_settings)
+    rest = _fake_rest(engine)
+    await engine.on_call_start("CA_in", "+4917", CallDirection.INBOUND)
+    await engine.on_call_start("CA_out", "+4917", CallDirection.OUTBOUND)
+    assert rest.updates == []
+    for _ in range(2):  # a reconnect does not ask again
+        engine.on_media_connected("CA_in")
+        engine.on_media_connected("CA_out")
+        engine.on_media_connected("CA_unknown")
+        await asyncio.sleep(0)
+    [(call_sid, params)] = rest.updates
+    assert call_sid == "CA_in" and params["status_callback"] == "https://example.com/api/apps/twilio/status"
 
 
 async def test_watch_call_status_points_twilio_at_the_status_webhook(mock_settings):

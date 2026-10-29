@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 from pincer.api.auth import OptionalIdentity, require_interactive
 from pincer.config import get_settings_relaxed
 from pincer.services.auth import WS_TICKET_TTL_SECONDS, AuthServiceDep, UnknownIdentityError
+from pincer.voice.engine import ENDED_BY_DASHBOARD, ENDED_BY_KEY
 from pincer.voice.pii_guard import mask_pii
 
 if TYPE_CHECKING:
@@ -87,9 +88,15 @@ def _duration_seconds(started_at: str, ended_at: str | None) -> int:
 
 class VoiceCapabilities(BaseModel):
     """What the dashboard may offer for voice. The frontend reads a missing
-    field as "unknown", so each one is declared here."""
+    field as "unknown", so each one is declared here.
 
-    call_controls: bool = True  # POST /api/voice/calls/{call_sid}/end
+    `call_controls` says the live-call controls bar has a backend at all; each
+    control in it has its own flag, so the bar shows only what works."""
+
+    call_controls: bool = True
+    hang_up: bool = True  # POST /api/voice/calls/{call_sid}/end
+    listen_in: bool = False  # WSS /api/voice/listen/{call_sid}, when the media fork is on
+    whisper: bool = False  # no endpoint yet
 
 
 class VoiceStatus(BaseModel):
@@ -301,6 +308,7 @@ async def voice_status() -> VoiceStatus:
         webhook_base_configured=s.voice_webhook_base_url.strip().startswith("http"),
         active_call_count=len(engine.get_active_calls()) if engine else 0,
         listen_in_enabled=getattr(s, "listen_in_enabled", False) is True,
+        capabilities=VoiceCapabilities(listen_in=getattr(s, "listen_in_enabled", False) is True),
     )
 
 
@@ -963,7 +971,7 @@ async def _audit_call_end(*, user: str, call_sid: str, twilio_error: str | None)
                 output_summary=f"Twilio rejected the hang-up: {twilio_error}" if twilio_error else "ended",
                 approved=True,
                 channel="voice",
-                metadata={"call_sid": call_sid, "ended_by": _DASHBOARD_USER, "twilio_error": twilio_error},
+                metadata={"call_sid": call_sid, "ended_by": ENDED_BY_DASHBOARD, "twilio_error": twilio_error},
             )
         )
     except Exception:  # pragma: no cover — auditing must not fail the hang-up
@@ -976,37 +984,41 @@ async def _audit_call_end(*, user: str, call_sid: str, twilio_error: str | None)
     response_class=Response,
     responses={
         404: {"description": "The call is not active (already ended, unknown, or voice is off)"},
-        502: {"description": "Twilio rejected the hang-up; the call is no longer tracked as active"},
+        502: {"description": "Twilio rejected the hang-up; the call is no longer tracked as active, retry to hang up"},
     },
 )
 async def end_active_call(call_sid: str, identity: OptionalIdentity) -> Response:
     """Hang up a live call.
 
     The call leaves the active list whatever Twilio answers: a 502 says the
-    REST hang-up failed, not that the call is still tracked."""
+    REST hang-up failed, not that the call is still tracked. Twilio may still
+    have the caller on the line then, so a call torn down in the last few
+    minutes can be ended again: that sends the REST hang-up alone."""
+    from pincer.observability.failure_codes import FailureCode
     from pincer.voice.call_locks import one_call_update_at_a_time
+    from pincer.voice.engine import CallDirection, set_end_cause
 
     engine = _get_engine()
-    if engine is None or engine.get_call_state(call_sid) is None:
+    if engine is None or (engine.get_call_state(call_sid) is None and not engine.was_recently_ended(call_sid)):
         raise HTTPException(status_code=404, detail="Call is not active")
     # The lock /status holds: a `completed` arriving meanwhile ends the call
-    # once, and then this request finds it gone.
+    # once, and then this request only repeats the hang-up.
     async with one_call_update_at_a_time(call_sid):
         state = engine.get_call_state(call_sid)
         if state is None:
-            raise HTTPException(status_code=404, detail="Call is not active")
-        # Who ended it, for the trace and the report. Not a failure code: an
-        # owner hanging up is not a failed call.
-        state.metadata.setdefault("ended_by", "dashboard")
-        error = await engine.end_call(call_sid)
+            error = await engine.hang_up(call_sid)
+        else:
+            # Who ended it: the channel counts it as a normal end, not a
+            # failure. Before anyone answered there was no conversation to
+            # complete, so that end gets its own code.
+            state.metadata.setdefault(ENDED_BY_KEY, ENDED_BY_DASHBOARD)
+            if state.direction == CallDirection.OUTBOUND and state.metadata.get("answered_at") is None:
+                set_end_cause(state, FailureCode.ENDED_BY_OWNER)
+            error = await engine.end_call(call_sid)
     user = (identity.pincer_user_id if identity is not None else "") or _DASHBOARD_USER
     await _audit_call_end(user=user, call_sid=call_sid, twilio_error=error)
     if error:
-        return Response(
-            content=json.dumps({"detail": f"Twilio rejected the hang-up: {error}"}),
-            status_code=502,
-            media_type="application/json",
-        )
+        raise HTTPException(status_code=502, detail=f"Twilio rejected the hang-up: {error}")
     return Response(status_code=204)
 
 

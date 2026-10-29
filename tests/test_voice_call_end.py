@@ -251,6 +251,8 @@ async def test_status_completed_does_not_rest_hangup():
         client_cls.assert_not_called()
         on_end.assert_awaited_once()
         assert engine.get_call_state(CALL) is None
+        # a plain hang-up: the same trace as when the media close wins the race
+        assert "remote_end_reason" not in on_end.call_args.args[1].metadata
     finally:
         twiml_server._engine, twiml_server._settings = saved
 
