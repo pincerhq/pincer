@@ -464,6 +464,21 @@ def test_is_triggered_in_group_by_bot_command_addressed_to_bot() -> None:
     assert channel._is_triggered_in_group(message) is True
 
 
+def test_is_triggered_in_group_by_bot_command_when_on_mention_off() -> None:
+    """/cmd@bot always triggers: with privacy mode on it's the only way to reach the bot first."""
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = ""
+    channel._settings.telegram_group_trigger_on_mention = False
+    channel._own_username = "pincer_bot"
+    text = "/ask@pincer_bot what time is it"
+    entity = MagicMock()
+    entity.type = "bot_command"
+    entity.offset = 0
+    entity.length = len("/ask@pincer_bot")
+    message = _mock_group_message(text=text, entities=[entity])
+    assert channel._is_triggered_in_group(message) is True
+
+
 def test_is_not_triggered_in_group_by_bot_command_for_other_bot() -> None:
     channel = _make_channel()
     channel._settings.telegram_group_trigger = ""

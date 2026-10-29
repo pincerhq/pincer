@@ -23,8 +23,8 @@ class ChannelSettings(BaseModel):
     telegram_group_trigger_on_mention: bool = Field(
         default=False,
         description=(
-            "In group chats, also reply when the bot is @-mentioned (`@BotName` or "
-            "`/cmd@BotName`). Trigger words from telegram_group_trigger apply either way."
+            "In group chats, also reply when the bot is @-mentioned (`@BotName`). "
+            "Trigger words from telegram_group_trigger and `/cmd@BotName` commands apply either way."
         ),
     )
     telegram_group_trigger_on_reply: bool = Field(
@@ -78,7 +78,8 @@ class ChannelSettings(BaseModel):
         default=True,
         description=(
             "In group chats, also reply when a message quotes one of the bot's messages. "
-            "On a shared personal number, replies to the person's own messages count too. "
+            "On a shared personal number, replies to the person's own messages count too "
+            "(except the person's own replies). "
             "Trigger words from whatsapp_group_trigger apply either way."
         ),
     )

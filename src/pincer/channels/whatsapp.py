@@ -907,13 +907,15 @@ class WhatsAppChannel(BaseChannel):
                 logger.debug("WA skip: outgoing message to %s → ignoring", chat_jid)
                 return
             elif is_group:
-                # Rule 4: Group — only process if a trigger word is used, or the
-                # bot is @mentioned and whatsapp_group_trigger_on_mention is on.
+                # Rule 4: Group — only process if a trigger word is used, the
+                # message replies to the bot (whatsapp_group_trigger_on_reply,
+                # not counted for our own number), or the bot is @mentioned and
+                # whatsapp_group_trigger_on_mention is on.
                 # This also covers the owner's own messages when Pincer is linked
                 # to the owner's own WhatsApp number (is_from_me=True): previously
                 # Rule 3 dropped these unconditionally, so the owner could never
                 # summon Pincer in a group the way any other member could.
-                if not self._is_addressed_in_group(msg):
+                if not self._is_addressed_in_group(msg, from_me=is_from_me):
                     return
                 if is_from_me:
                     # Unambiguously the owner — bypass the guest gate, which
@@ -1217,8 +1219,15 @@ class WhatsAppChannel(BaseChannel):
 
     # ── Group Trigger Detection ──────────────────
 
-    def _is_addressed_in_group(self, msg: WAMessage) -> bool:
-        """True if a group message triggers Pincer; logs why when it doesn't."""
+    def _is_addressed_in_group(self, msg: WAMessage, *, from_me: bool = False) -> bool:
+        """True if a group message triggers Pincer; logs why when it doesn't.
+
+        ``from_me`` marks a message sent from our own number. On a shared
+        personal number, Pincer's answers and the person's own messages carry
+        the same identity, so a reply from our number to our number is the
+        person commenting on Pincer's answer (or their own message), not a
+        prompt; only trigger words and mentions count for it.
+        """
         # Text-bearing payloads: plain text, and captioned media the extract
         # path forwards to the agent (image and document captions). Video has
         # no content path, so its caption must not pass the gate.
@@ -1244,9 +1253,12 @@ class WhatsAppChannel(BaseChannel):
         # trigger word or mention doesn't log a misleading skip.
         skip_reason = "group message without trigger word, mention or reply"
         if self._replies_to_self(ctx):
-            if self._settings.whatsapp_group_trigger_on_reply:
+            if from_me:
+                skip_reason = "group reply from our own number ignored, use a trigger word"
+            elif self._settings.whatsapp_group_trigger_on_reply:
                 return True
-            skip_reason = "group reply ignored, PINCER_WHATSAPP_GROUP_TRIGGER_ON_REPLY is off"
+            else:
+                skip_reason = "group reply ignored, PINCER_WHATSAPP_GROUP_TRIGGER_ON_REPLY is off"
         if self._mentions_self(text, ctx):
             if self._settings.whatsapp_group_trigger_on_mention:
                 return True

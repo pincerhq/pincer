@@ -513,11 +513,16 @@ class TelegramChannel(BaseChannel):
 
         Mirrors the WhatsApp channel's group gating: one of the configured
         trigger words/phrases in the text/caption, a reply to one of the bot's
-        own messages (on by default), or a mention of the bot's own @username,
-        including a ``/command@username`` (opt-in).
+        own messages (on by default), or a mention of the bot's own @username
+        (opt-in). A ``/command@username`` always triggers: with BotFather's
+        privacy mode on (the default), it is the only way to address the bot
+        before it has posted anything to reply to.
         """
         text = message.text or message.caption or ""
         if matches_group_trigger(text, self._settings.telegram_group_trigger):
+            return True
+        addressed = self._addressed_entities(message)
+        if "bot_command" in addressed:
             return True
         # Log only once the message is skipped, so a reply that also carries a
         # mention doesn't log a misleading skip.
@@ -526,7 +531,7 @@ class TelegramChannel(BaseChannel):
             if self._settings.telegram_group_trigger_on_reply:
                 return True
             skip_reason = "group reply ignored, PINCER_TELEGRAM_GROUP_TRIGGER_ON_REPLY is off"
-        if self._mentions_self(message):
+        if "mention" in addressed:
             if self._settings.telegram_group_trigger_on_mention:
                 return True
             skip_reason = "group @-mention ignored, PINCER_TELEGRAM_GROUP_TRIGGER_ON_MENTION is off"
@@ -541,9 +546,11 @@ class TelegramChannel(BaseChannel):
             and message.reply_to_message.from_user.id == self._bot.id
         )
 
-    def _mentions_self(self, message: Message) -> bool:
+    def _addressed_entities(self, message: Message) -> set[str]:
+        """Entity types that address the bot: ``mention`` (@username), ``bot_command`` (/cmd@username)."""
+        addressed: set[str] = set()
         if not self._own_username:
-            return False
+            return addressed
         text = message.text or message.caption or ""
         entities = message.entities or message.caption_entities or []
         own_mention = f"@{self._own_username.lower()}"
@@ -559,8 +566,8 @@ class TelegramChannel(BaseChannel):
             if (entity.type == "mention" and span == own_mention) or (
                 entity.type == "bot_command" and span.endswith(own_mention)
             ):
-                return True
-        return False
+                addressed.add(entity.type)
+        return addressed
 
     def _register_handlers(self, router: Router) -> None:
         """Register all message handlers on the router."""

@@ -23,10 +23,14 @@ or an @-mention (`..._GROUP_TRIGGER_ON_MENTION`, default `false`).
   person share one identity in groups: replies to their messages and
   @-mentions of them reach Pincer when the respective flag is on. Turn
   `..._ON_REPLY` / `..._ON_MENTION` off, or use a dedicated number, to avoid
-  that.
+  that. The person's own replies (such as quoting Pincer's answer to comment
+  on it) never count as replies; they need a trigger word.
+- Telegram: `/cmd@PincerBot` always triggers Pincer. With BotFather privacy
+  mode on (the default) it is the only message that reaches the bot before it
+  has posted anything to reply to.
 
-> **Behaviour change.** Telegram `@PincerBot` mentions (and `/cmd@PincerBot`)
-> no longer trigger Pincer in groups by default. Set
+> **Behaviour change.** Telegram `@PincerBot` mentions no longer trigger
+> Pincer in groups by default. Set
 > `PINCER_TELEGRAM_GROUP_TRIGGER_ON_MENTION=true` to restore the old behaviour.
 
 #### WhatsApp: group @-mentions behind `PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION`

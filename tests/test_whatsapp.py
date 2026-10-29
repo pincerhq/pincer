@@ -241,6 +241,19 @@ class TestWhatsAppChannel:
         msg = self._ext_msg_with_mentions("pincer, and tomorrow?", [], "491234567890@s.whatsapp.net")
         assert wa_channel._is_addressed_in_group(msg) is True
 
+    def test_reply_from_own_number_ignored(self, wa_channel, caplog):
+        """Shared number: the person quoting Pincer's answer is a comment, not a prompt."""
+        wa_channel._own_jid = "491234567890"
+        msg = self._ext_msg_with_mentions("ha, exactly", [], "491234567890@s.whatsapp.net")
+        with caplog.at_level(logging.DEBUG, logger="pincer.channels.whatsapp"):
+            assert wa_channel._is_addressed_in_group(msg, from_me=True) is False
+        assert "reply from our own number ignored" in caplog.text
+
+    def test_trigger_from_own_number_in_reply(self, wa_channel):
+        wa_channel._own_jid = "491234567890"
+        msg = self._ext_msg_with_mentions("pincer, and tomorrow?", [], "491234567890@s.whatsapp.net")
+        assert wa_channel._is_addressed_in_group(msg, from_me=True) is True
+
     def test_reply_in_image_caption(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         image = MagicMock()

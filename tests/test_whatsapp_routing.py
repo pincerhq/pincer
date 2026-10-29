@@ -557,6 +557,21 @@ class TestWhatsAppRouting:
         ch._handler.assert_called_once()
         ch._extract_message.assert_called_once()
 
+    async def test_group_owner_reply_to_own_message_ignored(self, routing_channel):
+        """Owner quoting Pincer's (their own number's) message without a trigger word → ignored."""
+        ch = routing_channel
+        event, _, _ = _make_message_event(
+            from_me=True,
+            chat_user="group123",
+            sender_user=OWNER_PHONE,
+            is_group=True,
+            quoted_participant=f"{OWNER_PHONE}@s.whatsapp.net",
+            message_text="ha, exactly",
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_not_called()
+        ch._extract_message.assert_not_called()
+
     async def test_group_mention_guest_rejected_when_identity_configured(self):
         """Group mention from a sender not in the identity map, guests not allowed → rejected."""
         settings = _make_settings(whatsapp_self_chat_only=False)

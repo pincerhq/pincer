@@ -38,7 +38,7 @@
 - Self-chat mode: message yourself → Pincer responds (LID-aware detection)
 - DM allowlist: only approved phone numbers can message the bot
 - Group chat: responds when a trigger word is used, when a message replies to Pincer (`PINCER_WHATSAPP_GROUP_TRIGGER_ON_REPLY`, default on), or when @mentioned if `PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION=true`
-- Shared ownership: linked to a person's own WhatsApp account, Pincer and that person share one identity in groups, so replies to their messages and @-mentions of them reach Pincer when the respective flag is on. Turn `..._ON_REPLY` / `..._ON_MENTION` off, or use a dedicated number, to avoid that
+- Shared ownership: linked to a person's own WhatsApp account, Pincer and that person share one identity in groups, so replies to their messages and @-mentions of them reach Pincer when the respective flag is on. Turn `..._ON_REPLY` / `..._ON_MENTION` off, or use a dedicated number, to avoid that. The person's own replies (e.g. quoting Pincer's answer) never count as replies; they need a trigger word
 - Supports text, voice notes (auto-transcribed), images, and documents
 - History-sync filter: ignores old messages on reconnect
 - Monkey-patched Go callback error handling for debugging
@@ -503,8 +503,8 @@ enables random failover.
 | Variable | Purpose |
 |----------|---------|
 | `PINCER_TELEGRAM_GUESTS_ALLOWED` | Once `PINCER_IDENTITY_MAP` is configured, allow unmapped senders through as disposable guests (default `false`; no-op if no identity map is configured) |
-| `PINCER_TELEGRAM_GROUP_TRIGGER` | In group chats, only reply when a trigger word appears, a message replies to the bot, or the bot is @mentioned (the last two have their own switches). Trigger words are comma-separated words/phrases, whole-word and case-insensitive; `@name` entries require the `@` (default: `pincer`). With BotFather privacy mode on (the default) the bot only receives commands and replies in groups; disable it (`/setprivacy` → Disable, then re-add the bot) or make the bot an admin for trigger words to work |
-| `PINCER_TELEGRAM_GROUP_TRIGGER_ON_MENTION` | Also reply in groups when the bot is @mentioned (`@PincerBot` or `/cmd@PincerBot`); trigger words keep working either way (default: `false`) |
+| `PINCER_TELEGRAM_GROUP_TRIGGER` | In group chats, only reply when a trigger word appears, a message replies to the bot, or the bot is @mentioned (the last two have their own switches). Trigger words are comma-separated words/phrases, whole-word and case-insensitive; `@name` entries require the `@` (default: `pincer`). With BotFather privacy mode on (the default) the bot only receives commands and replies in groups; disable it (`/setprivacy` → Disable, then re-add the bot) or make the bot an admin for trigger words to work. `/cmd@PincerBot` always reaches the bot and always triggers it |
+| `PINCER_TELEGRAM_GROUP_TRIGGER_ON_MENTION` | Also reply in groups when the bot is @mentioned (`@PincerBot`); trigger words and `/cmd@PincerBot` commands keep working either way (default: `false`) |
 | `PINCER_TELEGRAM_GROUP_TRIGGER_ON_REPLY` | Also reply in groups when a message replies to one of the bot's messages; trigger words keep working either way (default: `true`) |
 
 ### Optional — WhatsApp
@@ -515,7 +515,7 @@ enables random failover.
 | `PINCER_WHATSAPP_GUESTS_ALLOWED` | Once `PINCER_IDENTITY_MAP` is configured, allow unmapped senders through as disposable guests (default `false`). No-op if no identity map is configured for group mentions; for DMs, unlike Telegram/Signal, this is NOT a no-op — DMs are rejected by default with no identity map configured, and this flag overrides that |
 | `PINCER_WHATSAPP_GROUP_TRIGGER` | Comma-separated trigger words/phrases for group messages, whole-word and case-insensitive (default: `pincer`). A literal `@pincer` entry only helps when typed by hand |
 | `PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION` | Also reply in groups when the bot is picked in WhatsApp's @-picker (phone number or LID); trigger words keep working either way (default: `false`). On a shared personal number, @-mentions of the person count too |
-| `PINCER_WHATSAPP_GROUP_TRIGGER_ON_REPLY` | Also reply in groups when a message quotes one of the bot's messages; trigger words keep working either way (default: `true`). On a shared personal number, replies to the person's own messages count too |
+| `PINCER_WHATSAPP_GROUP_TRIGGER_ON_REPLY` | Also reply in groups when a message quotes one of the bot's messages; trigger words keep working either way (default: `true`). On a shared personal number, replies to the person's own messages count too; the person's own replies never do |
 
 ### Optional — Email & Calendar
 
