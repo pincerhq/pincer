@@ -715,3 +715,85 @@ async def test_fallback_and_end_says_goodbye_then_finalizes_once(mock_settings):
     end_call.assert_not_called()
     on_end.assert_awaited_once()
     assert engine.get_call_state("CAx") is None
+
+
+@pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
+async def test_end_call_reports_success_as_none(mock_settings, engine_cls):
+    engine = engine_cls(mock_settings)
+    rest = _fake_rest(engine)
+    on_end = AsyncMock()
+    engine.set_on_call_end(on_end)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    assert await engine.end_call("CAx") is None
+    [(call_sid, params)] = rest.updates
+    assert call_sid == "CAx" and params["status"] == "completed"
+    assert engine.get_call_state("CAx") is None
+    on_end.assert_awaited_once()
+
+
+def _twilio_error(status: int, code: int | None, msg: str) -> Exception:
+    from twilio.base.exceptions import TwilioRestException
+
+    return TwilioRestException(status, "/Calls/CAx", msg=msg, code=code)
+
+
+@pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (lambda: _twilio_error(401, 20003, "Authenticate"), "Authenticate (Twilio error 20003"),
+        (lambda: _twilio_error(500, None, "Internal error"), "Internal error (HTTP 500)"),
+        (TimeoutError, "TimeoutError"),
+    ],
+)
+async def test_end_call_reports_a_failed_hangup_and_still_tears_down(mock_settings, engine_cls, error, expected):
+    engine = engine_cls(mock_settings)
+    rest = _fake_rest(engine)
+    on_end = AsyncMock()
+    engine.set_on_call_end(on_end)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    rest.errors["update_call"] = error()
+    reason = await engine.end_call("CAx")
+    assert reason is not None and reason.startswith(expected)
+    assert "\x1b" not in reason
+    assert engine.get_call_state("CAx") is None
+    on_end.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        lambda: _twilio_error(400, 21220, "Call is not in-progress. Cannot redirect."),
+        lambda: _twilio_error(404, 20404, "The requested resource was not found"),
+    ],
+)
+async def test_end_call_on_a_call_already_over_is_success(mock_settings, error):
+    engine = ConversationRelayEngine(mock_settings)
+    rest = _fake_rest(engine)
+    await engine.on_call_start("CAx", "+4917", CallDirection.INBOUND)
+    rest.errors["update_call"] = error()
+    assert await engine.end_call("CAx") is None
+    assert engine.get_call_state("CAx") is None
+
+
+async def test_watch_call_status_points_twilio_at_the_status_webhook(mock_settings):
+    engine = ConversationRelayEngine(mock_settings)
+    rest = _fake_rest(engine)
+    await engine.watch_call_status("CAx")
+    [(call_sid, params)] = rest.updates
+    assert call_sid == "CAx"
+    assert params["status_callback"] == "https://example.com/api/apps/twilio/status"
+    assert params["status_callback_method"] == "POST"
+    assert params["twiml"] is None and params["status"] is None  # the call itself is left alone
+
+
+async def test_watch_call_status_needs_an_http_base_and_never_raises(mock_settings):
+    mock_settings.voice_webhook_base_url = "ws://example.com"
+    engine = ConversationRelayEngine(mock_settings)
+    rest = _fake_rest(engine)
+    await engine.watch_call_status("CAx")
+    assert rest.updates == []
+
+    mock_settings.voice_webhook_base_url = "https://example.com"
+    rest.errors["update_call"] = _twilio_error(400, 21220, "Call is not in-progress.")
+    await engine.watch_call_status("CAx")  # logged, not raised

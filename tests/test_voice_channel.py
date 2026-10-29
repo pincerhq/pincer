@@ -165,3 +165,54 @@ async def test_a_sentence_cancelled_mid_send_is_marked_by_what_the_caller_heard(
     assert [e.state for e in lines] == [expected]
     engine.speech_blocker = None  # the shutdown goodbye must not wait on it
     await channel.stop()
+
+
+async def _channel_with_fake_engine(tmp_path):
+    from voice_harness.fake_engine import FakeVoiceEngine
+    from voice_harness.settings import apply_test_paths
+
+    settings = apply_test_paths(MagicMock(), tmp_path)
+    settings.voice_default_language = "en"
+    settings.voice_supported_languages = "en,de"
+    engine = FakeVoiceEngine(settings)
+    channel = VoiceChannel(settings)
+    channel.set_engine(engine)
+    await channel.start(AsyncMock(return_value=""))
+    return settings, engine, channel
+
+
+async def test_call_row_is_written_at_start_and_closed_at_teardown(tmp_path):
+    """Without a post-call processor nothing else writes the history row: the
+    call must still be in it, open while live and with `ended_at` once over."""
+    from pathlib import Path
+
+    from pincer.services.voice.calls import CallsService
+
+    settings, engine, channel = await _channel_with_fake_engine(tmp_path)
+    await engine.on_call_start("CA_row", "+4930123456", CallDirection.INBOUND, language="en")
+    await channel._call_row_tasks["CA_row"]
+    calls = await CallsService.for_path(Path(settings.db_path))
+    row = await calls.get("CA_row")
+    assert row is not None
+    assert row["direction"] == "inbound" and row["from_number"] == "+4930123456"
+    assert row["engine"] == "fake" and row["started_at"]
+    assert row["ended_at"] is None
+
+    state = engine.get_call_state("CA_row")
+    await engine.end_call("CA_row")
+    row = await calls.get("CA_row")
+    assert row is not None and row["ended_at"] is not None
+    assert row["failure_code"] == state.metadata["failure_code"]  # the classified code, not ""
+    assert "CA_row" not in channel._call_row_tasks
+    await channel.stop()
+
+
+async def test_only_inbound_calls_ask_twilio_for_a_status_callback(tmp_path):
+    import asyncio
+
+    _settings, engine, channel = await _channel_with_fake_engine(tmp_path)
+    await engine.on_call_start("CA_in", "+4930123456", CallDirection.INBOUND, language="en")
+    await engine.on_call_start("CA_out", "+4930123456", CallDirection.OUTBOUND, language="en")
+    await asyncio.sleep(0)
+    assert engine.status_watches == ["CA_in"]
+    await channel.stop()

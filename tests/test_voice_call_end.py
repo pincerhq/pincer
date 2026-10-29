@@ -253,3 +253,43 @@ async def test_status_completed_does_not_rest_hangup():
         assert engine.get_call_state(CALL) is None
     finally:
         twiml_server._engine, twiml_server._settings = saved
+
+
+async def test_stream_status_events_are_not_call_statuses(caplog):
+    """<Stream statusCallbackUrl> posts stream events to /status. They carry no
+    CallStatus: nothing to act on, and no "Call status: CA… -> " log line."""
+    import logging
+    from unittest.mock import AsyncMock
+
+    import httpx
+    from fastapi import FastAPI
+
+    from pincer.voice import twiml_server
+    from pincer.voice.engine import ConversationRelayEngine
+
+    settings = _settings()
+    settings.voice_webhook_validate = False
+    settings.twilio_auth_token = MagicMock()
+    settings.twilio_auth_token.get_secret_value.return_value = ""
+    engine = ConversationRelayEngine(settings)
+    on_end = AsyncMock()
+    engine.set_on_call_end(on_end)
+    await engine.on_call_start(CALL, "+4917", CallDirection.INBOUND)
+
+    saved = twiml_server._engine, twiml_server._settings
+    twiml_server.init_voice_routes(engine, settings)
+    app = FastAPI()
+    app.include_router(twiml_server.twilio_router)
+    try:
+        with caplog.at_level(logging.INFO, logger="pincer.voice.twiml_server"):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.post(
+                    "/api/apps/twilio/status",
+                    data={"CallSid": CALL, "StreamSid": "MZ1", "StreamEvent": "stream-stopped"},
+                )
+        assert response.status_code == 200
+        assert "Call status:" not in caplog.text
+        on_end.assert_not_awaited()
+        assert engine.get_call_state(CALL) is not None
+    finally:
+        twiml_server._engine, twiml_server._settings = saved

@@ -352,9 +352,9 @@ class VoiceEngine(ABC):
             time_limit_s=int(self._settings.voice_transfer_max_duration_s),
         )
         update: dict[str, Any] = {"twiml": twiml}
-        base = str(getattr(self._settings, "voice_webhook_base_url", "") or "").strip().rstrip("/")
-        if base.startswith(("http://", "https://")):
-            update["status_callback"] = f"{base}/api/apps/twilio/status"
+        status_url = self._status_callback_url()
+        if status_url:
+            update["status_callback"] = status_url
             update["status_callback_method"] = "POST"
         # the media socket closes on the <Dial> redirect; that is not a hangup
         live = self._active_calls.get(call_sid)
@@ -552,15 +552,49 @@ class VoiceEngine(ABC):
         the caller decides what an unknown status means."""
         return await self._rest.fetch_call_status(call_sid, timeout=CALL_STATUS_FETCH_TIMEOUT_S)
 
-    async def end_call(self, call_sid: str) -> None:
+    def _status_callback_url(self) -> str:
+        """The /status webhook URL, or "" without an http(s) webhook base."""
+        base = str(getattr(self._settings, "voice_webhook_base_url", "") or "").strip().rstrip("/")
+        return f"{base}/api/apps/twilio/status" if base.startswith(("http://", "https://")) else ""
+
+    async def watch_call_status(self, call_sid: str) -> None:
+        """Have Twilio post this call's final status to /status.
+
+        Outbound calls get a status callback when they are dialled; an inbound
+        call has none unless one is set in the Twilio console, so its only end
+        signal is the media socket closing. When that close is missed the call
+        stays in `_active_calls` until the stuck-call reaper. With the callback,
+        `completed` reaches `finish_remote_ended` as well. Best effort: a
+        failure is logged, and the socket close still ends the call.
+        """
+        url = self._status_callback_url()
+        if not url:
+            return
+        try:
+            await self._rest.update_call(call_sid, status_callback=url, status_callback_method="POST")
+        except Exception as exc:
+            logger.warning("Status callback for call %s not set: %s", call_sid, _hangup_error_text(exc))
+
+    async def end_call(self, call_sid: str) -> str | None:
+        """Hang up through Twilio, then tear the call down.
+
+        Returns None when Twilio hung up (or the call was already over there),
+        else a short reason the REST hang-up failed. Teardown runs either way:
+        the call is unregistered and the end-of-call callback runs."""
+        error: str | None = None
         try:
             await self._rest.update_call(call_sid, status="completed")
-        except Exception:
-            logger.exception("Failed to end call %s", call_sid)
+        except Exception as exc:
+            if _already_over(exc):
+                logger.info("Call %s was already over at Twilio", call_sid)
+            else:
+                error = _hangup_error_text(exc)
+                logger.exception("Failed to end call %s", call_sid)
         finally:
             state = await self._unregister_call(call_sid)
             if state and self._on_call_end_callback:
                 await self._on_call_end_callback(call_sid, state)
+        return error
 
     async def send_dtmf(self, call_sid: str, digits: str) -> None:
         try:
@@ -993,6 +1027,24 @@ class VoiceEngine(ABC):
     # ConversationRelay hands audio to Twilio and never reports playout, so
     # its numbers can only ever be estimates from character counts.
     analytics_method: str = "estimated"
+
+
+# Twilio's "Call is not in-progress. Cannot redirect." — the call ended first.
+_TWILIO_CALL_NOT_IN_PROGRESS = 21220
+
+
+def _already_over(exc: BaseException) -> bool:
+    """A failed hang-up that means the call had already ended at Twilio."""
+    return getattr(exc, "status", None) == 404 or getattr(exc, "code", None) == _TWILIO_CALL_NOT_IN_PROGRESS
+
+
+def _hangup_error_text(exc: BaseException) -> str:
+    """One line for the log and the API: the Twilio code and message, or the
+    exception type for a timeout or a network error."""
+    from pincer.voice.outbound import twilio_error_text
+
+    text = twilio_error_text(exc) if isinstance(exc, Exception) else ""
+    return text or type(exc).__name__
 
 
 def note_transfer_started(call_sid: str, record: dict[str, Any]) -> None:
@@ -1857,9 +1909,9 @@ class MediaStreamEngine(VoiceEngine):
         if remaining_ns > 0:
             await asyncio.sleep(remaining_ns / 1_000_000_000)
 
-    async def end_call(self, call_sid: str) -> None:
+    async def end_call(self, call_sid: str) -> str | None:
         await self.close_media_stream(call_sid)
-        await super().end_call(call_sid)
+        return await super().end_call(call_sid)
 
     async def close_media_stream(self, call_sid: str) -> None:
         """Close STT stream and cancel transcript consumer."""

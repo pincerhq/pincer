@@ -845,6 +845,11 @@ async def voice_status(request: Request) -> PlainTextResponse:
     status = str(form.get("CallStatus", ""))
     duration = form.get("CallDuration", "0")
     answered_by = str(form.get("AnsweredBy", ""))
+    if not status and not answered_by:
+        # A <Stream statusCallbackUrl> event (stream-started/-stopped): no call
+        # status in it, nothing to act on.
+        logger.debug("Stream status [%s]: %s", call_sid, form.get("StreamEvent", ""))
+        return PlainTextResponse("OK")
 
     logger.info(
         "Call status: %s -> %s (duration=%s%s)",

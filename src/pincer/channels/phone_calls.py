@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
@@ -114,6 +116,11 @@ class VoiceChannel(BaseChannel):
         # here (not on the task) so a barge-in can close the PREVIOUS turn's
         # trace as cancelled rather than leaving it open forever.
         self._turn_traces: dict[str, Any] = {}
+        # The call's history row, written when the call starts (see
+        # _save_call_row); teardown waits for it before closing the row.
+        self._call_row_tasks: dict[str, asyncio.Task[None]] = {}
+        # Status-callback requests for inbound calls, held until they finish.
+        self._status_watch_tasks: set[asyncio.Task[None]] = set()
         self.metrics = VoiceMetricsRegistry()
 
     def set_stream_agent(self, agent: Any) -> None:
@@ -191,6 +198,56 @@ class VoiceChannel(BaseChannel):
         from pincer.voice.briefing import briefing_from_state, record_briefing
 
         record_briefing(self._transcripts.get(call_sid), briefing_from_state(state))
+        self._watch_inbound_status(call_sid, state)
+        # Off the call's path: a busy database must not delay the greeting.
+        self._call_row_tasks[call_sid] = asyncio.create_task(
+            self._save_call_row(state), name=f"voice-call-row-{call_sid}"
+        )
+
+    def _watch_inbound_status(self, call_sid: str, state: CallState) -> None:
+        """An inbound call has no status callback, so a missed media-socket
+        close left it live until the stuck-call reaper. Ask Twilio for one."""
+        if state.direction != CallDirection.INBOUND or self._engine is None:
+            return
+        try:
+            task = asyncio.create_task(
+                self._engine.watch_call_status(call_sid), name=f"voice-status-callback-{call_sid}"
+            )
+        except Exception:
+            logger.debug("Status callback request not started [%s]", call_sid, exc_info=True)
+            return
+        self._status_watch_tasks.add(task)
+        task.add_done_callback(self._status_watch_tasks.discard)
+
+    async def _save_call_row(self, state: CallState, *, ended: bool = False) -> None:
+        """Upsert the call's `pincer_voice_calls` row. Best effort.
+
+        Written at call start (no `ended_at`) and again at teardown, so the
+        call is in the history even when the post-call pipeline never runs.
+        The pipeline's own save, keyed on `call_sid` too, fills in the rest."""
+        db_path = getattr(self._settings, "db_path", None)
+        if not isinstance(db_path, (str, Path)) or not str(db_path):
+            return
+        values: dict[str, Any] = {
+            "call_sid": state.call_sid,
+            "direction": state.direction.value,
+            "from_number": state.caller_number,
+            "to_number": state.target_number,
+            "pincer_user_id": state.pincer_user_id,
+            "started_at": state.started_at.isoformat(),
+            "engine": state.engine_type,
+            "language": state.language,
+        }
+        if ended:
+            values["ended_at"] = (state.ended_at or datetime.now(UTC)).isoformat()
+            values["failure_code"] = str(state.metadata.get("failure_code", "") or "")
+        try:
+            from pincer.services.voice.calls import CallsService
+
+            calls = await CallsService.for_path(Path(str(db_path)))
+            await calls.save_call(values)
+        except Exception:
+            logger.warning("Call row %s not saved [%s]", "close" if ended else "start", state.call_sid, exc_info=True)
 
     @staticmethod
     def _session_key(state: CallState) -> str:
@@ -1701,6 +1758,12 @@ class VoiceChannel(BaseChannel):
 
         await self._record_call_telemetry(call_sid, state, failure_code, completed, summary)
         await self._close_call_trace(call_sid, state, sm, failure_code, completed)
+        # The history row gets its end now, not only from the post-call
+        # pipeline: a pipeline that fails or isn't wired left it open forever.
+        started_row = self._call_row_tasks.pop(call_sid, None)
+        if started_row is not None and started_row is not asyncio.current_task():
+            await asyncio.wait({started_row})  # never raises: _save_call_row logs its own errors
+        await self._save_call_row(state, ended=True)
 
         # Sprint 3: full post-call pipeline (report in the user's language,
         # memory notes, follow-up proposals). Runs as a background task so
