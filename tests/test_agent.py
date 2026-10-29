@@ -916,6 +916,33 @@ async def test_a_turn_without_memory_neither_reads_nor_writes_it(
         assert "the user's private fact" not in call.kwargs["system"]
 
 
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_a_conversation_without_memory_stays_without_it(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry, streaming
+):
+    """A memory-free conversation continued with memory=True is still
+    memory-free: its exchanges never reach long-term memory, summary included."""
+    memory = AsyncMock()
+    summarizer = Summarizer(mock_llm, memory, session_manager, threshold=2)
+    summarizer.maybe_summarize = AsyncMock(wraps=summarizer.maybe_summarize)
+    agent = Agent(
+        settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory, summarizer=summarizer
+    )
+    key = "test:user1:summary"
+
+    for text, with_memory in (("summarize the call", False), ("and the action items?", True)):
+        if streaming:
+            stream = agent.handle_message_stream("user1", "test", text, session_key=key, memory=with_memory)
+            chunks = [c async for c in stream]
+            assert chunks[-1].type == StreamEventType.DONE
+        else:
+            await agent.handle_message("user1", "test", text, session_key=key, memory=with_memory)
+
+    memory.search_text.assert_not_awaited()
+    memory.store_memory.assert_not_awaited()
+    summarizer.maybe_summarize.assert_not_awaited()
+
+
 async def test_a_turn_with_memory_still_reads_and_writes_it(
     settings, mock_llm, session_manager, cost_tracker, tool_registry
 ):

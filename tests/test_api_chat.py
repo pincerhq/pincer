@@ -192,6 +192,19 @@ def test_memory_is_on_unless_the_request_turns_it_off(authed_app):
     assert agent.stream_calls[-1][1]["memory"] is False
 
 
+def test_a_request_without_memory_needs_its_own_conversation():
+    """memory=false would mark the user's main chat memory-free for good."""
+    client = _make_client()
+    agent = client.app.state.agent
+    body = {"text": "summarize", "memory": False}
+    headers = {"X-Pincer-User": UUID}
+
+    assert client.post("/api/chat/message", json=body, headers=headers).status_code == 422
+    assert client.post("/api/chat/stream", json=body, headers=headers).status_code == 422
+    agent.handle_message.assert_not_called()
+    assert agent.stream_calls == []
+
+
 def test_conversation_id_case_does_not_split_the_session(authed_app):
     """Upper- and lower-case spellings of one id are one conversation."""
     client = _authed_client(authed_app)

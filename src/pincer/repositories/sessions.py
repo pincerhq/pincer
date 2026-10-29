@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import func, or_, update
 from sqlmodel import col, select
 
-from pincer.db.dialect import dialect_of, upsert
-from pincer.models.sessions import ChatSession
+from pincer.db.dialect import dialect_of, json_text_field, upsert
+from pincer.models.sessions import MEMORY_FREE_KEY, ChatSession
 from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
@@ -68,10 +68,20 @@ class SessionRepository(BaseRepository[ChatSession, str]):
         return (await self.session.exec(stmt)).first()
 
     async def exists_for(self, user_id: str, channel: str) -> bool:
-        """True when the channel user has any stored session, conversations included."""
+        """True when the channel user has any stored session, conversations included.
+
+        A memory-free conversation (a call summary, a knowledge-base question)
+        is not counted: it is not the user talking to Pincer, so it must not
+        make a new user look known and skip their onboarding.
+        """
+        memory_free = json_text_field(dialect_of(self.session), col(ChatSession.session_metadata), MEMORY_FREE_KEY)
         stmt = (
             select(ChatSession.session_id)
-            .where(col(ChatSession.user_id) == user_id, col(ChatSession.channel) == channel)
+            .where(
+                col(ChatSession.user_id) == user_id,
+                col(ChatSession.channel) == channel,
+                or_(memory_free.is_(None), memory_free != "true"),
+            )
             .limit(1)
         )
         return (await self.session.exec(stmt)).first() is not None

@@ -36,13 +36,15 @@ async def url(db_url: str):
         await conn.run_sync(lambda c: Onboarding.metadata.drop_all(c, tables=_TABLES))
 
 
-async def _store_session(url: str, session_id: str, *, user_id: str, channel: str = "web") -> None:
+async def _store_session(
+    url: str, session_id: str, *, user_id: str, channel: str = "web", metadata: str = "{}"
+) -> None:
     await SessionService(url).save(
         session_id=session_id,
         user_id=user_id,
         channel=channel,
         messages="[]",
-        metadata="{}",
+        metadata=metadata,
         created_at=1.0,
         updated_at=1.0,
     )
@@ -143,6 +145,17 @@ async def test_stored_sessions_count_conversations_for_that_user_and_channel_onl
     assert await service.has_any("u", "web") is True
     assert await service.has_any("u", "slack") is False
     assert await service.has_any("w", "web") is False
+
+
+async def test_stored_sessions_leave_out_memory_free_conversations(url):
+    service = SessionService(url)
+    await _store_session(url, f"web:u:{_CONVERSATION}", user_id="u", metadata='{"memory_free": "true"}')
+    await _store_session(url, "web:v", user_id="v", metadata='{"onboarding_complete": "true"}')
+    await _store_session(url, "web:w", user_id="w", metadata="")
+
+    assert await service.has_any("u", "web") is False
+    assert await service.has_any("v", "web") is True
+    assert await service.has_any("w", "web") is True
 
 
 async def test_renaming_moves_onboarding_and_its_asking_session(url):

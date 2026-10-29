@@ -33,7 +33,8 @@ class SessionService(DatabaseService):
             return None if row is None else _as_dict(row)
 
     async def has_any(self, user_id: str, channel: str) -> bool:
-        """True when the channel user has any stored session, conversations included."""
+        """True when the channel user has any stored session, conversations included
+        (memory-free ones aside)."""
         async with session_scope(self._url) as session:
             return await SessionRepository(session).exists_for(user_id, channel)
 

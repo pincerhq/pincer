@@ -6,6 +6,10 @@ from sqlmodel import Field, SQLModel
 
 from pincer.db.types import Real
 
+#: Session metadata marking a conversation that leaves long-term memory alone
+#: (see `Agent.handle_message`'s `memory`): it does not make its user known.
+MEMORY_FREE_KEY = "memory_free"
+
 
 class ChatSession(SQLModel, table=True):
     __tablename__ = "pincer_sessions"

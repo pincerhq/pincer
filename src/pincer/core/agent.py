@@ -520,10 +520,15 @@ class Agent:
                 (a call summary, a knowledge-base question): no long-term
                 memory is searched or written (the session is not summarized
                 into one either), and onboarding is neither asked nor read from
-                it. The turn still runs as ``user_id`` in its session.
+                it. The turn still runs as ``user_id`` in its session, which
+                is marked memory-free for good: every later turn in it runs
+                without memory too, whatever it asks, so the memory-free
+                exchanges never reach a summary. A memory-free session does
+                not count toward the user being known to onboarding.
         """
         self._last_active = (user_id, channel_name or channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
+        memory = self._memory_for_turn(session, memory)
         onboarding = (
             await self._onboarding_for_turn(session, user_id, channel, channel_name=channel_name)
             if memory
@@ -880,6 +885,7 @@ class Agent:
         """
         self._last_active = (user_id, channel)
         session = await self._sessions.get_or_create(user_id, channel, session_key=session_key)
+        memory = self._memory_for_turn(session, memory)
         onboarding = (
             await self._onboarding_for_turn(session, user_id, channel, channel_name=None) if memory else _NO_ONBOARDING
         )
@@ -1377,6 +1383,16 @@ class Agent:
         if not memories:
             return _with_extra(base_prompt)
         return _with_extra(f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}")
+
+    @staticmethod
+    def _memory_for_turn(session: Session, memory: bool) -> bool:
+        """Whether the turn uses long-term memory; a turn without it marks the
+        session memory-free, and every later turn in it follows (see
+        ``handle_message``'s ``memory``)."""
+        memory = memory and not session.is_memory_free()
+        if not memory:
+            session.mark_memory_free()
+        return memory
 
     async def _onboarding_for_turn(
         self,

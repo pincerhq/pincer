@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Boolean, ColumnElement, Table, cast, exists, func
+from sqlalchemy import Boolean, ColumnElement, Table, Text, cast, exists, func
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -70,6 +70,18 @@ def json_contains(dialect: str, column: Any, value: str) -> ColumnElement[bool]:
         elements = func.json_each(document).table_valued("value")
         return exists().where(elements.c.value == value)
     return cast(document, JSONB).op("?", return_type=Boolean)(value)
+
+
+def json_text_field(dialect: str, column: Any, key: str) -> ColumnElement[str]:
+    """The text value of `key` in the JSON object stored (as text) in `column`.
+
+    NULL when the key is absent or the column holds no JSON (the empty
+    string, as in `json_contains`).
+    """
+    document = func.nullif(column, "")
+    if dialect == "sqlite":
+        return func.json_extract(document, f"$.{key}")
+    return cast(document, JSONB).op("->>", return_type=Text)(key)
 
 
 def json_contains_sql(dialect: str, column: str, parameter: str) -> str:

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pincer.llm.base import LLMMessage, MessageRole
+from pincer.models.sessions import MEMORY_FREE_KEY
 from pincer.services.onboarding import OnboardingService
 from pincer.services.sessions import SessionService
 
@@ -77,6 +78,14 @@ class Session:
     def onboarding_prompt_already_sent(self) -> bool:
         return self.metadata.get(ONBOARDING_PROMPT_SENT_KEY) == "true"
 
+    def is_memory_free(self) -> bool:
+        """True once a turn without long-term memory has run in the session."""
+        return self.metadata.get(MEMORY_FREE_KEY) == "true"
+
+    def mark_memory_free(self) -> None:
+        """Flag the session memory-free; saved with its next message."""
+        self.metadata[MEMORY_FREE_KEY] = "true"
+
 
 class SessionManager:
     """Async SQLite-backed session store."""
@@ -122,7 +131,8 @@ class SessionManager:
         return self._onboarding
 
     async def has_stored_sessions(self, user_id: str, channel: str) -> bool:
-        """True when the user has any session stored on the channel, conversations included."""
+        """True when the user has any session stored on the channel, conversations included
+        (memory-free ones aside, see `Session.is_memory_free`)."""
         return await self._store.has_any(user_id, channel)
 
     async def get_or_create(

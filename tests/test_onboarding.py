@@ -296,6 +296,11 @@ async def test_a_turn_without_memory_is_never_asked(
     assert ONBOARDING_QUESTION_EN not in reply
     assert await _record(tmp_path, "user-s", "web") is None
 
+    chat = conversation_key("user-s", "web", "chat-1")
+    reply = await _reply(agent, path, "user-s", "web", "Hi!", session_key=chat)
+
+    assert ONBOARDING_QUESTION_EN in reply
+
 
 @_PATHS
 async def test_a_turn_without_memory_is_not_read_for_an_answer(
