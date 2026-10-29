@@ -634,3 +634,31 @@ def test_mcp_serve_handles_keyboard_interrupt(monkeypatch: pytest.MonkeyPatch) -
 
     assert result.exit_code == 0
     assert "Stopped." in result.output
+
+
+def test_mcp_commands_hide_internal_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Tools marked pincer_internal (the memory server's tool index) are never offered to the LLM,
+    so `pincer mcp test` / `tools` don't list or count them either."""
+    srv = _mk_server("sqlite_vec_memory")
+    mock_cfg = MagicMock()
+    mock_cfg.servers = [srv]
+    monkeypatch.setattr("pincer.mcp.config.load_mcp_config", lambda: mock_cfg)
+
+    visible = MagicMock(meta=None, description="Store a memory")
+    visible.name = "memory_store"
+    internal = MagicMock(meta={"pincer_internal": True}, description="Search the tool index")
+    internal.name = "tool_index_search"
+    mock_session = MagicMock()
+    mock_session.connect = AsyncMock()
+    mock_session.disconnect = AsyncMock()
+    mock_session.tools = [visible, internal]
+    monkeypatch.setattr("pincer.mcp.client.MCPClientSession", lambda srv: mock_session)
+
+    tested = runner.invoke(app, ["mcp", "test", "sqlite_vec_memory"])
+    listed = runner.invoke(app, ["mcp", "tools"])
+
+    assert "Connected! 1 tools discovered." in tested.output
+    for result in (tested, listed):
+        assert result.exit_code == 0
+        assert "memory_store" in result.output
+        assert "tool_index_search" not in result.output

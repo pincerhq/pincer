@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 import anyio
 
 from pincer.mcp.audit import MCPAuditLogger
-from pincer.mcp.bridge import MCPToolBridge, is_internal_tool
+from pincer.mcp.bridge import MCPToolBridge, llm_tools
 from pincer.mcp.client import MCPClientSession
 
 if TYPE_CHECKING:
@@ -35,11 +35,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger("pincer.mcp")
 
 _HEALTH_INTERVAL_SECONDS = 60
-
-
-def _llm_tool_count(session: MCPClientSession) -> int:
-    """Tools of a session the LLM can call (internal ones, e.g. the tool index, are skipped)."""
-    return sum(1 for t in session.tools if not is_internal_tool(t))
 
 
 class MCPClientManager:
@@ -199,7 +194,7 @@ class MCPClientManager:
                     "transport": srv.transport.value,
                     "enabled": srv.enabled,
                     "connected": session.connected if session else False,
-                    "tool_count": _llm_tool_count(session) if session else 0,
+                    "tool_count": len(llm_tools(session.tools)) if session else 0,
                     "instructions": session.instructions if session else None,
                     "disabled": srv.name in self._disabled,
                     "sandbox": srv.sandbox,
@@ -218,7 +213,7 @@ class MCPClientManager:
 
     def total_tool_count(self) -> int:
         """Total MCP tools currently registered."""
-        return sum(_llm_tool_count(s) for s in self._sessions.values() if s.connected)
+        return sum(len(llm_tools(s.tools)) for s in self._sessions.values() if s.connected)
 
     # ── Background tasks ──────────────────────────────────
 

@@ -72,6 +72,9 @@ logger = logging.getLogger(__name__)
 _MAX_CONSECUTIVE_ERRORS = 3
 # Tools called in this many latest session messages stay in a chat turn's tool set.
 _RECENT_TOOL_MESSAGES = 20
+# Chars of the previous assistant message / a loaded skill added to the tool-ranking query.
+_SELECTION_EXTRA_CHARS = 500
+_LOAD_SKILL_TOOL = "load_skill"
 _MAX_SANITIZE_ATTEMPTS = 2
 _SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please resend your message."
 # Onboarding: a question still unanswered after this long is closed, empty,
@@ -240,6 +243,25 @@ class AgentResponse:
     cost_usd: float = 0.0
     tool_calls_made: int = 0
     model: str = ""
+
+
+def _selection_query(text: str, session: Session | None) -> str:
+    """Tool-ranking query: the user's message, then the end of the assistant message it answers.
+
+    A short reply ("yes, do it" / "ja, bitte") to an assistant's proposal says
+    nothing about tools on its own; the proposal does. The user's text comes
+    first, since the embedding model reads only the start of a long query.
+    """
+    if session is None:
+        return text
+    messages = session.messages
+    # The current user message is already in the session; look before it.
+    end = len(messages) - 1 if messages and messages[-1].role == MessageRole.USER else len(messages)
+    previous = next(
+        (m.content for m in reversed(messages[:end]) if m.role == MessageRole.ASSISTANT and m.content.strip()),
+        "",
+    )
+    return f"{text}\n{previous[-_SELECTION_EXTRA_CHARS:]}" if previous else text
 
 
 def _clean_profile_value(v: Any) -> str | None:
@@ -585,7 +607,9 @@ class Agent:
             text,
             extra_system="\n\n".join(extra_parts) or None,
             skip_memory=not memory,
-            tool_names=[t["name"] for t in tool_schemas or []],
+            # In a call the hints follow the registry, as on the streaming voice path
+            # (stream_voice_turn), so the two paths keep one prompt.
+            tool_names=None if call_gate is not None else [t["name"] for t in tool_schemas or []],
         )
 
         total_cost = 0.0
@@ -666,6 +690,7 @@ class Agent:
 
                 # Execute each tool
                 iteration_had_error = False
+                skills_loaded: list[str] = []
                 for tool_call in response.tool_calls:
                     tool_calls_count += 1
                     if call_gate is not None:
@@ -684,6 +709,11 @@ class Agent:
 
                     if result.is_error:
                         iteration_had_error = True
+                    elif tool_call.name == _LOAD_SKILL_TOOL:
+                        skills_loaded.append(result.content)
+
+                if skills_loaded and call_gate is None:
+                    tool_schemas = await self._reselect_for_skills(text, session, skills_loaded) or tool_schemas
 
                 if iteration_had_error:
                     consecutive_errors += 1
@@ -983,6 +1013,7 @@ class Agent:
             await self._sessions.add_message(session, assistant_msg)
 
             iteration_had_error = False
+            skills_loaded: list[str] = []
             for tool_call in response.tool_calls:
                 yield StreamChunk(StreamEventType.TOOL_START, f"Using {tool_call.name}...")
                 result = await self._execute_tool(tool_call, user_id, channel, channel_user_id=channel_user_id)
@@ -995,6 +1026,10 @@ class Agent:
                 yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name)
                 if result.is_error:
                     iteration_had_error = True
+                elif tool_call.name == _LOAD_SKILL_TOOL:
+                    skills_loaded.append(result.content)
+            if skills_loaded:
+                tool_schemas = await self._reselect_for_skills(text, session, skills_loaded) or tool_schemas
 
             if iteration_had_error:
                 consecutive_errors += 1
@@ -1313,8 +1348,14 @@ class Agent:
         schemas: list[dict[str, Any]],
         text: str,
         session: Session | None = None,
+        *,
+        query: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Trim a chat turn's tools to tool_selection_max via the tool selector (see tools/selection.py)."""
+        """Trim a chat turn's tools to tool_selection_max via the tool selector (see tools/selection.py).
+
+        Ranks on ``query`` when given, else on ``text`` plus the assistant
+        message it answers (see ``_selection_query``).
+        """
         if self.tool_selector is None or not schemas:
             return schemas
         recent = (
@@ -1322,7 +1363,18 @@ class Agent:
             if session is not None
             else []
         )
-        return await self.tool_selector.select(schemas, text, reversed(recent))
+        if query is None:
+            query = _selection_query(text, session)
+        return await self.tool_selector.select(schemas, query, reversed(recent))
+
+    async def _reselect_for_skills(self, text: str, session: Session, skills: list[str]) -> list[dict[str, Any]]:
+        """Select the turn's tools again once skills are loaded mid-turn, ranking on their text first.
+
+        A skill usually needs tools the user's message didn't rank (e.g. a
+        google__ tool). Tools already called this turn stay, as recent tools.
+        """
+        query = "\n".join([*(s[:_SELECTION_EXTRA_CHARS] for s in skills), text])
+        return await self._select_tools(self._tools.get_schemas(), text, session, query=query)
 
     async def _user_timezone(self, user_id: str) -> str:
         """This user's configured timezone, or "" to fall back to settings.

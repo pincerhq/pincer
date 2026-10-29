@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import base64
 import fnmatch
-import json
 import logging
 import uuid
 from pathlib import Path
@@ -79,19 +78,9 @@ def is_internal_tool(tool: Any) -> bool:
     return isinstance(meta, dict) and bool(meta.get("pincer_internal"))
 
 
-def result_json(result: Any) -> Any:
-    """Decode the JSON value an MCP tool returned in a CallToolResult."""
-    # fastmcp sends object return values as structuredContent and wraps any other
-    # value as structuredContent={"result": ...}; prefer it over parsing text.
-    structured = getattr(result, "structuredContent", None)
-    if isinstance(structured, dict):
-        return structured.get("result", structured)
-    content = getattr(result, "content", None) or []
-    raw = str(getattr(content[0], "text", "")) if content else ""
-    # fastmcp serialises an empty list result as no content items at all.
-    if not raw.strip():
-        return None
-    return json.loads(raw)
+def llm_tools(tools: list[Any]) -> list[Any]:
+    """The tools of a session that are offered to the LLM (internal ones skipped)."""
+    return [t for t in tools if not is_internal_tool(t)]
 
 
 def _format_result(result: Any) -> str:

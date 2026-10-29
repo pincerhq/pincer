@@ -216,11 +216,13 @@ agent code needs a separate uid or container.
 
 ### Added
 
-- Tool selection for chat (tool RAG). With more tools than
-  `PINCER_TOOL_SELECTION_MAX` (default 127, under OpenAI's 128 cap), a turn
-  sends the `PINCER_TOOL_SELECTION_DEFAULT` tools, every tool of the memory MCP
-  server, tools already used in the conversation, and the best semantic
-  matches for the message. Before, the OpenAI path kept the first 128 tools in
+- Tool selection for chat (tool RAG). With an OpenAI-wire default or failover
+  provider and more tools than `PINCER_TOOL_SELECTION_MAX` (default 127, under
+  OpenAI's 128 cap), a turn sends the `PINCER_TOOL_SELECTION_DEFAULT` tools,
+  every tool of the memory MCP server, tools already used in the conversation,
+  and the best semantic matches for the message (plus the assistant message it
+  answers), in registry order; a skill loaded mid-turn selects again.
+  Anthropic-only setups keep every tool and their tools cache. Before, the OpenAI path kept the first 128 tools in
   registration order, so `make_phone_call`, `send_file`/`send_image` and MCP
   tools were cut. Ranking runs on sqlite-vec-memory-mcp's new internal
   `tool_index_sync`/`tool_index_search` tools with the multilingual

@@ -51,16 +51,23 @@ class ToolSettings(BaseModel):
     tool_selection_enabled: bool = Field(
         default=True,
         description=(
-            "When the registry has more than tool_selection_max tools, send each chat turn only: the "
-            "tool_selection_default tools, every tool of memory_mcp_server, tools used earlier in the "
-            "conversation, and the best semantic matches for the message (ranked on memory_mcp_server)"
+            "With an OpenAI-wire default or failover provider and more than tool_selection_max tools, send "
+            "each chat turn only: the tool_selection_default tools, every tool of memory_mcp_server, tools "
+            "used earlier in the conversation, and the best semantic matches for the request (ranked on "
+            "memory_mcp_server). Anthropic-only setups always get every tool"
         ),
     )
     tool_selection_max: int = Field(
         default=127,
         ge=1,
-        le=128,
-        description="Most tools sent per chat turn (OpenAI rejects more than 128)",
+        le=127,
+        description="Most tools sent per chat turn (OpenAI rejects more than 128; 127 keeps a margin)",
+    )
+    tool_selection_timeout: float = Field(
+        default=3.0,
+        gt=0,
+        le=30,
+        description="Seconds a chat turn waits for tool ranking before sending tools in registry order",
     )
     tool_selection_default: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: [

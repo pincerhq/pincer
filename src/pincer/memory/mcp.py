@@ -15,7 +15,7 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from pincer.mcp.bridge import result_json
+from pincer.mcp.results import first_text, raise_on_error, result_json
 from pincer.memory.base import (
     PINCER_MEMORY_CATEGORY_TAG_PREFIX,
     PINCER_MEMORY_COUNT_FETCH_LIMIT,
@@ -104,18 +104,10 @@ class MCPMemoryBackend(BaseMemoryBackend):
             session = await self._mcp_manager.get_session(self._server_name)
         except ValueError as e:
             raise RuntimeError(f"MCPMemoryBackend: memory server '{self._server_name}' is not connected") from e
-        result = await session.call_tool(tool_name, args)
-        if getattr(result, "isError", False):
-            raise RuntimeError(f"MCPMemoryBackend: {tool_name} failed: {self._first_text(result)}")
-        return result
-
-    @staticmethod
-    def _first_text(result: Any) -> str:
-        content = getattr(result, "content", None) or []
-        return str(getattr(content[0], "text", "")) if content else ""
+        return raise_on_error(await session.call_tool(tool_name, args), f"MCPMemoryBackend: {tool_name}")
 
     async def _call(self, tool_name: str, args: dict[str, Any]) -> str:
-        return self._first_text(await self._call_result(tool_name, args))
+        return first_text(await self._call_result(tool_name, args))
 
     async def _call_json(self, tool_name: str, args: dict[str, Any]) -> Any:
         return result_json(await self._call_result(tool_name, args))

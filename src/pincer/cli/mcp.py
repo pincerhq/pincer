@@ -90,13 +90,16 @@ async def _mcp_test(server_name: str) -> None:
         with console.status("[bold green]Connecting...[/bold green]"):
             await session.connect()
 
-        console.print(f"[green]Connected! {len(session.tools)} tools discovered.[/green]\n")
+        from pincer.mcp.bridge import llm_tools
 
-        if session.tools:
+        tools = llm_tools(session.tools)  # internal tools (e.g. the tool index) are never offered to the LLM
+        console.print(f"[green]Connected! {len(tools)} tools discovered.[/green]\n")
+
+        if tools:
             table = Table(title=f"Tools from '{server_name}'")
             table.add_column("Tool Name", style="bold")
             table.add_column("Description")
-            for tool in session.tools:
+            for tool in tools:
                 desc = (getattr(tool, "description", None) or "")[:80]
                 table.add_row(tool.name, desc)
             console.print(table)
@@ -145,9 +148,9 @@ async def _mcp_tools(server_filter: str) -> None:
         session = MCPClientSession(srv)
         try:
             await session.connect()
-            from pincer.mcp.bridge import _requires_approval
+            from pincer.mcp.bridge import _requires_approval, llm_tools
 
-            for tool in session.tools:
+            for tool in llm_tools(session.tools):
                 approval = _requires_approval(tool, srv.approval_required)
                 desc = (getattr(tool, "description", None) or "")[:60]
                 table.add_row(
@@ -269,7 +272,9 @@ async def _mcp_status() -> None:
             t0 = time.monotonic()
             await session.connect()
             latency_ms = f"{(time.monotonic() - t0) * 1000:.0f}ms"
-            tool_count = str(len(session.tools))
+            from pincer.mcp.bridge import llm_tools
+
+            tool_count = str(len(llm_tools(session.tools)))
             connected_cell = "[green]yes[/green]"
         except Exception as e:
             connected_cell = f"[red]no[/red] ({e})"

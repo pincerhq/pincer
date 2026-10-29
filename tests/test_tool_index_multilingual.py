@@ -14,9 +14,9 @@ FASTEMBED_CACHE_PATH): only with PINCER_RUN_EMBEDDING=1.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 
@@ -224,17 +224,14 @@ CASES = [
 
 
 @pytest.fixture(scope="module")
-def server() -> ModuleType:
+def server(memory_server_module: ModuleType) -> Iterator[ModuleType]:
     """The memory server with the real tool model and the snapshot tools indexed."""
-    spec = importlib.util.spec_from_file_location(
-        "sqlite_vec_memory_server_multilingual", _ROOT / "src" / "sqlite-vec-memory-mcp" / "memory_server.py"
-    )
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    saved = memory_server_module._tool_db, memory_server_module._tool_index_version
+    memory_server_module._tool_db, memory_server_module._tool_index_version = None, ""
     tools = json.loads((_ROOT / "tests" / "fixtures" / "tool_index_tools.json").read_text())
-    module.tool_index_sync([{"name": t["name"], "text": _index_text(t)} for t in tools], "v1")
-    return module
+    memory_server_module.tool_index_sync([{"name": t["name"], "text": _index_text(t)} for t in tools], "v1")
+    yield memory_server_module
+    memory_server_module._tool_db, memory_server_module._tool_index_version = saved
 
 
 @pytest.mark.parametrize(("lang", "task", "query"), CASES)

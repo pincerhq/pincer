@@ -45,7 +45,7 @@ async def build_agent_from_settings() -> Agent:
     report = register_default_tools(tools, settings)
     logger.info("Web agent tools registered: %s (total=%d)", report, len(tools.list_tools()))
 
-    return Agent(
+    agent = Agent(
         settings=settings,
         llm=llm,
         session_manager=session_mgr,
@@ -53,3 +53,10 @@ async def build_agent_from_settings() -> Agent:
         tool_registry=tools,
         approval_callback=request_web_approval,
     )
+    if settings.tool_selection_enabled:
+        from pincer.tools.selection import ToolSelector
+
+        # No MCP here: no ranking, but default and recent tools lead if the registry
+        # ever outgrows tool_selection_max, instead of the first 128 in registry order.
+        agent.tool_selector = ToolSelector(None, settings)
+    return agent

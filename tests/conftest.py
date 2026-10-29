@@ -1,6 +1,7 @@
 """Shared test fixtures."""
 
 import asyncio
+import importlib.util
 import logging
 import os
 import re
@@ -9,6 +10,7 @@ import time
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -782,3 +784,17 @@ def redis_url() -> str:
     if not url:
         pytest.skip("PINCER_TEST_REDIS_URL not set")
     return url
+
+
+_MEMORY_SERVER = Path(__file__).resolve().parents[1] / "src" / "sqlite-vec-memory-mcp" / "memory_server.py"
+
+
+@pytest.fixture(scope="session")
+def memory_server_module() -> ModuleType:
+    """src/sqlite-vec-memory-mcp/memory_server.py (a script, not a package), loaded once and
+    only for tests that ask for it. Tests that touch its tool index reset that state themselves."""
+    spec = importlib.util.spec_from_file_location("sqlite_vec_memory_server_under_test", _MEMORY_SERVER)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module

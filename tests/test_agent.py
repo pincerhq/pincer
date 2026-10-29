@@ -1,13 +1,15 @@
 """Tests for the ReAct agent loop."""
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from pincer.config import Settings
 from pincer.core.agent import (
     _SESSION_CLEARED_TEXT,
     Agent,
@@ -23,6 +25,7 @@ from pincer.memory.mcp import MCPMemoryBackend
 from pincer.memory.summarizer import Summarizer
 from pincer.tools.builtin import files
 from pincer.tools.registry import ToolRegistry
+from pincer.tools.selection import ToolSelector
 
 _DONE = LLMResponse(content="done", model="test", input_tokens=10, output_tokens=5, stop_reason="end_turn")
 _OPENAI_UNPAIRED = (
@@ -958,35 +961,50 @@ async def test_a_turn_with_memory_still_reads_and_writes_it(
     assert "the user's private fact" in mock_llm.complete.call_args.kwargs["system"]
 
 
-class _RecordingSelector:
-    """Stands in for ToolSelector: keeps only `keep`, records what it was asked."""
+class _RecordingSelector(ToolSelector):
+    """A ToolSelector that keeps the names in ``keeps`` (one set per call, the last repeats) and
+    records each call's query and recent tools."""
 
-    def __init__(self, keep: set[str]) -> None:
-        self.keep = keep
+    def __init__(self, settings: Settings, *keeps: set[str]) -> None:
+        super().__init__(None, settings)
+        self.keeps = list(keeps)
         self.calls: list[tuple[str, list[str]]] = []
 
-    async def select(self, schemas, query, recent_tool_names=()):
+    async def select(
+        self, schemas: list[dict[str, Any]], query: str, recent_tool_names: Iterable[str] = ()
+    ) -> list[dict[str, Any]]:
         self.calls.append((query, list(recent_tool_names)))
-        return [s for s in schemas if s["name"] in self.keep]
+        keep = self.keeps[min(len(self.calls), len(self.keeps)) - 1]
+        return [s for s in schemas if s["name"] in keep]
 
 
-def _phone_and_google_registry() -> ToolRegistry:
+def _phone_and_google_registry(skill_text: str = "skill") -> ToolRegistry:
     registry = ToolRegistry()
 
     async def noop() -> str:
         return "ok"
 
+    async def load_skill(name: str = "") -> str:
+        return skill_text
+
     for name in ("make_phone_call", "google__search_drive_files", "whoami"):
         registry.register(name=name, description=name, handler=noop, parameters={"type": "object", "properties": {}})
+    registry.register(
+        name="load_skill", description="load_skill", handler=load_skill, parameters={"type": "object", "properties": {}}
+    )
     return registry
+
+
+def _tool_names(call: Any) -> list[str]:
+    return [t["name"] for t in call.kwargs["tools"]]
 
 
 @pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
 async def test_tool_selector_sets_tools_and_prompt_hints(settings, mock_llm, session_manager, cost_tracker, streaming):
     """The selected tools are what the LLM gets, and the phone/google hints follow them, not the registry."""
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry())
-    selector = _RecordingSelector(keep={"whoami"})
-    agent.tool_selector = selector  # type: ignore[assignment]
+    selector = _RecordingSelector(settings, {"whoami"})
+    agent.tool_selector = selector
 
     session = await session_manager.get_or_create("user1", "test")
     session.messages.append(
@@ -1003,7 +1021,7 @@ async def test_tool_selector_sets_tools_and_prompt_hints(settings, mock_llm, ses
 
     assert selector.calls == [("Ruf mich an", ["google__search_drive_files"])]
     kwargs = mock_llm.complete.call_args.kwargs
-    assert [t["name"] for t in kwargs["tools"]] == ["whoami"]
+    assert _tool_names(mock_llm.complete.call_args) == ["whoami"]
     assert "make_phone_call tool" not in kwargs["system"]
     assert "google__" not in kwargs["system"]
 
@@ -1012,5 +1030,99 @@ async def test_without_selector_prompt_hints_follow_registry(settings, mock_llm,
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry())
     await agent.handle_message("user1", "test", "hi")
     kwargs = mock_llm.complete.call_args.kwargs
-    assert len(kwargs["tools"]) == 3
+    assert len(kwargs["tools"]) == 4
     assert "make_phone_call tool" in kwargs["system"]
+
+
+async def test_selection_query_adds_the_assistant_message_being_answered(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    """A short reply ("ja, bitte") ranks on the assistant's proposal it answers, too."""
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry())
+    selector = _RecordingSelector(settings, {"whoami"})
+    agent.tool_selector = selector
+    session = await session_manager.get_or_create("user1", "test")
+    session.messages.append(LLMMessage(role=MessageRole.ASSISTANT, content="Soll ich die Zahnarztpraxis anrufen?"))
+
+    await agent.handle_message("user1", "test", "ja, bitte")
+
+    assert selector.calls[0][0] == "ja, bitte\nSoll ich die Zahnarztpraxis anrufen?"
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_loading_a_skill_reselects_tools_mid_turn(settings, mock_llm, session_manager, cost_tracker, streaming):
+    """A skill loaded mid-turn can reach tools the user's message didn't rank."""
+    skill = "Budget skill: find the sheet with google__search_drive_files"
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry(skill))
+    selector = _RecordingSelector(settings, {"whoami", "load_skill"}, {"load_skill", "google__search_drive_files"})
+    agent.tool_selector = selector
+    mock_llm.complete.side_effect = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="tc1", name="load_skill", arguments={"name": "budget"})],
+            model="test",
+            input_tokens=10,
+            output_tokens=5,
+            stop_reason="tool_use",
+        ),
+        LLMResponse(content="done", model="test", input_tokens=10, output_tokens=5, stop_reason="end_turn"),
+    ]
+
+    if streaming:
+        async for _chunk in agent.handle_message_stream(user_id="user1", channel="test", text="Budget?"):
+            pass
+    else:
+        await agent.handle_message("user1", "test", "Budget?")
+
+    assert [q for q, _ in selector.calls] == ["Budget?", f"{skill}\nBudget?"]
+    assert selector.calls[1][1][0] == "load_skill"  # this turn's calls are recent tools, so they stay
+    first, second = mock_llm.complete.call_args_list
+    assert set(_tool_names(first)) == {"load_skill", "whoami"}
+    assert set(_tool_names(second)) == {"load_skill", "google__search_drive_files"}
+
+
+async def test_in_call_prompt_hints_follow_the_registry(settings, mock_llm, session_manager, cost_tracker):
+    """In a call the gate owns the tool set, but the hints follow the registry, as on the streaming voice path."""
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry())
+    agent.tool_selector = _RecordingSelector(settings, {"whoami"})
+    gate = MagicMock()
+    gate.filter_schemas.side_effect = lambda schemas: [s for s in schemas if s["name"] == "whoami"]
+
+    with patch("pincer.voice.in_call_tools.current_gate", return_value=gate):
+        await agent.handle_message("user1", "test", "Ruf mich an")
+
+    kwargs = mock_llm.complete.call_args.kwargs
+    assert _tool_names(mock_llm.complete.call_args) == ["whoami"]
+    assert "make_phone_call tool" in kwargs["system"]
+    assert agent.tool_selector.calls == []  # the gate, not the selector, picks in-call tools
+
+
+@pytest.mark.parametrize(
+    ("allowed", "expected_offered"),
+    [
+        (None, {"make_phone_call", "google__search_drive_files", "whoami", "load_skill"}),
+        (["whoami", "load_skill"], {"whoami", "load_skill"}),
+    ],
+    ids=["all-tools", "allowed_tools"],
+)
+async def test_run_headless_selects_from_the_allowed_tools(
+    settings, mock_llm, session_manager, cost_tracker, allowed, expected_offered
+):
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry())
+    offered: list[set[str]] = []
+
+    class _Selector(_RecordingSelector):
+        async def select(self, schemas, query, recent_tool_names=()):
+            offered.append({s["name"] for s in schemas})
+            return await super().select(schemas, query, recent_tool_names)
+
+    selector = _Selector(settings, {"whoami"})
+    agent.tool_selector = selector
+
+    await agent.run_headless("Check the budget", "user1", "scheduler", allowed_tools=allowed)
+
+    assert offered == [expected_offered]
+    assert selector.calls == [("Check the budget", [])]
+    kwargs = mock_llm.complete.call_args.kwargs
+    assert _tool_names(mock_llm.complete.call_args) == ["whoami"]
+    assert "make_phone_call tool" not in kwargs["system"]

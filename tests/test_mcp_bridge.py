@@ -7,15 +7,17 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from pincer.mcp.bridge import (
     MCPToolBridge,
     _convert_schema,
     _format_result,
     _inline_local_file_paths,
     _requires_approval,
-    result_json,
 )
 from pincer.mcp.config import MCPTransport
+from pincer.mcp.results import raise_on_error, result_json
 
 # ── Helpers / stubs ──────────────────────────────────────────────────────────
 
@@ -211,6 +213,14 @@ def test_result_json_reads_structured_content_and_text() -> None:
     assert result_json(text) == {"a": 1}
     empty = MagicMock(structuredContent=None, content=[])
     assert result_json(empty) is None
+
+
+def test_raise_on_error_names_the_call_and_the_server_text() -> None:
+    ok = MagicMock(isError=False)
+    assert raise_on_error(ok, "x") is ok
+    failed = MagicMock(isError=True, content=[FakeTextContent(text="no such table")])
+    with pytest.raises(RuntimeError, match="tool_index_search failed: no such table"):
+        raise_on_error(failed, "tool_index_search")
 
 
 def test_register_without_prefix() -> None:

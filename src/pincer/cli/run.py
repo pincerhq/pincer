@@ -636,8 +636,8 @@ async def _build_core(settings: Settings) -> CoreComponents:
     if settings.tool_selection_enabled:
         from pincer.tools.selection import ToolSelector
 
+        # The index warm-up (start_sync) runs once the caller has registered every tool.
         agent.tool_selector = ToolSelector(mcp_manager, settings)
-        agent.tool_selector.start_sync(tools.get_schemas())
 
     return CoreComponents(
         session_mgr=session_mgr,
@@ -1949,6 +1949,8 @@ async def _run_tasks_worker(settings: Settings) -> None:
     from pincer.tasks.delivery import TASK_RESULTS_CHANNEL, ResultEmitter, create_delivery_backend
 
     core = await _build_core(settings)
+    if core.agent.tool_selector is not None:
+        core.agent.tool_selector.start_sync(core.tools.get_schemas())
 
     proactive = ProactiveAgent(settings.db_path, agent=core.agent)
     await proactive.ensure_table()

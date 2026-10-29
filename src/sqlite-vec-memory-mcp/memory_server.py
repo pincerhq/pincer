@@ -60,6 +60,12 @@ _TOOL_EMBED_DIM = int(os.environ.get("TOOL_EMBED_DIM", "384"))
 _embed_model: Any = None
 _tool_embed_model: Any = None
 
+# Tool index state (see "Tool index" below): an in-memory database, guarded by
+# _tool_lock since fastmcp runs sync tools in worker threads.
+_tool_lock = threading.Lock()
+_tool_db: sqlite3.Connection | None = None
+_tool_index_version = ""
+
 
 # ---------------------------------------------------------------------------
 # Embeddings (ONNX via fastembed)
@@ -104,8 +110,9 @@ def _embed_tools(texts: list[str]) -> list[bytes]:
 # ---------------------------------------------------------------------------
 
 
-def _connect() -> sqlite3.Connection:
-    db = sqlite3.connect(_DB_PATH)
+def _connect(path: str | Path | None = None, *, check_same_thread: bool = True) -> sqlite3.Connection:
+    """A sqlite-vec connection to ``path`` (default MEMORY_DB_PATH)."""
+    db = sqlite3.connect(_DB_PATH if path is None else path, check_same_thread=check_same_thread)
     db.enable_load_extension(True)
     sqlite_vec.load(db)
     db.enable_load_extension(False)
@@ -465,20 +472,12 @@ def memory_update(memory_id: str, content: str, tags: list[str] | None = None) -
 # Both tools are marked pincer_internal so the host never offers them to the
 # LLM, and are not _logged so a search per chat turn writes nothing to disk.
 
-_tool_lock = threading.Lock()
-_tool_db: sqlite3.Connection | None = None
-_tool_index_version = ""
-
 
 def _tool_index_db() -> sqlite3.Connection:
     """The in-memory tool index; call with _tool_lock held."""
     global _tool_db
     if _tool_db is None:
-        db = sqlite3.connect(":memory:", check_same_thread=False)
-        db.enable_load_extension(True)
-        sqlite_vec.load(db)
-        db.enable_load_extension(False)
-        db.row_factory = sqlite3.Row
+        db = _connect(":memory:", check_same_thread=False)
         db.executescript(f"""
             CREATE TABLE tool_index (name TEXT UNIQUE NOT NULL, hash TEXT NOT NULL);
             CREATE VIRTUAL TABLE tool_vecs USING vec0(
