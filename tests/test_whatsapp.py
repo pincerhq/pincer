@@ -142,11 +142,14 @@ class TestWhatsAppChannel:
         assert wa_channel._is_addressed_in_group(msg) is False
 
     @staticmethod
-    def _ext_msg_with_mentions(text: str, mentioned: list[str], participant: str = "") -> MagicMock:
+    def _ext_msg_with_mentions(
+        text: str, mentioned: list[str], participant: str = "", quoted_id: str = ""
+    ) -> MagicMock:
         ext = MagicMock()
         ext.text = text
         ext.contextInfo.mentionedJID = mentioned
         ext.contextInfo.participant = participant
+        ext.contextInfo.stanzaID = quoted_id
         ext.HasField = MagicMock(side_effect=lambda f: f == "contextInfo")
         msg = MagicMock()
         msg.extendedTextMessage = ext
@@ -210,27 +213,41 @@ class TestWhatsAppChannel:
         msg = self._ext_msg_with_mentions("@207855026221128 help", ["207855026221128@lid"])
         assert wa_channel._is_addressed_in_group(msg) is True
 
-    def test_reply_to_own_phone(self, wa_channel):
+    @staticmethod
+    def _sent(channel, message_id: str) -> None:
+        channel._remember_pincer_message(MagicMock(ID=message_id))
+
+    def test_reply_to_pincer_message(self, wa_channel):
         wa_channel._own_jid = "491234567890"
-        msg = self._ext_msg_with_mentions("what about tomorrow?", [], "491234567890@s.whatsapp.net")
+        self._sent(wa_channel, "3EB0PINCER")
+        msg = self._ext_msg_with_mentions("what about tomorrow?", [], "491234567890@s.whatsapp.net", "3EB0PINCER")
         assert wa_channel._is_addressed_in_group(msg) is True
 
-    def test_reply_to_own_lid_with_device_suffix(self, wa_channel):
+    def test_reply_to_pincer_message_quoted_by_lid(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         wa_channel._own_lid = "207855026221128"
-        msg = self._ext_msg_with_mentions("and then?", [], "207855026221128:12@lid")
+        self._sent(wa_channel, "3EB0PINCER")
+        msg = self._ext_msg_with_mentions("and then?", [], "207855026221128:12@lid", "3EB0PINCER")
         assert wa_channel._is_addressed_in_group(msg) is True
+
+    def test_reply_to_the_persons_own_message_ignored(self, wa_channel):
+        """Shared number: a member replying to the person's own message is not for Pincer."""
+        wa_channel._own_jid = "491234567890"
+        self._sent(wa_channel, "3EB0PINCER")
+        msg = self._ext_msg_with_mentions("bring wine", [], "491234567890@s.whatsapp.net", "3EB0PERSON")
+        assert wa_channel._is_addressed_in_group(msg) is False
 
     def test_reply_to_someone_else(self, wa_channel):
         wa_channel._own_jid = "491234567890"
-        wa_channel._own_lid = "207855026221128"
-        msg = self._ext_msg_with_mentions("agreed", [], "14912345678901@s.whatsapp.net")
+        self._sent(wa_channel, "3EB0PINCER")
+        msg = self._ext_msg_with_mentions("agreed", [], "14912345678901@s.whatsapp.net", "3EB0OTHER")
         assert wa_channel._is_addressed_in_group(msg) is False
 
     def test_reply_ignored_when_on_reply_disabled(self, wa_channel, caplog):
         wa_channel._own_jid = "491234567890"
         wa_channel._settings.whatsapp_group_trigger_on_reply = False
-        msg = self._ext_msg_with_mentions("what about tomorrow?", [], "491234567890@s.whatsapp.net")
+        self._sent(wa_channel, "3EB0PINCER")
+        msg = self._ext_msg_with_mentions("what about tomorrow?", [], "491234567890@s.whatsapp.net", "3EB0PINCER")
         with caplog.at_level(logging.DEBUG, logger="pincer.channels.whatsapp"):
             assert wa_channel._is_addressed_in_group(msg) is False
         assert "PINCER_WHATSAPP_GROUP_TRIGGER_ON_REPLY is off" in caplog.text
@@ -238,34 +255,59 @@ class TestWhatsAppChannel:
     def test_trigger_works_when_on_reply_disabled(self, wa_channel):
         wa_channel._own_jid = "491234567890"
         wa_channel._settings.whatsapp_group_trigger_on_reply = False
-        msg = self._ext_msg_with_mentions("pincer, and tomorrow?", [], "491234567890@s.whatsapp.net")
+        self._sent(wa_channel, "3EB0PINCER")
+        msg = self._ext_msg_with_mentions("pincer, and tomorrow?", [], "491234567890@s.whatsapp.net", "3EB0PINCER")
         assert wa_channel._is_addressed_in_group(msg) is True
 
     def test_reply_from_own_number_ignored(self, wa_channel, caplog):
         """Shared number: the person quoting Pincer's answer is a comment, not a prompt."""
         wa_channel._own_jid = "491234567890"
-        msg = self._ext_msg_with_mentions("ha, exactly", [], "491234567890@s.whatsapp.net")
+        self._sent(wa_channel, "3EB0PINCER")
+        msg = self._ext_msg_with_mentions("ha, exactly", [], "491234567890@s.whatsapp.net", "3EB0PINCER")
         with caplog.at_level(logging.DEBUG, logger="pincer.channels.whatsapp"):
             assert wa_channel._is_addressed_in_group(msg, from_me=True) is False
         assert "reply from our own number ignored" in caplog.text
 
     def test_trigger_from_own_number_in_reply(self, wa_channel):
         wa_channel._own_jid = "491234567890"
-        msg = self._ext_msg_with_mentions("pincer, and tomorrow?", [], "491234567890@s.whatsapp.net")
+        self._sent(wa_channel, "3EB0PINCER")
+        msg = self._ext_msg_with_mentions("pincer, and tomorrow?", [], "491234567890@s.whatsapp.net", "3EB0PINCER")
         assert wa_channel._is_addressed_in_group(msg, from_me=True) is True
 
     def test_reply_in_image_caption(self, wa_channel):
         wa_channel._own_jid = "491234567890"
+        self._sent(wa_channel, "3EB0PINCER")
         image = MagicMock()
         image.caption = "like this one?"
         image.contextInfo.mentionedJID = []
         image.contextInfo.participant = "491234567890@s.whatsapp.net"
+        image.contextInfo.stanzaID = "3EB0PINCER"
         image.HasField = MagicMock(side_effect=lambda f: f == "contextInfo")
         msg = MagicMock()
         msg.conversation = ""
         msg.imageMessage = image
         msg.HasField = MagicMock(side_effect=lambda f: f == "imageMessage")
         assert wa_channel._is_addressed_in_group(msg) is True
+
+    def test_remembered_pincer_messages_are_bounded(self, wa_channel):
+        wa_channel._max_pincer_message_ids = 2
+        for message_id in ("A", "B", "C"):
+            self._sent(wa_channel, message_id)
+        self._sent(wa_channel, "C")
+        assert wa_channel._pincer_message_ids == {"B", "C"}
+        assert list(wa_channel._pincer_message_ids_order) == ["B", "C"]
+
+    @pytest.mark.asyncio
+    async def test_sends_remember_their_message_ids(self, wa_channel):
+        client = MagicMock()
+        client.send_message = AsyncMock(side_effect=[MagicMock(ID="T1"), MagicMock(ID="T2")])
+        client.send_image = AsyncMock(return_value=MagicMock(ID="I1"))
+        wa_channel._client = client
+        wa_channel._jid_for = AsyncMock(return_value="group@g.us")
+        await wa_channel.send("120363000000000000", "hello")
+        await wa_channel._send_tracked("120363000000000000", "status")
+        await wa_channel.send_photo("120363000000000000", "https://example.com/a.png")
+        assert wa_channel._pincer_message_ids == {"T1", "T2", "I1"}
 
     @pytest.mark.asyncio
     async def test_on_connected_seeds_own_lid(self, wa_channel):

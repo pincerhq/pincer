@@ -77,9 +77,9 @@ class ChannelSettings(BaseModel):
     whatsapp_group_trigger_on_reply: bool = Field(
         default=True,
         description=(
-            "In group chats, also reply when a message quotes one of the bot's messages. "
-            "On a shared personal number, replies to the person's own messages count too "
-            "(except the person's own replies). "
+            "In group chats, also reply when a message quotes a message the bot sent "
+            "(matched on message id, last 1000 in memory; the person's own replies on a "
+            "shared personal number never count). "
             "Trigger words from whatsapp_group_trigger apply either way."
         ),
     )

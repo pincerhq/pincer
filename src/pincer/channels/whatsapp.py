@@ -194,6 +194,13 @@ class WhatsAppChannel(BaseChannel):
         self._recent_sent_ids: set[str] = set()
         self._recent_sent_ids_order: deque[str] = deque()
         self._max_recent_sent_ids = 100
+        # Ids of messages Pincer sent, kept apart from the echo set above (which
+        # drops each id on its echo) so a group reply quoting one of them is
+        # recognised. In memory only: replies to messages sent before a restart
+        # need a trigger word.
+        self._pincer_message_ids: set[str] = set()
+        self._pincer_message_ids_order: deque[str] = deque()
+        self._max_pincer_message_ids = 1000
 
     @property
     def name(self) -> str:
@@ -351,7 +358,21 @@ class WhatsAppChannel(BaseChannel):
                     self._recent_sent_ids.discard(old)
                 self._recent_sent_ids_order.append(last_id)
                 self._recent_sent_ids.add(last_id)
+            self._remember_pincer_message(result)
         return last_id
+
+    def _remember_pincer_message(self, result: Any) -> None:
+        """Record the id of a message Pincer sent, so replies quoting it trigger."""
+        sid = getattr(result, "ID", None) if result is not None else None
+        if not sid:
+            return
+        sid = str(sid)
+        if sid in self._pincer_message_ids:
+            return
+        while len(self._pincer_message_ids_order) >= self._max_pincer_message_ids:
+            self._pincer_message_ids.discard(self._pincer_message_ids_order.popleft())
+        self._pincer_message_ids_order.append(sid)
+        self._pincer_message_ids.add(sid)
 
     # ── Progress reporting (tool_event_callback bridge) ─────
 
@@ -580,7 +601,7 @@ class WhatsAppChannel(BaseChannel):
 
         jid = await self._jid_for(user_id)
         for chunk in _split_whatsapp_message(text or ""):
-            await self._client.send_message(jid, chunk)
+            self._remember_pincer_message(await self._client.send_message(jid, chunk))
         logger.debug("WhatsApp message sent to %s (%d chars)", user_id, len(text))
 
     async def send_photo(self, user_id: str, url: str, caption: str = "") -> None:
@@ -590,7 +611,7 @@ class WhatsAppChannel(BaseChannel):
 
             raise ChannelNotConnectedError("WhatsApp client not connected")
         jid = await self._jid_for(user_id)
-        await self._client.send_image(jid, url, caption=caption or None)
+        self._remember_pincer_message(await self._client.send_image(jid, url, caption=caption or None))
 
     async def send_photo_from_bytes(
         self,
@@ -605,7 +626,7 @@ class WhatsAppChannel(BaseChannel):
 
             raise ChannelNotConnectedError("WhatsApp client not connected")
         jid = await self._jid_for(user_id)
-        await self._client.send_image(jid, data, caption=caption or None)
+        self._remember_pincer_message(await self._client.send_image(jid, data, caption=caption or None))
 
     async def send_file(self, user_id: str, file_path: str, caption: str = "") -> None:
         """Send a file as a WhatsApp document."""
@@ -620,13 +641,14 @@ class WhatsAppChannel(BaseChannel):
         filename = p.name
         mime, _ = mimetypes.guess_type(filename)
         jid = await self._jid_for(user_id)
-        await self._client.send_document(
+        result = await self._client.send_document(
             jid,
             file_path,
             caption=caption or None,
             filename=filename,
             mimetype=mime or "application/octet-stream",
         )
+        self._remember_pincer_message(result)
 
     async def send_animation(self, user_id: str, url: str, caption: str = "") -> None:
         """Send a GIF/animation — delivered as a looping video on WhatsApp."""
@@ -636,7 +658,7 @@ class WhatsAppChannel(BaseChannel):
             raise ChannelNotConnectedError("WhatsApp client not connected")
         jid = await self._jid_for(user_id)
         try:
-            await self._client.send_video(
+            result = await self._client.send_video(
                 jid,
                 url,
                 caption=caption or None,
@@ -645,7 +667,8 @@ class WhatsAppChannel(BaseChannel):
             )
         except Exception:
             logger.exception("send_animation failed, falling back to image")
-            await self._client.send_image(jid, url, caption=caption or None)
+            result = await self._client.send_image(jid, url, caption=caption or None)
+        self._remember_pincer_message(result)
 
     # ── Event Handlers ───────────────────────────
 
@@ -995,9 +1018,11 @@ class WhatsAppChannel(BaseChannel):
             if approval_fut and not approval_fut.done():
                 decision = self._parse_yes_no(incoming.text)
                 if decision is None:
-                    await client.send_message(
-                        build_jid(chat_user, source.Chat.Server),
-                        "Please reply *yes* or *no*.",
+                    self._remember_pincer_message(
+                        await client.send_message(
+                            build_jid(chat_user, source.Chat.Server),
+                            "Please reply *yes* or *no*.",
+                        )
                     )
                     return
                 approval_fut.set_result(decision)
@@ -1037,6 +1062,7 @@ class WhatsAppChannel(BaseChannel):
                     reply_jid = build_jid(chat_user, source.Chat.Server)
                     for chunk in _split_whatsapp_message(response):
                         result = await client.send_message(reply_jid, chunk)
+                        self._remember_pincer_message(result)
                         sent_id = getattr(result, "ID", None) if result is not None else None
                         if sent_id is not None:
                             sid = str(sent_id)
@@ -1272,12 +1298,13 @@ class WhatsAppChannel(BaseChannel):
         return {own_id for own_id in (self._own_jid, self._own_lid) if own_id}
 
     def _replies_to_self(self, ctx: Any) -> bool:
-        # A quoting message names the quoted message's author in
-        # ContextInfo.participant. On a shared personal number that author is
-        # also the person, so replies to their own messages count too.
-        if ctx is None or not ctx.participant:
+        # A quoting message carries the quoted message's id in
+        # ContextInfo.stanzaID. Match it against what Pincer itself sent, not
+        # the quoted author: on a shared personal number the author id is also
+        # the person, and members replying to the person must not reach Pincer.
+        if ctx is None or not ctx.stanzaID:
             return False
-        return str(ctx.participant).split("@", 1)[0].split(":", 1)[0] in self._own_ids()
+        return str(ctx.stanzaID) in self._pincer_message_ids
 
     def _mentions_self(self, text: str, ctx: Any) -> bool:
         own_ids = self._own_ids()

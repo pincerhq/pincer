@@ -103,6 +103,7 @@ def _make_message_event(
     msg_id: str = "test-msg-id",
     mentioned_jid: str | None = None,
     quoted_participant: str | None = None,
+    quoted_id: str = "",
     message_text: str = "hello",
 ):
     """Build a minimal MessageEv-like mock for routing tests."""
@@ -138,6 +139,7 @@ def _make_message_event(
         ctx.mentionedJID = [mentioned_jid] if mentioned_jid is not None else []
         # Set explicitly: an unset MagicMock attribute would be read as a reply.
         ctx.participant = quoted_participant or ""
+        ctx.stanzaID = quoted_id
         ext.contextInfo = ctx
     else:
         ext.contextInfo = None
@@ -542,30 +544,51 @@ class TestWhatsAppRouting:
         ch._handler.assert_called_once()
         ch._extract_message.assert_called_once()
 
-    async def test_group_reply_to_owner_responds(self, routing_channel):
-        """Reply quoting the owner's (Pincer's) message, no trigger word → responds."""
+    async def test_group_reply_to_pincer_responds(self, routing_channel):
+        """Reply quoting a message Pincer sent, no trigger word → responds."""
         ch = routing_channel
+        ch._remember_pincer_message(MagicMock(ID="3EB0PINCER"))
         event, _, _ = _make_message_event(
             from_me=False,
             chat_user="group123",
             sender_user=OTHER_PHONE,
             is_group=True,
             quoted_participant=f"{OWNER_PHONE}@s.whatsapp.net",
+            quoted_id="3EB0PINCER",
             message_text="and tomorrow?",
         )
         await ch._on_message(MagicMock(), event)
         ch._handler.assert_called_once()
         ch._extract_message.assert_called_once()
 
+    async def test_group_reply_to_the_persons_own_message_ignored(self, routing_channel):
+        """Shared number: a member replying to the person's own message → ignored."""
+        ch = routing_channel
+        ch._remember_pincer_message(MagicMock(ID="3EB0PINCER"))
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user="group123",
+            sender_user=OTHER_PHONE,
+            is_group=True,
+            quoted_participant=f"{OWNER_PHONE}@s.whatsapp.net",
+            quoted_id="3EB0PERSON",
+            message_text="bring wine",
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_not_called()
+        ch._extract_message.assert_not_called()
+
     async def test_group_owner_reply_to_own_message_ignored(self, routing_channel):
         """Owner quoting Pincer's (their own number's) message without a trigger word → ignored."""
         ch = routing_channel
+        ch._remember_pincer_message(MagicMock(ID="3EB0PINCER"))
         event, _, _ = _make_message_event(
             from_me=True,
             chat_user="group123",
             sender_user=OWNER_PHONE,
             is_group=True,
             quoted_participant=f"{OWNER_PHONE}@s.whatsapp.net",
+            quoted_id="3EB0PINCER",
             message_text="ha, exactly",
         )
         await ch._on_message(MagicMock(), event)
