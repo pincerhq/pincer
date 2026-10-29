@@ -1512,10 +1512,8 @@ class Agent:
             logger.info("onboarding.empty_reply user=%s channel=%s closed=%s", user_id, channel, closed)
             return
 
-        if not await self._sessions.onboarding.complete(
-            user_id, channel, now=time.time(), max_empty=_ONBOARDING_MAX_EMPTY_REPLIES
-        ):
-            # Another turn closed it first and wrote its own profile.
+        if not await self._sessions.onboarding.complete_answer(user_id, channel, now=time.time()):
+            # Another answer or expiry closed the gate first.
             logger.info("onboarding.already_completed user=%s channel=%s", user_id, channel)
             return
         logger.info(

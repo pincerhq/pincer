@@ -113,11 +113,24 @@ async def test_a_real_answer_can_win_after_an_empty_reply_closes_the_gate(url):
     assert await service.record_empty_reply("u", "web", max_empty=2, now=30.0) is True
 
     assert await service.complete("u", "web", now=35.0) is False
-    assert await service.complete("u", "web", now=40.0, max_empty=2) is True
+    assert await service.complete_answer("u", "web", now=40.0) is True
     record = await service.get("u", "web")
     assert record is not None
-    assert (record.attempts, record.completed_at) == (0, 40.0)
-    assert await service.complete("u", "web", now=50.0, max_empty=2) is False
+    assert (record.attempts, record.completed_at) == (2, 40.0)
+    assert await service.complete_answer("u", "web", now=50.0) is False
+
+
+@pytest.mark.parametrize("first_answer", [False, True])
+async def test_answer_cannot_take_over_expiry_or_another_answer(url, first_answer):
+    service = OnboardingService(url)
+    await service.claim_prompt("u", "web", "web:u", now=10.0)
+    await service.record_empty_reply("u", "web", max_empty=2, now=15.0)
+    close = service.complete_answer if first_answer else service.complete
+    assert await close("u", "web", now=20.0) is True
+    assert await service.complete_answer("u", "web", now=30.0) is False
+    record = await service.get("u", "web")
+    assert record is not None
+    assert (record.attempts, record.completed_at) == (1, 20.0)
 
 
 async def test_an_empty_reply_without_a_row_inserts_one(url):
