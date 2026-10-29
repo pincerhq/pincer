@@ -470,6 +470,7 @@ CALL_NOT_CONNECTED_REASONS = {
     "voicemail": "voicemail detected, no message left",
     "shutdown": "the assistant was restarted before anyone answered",
     "stuck": "the call rang past its time limit and was ended",
+    "ended_by_owner": "the call was ended from the dashboard before anyone answered",
     "unknown": "the call ended before anyone answered",
     # Any other code: never fall back to the English operator text.
     "_other": "the call ended before anyone answered",

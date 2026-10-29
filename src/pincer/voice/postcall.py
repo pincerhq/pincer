@@ -608,18 +608,7 @@ class PostCallProcessor:
             # the same row — they are what the golden signals and the weekly
             # digest group by, and writing them here keeps the call row the
             # single source of truth for "how did it go".
-            values: dict[str, Any] = {
-                "call_sid": call_sid,
-                "direction": state.direction.value,
-                "from_number": state.caller_number,
-                "to_number": state.target_number,
-                "pincer_user_id": state.pincer_user_id,
-                "started_at": state.started_at.isoformat(),
-                "ended_at": (state.ended_at or datetime.now(UTC)).isoformat(),
-                "failure_code": str(state.metadata.get("failure_code", "") or ""),
-                "engine": state.engine_type,
-                "language": state.language,
-            }
+            values: dict[str, Any] = state.history_row()
             # The briefing is stored verbatim so the dashboard can show exactly
             # what the agent was told — not our rendering of it.
             briefing = briefing_from_state(state)

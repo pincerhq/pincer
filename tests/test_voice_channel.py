@@ -181,6 +181,13 @@ async def _channel_with_fake_engine(tmp_path):
     return settings, engine, channel
 
 
+async def _settle_rows(channel):
+    import asyncio
+
+    while channel._call_row_tasks:
+        await asyncio.wait(set(channel._call_row_tasks.values()))
+
+
 async def test_call_row_is_written_at_start_and_closed_at_teardown(tmp_path):
     """Without a post-call processor nothing else writes the history row: the
     call must still be in it, open while live and with `ended_at` once over."""
@@ -190,7 +197,7 @@ async def test_call_row_is_written_at_start_and_closed_at_teardown(tmp_path):
 
     settings, engine, channel = await _channel_with_fake_engine(tmp_path)
     await engine.on_call_start("CA_row", "+4930123456", CallDirection.INBOUND, language="en")
-    await channel._call_row_tasks["CA_row"]
+    await _settle_rows(channel)
     calls = await CallsService.for_path(Path(settings.db_path))
     row = await calls.get("CA_row")
     assert row is not None
@@ -200,19 +207,78 @@ async def test_call_row_is_written_at_start_and_closed_at_teardown(tmp_path):
 
     state = engine.get_call_state("CA_row")
     await engine.end_call("CA_row")
+    await _settle_rows(channel)
     row = await calls.get("CA_row")
     assert row is not None and row["ended_at"] is not None
     assert row["failure_code"] == state.metadata["failure_code"]  # the classified code, not ""
-    assert "CA_row" not in channel._call_row_tasks
     await channel.stop()
 
 
-async def test_only_inbound_calls_ask_twilio_for_a_status_callback(tmp_path):
-    import asyncio
+async def test_a_re_registered_call_keeps_its_row_start(tmp_path):
+    """Lost-state recovery registers the call again with a fresh CallState:
+    the row keeps its real start and numbers."""
+    from pathlib import Path
+
+    from pincer.services.voice.calls import CallsService
+
+    settings, engine, channel = await _channel_with_fake_engine(tmp_path)
+    await engine.on_call_start("CA_re", "+4930123456", CallDirection.INBOUND, language="en")
+    await _settle_rows(channel)
+    calls = await CallsService.for_path(Path(settings.db_path))
+    first = await calls.get("CA_re")
+
+    engine._active_calls.pop("CA_re")
+    await engine.on_call_start("CA_re", "+4930999999", CallDirection.INBOUND, language="en")
+    await _settle_rows(channel)
+    again = await calls.get("CA_re")
+    assert again["started_at"] == first["started_at"] and again["from_number"] == "+4930123456"
+
+    await engine.end_call("CA_re")
+    await _settle_rows(channel)
+    closed = await calls.get("CA_re")
+    assert closed["started_at"] == first["started_at"] and closed["ended_at"] is not None
+    await channel.stop()
+
+
+async def test_rows_left_open_by_a_previous_run_are_closed_at_start(tmp_path):
+    from pathlib import Path
+
+    from voice_harness.settings import apply_test_paths
+
+    from pincer.services.voice.calls import CallsService
+
+    settings = apply_test_paths(MagicMock(), tmp_path)
+    calls = await CallsService.for_path(Path(settings.db_path))
+    await calls.save_call({"call_sid": "CA_orphan", "direction": "inbound", "started_at": "2026-10-01T10:00:00+00:00"})
+    await calls.save_call(
+        {
+            "call_sid": "CA_done",
+            "direction": "inbound",
+            "started_at": "2026-10-01T09:00:00+00:00",
+            "ended_at": "2026-10-01T09:05:00+00:00",
+            "failure_code": "none",
+        }
+    )
+
+    channel = VoiceChannel(settings)
+    await channel.start(AsyncMock())
+    orphan = await calls.get("CA_orphan")
+    assert orphan["ended_at"] == orphan["started_at"] and orphan["failure_code"] == "shutdown"
+    done = await calls.get("CA_done")
+    assert done["ended_at"] == "2026-10-01T09:05:00+00:00" and done["failure_code"] == "none"
+
+
+async def test_a_dashboard_hangup_mid_action_is_not_a_failure(tmp_path):
+    from pincer.voice.engine import ENDED_BY_DASHBOARD, ENDED_BY_KEY
+    from pincer.voice.state_machine import CallPhase
 
     _settings, engine, channel = await _channel_with_fake_engine(tmp_path)
-    await engine.on_call_start("CA_in", "+4930123456", CallDirection.INBOUND, language="en")
-    await engine.on_call_start("CA_out", "+4930123456", CallDirection.OUTBOUND, language="en")
-    await asyncio.sleep(0)
-    assert engine.status_watches == ["CA_in"]
+    state = await engine.on_call_start("CA_own", "+4930123456", CallDirection.INBOUND, language="en")
+    sm = channel.get_state_machine("CA_own")
+    assert sm is not None and sm.phase not in (CallPhase.COMPLETED, CallPhase.FAILED)
+    state.metadata[ENDED_BY_KEY] = ENDED_BY_DASHBOARD
+    await engine.end_call("CA_own")
+    assert sm.phase == CallPhase.COMPLETED
+    assert state.metadata["failure_code"] == "none"
+    await _settle_rows(channel)
     await channel.stop()

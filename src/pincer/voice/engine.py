@@ -64,6 +64,12 @@ END_CODE_KEY = "end_code"
 #: Metadata key for the provider status that set `end_code`, when one did: the
 #: report wording can be more specific than the code (`canceled` vs `failed`).
 PROVIDER_STATUS_KEY = "provider_status"
+#: Metadata key for who hung the call up from outside it (`ENDED_BY_DASHBOARD`).
+#: An owner ending a call is not a failure; see VoiceChannel._handle_call_end.
+ENDED_BY_KEY = "ended_by"
+ENDED_BY_DASHBOARD = "dashboard"
+#: Metadata key: the call's status callback has been asked for (inbound calls).
+STATUS_WATCH_KEY = "status_watch"
 #: Metadata key for the token of the call's latest <Dial>. `transfer_call` puts it
 #: in the action URL (`?dial=…`, covered by the Twilio signature), so a dial
 #: result names the dial it belongs to even when Twilio sends no DialCallSid.
@@ -152,6 +158,26 @@ class CallState:
         end = self.ended_at or datetime.now(UTC)
         return int((end - self.started_at).total_seconds())
 
+    def history_row(self, *, ended: bool = True) -> dict[str, Any]:
+        """The call's `pincer_voice_calls` columns that the call state knows.
+
+        Shared by the channel's start/end rows and the post-call save, so the
+        three writes agree. Without `ended`, no `ended_at` / `failure_code`."""
+        row: dict[str, Any] = {
+            "call_sid": self.call_sid,
+            "direction": self.direction.value,
+            "from_number": self.caller_number,
+            "to_number": self.target_number,
+            "pincer_user_id": self.pincer_user_id,
+            "started_at": self.started_at.isoformat(),
+            "engine": self.engine_type,
+            "language": self.language,
+        }
+        if ended:
+            row["ended_at"] = (self.ended_at or datetime.now(UTC)).isoformat()
+            row["failure_code"] = str(self.metadata.get("failure_code", "") or "")
+        return row
+
     def mark_caller_spoke(self) -> None:
         """Flag a demonstrably conversing counterpart — shields the call from
         late/false AMD "machine" verdicts in the status webhook. Speech inside
@@ -228,6 +254,8 @@ class VoiceEngine(ABC):
         self.metrics_registry: Any = None
         # Hangup, transfer, DTMF, fallback <Say>: awaited, never blocking the loop.
         self._rest = TwilioRest(settings)
+        # Fire-and-forget REST requests (status callbacks), held until done.
+        self._background: set[asyncio.Task[None]] = set()
 
     def set_on_speech(self, callback: Callable) -> None:
         self._on_speech_callback = callback
@@ -557,6 +585,21 @@ class VoiceEngine(ABC):
         base = str(getattr(self._settings, "voice_webhook_base_url", "") or "").strip().rstrip("/")
         return f"{base}/api/apps/twilio/status" if base.startswith(("http://", "https://")) else ""
 
+    def on_media_connected(self, call_sid: str) -> None:
+        """The call's media socket is up (relay `setup`, stream `start`).
+
+        For an inbound call this is the first moment Twilio has it
+        in progress: during /webhook it is still ringing, and an update then
+        is refused. So the status callback is asked for here, once per call,
+        without holding up the socket's read loop."""
+        state = self._active_calls.get(call_sid)
+        if state is None or state.direction != CallDirection.INBOUND or state.metadata.get(STATUS_WATCH_KEY):
+            return
+        state.metadata[STATUS_WATCH_KEY] = True
+        task = asyncio.create_task(self.watch_call_status(call_sid), name=f"voice-status-callback-{call_sid}")
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
     async def watch_call_status(self, call_sid: str) -> None:
         """Have Twilio post this call's final status to /status.
 
@@ -575,21 +618,27 @@ class VoiceEngine(ABC):
         except Exception as exc:
             logger.warning("Status callback for call %s not set: %s", call_sid, _hangup_error_text(exc))
 
-    async def end_call(self, call_sid: str) -> str | None:
-        """Hang up through Twilio, then tear the call down.
-
-        Returns None when Twilio hung up (or the call was already over there),
-        else a short reason the REST hang-up failed. Teardown runs either way:
-        the call is unregistered and the end-of-call callback runs."""
-        error: str | None = None
+    async def hang_up(self, call_sid: str) -> str | None:
+        """The REST hang-up alone, no teardown. Returns None when Twilio hung
+        up or the call was already over there, else a short reason."""
         try:
             await self._rest.update_call(call_sid, status="completed")
         except Exception as exc:
             if _already_over(exc):
                 logger.info("Call %s was already over at Twilio", call_sid)
-            else:
-                error = _hangup_error_text(exc)
-                logger.exception("Failed to end call %s", call_sid)
+                return None
+            logger.exception("Failed to end call %s", call_sid)
+            return _hangup_error_text(exc)
+        return None
+
+    async def end_call(self, call_sid: str) -> str | None:
+        """Hang up through Twilio, then tear the call down.
+
+        Returns what `hang_up` returns. Teardown runs either way: the call is
+        unregistered and the end-of-call callback runs."""
+        error: str | None = None
+        try:
+            error = await self.hang_up(call_sid)
         finally:
             state = await self._unregister_call(call_sid)
             if state and self._on_call_end_callback:
@@ -639,9 +688,10 @@ class VoiceEngine(ABC):
     async def on_media_closed(self, call_sid: str) -> None:
         """The media WebSocket closed: the call is over on Twilio's side.
 
-        Inbound calls get no status callback unless one is configured in the
-        console, so this is their end signal. No-op if we already ended the
-        call or it is being transferred; never issues a REST hangup.
+        One of two end signals: inbound calls also get a status callback once
+        their media connects (`on_media_connected`), and whichever arrives
+        first ends the call. No-op if we already ended the call or it is being
+        transferred; never issues a REST hangup.
         """
         state = self._active_calls.get(call_sid)
         if state is None or state.metadata.get("transferring"):
@@ -1033,18 +1083,20 @@ class VoiceEngine(ABC):
 _TWILIO_CALL_NOT_IN_PROGRESS = 21220
 
 
-def _already_over(exc: BaseException) -> bool:
-    """A failed hang-up that means the call had already ended at Twilio."""
-    return getattr(exc, "status", None) == 404 or getattr(exc, "code", None) == _TWILIO_CALL_NOT_IN_PROGRESS
+def _already_over(exc: Exception) -> bool:
+    """A failed hang-up that means the call had already ended at Twilio.
+
+    Only 21220. A 404 (20404) is not taken as "over": wrong account or
+    subaccount credentials answer 404 for a call that is very much live."""
+    return getattr(exc, "code", None) == _TWILIO_CALL_NOT_IN_PROGRESS
 
 
-def _hangup_error_text(exc: BaseException) -> str:
+def _hangup_error_text(exc: Exception) -> str:
     """One line for the log and the API: the Twilio code and message, or the
     exception type for a timeout or a network error."""
     from pincer.voice.outbound import twilio_error_text
 
-    text = twilio_error_text(exc) if isinstance(exc, Exception) else ""
-    return text or type(exc).__name__
+    return twilio_error_text(exc) or type(exc).__name__
 
 
 def note_transfer_started(call_sid: str, record: dict[str, Any]) -> None:

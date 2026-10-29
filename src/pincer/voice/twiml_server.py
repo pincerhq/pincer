@@ -923,7 +923,11 @@ async def voice_status(request: Request) -> PlainTextResponse:
             if state:
                 # Twilio has already ended the call: finalize without a REST
                 # hangup, which could only fail.
-                await _engine.finish_remote_ended(call_sid, reason="provider_completed")
+                # A plain hang-up reaches us twice (this and the media close):
+                # no reason, so the trace says the same whichever wins. During
+                # a transfer the media is already gone and this is the signal.
+                reason = "provider_completed" if state.metadata.get("transfer") else ""
+                await _engine.finish_remote_ended(call_sid, reason=reason)
             elif _already_torn_down(call_sid):
                 # Race: end_call (AMD hangup, caller hangup, shutdown) popped the
                 # state and handed the final message to its post-call pipeline,
@@ -1054,6 +1058,7 @@ async def relay_ws(websocket: WebSocket) -> None:
                 # the call starts from here — an outbound state exists from
                 # before the dial, so registration is NOT an answer.
                 await _engine.mark_call_answered(call_sid)
+                _engine.on_media_connected(call_sid)
 
             elif msg_type == "prompt":
                 text = str(msg.get("voicePrompt", ""))
@@ -1367,6 +1372,7 @@ async def media_stream_ws(websocket: WebSocket, call_sid: str) -> None:
 
     telemetry.media_open(call_sid, engine="media_streams")
     await _engine.mark_call_answered(call_sid)
+    _engine.on_media_connected(call_sid)
 
     # Inbound frame arrival gaps are the only audio-quality signal this
     # transport exposes: Twilio terminates the RTP leg, so there is no jitter
