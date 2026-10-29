@@ -8,8 +8,9 @@ Data sources:
   - Live call state:  the engine wired by `init_voice_routes` at startup
     (`pincer.voice.twiml_server.get_engine`) — empty when voice is off.
   - History:          voice_calls / call_transcripts / call_actions in the
-    main SQLite DB, as created by `pincer.voice.retention.ensure_voice_tables`
-    and written by the post-call processor. `status` and `duration_seconds`
+    main SQLite DB, as created by `pincer.voice.retention.ensure_voice_tables`.
+    The voice channel writes the call row at call start and closes it at
+    teardown; the post-call processor fills in the rest. `status` and `duration_seconds`
     are derived from started_at/ended_at — the runtime schema stores neither.
   - Contacts:         phone_contacts (may not exist yet; served as empty).
   - Outbound:         `pincer.voice.outbound.make_phone_call`, the same
@@ -84,6 +85,13 @@ def _duration_seconds(started_at: str, ended_at: str | None) -> int:
 # ── Schemas ──────────────────────────────────────────────────────────
 
 
+class VoiceCapabilities(BaseModel):
+    """What the dashboard may offer for voice. The frontend reads a missing
+    field as "unknown", so each one is declared here."""
+
+    call_controls: bool = True  # POST /api/voice/calls/{call_sid}/end
+
+
 class VoiceStatus(BaseModel):
     enabled: bool = False
     engine: str = ""
@@ -94,6 +102,7 @@ class VoiceStatus(BaseModel):
     webhook_base_configured: bool = False
     active_call_count: int = 0
     listen_in_enabled: bool = False  # Sprint 15: live listen-in media fork on
+    capabilities: VoiceCapabilities = Field(default_factory=VoiceCapabilities)
 
 
 class AnalyticsOut(BaseModel):
@@ -937,6 +946,68 @@ async def cancel_scheduled_call(schedule_id: str) -> None:
         raise HTTPException(status_code=404, detail="No such scheduled call")
     if not await scheduler.remove(schedule_id, _DASHBOARD_USER):
         raise HTTPException(status_code=404, detail="No such scheduled call")
+
+
+async def _audit_call_end(*, user: str, call_sid: str, twilio_error: str | None) -> None:
+    """Every hang-up from the dashboard leaves one audit row. Best effort."""
+    try:
+        from pincer.security.audit import AuditAction, AuditEntry, get_audit_logger
+
+        audit = await get_audit_logger()
+        await audit.log(
+            AuditEntry(
+                user_id=user,
+                action=AuditAction.VOICE_CALL_END,
+                tool="voice_call_end",
+                input_summary=call_sid,
+                output_summary=f"Twilio rejected the hang-up: {twilio_error}" if twilio_error else "ended",
+                approved=True,
+                channel="voice",
+                metadata={"call_sid": call_sid, "ended_by": _DASHBOARD_USER, "twilio_error": twilio_error},
+            )
+        )
+    except Exception:  # pragma: no cover — auditing must not fail the hang-up
+        logger.debug("Audit logging of call end failed", exc_info=True)
+
+
+@router.post(
+    "/calls/{call_sid}/end",
+    status_code=204,
+    response_class=Response,
+    responses={
+        404: {"description": "The call is not active (already ended, unknown, or voice is off)"},
+        502: {"description": "Twilio rejected the hang-up; the call is no longer tracked as active"},
+    },
+)
+async def end_active_call(call_sid: str, identity: OptionalIdentity) -> Response:
+    """Hang up a live call.
+
+    The call leaves the active list whatever Twilio answers: a 502 says the
+    REST hang-up failed, not that the call is still tracked."""
+    from pincer.voice.call_locks import one_call_update_at_a_time
+
+    engine = _get_engine()
+    if engine is None or engine.get_call_state(call_sid) is None:
+        raise HTTPException(status_code=404, detail="Call is not active")
+    # The lock /status holds: a `completed` arriving meanwhile ends the call
+    # once, and then this request finds it gone.
+    async with one_call_update_at_a_time(call_sid):
+        state = engine.get_call_state(call_sid)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Call is not active")
+        # Who ended it, for the trace and the report. Not a failure code: an
+        # owner hanging up is not a failed call.
+        state.metadata.setdefault("ended_by", "dashboard")
+        error = await engine.end_call(call_sid)
+    user = (identity.pincer_user_id if identity is not None else "") or _DASHBOARD_USER
+    await _audit_call_end(user=user, call_sid=call_sid, twilio_error=error)
+    if error:
+        return Response(
+            content=json.dumps({"detail": f"Twilio rejected the hang-up: {error}"}),
+            status_code=502,
+            media_type="application/json",
+        )
+    return Response(status_code=204)
 
 
 @router.get("/calls/{call_sid}", response_model=CallDetail)

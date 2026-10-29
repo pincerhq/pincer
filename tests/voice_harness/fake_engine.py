@@ -22,6 +22,7 @@ class FakeVoiceEngine(VoiceEngine):
         self.silenced: dict[str, list[int]] = {}
         self.dtmf: dict[str, list[str]] = {}
         self.ended: list[str] = []
+        self.status_watches: list[str] = []  # inbound calls given a status callback
         self.transfers: dict[str, list[dict[str, Any]]] = {}  # Sprint 12: <Dial> redirects
         # what Twilio reports for a call (fetch_call_status); an exception is raised
         self.call_status: str | Exception = "in-progress"
@@ -121,13 +122,17 @@ class FakeVoiceEngine(VoiceEngine):
             raise self.call_status
         return self.call_status
 
-    async def end_call(self, call_sid: str) -> None:
+    async def end_call(self, call_sid: str) -> str | None:
         if call_sid in self.ended:
-            return
+            return None
         self.ended.append(call_sid)
         state = await self._unregister_call(call_sid)
         if state and self._on_call_end_callback:
             await self._on_call_end_callback(call_sid, state)
+        return None
+
+    async def watch_call_status(self, call_sid: str) -> None:
+        self.status_watches.append(call_sid)
 
     async def send_dtmf(self, call_sid: str, digits: str) -> None:
         self.dtmf.setdefault(call_sid, []).append(digits)
