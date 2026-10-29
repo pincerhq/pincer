@@ -395,9 +395,12 @@ selection would invalidate. Voice calls keep their own tool filter.
 
 The ranking query is the user's message plus the end of the assistant message
 it answers, so a short "ja, bitte" to a proposal still ranks the proposed tool.
-When a skill is loaded mid-turn (`load_skill`), the turn's tools are selected
-again with the skill's text first, so the skill can reach tools the message
-didn't rank; tools already called stay.
+When a skill is loaded mid-turn (`load_skill`, in chat and in scheduled
+actions), the turn's tools are selected again with the skill's text first, so
+the skill can reach tools the message didn't rank; tools already called stay,
+and a scheduled action still picks only from its `allowed_tools`. The system
+prompt is rebuilt with the new set, so its tool hints match. A failed load
+(`Error: no skill named …`) changes nothing.
 
 Ranking runs on the memory server: its `tool_index_sync` / `tool_index_search`
 tools embed tool names and descriptions with

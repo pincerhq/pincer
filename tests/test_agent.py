@@ -1079,6 +1079,73 @@ async def test_loading_a_skill_reselects_tools_mid_turn(settings, mock_llm, sess
     first, second = mock_llm.complete.call_args_list
     assert set(_tool_names(first)) == {"load_skill", "whoami"}
     assert set(_tool_names(second)) == {"load_skill", "google__search_drive_files"}
+    # The system prompt is rebuilt with the new set: its google__ hints follow the tools sent.
+    assert "google__" not in first.kwargs["system"]
+    assert "google__" in second.kwargs["system"]
+
+
+def _load_skill_then_answer() -> list[LLMResponse]:
+    return [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="tc1", name="load_skill", arguments={"name": "budget"})],
+            model="test",
+            input_tokens=10,
+            output_tokens=5,
+            stop_reason="tool_use",
+        ),
+        LLMResponse(content="done", model="test", input_tokens=10, output_tokens=5, stop_reason="end_turn"),
+    ]
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_failed_skill_load_keeps_the_turns_tools(settings, mock_llm, session_manager, cost_tracker, streaming):
+    """load_skill reports an unknown name as an "Error: ..." result, not is_error: no skill loaded, no re-selection."""
+    failure = "Error: no skill named 'budget'. Available skills: a, b, c"
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry(failure))
+    selector = _RecordingSelector(settings, {"whoami", "load_skill"}, {"google__search_drive_files"})
+    agent.tool_selector = selector
+    mock_llm.complete.side_effect = _load_skill_then_answer()
+
+    if streaming:
+        async for _chunk in agent.handle_message_stream(user_id="user1", channel="test", text="Budget?"):
+            pass
+    else:
+        await agent.handle_message("user1", "test", "Budget?")
+
+    assert [q for q, _ in selector.calls] == ["Budget?"]
+    first, second = mock_llm.complete.call_args_list
+    assert _tool_names(second) == _tool_names(first)
+    assert second.kwargs["system"] == first.kwargs["system"]
+
+
+async def test_run_headless_reselects_from_allowed_tools_after_a_skill(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    """Scheduled actions re-select after load_skill too, but only from their allowed_tools."""
+    skill = "Budget skill: find the sheet with google__search_drive_files"
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry(skill))
+    offered: list[set[str]] = []
+
+    class _Selector(_RecordingSelector):
+        async def select(self, schemas, query, recent_tool_names=()):
+            offered.append({s["name"] for s in schemas})
+            return await super().select(schemas, query, recent_tool_names)
+
+    selector = _Selector(settings, {"load_skill"}, {"load_skill", "google__search_drive_files"})
+    agent.tool_selector = selector
+    mock_llm.complete.side_effect = _load_skill_then_answer()
+    allowed = ["load_skill", "google__search_drive_files", "whoami"]
+
+    await agent.run_headless("Run the budget skill", "user1", "scheduler", allowed_tools=allowed)
+
+    assert offered == [set(allowed), set(allowed)]  # never make_phone_call, which isn't allowed
+    assert selector.calls[1] == (f"{skill}\nRun the budget skill", ["load_skill"])
+    first, second = mock_llm.complete.call_args_list
+    assert _tool_names(first) == ["load_skill"]
+    assert set(_tool_names(second)) == {"load_skill", "google__search_drive_files"}
+    assert "google__" not in first.kwargs["system"]
+    assert "google__" in second.kwargs["system"]
 
 
 async def test_in_call_prompt_hints_follow_the_registry(settings, mock_llm, session_manager, cost_tracker):

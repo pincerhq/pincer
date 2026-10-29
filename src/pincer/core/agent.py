@@ -245,23 +245,38 @@ class AgentResponse:
     model: str = ""
 
 
-def _selection_query(text: str, session: Session | None) -> str:
+def _selection_query(text: str, history: list[LLMMessage] | None) -> str:
     """Tool-ranking query: the user's message, then the end of the assistant message it answers.
 
     A short reply ("yes, do it" / "ja, bitte") to an assistant's proposal says
     nothing about tools on its own; the proposal does. The user's text comes
     first, since the embedding model reads only the start of a long query.
     """
-    if session is None:
+    if not history:
         return text
-    messages = session.messages
-    # The current user message is already in the session; look before it.
+    messages = history
+    # The current user message is already in the history; look before it.
     end = len(messages) - 1 if messages and messages[-1].role == MessageRole.USER else len(messages)
     previous = next(
         (m.content for m in reversed(messages[:end]) if m.role == MessageRole.ASSISTANT and m.content.strip()),
         "",
     )
     return f"{text}\n{previous[-_SELECTION_EXTRA_CHARS:]}" if previous else text
+
+
+def _loaded_skill(tool_call: ToolCall, result: ToolResult) -> str | None:
+    """The text of a skill this tool call loaded, or None.
+
+    load_skill reports failures (unknown name, unreadable files) as a normal
+    result starting with "Error", like the other skill tools, not as is_error.
+    """
+    if tool_call.name != _LOAD_SKILL_TOOL or result.is_error or result.content.startswith("Error"):
+        return None
+    return result.content
+
+
+def _schema_names(schemas: list[dict[str, Any]] | None) -> list[str]:
+    return [s["name"] for s in schemas or []]
 
 
 def _clean_profile_value(v: Any) -> str | None:
@@ -595,22 +610,25 @@ class Agent:
         elif call_gate is not None:
             tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
         else:
-            tool_schemas = await self._select_tools(self._tools.get_schemas(), text, session)
+            tool_schemas = await self._select_tools(self._tools.get_schemas(), text, session.messages)
         logger.debug(
             "Tools available (%d): %s",
             len(tool_schemas or []),
             [t.get("name") for t in (tool_schemas or [])],
         )
 
-        system_prompt = await self._build_system_prompt(
-            user_id,
-            text,
-            extra_system="\n\n".join(extra_parts) or None,
-            skip_memory=not memory,
-            # In a call the hints follow the registry, as on the streaming voice path
-            # (stream_voice_turn), so the two paths keep one prompt.
-            tool_names=None if call_gate is not None else [t["name"] for t in tool_schemas or []],
-        )
+        async def build_prompt(tool_names: list[str] | None) -> str:
+            return await self._build_system_prompt(
+                user_id,
+                text,
+                extra_system="\n\n".join(extra_parts) or None,
+                skip_memory=not memory,
+                tool_names=tool_names,
+            )
+
+        # In a call the hints follow the registry, as on the streaming voice path
+        # (stream_voice_turn), so the two paths keep one prompt.
+        system_prompt = await build_prompt(None if call_gate is not None else _schema_names(tool_schemas))
 
         total_cost = 0.0
         tool_calls_count = 0
@@ -709,11 +727,16 @@ class Agent:
 
                     if result.is_error:
                         iteration_had_error = True
-                    elif tool_call.name == _LOAD_SKILL_TOOL:
-                        skills_loaded.append(result.content)
+                    elif (skill := _loaded_skill(tool_call, result)) is not None:
+                        skills_loaded.append(skill)
 
                 if skills_loaded and call_gate is None:
-                    tool_schemas = await self._reselect_for_skills(text, session, skills_loaded) or tool_schemas
+                    reselected = await self._reselect_after_skills(
+                        self._tools.get_schemas(), text, session.messages, skills_loaded
+                    )
+                    if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
+                        tool_schemas = reselected
+                        system_prompt = await build_prompt(_schema_names(tool_schemas))
 
                 if iteration_had_error:
                     consecutive_errors += 1
@@ -812,13 +835,12 @@ class Agent:
         """
         messages: list[LLMMessage] = [LLMMessage(role=MessageRole.USER, content=prompt)]
 
-        tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
-        if tool_schemas is not None and allowed_tools is not None:
-            tool_schemas = [s for s in tool_schemas if s.get("name") in allowed_tools] or None
-        if tool_schemas is not None:
-            tool_schemas = await self._select_tools(tool_schemas, prompt)
+        candidates = self._tools.get_schemas() if self._tools.has_tools else None
+        if candidates is not None and allowed_tools is not None:
+            candidates = [s for s in candidates if s.get("name") in allowed_tools] or None
+        tool_schemas = await self._select_tools(candidates, prompt) if candidates is not None else None
         system_prompt = await self._build_system_prompt(
-            user_id, prompt, skip_memory=True, tool_names=[t["name"] for t in tool_schemas or []]
+            user_id, prompt, skip_memory=True, tool_names=_schema_names(tool_schemas)
         )
 
         final_text = ""
@@ -864,6 +886,7 @@ class Agent:
                 )
 
                 iteration_had_error = False
+                skills_loaded: list[str] = []
                 for tool_call in response.tool_calls:
                     result = await self._execute_tool(
                         tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True
@@ -877,6 +900,17 @@ class Agent:
                     )
                     if result.is_error:
                         iteration_had_error = True
+                    elif (skill := _loaded_skill(tool_call, result)) is not None:
+                        skills_loaded.append(skill)
+
+                if skills_loaded and candidates is not None:
+                    # From the allowed_tools subset only, like the first selection.
+                    reselected = await self._reselect_after_skills(candidates, prompt, messages, skills_loaded)
+                    if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
+                        tool_schemas = reselected
+                        system_prompt = await self._build_system_prompt(
+                            user_id, prompt, skip_memory=True, tool_names=_schema_names(tool_schemas)
+                        )
 
                 if iteration_had_error:
                     consecutive_errors += 1
@@ -951,20 +985,22 @@ class Agent:
 
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
         tool_schemas = (
-            await self._select_tools(self._tools.get_schemas(), text, session) if self._tools.has_tools else None
+            await self._select_tools(self._tools.get_schemas(), text, session.messages)
+            if self._tools.has_tools
+            else None
         )
         logger.debug(
             "Tools available (%d): %s",
             len(tool_schemas or []),
             [t.get("name") for t in (tool_schemas or [])],
         )
-        system_prompt = await self._build_system_prompt(
-            user_id,
-            text,
-            extra_system=extra_system,
-            skip_memory=not memory,
-            tool_names=[t["name"] for t in tool_schemas or []],
-        )
+
+        async def build_prompt(tool_names: list[str]) -> str:
+            return await self._build_system_prompt(
+                user_id, text, extra_system=extra_system, skip_memory=not memory, tool_names=tool_names
+            )
+
+        system_prompt = await build_prompt(_schema_names(tool_schemas))
         consecutive_errors = 0
         circuit_broken = False
         sanitize_attempts = 0
@@ -1026,10 +1062,15 @@ class Agent:
                 yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name)
                 if result.is_error:
                     iteration_had_error = True
-                elif tool_call.name == _LOAD_SKILL_TOOL:
-                    skills_loaded.append(result.content)
+                elif (skill := _loaded_skill(tool_call, result)) is not None:
+                    skills_loaded.append(skill)
             if skills_loaded:
-                tool_schemas = await self._reselect_for_skills(text, session, skills_loaded) or tool_schemas
+                reselected = await self._reselect_after_skills(
+                    self._tools.get_schemas(), text, session.messages, skills_loaded
+                )
+                if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
+                    tool_schemas = reselected
+                    system_prompt = await build_prompt(_schema_names(tool_schemas))
 
             if iteration_had_error:
                 consecutive_errors += 1
@@ -1347,34 +1388,39 @@ class Agent:
         self,
         schemas: list[dict[str, Any]],
         text: str,
-        session: Session | None = None,
+        history: list[LLMMessage] | None = None,
         *,
         query: str | None = None,
     ) -> list[dict[str, Any]]:
         """Trim a chat turn's tools to tool_selection_max via the tool selector (see tools/selection.py).
 
-        Ranks on ``query`` when given, else on ``text`` plus the assistant
-        message it answers (see ``_selection_query``).
+        ``history`` (the session's messages, or run_headless' own) supplies the
+        recently called tools. Ranks on ``query`` when given, else on ``text``
+        plus the assistant message it answers (see ``_selection_query``).
         """
         if self.tool_selector is None or not schemas:
             return schemas
-        recent = (
-            [tc.name for msg in session.messages[-_RECENT_TOOL_MESSAGES:] for tc in msg.tool_calls]
-            if session is not None
-            else []
-        )
+        recent = [tc.name for msg in (history or [])[-_RECENT_TOOL_MESSAGES:] for tc in msg.tool_calls]
         if query is None:
-            query = _selection_query(text, session)
+            query = _selection_query(text, history)
         return await self.tool_selector.select(schemas, query, reversed(recent))
 
-    async def _reselect_for_skills(self, text: str, session: Session, skills: list[str]) -> list[dict[str, Any]]:
-        """Select the turn's tools again once skills are loaded mid-turn, ranking on their text first.
+    async def _reselect_after_skills(
+        self,
+        candidates: list[dict[str, Any]],
+        text: str,
+        history: list[LLMMessage],
+        skills: list[str],
+    ) -> list[dict[str, Any]]:
+        """Select a turn's tools again from ``candidates`` once skills loaded mid-turn, ranking on their text first.
 
         A skill usually needs tools the user's message didn't rank (e.g. a
         google__ tool). Tools already called this turn stay, as recent tools.
+        Callers rebuild the system prompt when the set changes, so its tool
+        hints keep following the tools sent.
         """
         query = "\n".join([*(s[:_SELECTION_EXTRA_CHARS] for s in skills), text])
-        return await self._select_tools(self._tools.get_schemas(), text, session, query=query)
+        return await self._select_tools(candidates, text, history, query=query)
 
     async def _user_timezone(self, user_id: str) -> str:
         """This user's configured timezone, or "" to fall back to settings.
