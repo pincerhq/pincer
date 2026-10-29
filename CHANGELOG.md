@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Group triggers: replies on both channels, Telegram @-mentions behind a flag
+
+Group messages on WhatsApp and Telegram now follow one rule set. Pincer is
+triggered by any of: a trigger word (`PINCER_{WHATSAPP,TELEGRAM}_GROUP_TRIGGER`),
+a reply to one of its messages (`..._GROUP_TRIGGER_ON_REPLY`, default `true`),
+or an @-mention (`..._GROUP_TRIGGER_ON_MENTION`, default `false`).
+
+- WhatsApp: quoting one of Pincer's messages now triggers it.
+- Telegram: replies to the bot (always on before) can now be turned off with
+  `PINCER_TELEGRAM_GROUP_TRIGGER_ON_REPLY=false`.
+- When Pincer is linked to a person's own WhatsApp account, Pincer and that
+  person share one identity in groups: replies to their messages and
+  @-mentions of them reach Pincer when the respective flag is on. Turn
+  `..._ON_REPLY` / `..._ON_MENTION` off, or use a dedicated number, to avoid
+  that.
+
+> **Behaviour change.** Telegram `@PincerBot` mentions (and `/cmd@PincerBot`)
+> no longer trigger Pincer in groups by default. Set
+> `PINCER_TELEGRAM_GROUP_TRIGGER_ON_MENTION=true` to restore the old behaviour.
+
 #### WhatsApp: group @-mentions behind `PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION`
 
 Picking Pincer in WhatsApp's @-picker in a group (the mention carries its

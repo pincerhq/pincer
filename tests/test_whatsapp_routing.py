@@ -77,11 +77,13 @@ def _make_settings(
     whatsapp_self_chat_only: bool = True,
     whatsapp_group_trigger: str = "pincer",
     whatsapp_group_trigger_on_mention: bool = False,
+    whatsapp_group_trigger_on_reply: bool = True,
 ):
     settings = MagicMock()
     settings.whatsapp_self_chat_only = whatsapp_self_chat_only
     settings.whatsapp_group_trigger = whatsapp_group_trigger
     settings.whatsapp_group_trigger_on_mention = whatsapp_group_trigger_on_mention
+    settings.whatsapp_group_trigger_on_reply = whatsapp_group_trigger_on_reply
     settings.data_dir = "/tmp/test"
     settings.openai_api_key.get_secret_value.return_value = "test-key"
     return settings
@@ -100,6 +102,7 @@ def _make_message_event(
     sender_alt_server: str = "",
     msg_id: str = "test-msg-id",
     mentioned_jid: str | None = None,
+    quoted_participant: str | None = None,
     message_text: str = "hello",
 ):
     """Build a minimal MessageEv-like mock for routing tests."""
@@ -129,10 +132,12 @@ def _make_message_event(
 
     ext = MagicMock()
     ext.text = message_text
-    has_context = mentioned_jid is not None
+    has_context = mentioned_jid is not None or quoted_participant is not None
     if has_context:
         ctx = MagicMock()
-        ctx.mentionedJID = [mentioned_jid]
+        ctx.mentionedJID = [mentioned_jid] if mentioned_jid is not None else []
+        # Set explicitly: an unset MagicMock attribute would be read as a reply.
+        ctx.participant = quoted_participant or ""
         ext.contextInfo = ctx
     else:
         ext.contextInfo = None
@@ -532,6 +537,21 @@ class TestWhatsAppRouting:
             sender_user=OTHER_PHONE,
             is_group=True,
             message_text="pincer, what's up?",
+        )
+        await ch._on_message(MagicMock(), event)
+        ch._handler.assert_called_once()
+        ch._extract_message.assert_called_once()
+
+    async def test_group_reply_to_owner_responds(self, routing_channel):
+        """Reply quoting the owner's (Pincer's) message, no trigger word → responds."""
+        ch = routing_channel
+        event, _, _ = _make_message_event(
+            from_me=False,
+            chat_user="group123",
+            sender_user=OTHER_PHONE,
+            is_group=True,
+            quoted_participant=f"{OWNER_PHONE}@s.whatsapp.net",
+            message_text="and tomorrow?",
         )
         await ch._on_message(MagicMock(), event)
         ch._handler.assert_called_once()

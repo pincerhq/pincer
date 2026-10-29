@@ -1236,21 +1236,38 @@ class WhatsAppChannel(BaseChannel):
                         ctx = media.contextInfo
                     break
 
-        # Trigger words apply either way; mentions are opt-in.
+        # Trigger words apply either way; replies are on by default, mentions opt-in.
         if matches_group_trigger(text, self._settings.whatsapp_group_trigger):
             return True
-        if not self._mentions_self(text, ctx):
-            logger.debug("WA skip: group message without trigger word or mention")
-            return False
-        if not self._settings.whatsapp_group_trigger_on_mention:
-            logger.debug("WA skip: group @-mention ignored, PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION is off")
-            return False
-        return True
+        # Log only once the message is skipped, so a reply that also carries a
+        # trigger word or mention doesn't log a misleading skip.
+        skip_reason = "group message without trigger word, mention or reply"
+        if self._replies_to_self(ctx):
+            if self._settings.whatsapp_group_trigger_on_reply:
+                return True
+            skip_reason = "group reply ignored, PINCER_WHATSAPP_GROUP_TRIGGER_ON_REPLY is off"
+        if self._mentions_self(text, ctx):
+            if self._settings.whatsapp_group_trigger_on_mention:
+                return True
+            skip_reason = "group @-mention ignored, PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION is off"
+        logger.debug("WA skip: %s", skip_reason)
+        return False
 
-    def _mentions_self(self, text: str, ctx: Any) -> bool:
+    def _own_ids(self) -> set[str]:
         # The @-picker inserts the phone number in classic groups and the LID
         # in LID-addressed groups, so accept either of our own identifiers.
-        own_ids = {own_id for own_id in (self._own_jid, self._own_lid) if own_id}
+        return {own_id for own_id in (self._own_jid, self._own_lid) if own_id}
+
+    def _replies_to_self(self, ctx: Any) -> bool:
+        # A quoting message names the quoted message's author in
+        # ContextInfo.participant. On a shared personal number that author is
+        # also the person, so replies to their own messages count too.
+        if ctx is None or not ctx.participant:
+            return False
+        return str(ctx.participant).split("@", 1)[0].split(":", 1)[0] in self._own_ids()
+
+    def _mentions_self(self, text: str, ctx: Any) -> bool:
+        own_ids = self._own_ids()
 
         if ctx is not None and ctx.mentionedJID:
             for jid in ctx.mentionedJID:

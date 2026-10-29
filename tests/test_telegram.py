@@ -1,6 +1,7 @@
 """Tests for Telegram channel utilities."""
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -37,6 +38,9 @@ def test_split_preserves_content() -> None:
 
 def _make_channel() -> TelegramChannel:
     settings = MagicMock()
+    # Set explicitly: MagicMock attributes are truthy.
+    settings.telegram_group_trigger_on_mention = False
+    settings.telegram_group_trigger_on_reply = True
     channel = TelegramChannel(settings)
     channel._bot = AsyncMock()
     return channel
@@ -415,6 +419,7 @@ def test_is_not_triggered_in_group_by_partial_word() -> None:
 
 def test_is_triggered_in_group_by_mention_entity() -> None:
     channel = _make_channel()
+    channel._settings.telegram_group_trigger_on_mention = True
     channel._settings.telegram_group_trigger = ""
     channel._own_username = "PincerBot"
     text = "hey @PincerBot help me"
@@ -433,6 +438,7 @@ def _utf16_len(s: str) -> int:
 def test_is_triggered_in_group_by_mention_after_emoji() -> None:
     """Entity offsets are UTF-16 code units; an emoji before the mention must not shift the slice."""
     channel = _make_channel()
+    channel._settings.telegram_group_trigger_on_mention = True
     channel._settings.telegram_group_trigger = ""
     channel._own_username = "pincer_bot"
     text = "😀 @pincer_bot help"
@@ -446,6 +452,7 @@ def test_is_triggered_in_group_by_mention_after_emoji() -> None:
 
 def test_is_triggered_in_group_by_bot_command_addressed_to_bot() -> None:
     channel = _make_channel()
+    channel._settings.telegram_group_trigger_on_mention = True
     channel._settings.telegram_group_trigger = "pincer"
     channel._own_username = "pincer_bot"
     text = "/ask@pincer_bot what time is it"
@@ -472,6 +479,7 @@ def test_is_not_triggered_in_group_by_bot_command_for_other_bot() -> None:
 
 def test_is_triggered_in_group_skips_unrelated_entities() -> None:
     channel = _make_channel()
+    channel._settings.telegram_group_trigger_on_mention = True
     channel._settings.telegram_group_trigger = ""
     channel._own_username = "PincerBot"
     text = "see https://x.io @PincerBot"
@@ -492,6 +500,52 @@ def test_is_triggered_in_group_by_reply_to_bot() -> None:
     channel._settings.telegram_group_trigger = ""
     channel._bot.id = 111
     message = _mock_group_message(text="what do you think?", reply_to_bot_id=111)
+    assert channel._is_triggered_in_group(message) is True
+
+
+def _mention_message(text: str = "@PincerBot hey") -> MagicMock:
+    entity = MagicMock()
+    entity.type = "mention"
+    entity.offset = text.index("@PincerBot")
+    entity.length = len("@PincerBot")
+    return _mock_group_message(text=text, entities=[entity])
+
+
+def test_is_not_triggered_in_group_by_mention_when_on_mention_off(caplog: pytest.LogCaptureFixture) -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = "pincer"
+    channel._own_username = "PincerBot"
+    with caplog.at_level(logging.DEBUG, logger="pincer.channels.telegram"):
+        assert channel._is_triggered_in_group(_mention_message()) is False
+    assert "PINCER_TELEGRAM_GROUP_TRIGGER_ON_MENTION is off" in caplog.text
+
+
+def test_is_triggered_in_group_by_mention_without_trigger_list() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = ""
+    channel._settings.telegram_group_trigger_on_mention = True
+    channel._own_username = "PincerBot"
+    assert channel._is_triggered_in_group(_mention_message()) is True
+
+
+def test_is_not_triggered_in_group_by_reply_when_on_reply_off(caplog: pytest.LogCaptureFixture) -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = "pincer"
+    channel._settings.telegram_group_trigger_on_reply = False
+    channel._bot.id = 111
+    message = _mock_group_message(text="what do you think?", reply_to_bot_id=111)
+    with caplog.at_level(logging.DEBUG, logger="pincer.channels.telegram"):
+        assert channel._is_triggered_in_group(message) is False
+    assert "PINCER_TELEGRAM_GROUP_TRIGGER_ON_REPLY is off" in caplog.text
+
+
+def test_is_triggered_in_group_by_trigger_word_with_both_flags_off() -> None:
+    channel = _make_channel()
+    channel._settings.telegram_group_trigger = "pincer"
+    channel._settings.telegram_group_trigger_on_mention = False
+    channel._settings.telegram_group_trigger_on_reply = False
+    channel._bot.id = 111
+    message = _mock_group_message(text="pincer, what do you think?", reply_to_bot_id=111)
     assert channel._is_triggered_in_group(message) is True
 
 
