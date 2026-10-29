@@ -1,7 +1,7 @@
 # ============================================
 # Stage 0: Dashboard build
 # ============================================
-FROM node:22-slim AS dashboard-builder
+FROM node:25-slim AS dashboard-builder
 
 WORKDIR /app
 
