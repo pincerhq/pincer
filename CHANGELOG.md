@@ -216,6 +216,23 @@ agent code needs a separate uid or container.
 
 ### Added
 
+- Tool selection for chat (tool RAG). With more tools than
+  `PINCER_TOOL_SELECTION_MAX` (default 127, under OpenAI's 128 cap), a turn
+  sends the `PINCER_TOOL_SELECTION_DEFAULT` tools, every tool of the memory MCP
+  server, tools already used in the conversation, and the best semantic
+  matches for the message. Before, the OpenAI path kept the first 128 tools in
+  registration order, so `make_phone_call`, `send_file`/`send_image` and MCP
+  tools were cut. Ranking runs on sqlite-vec-memory-mcp's new internal
+  `tool_index_sync`/`tool_index_search` tools with the multilingual
+  `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` model
+  (`TOOL_EMBED_MODEL`). MCP tools marked `meta={"pincer_internal": true}` are
+  no longer offered to the LLM.
+- The `sqlite-vec-memory-mcp` Docker image bakes both embedding models
+  (`BAAI/bge-small-en-v1.5` and the tool model) into `/app/models` at build
+  time, and its `model-cache` volume is gone: it would hide the baked models
+  behind an older copy. `docker volume rm` it if you had one. Pincer's own
+  stdio memory server still downloads them into `fastembed_cache/` under the
+  data directory.
 - `PINCER_VOICE_TRANSFER_MAX_DURATION_S` (default 3600): ceiling for a call
   transferred to a human (`<Dial timeLimit>`), and the metric
   `pincer.voice.receptionist.transfers{result=…}`.

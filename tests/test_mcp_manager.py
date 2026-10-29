@@ -612,3 +612,32 @@ async def test_reconnect_applies_notification_handler_to_new_session() -> None:
         await manager._reconnect("srv")
 
     new_session.set_notification_handler.assert_called_once_with(handler)
+
+
+def test_tool_names_returns_connected_servers_bridge_names() -> None:
+    manager = _make_manager(_make_config("srv"))
+    assert manager.tool_names("srv") == []
+
+    session = MagicMock(connected=True)
+    bridge = MagicMock(registered_names=["srv__memory_store", "srv__memory_search"])
+    manager._sessions["srv"] = session
+    manager._bridges["srv"] = bridge
+    assert manager.tool_names("srv") == ["srv__memory_store", "srv__memory_search"]
+
+    session.connected = False
+    assert manager.tool_names("srv") == []
+
+
+async def test_tool_counts_skip_internal_tools() -> None:
+    """tool_index_* are hidden from the LLM, so the prompt's per-server count must not include them."""
+    from types import SimpleNamespace
+
+    manager = _make_manager(_make_config("srv"))
+    tools = [
+        SimpleNamespace(name="memory_store", meta=None),
+        SimpleNamespace(name="tool_index_search", meta={"pincer_internal": True}),
+    ]
+    manager._sessions["srv"] = MagicMock(connected=True, tools=tools, instructions=None)
+
+    assert manager.total_tool_count() == 1
+    assert (await manager.list_servers())[0]["tool_count"] == 1

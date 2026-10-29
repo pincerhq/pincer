@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator
+from pydantic_settings import NoDecode
 
 
 class ToolSettings(BaseModel):
@@ -42,6 +45,40 @@ class ToolSettings(BaseModel):
         description=(
             "MCP server name used when memory_backend='mcp'. "
             "Connection to MCP server will taken from existing MCP servers pool"
+        ),
+    )
+    # ── Tool selection (tool RAG) ─────────────────────────
+    tool_selection_enabled: bool = Field(
+        default=True,
+        description=(
+            "When the registry has more than tool_selection_max tools, send each chat turn only: the "
+            "tool_selection_default tools, every tool of memory_mcp_server, tools used earlier in the "
+            "conversation, and the best semantic matches for the message (ranked on memory_mcp_server)"
+        ),
+    )
+    tool_selection_max: int = Field(
+        default=127,
+        ge=1,
+        le=128,
+        description="Most tools sent per chat turn (OpenAI rejects more than 128)",
+    )
+    tool_selection_default: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: [
+            "make_phone_call",
+            "get_call_transcript",
+            "send_file",
+            "send_image",
+            "schedule_create",
+            "schedule_list",
+            "schedule_remove",
+            "schedule_toggle",
+            "load_skill",
+            "load_skill_reference",
+            "run_skill_script",
+        ],
+        description=(
+            "Tools always sent when selection applies: names or fnmatch patterns (comma-separated). "
+            "Setting it replaces the whole default list"
         ),
     )
     summary_model: str = Field(
@@ -97,6 +134,13 @@ class ToolSettings(BaseModel):
     def check_value_allowed(cls, v: str) -> str:
         if v not in ["sqlite", "mcp"]:
             raise ValidationError("Provided value not in allowed list: sqlite, mcp")
+        return v
+
+    @field_validator("tool_selection_default", mode="before")
+    @classmethod
+    def parse_tool_selection_default(cls, v: str | list[str]) -> list[str]:
+        if isinstance(v, str):
+            return [name.strip() for name in v.split(",") if name.strip()]
         return v
 
     @field_validator("approval_policy", mode="before")

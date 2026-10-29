@@ -42,10 +42,11 @@ def convert_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]
     """Convert Anthropic-style tool defs to OpenAI function-calling format."""
     if len(tools) > OPENAI_MAX_TOOLS:
         logger.warning(
-            "%d tools exceed OpenAI's %d-tool limit — sending the first %d and dropping the rest",
+            "%d tools exceed OpenAI's %d-tool limit — sending the first %d and dropping: %s",
             len(tools),
             OPENAI_MAX_TOOLS,
             OPENAI_MAX_TOOLS,
+            ", ".join(t.get("name", "?") for t in tools[OPENAI_MAX_TOOLS:]),
         )
         tools = tools[:OPENAI_MAX_TOOLS]
     oai_tools: list[dict[str, Any]] = []

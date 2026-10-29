@@ -164,6 +164,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "perf: timing benchmark, runs only with PINCER_RUN_PERF=1",
+    "embedding: runs the real tool-index embedding model (~240 MB download), only with PINCER_RUN_EMBEDDING=1",
     "allow_loop_stall: opt out of the event-loop stall guard on tests/test_voice*",
 ]
 

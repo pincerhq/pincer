@@ -956,3 +956,61 @@ async def test_a_turn_with_memory_still_reads_and_writes_it(
     memory.search_text.assert_awaited()
     memory.store_memory.assert_awaited_once()
     assert "the user's private fact" in mock_llm.complete.call_args.kwargs["system"]
+
+
+class _RecordingSelector:
+    """Stands in for ToolSelector: keeps only `keep`, records what it was asked."""
+
+    def __init__(self, keep: set[str]) -> None:
+        self.keep = keep
+        self.calls: list[tuple[str, list[str]]] = []
+
+    async def select(self, schemas, query, recent_tool_names=()):
+        self.calls.append((query, list(recent_tool_names)))
+        return [s for s in schemas if s["name"] in self.keep]
+
+
+def _phone_and_google_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+
+    async def noop() -> str:
+        return "ok"
+
+    for name in ("make_phone_call", "google__search_drive_files", "whoami"):
+        registry.register(name=name, description=name, handler=noop, parameters={"type": "object", "properties": {}})
+    return registry
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["handle_message", "handle_message_stream"])
+async def test_tool_selector_sets_tools_and_prompt_hints(settings, mock_llm, session_manager, cost_tracker, streaming):
+    """The selected tools are what the LLM gets, and the phone/google hints follow them, not the registry."""
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry())
+    selector = _RecordingSelector(keep={"whoami"})
+    agent.tool_selector = selector  # type: ignore[assignment]
+
+    session = await session_manager.get_or_create("user1", "test")
+    session.messages.append(
+        LLMMessage(
+            role=MessageRole.ASSISTANT, tool_calls=[ToolCall(id="t0", name="google__search_drive_files", arguments={})]
+        )
+    )
+
+    if streaming:
+        async for _chunk in agent.handle_message_stream(user_id="user1", channel="test", text="Ruf mich an"):
+            pass
+    else:
+        await agent.handle_message("user1", "test", "Ruf mich an")
+
+    assert selector.calls == [("Ruf mich an", ["google__search_drive_files"])]
+    kwargs = mock_llm.complete.call_args.kwargs
+    assert [t["name"] for t in kwargs["tools"]] == ["whoami"]
+    assert "make_phone_call tool" not in kwargs["system"]
+    assert "google__" not in kwargs["system"]
+
+
+async def test_without_selector_prompt_hints_follow_registry(settings, mock_llm, session_manager, cost_tracker):
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, _phone_and_google_registry())
+    await agent.handle_message("user1", "test", "hi")
+    kwargs = mock_llm.complete.call_args.kwargs
+    assert len(kwargs["tools"]) == 3
+    assert "make_phone_call tool" in kwargs["system"]

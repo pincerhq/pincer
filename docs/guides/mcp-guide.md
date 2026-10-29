@@ -374,6 +374,40 @@ Memories are stored with two tags so the server can filter by user or category i
 
 The `pincer_user_id` is the unified cross-channel identity — the same ID regardless of whether the user wrote from Telegram, WhatsApp, or Slack.
 
+### Tool selection (tool RAG)
+
+OpenAI-compatible APIs reject requests with more than 128 tools. When the
+registry holds more than `PINCER_TOOL_SELECTION_MAX` tools (default 127), each
+chat turn sends only:
+
+1. the `PINCER_TOOL_SELECTION_DEFAULT` tools (phone, `send_file`/`send_image`,
+   schedules and skills by default; names or `fnmatch` patterns, comma-separated;
+   setting it replaces the whole list),
+2. every tool of the memory server (`PINCER_MEMORY_MCP_SERVER`),
+3. tools already called in the conversation,
+4. the tools that best match the message, filling the remaining slots.
+
+Ranking runs on the memory server: its `tool_index_sync` / `tool_index_search`
+tools embed tool names and descriptions with
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`
+(`TOOL_EMBED_MODEL`), so requests in German, Ukrainian and other languages
+rank correctly. The index lives in the server's memory; Pincer re-syncs it after
+a restart. These two tools carry `meta={"pincer_internal": true}`, which keeps
+them out of the LLM's tool list.
+
+The index is built in the background at startup. The stdio server Pincer runs
+itself downloads the memory and tool models once (about 300 MB) into
+`fastembed_cache/` under the data directory (`PINCER_DATA_DIR`), set by
+`FASTEMBED_CACHE_PATH` in `pincer.toml`. The `sqlite-vec-memory-mcp` Docker
+image bakes both models into `/app/models` at build time. Until the index is ready, or when the server
+is down, steps 1-3 are followed by the rest of the registry in registration
+order, and one warning names the dropped tools. Turn the feature off with
+`PINCER_TOOL_SELECTION_ENABLED=false`. Voice calls keep their own tool filter.
+
+`tests/test_tool_index_multilingual.py` checks the real model's ranking for
+five tasks in 24 European languages; it downloads the model, so it runs only
+with `PINCER_RUN_EMBEDDING=1`.
+
 ---
 
 ## OAuth 2.0 Authorization Server

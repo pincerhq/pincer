@@ -8,6 +8,9 @@ Environment variables:
     MEMORY_DB_PATH      Path to the SQLite database file (default: ~/memory.db)
     EMBED_MODEL         fastembed model name (default: BAAI/bge-small-en-v1.5)
     EMBED_DIM           Vector dimension — must match model (default: 384)
+    TOOL_EMBED_MODEL    fastembed model for the tool index (default:
+                        sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2)
+    TOOL_EMBED_DIM      Tool index vector dimension — must match TOOL_EMBED_MODEL (default: 384)
     FASTEMBED_CACHE_PATH Model cache directory (default: $TMPDIR/fastembed_cache)
     TRANSPORT           stdio | http (default: stdio)
     HOST                HTTP host (default: 127.0.0.1)
@@ -18,6 +21,7 @@ Environment variables:
 from __future__ import annotations
 
 import functools
+import hashlib
 import html as _html
 import inspect
 import json
@@ -25,6 +29,7 @@ import logging
 import os
 import sqlite3
 import struct
+import threading
 import time as _time
 import uuid
 from pathlib import Path
@@ -47,9 +52,13 @@ _DB_PATH = Path(os.environ.get("MEMORY_DB_PATH", Path.home() / "memory.db"))
 _EMBED_MODEL = os.environ.get("EMBED_MODEL", "BAAI/bge-small-en-v1.5")  # ex. all-MiniLM-L6-v2
 _EMBED_DIM = int(os.environ.get("EMBED_DIM", "384"))
 _UI_ENABLED: bool = os.environ.get("SERVER_UI", "0").lower() in ("1", "true", "yes")
+# Tool index model: multilingual, so German and Ukrainian requests rank the right tools.
+_TOOL_EMBED_MODEL = os.environ.get("TOOL_EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+_TOOL_EMBED_DIM = int(os.environ.get("TOOL_EMBED_DIM", "384"))
 
-# Lazy singleton — loaded once on first embedding call.
+# Lazy singletons — loaded once on first embedding call.
 _embed_model: Any = None
+_tool_embed_model: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +80,23 @@ def _embed(text: str) -> bytes:
     model = _get_embed_model()
     vec = next(model.embed([text]))  # numpy float32 array
     return struct.pack(f"{len(vec)}f", *vec)
+
+
+def _get_tool_embed_model() -> Any:
+    global _tool_embed_model
+    if _tool_embed_model is None:
+        from fastembed import TextEmbedding
+
+        _tool_embed_model = TextEmbedding(model_name=_TOOL_EMBED_MODEL)
+    return _tool_embed_model
+
+
+def _embed_tools(texts: list[str]) -> list[bytes]:
+    """Embed many tool texts in one call; float32 bytes ready for sqlite_vec."""
+    if not texts:
+        return []
+    model = _get_tool_embed_model()
+    return [struct.pack(f"{len(vec)}f", *vec) for vec in model.embed(texts)]
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +455,106 @@ def memory_update(memory_id: str, content: str, tags: list[str] | None = None) -
     db.commit()
     db.close()
     return f"updated:{memory_id}"
+
+
+# ---------------------------------------------------------------------------
+# Tool index (tool RAG for the pincer host)
+# ---------------------------------------------------------------------------
+# Derived data, so it lives in memory rather than in MEMORY_DB_PATH (which may
+# sit on a network share): after a restart the host sees `stale` and re-syncs.
+# Both tools are marked pincer_internal so the host never offers them to the
+# LLM, and are not _logged so a search per chat turn writes nothing to disk.
+
+_tool_lock = threading.Lock()
+_tool_db: sqlite3.Connection | None = None
+_tool_index_version = ""
+
+
+def _tool_index_db() -> sqlite3.Connection:
+    """The in-memory tool index; call with _tool_lock held."""
+    global _tool_db
+    if _tool_db is None:
+        db = sqlite3.connect(":memory:", check_same_thread=False)
+        db.enable_load_extension(True)
+        sqlite_vec.load(db)
+        db.enable_load_extension(False)
+        db.row_factory = sqlite3.Row
+        db.executescript(f"""
+            CREATE TABLE tool_index (name TEXT UNIQUE NOT NULL, hash TEXT NOT NULL);
+            CREATE VIRTUAL TABLE tool_vecs USING vec0(
+                embedding float[{_TOOL_EMBED_DIM}] distance_metric=cosine
+            );
+        """)
+        _tool_db = db
+    return _tool_db
+
+
+@mcp.tool(meta={"pincer_internal": True})
+def tool_index_sync(tools: list[dict[str, str]], version: str) -> dict[str, Any]:
+    """Make the tool index match `tools` ([{name, text}]); only new or changed texts are embedded."""
+    global _tool_index_version
+    wanted = {t["name"]: t.get("text", "") for t in tools}
+    hashes = {name: hashlib.sha256(text.encode()).hexdigest() for name, text in wanted.items()}
+    with _tool_lock:
+        db = _tool_index_db()
+        current = {r["name"]: (r["rowid"], r["hash"]) for r in db.execute("SELECT rowid, name, hash FROM tool_index")}
+        removed = [name for name in current if name not in wanted]
+        changed = [name for name in wanted if name not in current or current[name][1] != hashes[name]]
+        vecs = _embed_tools([wanted[name] for name in changed])
+        try:
+            for name in removed:
+                rowid = current[name][0]
+                db.execute("DELETE FROM tool_vecs WHERE rowid = ?", (rowid,))
+                db.execute("DELETE FROM tool_index WHERE rowid = ?", (rowid,))
+            for name, vec in zip(changed, vecs, strict=True):
+                if name in current:
+                    rowid = current[name][0]
+                    db.execute("UPDATE tool_index SET hash = ? WHERE rowid = ?", (hashes[name], rowid))
+                    db.execute("DELETE FROM tool_vecs WHERE rowid = ?", (rowid,))
+                else:
+                    cur = db.execute("INSERT INTO tool_index (name, hash) VALUES (?, ?)", (name, hashes[name]))
+                    rowid = cur.lastrowid
+                db.execute("INSERT INTO tool_vecs (rowid, embedding) VALUES (?, ?)", (rowid, vec))
+            db.commit()
+        except Exception:
+            # All or nothing: a half-applied sync would store a new hash without
+            # its vector, and later syncs would never re-embed that tool.
+            db.rollback()
+            raise
+        _tool_index_version = version
+    added = sum(1 for name in changed if name not in current)
+    return {
+        "version": version,
+        "added": added,
+        "updated": len(changed) - added,
+        "removed": len(removed),
+        "unchanged": len(wanted) - len(changed),
+    }
+
+
+@mcp.tool(meta={"pincer_internal": True})
+def tool_index_search(query: str, k: int, version: str) -> dict[str, Any]:
+    """Names of the k indexed tools closest to `query`; stale=true when the index is not at `version`."""
+    with _tool_lock:
+        if version != _tool_index_version:
+            return {"stale": True, "results": []}
+        db = _tool_index_db()
+        k = min(k, db.execute("SELECT COUNT(*) FROM tool_index").fetchone()[0])
+        if k <= 0 or not query.strip():
+            return {"stale": False, "results": []}
+        vec = _embed_tools([query])[0]
+        rows = db.execute(
+            """
+            SELECT t.name, v.distance
+            FROM tool_vecs v
+            JOIN tool_index t ON t.rowid = v.rowid
+            WHERE v.embedding MATCH ?
+              AND k = ?
+            ORDER BY v.distance
+            """,
+            (vec, k),
+        ).fetchall()
+    return {"stale": False, "results": [{"name": r["name"], "distance": round(r["distance"], 6)} for r in rows]}
 
 
 # ---------------------------------------------------------------------------

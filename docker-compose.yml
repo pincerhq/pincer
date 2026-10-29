@@ -287,7 +287,6 @@ services:
 volumes:
   pincer-data:
   memory-data:
-  model-cache:
   ms365-data:
   doctr-model-cache:
   redis-data:

@@ -11,11 +11,11 @@ Limitations vs SqlMemoryBackend:
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from pincer.mcp.bridge import result_json
 from pincer.memory.base import (
     PINCER_MEMORY_CATEGORY_TAG_PREFIX,
     PINCER_MEMORY_COUNT_FETCH_LIMIT,
@@ -118,16 +118,7 @@ class MCPMemoryBackend(BaseMemoryBackend):
         return self._first_text(await self._call_result(tool_name, args))
 
     async def _call_json(self, tool_name: str, args: dict[str, Any]) -> Any:
-        result = await self._call_result(tool_name, args)
-        # fastmcp wraps return values as structuredContent={"result": ...}; prefer it over parsing text.
-        structured = getattr(result, "structuredContent", None)
-        if isinstance(structured, dict) and "result" in structured:
-            return structured["result"]
-        raw = self._first_text(result)
-        # fastmcp serialises an empty list result as no content items at all.
-        if not raw.strip():
-            return None
-        return json.loads(raw)
+        return result_json(await self._call_result(tool_name, args))
 
     async def _call_list(self, tool_name: str, args: dict[str, Any]) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = await self._call_json(tool_name, args) or []

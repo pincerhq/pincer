@@ -1,0 +1,90 @@
+[
+  {
+    "name": "make_phone_call",
+    "description": "Place a real phone call to a number. REQUIRED when the user asks you to call someone: you MUST call this tool with target_number (E.164) and purpose. Do NOT describe or simulate a call in text. Do NOT output XML or structured call blocks. Only this tool can place calls. Set language='de' when the user writes in German or the callee is German-speaking — e.g. 'Ruf beim Zahnarzt an und bestätige den Termin', 'Bitte ruf Herrn Müller an', 'Sag das Restaurant für morgen ab' → language='de'. Set language='uk' when the user writes in Ukrainian or the callee is Ukrainian-speaking — e.g. 'Зателефонуй мені', 'Подзвони до лікаря і підтверди запис' → language='uk'. English commands ('Call the dentist...') → language='en' (default)."
+  },
+  {
+    "name": "get_call_transcript",
+    "description": "Retrieve the transcript of a phone call (PII-masked). Use when the user asks 'show me the transcript of the last call' / 'zeig mir das Transkript' or references /transcript <CallSid>. Empty call_sid = most recent call."
+  },
+  {
+    "name": "generate_image",
+    "description": "Generate image(s) from a text prompt and send them directly to the user. Use for creating original images, illustrations, or artwork."
+  },
+  {
+    "name": "send_file",
+    "description": "Send a file to the user as a document attachment (PDF, image, CSV, etc.). Use after python_exec generates a file, or to deliver any workspace file."
+  },
+  {
+    "name": "send_image",
+    "description": "Display an image or GIF inline in the chat. You MUST call this tool for EVERY image/GIF URL you want the user to see. Do NOT paste image URLs as plain text — they won't render. Instead, call send_image(url=...) so the picture appears visually. Works with direct image URLs (.jpg, .png, .gif, .webp) and GIF services (Giphy, Tenor)."
+  },
+  {
+    "name": "email_send",
+    "description": "Send an email. Requires recipient, subject, body. Use when the user asks to send, write, or compose an email."
+  },
+  {
+    "name": "email_check",
+    "description": "Check emails in a folder. By default shows unread (UNSEEN) emails. Set status='ALL' to list all emails regardless of read status — use this when checking Spam, Trash, or counting total emails in a folder. Returns UID, sender, subject, and date for each."
+  },
+  {
+    "name": "calendar_create",
+    "description": "Create a new Google Calendar event. Use when user asks to schedule, add, or book a meeting or event. On success, the tool returns the event's direct URL (htmlLink). You MUST include this URL in your final response so the user can open the event."
+  },
+  {
+    "name": "calendar_today",
+    "description": "Get today's calendar events. Use when user asks about their schedule, meetings, or agenda today."
+  },
+  {
+    "name": "calendar_week",
+    "description": "Get this week's calendar events. Use when user asks about their week or upcoming schedule."
+  },
+  {
+    "name": "schedule_create",
+    "description": "Create a scheduled job that runs a prompt through the agent later and delivers the result to the user's channel. Pass EXACTLY ONE of cron_expr or run_in_minutes:\n- run_in_minutes: for a ONE-TIME request relative to now (e.g. 'in 10 minutes', 'in an hour') — the exact future time is computed from the real clock, not guessed, so you never need to know or compute the current date/time yourself.\n- cron_expr: for a RECURRING request with a stated clock time (e.g. 'every day at 8am', 'every Monday at 9') — a standard 5-field cron expression.\nNever invent a cron_expr to approximate 'soon' or 'in N minutes' — that produces wrong, often dangerously frequent schedules (e.g. '* * * * *' fires every minute forever). Use run_in_minutes for anything relative to 'now'.\nTimezone defaults to this app's configured timezone. If the user's timezone is genuinely ambiguous or important for a recurring job (e.g. crosses regions), ask them rather than guessing.\nThe prompt runs later with NO conversation context or memory, so it must be fully self-contained — e.g. 'search the web for the latest news about X and summarize it', not 'the thing we discussed'."
+  },
+  {
+    "name": "browse",
+    "description": "Navigate to a URL and return the page's readable text content. Use for reading web pages, articles, documentation, etc."
+  },
+  {
+    "name": "python_exec",
+    "description": "Execute Python code in an isolated subprocess and return the output. Use for calculations, data analysis, generating charts, or running scripts. Common libraries available: pandas, numpy, matplotlib, fpdf2. Generated files are saved to ~/.pincer/workspace/exec_output/ — use send_file to deliver them to the user."
+  },
+  {
+    "name": "file_read",
+    "description": "Read a file"
+  },
+  {
+    "name": "google__search_drive_files",
+    "description": "Search for files and folders in Google Drive.\n\nSimple search (recommended): pass 'name' to find files by name.\n  Example: name='budget'  → finds files with 'budget' in the name\n  Example: name='QA checklist', file_type='spreadsheet'  → only Google Sheets\n\nOptional filters:\n  file_type: 'spreadsheet', 'document', 'presentation', 'pdf', 'folder', 'image', 'xlsx', 'any' (default: 'any')\n  shared_with_me: True to show only shared files\n  starred: True to show only starred files\n\nResults include file type labels and next-step tool hints:\n  Google Sheet → use google__get_sheet_values(spreadsheet_id='...')\n  Google Doc → use google__get_doc_content(file_id='...')\n  .xlsx / PDF / other → use google__download_file(file_id='...')\n\nFor advanced Drive API queries, use 'drive_query' with raw syntax (e.g., drive_query=\"modifiedTime > '2026-01-01'\").\nNEVER construct raw Drive query syntax via 'query' — use 'name' instead."
+  },
+  {
+    "name": "google__list_drive_files",
+    "description": "List files and folders in a Google Drive folder (default: root)."
+  },
+  {
+    "name": "google__upload_file",
+    "description": "Upload a local file to Google Drive. Accepts paths relative to ~/.pincer/ (e.g., 'downloads/report.pdf'), bare filenames (e.g., 'report.pdf' — searched in downloads/ and workspace/), or absolute paths (e.g., '/Users/user/Documents/file.pdf'). Files from google__download_file are in ~/.pincer/downloads/. Files from file_write or python_exec are in ~/.pincer/workspace/. If you don't know the path, call google__list_local_files first. Optionally specify folder_id to upload into a specific Drive folder. MIME type is auto-detected from the file extension."
+  },
+  {
+    "name": "google__send_message",
+    "description": "Send a new email. Supports plain text and HTML, CC, and BCC."
+  },
+  {
+    "name": "google__list_messages",
+    "description": "List Gmail messages in a label (default: INBOX). Returns sender, subject, snippet."
+  },
+  {
+    "name": "google__reply_to_message",
+    "description": "Reply to a specific message, keeping it in-thread."
+  },
+  {
+    "name": "google__create_meet_space",
+    "description": "Create a new Google Meet meeting space and return the meeting URL. access_type: OPEN=anyone with link, TRUSTED=same org only, RESTRICTED=invited only. Enable auto_recording, auto_transcription, auto_smart_notes for automatic artifacts."
+  },
+  {
+    "name": "google__create_contact",
+    "description": "Create a new Google Contact."
+  }
+]

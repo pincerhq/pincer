@@ -16,7 +16,7 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
@@ -64,11 +64,14 @@ if TYPE_CHECKING:
     from pincer.memory.summarizer import Summarizer
     from pincer.services.skills import SkillService
     from pincer.tools.registry import ToolRegistry
+    from pincer.tools.selection import ToolSelector
 
 logger = logging.getLogger(__name__)
 
 
 _MAX_CONSECUTIVE_ERRORS = 3
+# Tools called in this many latest session messages stay in a chat turn's tool set.
+_RECENT_TOOL_MESSAGES = 20
 _MAX_SANITIZE_ATTEMPTS = 2
 _SESSION_CLEARED_TEXT = "I had a session error and cleared my context. Please resend your message."
 # Onboarding: a question still unanswered after this long is closed, empty,
@@ -399,6 +402,8 @@ class Agent:
         self.mcp_manager: MCPClientManager | None = None  # set by cli after startup
         self.mcp_server: PincerMCPServer | None = None  # set by cli after startup
         self.skill_service: SkillService | None = None  # set by cli after startup
+        # set by cli after startup; trims chat turns to tool_selection_max tools
+        self.tool_selector: ToolSelector | None = None
         # set by cli after startup; supplies each user's own timezone so the
         # clock in the system prompt reads in *their* zone, not the server's
         self.identity_resolver: Any = None
@@ -557,10 +562,6 @@ class Agent:
         extra_parts = [ONBOARDING_FOLLOWUP_INSTRUCTION] if onboarding.followup else []
         if extra_system:
             extra_parts.append(extra_system)
-        system_prompt = await self._build_system_prompt(
-            user_id, text, extra_system="\n\n".join(extra_parts) or None, skip_memory=not memory
-        )
-
         # Get tool schemas. In call context (Sprint 11) the bound in-call gate
         # owns the EXACT tool set — the blocking voice path (guard regeneration,
         # harness) must never see more than the streaming path does.
@@ -572,10 +573,19 @@ class Agent:
         elif call_gate is not None:
             tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
         else:
-            tool_schemas = self._tools.get_schemas()
+            tool_schemas = await self._select_tools(self._tools.get_schemas(), text, session)
         logger.debug(
-            "Tools available: %s",
+            "Tools available (%d): %s",
+            len(tool_schemas or []),
             [t.get("name") for t in (tool_schemas or [])],
+        )
+
+        system_prompt = await self._build_system_prompt(
+            user_id,
+            text,
+            extra_system="\n\n".join(extra_parts) or None,
+            skip_memory=not memory,
+            tool_names=[t["name"] for t in tool_schemas or []],
         )
 
         total_cost = 0.0
@@ -771,11 +781,15 @@ class Agent:
         fact) — ``None`` means the full tool surface, same as live chat.
         """
         messages: list[LLMMessage] = [LLMMessage(role=MessageRole.USER, content=prompt)]
-        system_prompt = await self._build_system_prompt(user_id, prompt, skip_memory=True)
 
         tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
         if tool_schemas is not None and allowed_tools is not None:
             tool_schemas = [s for s in tool_schemas if s.get("name") in allowed_tools] or None
+        if tool_schemas is not None:
+            tool_schemas = await self._select_tools(tool_schemas, prompt)
+        system_prompt = await self._build_system_prompt(
+            user_id, prompt, skip_memory=True, tool_names=[t["name"] for t in tool_schemas or []]
+        )
 
         final_text = ""
         last_response: LLMResponse | None = None
@@ -906,13 +920,20 @@ class Agent:
             await self._maybe_summarize(session)
 
         extra_system = ONBOARDING_FOLLOWUP_INSTRUCTION if onboarding.followup else None
-        system_prompt = await self._build_system_prompt(
-            user_id, text, extra_system=extra_system, skip_memory=not memory
+        tool_schemas = (
+            await self._select_tools(self._tools.get_schemas(), text, session) if self._tools.has_tools else None
         )
-        tool_schemas = self._tools.get_schemas() if self._tools.has_tools else None
         logger.debug(
-            "Tools available: %s",
+            "Tools available (%d): %s",
+            len(tool_schemas or []),
             [t.get("name") for t in (tool_schemas or [])],
+        )
+        system_prompt = await self._build_system_prompt(
+            user_id,
+            text,
+            extra_system=extra_system,
+            skip_memory=not memory,
+            tool_names=[t["name"] for t in tool_schemas or []],
         )
         consecutive_errors = 0
         circuit_broken = False
@@ -1287,6 +1308,22 @@ class Agent:
             await self._sessions.add_message(session, LLMMessage(role=MessageRole.ASSISTANT, content=full_text))
         yield StreamChunk(StreamEventType.DONE, full_text)
 
+    async def _select_tools(
+        self,
+        schemas: list[dict[str, Any]],
+        text: str,
+        session: Session | None = None,
+    ) -> list[dict[str, Any]]:
+        """Trim a chat turn's tools to tool_selection_max via the tool selector (see tools/selection.py)."""
+        if self.tool_selector is None or not schemas:
+            return schemas
+        recent = (
+            [tc.name for msg in session.messages[-_RECENT_TOOL_MESSAGES:] for tc in msg.tool_calls]
+            if session is not None
+            else []
+        )
+        return await self.tool_selector.select(schemas, text, reversed(recent))
+
     async def _user_timezone(self, user_id: str) -> str:
         """This user's configured timezone, or "" to fall back to settings.
 
@@ -1309,19 +1346,26 @@ class Agent:
         *,
         extra_system: str | None = None,
         skip_memory: bool = False,
+        tool_names: Collection[str] | None = None,
     ) -> str:
-        """Build system prompt, injecting relevant memories if available."""
+        """Build system prompt, injecting relevant memories if available.
+
+        ``tool_names`` are the tools sent with this turn (the tool hints follow
+        them); ``None`` means the whole registry.
+        """
         base_prompt = self._settings.system_prompt + "\n\n" + PROFILE_USAGE_INSTRUCTION
+        if tool_names is None:
+            tool_names = self._tools.list_tools()
 
         # Phone-call guidance when make_phone_call tool is available
-        if "make_phone_call" in self._tools.list_tools():
+        if "make_phone_call" in tool_names:
             base_prompt += (
                 "\n\nWhen the user asks you to call a phone number, you MUST use the "
                 "make_phone_call tool. Do not describe or simulate the call in your response — call the tool."
             )
 
         # Google Workspace tool chain hints when google__ tools are registered
-        if any(t.startswith("google__") for t in self._tools.list_tools()):
+        if any(t.startswith("google__") for t in tool_names):
             base_prompt += "\n" + _GOOGLE_TOOL_CHAIN_HINTS
 
         # Inject available skills (progressive disclosure level 1)

@@ -9,14 +9,15 @@ services:
       MEMORY_DB_PATH: /app/data/memory.db
       EMBED_MODEL: BAAI/bge-small-en-v1.5
       EMBED_DIM: 384
-      # FASTEMBED_CACHE_PATH is already /app/models inside the image.
-      # Mount model_cache to avoid re-downloading on container restart.
+      TOOL_EMBED_MODEL: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+      TOOL_EMBED_DIM: 384
+      # Both models are baked into /app/models at build time (see Dockerfile);
+      # no cache volume, which would hide them behind an older copy.
       FASTEMBED_CACHE_PATH: /app/models
       # Passed through to the server if you later add env-based config
       PYTHONUNBUFFERED: 1
     volumes:
       - memory-data:/app/data
-      - model-cache:/app/models
     #ports:
     #  - "8100:8000"
     healthcheck:
@@ -28,4 +29,3 @@ services:
 
 volumes:
   memory-data:
-  model-cache:

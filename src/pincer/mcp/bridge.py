@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import fnmatch
+import json
 import logging
 import uuid
 from pathlib import Path
@@ -66,6 +67,31 @@ def _requires_approval(tool: Any, approval_patterns: list[str]) -> bool:
             return False
 
     return True  # Fail-safe: no patterns configured at all
+
+
+def is_internal_tool(tool: Any) -> bool:
+    """Whether a server marks this tool as host plumbing (``meta={"pincer_internal": true}``).
+
+    Pincer calls such tools itself through the session (e.g. the tool index
+    on the memory server) and never offers them to the LLM.
+    """
+    meta = getattr(tool, "meta", None) or getattr(tool, "_meta", None)
+    return isinstance(meta, dict) and bool(meta.get("pincer_internal"))
+
+
+def result_json(result: Any) -> Any:
+    """Decode the JSON value an MCP tool returned in a CallToolResult."""
+    # fastmcp sends object return values as structuredContent and wraps any other
+    # value as structuredContent={"result": ...}; prefer it over parsing text.
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, dict):
+        return structured.get("result", structured)
+    content = getattr(result, "content", None) or []
+    raw = str(getattr(content[0], "text", "")) if content else ""
+    # fastmcp serialises an empty list result as no content items at all.
+    if not raw.strip():
+        return None
+    return json.loads(raw)
 
 
 def _format_result(result: Any) -> str:
@@ -163,6 +189,8 @@ class MCPToolBridge:
         """
         count = 0
         for tool in self.session.tools:
+            if is_internal_tool(tool):
+                continue
             pincer_name = self._make_name(tool.name)
 
             # Collision detection: refuse to shadow existing tools
@@ -199,6 +227,11 @@ class MCPToolBridge:
         if count:
             logger.info("MCP '%s': registered %d tools", self.session.name, count)
         return count
+
+    @property
+    def registered_names(self) -> list[str]:
+        """Registry names of the tools this bridge registered."""
+        return list(self._registered_names)
 
     def deregister_tools(self) -> None:
         """Remove all tools from this session from the registry."""
