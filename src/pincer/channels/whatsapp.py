@@ -6,8 +6,9 @@ Features:
 - Text messages, voice notes, images, documents
 - Self-chat mode (user messages themselves, agent responds)
 - DM allowlist (only approved phone numbers)
-- Group chat (respond only to a trigger word, or to an @-mention when
-  PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION is on)
+- Group chat (respond only to a trigger word, a reply to the bot's message
+  when PINCER_WHATSAPP_GROUP_TRIGGER_ON_REPLY is on (default), or an
+  @-mention when PINCER_WHATSAPP_GROUP_TRIGGER_ON_MENTION is on)
 """
 
 from __future__ import annotations
