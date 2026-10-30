@@ -23,4 +23,5 @@ class Onboarding(SQLModel, table=True):
     asked_session_id: str | None = Field(default=None, sa_column=Column(Text()))
     asked_at: float | None = Field(default=None, sa_column=Column(Real()))
     completed_at: float | None = Field(default=None, sa_column=Column(Real()))
+    closed_by: str | None = Field(default=None, sa_column=Column(Text()))
     attempts: int = Field(default=0, sa_column=Column(Integer(), nullable=False, server_default=sa.text("0")))

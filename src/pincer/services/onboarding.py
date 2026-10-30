@@ -72,10 +72,16 @@ class OnboardingService(DatabaseService):
             )
 
     async def complete(self, user_id: str, channel: str, *, now: float) -> bool:
-        """Close the gate. True only for the caller that closed it, which is
-        the one to record the answer; False when it was closed already."""
+        """Close an open gate, for example when the answer window expires."""
+        return await self._complete(user_id, channel, now=now, answer=False)
+
+    async def complete_answer(self, user_id: str, channel: str, *, now: float) -> bool:
+        """Claim an answer, including after an empty close; expiry and answers are final."""
+        return await self._complete(user_id, channel, now=now, answer=True)
+
+    async def _complete(self, user_id: str, channel: str, *, now: float, answer: bool) -> bool:
         async with session_scope(self._url) as session:
-            won = await OnboardingRepository(session).mark_completed(user_id, channel, now)
+            won = await OnboardingRepository(session).mark_completed(user_id, channel, now, answer=answer)
         _remember_completed(self._url, user_id, channel)
         return won
 

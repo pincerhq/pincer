@@ -2085,6 +2085,7 @@ def test_0023_onboarding_is_keyed_by_user_and_channel_and_round_trips(migration_
             "asked_session_id": True,
             "asked_at": True,
             "completed_at": True,
+            "closed_by": True,
             "attempts": False,
         }
         assert inspector.get_pk_constraint("pincer_onboarding")["constrained_columns"] == ["user_id", "channel"]
@@ -2093,5 +2094,24 @@ def test_0023_onboarding_is_keyed_by_user_and_channel_and_round_trips(migration_
         assert "pincer_onboarding" not in sa.inspect(engine_).get_table_names()
         command.upgrade(cfg, "head")
         assert "pincer_onboarding" in sa.inspect(engine_).get_table_names()
+    finally:
+        engine_.dispose()
+
+
+def test_0024_preserves_existing_onboarding_closures(migration_url, tmp_path):
+    cfg = _config(migration_url, tmp_path)
+    command.upgrade(cfg, "0023")
+    engine_ = sa.create_engine(migration_url)
+    try:
+        with engine_.begin() as conn:
+            conn.execute(
+                sa.text("INSERT INTO pincer_onboarding (user_id, channel, completed_at) VALUES ('u', 'web', 1)")
+            )
+        command.upgrade(cfg, "head")
+        with engine_.connect() as conn:
+            assert conn.execute(sa.text("SELECT completed_at, closed_by FROM pincer_onboarding")).one() == (1, None)
+        command.downgrade(cfg, "0023")
+        assert "closed_by" not in {column["name"] for column in sa.inspect(engine_).get_columns("pincer_onboarding")}
+        command.upgrade(cfg, "head")
     finally:
         engine_.dispose()

@@ -496,6 +496,25 @@ async def test_concurrent_answers_write_one_profile(
     assert len(await memory_store.list_memories(user_id="user-c2", category="profile")) == 1
 
 
+async def test_inflight_answer_after_empty_closure_writes_profile(
+    settings, session_manager, cost_tracker, tool_registry, memory_store
+):
+    answer = '{"answers_question": true, "name": "Bob"}'
+    llm = _scripted_llm(answer)
+    agent = Agent(settings, llm, session_manager, cost_tracker, tool_registry, memory_store=memory_store)
+    onboarding = session_manager.onboarding
+    assert await onboarding.claim_prompt("user-race", "web", "web:user-race", now=1.0)
+    assert not await onboarding.record_empty_reply("user-race", "web", max_empty=2, now=2.0)
+    assert await onboarding.record_empty_reply("user-race", "web", max_empty=2, now=3.0)
+
+    await agent._ingest_onboarding_reply("I'm Bob", "user-race", "web")
+
+    record = await onboarding.get("user-race", "web")
+    assert record is not None and record.attempts == 2
+    profiles = await memory_store.list_memories(user_id="user-race", category="profile")
+    assert len(profiles) == 1 and "Bob" in profiles[0].content
+
+
 @_PATHS
 async def test_existing_user_new_conversation_is_separate_and_not_prompted(
     path, tmp_path, settings, mock_llm, session_manager, cost_tracker, tool_registry

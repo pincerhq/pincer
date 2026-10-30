@@ -25,20 +25,23 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
         )
         return int(result.rowcount) == 1
 
-    async def mark_completed(self, user_id: str, channel: str, completed_at: float) -> bool:
-        """Close the gate, creating the row for a user asked before it existed.
-
-        True only for the call that closed it: a row already closed keeps the
-        time it was closed, and this call changes nothing.
-        """
+    async def mark_completed(self, user_id: str, channel: str, completed_at: float, *, answer: bool = False) -> bool:
+        """Close the gate; an answer may take over an empty-reply closure."""
+        eligible = _TABLE.c.completed_at.is_(None)
+        if answer:
+            eligible = eligible | (_TABLE.c.closed_by == "empty")
+        reason = "answer" if answer else "expired"
         result = await self.session.exec(
             upsert(
                 dialect_of(self.session),
                 Onboarding,
-                {"user_id": user_id, "channel": channel, "completed_at": completed_at},
+                {"user_id": user_id, "channel": channel, "completed_at": completed_at, "closed_by": reason},
                 index_elements=["user_id", "channel"],
-                set_=lambda excluded: {"completed_at": excluded.completed_at},
-                where=_TABLE.c.completed_at.is_(None),
+                set_={
+                    "completed_at": completed_at,
+                    "closed_by": reason,
+                },
+                where=eligible,
             )
         )
         return int(result.rowcount) == 1
@@ -55,11 +58,13 @@ class OnboardingRepository(BaseRepository[Onboarding, tuple[str, str]]):
                     "channel": channel,
                     "attempts": 1,
                     "completed_at": now if max_empty <= 1 else None,
+                    "closed_by": "empty" if max_empty <= 1 else None,
                 },
                 index_elements=["user_id", "channel"],
                 set_={
                     "attempts": _TABLE.c.attempts + 1,
                     "completed_at": case((_TABLE.c.attempts + 1 >= max_empty, now), else_=None),
+                    "closed_by": case((_TABLE.c.attempts + 1 >= max_empty, "empty"), else_=None),
                 },
                 where=_TABLE.c.completed_at.is_(None),
             )
