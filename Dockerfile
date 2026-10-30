@@ -1,11 +1,14 @@
 # ============================================
 # Stage 0: Dashboard build
 # ============================================
-FROM node:25-slim AS dashboard-builder
+FROM node:26-slim AS dashboard-builder
 
 WORKDIR /app
 
-RUN corepack enable pnpm
+# Node 25+ no longer bundles corepack, so install it: pnpm then still comes from
+# dashboard/package.json's `packageManager` pin, checked against its hash.
+# --force lets corepack's yarn shims replace the ones the image ships.
+RUN npm install -g --force corepack@0.36.0 && corepack enable pnpm
 
 COPY dashboard/ ./
 
@@ -45,14 +48,17 @@ FROM python:3.14-slim AS runtime
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl libmagic1 \
+    && apt-get install -y --no-install-recommends ca-certificates curl libmagic1 libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Node.js from the dashboard builder so npx-based MCP stdio servers work
+# (the node binary links libatomic, installed above). npm and npx are symlinks
+# into node_modules there; COPY would copy the scripts they point at, whose
+# relative require('../lib/cli.js') then misses, so they are linked again.
 COPY --from=dashboard-builder /usr/local/bin/node /usr/local/bin/node
-COPY --from=dashboard-builder /usr/local/bin/npm /usr/local/bin/npm
-COPY --from=dashboard-builder /usr/local/bin/npx /usr/local/bin/npx
 COPY --from=dashboard-builder /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
 
 RUN groupadd -r pincer && useradd -r -g pincer -m pincer
 
