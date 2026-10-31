@@ -50,6 +50,28 @@ class CallsService(DatabaseService):
                         direction=values.get("direction"),
                     )
 
+    async def record_call_start(self, values: dict[str, Any]) -> None:
+        """The row of a call that just started. A row that already exists (the
+        call re-registered after its state was lost) keeps its start."""
+        async with session_scope(self._url) as session:
+            await CallRepository(session).insert_if_absent(values)
+
+    async def record_call_end(self, values: dict[str, Any]) -> None:
+        """Close the call's row: only `ended_at` and `failure_code` change.
+        Without a row (its start write failed), the whole row is written."""
+        async with session_scope(self._url) as session:
+            calls = CallRepository(session)
+            closed = await calls.set_fields(
+                str(values["call_sid"]), {"ended_at": values["ended_at"], "failure_code": values["failure_code"]}
+            )
+            if not closed:
+                await calls.save(values)
+
+    async def close_open_calls(self, failure_code: str) -> int:
+        """End the rows of calls a previous process never tore down."""
+        async with session_scope(self._url) as session:
+            return await CallRepository(session).close_open(failure_code)
+
     async def set_fields(self, call_sid: str, values: dict[str, Any]) -> int:
         async with session_scope(self._url) as session:
             return await CallRepository(session).set_fields(call_sid, values)

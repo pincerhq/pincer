@@ -518,6 +518,7 @@ CALL_NOT_CONNECTED_REASONS = {
     "voicemail": "Anrufbeantworter erkannt, keine Nachricht hinterlassen",
     "shutdown": "der Assistent wurde neu gestartet, bevor jemand abgenommen hat",
     "stuck": "der Anruf klingelte über das Zeitlimit hinaus und wurde beendet",
+    "ended_by_owner": "der Anruf wurde im Dashboard beendet, bevor jemand abgenommen hat",
     "unknown": "der Anruf endete, bevor jemand abgenommen hat",
     # Any other code: never fall back to the English operator text.
     "_other": "der Anruf endete, bevor jemand abgenommen hat",

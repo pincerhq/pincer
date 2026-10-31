@@ -17,12 +17,21 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
 from pincer.observability.failure_codes import FailureCode, classify_failure
 from pincer.voice import call_end
-from pincer.voice.engine import END_CODE_KEY, PROVIDER_STATUS_KEY, UTTERANCE_MARKERS, CallDirection, set_end_cause
+from pincer.voice.engine import (
+    END_CODE_KEY,
+    ENDED_BY_DASHBOARD,
+    ENDED_BY_KEY,
+    PROVIDER_STATUS_KEY,
+    UTTERANCE_MARKERS,
+    CallDirection,
+    set_end_cause,
+)
 from pincer.voice.metrics import VoiceMetricsRegistry
 from pincer.voice.state_machine import CallPhase, CallStateMachine
 from pincer.voice.transcript import Speaker, TranscriptLogger
@@ -67,6 +76,8 @@ SHUTDOWN_SPEECH_TIMEOUT_S = 10.0
 # Post-call reports run an LLM request; a hung provider must not block
 # shutdown forever.
 POSTCALL_DRAIN_TIMEOUT_S = 30.0
+# History-row writes left at shutdown: local database writes, so short.
+CALL_ROW_DRAIN_TIMEOUT_S = 10.0
 
 # The engine's per-utterance STT stamps (UTTERANCE_MARKERS) are snapshotted
 # when the utterance is handed off, because the engine clears them as soon as
@@ -114,6 +125,9 @@ class VoiceChannel(BaseChannel):
         # here (not on the task) so a barge-in can close the PREVIOUS turn's
         # trace as cancelled rather than leaving it open forever.
         self._turn_traces: dict[str, Any] = {}
+        # The write of each call's history row in flight (start, then end; see
+        # _record_call_start). The end write waits for the start write.
+        self._call_row_tasks: dict[str, asyncio.Task[None]] = {}
         self.metrics = VoiceMetricsRegistry()
 
     def set_stream_agent(self, agent: Any) -> None:
@@ -191,6 +205,74 @@ class VoiceChannel(BaseChannel):
         from pincer.voice.briefing import briefing_from_state, record_briefing
 
         record_briefing(self._transcripts.get(call_sid), briefing_from_state(state))
+        self._record_call_start(state)
+
+    # ── Call history row ──────────────────────────────────
+    #
+    # Written at call start (no `ended_at`) and closed at teardown, so the call
+    # is in the history even when the post-call pipeline never runs; the
+    # pipeline's own save, keyed on `call_sid` too, fills in the rest. Both
+    # writes run off the call's path: a busy database must delay neither the
+    # greeting nor the teardown (which the dashboard's hang-up waits on).
+
+    async def _calls_service(self) -> Any | None:
+        db_path = getattr(self._settings, "db_path", None)
+        if not isinstance(db_path, (str, Path)) or not str(db_path):
+            return None
+        from pincer.services.voice.calls import CallsService
+
+        return await CallsService.for_path(Path(str(db_path)))
+
+    def _track_call_row(self, call_sid: str, coro: Any) -> None:
+        task: asyncio.Task[None] = asyncio.create_task(coro, name=f"voice-call-row-{call_sid}")
+        self._call_row_tasks[call_sid] = task
+
+        def _forget(done: asyncio.Task[None]) -> None:
+            if self._call_row_tasks.get(call_sid) is done:
+                del self._call_row_tasks[call_sid]
+
+        task.add_done_callback(_forget)
+
+    def _record_call_start(self, state: CallState) -> None:
+        async def _write() -> None:
+            try:
+                calls = await self._calls_service()
+                if calls is not None:
+                    await calls.record_call_start(state.history_row(ended=False))
+            except Exception:
+                logger.warning("Call row start not saved [%s]", state.call_sid, exc_info=True)
+
+        self._track_call_row(state.call_sid, _write())
+
+    def _record_call_end(self, state: CallState) -> None:
+        started = self._call_row_tasks.get(state.call_sid)
+
+        async def _write() -> None:
+            if started is not None:
+                await asyncio.wait({started})  # never raises; the start logs its own errors
+            try:
+                calls = await self._calls_service()
+                if calls is not None:
+                    await calls.record_call_end(state.history_row())
+            except Exception:
+                logger.warning("Call row end not saved [%s]", state.call_sid, exc_info=True)
+
+        self._track_call_row(state.call_sid, _write())
+
+    async def _close_orphaned_call_rows(self) -> None:
+        """Rows a previous process opened and never closed (a crash, a kill
+        mid-call). Nothing is live before this channel starts, so every open
+        row is one: left alone, the history would show it active for good."""
+        try:
+            calls = await self._calls_service()
+            if calls is None:
+                return
+            closed = await calls.close_open_calls(str(FailureCode.SHUTDOWN))
+        except Exception:
+            logger.warning("Closing orphaned call rows failed", exc_info=True)
+            return
+        if closed:
+            logger.warning("Closed %d call row(s) left open by a previous run", closed)
 
     @staticmethod
     def _session_key(state: CallState) -> str:
@@ -240,6 +322,7 @@ class VoiceChannel(BaseChannel):
 
     async def start(self, handler: MessageHandler) -> None:
         self._handler = handler
+        await self._close_orphaned_call_rows()
         logger.info("Voice channel started")
 
     async def stop(self) -> None:
@@ -283,6 +366,9 @@ class VoiceChannel(BaseChannel):
             # outlive the loop
             with contextlib.suppress(Exception):
                 await self._engine.aclose()
+        # The drained calls' history rows, bounded like the reports below.
+        if self._call_row_tasks:
+            await asyncio.wait(set(self._call_row_tasks.values()), timeout=CALL_ROW_DRAIN_TIMEOUT_S)
         # The drained calls' failure reports are user-facing (the initiator
         # must learn the call was cut) — let them finish before exiting,
         # bounded so a hung LLM request can't block shutdown indefinitely.
@@ -1673,9 +1759,13 @@ class VoiceChannel(BaseChannel):
                 # NORMAL ending ("thanks, bye" + click) — only a hangup during
                 # an action (VERIFY/EXECUTE), an error state, or before any
                 # conversation (greeting phases) counts as failed.
-                benign = sm.phase in _BENIGN_HANGUP_PHASES and not never_answered_outbound
+                # An owner hanging up from the dashboard is a normal end in
+                # any phase. (Before an answer, the endpoint records
+                # ENDED_BY_OWNER as the end code instead.)
+                by_owner = state.metadata.get(ENDED_BY_KEY) == ENDED_BY_DASHBOARD
+                benign = (by_owner or sm.phase in _BENIGN_HANGUP_PHASES) and not never_answered_outbound
                 terminal = CallPhase.COMPLETED if benign else CallPhase.FAILED
-                sm.force_terminal(terminal, reason="call_end_cleanup")
+                sm.force_terminal(terminal, reason="ended_by_dashboard" if by_owner else "call_end_cleanup")
             completed = sm.phase == CallPhase.COMPLETED
         if never_answered_outbound:
             # No human was ever on the line: never a success, whatever phase
@@ -1705,6 +1795,9 @@ class VoiceChannel(BaseChannel):
 
         await self._record_call_telemetry(call_sid, state, failure_code, completed, summary)
         await self._close_call_trace(call_sid, state, sm, failure_code, completed)
+        # The history row gets its end now, not only from the post-call
+        # pipeline: a pipeline that fails or isn't wired left it open forever.
+        self._record_call_end(state)
 
         # Sprint 3: full post-call pipeline (report in the user's language,
         # memory notes, follow-up proposals). Runs as a background task so
