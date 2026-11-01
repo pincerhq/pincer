@@ -133,10 +133,11 @@ class ToolRegistry:
 
         tool = self._tools[name]
 
-        # Inject 'context' if the handler accepts it
+        # Inject 'context' if the handler accepts it — into a copy: the caller's dict is
+        # often the LLM's tool_call.arguments, which is persisted and re-sent.
         sig = inspect.signature(tool.handler)
         if "context" in sig.parameters:
-            arguments["context"] = context or {}
+            arguments = {**arguments, "context": context or {}}
 
         result = await tool.handler(**arguments)
 

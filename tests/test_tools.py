@@ -30,6 +30,26 @@ async def test_execute_missing_tool(tool_registry: ToolRegistry) -> None:
         await tool_registry.execute("nope", {})
 
 
+@pytest.mark.asyncio
+async def test_execute_leaves_the_callers_arguments_unchanged() -> None:
+    """The agent passes the LLM's tool_call.arguments: the injected context must not end up in the
+    persisted message, the next LLM request or a draft's args."""
+    seen: dict[str, object] = {}
+
+    async def zoned(when: str, context: dict | None = None) -> str:
+        seen.update(context or {})
+        return when
+
+    registry = ToolRegistry()
+    registry.register("zoned", "d", zoned, {"type": "object", "properties": {"when": {"type": "string"}}})
+    arguments = {"when": "14:00"}
+
+    assert await registry.execute("zoned", arguments, context={"turn_id": "t1"}) == "14:00"
+
+    assert seen == {"turn_id": "t1"}  # precondition: the handler did get the context
+    assert arguments == {"when": "14:00"}
+
+
 def test_shell_blocked_commands() -> None:
     assert is_blocked("rm -rf /") is not None
     assert is_blocked("dd if=/dev/zero of=/dev/sda") is not None
