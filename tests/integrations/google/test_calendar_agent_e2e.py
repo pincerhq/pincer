@@ -440,7 +440,7 @@ async def test_a_move_on_a_call_reads_the_new_time_in_the_voice_zone(
     tmp_path, fake, berlin_settings, registry, costs
 ) -> None:
     """Update reads offset-less times in the event's stored zone (Kyiv here) unless given one: on a call
-    the voice zone is that given zone."""
+    the new time gets the voice zone's offset instead, and the event keeps its zone."""
     berlin_settings.voice_tool_approval = "off"
     berlin_settings.voice_tools_extra = "google__update_event"
     day = _tomorrow()
@@ -452,11 +452,10 @@ async def test_a_move_on_a_call_reads_the_new_time_in_the_voice_zone(
     await _on_a_call(tmp_path, berlin_settings, llm, costs, registry, "generic")
 
     assert "google__update_event" in llm.offered[0]  # precondition: the call offered the tool
-    # The update also sends the voice zone as the event's timeZone (Kyiv → Berlin): accepted, the
-    # instant is what the caller asked for and what is asserted.
     assert fake.start_of("primary", event_id) == datetime.fromisoformat(f"{day}T14:00:00").replace(
         tzinfo=ZoneInfo("Europe/Berlin")
     )
+    assert fake.event("primary", event_id)["start"]["timeZone"] == "Europe/Kyiv"  # the event's own zone is kept
 
 
 def _read_bounds(fake: FakeCalendarService, tool: str) -> tuple[str, str]:
@@ -487,3 +486,28 @@ async def test_an_availability_read_on_a_call_queries_the_voice_zone(
         datetime.fromisoformat(f"{day}T14:00:00").replace(tzinfo=berlin).isoformat(),
         datetime.fromisoformat(f"{day}T15:00:00").replace(tzinfo=berlin).isoformat(),
     )
+
+
+async def test_a_move_on_a_call_keeps_the_events_own_zone(tmp_path, fake, berlin_settings, registry, costs) -> None:
+    """A New York event moved on a call to "17:00" (start only) lands at 17:00 in the voice zone (Berlin),
+    keeps its 90 minutes and stays a New York event: the call's zone says when, not where the event lives."""
+    berlin_settings.voice_tool_approval = "off"
+    berlin_settings.voice_tools_extra = "google__update_event"
+    day = _tomorrow()
+    new_york = ZoneInfo("America/New_York")
+    event_id = fake.seed_event(
+        "primary",
+        "Board call",
+        datetime.fromisoformat(f"{day}T10:00:00").replace(tzinfo=new_york).isoformat(),
+        datetime.fromisoformat(f"{day}T11:30:00").replace(tzinfo=new_york).isoformat(),
+        time_zone="America/New_York",
+    )
+    llm = _OneCallLLM("google__update_event", {"event_id": event_id, "start": f"{day}T17:00:00"})
+
+    await _on_a_call(tmp_path, berlin_settings, llm, costs, registry, "generic")
+
+    assert "google__update_event" in llm.offered[0]  # precondition: the call offered the tool
+    stored = fake.event("primary", event_id)
+    assert (stored["start"].get("timeZone"), stored["end"].get("timeZone")) == ("America/New_York", "America/New_York")
+    starts = datetime.fromisoformat(f"{day}T17:00:00").replace(tzinfo=ZoneInfo("Europe/Berlin"))
+    assert fake.instants(stored, "Europe/Kyiv") == (starts, starts + timedelta(minutes=90))

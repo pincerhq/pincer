@@ -115,3 +115,13 @@ def test_call_read_bounds_take_the_voice_zone_offset_and_leave_the_rest():
     }
     fixed = {"time_min": "2026-11-12T14:00:00+05:00", "time_max": "2026-11-12T15:00:00Z", "emails": "a@b.c"}
     assert with_voice_zone("google__check_freebusy", fixed, _settings()) is fixed
+
+
+def test_a_call_update_gets_voice_zone_offsets_not_a_timezone_and_a_named_zone_wins():
+    berlin = _settings(voice_timezone="Europe/Berlin")
+    moved = with_voice_zone("google__update_event", {"event_id": "e1", "start": "2026-11-12T16:00:00"}, berlin)
+    assert moved == {"event_id": "e1", "start": "2026-11-12T16:00:00+01:00"}
+    named = {"event_id": "e1", "start": "2026-11-12T16:00:00", "timezone": "Asia/Tokyo"}
+    assert with_voice_zone("google__update_event", named, berlin) is named
+    booked = with_voice_zone("google__create_event", {"start": "2026-11-12T16:00:00"}, berlin)
+    assert booked == {"start": "2026-11-12T16:00:00", "timezone": "Europe/Berlin"}

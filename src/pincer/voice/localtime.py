@@ -18,12 +18,16 @@ if TYPE_CHECKING:
     from pincer.config import Settings
 
 DEFAULT_VOICE_TIMEZONE = "Europe/Berlin"
-# Calendar writes whose offset-less times the call prompt (TIME_CONTEXT) tells the
-# model to give "as local wall-clock time in <voice zone>".
-VOICE_ZONED_CALENDAR_WRITES = frozenset({"google__create_event", "google__update_event"})
-# Calendar reads whose offset-less bounds are the caller's (voice-zone) times: they get the
-# voice zone's offset, so an availability check covers the slot a booking would take.
+# The call prompt (TIME_CONTEXT) tells the model to give calendar times "as local
+# wall-clock time in <voice zone>". A new event is booked in the voice zone (its
+# ``timezone`` argument) ...
+VOICE_ZONED_CALENDAR_CREATES = frozenset({"google__create_event"})
+# ... while these keep their own zone choice and only get the voice zone's offset on
+# offset-less times: an update keeps the event's stored zone (a New York event moved on
+# a call stays a New York event), and an availability check covers the slot a booking
+# would take.
 VOICE_LOCAL_TIME_ARGS: dict[str, tuple[str, ...]] = {
+    "google__update_event": ("start", "end"),
     "google__list_events": ("time_min", "time_max"),
     "google__check_freebusy": ("time_min", "time_max"),
 }
@@ -50,15 +54,16 @@ def with_voice_zone(tool_name: str, arguments: dict[str, Any], settings: Setting
 
     Without it the calendar tools read offset-less times in the calendar's own
     zone: a caller's "14:00" on a Kyiv calendar of a Berlin deployment would be
-    booked (or checked) at 14:00 Kyiv (13:00 Berlin). Writes get ``timezone``
-    set to the voice zone unless the model gave one; reads get the voice zone's
-    offset on their date-time bounds (a bare date stays the calendar's day).
+    booked (or checked) at 14:00 Kyiv (13:00 Berlin). A create gets ``timezone``
+    set to the voice zone; an update and the reads get the voice zone's offset
+    on their offset-less date-times (a bare date stays as given: an all-day
+    move, or the calendar's day). A zone the model named is never overridden.
     Other tools' arguments are returned as is.
     """
+    if str(arguments.get("timezone") or "").strip():
+        return arguments
     zone = get_voice_timezone(settings)
-    if tool_name in VOICE_ZONED_CALENDAR_WRITES:
-        if str(arguments.get("timezone") or "").strip():
-            return arguments
+    if tool_name in VOICE_ZONED_CALENDAR_CREATES:
         return {**arguments, "timezone": zone.key}
     pinned = {
         key: localize(value, zone)
