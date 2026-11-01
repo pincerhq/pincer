@@ -122,7 +122,7 @@ class FakeVoiceEngine(VoiceEngine):
             raise self.call_status
         return self.call_status
 
-    async def end_call(self, call_sid: str) -> str | None:
+    async def end_call(self, call_sid: str, *, ringing: bool = False) -> str | None:
         if call_sid in self.ended:
             return None
         self.ended.append(call_sid)

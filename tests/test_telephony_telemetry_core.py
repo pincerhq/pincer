@@ -267,6 +267,7 @@ def test_provider_event_ids_are_deterministic_so_retries_dedupe():
         ("blocked", FailureCategory.POLICY_DECLINED),
         ("quiet_hours", FailureCategory.POLICY_DECLINED),
         ("callee_hangup", FailureCategory.ENDED_BY_PARTY),
+        ("ended_by_owner", FailureCategory.ENDED_BY_OWNER),
         ("ws_drop", FailureCategory.TECHNICAL),
         ("llm_error", FailureCategory.TECHNICAL),
         ("not_a_real_code", FailureCategory.UNKNOWN),

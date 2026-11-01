@@ -250,6 +250,9 @@ class VoiceEngine(ABC):
         self._pending_outbound: dict[str, CallState] = {}
         # call_sid -> monotonic time of teardown. See was_recently_ended().
         self._ended_calls: dict[str, float] = {}
+        # call_sid -> (monotonic time, ringing) of a REST hang-up Twilio
+        # refused. See note_hang_up_failed().
+        self._failed_hang_ups: dict[str, tuple[float, bool]] = {}
         # Optional VoiceMetricsRegistry, injected by VoiceChannel.set_engine
         self.metrics_registry: Any = None
         # Hangup, transfer, DTMF, fallback <Say>: awaited, never blocking the loop.
@@ -618,27 +621,66 @@ class VoiceEngine(ABC):
         except Exception as exc:
             logger.warning("Status callback for call %s not set: %s", call_sid, _hangup_error_text(exc))
 
-    async def hang_up(self, call_sid: str) -> str | None:
+    async def hang_up(self, call_sid: str, *, ringing: bool = False) -> str | None:
         """The REST hang-up alone, no teardown. Returns None when Twilio hung
-        up or the call was already over there, else a short reason."""
+        up or the call was already over there, else a short reason.
+
+        `ringing`: an outbound call nobody has answered yet. Twilio stops a
+        queued or ringing call with `canceled`; `completed` only hangs up one
+        in progress. Cancelling an answered call does nothing, so `completed`
+        follows anyway for a call answered in the meantime."""
+        cancel_error: str | None = None
+        if ringing:
+            try:
+                await self._rest.update_call(call_sid, status="canceled")
+            except Exception as exc:
+                if not _already_over(exc):
+                    cancel_error = _hangup_error_text(exc)
+                    logger.warning("Cancelling ringing call %s failed: %s", call_sid, cancel_error)
         try:
             await self._rest.update_call(call_sid, status="completed")
         except Exception as exc:
             if _already_over(exc):
+                # After a failed cancel, "not in progress" can mean "still
+                # ringing": that is not a hang-up.
+                if cancel_error:
+                    return cancel_error
                 logger.info("Call %s was already over at Twilio", call_sid)
                 return None
             logger.exception("Failed to end call %s", call_sid)
             return _hangup_error_text(exc)
         return None
 
-    async def end_call(self, call_sid: str) -> str | None:
+    def note_hang_up_failed(self, call_sid: str, *, ringing: bool = False) -> None:
+        """Twilio refused the dashboard's hang-up of a call that is already
+        torn down here: the caller may still be on the line, so the hang-up
+        may be retried (`hang_up_failed_recently`) for `_ENDED_CALL_TTL_S`."""
+        now = time.monotonic()
+        self._failed_hang_ups[call_sid] = (now, ringing)
+        for sid in [s for s, (at, _) in self._failed_hang_ups.items() if at < now - _ENDED_CALL_TTL_S]:
+            self._failed_hang_ups.pop(sid, None)
+        while len(self._failed_hang_ups) > _MAX_ENDED_CALLS:
+            self._failed_hang_ups.pop(next(iter(self._failed_hang_ups)), None)
+
+    def hang_up_failed_recently(self, call_sid: str) -> bool | None:
+        """None unless a hang-up of this call failed in the last
+        `_ENDED_CALL_TTL_S`; then whether the call was still ringing."""
+        failed = self._failed_hang_ups.get(call_sid)
+        if failed is None or time.monotonic() - failed[0] >= _ENDED_CALL_TTL_S:
+            return None
+        return failed[1]
+
+    def forget_hang_up_failure(self, call_sid: str) -> None:
+        self._failed_hang_ups.pop(call_sid, None)
+
+    async def end_call(self, call_sid: str, *, ringing: bool = False) -> str | None:
         """Hang up through Twilio, then tear the call down.
 
         Returns what `hang_up` returns. Teardown runs either way: the call is
         unregistered and the end-of-call callback runs."""
         error: str | None = None
         try:
-            error = await self.hang_up(call_sid)
+            error = await self.hang_up(call_sid, ringing=ringing)
         finally:
             state = await self._unregister_call(call_sid)
             if state and self._on_call_end_callback:
@@ -1961,9 +2003,9 @@ class MediaStreamEngine(VoiceEngine):
         if remaining_ns > 0:
             await asyncio.sleep(remaining_ns / 1_000_000_000)
 
-    async def end_call(self, call_sid: str) -> str | None:
+    async def end_call(self, call_sid: str, *, ringing: bool = False) -> str | None:
         await self.close_media_stream(call_sid)
-        return await super().end_call(call_sid)
+        return await super().end_call(call_sid, ringing=ringing)
 
     async def close_media_stream(self, call_sid: str) -> None:
         """Close STT stream and cancel transcript consumer."""

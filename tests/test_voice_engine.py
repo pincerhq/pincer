@@ -778,6 +778,72 @@ async def test_a_404_hangup_is_not_taken_as_over(mock_settings):
     assert reason is not None and "20404" in reason
 
 
+def _scripted_updates(engine, outcomes: dict[str, Exception | None]) -> list[str]:
+    """Twilio answers each `status=` update from `outcomes`; returns the
+    statuses sent, in order."""
+    sent: list[str] = []
+
+    async def update_call(call_sid, **params):
+        sent.append(params["status"])
+        error = outcomes.get(params["status"])
+        if error is not None:
+            raise error
+
+    engine._rest.update_call = update_call
+    return sent
+
+
+@pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
+async def test_ending_a_ringing_call_cancels_it(mock_settings, engine_cls):
+    """Twilio stops a ringing call with `canceled`; `completed` follows for a
+    call answered meanwhile and finds the cancelled call over."""
+    engine = engine_cls(mock_settings)
+    _fake_rest(engine)
+    await engine.on_call_start("CAx", "+4917", CallDirection.OUTBOUND)
+    sent = _scripted_updates(engine, {"completed": _twilio_error(400, 21220, "Call is not in-progress.")})
+    assert await engine.end_call("CAx", ringing=True) is None
+    assert sent == ["canceled", "completed"]
+    assert engine.get_call_state("CAx") is None
+
+
+async def test_a_failed_cancel_is_not_hidden_by_a_call_not_in_progress(mock_settings):
+    """The cancel failed and `completed` says "not in progress": the call may
+    still be ringing, so that is the cancel's error, not a hang-up."""
+    engine = ConversationRelayEngine(mock_settings)
+    _fake_rest(engine)
+    sent = _scripted_updates(
+        engine,
+        {"canceled": TimeoutError(), "completed": _twilio_error(400, 21220, "Call is not in-progress.")},
+    )
+    assert await engine.hang_up("CAx", ringing=True) == "TimeoutError"
+    assert sent == ["canceled", "completed"]
+
+
+async def test_a_ringing_call_answered_meanwhile_is_still_hung_up(mock_settings):
+    engine = ConversationRelayEngine(mock_settings)
+    _fake_rest(engine)
+    sent = _scripted_updates(engine, {"canceled": _twilio_error(400, 21220, "Call is not queued or ringing.")})
+    assert await engine.hang_up("CAx", ringing=True) is None
+    assert sent == ["canceled", "completed"]
+
+
+def test_failed_hang_ups_are_remembered_for_a_while(mock_settings, monkeypatch):
+    from pincer.voice import engine as engine_mod
+
+    engine = ConversationRelayEngine(mock_settings)
+    assert engine.hang_up_failed_recently("CAx") is None
+    engine.note_hang_up_failed("CAx", ringing=True)
+    engine.note_hang_up_failed("CAy")
+    assert engine.hang_up_failed_recently("CAx") is True
+    assert engine.hang_up_failed_recently("CAy") is False
+    engine.forget_hang_up_failure("CAy")
+    assert engine.hang_up_failed_recently("CAy") is None
+
+    later = engine_mod.time.monotonic() + engine_mod._ENDED_CALL_TTL_S + 1
+    monkeypatch.setattr(engine_mod.time, "monotonic", lambda: later)
+    assert engine.hang_up_failed_recently("CAx") is None
+
+
 @pytest.mark.parametrize("engine_cls", [ConversationRelayEngine, MediaStreamEngine])
 async def test_media_connect_asks_for_the_status_callback_once_inbound_only(mock_settings, engine_cls):
     """Not at registration: during /webhook the call is still ringing."""

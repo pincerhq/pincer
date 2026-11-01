@@ -91,7 +91,8 @@ class _FakeEngine:
         self.end_error: str | None = None  # what end_call / hang_up report (None: Twilio hung up)
         self.ended: list[str] = []
         self.hang_ups: list[str] = []  # REST hang-ups without teardown (the retry path)
-        self.recently_ended: set[str] = set()
+        self.ringing: list[bool] = []  # the `ringing` flag of each hang-up, in order
+        self.failed_hang_ups: dict[str, bool] = {}
 
     def get_active_calls(self):
         return dict(self._calls)
@@ -99,18 +100,25 @@ class _FakeEngine:
     def get_call_state(self, call_sid):
         return self._calls.get(call_sid)
 
-    def was_recently_ended(self, call_sid):
-        return call_sid in self.recently_ended
+    def note_hang_up_failed(self, call_sid, *, ringing=False):
+        self.failed_hang_ups[call_sid] = ringing
 
-    async def hang_up(self, call_sid):
+    def hang_up_failed_recently(self, call_sid):
+        return self.failed_hang_ups.get(call_sid)
+
+    def forget_hang_up_failure(self, call_sid):
+        self.failed_hang_ups.pop(call_sid, None)
+
+    async def hang_up(self, call_sid, *, ringing=False):
         self.hang_ups.append(call_sid)
+        self.ringing.append(ringing)
         return self.end_error
 
-    async def end_call(self, call_sid):
+    async def end_call(self, call_sid, *, ringing=False):
         # like the real engine: unregistered whatever Twilio answered
         self.ended.append(call_sid)
+        self.ringing.append(ringing)
         self._calls.pop(call_sid, None)
-        self.recently_ended.add(call_sid)
         return self.end_error
 
 
@@ -370,6 +378,42 @@ def test_end_call_before_an_answer_records_the_owner_as_the_cause(client, fake_e
     state = fake_engine._calls["CA-live"]  # outbound, still ringing
     assert client.post("/api/voice/calls/CA-live/end").status_code == 204
     assert state.metadata["end_code"] == "ended_by_owner"
+    assert fake_engine.ringing == [True]  # cancelled, not only `completed`
+
+
+async def test_end_call_before_an_answer_does_not_redial_an_appointment(client, fake_engine):
+    """The `canceled` status Twilio posts after the owner's hang-up must not
+    read as an unreachable contact and schedule the appointment redial."""
+    from pincer.voice import scheduling
+
+    scheduling._reset_for_tests()
+    task = scheduling.AppointmentTask(
+        task_id="t1",
+        user_id="u1",
+        channel="telegram",
+        target_number="+15550002222",
+        contact_name="Dr. Who",
+        topic="checkup",
+        timeframe="",
+        duration_minutes=30,
+        language="en",
+    )
+    scheduling.register_appointment("CA-live", task)
+    try:
+        assert client.post("/api/voice/calls/CA-live/end").status_code == 204
+        assert scheduling.get_appointment("CA-live") is None
+        assert await scheduling.handle_call_not_connected("CA-live", "canceled", SimpleNamespace()) is False
+    finally:
+        scheduling._reset_for_tests()
+
+
+def test_end_call_after_the_call_ended_on_its_own_is_404(client, fake_engine):
+    """A stale tab ending a call the caller already hung up: 404, no REST
+    hang-up and no audit row claiming the owner ended it."""
+    fake_engine._calls.clear()
+    r = client.post("/api/voice/calls/CA-live/end")
+    assert r.status_code == 404
+    assert fake_engine.hang_ups == [] and fake_engine.ended == []
 
 
 def test_end_call_unknown_sid_is_404(client, fake_engine):
@@ -402,6 +446,9 @@ def test_end_call_can_be_retried_after_a_502(client, fake_engine):
     assert client.post("/api/voice/calls/CA-live/end").status_code == 204
     assert fake_engine.ended == ["CA-live"]  # torn down once
     assert fake_engine.hang_ups == ["CA-live", "CA-live"]
+    assert fake_engine.ringing == [True, True, True]  # the retries still cancel a ringing call
+    # Hung up at last: a further click is a 404 like any ended call.
+    assert client.post("/api/voice/calls/CA-live/end").status_code == 404
 
 
 def test_end_call_is_audited(client, fake_engine, monkeypatch):

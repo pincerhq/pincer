@@ -926,7 +926,9 @@ async def voice_status(request: Request) -> PlainTextResponse:
                 # A plain hang-up reaches us twice (this and the media close):
                 # no reason, so the trace says the same whichever wins. During
                 # a transfer the media is already gone and this is the signal.
-                reason = "provider_completed" if state.metadata.get("transfer") else ""
+                # `transferring`, not the `transfer` record: the record outlives
+                # a failed transfer that handed the call back to the AI.
+                reason = "provider_completed" if state.metadata.get("transferring") else ""
                 await _engine.finish_remote_ended(call_sid, reason=reason)
             elif _already_torn_down(call_sid):
                 # Race: end_call (AMD hangup, caller hangup, shutdown) popped the

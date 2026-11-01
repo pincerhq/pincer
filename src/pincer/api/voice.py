@@ -992,29 +992,42 @@ async def end_active_call(call_sid: str, identity: OptionalIdentity) -> Response
 
     The call leaves the active list whatever Twilio answers: a 502 says the
     REST hang-up failed, not that the call is still tracked. Twilio may still
-    have the caller on the line then, so a call torn down in the last few
-    minutes can be ended again: that sends the REST hang-up alone."""
+    have the caller on the line then, so for a few minutes after a 502 the
+    call can be ended again: that sends the REST hang-up alone. Any other
+    call that is no longer tracked is a 404, however recently it ended."""
     from pincer.observability.failure_codes import FailureCode
     from pincer.voice.call_locks import one_call_update_at_a_time
     from pincer.voice.engine import CallDirection, set_end_cause
+    from pincer.voice.scheduling import clear_appointment
 
     engine = _get_engine()
-    if engine is None or (engine.get_call_state(call_sid) is None and not engine.was_recently_ended(call_sid)):
+    if engine is None or (engine.get_call_state(call_sid) is None and engine.hang_up_failed_recently(call_sid) is None):
         raise HTTPException(status_code=404, detail="Call is not active")
     # The lock /status holds: a `completed` arriving meanwhile ends the call
     # once, and then this request only repeats the hang-up.
     async with one_call_update_at_a_time(call_sid):
         state = engine.get_call_state(call_sid)
         if state is None:
-            error = await engine.hang_up(call_sid)
+            ringing = engine.hang_up_failed_recently(call_sid)
+            if ringing is None:  # a retry that succeeded meanwhile
+                raise HTTPException(status_code=404, detail="Call is not active")
+            error = await engine.hang_up(call_sid, ringing=ringing)
         else:
             # Who ended it: the channel counts it as a normal end, not a
             # failure. Before anyone answered there was no conversation to
             # complete, so that end gets its own code.
             state.metadata.setdefault(ENDED_BY_KEY, ENDED_BY_DASHBOARD)
-            if state.direction == CallDirection.OUTBOUND and state.metadata.get("answered_at") is None:
+            ringing = state.direction == CallDirection.OUTBOUND and state.metadata.get("answered_at") is None
+            if ringing:
                 set_end_cause(state, FailureCode.ENDED_BY_OWNER)
-            error = await engine.end_call(call_sid)
+                # The `canceled` status Twilio posts next is the owner's doing,
+                # not an unreachable contact: no appointment redial for it.
+                clear_appointment(call_sid)
+            error = await engine.end_call(call_sid, ringing=ringing)
+        if error:
+            engine.note_hang_up_failed(call_sid, ringing=ringing)
+        else:
+            engine.forget_hang_up_failure(call_sid)
     user = (identity.pincer_user_id if identity is not None else "") or _DASHBOARD_USER
     await _audit_call_end(user=user, call_sid=call_sid, twilio_error=error)
     if error:
