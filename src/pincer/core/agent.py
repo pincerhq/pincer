@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from enum import StrEnum
@@ -412,6 +413,15 @@ class _OutageLog:
             logger.info(self._recovery)
 
 
+@dataclass(frozen=True)
+class _Turn:
+    """One chat turn's tool context: a UUID7 for log tracing (and calendar
+    dedup), plus the user's identity timezone, looked up once per turn."""
+
+    turn_id: str
+    timezone: str
+
+
 class Agent:
     """The core Pincer agent."""
 
@@ -634,6 +644,8 @@ class Agent:
             [t.get("name") for t in (tool_schemas or [])],
         )
 
+        turn = await self._begin_turn(user_id)
+
         async def build_prompt(tool_names: list[str] | None) -> str:
             return await self._build_system_prompt(
                 user_id,
@@ -641,6 +653,7 @@ class Agent:
                 extra_system="\n\n".join(extra_parts) or None,
                 skip_memory=not memory,
                 tool_names=tool_names,
+                user_timezone=turn.timezone,
             )
 
         # In a call the hints follow the registry, as on the streaming voice path
@@ -730,10 +743,18 @@ class Agent:
                     tool_calls_count += 1
                     if call_gate is not None:
                         result = await self._execute_call_tool(
-                            tool_call, user_id, channel, channel_user_id, call_gate, channel_name=channel_name
+                            tool_call,
+                            user_id,
+                            channel,
+                            channel_user_id,
+                            call_gate,
+                            channel_name=channel_name,
+                            turn=turn,
                         )
                     else:
-                        result = await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id)
+                        result = await self._execute_tool(
+                            tool_call, user_id, channel, channel_name, channel_user_id, turn=turn
+                        )
 
                     result_msg = LLMMessage(
                         role=MessageRole.TOOL_RESULT,
@@ -856,8 +877,9 @@ class Agent:
         if candidates is not None and allowed_tools is not None:
             candidates = [s for s in candidates if s.get("name") in allowed_tools] or None
         tool_schemas = await self._select_tools(candidates, prompt) if candidates is not None else None
+        turn = await self._begin_turn(user_id)
         system_prompt = await self._build_system_prompt(
-            user_id, prompt, skip_memory=True, tool_names=_schema_names(tool_schemas)
+            user_id, prompt, skip_memory=True, tool_names=_schema_names(tool_schemas), user_timezone=turn.timezone
         )
 
         final_text = ""
@@ -906,7 +928,7 @@ class Agent:
                 skills_loaded: list[str] = []
                 for tool_call in response.tool_calls:
                     result = await self._execute_tool(
-                        tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True
+                        tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True, turn=turn
                     )
                     messages.append(
                         LLMMessage(
@@ -926,7 +948,11 @@ class Agent:
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
                         tool_schemas = reselected
                         system_prompt = await self._build_system_prompt(
-                            user_id, prompt, skip_memory=True, tool_names=_schema_names(tool_schemas)
+                            user_id,
+                            prompt,
+                            skip_memory=True,
+                            tool_names=_schema_names(tool_schemas),
+                            user_timezone=turn.timezone,
                         )
 
                 if iteration_had_error:
@@ -1033,9 +1059,16 @@ class Agent:
             [t.get("name") for t in (tool_schemas or [])],
         )
 
+        turn = await self._begin_turn(user_id)
+
         async def build_prompt(tool_names: list[str]) -> str:
             return await self._build_system_prompt(
-                user_id, text, extra_system=extra_system, skip_memory=not memory, tool_names=tool_names
+                user_id,
+                text,
+                extra_system=extra_system,
+                skip_memory=not memory,
+                tool_names=tool_names,
+                user_timezone=turn.timezone,
             )
 
         system_prompt = await build_prompt(_schema_names(tool_schemas))
@@ -1090,7 +1123,9 @@ class Agent:
             skills_loaded: list[str] = []
             for tool_call in response.tool_calls:
                 yield StreamChunk(StreamEventType.TOOL_START, f"Using {tool_call.name}...")
-                result = await self._execute_tool(tool_call, user_id, channel, channel_user_id=channel_user_id)
+                result = await self._execute_tool(
+                    tool_call, user_id, channel, channel_user_id=channel_user_id, turn=turn
+                )
                 result_msg = LLMMessage(
                     role=MessageRole.TOOL_RESULT,
                     content=result.content,
@@ -1253,7 +1288,10 @@ class Agent:
         # add_message auto-trims to max_session_messages, so context stays
         # bounded; text channels keep the richer summarize-then-trim flow.
 
-        system_prompt = await self._build_system_prompt(user_id, text, extra_system=extra_system)
+        turn = await self._begin_turn(user_id)
+        system_prompt = await self._build_system_prompt(
+            user_id, text, extra_system=extra_system, user_timezone=turn.timezone
+        )
         # Sprint 11: in call context the bound gate owns the EXACT tool set
         # (tier table ∩ call scope); the Sprint-8 name filter is the fallback
         # when no gate is bound (legacy callers, tests).
@@ -1419,7 +1457,9 @@ class Agent:
                         iteration=_iteration + 1,
                     )
                     turn_trace.bump("tool_calls")
-                result = await self._execute_call_tool(tool_call, user_id, channel, channel_user_id, call_gate)
+                result = await self._execute_call_tool(
+                    tool_call, user_id, channel, channel_user_id, call_gate, turn=turn
+                )
                 if tool_span is not None:
                     tool_span.close(_SpanStatus.ERROR if result.is_error else _SpanStatus.OK)
                 if turn_trace is not None:
@@ -1505,6 +1545,10 @@ class Agent:
             logger.debug("Timezone lookup failed for %s", user_id, exc_info=True)
             return ""
 
+    async def _begin_turn(self, user_id: str) -> _Turn:
+        """Mint this turn's ID and resolve the user's zone once for all its tool calls."""
+        return _Turn(turn_id=str(uuid.uuid7()), timezone=await self._user_timezone(user_id))
+
     async def _build_system_prompt(
         self,
         user_id: str,
@@ -1513,11 +1557,13 @@ class Agent:
         extra_system: str | None = None,
         skip_memory: bool = False,
         tool_names: Collection[str] | None = None,
+        user_timezone: str | None = None,
     ) -> str:
         """Build system prompt, injecting relevant memories if available.
 
         ``tool_names`` are the tools sent with this turn (the tool hints follow
-        them); ``None`` means the whole registry.
+        them); ``None`` means the whole registry. ``user_timezone`` is the
+        turn's already-resolved identity zone (``None`` = look it up).
         """
         base_prompt = self._settings.system_prompt + "\n\n" + PROFILE_USAGE_INSTRUCTION
         if tool_names is None:
@@ -1571,7 +1617,9 @@ class Agent:
         # The model has no clock and will invent today's date if nothing states
         # it (see core/clock.py). Appended on every return path below, and last
         # so it is the most recent thing the model reads before the messages.
-        time_block = current_time_block(self._settings, await self._user_timezone(user_id))
+        if user_timezone is None:
+            user_timezone = await self._user_timezone(user_id)
+        time_block = current_time_block(self._settings, user_timezone)
 
         def _with_extra(prompt: str) -> str:
             parts = [prompt]
@@ -1753,6 +1801,45 @@ class Agent:
         channel_user_id: str | None = None,
         *,
         skip_approval: bool = False,
+        turn: _Turn | None = None,
+    ) -> ToolResult:
+        """Execute one tool call, logging a "Tool call" and a matching "Tool
+        result" line (tool, turn, call, error flag, duration) for every tool.
+
+        ``turn`` carries the turn ID and the user's zone; a caller outside a
+        turn (tests, one-off paths) gets a fresh one for this call.
+        """
+        turn = turn or await self._begin_turn(user_id)
+        logger.info(
+            "Tool call: %s(%s) [turn=%s call=%s]", tool_call.name, tool_call.arguments, turn.turn_id, tool_call.id
+        )
+        started = time.monotonic()
+        result: ToolResult | None = None
+        try:
+            result = await self._run_tool_call(
+                tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=skip_approval, turn=turn
+            )
+            return result
+        finally:
+            logger.info(
+                "Tool result: tool=%s turn=%s call=%s error=%s duration_ms=%d",
+                tool_call.name,
+                turn.turn_id,
+                tool_call.id,
+                result.is_error if result is not None else True,
+                (time.monotonic() - started) * 1000,
+            )
+
+    async def _run_tool_call(
+        self,
+        tool_call: ToolCall,
+        user_id: str,
+        channel: str,
+        channel_name: str | None,
+        channel_user_id: str | None,
+        *,
+        skip_approval: bool,
+        turn: _Turn,
     ) -> ToolResult:
         """Execute a single tool call, catching errors.
 
@@ -1773,8 +1860,6 @@ class Agent:
         approval authority during a phone call) may set this — never the
         plain ``handle_message``/``handle_message_stream`` paths.
         """
-        logger.info("Tool call: %s(%s)", tool_call.name, tool_call.arguments)
-
         # Guard: block Google-related code in general-purpose execution tools
         if tool_call.name in ("python_exec", "shell_exec"):
             code = tool_call.arguments.get("code", "") or tool_call.arguments.get("command", "")
@@ -1844,7 +1929,10 @@ class Agent:
                         # Per-user identity zone: calendar tools read
                         # offset-less times in it when the calendar's own
                         # zone is unavailable ("" = use PINCER_TIMEZONE).
-                        "timezone": await self._user_timezone(user_id),
+                        "timezone": turn.timezone,
+                        # Tracing (log lines) and calendar create dedup.
+                        "turn_id": turn.turn_id,
+                        "tool_call_id": tool_call.id,
                     },
                 )
                 if tool_call.name == "make_phone_call":
@@ -1891,6 +1979,7 @@ class Agent:
         call_gate: Any,
         *,
         channel_name: str | None = None,
+        turn: _Turn | None = None,
     ) -> ToolResult:
         """Sprint 11: run one tool_use through the in-call gate.
 
@@ -1899,11 +1988,11 @@ class Agent:
         approval prompt is skipped; without a gate the normal path applies.
         """
         if call_gate is None:
-            return await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id)
+            return await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id, turn=turn)
 
         async def _run() -> tuple[str, bool]:
             inner = await self._execute_tool(
-                tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True
+                tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True, turn=turn
             )
             return inner.content, inner.is_error
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 from types import SimpleNamespace
@@ -278,6 +279,18 @@ async def test_tool_not_found(settings, mock_llm, session_manager, cost_tracker,
     assert "Sorry, that tool isn't available." in result.text
 
 
+_UUID7_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+
+
+def _without_turn_id(contexts: list[dict]) -> list[dict]:
+    """The contexts minus ``turn_id`` (asserted to be a UUID7: it differs every turn)."""
+    stripped = []
+    for ctx in contexts:
+        assert _UUID7_RE.match(str(ctx.get("turn_id"))), ctx
+        stripped.append({k: v for k, v in ctx.items() if k != "turn_id"})
+    return stripped
+
+
 def _context_capturing_registry() -> tuple[ToolRegistry, list[dict]]:
     """A registry with one tool that records the `context` dict it was called with.
 
@@ -330,13 +343,14 @@ async def test_tool_context_prefers_channel_user_id(settings, mock_llm, session_
         channel_user_id="123456789",
     )
 
-    assert seen_contexts == [
+    assert _without_turn_id(seen_contexts) == [
         {
             "user_id": "123456789",
             "channel": "test",
             "pincer_user_id": "canonical-r_lutsiv",
             "channel_name": "test",
             "timezone": "",
+            "tool_call_id": "tc1",
         }
     ]
 
@@ -368,8 +382,15 @@ async def test_tool_context_falls_back_to_user_id_when_no_channel_user_id(
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
     await agent.handle_message(user_id="user1", channel="test", text="who am i")
 
-    assert seen_contexts == [
-        {"user_id": "user1", "channel": "test", "pincer_user_id": "user1", "channel_name": "test", "timezone": ""}
+    assert _without_turn_id(seen_contexts) == [
+        {
+            "user_id": "user1",
+            "channel": "test",
+            "pincer_user_id": "user1",
+            "channel_name": "test",
+            "timezone": "",
+            "tool_call_id": "tc1",
+        }
     ]
 
 
@@ -436,13 +457,14 @@ async def test_stream_tool_context_prefers_channel_user_id(settings, mock_llm, s
     ):
         pass
 
-    assert seen_contexts == [
+    assert _without_turn_id(seen_contexts) == [
         {
             "user_id": "123456789",
             "channel": "test",
             "pincer_user_id": "canonical-r_lutsiv",
             "channel_name": "test",
             "timezone": "",
+            "tool_call_id": "tc1",
         }
     ]
 
@@ -1412,3 +1434,49 @@ async def test_run_headless_selects_from_the_allowed_tools(
     kwargs = mock_llm.complete.call_args.kwargs
     assert _tool_names(mock_llm.complete.call_args) == ["whoami"]
     assert "make_phone_call tool" not in kwargs["system"]
+
+
+@pytest.mark.asyncio
+async def test_tool_calls_share_one_turn_id_per_turn_and_zone_is_looked_up_once(
+    settings, mock_llm, session_manager, cost_tracker
+):
+    registry, seen_contexts = _context_capturing_registry()
+
+    def _two_calls_then_done():
+        return [
+            LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(id="tc1", name="whoami", arguments={}),
+                    ToolCall(id="tc2", name="whoami", arguments={}),
+                ],
+                model="test",
+                input_tokens=50,
+                output_tokens=30,
+                stop_reason="tool_use",
+            ),
+            LLMResponse(content="done", model="test", input_tokens=80, output_tokens=20, stop_reason="end_turn"),
+        ]
+
+    mock_llm.complete.side_effect = [*_two_calls_then_done(), *_two_calls_then_done()]
+    looked_up: list[str] = []
+
+    class _Identity:
+        async def get_timezone(self, pincer_user_id: str) -> str:
+            looked_up.append(pincer_user_id)
+            return "Europe/Kyiv"
+
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+    agent.identity_resolver = _Identity()
+    await agent.handle_message(user_id="u1", channel="test", text="first")
+    lookups_after_first_turn = len(looked_up)
+    await agent.handle_message(user_id="u1", channel="test", text="second")
+
+    turn_ids = [ctx["turn_id"] for ctx in seen_contexts]
+    assert [ctx["tool_call_id"] for ctx in seen_contexts] == ["tc1", "tc2", "tc1", "tc2"]
+    assert turn_ids[0] == turn_ids[1]
+    assert turn_ids[2] == turn_ids[3]
+    assert turn_ids[0] != turn_ids[2]
+    assert all(_UUID7_RE.match(t) for t in turn_ids)
+    assert lookups_after_first_turn == 1
+    assert len(looked_up) == 2
