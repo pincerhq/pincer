@@ -20,7 +20,8 @@ Niemals raten.
 7. Sie haben Zugriff auf den Gesprächsverlauf aus den Text-Chats des Nutzers.
 8. Fassen Sie Tool-Ergebnisse gesprächstauglich zusammen — lesen Sie keine Rohdaten vor. Termine und Uhrzeiten \
 immer ausgesprochen nennen ("Dienstag, der achtzehnte August um vierzehn Uhr"), niemals als Datumscode.
-9. Sagen Sie VOR einem Tool-Aufruf einen kurzen Füllsatz wie "Einen Moment bitte...", damit keine Stille entsteht.
+9. Sagen Sie VOR einem Tool-Aufruf einen kurzen Füllsatz wie "Einen Moment bitte...", damit keine Stille entsteht — \
+höchstens EINEN pro Antwort und keinen mehr, sobald ein Tool-Ergebnis da ist.
 10. Behaupten Sie NIEMALS, etwas sei erledigt, gebucht, gesendet oder storniert, \
 wenn kein Tool-Ergebnis in diesem Anruf das bestätigt. Bei Fehlern ehrlich sein.
 11. Siezen Sie den Gesprächspartner durchgehend. Seien Sie freundlich, professionell und knapp.
@@ -274,6 +275,10 @@ TOOL_TIMEOUT_DEFER = "Das kläre ich im Nachgang und melde mich."
 
 TOOL_ERROR = "Das hat gerade nicht geklappt. Ich kümmere mich im Nachgang darum."
 
+# Gesprochen, wenn das Modell in einem Gesprächszug immer wieder dasselbe Tool
+# mit denselben Argumenten aufruft und der Zug deshalb abgebrochen wird.
+TOOL_NO_PROGRESS = "Das kann ich gerade leider nicht herausfinden."
+
 VERIFY_ACTION = "Zur Bestätigung: Ich würde jetzt {action}. Ist das so richtig?"
 
 VERIFY_REASK = "Entschuldigung, das habe ich nicht verstanden. {question}"
@@ -322,7 +327,14 @@ was darin steht — niemals Details ergänzen, raten oder ausschmücken.
 - Sagt ein Tool-Ergebnis, dass eine Aktion noch bestätigt werden muss, abgelehnt, verschoben oder \
 fehlgeschlagen ist, sagen Sie das ehrlich; behaupten Sie nie, es sei erledigt.
 - Vor einem Schreibzugriff (Termin anlegen oder ändern, Notiz weitergeben) nennen Sie die genaue \
-Zusage und warten auf ein klares Ja. Lehnt der Partner ab oder bleibt unklar, nicht insistieren.\
+Zusage und warten auf ein klares Ja. Lehnt der Partner ab oder bleibt unklar, nicht insistieren.
+- Passt keines Ihrer Tools zur Anfrage, sagen Sie das direkt in EINEM Satz ("Das kann ich während des \
+Anrufs leider nicht nachschlagen.") und bieten Sie eine Alternative an — es zu notieren oder an Ihren \
+Nutzer weiterzugeben, wenn Sie dafür ein Tool haben. Rufen Sie NIE ein unpassendes Tool als Ersatz auf.
+- Rufen Sie ein Tool nie erneut mit denselben Argumenten auf. Beantwortet das Ergebnis die Frage nicht, \
+sagen Sie das einmal.
+- Fehlt für eine Abfrage eine wesentliche Angabe, fragen Sie zuerst danach (z. B. bei Spritpreisen: \
+E5, E10 oder Diesel?).\
 """
 
 ACTION_DESCRIPTIONS = {
@@ -349,6 +361,12 @@ TOOL_SPEECH = {
     "memory_search.none": "Dazu habe ich nichts notiert.",
     "memory_search.some": "Früher notiert: {items}.",
     "business_profile_lookup.ok": "{profile}.",
+    "websearch.some": "Laut {source}: {text}",
+    "websearch.none": "Dazu habe ich im Web nichts gefunden.",
+    "websearch.as_of": "Stand {date}",
+    "websearch.unknown_source": "einer Webseite",
+    "duplicate": "Dieses Tool wurde mit denselben Angaben schon aufgerufen. Antworten Sie mit dem, was Sie haben, "
+    "oder sagen Sie ehrlich, dass Sie es nicht herausfinden können. Nicht erneut aufrufen.",
     "default.ok": "Erledigt.",
     "pending": "Aktion wartet auf die Bestätigung des Gesprächspartners: {action}. Nicht als erledigt ausgeben.",
     "denied": "Die Aktion konnte nicht ausgeführt werden. Nicht als erledigt ausgeben.",

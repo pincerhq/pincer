@@ -54,6 +54,8 @@ TIERS: dict[str, str] = {
     # excludes it — enforced by allowed_tools_for_call (§5.3).
     "memory_search": TIER_R,
     "business_profile_lookup": TIER_R,
+    # Web search (issue #300): opt-in only, see CALL_OPT_IN_TOOLS.
+    "websearch__search": TIER_R,
     # ── Tier W: reversible writes, follow the approval mode
     "google__create_event": TIER_W,
     "google__update_event": TIER_W,
@@ -114,6 +116,9 @@ APPOINTMENT_CALL_TOOLS: frozenset[str] = frozenset(
     }
 )
 GENERIC_CALL_WRITE_TOOLS: frozenset[str] = frozenset({"send_owner_message", "memory_note"})
+# Tier R/W tools that no call gets by default: they join a generic or
+# appointment call only when PINCER_VOICE_TOOLS_EXTRA names them.
+CALL_OPT_IN_TOOLS: frozenset[str] = frozenset({"websearch__search"})
 # Sprint 12 §9: the inbound receptionist's EXACT tool set. Explicitly absent
 # vs outbound: memory_search, contact_lookup, google__list_events (event
 # contents must be unreachable — free/busy returns windows only).
@@ -299,7 +304,7 @@ def allowed_tools_for_call(
     if kind == "appointment":
         scope = set(APPOINTMENT_CALL_TOOLS)
     else:
-        scope = set(tier_r_tools()) | set(GENERIC_CALL_WRITE_TOOLS)
+        scope = (set(tier_r_tools()) - CALL_OPT_IN_TOOLS) | set(GENERIC_CALL_WRITE_TOOLS)
     for name in parse_csv(str(getattr(settings, "voice_tools_extra", "") or "")):
         if tier_of(name) != TIER_X:
             scope.add(name)
@@ -455,6 +460,7 @@ def validate_settings(settings: Any) -> list[str]:
 __all__ = [
     "APPOINTMENT_CALL_TOOLS",
     "APPROVAL_MODES",
+    "CALL_OPT_IN_TOOLS",
     "DEFAULT_TIER",
     "DENY_REASONS",
     "GENERIC_CALL_WRITE_TOOLS",

@@ -476,7 +476,7 @@ tools. The allowlist is a tier table in `src/pincer/voice/tool_policy.py`
 
 | Tier | Tools | Behaviour |
 |------|-------|-----------|
-| **R** read-only | `google__list_events`, `google__check_freebusy`, `contact_lookup`, `memory_search` (outbound only), `business_profile_lookup` | Runs instantly in every mode, from any phase; a slow read gets a spoken filler first |
+| **R** read-only | `google__list_events`, `google__check_freebusy`, `contact_lookup`, `memory_search` (outbound only), `business_profile_lookup`, `websearch__search` (opt-in, see below) | Runs instantly in every mode, from any phase; a slow read gets a spoken filler first |
 | **W** reversible writes | `google__create_event`, `google__update_event`, `send_owner_message`, `memory_note` | Follows the approval mode below; counted against `PINCER_VOICE_MAX_WRITES_PER_CALL` |
 | **X** never on a call | `email_send`, `google__delete_event`, `make_phone_call`, `schedule_appointment_call`, `file_*`, `config_*`, `memory_dump`, `do_not_call_*`, **and every unlisted tool** | Not callable — its schema is never passed to the model. No override or extra can change this. |
 
@@ -485,6 +485,21 @@ appointment calls (`schedule_appointment_call`) get the fixed scheduling set;
 generic calls (`make_phone_call`, inbound) get all reads plus the two
 owner-facing writes — calendar writes are *not* default there and must be
 added with `PINCER_VOICE_TOOLS_EXTRA=google__create_event`.
+
+Web search is a read, but no call gets it by default: add it with
+`PINCER_VOICE_TOOLS_EXTRA=websearch__search` (it needs the `websearch` MCP
+server connected). It then runs without approval on generic and appointment
+calls — the server's chat-side `approval_required` does not apply in a call,
+where the tier table is the authority — and the model hears the top results as
+"According to <site>: …". The inbound receptionist never gets it, extra or not.
+
+The system prompt follows the same set: tool hints and the connected-MCP-server
+list name only the tools the call actually offers, so a model is never told
+about a tool it cannot call. When nothing fits a request, the call rules tell
+it to say so in one sentence and offer to note it or pass it on. A turn that
+repeats a tool call it already made (same name, same arguments) gets
+"already called" back instead of a second run; after two repeats the turn ends
+with a short "I can't find that out right now".
 
 `PINCER_VOICE_TOOL_APPROVAL` sets the mode for Tier W:
 

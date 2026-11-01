@@ -451,6 +451,55 @@ async def test_generic_call_has_no_calendar_writes_unless_extra():
     await channel2.stop()
 
 
+WEBSEARCH_ARGS = {"query": "günstigster Benzinpreis Bünde 32257 E10"}
+WEBSEARCH_RESULT = (
+    '{"answer": null, "results": [{"title": "Spritpreise Bünde", "url": "https://www.clever-tanken.de/x", '
+    '"snippet": "E10 ab 1,62 Euro bei der Tankstelle am Markt."}]}'
+)
+
+
+async def test_websearch_is_opt_in_on_a_generic_call():
+    agent = ToolAgent([[Tool("websearch__search", WEBSEARCH_ARGS, result=WEBSEARCH_RESULT)]])
+    channel, engine, state = await _start(agent)
+    await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
+    assert agent.gate_results[0].deny_reason == "not_in_call_scope"
+    assert agent.executed == []
+    await channel.stop()
+
+
+async def test_websearch_via_extra_plays_the_filler_and_logs_r_auto():
+    agent = ToolAgent(
+        [
+            [
+                Tool(
+                    "websearch__search",
+                    WEBSEARCH_ARGS,
+                    result=WEBSEARCH_RESULT,
+                    delay_s=0.01,
+                    then="Soll ich mehr suchen?",
+                )
+            ]
+        ]
+    )
+    channel, engine, state = await _start(agent, settings=_settings(voice_tools_extra="websearch__search"))
+    await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
+
+    spoken = engine.spoken[CALL]
+    assert spoken[0] == de_pack.TOOL_WAIT_FILLER, spoken
+    assert spoken.count(de_pack.TOOL_WAIT_FILLER) == 1
+    result = agent.gate_results[0]
+    assert result.executed
+    assert (
+        result.content
+        == "[TOOL RESULT: Laut clever-tanken.de: Spritpreise Bünde: E10 ab 1,62 Euro bei der Tankstelle am Markt.]"
+    )
+    actions = channel.get_transcript(CALL).actions
+    assert actions[-1].action_type == "tool_execute"
+    assert actions[-1].tool_name == "websearch__search"
+    assert actions[-1].tier == "R" and actions[-1].approval_mode == "auto"
+    await channel.stop()
+
+
 async def test_inbound_call_excludes_memory_search():
     agent = ToolAgent([[Tool("memory_search", {"query": "x"}, result="nothing")]])
     channel, engine, state = await _start(agent, direction=CallDirection.INBOUND)

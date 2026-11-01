@@ -190,10 +190,46 @@ def test_appointment_scope_exact():
 
 def test_generic_scope_has_reads_and_owner_writes_only():
     scope = tp.allowed_tools_for_call(_settings(), kind="generic")
-    assert tp.tier_r_tools() <= scope
+    assert tp.tier_r_tools() - tp.CALL_OPT_IN_TOOLS <= scope
     assert {"send_owner_message", "memory_note"} <= scope
     assert "google__create_event" not in scope
     assert "google__update_event" not in scope
+
+
+def test_websearch_is_tier_r():
+    assert tp.tier_of("websearch__search") == tp.TIER_R
+
+
+@pytest.mark.parametrize("kind", ["generic", "appointment", "receptionist"])
+@pytest.mark.parametrize("direction", ["outbound", "inbound"])
+def test_websearch_is_not_in_any_default_scope(kind, direction):
+    assert "websearch__search" not in tp.allowed_tools_for_call(_settings(), kind=kind, direction=direction)
+
+
+@pytest.mark.parametrize("kind", ["generic", "appointment"])
+@pytest.mark.parametrize("direction", ["outbound", "inbound"])
+def test_websearch_joins_the_scope_through_extras(kind, direction):
+    settings = _settings(voice_tools_extra="websearch__search")
+    scope = tp.allowed_tools_for_call(settings, kind=kind, direction=direction)
+    assert "websearch__search" in scope
+    assert tp.ignored_extra_tools(settings.voice_tools_extra) == []
+    state = _state(kind=kind, settings=settings)
+    decision = tp.decide("websearch__search", state, settings, {"query": "Benzinpreis Bünde"})
+    assert (decision.action, decision.reason) == ("execute", "tier_r")
+
+
+def test_websearch_never_reaches_the_receptionist():
+    settings = _settings(voice_tools_extra="websearch__search")
+    for direction in ("outbound", "inbound"):
+        assert "websearch__search" not in tp.allowed_tools_for_call(settings, kind="receptionist", direction=direction)
+
+
+def test_doctor_does_not_warn_about_websearch_extra(tmp_path):
+    from pincer.security.doctor import CheckStatus
+
+    settings = _settings(voice_tools_extra="websearch__search")
+    assert tp.validate_settings(settings) == []
+    assert _doctor(tmp_path)._check_voice_tier_x_reachable(settings).status == CheckStatus.PASS
 
 
 def test_inbound_excludes_memory_search():

@@ -115,3 +115,76 @@ def test_spoken_datetime_forms():
     assert ts.spoken_datetime(dt, "en") == "Tuesday, August 18 at 2:30 PM"
     assert ts.spoken_datetime(dt, "uk") == "вівторок, 18 серпня о 14:30"
     assert not ts.RAW_DATA_RE.search(ts.spoken_datetime(dt, "uk"))
+
+
+# ── Web search (issue #300) ──────────────────────────────────────────
+
+
+def _websearch(*results: dict, answer: str | None = None) -> str:
+    import json
+
+    return json.dumps({"answer": answer, "results": list(results)}, indent=2)
+
+
+def test_websearch_results_are_sourced_by_domain():
+    result = _websearch(
+        {"title": "Spritpreise Bünde", "url": "https://www.clever-tanken.de/a", "snippet": "E10 ab 1,62 Euro."},
+        {"title": "Tankstellen 32257", "url": "https://mehr-tanken.de/b?x=1", "snippet": "Diesel ab 1,55 Euro"},
+        answer="An unsourced summary.",
+    )
+    assert ts.render("websearch__search", result, "de") == (
+        "Laut clever-tanken.de: Spritpreise Bünde: E10 ab 1,62 Euro. "
+        "Laut mehr-tanken.de: Tankstellen 32257: Diesel ab 1,55 Euro."
+    )
+    en = ts.render("websearch__search", result, "en")
+    assert en.startswith("According to clever-tanken.de: ")
+    assert "unsourced" not in en
+
+
+def test_websearch_keeps_the_top_results_only():
+    results = [{"title": f"T{i}", "url": f"https://s{i}.example", "snippet": f"S{i}"} for i in range(6)]
+    text = ts.render("websearch__search", _websearch(*results), "en")
+    assert text.count("According to") == ts.MAX_LIST_ITEMS
+    assert "s3.example" not in text
+
+
+def test_websearch_dates_are_spoken():
+    result = _websearch(
+        {"title": "Preise", "url": "https://a.de", "snippet": "E5 1,70", "published_date": "2026-08-18T09:00:00+02:00"}
+    )
+    text = ts.render("websearch__search", result, "de")
+    assert text == "Laut a.de (Stand Dienstag, der achtzehnte August): Preise: E5 1,70."
+
+
+@pytest.mark.parametrize("language", ["en", "de", "uk"])
+def test_websearch_without_results(language):
+    from pincer.voice.prompts import get_prompt
+
+    expected = get_prompt("TOOL_SPEECH", language)["websearch.none"]
+    assert ts.render("websearch__search", _websearch(), language) == expected
+    assert ts.render("websearch__search", _websearch({"title": "", "snippet": " "}), language) == expected
+
+
+def test_websearch_error_and_garbage_are_the_error_line():
+    assert ts.render("websearch__search", '{"error": "RatelimitException: 429"}', "de") == de_pack.TOOL_ERROR
+    assert ts.render("websearch__search", "not json at all", "en") == en_pack.TOOL_ERROR
+
+
+def test_websearch_strips_urls_markup_and_caps_length():
+    snippet = (
+        "<b>Günstig</b> tanken: **E10** {heute} siehe https://evil.example/path?q=1 oder www.foo.de "
+        "Stand 2026-08-18T09:00:00 " + "sehr langer Text " * 60
+    )
+    results = [{"title": "# Titel | [Link]", "url": "https://a.de", "snippet": snippet}]
+    text = ts.render("websearch__search", _websearch(*results), "de")
+    assert ts.is_speakable(text)
+    for leftover in ("http", "www.", "<b>", "**", "#", "|", "[", "{"):
+        assert leftover not in text, leftover
+    assert text.startswith("Laut a.de: Titel Link: Günstig tanken: E10 heute siehe oder Stand")
+    assert len(text) <= ts.WEBSEARCH_MAX_CHARS + len("Laut a.de: ") + 1
+    assert text.endswith("…")
+
+
+def test_websearch_without_url_names_no_domain():
+    text = ts.render("websearch__search", _websearch({"title": "Preis", "snippet": "1,60"}), "en")
+    assert text == "According to a website: Preis: 1,60."

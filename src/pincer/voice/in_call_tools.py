@@ -41,7 +41,7 @@ from pincer.voice.engine import CallDirection
 from pincer.voice.prompts import get_prompt
 from pincer.voice.safety_gates import ConfirmationStatus, parse_confirmation
 from pincer.voice.state_machine import CallPhase
-from pincer.voice.tool_speech import describe_action, render, render_denied, render_pending
+from pincer.voice.tool_speech import describe_action, render, render_denied, render_duplicate, render_pending
 from pincer.voice.transcript import Speaker
 
 if TYPE_CHECKING:
@@ -109,6 +109,7 @@ TOOL_LATENCY_HINTS_S: dict[str, float] = {
     "contact_lookup": 0.3,
     "send_owner_message": 0.5,
     "memory_note": 0.5,
+    "websearch__search": 3.0,
 }
 
 # Deny reason used when the callee hangs up while a `user` approval is open
@@ -245,6 +246,11 @@ class InCallToolGate:
     def prompt(self, key: str) -> str:
         lang, formality = self.language()
         return str(get_prompt(key, lang, formality) or "")
+
+    def duplicate_call_result(self) -> str:
+        """Fed back instead of re-running a tool call already made this turn."""
+        lang, _ = self.language()
+        return f"[TOOL RESULT: {render_duplicate(lang)}]"
 
     async def speak(self, text: str) -> None:
         """Deterministic gate speech: through the channel's turn speaker when

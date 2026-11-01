@@ -70,6 +70,9 @@ logger = logging.getLogger(__name__)
 
 
 _MAX_CONSECUTIVE_ERRORS = 3
+# A call turn whose model repeats this many tool calls it already made ends
+# with TOOL_NO_PROGRESS instead of another round (issue #300).
+_MAX_DUPLICATE_TOOL_CALLS = 2
 # Tools called in this many latest session messages stay in a chat turn's tool set.
 _RECENT_TOOL_MESSAGES = 20
 # Chars of the previous assistant message / a loaded skill added to the tool-ranking query.
@@ -277,6 +280,49 @@ def _loaded_skill(tool_call: ToolCall, result: ToolResult) -> str | None:
 
 def _schema_names(schemas: list[dict[str, Any]] | None) -> list[str]:
     return [s["name"] for s in schemas or []]
+
+
+class _RepeatedCallGuard:
+    """The tool calls made so far in one call turn, by name and arguments.
+
+    A call already made this turn is not run again: the model is told so
+    instead (``duplicate_result``). Calendar reads that answer nothing would
+    otherwise repeat until the iteration limit, each one a "moment please".
+    """
+
+    def __init__(self, call_gate: Any) -> None:
+        self._gate = call_gate
+        self._seen: set[tuple[str, str]] = set()
+        self.duplicates = 0
+
+    def is_repeat(self, tool_call: ToolCall) -> bool:
+        key = (tool_call.name, json.dumps(tool_call.arguments or {}, sort_keys=True, default=str))
+        if key not in self._seen:
+            self._seen.add(key)
+            return False
+        self.duplicates += 1
+        logger.warning("Repeated tool call skipped: %s %s (%d this turn)", key[0], key[1][:200], self.duplicates)
+        return True
+
+    @property
+    def exhausted(self) -> bool:
+        return self.duplicates >= _MAX_DUPLICATE_TOOL_CALLS
+
+    def duplicate_result(self, tool_call: ToolCall) -> ToolResult:
+        if self._gate is not None:
+            content = self._gate.duplicate_call_result()
+        else:
+            from pincer.voice.tool_speech import render_duplicate
+
+            content = f"[TOOL RESULT: {render_duplicate('en')}]"
+        return ToolResult(tool_call_id=tool_call.id, content=content, is_error=False)
+
+    def no_progress_line(self) -> str:
+        if self._gate is not None:
+            return str(self._gate.prompt("TOOL_NO_PROGRESS"))
+        from pincer.voice.prompts import get_prompt
+
+        return str(get_prompt("TOOL_NO_PROGRESS", "en") or "")
 
 
 def _clean_profile_value(v: Any) -> str | None:
@@ -643,9 +689,10 @@ class Agent:
                 tool_names=tool_names,
             )
 
-        # In a call the hints follow the registry, as on the streaming voice path
-        # (stream_voice_turn), so the two paths keep one prompt.
-        system_prompt = await build_prompt(None if call_gate is not None else _schema_names(tool_schemas))
+        # The hints follow the tools this turn sends, in a call too: a prompt
+        # that advertises a tool the model was not given gets the nearest
+        # offered tool called in its place (issue #300).
+        system_prompt = await build_prompt(_schema_names(tool_schemas))
 
         total_cost = 0.0
         tool_calls_count = 0
@@ -653,6 +700,7 @@ class Agent:
         last_response: LLMResponse | None = None
         consecutive_errors = 0
         sanitize_attempts = 0
+        repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
 
         # ── ReAct Loop ───────────────────────────────────
         for _iteration in range(self._settings.max_tool_iterations):
@@ -728,7 +776,9 @@ class Agent:
                 skills_loaded: list[str] = []
                 for tool_call in response.tool_calls:
                     tool_calls_count += 1
-                    if call_gate is not None:
+                    if repeats is not None and repeats.is_repeat(tool_call):
+                        result = repeats.duplicate_result(tool_call)
+                    elif call_gate is not None:
                         result = await self._execute_call_tool(
                             tool_call, user_id, channel, channel_user_id, call_gate, channel_name=channel_name
                         )
@@ -746,6 +796,10 @@ class Agent:
                         iteration_had_error = True
                     elif (skill := _loaded_skill(tool_call, result)) is not None:
                         skills_loaded.append(skill)
+
+                if repeats is not None and repeats.exhausted:
+                    final_text = repeats.no_progress_line()
+                    break
 
                 if skills_loaded and call_gate is None:
                     reselected = await self._reselect_after_skills(
@@ -1253,7 +1307,6 @@ class Agent:
         # add_message auto-trims to max_session_messages, so context stays
         # bounded; text channels keep the richer summarize-then-trim flow.
 
-        system_prompt = await self._build_system_prompt(user_id, text, extra_system=extra_system)
         # Sprint 11: in call context the bound gate owns the EXACT tool set
         # (tier table ∩ call scope); the Sprint-8 name filter is the fallback
         # when no gate is bound (legacy callers, tests).
@@ -1266,6 +1319,12 @@ class Agent:
             tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
         else:
             tool_schemas = filter_voice_tools(self._tools.get_schemas())
+        # The hints and the MCP server block name only the tools this call
+        # offers (issue #300); without a gate they follow the registry.
+        prompt_tools = _schema_names(tool_schemas) if call_gate is not None or tool_schemas is None else None
+        system_prompt = await self._build_system_prompt(
+            user_id, text, extra_system=extra_system, tool_names=prompt_tools
+        )
         max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 220) or 220)
 
         # Voice turn model (Sprint 5 T5.4): "" = default provider+model;
@@ -1307,6 +1366,7 @@ class Agent:
         full_text = ""
         consecutive_errors = 0
         sanitize_attempts = 0
+        repeats = _RepeatedCallGuard(call_gate)
 
         for _iteration in range(self._settings.max_tool_iterations):
             await self._repair_tool_pairs(session)
@@ -1396,6 +1456,15 @@ class Agent:
 
             iteration_had_error = False
             for tool_call in response.tool_calls:
+                if repeats.is_repeat(tool_call):
+                    duplicate = repeats.duplicate_result(tool_call)
+                    await self._sessions.add_message(
+                        session,
+                        LLMMessage(
+                            role=MessageRole.TOOL_RESULT, content=duplicate.content, tool_call_id=duplicate.tool_call_id
+                        ),
+                    )
+                    continue
                 yield StreamChunk(StreamEventType.TOOL_START, tool_call.name)
                 tool_span = (
                     turn_trace.open_span(
@@ -1437,6 +1506,14 @@ class Agent:
                 yield StreamChunk(StreamEventType.TOOL_DONE, tool_call.name)
                 if result.is_error:
                     iteration_had_error = True
+
+            if repeats.exhausted:
+                fallback = repeats.no_progress_line()
+                if fallback:
+                    spoken = f" {fallback}" if full_text and not full_text.endswith(" ") else fallback
+                    full_text += spoken
+                    yield StreamChunk(StreamEventType.TEXT, spoken)
+                break
 
             if iteration_had_error:
                 consecutive_errors += 1
@@ -1516,10 +1593,11 @@ class Agent:
     ) -> str:
         """Build system prompt, injecting relevant memories if available.
 
-        ``tool_names`` are the tools sent with this turn (the tool hints follow
-        them); ``None`` means the whole registry.
+        ``tool_names`` are the tools sent with this turn (the tool hints and
+        the MCP server block follow them); ``None`` means the whole registry.
         """
         base_prompt = self._settings.system_prompt + "\n\n" + PROFILE_USAGE_INSTRUCTION
+        offered = None if tool_names is None else set(tool_names)
         if tool_names is None:
             tool_names = self._tools.list_tools()
 
@@ -1550,6 +1628,9 @@ class Agent:
             try:
                 servers = await self.mcp_manager.list_servers()
                 connected = [s for s in servers if s["connected"]]
+                if offered is not None:
+                    # A server whose tools this turn does not send is not advertised.
+                    connected = [s for s in connected if offered.intersection(self.mcp_manager.tool_names(s["name"]))]
                 if connected:
                     max_chars = self._settings.mcp_instructions_max_chars
                     server_lines = []

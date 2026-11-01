@@ -14,11 +14,13 @@ would, the generic fallback is spoken instead.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import urlsplit
 
 from pincer.voice.prompts import get_prompt
 
@@ -67,6 +69,11 @@ _MONTHS = {
 }
 
 MAX_LIST_ITEMS = 3
+# Web search results are read back from snippets: cap what reaches the model.
+WEBSEARCH_MAX_CHARS = 400
+
+_URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
+_MARKUP_RE = re.compile(r"<[^>]*>|[*_`#|\[\]{}]+")
 
 
 def _lang(language: str) -> str:
@@ -271,6 +278,68 @@ def _render_profile(result: str, language: str) -> str:
     return _tpl("business_profile_lookup.ok", language).format(profile=text.rstrip("."))
 
 
+def _clean_web_text(value: Any) -> str:
+    """Snippet text without URLs, HTML/Markdown markup, braces or ISO timestamps."""
+    text = html.unescape(str(value or ""))
+    text = _URL_RE.sub(" ", text)
+    text = _MARKUP_RE.sub(" ", text)
+    text = ISO_TIMESTAMP_RE.sub(" ", text)
+    return " ".join(text.split()).strip(" .,;:-–—")
+
+
+def _source_domain(url: Any) -> str:
+    try:
+        host = urlsplit(str(url or "")).hostname or ""
+    except ValueError:
+        return ""
+    return host.removeprefix("www.")
+
+
+def _truncate_words(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" .,;:-–—")
+    return f"{cut}…" if cut else ""
+
+
+def _render_websearch(result: str, language: str) -> str:
+    """The websearch MCP returns JSON ``{"answer", "results": [{title, url,
+    snippet}]}`` or ``{"error": ...}``. Each of the top results becomes
+    'According to <domain>: <title>: <snippet>', capped in total; the
+    unsourced Tavily ``answer`` summary is left out."""
+    try:
+        data = json.loads(result)
+    except (TypeError, ValueError):
+        data = None
+    if not isinstance(data, dict) or data.get("error"):
+        return str(get_prompt("TOOL_ERROR", language) or "")
+    found: list[tuple[str, str]] = []
+    for item in data.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        title = _clean_web_text(item.get("title"))
+        snippet = _clean_web_text(item.get("snippet") or item.get("content"))
+        text = f"{title}: {snippet}" if title and snippet else title or snippet
+        if not text:
+            continue
+        source = _source_domain(item.get("url")) or _tpl("websearch.unknown_source", language)
+        published = parse_iso(item.get("published_date") or item.get("date"))
+        if published is not None:
+            as_of = _tpl("websearch.as_of", language).format(date=spoken_datetime(published, language, False))
+            source = f"{source} ({as_of})"
+        found.append((source, text))
+        if len(found) == MAX_LIST_ITEMS:
+            break
+    if not found:
+        return _tpl("websearch.none", language)
+    budget = WEBSEARCH_MAX_CHARS // len(found)
+    lines = []
+    for source, text in found:
+        line = _tpl("websearch.some", language).format(source=source, text=_truncate_words(text, budget))
+        lines.append(line if line.endswith((".", "!", "?", "…")) else f"{line}.")
+    return " ".join(lines)
+
+
 def render(tool_name: str, result: str, language: str, args: dict[str, Any] | None = None) -> str:
     """Deterministic, speakable rendering of a tool result (§7)."""
     args = args or {}
@@ -296,6 +365,8 @@ def render(tool_name: str, result: str, language: str, args: dict[str, Any] | No
             text = _render_memory_search(result, language)
         elif tool_name == "business_profile_lookup":
             text = _render_profile(result, language)
+        elif tool_name == "websearch__search":
+            text = _render_websearch(result, language)
         else:
             text = _tpl("default.ok", language)
     except Exception:
@@ -310,6 +381,11 @@ def render_pending(action_description: str, language: str) -> str:
 
 def render_denied(language: str) -> str:
     return ensure_speakable(_tpl("denied", language), language)
+
+
+def render_duplicate(language: str) -> str:
+    """What the model is told instead of re-running a call it already made this turn."""
+    return ensure_speakable(_tpl("duplicate", language), language)
 
 
 # ── Action description for VERIFY_ACTION ─────────────────────────────
@@ -351,12 +427,14 @@ def _spoken_fallback_when(args: dict[str, Any], language: str) -> str:
 __all__ = [
     "ISO_TIMESTAMP_RE",
     "RAW_DATA_RE",
+    "WEBSEARCH_MAX_CHARS",
     "describe_action",
     "ensure_speakable",
     "is_speakable",
     "parse_iso",
     "render",
     "render_denied",
+    "render_duplicate",
     "render_pending",
     "spoken_datetime",
     "spoken_range",
