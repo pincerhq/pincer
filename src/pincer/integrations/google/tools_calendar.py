@@ -443,7 +443,8 @@ async def google__create_event(
         if outcome.existed
         else f"Event created: '{title}'"
     )
-    unapplied = _unapplied_fields(body, created) if outcome.existed else []
+    # Found rather than written (a 409, or a lookup after a reset insert): it may lack this call's details.
+    unapplied = _unapplied_fields(body, created) if outcome.existed or outcome.recovered else []
     if unapplied:
         headline += UNAPPLIED_NOTE.format(fields=", ".join(unapplied))
     return render_write(

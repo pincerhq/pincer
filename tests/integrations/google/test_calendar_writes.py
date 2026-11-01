@@ -305,6 +305,33 @@ async def test_a_same_turn_re_call_with_other_details_says_they_were_not_applied
     ) in again
 
 
+async def test_a_re_call_whose_insert_resets_still_says_which_details_were_not_applied(fake_registry, fake):
+    """The re-call's insert dies without an answer and the lookup finds the FIRST event: its missing
+    attendees must be reported just as on a plain "already created"."""
+    await _create(fake_registry, "turn-a", "c1")
+    fake.fail_next("events.insert", "before-commit-reset")
+
+    again = await _create(fake_registry, "turn-a", "c2", attendees="ana@example.com")
+
+    (event,) = fake.events_on("primary")
+    assert "attendees" not in event  # precondition: the re-call changed nothing
+    assert len(fake.sent("events.get")) == 1  # precondition: the reset path looked the event up
+    assert (
+        "Not applied: attendees differ from the existing event; call google__update_event with its ID to change them."
+    ) in again
+
+
+async def test_an_own_insert_found_after_a_reset_says_nothing_about_unapplied_fields(fake_registry, fake):
+    """The benign twin: the reset insert committed with the attendees, so nothing is missing."""
+    fake.fail_next("events.insert", "after-commit-reset")
+
+    result = await _create(fake_registry, "turn-a", "c1", attendees="ana@example.com")
+
+    (event,) = fake.events_on("primary")
+    assert [a["email"] for a in event["attendees"]] == ["ana@example.com"]  # precondition: our write landed
+    assert result.startswith("Event created: 'Dentist'") and "Not applied" not in result
+
+
 async def test_an_identical_same_turn_re_call_says_nothing_about_unapplied_fields(fake_registry, fake):
     await _create(fake_registry, "turn-a", "c1", description="Bring the X-ray")
 

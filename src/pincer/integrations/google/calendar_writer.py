@@ -95,6 +95,9 @@ class CreateResult:
     event: dict[str, Any]
     #: True when the event already existed (409) and was fetched, not created now.
     existed: bool
+    #: True when the insert got no answer (a reset connection) and a lookup found the event:
+    #: this call's write or an earlier one with the same ID — which, the lookup cannot tell.
+    recovered: bool = False
 
 
 def _status(exc: BaseException) -> int | None:
@@ -190,27 +193,27 @@ async def create(
     for _generation in range(MAX_ID_GENERATIONS):
         outcome = await _insert_or_fetch(svc, calendar_id, body, event_id, insert_kwargs)
         if outcome is not None:
-            saved, existed = outcome
+            saved, existed, recovered = outcome
             break
         # That ID belongs to a deleted (or purged) event: derive the next one.
         event_id = client_event_id(f"{seed}\x1fafter-cancelled:{event_id}", calendar_id, body)
     else:
         raise RuntimeError(ALL_IDS_TAKEN_MESSAGE)
-    result = CreateResult(event=_confirmed(saved), existed=existed)
+    result = CreateResult(event=_confirmed(saved), existed=existed, recovered=recovered)
     log_write("create", trace, calendar_id, result.event, existed=existed)
     return result
 
 
 async def _insert_or_fetch(
     svc: Any, calendar_id: str, body: dict[str, Any], event_id: str, insert_kwargs: dict[str, Any]
-) -> tuple[Any, bool] | None:
-    """Insert under ``event_id``: (saved, existed), or None when the ID is taken by a non-live event."""
+) -> tuple[Any, bool, bool] | None:
+    """Insert under ``event_id``: (saved, existed, recovered), or None when the ID is taken by a non-live event."""
     payload = {**body, "id": event_id}
     try:
         saved, _attempts = await _attempted(
             lambda: svc.events().insert(calendarId=calendar_id, body=payload, **insert_kwargs).execute()
         )
-        return saved, False
+        return saved, False, False
     except _AttemptError as failed:
         status = _status(failed.error)
         if status is None:
@@ -226,13 +229,13 @@ async def _insert_or_fetch(
         raise
     if existing.get("status") == "cancelled":
         return None
-    return existing, conflict_on_first_attempt
+    return existing, conflict_on_first_attempt, False
 
 
 async def _committed_despite(
     failed: _AttemptError, svc: Any, calendar_id: str, event_id: str
-) -> tuple[dict[str, Any], bool]:
-    """A non-HTTP insert failure: the event under ``event_id`` if it is live (created now), else the error."""
+) -> tuple[dict[str, Any], bool, bool]:
+    """A non-HTTP insert failure: the event under ``event_id`` if live (created now, recovered), else the error."""
     try:
         existing = await _live_on(svc, calendar_id, event_id)
     except Exception:
@@ -240,7 +243,7 @@ async def _committed_despite(
     if existing is None:
         raise failed.error from None
     logger.info("An insert failed with %s, but the event is in place: created", type(failed.error).__name__)
-    return existing, False
+    return existing, False, True
 
 
 async def update(
