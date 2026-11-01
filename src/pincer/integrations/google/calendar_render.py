@@ -57,6 +57,11 @@ AGENDA_RANGE = "–"
 NO_EVENTS_TODAY = "No events today."
 
 
+def strip_edit_hint(text: str) -> str:
+    """A read result without its trailing ``EDIT_HINT`` — for MCP clients, which lack the update tool."""
+    return text.removesuffix(f"\n{EDIT_HINT}")
+
+
 def _instant(field: dict[str, Any]) -> datetime | None:
     raw = field.get("dateTime")
     if not raw:

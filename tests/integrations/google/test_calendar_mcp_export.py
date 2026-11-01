@@ -9,6 +9,8 @@ calendar tools, and an exported name that is not registered logs a warning.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import importlib.util
 import logging
 import pathlib
@@ -20,8 +22,10 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from integrations.google.fake_calendar import FakeCalendarFactory, FakeCalendarService
+from pincer.integrations.google.calendar_render import EDIT_HINT
 from pincer.integrations.google.tools_calendar import register_calendar_tools
 from pincer.mcp.auth.scopes import check_tool_scope
+from pincer.mcp.calendar_alias import NOT_CONNECTED
 from pincer.mcp.config import MCPServerExportConfig
 from pincer.mcp.embedded import EmbeddedMCPShell
 from pincer.mcp.exporter import PincerToolExporter
@@ -83,24 +87,6 @@ async def test_exporter_keeps_pincer_calendar_today_by_default(registry, fake) -
     assert "Lunch with Ana" in text
     assert "Tomorrow's call" not in text
     assert "calendar_today" not in registry.list_tools()  # MCP-only, never offered to the model
-
-
-async def test_embedded_server_keeps_pincer_calendar_today(registry, fake) -> None:
-    _seed_today(fake)
-    agent = _agent(registry)
-    server = SimpleNamespace(
-        enabled=False, expose_tools=MCPServerExportConfig().expose_tools, sampling=SimpleNamespace(enabled=False)
-    )
-    shell = EmbeddedMCPShell(agent=agent, mcp_config=SimpleNamespace(enabled=True, servers=[], server=server))
-    await shell.start()
-    try:
-        tool = shell.core._server_tools.get("pincer_calendar_today")
-        assert tool is not None
-        text = await tool.handler()
-    finally:
-        await shell.stop()
-    assert "Lunch with Ana" in text
-    assert "Tomorrow's call" not in text
 
 
 async def test_alias_day_is_the_calendar_zone_day_not_the_clock_day(registry, fake, monkeypatch) -> None:
@@ -169,3 +155,98 @@ def test_builtin_calendar_module_is_gone_and_unimported() -> None:
         if "builtin.calendar_tool" in p.read_text(encoding="utf-8", errors="replace")
     ]
     assert importers == []
+
+
+# ── What external clients are actually served (review #1, #8, #9) ─────────────
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """FastMCP registers tools for real; only its HTTP serving loop is replaced."""
+
+    async def _serve_forever(_self) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr("mcp.server.fastmcp.FastMCP.run_streamable_http_async", _serve_forever)
+
+
+def _served_text(result) -> str:
+    blocks = result[0] if isinstance(result, tuple) else result
+    return "\n".join(getattr(b, "text", "") for b in blocks)
+
+
+async def _served(fmcp) -> tuple[set[str], str]:
+    names = {t.name for t in await fmcp.list_tools()}
+    text = _served_text(await fmcp.call_tool("pincer_calendar_today", {})) if "pincer_calendar_today" in names else ""
+    return names, text
+
+
+async def test_mcp_serve_serves_pincer_calendar_today(fake, google_token, no_network, monkeypatch) -> None:
+    """`pincer mcp serve` (StandaloneMCPShell → MCPServiceCore) with the server enabled."""
+    from pincer.mcp.config import MCPConfig
+    from pincer.mcp.standalone import StandaloneMCPShell
+
+    monkeypatch.setattr("pincer.mcp.standalone._load_builtin_tools_into", lambda _registry: None)
+    _seed_today(fake)
+    shell = StandaloneMCPShell(mcp_config=MCPConfig(server=MCPServerExportConfig(enabled=True)))
+    task = asyncio.create_task(shell.run())
+    try:
+        for _ in range(200):
+            if shell.core is not None and shell.core._server is not None and shell.core._server._fmcp is not None:
+                break
+            await asyncio.sleep(0.01)
+        names, text = await _served(shell.core._server._fmcp)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    assert "pincer_calendar_today" in names
+    assert "Lunch with Ana" in text
+    assert "Tomorrow's call" not in text
+    assert EDIT_HINT not in text
+
+
+async def test_embedded_server_enabled_serves_pincer_calendar_today(registry, fake, no_network) -> None:
+    from pincer.mcp.config import MCPConfig
+
+    _seed_today(fake)
+    shell = EmbeddedMCPShell(agent=_agent(registry), mcp_config=MCPConfig(server=MCPServerExportConfig(enabled=True)))
+    await shell.start()
+    try:
+        names, text = await _served(shell.core._server._fmcp)
+    finally:
+        await shell.stop()
+    assert "pincer_calendar_today" in names
+    assert "Lunch with Ana" in text
+    assert EDIT_HINT not in text
+
+
+async def test_pincer_run_export_strips_the_edit_hint(registry, fake) -> None:
+    """`pincer run` exports the real registry: clients get no hint naming a tool they lack
+    (google__update_event is not exported, and would be pincer_google__update_event)."""
+    _seed_today(fake)
+    llm_text = await registry.execute("google__search_events", {"query": "Lunch"})
+    assert llm_text.splitlines()[-1] == EDIT_HINT  # the model still gets it
+    fmcp = _fmcp()
+    expose = ["calendar_today", "google__list_events", "google__search_events", "google__get_event"]
+    PincerToolExporter(registry, expose_tools=expose).export_to(fmcp)
+    texts = {
+        "list": await fmcp.tools["pincer_google__list_events"](time_min=datetime.now(KYIV).date().isoformat()),
+        "search": await fmcp.tools["pincer_google__search_events"](query="Lunch"),
+        "get": await fmcp.tools["pincer_google__get_event"](event_id="evt1"),
+        "alias": await fmcp.tools["pincer_calendar_today"](),
+    }
+    for name, text in texts.items():
+        assert "Lunch with Ana" in text, (name, text)
+        assert EDIT_HINT not in text and "google__update_event" not in text, (name, text)
+
+
+async def test_alias_without_a_factory_is_not_connected(registry, fake, monkeypatch) -> None:
+    """A failed Google setup is cached for the process: never fall back to the clock's day."""
+    monkeypatch.setattr("pincer.integrations.google.calendar_source._resolve", lambda: (None, "setup failed"))
+    _seed_today(fake)
+    fmcp = _fmcp()
+    PincerToolExporter(registry, expose_tools=["calendar_today"]).export_to(fmcp)
+
+    assert "google__list_events" in registry.list_tools()
+    assert await fmcp.tools["pincer_calendar_today"]() == NOT_CONNECTED

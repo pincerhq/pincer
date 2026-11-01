@@ -4,6 +4,7 @@ PincerToolExporter — maps Pincer ToolRegistry entries to FastMCP tool registra
 Only tools in the `expose_tools` whitelist are exported.
 `pincer_ask_user` is always registered regardless of the whitelist.
 `calendar_today` is an MCP-only alias (see `pincer.mcp.calendar_alias`).
+Results never carry the model's calendar edit hint (it names a tool MCP clients lack).
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from pincer.integrations.google.calendar_render import strip_edit_hint
 from pincer.mcp.calendar_alias import CALENDAR_TODAY, DESCRIPTION, CalendarTodayAlias
 
 if TYPE_CHECKING:
@@ -122,13 +124,8 @@ class PincerToolExporter:
         """Create an async handler for *pincer_name* and register it on *fmcp*."""
         registry = self._registry
         approval_cb = self._approval_callback
-        security = self._security_gate
 
-        async def _handler(**kwargs: Any) -> str:
-            # Rate limiting (server = "pincer_server" for exported tools)
-            if security and not security.check_rate_limit("pincer_server", pincer_name):
-                return f"[RateLimited] Too many calls to {pincer_name} — slow down"
-
+        async def _call(kwargs: dict[str, Any]) -> str:
             if needs_approval and approval_cb:
                 try:
                     approved = await approval_cb(pincer_name, kwargs)
@@ -137,11 +134,10 @@ class PincerToolExporter:
                     approved = False
                 if not approved:
                     return f"[Denied] User declined to execute {pincer_name}"
-            try:
-                return await registry.execute(pincer_name, kwargs)
-            except Exception as e:
-                logger.exception("MCP server tool '%s' failed", pincer_name)
-                return f"[Error] {pincer_name}: {type(e).__name__}: {e}"
+            return strip_edit_hint(await registry.execute(pincer_name, kwargs))
+
+        async def _handler(**kwargs: Any) -> str:
+            return await self._guarded(pincer_name, mcp_name, lambda: _call(kwargs))
 
         _handler.__name__ = mcp_name
         _handler.__doc__ = (
@@ -153,22 +149,26 @@ class PincerToolExporter:
 
     def _register_calendar_today(self, fmcp: FastMCP) -> None:
         """The MCP-only ``pincer_calendar_today`` alias (read-only, no approval)."""
-        alias = CalendarTodayAlias(self._registry)
-        security = self._security_gate
+        alias = CalendarTodayAlias()
         mcp_name = f"{_TOOL_PREFIX}{CALENDAR_TODAY}"
 
         async def pincer_calendar_today(calendar_id: str = "primary") -> str:
-            if security and not security.check_rate_limit("pincer_server", CALENDAR_TODAY):
-                return f"[RateLimited] Too many calls to {CALENDAR_TODAY} — slow down"
-            try:
-                return await alias(calendar_id)
-            except Exception as e:
-                logger.exception("MCP server tool '%s' failed", mcp_name)
-                return f"[Error] {CALENDAR_TODAY}: {type(e).__name__}: {e}"
+            return await self._guarded(CALENDAR_TODAY, mcp_name, lambda: alias(calendar_id))
 
         pincer_calendar_today.__doc__ = DESCRIPTION
         fmcp.add_tool(pincer_calendar_today, name=mcp_name)
         self._registered.append(mcp_name)
+
+    async def _guarded(self, pincer_name: str, mcp_name: str, call: Callable[[], Awaitable[str]]) -> str:
+        """Rate limit (server = "pincer_server" for exported tools), then run *call*; errors become text."""
+        security = self._security_gate
+        if security and not security.check_rate_limit("pincer_server", pincer_name):
+            return f"[RateLimited] Too many calls to {pincer_name} — slow down"
+        try:
+            return await call()
+        except Exception as e:
+            logger.exception("MCP server tool '%s' failed", mcp_name)
+            return f"[Error] {pincer_name}: {type(e).__name__}: {e}"
 
     def _register_ask_user(self, fmcp: FastMCP) -> None:
         """Always register pincer_ask_user regardless of the expose_tools list."""
