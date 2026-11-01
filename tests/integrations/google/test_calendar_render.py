@@ -687,7 +687,7 @@ async def test_get_shows_an_event_zone_with_the_same_offset_but_another_identity
 
 
 async def test_list_and_search_lines_name_an_event_zone_that_is_not_the_calendars(fake_factory, fake):
-    """update reads offset-less times in the event's own zone: list/search must show it when it differs."""
+    """An update keeps the event's own zone: list/search must show it when it differs."""
     fake.seed_event("primary", "Ferry", "2026-07-15T10:00:00", "2026-07-15T11:00:00", time_zone="Europe/Istanbul")
     fake.seed_event("primary", "Lunch", "2026-07-15T12:00:00", "2026-07-15T13:00:00", time_zone="Europe/Kyiv")
 

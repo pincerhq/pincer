@@ -78,7 +78,8 @@ async def test_update_of_event_without_stored_zone_uses_the_calendar_zone(fake_f
 
 
 async def test_time_only_update_keeps_the_events_own_zone(fake_factory, fake):
-    """An event deliberately set in New York on a Kyiv calendar stays in New York."""
+    """An event deliberately set in New York on a Kyiv calendar stays in New York; the new
+    offset-less time is read in the calendar's zone, the one it was listed in."""
     event_id = fake.seed_event(
         "primary", "NY call", "2026-11-12T09:00:00", "2026-11-12T10:00:00", time_zone="America/New_York"
     )
@@ -86,9 +87,28 @@ async def test_time_only_update_keeps_the_events_own_zone(fake_factory, fake):
     await google__update_event(fake_factory, event_id=event_id, start="2026-11-12T11:00:00", end="2026-11-12T12:00:00")
 
     event = fake.event("primary", event_id)
-    assert fake.start_of("primary", event_id) == datetime(2026, 11, 12, 11, 0, tzinfo=NEW_YORK)
+    assert fake.start_of("primary", event_id) == datetime(2026, 11, 12, 11, 0, tzinfo=KYIV)
     assert event["start"]["timeZone"] == "America/New_York"
     assert event["end"]["timeZone"] == "America/New_York"
+
+
+async def test_offset_less_move_of_a_legacy_event_is_read_in_the_listed_zone(fake_factory, fake):
+    """PR #316 review: a legacy Berlin-zoned event on a Kyiv calendar is LISTED in Kyiv time
+    (10:00 Berlin = 11:00+02:00). "Move it to 15:00" means 15:00 as listed, not 15:00 Berlin
+    (16:00 Kyiv); the event still keeps its own Berlin zone."""
+    event_id = fake.seed_event(
+        "primary", "Dentist", "2026-11-12T10:00:00", "2026-11-12T11:00:00", time_zone="Europe/Berlin"
+    )
+    listed = await google__list_events(fake_factory, time_min="2026-11-12", time_max="2026-11-12")
+    assert any(line.startswith("  2026-11-12T11:00:00+02:00 →") for line in listed.splitlines()), listed
+
+    await google__update_event(fake_factory, event_id=event_id, start="2026-11-12T15:00:00")
+
+    event = fake.event("primary", event_id)
+    assert (event["start"], event["end"]) == (
+        {"dateTime": "2026-11-12T15:00:00+02:00", "timeZone": "Europe/Berlin"},
+        {"dateTime": "2026-11-12T16:00:00+02:00", "timeZone": "Europe/Berlin"},
+    )
 
 
 @pytest.mark.parametrize(

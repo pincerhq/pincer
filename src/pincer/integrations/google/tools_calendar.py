@@ -562,7 +562,8 @@ async def google__update_event(
     """Update fields on an existing calendar event.
 
     Offset-less start/end are read in ``timezone`` when given, else in the
-    event's own stored zone, else in the calendar's zone. A bare date moves an
+    calendar's zone (the zone list/search/get show times in); the event keeps
+    its own stored ``timeZone`` unless ``timezone`` is given. A bare date moves an
     all-day event. Given only a new start, the end moves with it (the stored
     duration is kept); given only a new end, the start stays.
     """
@@ -581,9 +582,10 @@ async def google__update_event(
         if is_date_only(value):
             changed[key] = {"date": value.strip()}
             continue
-        stored_zone = stored_zone_name(event, key)
-        tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone or stored_zone)
-        changed[key] = {"dateTime": localize(value, zone) if zone else rfc3339(value), "timeZone": tz_name}
+        # Read in the zone the times were shown in (or the caller's); keep the event's own zone.
+        tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone)
+        kept_zone = timezone.strip() or stored_zone_name(event, key) or tz_name
+        changed[key] = {"dateTime": localize(value, zone) if zone else rfc3339(value), "timeZone": kept_zone}
     if "start" in changed and "end" not in changed:
         changed["end"] = _end_keeping_duration(
             event.get("start") or {}, event.get("end") or {}, changed["start"], timezone
@@ -888,7 +890,8 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
             "location. Empty fields are kept, but a new start alone moves the end too (duration kept); the "
             "event keeps its ID. Use this — not google__create_event — for any change to an event; without "
             "the ID, find it first with google__search_events (and calendar_id, if not primary). "
-            "Times without a UTC offset are read in the event's own timezone, else the calendar's timezone."
+            "Times without a UTC offset are read in the calendar's timezone, as listed; the event keeps "
+            "its own timezone."
         ),
         handler=_h(google__update_event),
         parameters={
@@ -916,8 +919,8 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 "location": {"type": "string", "default": ""},
                 "timezone": {
                     "type": "string",
-                    "description": "IANA timezone for offset-less start/end (default: the event's own, "
-                    "else the calendar's timezone). Leave empty unless the user names another zone",
+                    "description": "IANA timezone for offset-less start/end (default: the calendar's "
+                    "timezone). Leave empty unless the user names another zone",
                     "default": "",
                 },
             },
