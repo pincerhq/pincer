@@ -27,7 +27,7 @@ from pincer.integrations.google.calendar_render import EDIT_HINT, EDIT_HINT_KEY
 from pincer.integrations.google.tools_calendar import google__list_events, register_calendar_tools
 from pincer.mcp.auth.scopes import check_tool_scope
 from pincer.mcp.calendar_alias import MCP_TOOL_CONTEXT, NOT_CONNECTED
-from pincer.mcp.config import MCPServerExportConfig
+from pincer.mcp.config import MCPServerExportConfig, _parse_mcp_config
 from pincer.mcp.embedded import EmbeddedMCPShell
 from pincer.mcp.exporter import PincerToolExporter
 from pincer.tools.registry import ToolRegistry
@@ -126,11 +126,30 @@ async def test_embedded_export_of_an_unregistered_tool_logs_a_warning(registry, 
     assert [r.levelno for r in hits] == [logging.WARNING]
 
 
-def test_default_exports_name_workspace_calendar_tools() -> None:
+def test_default_exports_only_todays_calendar() -> None:
+    """Owner ruling (PR #316 review): an install that never set ``expose_tools`` must not start giving
+    MCP clients full calendar read and search — list/search are opt-in."""
     exposed = set(MCPServerExportConfig().expose_tools)
     assert "calendar_today" in exposed
-    assert {"google__list_events", "google__search_events"} <= exposed
+    assert not {"google__list_events", "google__search_events"} & exposed
     assert not {"calendar_week", "calendar_create"} & exposed
+    assert exposed == set(_parse_mcp_config({"server": {}}).server.expose_tools)  # both default paths agree
+
+
+async def test_default_exports_missing_from_the_registry_log_no_warning(caplog) -> None:
+    """An install without Google (or email) has none of those tools: defaults it lacks are not a warning."""
+    agent = _agent(ToolRegistry())
+    server = SimpleNamespace(
+        enabled=False, expose_tools=list(MCPServerExportConfig().expose_tools), sampling=SimpleNamespace(enabled=False)
+    )
+    shell = EmbeddedMCPShell(agent=agent, mcp_config=SimpleNamespace(enabled=True, servers=[], server=server))
+    with caplog.at_level(logging.DEBUG, logger="pincer.mcp"):
+        await shell.start()
+        PincerToolExporter(ToolRegistry(), expose_tools=server.expose_tools).export_to(_fmcp())
+    await shell.stop()
+    missing = [r for r in caplog.records if "not in registry" in r.getMessage()]
+    assert missing, "precondition: the default tools really were missing"
+    assert [r.levelno for r in missing if r.levelno > logging.DEBUG] == []
 
 
 @pytest.mark.parametrize(
@@ -309,11 +328,13 @@ async def test_alias_without_a_factory_is_not_connected(registry, fake, monkeypa
     assert await fmcp.tools["pincer_calendar_today"]() == NOT_CONNECTED
 
 
-def test_shipped_pincer_toml_exports_the_workspace_calendar_reads() -> None:
-    """pincer.toml (copied into the Docker image) overrides the defaults: it must carry the reads too."""
+def test_shipped_pincer_toml_exports_only_todays_calendar() -> None:
+    """pincer.toml (copied into the Docker image) overrides the defaults: list/search stay opt-in there too."""
     shipped = (SRC.parent / "pincer.toml").read_text(encoding="utf-8")
     exposed = tomllib.loads(shipped)["mcp"]["server"]["expose_tools"]
-    assert {"calendar_today", "google__list_events", "google__search_events"} <= set(exposed)
+    assert "calendar_today" in exposed
+    assert not {"google__list_events", "google__search_events"} & set(exposed)
+    assert '# "google__list_events"' in shipped  # offered as an opt-in suggestion
     assert not {"calendar_week", "calendar_create"} & set(exposed)
     assert "calendar_create" not in shipped  # not even as a commented-out suggestion
 

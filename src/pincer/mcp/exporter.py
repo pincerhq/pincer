@@ -14,6 +14,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from pincer.mcp.calendar_alias import CALENDAR_TODAY, DESCRIPTION, MCP_TOOL_CONTEXT, CalendarTodayAlias
+from pincer.mcp.config import missing_export_log_level
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -85,7 +86,11 @@ class PincerToolExporter:
                 self._register_calendar_today(fmcp)
                 continue
             if pincer_name not in registered_tools:
-                logger.warning("MCP export: tool '%s' not in registry — skipping", pincer_name)
+                logger.log(
+                    missing_export_log_level(pincer_name),
+                    "MCP export: tool '%s' not in registry — skipping",
+                    pincer_name,
+                )
                 continue
             mcp_name = pincer_name if pincer_name.startswith(_TOOL_PREFIX) else f"{_TOOL_PREFIX}{pincer_name}"
             needs_approval = (

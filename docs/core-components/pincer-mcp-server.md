@@ -47,9 +47,10 @@ path    = "/mcp"         # Endpoint path
 expose_tools = [
     "email_check",
     "calendar_today",          # alias: today's events, in the calendar's timezone
-    "google__list_events",
-    "google__search_events",
     "memory_search",
+    # Opt-in: full calendar read and search
+    # "google__list_events",
+    # "google__search_events",
 ]
 ```
 

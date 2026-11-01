@@ -22,10 +22,10 @@ path         = "/mcp"
 expose_tools = [
     "email_check",
     "calendar_today",          # alias: today's events, in the calendar's timezone
-    "google__list_events",
-    "google__search_events",
     "memory_search",
     # Uncomment to expose more tools:
+    # "google__list_events",   # full calendar read (any range, attendees, descriptions)
+    # "google__search_events", # calendar search
     # "web_browse",
     # "file_read",
     # "email_send",            # requires approval

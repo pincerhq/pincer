@@ -46,8 +46,11 @@ in the calendar's own timezone.
 >   `calendar_week` or `calendar_create` is skipped with a warning.
 >   `calendar_today` is still served to MCP clients as an alias over the
 >   Workspace list, with "today" taken in the calendar's zone.
-> - The MCP server's default export now also includes `google__list_events` and
->   `google__search_events`. MCP results never carry the model's edit hint.
+> - The MCP server's default export still gives external clients today's
+>   events only (`calendar_today`). Full calendar read and search are opt-in:
+>   add `"google__list_events"` and/or `"google__search_events"` to
+>   `expose_tools` under `[mcp.server]` in `pincer.toml` (the shipped file lists
+>   them commented out). MCP results never carry the model's edit hint.
 > - The voice tool allowlist names the Workspace calendar tools
 >   (`google__list_events`, `google__search_events`, `google__get_event`,
 >   `google__check_freebusy`, `google__create_event`, `google__update_event`)

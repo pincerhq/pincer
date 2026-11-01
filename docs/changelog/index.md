@@ -19,9 +19,11 @@ in the calendar's own timezone.
   event instead of making another one. An insert that fails on a dropped
   connection but was saved anyway is reported as created.
 - Offset-less times are read in the target calendar's zone, then the person's
-  zone, then `PINCER_TIMEZONE`. On a phone call they are read in the voice zone
-  (`PINCER_VOICE_TIMEZONE`), as the call prompt tells the model, unless the
-  model names a zone.
+  zone, then `PINCER_TIMEZONE`. On a phone call every calendar tool reads them,
+  and shows its times, in the voice zone (`PINCER_VOICE_TIMEZONE`), as the call
+  prompt tells the model, unless the model names a zone. Moving an event reads
+  the new time in the zone the times were shown in; the event keeps its own
+  timezone.
 - List and search lines name an event's own timezone when it differs from the
   calendar's. Deleting an event that is already deleted reports that, instead
   of an error.
@@ -41,8 +43,11 @@ in the calendar's own timezone.
 >   `calendar_week` or `calendar_create` is skipped with a warning.
 >   `calendar_today` is still served to MCP clients as an alias over the
 >   Workspace list, with "today" taken in the calendar's zone.
-> - The MCP server's default export now also includes `google__list_events` and
->   `google__search_events`. MCP results never carry the model's edit hint.
+> - The MCP server's default export still gives external clients today's
+>   events only (`calendar_today`). Full calendar read and search are opt-in:
+>   add `"google__list_events"` and/or `"google__search_events"` to
+>   `expose_tools` under `[mcp.server]` in `pincer.toml` (the shipped file lists
+>   them commented out). MCP results never carry the model's edit hint.
 > - The voice tool allowlist names the Workspace calendar tools
 >   (`google__list_events`, `google__search_events`, `google__get_event`,
 >   `google__check_freebusy`, `google__create_event`, `google__update_event`)

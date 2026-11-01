@@ -29,6 +29,7 @@ Environment variable format for a single server:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -45,6 +46,21 @@ if TYPE_CHECKING:
 # priority over "../.env" (monorepo layout — commands run from a subdirectory
 # still find the repo-root .env as a fallback).
 _DOTENV_CANDIDATES = (".env", "../.env")
+# The tools exposed to MCP clients when ``expose_tools`` is not set: conservative, read-only plus
+# skills. Calendar is today's events only (owner ruling, #297): full list/search is opt-in.
+DEFAULT_EXPOSE_TOOLS = (
+    "email_check",
+    "calendar_today",
+    "memory_search",
+    "load_skill",
+    "load_skill_reference",
+)
+
+
+def missing_export_log_level(tool_name: str) -> int:
+    """How loudly to report an ``expose_tools`` entry missing from the registry: a default the
+    install simply lacks (no Google, no email) is DEBUG; a tool someone opted into is a WARNING."""
+    return logging.DEBUG if tool_name in DEFAULT_EXPOSE_TOOLS else logging.WARNING
 
 
 def _load_dotenv_into_environ() -> None:
@@ -148,17 +164,7 @@ class MCPServerExportConfig:
     port: int = 18800
     path: str = "/mcp"
     # Which Pincer tools to expose (conservative default: read-only + ask_user)
-    expose_tools: list[str] = field(
-        default_factory=lambda: [
-            "email_check",
-            "calendar_today",
-            "google__list_events",
-            "google__search_events",
-            "memory_search",
-            "load_skill",
-            "load_skill_reference",
-        ]
-    )
+    expose_tools: list[str] = field(default_factory=lambda: list(DEFAULT_EXPOSE_TOOLS))
     # Approval policy for standalone mode
     approval_policy: MCPApprovalPolicyConfig = field(default_factory=MCPApprovalPolicyConfig)
     # Sampling configuration
@@ -340,18 +346,7 @@ def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | Non
         host=srv_raw.get("host", "127.0.0.1"),
         port=int(srv_raw.get("port", 18800)),
         path=srv_raw.get("path", "/mcp"),
-        expose_tools=srv_raw.get(
-            "expose_tools",
-            [
-                "email_check",
-                "calendar_today",
-                "google__list_events",
-                "google__search_events",
-                "memory_search",
-                "load_skill",
-                "load_skill_reference",
-            ],
-        ),
+        expose_tools=srv_raw.get("expose_tools", list(DEFAULT_EXPOSE_TOOLS)),
         approval_policy=approval_policy,
         sampling=sampling,
         webhook_url=srv_raw.get("webhook_url"),
