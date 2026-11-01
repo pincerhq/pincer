@@ -20,7 +20,8 @@ import logging
 import re
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 try:
@@ -53,13 +54,14 @@ except ImportError:
     ChatPresenceMedia = None  # type: ignore[assignment,misc]
     _NEONIZE_VERSION = "not installed"
 
+from pincer.channels.approval_text import norm_emoji, parse_yes_no
 from pincer.channels.base import (
     BaseChannel,
     ChannelType,
     IncomingMessage,
     MessageHandler,
 )
-from pincer.channels.group_trigger import matches_group_trigger
+from pincer.channels.group_trigger import matches_group_trigger, strip_group_triggers
 
 if TYPE_CHECKING:
     from neonize.proto.waE2E.WAWebProtobufsE2E_pb2 import (
@@ -81,6 +83,17 @@ _active_group: contextvars.ContextVar[tuple[str, tuple[str, str]] | None] = cont
 )
 
 MAX_WHATSAPP_MESSAGE_LENGTH = 4096
+
+
+@dataclass
+class _PendingPrompt:
+    """An approval or question waiting for the user's answer."""
+
+    future: asyncio.Future[Any]
+    # The group (user, server) the prompt went to, or None for a direct chat.
+    # An answer only counts in that chat.
+    chat: tuple[str, str] | None
+
 
 # Remediation text keyed by neonize ConnectFailureReason enum values.
 # Kept as plain ints so tests can exercise the map without the neonize stub.
@@ -171,8 +184,10 @@ class WhatsAppChannel(BaseChannel):
         # Set by login-failure handlers. Consumed by start() to turn silent
         # upstream rejections (err-client-outdated etc.) into loud errors.
         self._login_error: str | None = None
-        self._pending_approvals: dict[str, asyncio.Future[bool]] = {}
-        self._pending_inputs: dict[str, asyncio.Future[str]] = {}
+        self._pending_approvals: dict[str, _PendingPrompt] = {}
+        self._pending_inputs: dict[str, _PendingPrompt] = {}
+        # ("approval" | "input", user_id) → lock; one prompt of each kind per user at a time.
+        self._prompt_locks: defaultdict[tuple[str, str], asyncio.Lock] = defaultdict(asyncio.Lock)
         # message_id of approval prompt → user_id; used to accept 👍/👎 reactions.
         self._approval_prompt_ids: dict[str, str] = {}
         # Per-user in-place progress message: user_id → {id, jid, tools}
@@ -232,8 +247,8 @@ class WhatsAppChannel(BaseChannel):
     # ── Interactive prompts (approval / ask_user) ────
 
     # Shaped like Telegram's approval: returns True/False. On WhatsApp there
-    # are no inline buttons, so we ask the user to reply yes/no and consume
-    # the next inbound message for this user.
+    # are no inline buttons, so we ask the user to reply yes/no (or react) and
+    # consume their answer in the chat the prompt went to.
     async def request_approval(
         self,
         user_id: str,
@@ -242,15 +257,22 @@ class WhatsAppChannel(BaseChannel):
     ) -> bool:
         if self._client is None:
             return False
+        # One prompt per user at a time: a second run for the same user waits
+        # here instead of replacing the prompt the user is answering.
+        async with self._prompt_locks[("approval", user_id)]:
+            return await self._ask_approval(user_id, tool_name, arguments)
+
+    async def _ask_approval(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> bool:
         args_preview = ", ".join(f"{k}={v}" for k, v in arguments.items())
         if len(args_preview) > 200:
             args_preview = args_preview[:200] + "…"
-        prompt = (
-            f"🔐 *Approval required*\n\n"
-            f"Tool: `{tool_name}`\n"
-            f"Args: `{args_preview}`\n\n"
-            f"Reply *yes* / *no*, or react with 👍 / 👎."
+        chat = self._active_group_for(user_id)
+        how_to_answer = (
+            "Reply *yes* / *no* or react 👍 / 👎 (within 2 min)."
+            if chat is not None
+            else "Reply *yes* / *no*, or react with 👍 / 👎."
         )
+        prompt = f"🔐 *Approval required*\n\nTool: `{tool_name}`\nArgs: `{args_preview}`\n\n{how_to_answer}"
         prompt_id: str | None = None
         try:
             prompt_id = await self._send_tracked(user_id, prompt)
@@ -267,17 +289,18 @@ class WhatsAppChannel(BaseChannel):
             return False
 
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future[bool] = loop.create_future()
-        self._pending_approvals[user_id] = fut
+        pending = _PendingPrompt(loop.create_future(), chat)
+        self._pending_approvals[user_id] = pending
         if prompt_id:
             self._approval_prompt_ids[prompt_id] = user_id
         try:
-            return await asyncio.wait_for(fut, timeout=120)
+            return await asyncio.wait_for(pending.future, timeout=120)
         except TimeoutError:
             logger.info("WA approval timed out for %s / %s", user_id, tool_name)
             return False
         finally:
-            self._pending_approvals.pop(user_id, None)
+            if self._pending_approvals.get(user_id) is pending:
+                del self._pending_approvals[user_id]
             if prompt_id:
                 self._approval_prompt_ids.pop(prompt_id, None)
 
@@ -285,58 +308,168 @@ class WhatsAppChannel(BaseChannel):
         """Prompt the user and wait for their next message as the answer."""
         if self._client is None:
             return "[WhatsApp not connected]"
+        async with self._prompt_locks[("input", user_id)]:
+            return await self._ask_input(user_id, question)
+
+    async def _ask_input(self, user_id: str, question: str) -> str:
+        chat = self._active_group_for(user_id)
         try:
             await self.send(user_id, question)
         except Exception as e:
             logger.warning("WA input prompt undeliverable to %s (%s)", user_id, e)
             return "[Could not deliver question to user]"
         loop = asyncio.get_running_loop()
-        fut: asyncio.Future[str] = loop.create_future()
-        self._pending_inputs[user_id] = fut
+        pending = _PendingPrompt(loop.create_future(), chat)
+        self._pending_inputs[user_id] = pending
         try:
-            return await asyncio.wait_for(fut, timeout=120)
+            return await asyncio.wait_for(pending.future, timeout=120)
         except TimeoutError:
             return "[No response from user — timed out after 120s]"
         finally:
-            self._pending_inputs.pop(user_id, None)
+            if self._pending_inputs.get(user_id) is pending:
+                del self._pending_inputs[user_id]
 
     @staticmethod
-    def _parse_yes_no(text: str) -> bool | None:
-        t = (text or "").strip().lower()
-        if t in {"yes", "y", "ok", "okay", "sure", "approve", "approved", "allow", "👍", "✅"}:
-            return True
-        if t in {"no", "n", "deny", "denied", "cancel", "stop", "abort", "👎", "❌"}:
-            return False
+    def _active_group_for(user_id: str) -> tuple[str, str] | None:
+        """The group whose message from *user_id* this task is handling (see _active_group), or None."""
+        active = _active_group.get()
+        return active[1] if active is not None and active[0] == user_id else None
+
+    # A group answer may carry a few words ("yes, go ahead"), not a sentence:
+    # the requester may be talking to the other members.
+    _GROUP_ANSWER_MAX_WORDS = 3
+
+    def _parse_yes_no(self, text: str, *, max_words: int | None = None) -> bool | None:
+        """Read a yes/no answer, ignoring our own mention and ids and the group trigger words.
+
+        So "@<our number> yes" and "pincer, yes!" both count as "yes". A
+        message that mentions anyone else is addressed to them, not an answer:
+        "@Alice yes" is None. ``max_words`` is skipped when the message
+        addresses us by mention or trigger word, since it is then not chatter.
+        """
+        text = text or ""
+        own_ids = self._own_ids()
+        mentions = re.findall(r"@(\d+)", text)
+        if any(m not in own_ids for m in mentions):
+            return None
+        trigger = self._settings.whatsapp_group_trigger
+        if mentions or matches_group_trigger(text, trigger):
+            max_words = None
+        t = text
+        for own_id in own_ids:
+            t = re.sub(rf"(?<!\d){re.escape(own_id)}(?!\d)", " ", t)
+        t = strip_group_triggers(t, trigger)
+        return parse_yes_no(t, max_words=max_words)
+
+    _REACTION_APPROVE = frozenset(norm_emoji(e) for e in ("👍", "✅", "👌", "❤️", "🙏"))
+    _REACTION_DENY = frozenset(norm_emoji(e) for e in ("👎", "❌", "🚫"))
+
+    def _sender_ids(self, source: Any) -> set[str]:
+        """Every id the sender of a message may be known by.
+
+        The requester's user_id is whichever form their first message used, a
+        LID or a phone number; SenderAlt carries the other form. A message from
+        our own number is the owner, under any of our ids.
+        """
+        ids = {source.Sender.User, source.SenderAlt.User}
+        if source.IsFromMe:
+            ids |= self._own_ids()
+        return {str(i) for i in ids if i}
+
+    @staticmethod
+    def _pending_in_chat(
+        pending: dict[str, _PendingPrompt], sender_ids: set[str], chat_user: str, is_group: bool
+    ) -> tuple[str, _PendingPrompt] | None:
+        """The sender's unanswered prompt in this chat: (user_id, prompt), or None.
+
+        A prompt sent to a group is answered in that group; one sent to a
+        direct chat, in a direct chat.
+        """
+        chat = chat_user if is_group else None
+        for user_id in sender_ids:
+            prompt = pending.get(user_id)
+            prompt_chat = prompt.chat[0] if prompt is not None and prompt.chat is not None else None
+            if prompt is not None and not prompt.future.done() and prompt_chat == chat:
+                return user_id, prompt
         return None
 
-    _REACTION_APPROVE = {"👍", "✅", "👌", "❤"}
-    _REACTION_DENY = {"👎", "❌", "🚫"}
+    @staticmethod
+    def _message_text(msg: WAMessage) -> str:
+        """Text or caption of a message, without downloading anything."""
+        if msg.conversation:
+            return msg.conversation
+        for field in ("extendedTextMessage", "imageMessage", "documentMessage"):
+            if msg.HasField(field):
+                inner = getattr(msg, field)
+                return (inner.text if field == "extendedTextMessage" else inner.caption) or ""
+        return ""
 
-    def _handle_reaction_approval(self, msg: WAMessage) -> bool:
-        """If this reaction targets a pending-approval prompt, resolve it.
+    def _try_resolve_pending(self, msg: WAMessage, sender_ids: set[str], chat_user: str, is_group: bool) -> bool:
+        """Resolve a pending approval or input with this message, before any gating.
 
-        Returns True if the reaction was consumed (and the caller should stop),
-        False if it's an unrelated reaction that should be ignored normally.
+        Handles a reaction on an approval prompt, and a text or caption answer
+        from the requester in the chat the prompt went to. Returns True if the
+        message was consumed.
+        """
+        if msg.HasField("reactionMessage"):
+            return self._resolve_reaction(msg, sender_ids)
+        text = self._message_text(msg)
+        return bool(text) and self._resolve_pending_text(sender_ids, chat_user, is_group, text)
+
+    def _resolve_reaction(self, msg: WAMessage, sender_ids: set[str]) -> bool:
+        """Resolve an approval from a reaction on its prompt by the requester.
+
+        Returns True if the reaction targets a pending prompt (consumed, even
+        when ignored), False for any other reaction.
         """
         reaction = msg.reactionMessage
-        target_id = getattr(reaction.key, "ID", "") or ""
-        if not target_id:
-            return False
-        user_id = self._approval_prompt_ids.get(target_id)
+        target_id = str(getattr(reaction.key, "ID", "") or "")
+        user_id = self._approval_prompt_ids.get(target_id) if target_id else None
         if not user_id:
             return False
-        fut = self._pending_approvals.get(user_id)
-        if not fut or fut.done():
+        pending = self._pending_approvals.get(user_id)
+        if pending is None or pending.future.done():
             return False
+        if user_id not in sender_ids:
+            logger.info(
+                "WA approval: reaction from %s ignored, only %s can answer", ", ".join(sorted(sender_ids)), user_id
+            )
+            return True
+        emoji = norm_emoji(reaction.text or "").strip()
+        if not emoji:
+            # Reaction removed.
+            return True
+        if emoji in self._REACTION_APPROVE or emoji in self._REACTION_DENY:
+            decision = emoji in self._REACTION_APPROVE
+            logger.info("WA approval %s by %s (reaction %s)", "granted" if decision else "denied", user_id, emoji)
+            pending.future.set_result(decision)
+            return True
+        logger.info("WA approval: reaction %r from %s is not 👍/👎, ignored", emoji, user_id)
+        return True
 
-        emoji = (reaction.text or "").strip()
-        if emoji in self._REACTION_APPROVE:
-            fut.set_result(True)
+    def _resolve_pending_text(self, sender_ids: set[str], chat_user: str, is_group: bool, text: str) -> bool:
+        """Resolve the sender's pending approval or input in this chat with *text*.
+
+        Returns True if it resolved one. A message that isn't a yes/no answer
+        leaves the approval pending and returns False, so ordinary group
+        chatter goes through the gate.
+        """
+        found = self._pending_in_chat(self._pending_approvals, sender_ids, chat_user, is_group)
+        if found is not None:
+            user_id, pending = found
+            decision = self._parse_yes_no(text, max_words=self._GROUP_ANSWER_MAX_WORDS if is_group else None)
+            if decision is None:
+                return False
+            logger.info("WA approval %s by %s (reply)", "granted" if decision else "denied", user_id)
+            pending.future.set_result(decision)
             return True
-        if emoji in self._REACTION_DENY:
-            fut.set_result(False)
+        found = self._pending_in_chat(self._pending_inputs, sender_ids, chat_user, is_group)
+        if found is not None:
+            # Any next message from the requester in that chat answers the question.
+            user_id, pending = found
+            logger.info("WA input answered by %s", user_id)
+            pending.future.set_result(text)
             return True
-        # Empty string = reaction removed; ignore without consuming.
         return False
 
     async def _send_tracked(self, user_id: str, text: str) -> str | None:
@@ -352,21 +485,24 @@ class WhatsAppChannel(BaseChannel):
             sid = getattr(result, "ID", None) if result is not None else None
             if sid is not None:
                 last_id = str(sid)
-                # Echo suppression: don't re-process this as an inbound message.
-                while len(self._recent_sent_ids_order) >= self._max_recent_sent_ids:
-                    old = self._recent_sent_ids_order.popleft()
-                    self._recent_sent_ids.discard(old)
-                self._recent_sent_ids_order.append(last_id)
-                self._recent_sent_ids.add(last_id)
             self._remember_pincer_message(result)
         return last_id
 
     def _remember_pincer_message(self, result: Any) -> None:
-        """Record the id of a message Pincer sent, so replies quoting it trigger."""
+        """Record the id of a message Pincer sent.
+
+        Its echo is then skipped as inbound (a prompt's echo must not answer
+        the prompt), and group replies quoting it trigger.
+        """
         sid = getattr(result, "ID", None) if result is not None else None
         if not sid:
             return
         sid = str(sid)
+        if sid not in self._recent_sent_ids:
+            while len(self._recent_sent_ids_order) >= self._max_recent_sent_ids:
+                self._recent_sent_ids.discard(self._recent_sent_ids_order.popleft())
+            self._recent_sent_ids_order.append(sid)
+            self._recent_sent_ids.add(sid)
         if sid in self._pincer_message_ids:
             return
         while len(self._pincer_message_ids_order) >= self._max_pincer_message_ids:
@@ -573,8 +709,7 @@ class WhatsAppChannel(BaseChannel):
         if "@" in user_id:
             user, server = user_id.split("@", 1)
             return build_jid(user, server)
-        active = _active_group.get()
-        target = active[1] if active is not None and active[0] == user_id else self._reply_targets.get(user_id)
+        target = self._active_group_for(user_id) or self._reply_targets.get(user_id)
         if target is not None:
             user, server = target
             return build_jid(user, server)
@@ -921,14 +1056,38 @@ class WhatsAppChannel(BaseChannel):
                 logger.info("WA skip old message (age=%ds, limit=%ds)", age, self._MAX_MESSAGE_AGE)
                 return
 
-            # Rule 2: Self-chat — owner messages themselves → process.
             is_self_chat = not is_group and is_from_me and self._is_self_chat(chat_user)
-            if is_self_chat:
-                logger.info("WA routing: self-chat (chat_user=%s own_jid=%s)", chat_user, self._own_jid)
-            elif is_from_me and not is_group:
+            if is_from_me and not is_group and not is_self_chat:
                 # Rule 3: Outgoing DM to someone else → always ignore.
                 logger.debug("WA skip: outgoing message to %s → ignoring", chat_jid)
                 return
+
+            # Defensive unwrap: the Go library should unwrap these, but
+            # if for any reason the raw wrapper arrives, extract the inner
+            # message so content checks find the actual text/media.
+            msg = self._unwrap_message(msg)
+
+            # Answers to a pending approval or question, before the group gate:
+            # a plain "yes" or a reaction carries no trigger word, and only the
+            # requester can answer, in the chat the prompt went to.
+            sender_ids = self._sender_ids(source)
+            if self._try_resolve_pending(msg, sender_ids, chat_user, is_group):
+                return
+            awaiting_answer = any(
+                self._pending_in_chat(pending, sender_ids, chat_user, is_group)
+                for pending in (self._pending_approvals, self._pending_inputs)
+            )
+            incoming: IncomingMessage | None = None
+            if awaiting_answer and not self._message_text(msg) and self._has_supported_content(msg):
+                # A voice note's answer is only readable once transcribed, and
+                # the group gate would drop it for lacking a trigger word.
+                incoming = await self._extract_message(client, event, sender_phone, chat_jid, msg)
+                if incoming is not None and self._resolve_pending_text(sender_ids, chat_user, is_group, incoming.text):
+                    return
+
+            # Rule 2: Self-chat — owner messages themselves → process.
+            if is_self_chat:
+                logger.info("WA routing: self-chat (chat_user=%s own_jid=%s)", chat_user, self._own_jid)
             elif is_group:
                 # Rule 4: Group — only process if a trigger word is used, the
                 # message replies to the bot (whatsapp_group_trigger_on_reply,
@@ -939,6 +1098,11 @@ class WhatsAppChannel(BaseChannel):
                 # Rule 3 dropped these unconditionally, so the owner could never
                 # summon Pincer in a group the way any other member could.
                 if not self._is_addressed_in_group(msg, from_me=is_from_me):
+                    if self._pending_in_chat(self._pending_approvals, sender_ids, chat_user, is_group):
+                        logger.info(
+                            "WA skip: group message from %s while their approval is pending (not a yes/no answer)",
+                            sender_phone,
+                        )
                     return
                 if is_from_me:
                     # Unambiguously the owner — bypass the guest gate, which
@@ -987,16 +1151,6 @@ class WhatsAppChannel(BaseChannel):
                         return
                 logger.info("WA routing: DM from %s", sender_phone)
 
-            # Defensive unwrap: the Go library should unwrap these, but
-            # if for any reason the raw wrapper arrives, extract the inner
-            # message so content checks find the actual text/media.
-            msg = self._unwrap_message(msg)
-
-            # Reaction-based approval: handled before the content filter,
-            # which drops reactionMessage as "unsupported content".
-            if msg.HasField("reactionMessage") and self._handle_reaction_approval(msg):
-                return
-
             if not self._has_supported_content(msg):
                 set_fields = self._message_set_fields(msg)
                 logger.info(
@@ -1005,7 +1159,8 @@ class WhatsAppChannel(BaseChannel):
                 )
                 return
 
-            incoming = await self._extract_message(client, event, sender_phone, chat_jid, msg)
+            if incoming is None:
+                incoming = await self._extract_message(client, event, sender_phone, chat_jid, msg)
             if incoming is None:
                 logger.warning(
                     "WA skip: unsupported message type from %s (check debug for message type)",
@@ -1013,23 +1168,15 @@ class WhatsAppChannel(BaseChannel):
                 )
                 return
 
-            # Intercept approval/input responses before normal routing.
-            approval_fut = self._pending_approvals.get(sender_phone)
-            if approval_fut and not approval_fut.done():
-                decision = self._parse_yes_no(incoming.text)
-                if decision is None:
-                    self._remember_pincer_message(
-                        await client.send_message(
-                            build_jid(chat_user, source.Chat.Server),
-                            "Please reply *yes* or *no*.",
-                        )
+            # A message to Pincer while its approval prompt in this chat is
+            # unanswered re-asks, rather than starting a second agent run.
+            if self._pending_in_chat(self._pending_approvals, sender_ids, chat_user, is_group):
+                self._remember_pincer_message(
+                    await client.send_message(
+                        build_jid(chat_user, source.Chat.Server),
+                        "Please reply *yes* or *no*.",
                     )
-                    return
-                approval_fut.set_result(decision)
-                return
-            input_fut = self._pending_inputs.get(sender_phone)
-            if input_fut and not input_fut.done():
-                input_fut.set_result(incoming.text)
+                )
                 return
 
             # Expose both sender JID user and chat JID user as candidates.
@@ -1061,16 +1208,7 @@ class WhatsAppChannel(BaseChannel):
                 if response:
                     reply_jid = build_jid(chat_user, source.Chat.Server)
                     for chunk in _split_whatsapp_message(response):
-                        result = await client.send_message(reply_jid, chunk)
-                        self._remember_pincer_message(result)
-                        sent_id = getattr(result, "ID", None) if result is not None else None
-                        if sent_id is not None:
-                            sid = str(sent_id)
-                            while len(self._recent_sent_ids_order) >= self._max_recent_sent_ids:
-                                old = self._recent_sent_ids_order.popleft()
-                                self._recent_sent_ids.discard(old)
-                            self._recent_sent_ids_order.append(sid)
-                            self._recent_sent_ids.add(sid)
+                        self._remember_pincer_message(await client.send_message(reply_jid, chunk))
                     logger.debug("WA reply sent to %s (%d chars)", chat_jid, len(response))
                 else:
                     logger.debug("WA handler returned empty response")

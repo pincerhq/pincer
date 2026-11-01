@@ -7,6 +7,7 @@ and no real Teams connection is made.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -303,6 +304,23 @@ async def test_handle_activity_strips_mention() -> None:
     activity = make_activity(text="<at>Pincer Bot</at> what is the weather")
     await ch._handle_activity(make_ctx(activity))
     assert captured["text"] == "what is the weather"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("text", "expected"), [("<at>Pincer Bot</at> Yes!", True), ("no thanks", False)])
+async def test_handle_activity_answers_pending_approval(text: str, expected: bool) -> None:
+    """Approval replies use the parser shared with WhatsApp."""
+    ch = MicrosoftTeamsChannel(make_settings())
+    handler = AsyncMock()
+    ch._handler = handler
+    activity = make_activity(text=text)
+    fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+    ch._pending_approvals[ch._activity_user_id(activity)] = fut
+
+    await ch._handle_activity(make_ctx(activity))
+
+    assert fut.result() is expected
+    handler.assert_not_awaited()
 
 
 @pytest.mark.asyncio
