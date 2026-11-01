@@ -384,3 +384,31 @@ async def test_idempotent_hit_shows_the_existing_events_stored_zone(fake_factory
         "Start: 2026-11-12T10:00:00+02:00 | End: 2026-11-12T11:00:00+02:00 (Europe/Kiev)",
     ]
     assert "event's timezone" not in again
+
+
+# ── All-day only, missing stored times (B review R3, R4) ─────────────────────
+
+
+async def test_all_day_only_results_show_no_mismatch_note(fake_factory, fake):
+    fake.seed_all_day("primary", "Holiday", "2026-11-12", "2026-11-13")
+
+    listed = await google__list_events(fake_factory, time_min="2026-11-12", time_max="2026-11-12")
+    got = await google__get_event(fake_factory, event_id="evt1")
+
+    assert listed.splitlines()[0] == "1 event(s) (2026-11-12), times in Europe/Kiev:"
+    assert "Note:" not in listed
+    assert "Note:" not in got
+
+
+async def test_write_response_with_id_but_no_times_says_stored_times_unavailable(fake_factory, fake):
+    def _response_without_times(event):
+        event.pop("start", None)
+        event.pop("end", None)
+
+    fake.on_store = _response_without_times
+
+    result = await google__create_event(
+        fake_factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00"
+    )
+
+    assert result == (f"Event created: 'Dentist'\nStart: (stored times unavailable)\nID: evt1\nLink: {LINK1}")

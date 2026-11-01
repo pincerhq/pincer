@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from zoneinfo import ZoneInfo
 
 ALL_DAY = "all day"
+#: Shown when a write response carries an id but no start/end.
+STORED_TIMES_UNAVAILABLE = "(stored times unavailable)"
 
 # What the zone a result is rendered in actually is — the mismatch note names it.
 CALENDAR_ZONE_LABEL = "this calendar's timezone"
@@ -105,7 +107,8 @@ def mismatch_note(
     ``zone_label`` says what the render zone is (the calendar's, a caller-given
     event zone, or the configured fallback) so the note never misnames it.
     """
-    if clock_zone is None or zones_equivalent(zone, clock_zone, instants):
+    if clock_zone is None or not instants or zones_equivalent(zone, clock_zone, instants):
+        # No timed value rendered (e.g. only all-day events): nothing to warn about.
         return ""
     return f"Note: times are in {zone_label} ({zone.key}), which differs from your clock timezone ({clock_zone.key})."
 
@@ -216,7 +219,10 @@ def render_write(
 ) -> str:
     """A write confirmation from Google's stored copy: stored start/end + zone, ID, link."""
     start, end = _when(event, zone)
-    lines = [headline, f"Start: {start} | End: {end} ({zone.key})"]
+    if not start and not end:
+        lines = [headline, f"Start: {STORED_TIMES_UNAVAILABLE}"]
+    else:
+        lines = [headline, f"Start: {start} | End: {end} ({zone.key})"]
     note = mismatch_note(zone, clock_zone, event_instants([event]), zone_label)
     if note:
         lines.append(note)
