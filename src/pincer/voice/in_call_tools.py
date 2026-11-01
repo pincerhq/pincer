@@ -321,6 +321,14 @@ class InCallToolGate:
         args = dict(arguments or {})
         if not trusted_key:
             args.pop("idempotency_key", None)
+        # Before any branch: every path that can reach `execute` (direct,
+        # confirmed, owner-approved) sends `arguments`, so the key must be
+        # settled there first — never a key the model copied from history.
+        if tool_name in IDEMPOTENT_CREATE_TOOLS and isinstance(arguments, dict):
+            if not trusted_key:
+                arguments.pop("idempotency_key", None)
+            if not arguments.get("idempotency_key"):
+                arguments["idempotency_key"] = call_idempotency_key(self.call_sid, tool_name, args)
         decision = tool_policy.decide(tool_name, self.state, self.settings, args, self.requires_approval)
         logger.info(
             "In-call tool decision [%s]: %s -> %s (%s, tier=%s, mode=%s)",
@@ -337,8 +345,6 @@ class InCallToolGate:
             return await self._start_verify(tool_name, args, decision)
         if decision.action == "need_user_approval":
             return await self._user_approval(tool_name, args, execute, decision)
-        if tool_name in IDEMPOTENT_CREATE_TOOLS and isinstance(arguments, dict) and not args.get("idempotency_key"):
-            arguments["idempotency_key"] = call_idempotency_key(self.call_sid, tool_name, args)
         approval_mode = "auto" if decision.tier == tool_policy.TIER_R else decision.mode
         user_confirmed = True if decision.mode == "verbal" else None
         return await self._execute(tool_name, args, execute, decision, approval_mode, user_confirmed)

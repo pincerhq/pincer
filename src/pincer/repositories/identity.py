@@ -210,9 +210,14 @@ class IdentityPhoneRepository(BaseRepository[IdentityPhone, str]):
                 IdentityPhone,
                 {"phone": phone, "confirmed_at": now if confirmed else None, **values},
                 index_elements=["phone"],
-                set_={
+                # COALESCE with the row being inserted, not a bound `now`: a
+                # bound string has no column type, and Postgres refuses to
+                # coalesce TIMESTAMP with VARCHAR.
+                set_=lambda excluded: {
                     **values,
-                    "confirmed_at": func.coalesce(col(IdentityPhone.confirmed_at), now) if confirmed else None,
+                    "confirmed_at": (
+                        func.coalesce(col(IdentityPhone.confirmed_at), excluded.confirmed_at) if confirmed else None
+                    ),
                 },
             )
         )

@@ -171,8 +171,9 @@ class SecurityDoctor:
         report.checks.append(self._check_voice_ws_auth(settings))
         report.checks.append(self._check_voice_abuse_limits(settings))
         report.checks.append(self._check_voice_do_not_call_enforced())
-        # Voice in-call tool execution (2 checks, Sprint 11 / #299)
+        # Voice in-call tool execution (3 checks, Sprint 11 / #299)
         report.checks.append(self._check_voice_legacy_tool_vars())
+        report.checks.append(self._check_voice_registered_phones(settings))
         report.checks.append(self._check_voice_tier_x_reachable(settings))
         # Inbound receptionist (2 checks, Sprint 12)
         report.checks.append(self._check_receptionist_profile(settings))
@@ -706,6 +707,49 @@ class SecurityDoctor:
             name="voice_legacy_tool_vars",
             status=CheckStatus.PASS,
             message="No removed voice tool approval variables set",
+            category="voice",
+        )
+
+    def _check_voice_registered_phones(self, cfg: Settings | None = None) -> CheckResult:
+        """#299: with no confirmed phone configured, every call party is a guest,
+        and a guest gets no calendar writes on a generic call by default."""
+        settings = self._cfg(cfg)
+        if not getattr(settings, "voice_enabled", False):
+            return CheckResult(
+                name="voice_registered_phones",
+                status=CheckStatus.SKIPPED,
+                message="Voice disabled",
+                category="voice",
+            )
+        from pincer.config.identity import resolve_identity_map_config
+
+        try:
+            _config, profiles = resolve_identity_map_config(
+                str(getattr(settings, "identity_map", "") or ""), self.config_dir
+            )
+        except ValueError as e:
+            return CheckResult(
+                name="voice_registered_phones",
+                status=CheckStatus.WARNING,
+                message=f"Identity config is invalid, so no phone is confirmed: {e}",
+                fix_hint="Fix the [identity] section in pincer.toml / pincer.local.toml",
+                category="voice",
+            )
+        owners = sorted(uid for uid, profile in profiles.items() if profile.phones)
+        if not owners:
+            return CheckResult(
+                name="voice_registered_phones",
+                status=CheckStatus.WARNING,
+                message="No identity lists `phones`: everyone on a call is a guest, so the agent cannot "
+                "create calendar events on a generic call",
+                fix_hint='Add your number to your identity in pincer.toml: phones = ["+49…"]; '
+                "or allow guests, e.g. PINCER_VOICE_GUESTS_TOOLS_ALLOWED=google__*",
+                category="voice",
+            )
+        return CheckResult(
+            name="voice_registered_phones",
+            status=CheckStatus.PASS,
+            message="Confirmed phones configured for: " + ", ".join(owners),
             category="voice",
         )
 

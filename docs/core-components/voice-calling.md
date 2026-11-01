@@ -497,6 +497,10 @@ phones = ["+4915112345678"]
 | **Registered user** (confirmed phone) | Every Tier R/W tool | The standard tool approval policy (`PINCER_APPROVAL_POLICY`): a tool that needs approval is confirmed out loud, anything else runs directly. Under the default `critical` mode, calendar writes run at once; `send_owner_message` is confirmed. |
 | **Guest** (any other number, or a failed lookup) | All reads plus `send_owner_message` and `memory_note` — or, when `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` is set, exactly the R/W tools it lists (it replaces the default set, so list the reads guests need too) (`google__*` patterns allowed; Tier X never matches). Inbound guests never get `memory_search`. | Always out loud |
 
+With no `phones` configured, everyone on a call is a guest, and on a generic
+call the agent cannot create calendar events. Startup logs a warning and
+`pincer doctor` reports it (`voice_registered_phones`).
+
 Appointment calls (`schedule_appointment_call`) and the inbound receptionist
 keep their own fixed tool sets whoever is on the line. The receptionist's
 bookings follow `PINCER_RECEPTIONIST_BOOKING_APPROVAL`.

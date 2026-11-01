@@ -50,6 +50,10 @@ calendar has no appointments") instead of creating the event.
   replaced, so it cannot reuse one from an earlier booking.
 - **Startup.** Phones removed from the config are dropped in their own step,
   before seeding, so a seeding failure cannot leave an old number trusted.
+  With voice enabled and no identity listing `phones`, startup logs a warning
+  and `pincer doctor` reports `voice_registered_phones`: on a stock install
+  everyone on a call is a guest, and the agent cannot book on a generic call
+  until you add your number (or allow guests to).
 
 Caller ID can be spoofed: a confirmed phone grants the full R/W scope on
 inbound calls too. Tier X, the call scope and the write budget still hold.

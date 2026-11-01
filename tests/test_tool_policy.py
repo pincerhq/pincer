@@ -346,6 +346,22 @@ def test_doctor_tier_x_reachable_self_test(tmp_path, monkeypatch):
     assert doc._check_voice_tier_x_reachable(_settings()).status == CheckStatus.CRITICAL
 
 
+def test_doctor_warns_when_no_identity_has_phones(tmp_path):
+    from pincer.security.doctor import CheckStatus
+
+    doc = _doctor(tmp_path)
+    voice = _settings(voice_enabled=True, identity_map="")
+    assert doc._check_voice_registered_phones(_settings(voice_enabled=False)).status == CheckStatus.SKIPPED
+    assert doc._check_voice_registered_phones(voice).status == CheckStatus.WARNING
+    (tmp_path / "pincer.toml").write_text(
+        '[identity.owner]\nphones = ["+491512345678"]\n[[identity.owner.channels]]\n'
+        'channel = "telegram"\nchannel_user_id = 1\n'
+    )
+    result = doc._check_voice_registered_phones(voice)
+    assert result.status == CheckStatus.PASS
+    assert "owner" in result.message
+
+
 def test_removed_settings_are_gone():
     from pincer.config import Settings
 

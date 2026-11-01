@@ -595,13 +595,26 @@ async def test_unknown_number_is_a_guest(owner_phone):
 
 
 async def test_caller_lookup_failure_fails_closed(monkeypatch):
+    """A failing lookup must not abort the call start: the gate, the thread
+    context and the briefing still happen, with the caller as a guest. The
+    call is started through the engine only — no manual tracking — so the
+    guard in _resolve_caller is what this test protects."""
     from pincer.services.identity import IdentityService
 
     async def _boom(self, phone):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(IdentityService, "user_for_confirmed_phone", _boom)
-    channel, engine, state = await _start(ToolAgent([]), tools=_Registry())
+    settings = _settings()
+    engine = FakeVoiceEngine(settings)
+    channel = VoiceChannel(settings)
+    channel.set_engine(engine)
+    channel.set_stream_agent(ToolAgent([]))
+    channel.set_tool_registry(_Registry())
+    await channel.start(lambda incoming: None)
+    state = await engine.on_call_start(CALL, "+4930123456", CallDirection.OUTBOUND, language="de")
+    assert channel.get_tool_gate(CALL) is not None
+    assert "thread_id" in state.metadata
     assert state.metadata[tp.META_CALLER_CLASS] == "guest"
     assert "google__create_event" not in state.metadata["allowed_tools"]
     await channel.stop()
@@ -661,6 +674,57 @@ async def test_repeated_create_is_idempotent_per_call(owner_phone):
     assert seen[-1] == ict.call_idempotency_key(CALL, "google__create_event", later_action)
     assert seen[-1] != seen[0]
     assert result.content == "[TOOL RESULT: Der Termin ist eingetragen.]"
+    await channel.stop()
+
+
+async def test_owner_approved_create_gets_the_call_key(owner_phone):
+    """`user` mode (receptionist booking approval) executes from the approval
+    path; the key must be settled before it, and a model-copied key replaced."""
+    cards = _Cards()
+    approvals.set_presenter(cards.presenter)
+    approvals.set_finalizer(cards.finalizer)
+    channel, engine, state = await _start(ToolAgent([]), settings=_user_mode_settings(), tools=_Registry(), modes=USER)
+    gate = channel.get_tool_gate(CALL)
+    sent: list[str] = []
+    arguments = {**CREATE_ARGS, "idempotency_key": "copied-from-history"}
+
+    async def _run():
+        sent.append(arguments["idempotency_key"])
+        return CREATE_RESULT, False
+
+    async def _approve():
+        while not cards.requests:
+            await asyncio.sleep(0.01)
+        approvals.resolve(cards.requests[0].approval_id, True)
+
+    approver = asyncio.create_task(_approve())
+    result = await gate.run("google__create_event", arguments, _run, trusted_key=False)
+    await approver
+    assert result.executed
+    assert sent == [ict.call_idempotency_key(CALL, "google__create_event", CREATE_ARGS)]
+    await channel.stop()
+
+
+async def test_agent_passes_model_tool_calls_as_untrusted(owner_phone):
+    """The one production call site with trusted_key=False: a key the model
+    copied into its tool call never reaches the calendar."""
+    from pincer.core.agent import Agent
+    from pincer.llm.base import ToolCall, ToolResult
+
+    channel, engine, state = await _start(ToolAgent([]), tools=_Registry())
+    gate = channel.get_tool_gate(CALL)
+    agent = object.__new__(Agent)  # only _execute_call_tool is under test
+    sent: list[dict] = []
+
+    async def _execute_tool(tool_call, *args, **kwargs):
+        sent.append(dict(tool_call.arguments))
+        return ToolResult(tool_call_id=tool_call.id, content=CREATE_RESULT, is_error=False)
+
+    agent._execute_tool = _execute_tool  # type: ignore[method-assign]
+    call = ToolCall(id="t1", name="google__create_event", arguments={**CREATE_ARGS, "idempotency_key": "copied"})
+    result = await agent._execute_call_tool(call, "owner", "voice", None, gate)
+    assert not result.is_error
+    assert sent[0]["idempotency_key"] == ict.call_idempotency_key(CALL, "google__create_event", CREATE_ARGS)
     await channel.stop()
 
 

@@ -29,10 +29,10 @@ def test_run_all_returns_report(doctor_env):
     assert isinstance(report, DoctorReport)
     # 31 original + 7 MCP + 3 MCP security + 1 WA neonize + 3 voice DACH
     # + 1 ElevenLabs + 4 voice security (Sprint 8) + 2 observability (Sprint 9)
-    # + 2 in-call tool execution (Sprint 11, #299) + 2 receptionist (Sprint 12)
+    # + 3 in-call tool execution (Sprint 11, #299) + 2 receptionist (Sprint 12)
     # + 1 live listen-in announce gate (Sprint 15) + 1 schedule action types (issue #217)
     # + 1 leftover shared API tokens (issue #228)
-    assert len(report.checks) == 62
+    assert len(report.checks) == 63
 
     assert 0 <= report.score <= 100
 

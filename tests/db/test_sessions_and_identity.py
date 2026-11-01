@@ -20,6 +20,7 @@ from pincer.models.sessions import ChatSession
 from pincer.repositories.identity import (
     AuthSessionRepository,
     IdentityCredentialRepository,
+    IdentityPhoneRepository,
     IdentityProfileRepository,
 )
 from pincer.repositories.sessions import SessionRepository, rekeyed_session_id
@@ -627,3 +628,74 @@ async def test_rotating_a_session_needs_the_refresh_token_that_is_current(url):
     async with session_scope(url) as session:
         stored = await AuthSessionRepository(session).get(session_id)
         assert (stored.refresh_jti, stored.prev_refresh_jti) == ("r1", "r0")
+
+
+# ── Identity phones (#299) ───────────────────────────────────────────
+
+
+def _phone_seed(uid: str, channel_id: str, phones: tuple[str, ...]) -> SeedEntry:
+    fields = {"preferred_channel": "telegram", "display_name": None, "email": None, "timezone": None}
+    return SeedEntry(
+        pincer_user_id=uid,
+        channels=[("telegram", channel_id)],
+        insert=fields,
+        backfill={**fields, "preferred_channel": None},
+        phones=phones,
+    )
+
+
+async def _phone_row(url: str, phone: str):
+    async with session_scope(url) as session:
+        return await IdentityPhoneRepository(session).get(phone)
+
+
+async def test_seeding_stores_config_phones_confirmed(url):
+    service = IdentityService(url)
+    await service.seed([_phone_seed("alice", "111", ("+4915112345678",))])
+    assert (await service.profile_with_channels("alice"))["phones"] == [{"phone": "+4915112345678", "confirmed": True}]
+    assert await service.user_for_confirmed_phone("+49 151 12345678") == "alice"
+    first = await _phone_row(url, "+4915112345678")
+    assert first is not None and first.source == "config" and first.confirmed_at is not None
+
+    # Seeding again (every start) takes the conflict path and keeps the first confirmation
+    await service.seed([_phone_seed("alice", "111", ("+4915112345678",))])
+    again = await _phone_row(url, "+4915112345678")
+    assert again is not None and again.confirmed_at == first.confirmed_at
+
+
+async def test_an_unconfirmed_phone_has_no_owner(url):
+    service = IdentityService(url)
+    await service.seed([_phone_seed("alice", "111", ())])
+    async with session_scope(url) as session:
+        await IdentityPhoneRepository(session).upsert("+4930123456", "alice", confirmed=False, source="api", now=_NOW)
+    assert await service.user_for_confirmed_phone("+4930123456") is None
+    assert (await service.profile_with_channels("alice"))["phones"] == [{"phone": "+4930123456", "confirmed": False}]
+
+
+async def test_pruning_config_phones_keeps_listed_and_non_config_ones(url):
+    service = IdentityService(url)
+    await service.seed([_phone_seed("alice", "111", ("+4915100000001", "+4915100000002"))])
+    async with session_scope(url) as session:
+        await IdentityPhoneRepository(session).upsert("+4930123456", "alice", confirmed=False, source="api", now=_NOW)
+
+    assert await service.prune_config_phones(["+4915100000001"]) == 1
+    assert await service.user_for_confirmed_phone("+4915100000001") == "alice"
+    assert await service.user_for_confirmed_phone("+4915100000002") is None
+    assert await _phone_row(url, "+4930123456") is not None
+
+
+async def test_listing_identities_batches_their_phones(url):
+    service = IdentityService(url)
+    await service.seed([_phone_seed("alice", "111", ("+4915100000001",)), _phone_seed("bob", "222", ())])
+    rows = {row["pincer_user_id"]: row["phones"] for row in await service.list_profiles()}
+    assert rows == {"alice": [{"phone": "+4915100000001", "confirmed": True}], "bob": []}
+
+
+async def test_renaming_moves_phones_and_pruning_drops_them(url):
+    service = IdentityService(url)
+    await service.seed([_phone_seed("alice", "111", ("+4915100000001",))])
+    await service.rename_identity("alice", "alicia")
+    assert await service.user_for_confirmed_phone("+4915100000001") == "alicia"
+
+    assert await service.prune(set()) == (1, 1)
+    assert await _phone_row(url, "+4915100000001") is None

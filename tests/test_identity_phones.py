@@ -139,6 +139,21 @@ async def test_cleanup_removes_config_phones_no_longer_listed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cleanup_keeps_phones_still_in_the_config(tmp_path):
+    two = OWNER_TOML.replace('["+49 151 2345-678", "+491512345678"]', '["+491512345678", "+491700000001"]')
+    _write(tmp_path, two)
+    resolver = await _resolver(tmp_path)
+    await resolver.seed_from_config()
+    store = resolver._store
+
+    _write(tmp_path, OWNER_TOML)  # +491700000001 removed, +491512345678 kept
+    resolver = await _resolver(tmp_path)
+    await resolver.cleanup_phones()
+    assert await store.user_for_confirmed_phone("+491512345678") == "owner"
+    assert await store.user_for_confirmed_phone("+491700000001") is None
+
+
+@pytest.mark.asyncio
 async def test_removed_phone_is_dropped_even_when_seeding_fails(tmp_path, monkeypatch):
     from pincer.channels.router import ChannelRouter
 
