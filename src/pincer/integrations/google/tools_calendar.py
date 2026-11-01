@@ -903,7 +903,10 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
     )
     registry.register(
         name="google__move_event",
-        description="Move a calendar event to a different calendar.",
+        description=(
+            "Move a calendar event to a different calendar. This is not for changing the time: "
+            "to reschedule an event, use google__update_event."
+        ),
         handler=_h(google__move_event),
         parameters={
             "type": "object",

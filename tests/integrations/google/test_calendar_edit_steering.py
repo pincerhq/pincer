@@ -68,6 +68,15 @@ def test_update_description_names_the_edits(registry) -> None:
         assert edit in text, edit
 
 
+def test_move_description_is_only_for_changing_calendars(registry) -> None:
+    """ "Move my 10am" ranked this tool first: it must say it does not change the time."""
+    text = _description(registry, "google__move_event")
+    assert "different calendar" in text
+    assert "not for changing the time" in text
+    assert "reschedule" in text
+    assert "google__update_event" in text
+
+
 @pytest.mark.parametrize(
     ("tool", "args"),
     [
