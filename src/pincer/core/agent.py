@@ -167,6 +167,25 @@ NEVER use python_exec for Google Sheets operations.
 The sandbox has no gspread, no openpyxl, no pandas Google Sheets support, and no Google credentials.
 """
 
+# The tools _GOOGLE_TOOL_CHAIN_HINTS describes; a turn without any of them
+# (a call offering only calendar reads) gets no hints about the rest.
+_GOOGLE_HINT_TOOLS = frozenset(
+    {
+        "google__download_file",
+        "google__export_google_doc",
+        "google__get_attachment",
+        "google__get_doc_content",
+        "google__get_message",
+        "google__get_sheet_values",
+        "google__list_local_files",
+        "google__list_sheets",
+        "google__search_drive_files",
+        "google__search_messages",
+        "google__search_sheet_values",
+        "google__upload_file",
+    }
+)
+
 _GOOGLE_FALLBACK_PATTERNS = [
     "gmail",
     "googleapiclient",
@@ -285,44 +304,44 @@ def _schema_names(schemas: list[dict[str, Any]] | None) -> list[str]:
 class _RepeatedCallGuard:
     """The tool calls made so far in one call turn, by name and arguments.
 
-    A call already made this turn is not run again: the model is told so
-    instead (``duplicate_result``). Calendar reads that answer nothing would
-    otherwise repeat until the iteration limit, each one a "moment please".
+    A call already made this turn is not run again: the gate logs it and the
+    model is told so instead (``repeat_result``). Calendar reads that answer
+    nothing would otherwise repeat until the iteration limit, each one a
+    "moment please".
     """
 
     def __init__(self, call_gate: Any) -> None:
         self._gate = call_gate
-        self._seen: set[tuple[str, str]] = set()
-        self.duplicates = 0
+        # (name, canonical args) -> whether the first run was an error
+        self._errors: dict[tuple[str, str], bool] = {}
+        self.repeats = 0
+
+    @staticmethod
+    def _key(tool_call: ToolCall) -> tuple[str, str]:
+        from pincer.voice.tool_policy import canonical_json
+
+        return tool_call.name, canonical_json(tool_call.arguments)
 
     def is_repeat(self, tool_call: ToolCall) -> bool:
-        key = (tool_call.name, json.dumps(tool_call.arguments or {}, sort_keys=True, default=str))
-        if key not in self._seen:
-            self._seen.add(key)
-            return False
-        self.duplicates += 1
-        logger.warning("Repeated tool call skipped: %s %s (%d this turn)", key[0], key[1][:200], self.duplicates)
-        return True
+        return self._key(tool_call) in self._errors
+
+    def record(self, tool_call: ToolCall, result: ToolResult) -> None:
+        self._errors[self._key(tool_call)] = result.is_error
+
+    def repeat_result(self, tool_call: ToolCall) -> ToolResult:
+        """What the model gets instead of a second run. A repeat of a failed
+        call stays an error, so the consecutive-error breaker still counts it."""
+        self.repeats += 1
+        logger.warning("Repeated tool call skipped: %s (%d this turn)", tool_call.name, self.repeats)
+        content = self._gate.repeated_call_result(tool_call.name, tool_call.arguments)
+        return ToolResult(tool_call_id=tool_call.id, content=content, is_error=self._errors[self._key(tool_call)])
 
     @property
     def exhausted(self) -> bool:
-        return self.duplicates >= _MAX_DUPLICATE_TOOL_CALLS
-
-    def duplicate_result(self, tool_call: ToolCall) -> ToolResult:
-        if self._gate is not None:
-            content = self._gate.duplicate_call_result()
-        else:
-            from pincer.voice.tool_speech import render_duplicate
-
-            content = f"[TOOL RESULT: {render_duplicate('en')}]"
-        return ToolResult(tool_call_id=tool_call.id, content=content, is_error=False)
+        return self.repeats >= _MAX_DUPLICATE_TOOL_CALLS
 
     def no_progress_line(self) -> str:
-        if self._gate is not None:
-            return str(self._gate.prompt("TOOL_NO_PROGRESS"))
-        from pincer.voice.prompts import get_prompt
-
-        return str(get_prompt("TOOL_NO_PROGRESS", "en") or "")
+        return str(self._gate.prompt("TOOL_NO_PROGRESS"))
 
 
 def _clean_profile_value(v: Any) -> str | None:
@@ -774,14 +793,18 @@ class Agent:
                 # Execute each tool
                 iteration_had_error = False
                 skills_loaded: list[str] = []
+                ran_new_call = False
                 for tool_call in response.tool_calls:
                     tool_calls_count += 1
                     if repeats is not None and repeats.is_repeat(tool_call):
-                        result = repeats.duplicate_result(tool_call)
+                        result = repeats.repeat_result(tool_call)
                     elif call_gate is not None:
                         result = await self._execute_call_tool(
                             tool_call, user_id, channel, channel_user_id, call_gate, channel_name=channel_name
                         )
+                        if repeats is not None:
+                            repeats.record(tool_call, result)
+                        ran_new_call = True
                     else:
                         result = await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id)
 
@@ -797,7 +820,9 @@ class Agent:
                     elif (skill := _loaded_skill(tool_call, result)) is not None:
                         skills_loaded.append(skill)
 
-                if repeats is not None and repeats.exhausted:
+                # A batch that also ran a new call goes back to the model, which
+                # has not seen that result yet.
+                if repeats is not None and repeats.exhausted and not ran_new_call:
                     final_text = repeats.no_progress_line()
                     break
 
@@ -1319,11 +1344,10 @@ class Agent:
             tool_schemas = call_gate.filter_schemas(self._tools.get_schemas()) or None
         else:
             tool_schemas = filter_voice_tools(self._tools.get_schemas())
-        # The hints and the MCP server block name only the tools this call
-        # offers (issue #300); without a gate they follow the registry.
-        prompt_tools = _schema_names(tool_schemas) if call_gate is not None or tool_schemas is None else None
+        # The hints and the MCP server block name only the tools this turn
+        # sends (issue #300).
         system_prompt = await self._build_system_prompt(
-            user_id, text, extra_system=extra_system, tool_names=prompt_tools
+            user_id, text, extra_system=extra_system, tool_names=_schema_names(tool_schemas)
         )
         max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 220) or 220)
 
@@ -1366,7 +1390,7 @@ class Agent:
         full_text = ""
         consecutive_errors = 0
         sanitize_attempts = 0
-        repeats = _RepeatedCallGuard(call_gate)
+        repeats = _RepeatedCallGuard(call_gate) if call_gate is not None else None
 
         for _iteration in range(self._settings.max_tool_iterations):
             await self._repair_tool_pairs(session)
@@ -1455,16 +1479,19 @@ class Agent:
             await self._sessions.add_message(session, assistant_msg)
 
             iteration_had_error = False
+            ran_new_call = False
             for tool_call in response.tool_calls:
-                if repeats.is_repeat(tool_call):
-                    duplicate = repeats.duplicate_result(tool_call)
+                if repeats is not None and repeats.is_repeat(tool_call):
+                    repeat = repeats.repeat_result(tool_call)
                     await self._sessions.add_message(
                         session,
                         LLMMessage(
-                            role=MessageRole.TOOL_RESULT, content=duplicate.content, tool_call_id=duplicate.tool_call_id
+                            role=MessageRole.TOOL_RESULT, content=repeat.content, tool_call_id=repeat.tool_call_id
                         ),
                     )
+                    iteration_had_error = iteration_had_error or repeat.is_error
                     continue
+                ran_new_call = True
                 yield StreamChunk(StreamEventType.TOOL_START, tool_call.name)
                 tool_span = (
                     turn_trace.open_span(
@@ -1489,6 +1516,8 @@ class Agent:
                     )
                     turn_trace.bump("tool_calls")
                 result = await self._execute_call_tool(tool_call, user_id, channel, channel_user_id, call_gate)
+                if repeats is not None:
+                    repeats.record(tool_call, result)
                 if tool_span is not None:
                     tool_span.close(_SpanStatus.ERROR if result.is_error else _SpanStatus.OK)
                 if turn_trace is not None:
@@ -1507,7 +1536,9 @@ class Agent:
                 if result.is_error:
                     iteration_had_error = True
 
-            if repeats.exhausted:
+            # A batch that also ran a new call goes back to the model, which
+            # has not seen that result yet.
+            if repeats is not None and repeats.exhausted and not ran_new_call:
                 fallback = repeats.no_progress_line()
                 if fallback:
                     spoken = f" {fallback}" if full_text and not full_text.endswith(" ") else fallback
@@ -1608,8 +1639,8 @@ class Agent:
                 "make_phone_call tool. Do not describe or simulate the call in your response — call the tool."
             )
 
-        # Google Workspace tool chain hints when google__ tools are registered
-        if any(t.startswith("google__") for t in tool_names):
+        # Google Workspace tool chain hints when the tools they name are sent
+        if _GOOGLE_HINT_TOOLS.intersection(tool_names):
             base_prompt += "\n" + _GOOGLE_TOOL_CHAIN_HINTS
 
         # Inject available skills (progressive disclosure level 1)
@@ -1629,8 +1660,20 @@ class Agent:
                 servers = await self.mcp_manager.list_servers()
                 connected = [s for s in servers if s["connected"]]
                 if offered is not None:
-                    # A server whose tools this turn does not send is not advertised.
-                    connected = [s for s in connected if offered.intersection(self.mcp_manager.tool_names(s["name"]))]
+                    # Only the tools this turn sends are advertised: a server
+                    # with none of them is left out, and one with some of them
+                    # shows that count and none of its instructions, which
+                    # describe the tools the model was not given too.
+                    shown = []
+                    for s in connected:
+                        registered = set(self.mcp_manager.tool_names(s["name"]))
+                        sent = len(offered & registered)
+                        if sent:
+                            partial = sent < len(registered)
+                            shown.append(
+                                {**s, "tool_count": sent, "instructions": None if partial else s.get("instructions")}
+                            )
+                    connected = shown
                 if connected:
                     max_chars = self._settings.mcp_instructions_max_chars
                     server_lines = []

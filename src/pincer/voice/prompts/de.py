@@ -363,7 +363,6 @@ TOOL_SPEECH = {
     "business_profile_lookup.ok": "{profile}.",
     "websearch.some": "Laut {source}: {text}",
     "websearch.none": "Dazu habe ich im Web nichts gefunden.",
-    "websearch.as_of": "Stand {date}",
     "websearch.unknown_source": "einer Webseite",
     "duplicate": "Dieses Tool wurde mit denselben Angaben schon aufgerufen. Antworten Sie mit dem, was Sie haben, "
     "oder sagen Sie ehrlich, dass Sie es nicht herausfinden können. Nicht erneut aufrufen.",

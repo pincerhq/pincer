@@ -477,6 +477,56 @@ def _list_events_call(call_id: str) -> ToolCall:
     return ToolCall(id=call_id, name="google__list_events", arguments={"time_min": "2026-11-01", "max_results": 5})
 
 
+class TestPartialServerAndGoogleHints:
+    async def test_a_partly_offered_server_shows_only_the_offered_count(
+        self, settings, session_manager, cost_tracker, tool_registry
+    ):
+        from pincer.voice.in_call_tools import bind_gate
+
+        settings.voice_turn_model = ""
+        google = ["google__list_events", "google__check_freebusy", "google__search_messages", "google__get_attachment"]
+        _register(tool_registry, *google)
+        provider = ScriptedProvider([_text_turn("Gerne.")])
+        agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
+        agent.mcp_manager = _MCPStub({"google": google})
+
+        with bind_gate(_call_gate(settings, {"google__list_events", "google__check_freebusy"})):
+            await _collect(agent, user_id="u1", channel="voice", text="Wann haben Sie Zeit?")
+
+        system = provider.calls[0]["system"]
+        assert "google (2 tool(s))" in system
+        assert "google server notes" not in system
+        assert "Google Workspace Tool Chains" not in system
+        assert "google__search_messages" not in system
+
+    async def test_google_hints_follow_the_tools_they_describe(
+        self, settings, session_manager, cost_tracker, tool_registry, mock_llm
+    ):
+        _register(tool_registry, "google__search_messages", "google__get_attachment")
+        agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+        await agent.handle_message("u1", "telegram", "Anhang speichern")
+
+        assert "Google Workspace Tool Chains" in mock_llm.complete.call_args.kwargs["system"]
+
+    async def test_without_a_gate_the_prompt_follows_the_voice_filter(
+        self, settings, session_manager, cost_tracker, tool_registry
+    ):
+        settings.voice_turn_model = ""
+        _register(tool_registry, "shell_exec", "weather__now")
+        provider = ScriptedProvider([_text_turn("Gerne.")])
+        agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
+        agent.mcp_manager = _MCPStub({"shell": ["shell_exec"], "weather": ["weather__now"]})
+
+        await _collect(agent, user_id="u1", channel="voice", text="Hallo")
+
+        names = [t["name"] for t in provider.calls[0]["tools"]]
+        system = provider.calls[0]["system"]
+        assert "shell_exec" not in names
+        assert "shell (" not in system
+        assert "weather (1 tool(s))" in system
+
+
 class TestRepeatedToolCalls:
     async def test_a_repeated_call_is_not_run_again(self, settings, session_manager, cost_tracker, tool_registry):
         from pincer.voice.in_call_tools import bind_gate
@@ -504,7 +554,7 @@ class TestRepeatedToolCalls:
         last_result = provider.calls[2]["messages"][-1]
         assert last_result.role == MessageRole.TOOL_RESULT
         assert last_result.tool_call_id == "tc2"
-        assert last_result.content == gate.duplicate_call_result()
+        assert last_result.content.startswith("[TOOL RESULT: ")
         assert "denselben Angaben" in last_result.content
         assert chunks[-1].content == "Das kann ich während des Anrufs leider nicht nachschlagen."
 
@@ -559,6 +609,46 @@ class TestRepeatedToolCalls:
         assert calls == ["google__list_events"]
         assert mock_llm.complete.await_count == 3
         assert result.text == de_pack.TOOL_NO_PROGRESS
+
+    async def test_a_batch_with_a_new_call_goes_back_to_the_model(
+        self, settings, session_manager, cost_tracker, tool_registry
+    ):
+        """At the repeat limit, a batch that also ran a new call is not cut short: the model gets its result."""
+        from pincer.voice.in_call_tools import bind_gate
+
+        settings.voice_turn_model = ""
+        calls: list[str] = []
+        _register(tool_registry, "google__list_events", "websearch__search", calls=calls)
+        search = ToolCall(id="tc3", name="websearch__search", arguments={"query": "Benzin Bünde"})
+        provider = ScriptedProvider(
+            [
+                _text_turn(tool_calls=[_list_events_call("tc1")]),
+                _text_turn(tool_calls=[_list_events_call("tc2")]),
+                _text_turn(tool_calls=[_list_events_call("tc4"), search]),
+                _text_turn("E10 kostet dort 1,62 Euro."),
+            ]
+        )
+        agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
+
+        with bind_gate(_call_gate(settings, {"google__list_events", "websearch__search"})):
+            chunks = await _collect(agent, user_id="u1", channel="voice", text="Benzinpreis?")
+
+        assert calls == ["google__list_events", "websearch__search"]
+        assert len(provider.calls) == 4
+        assert chunks[-1].content == "E10 kostet dort 1,62 Euro."
+
+    async def test_a_repeat_of_a_failed_call_stays_an_error(
+        self, settings, session_manager, cost_tracker, tool_registry
+    ):
+        from pincer.core.agent import _RepeatedCallGuard
+        from pincer.llm.base import ToolResult
+
+        guard = _RepeatedCallGuard(_call_gate(settings, {"google__list_events"}))
+        first = _list_events_call("tc1")
+        guard.record(first, ToolResult(tool_call_id="tc1", content="[TOOL DENIED: tool_error]", is_error=True))
+        repeat = _list_events_call("tc2")
+        assert guard.is_repeat(repeat)
+        assert guard.repeat_result(repeat).is_error
 
     async def test_chat_turns_are_not_guarded(self, settings, session_manager, cost_tracker, tool_registry, mock_llm):
         calls: list[str] = []

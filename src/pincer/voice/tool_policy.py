@@ -92,6 +92,8 @@ REASON_APPROVAL_DENIED = "approval_denied"
 REASON_APPROVAL_TIMEOUT = "approval_timeout"
 REASON_TOOL_TIMEOUT = "tool_timeout"
 REASON_TOOL_ERROR = "tool_error"
+# The model asked for a call it already made this turn (same tool, same args).
+REASON_REPEATED_CALL = "repeated_call"
 DENY_REASONS: tuple[str, ...] = (
     REASON_TIER_X,
     REASON_NOT_IN_SCOPE,
@@ -100,6 +102,7 @@ DENY_REASONS: tuple[str, ...] = (
     REASON_APPROVAL_TIMEOUT,
     REASON_TOOL_TIMEOUT,
     REASON_TOOL_ERROR,
+    REASON_REPEATED_CALL,
 )
 
 # Per-purpose narrowing (§5.3). The appointment set is fixed; the generic set

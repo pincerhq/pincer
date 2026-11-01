@@ -491,15 +491,18 @@ Web search is a read, but no call gets it by default: add it with
 server connected). It then runs without approval on generic and appointment
 calls — the server's chat-side `approval_required` does not apply in a call,
 where the tier table is the authority — and the model hears the top results as
-"According to <site>: …". The inbound receptionist never gets it, extra or not.
+"According to <site>: …". If it times out, the caller hears "I can't find that
+out right now" and nothing is queued for after the call. The inbound
+receptionist never gets it, extra or not.
 
 The system prompt follows the same set: tool hints and the connected-MCP-server
 list name only the tools the call actually offers, so a model is never told
 about a tool it cannot call. When nothing fits a request, the call rules tell
 it to say so in one sentence and offer to note it or pass it on. A turn that
 repeats a tool call it already made (same name, same arguments) gets
-"already called" back instead of a second run; after two repeats the turn ends
-with a short "I can't find that out right now".
+"already called" back instead of a second run, and the call's actions log it as
+denied with `repeated_call`; after two repeats the turn ends with a short "I
+can't find that out right now".
 
 `PINCER_VOICE_TOOL_APPROVAL` sets the mode for Tier W:
 

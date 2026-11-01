@@ -304,12 +304,14 @@ def _truncate_words(text: str, limit: int) -> str:
 
 def _render_websearch(result: str, language: str) -> str:
     """The websearch MCP returns JSON ``{"answer", "results": [{title, url,
-    snippet}]}`` or ``{"error": ...}``. Each of the top results becomes
-    'According to <domain>: <title>: <snippet>', capped in total; the
-    unsourced Tavily ``answer`` summary is left out."""
+    snippet}]}`` or ``{"error": ...}``; the bridge may put a ``[SECURITY
+    NOTE: ...]`` line in front of it. Each of the top results becomes
+    'According to <domain>: <title>: <snippet>', all of them together within
+    WEBSEARCH_MAX_CHARS; the unsourced Tavily ``answer`` summary is left out."""
+    start = result.find("{")
     try:
-        data = json.loads(result)
-    except (TypeError, ValueError):
+        data = json.loads(result[start:]) if start >= 0 else None
+    except ValueError:
         data = None
     if not isinstance(data, dict) or data.get("error"):
         return str(get_prompt("TOOL_ERROR", language) or "")
@@ -318,24 +320,24 @@ def _render_websearch(result: str, language: str) -> str:
         if not isinstance(item, dict):
             continue
         title = _clean_web_text(item.get("title"))
-        snippet = _clean_web_text(item.get("snippet") or item.get("content"))
+        snippet = _clean_web_text(item.get("snippet"))
         text = f"{title}: {snippet}" if title and snippet else title or snippet
         if not text:
             continue
         source = _source_domain(item.get("url")) or _tpl("websearch.unknown_source", language)
-        published = parse_iso(item.get("published_date") or item.get("date"))
-        if published is not None:
-            as_of = _tpl("websearch.as_of", language).format(date=spoken_datetime(published, language, False))
-            source = f"{source} ({as_of})"
         found.append((source, text))
         if len(found) == MAX_LIST_ITEMS:
             break
     if not found:
         return _tpl("websearch.none", language)
-    budget = WEBSEARCH_MAX_CHARS // len(found)
+    template = _tpl("websearch.some", language)
+    # Each line gets an equal share of the cap, its "According to <domain>: "
+    # and the separating space included.
+    share = WEBSEARCH_MAX_CHARS // len(found) - 1
     lines = []
     for source, text in found:
-        line = _tpl("websearch.some", language).format(source=source, text=_truncate_words(text, budget))
+        room = share - len(template.format(source=source, text="")) - 1
+        line = template.format(source=source, text=_truncate_words(text, max(room, 0)))
         lines.append(line if line.endswith((".", "!", "?", "…")) else f"{line}.")
     return " ".join(lines)
 

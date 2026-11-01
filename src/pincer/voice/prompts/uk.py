@@ -338,7 +338,6 @@ TOOL_SPEECH = {
     "business_profile_lookup.ok": "{profile}.",
     "websearch.some": "За даними {source}: {text}",
     "websearch.none": "В інтернеті я нічого про це не знайшов.",
-    "websearch.as_of": "станом на {date}",
     "websearch.unknown_source": "одного сайту",
     "duplicate": "Цей інструмент уже викликали з тими самими аргументами. Відповідайте тим, що маєте, "
     "або чесно скажіть, що не можете це з'ясувати. Не викликайте його знову.",

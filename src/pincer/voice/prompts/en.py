@@ -347,7 +347,6 @@ TOOL_SPEECH = {
     "business_profile_lookup.ok": "{profile}.",
     "websearch.some": "According to {source}: {text}",
     "websearch.none": "I found nothing about that on the web.",
-    "websearch.as_of": "as of {date}",
     "websearch.unknown_source": "a website",
     "duplicate": "This tool was already called with the same arguments. Answer with what you have, "
     "or say honestly that you cannot find it out. Do not call it again.",

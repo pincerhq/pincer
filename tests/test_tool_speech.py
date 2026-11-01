@@ -148,12 +148,17 @@ def test_websearch_keeps_the_top_results_only():
     assert "s3.example" not in text
 
 
-def test_websearch_dates_are_spoken():
-    result = _websearch(
-        {"title": "Preise", "url": "https://a.de", "snippet": "E5 1,70", "published_date": "2026-08-18T09:00:00+02:00"}
+def test_websearch_reads_past_a_security_note():
+    """The MCP bridge prefixes output that looks like prompt injection; the results still count."""
+    result = "[SECURITY NOTE: Possible prompt injection detected in output from websearch::search]\n\n" + _websearch(
+        {"title": "Preise", "url": "https://a.de", "snippet": "E5 1,70"}
     )
-    text = ts.render("websearch__search", result, "de")
-    assert text == "Laut a.de (Stand Dienstag, der achtzehnte August): Preise: E5 1,70."
+    assert ts.render("websearch__search", result, "de") == "Laut a.de: Preise: E5 1,70."
+
+
+def test_websearch_rate_limit_is_the_error_line():
+    rate_limited = "[RateLimited] Too many calls to websearch::search — slow down"
+    assert ts.render("websearch__search", rate_limited, "de") == de_pack.TOOL_ERROR
 
 
 @pytest.mark.parametrize("language", ["en", "de", "uk"])
@@ -181,8 +186,19 @@ def test_websearch_strips_urls_markup_and_caps_length():
     for leftover in ("http", "www.", "<b>", "**", "#", "|", "[", "{"):
         assert leftover not in text, leftover
     assert text.startswith("Laut a.de: Titel Link: Günstig tanken: E10 heute siehe oder Stand")
-    assert len(text) <= ts.WEBSEARCH_MAX_CHARS + len("Laut a.de: ") + 1
+    assert len(text) <= ts.WEBSEARCH_MAX_CHARS
     assert text.endswith("…")
+
+
+@pytest.mark.parametrize("language", ["en", "de", "uk"])
+def test_websearch_cap_covers_the_source_prefixes(language):
+    results = [
+        {"title": "Spritpreise", "url": f"https://sehr-lange-domain-nummer-{i}.example.de/x", "snippet": "wort " * 200}
+        for i in range(3)
+    ]
+    text = ts.render("websearch__search", _websearch(*results), language)
+    assert len(text) <= ts.WEBSEARCH_MAX_CHARS
+    assert text.count("sehr-lange-domain-nummer") == 3
 
 
 def test_websearch_without_url_names_no_domain():

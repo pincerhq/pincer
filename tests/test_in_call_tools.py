@@ -500,6 +500,38 @@ async def test_websearch_via_extra_plays_the_filler_and_logs_r_auto():
     await channel.stop()
 
 
+async def test_websearch_timeout_says_so_and_queues_no_follow_up():
+    settings = _settings(voice_tools_extra="websearch__search")
+    settings.voice_tool_timeout_s = 0.05  # type: ignore[assignment]
+    agent = ToolAgent([[Tool("websearch__search", WEBSEARCH_ARGS, result=WEBSEARCH_RESULT, delay_s=1.0)]])
+    channel, engine, state = await _start(agent, settings=settings)
+    await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
+
+    assert agent.gate_results[0].deny_reason == "tool_timeout"
+    assert de_pack.TOOL_NO_PROGRESS in engine.spoken[CALL]
+    assert de_pack.TOOL_TIMEOUT_DEFER not in engine.spoken[CALL]
+    assert state.metadata.get("deferred_actions", []) == []
+    await channel.stop()
+
+
+async def test_a_repeated_call_is_logged_as_denied():
+    agent = ToolAgent([[Text("Gerne.")]])
+    channel, engine, state = await _start(agent)
+    gate = channel.get_tool_gate(CALL)
+
+    content = gate.repeated_call_result("google__list_events", {"max_results": 5})
+
+    assert content.startswith("[TOOL RESULT: ") and "denselben Angaben" in content
+    row = channel.get_transcript(CALL).actions[-1]
+    assert (row.action_type, row.tool_name, row.deny_reason, row.tier) == (
+        "tool_denied",
+        "google__list_events",
+        "repeated_call",
+        "R",
+    )
+    await channel.stop()
+
+
 async def test_inbound_call_excludes_memory_search():
     agent = ToolAgent([[Tool("memory_search", {"query": "x"}, result="nothing")]])
     channel, engine, state = await _start(agent, direction=CallDirection.INBOUND)
