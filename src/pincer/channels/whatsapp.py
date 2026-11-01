@@ -340,14 +340,25 @@ class WhatsAppChannel(BaseChannel):
     _GROUP_ANSWER_MAX_WORDS = 3
 
     def _parse_yes_no(self, text: str, *, max_words: int | None = None) -> bool | None:
-        """Read a yes/no answer, ignoring @-mentions, our own ids and the group trigger words.
+        """Read a yes/no answer, ignoring our own mention and ids and the group trigger words.
 
-        So "@4917… yes" and "pincer, yes!" both count as "yes".
+        So "@<our number> yes" and "pincer, yes!" both count as "yes". A
+        message that mentions anyone else is addressed to them, not an answer:
+        "@Alice yes" is None. ``max_words`` is skipped when the message
+        addresses us by mention or trigger word, since it is then not chatter.
         """
-        t = re.sub(r"@\d+", " ", text or "")
-        for own_id in self._own_ids():
+        text = text or ""
+        own_ids = self._own_ids()
+        mentions = re.findall(r"@(\d+)", text)
+        if any(m not in own_ids for m in mentions):
+            return None
+        trigger = self._settings.whatsapp_group_trigger
+        if mentions or matches_group_trigger(text, trigger):
+            max_words = None
+        t = text
+        for own_id in own_ids:
             t = re.sub(rf"(?<!\d){re.escape(own_id)}(?!\d)", " ", t)
-        t = strip_group_triggers(t, self._settings.whatsapp_group_trigger)
+        t = strip_group_triggers(t, trigger)
         return parse_yes_no(t, max_words=max_words)
 
     _REACTION_APPROVE = frozenset(norm_emoji(e) for e in ("👍", "✅", "👌", "❤️", "🙏"))

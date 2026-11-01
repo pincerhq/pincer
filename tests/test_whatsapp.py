@@ -579,7 +579,10 @@ class TestWhatsAppMediaAndApproval:
             ("*no*", False),
             ("pincer yes", True),
             ("Pincer, no.", False),
-            ("@4915100000000 yes", True),
+            ("@491622549781 yes", True),
+            # A mention of someone else addresses them, not us.
+            ("@4915100000000 yes", None),
+            ("@491622549781 @4915100000000 yes", None),
             ("491622549781 ok", True),
             ("👍🏽", True),
             ("так", True),
@@ -594,6 +597,20 @@ class TestWhatsAppMediaAndApproval:
     def test_parse_yes_no_lenient(self, wa_channel, text, expected):
         wa_channel._own_jid = "491622549781"
         assert wa_channel._parse_yes_no(text) is expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("pincer yes go ahead now", True),
+            ("@491622549781 yes, go ahead and send it", True),
+            ("yes go ahead please", None),
+            ("pincer yes but use the other address", None),
+        ],
+    )
+    def test_parse_yes_no_word_cap_skipped_when_addressed(self, wa_channel, text, expected):
+        wa_channel._own_jid = "491622549781"
+        wa_channel._settings.whatsapp_group_trigger = "pincer"
+        assert wa_channel._parse_yes_no(text, max_words=3) is expected
 
     def test_reaction_sets_ignore_variation_selectors_and_skin_tones(self, wa_channel):
         from pincer.channels.approval_text import norm_emoji
