@@ -4,7 +4,9 @@
 Replays the 2026-10-31 reproduction against a real Google account through a
 running Pincer. YOU send the messages from your phone; this script prints them
 and then reads the real calendar to check what Pincer actually stored. It never
-talks to Pincer and never runs in CI (not a test module, not collected).
+talks to Pincer and never runs against Google in CI (not a test module, not
+collected); its checker logic is tested against a fake Calendar by the collected
+tests/integrations/google/test_calendar_smoke_script.py.
 
 Each run has a unique tag (e.g. "Smoke-7F3A2C") that starts every title it
 asks for ("Smoke-7F3A2C Alpha"). The script LISTS every event on the primary
