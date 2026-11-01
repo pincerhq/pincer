@@ -10,15 +10,19 @@ hint pointing changes at the update tool with the event's ID.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from integrations.google.fake_calendar import FakeCalendarFactory, FakeCalendarService
+from pincer.integrations.google.calendar_render import EDIT_HINT
 from pincer.integrations.google.tools_calendar import register_calendar_tools
 from pincer.tools.registry import ToolRegistry
 
 DAY = "2026-11-12"
+FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "tool_index_tools.json"
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +70,29 @@ def test_update_description_names_the_edits(registry) -> None:
     text = _description(registry, "google__update_event")
     for edit in ("rename", "reschedule", "change the time", "change details"):
         assert edit in text, edit
+
+
+def test_update_description_says_a_start_alone_moves_the_end(registry) -> None:
+    """ "Only provided fields are changed": for "start the 10–11 meeting at 9:30, same end" a model
+    sends only start and gets 9:30–10:30 (the end moves with the start)."""
+    text = _description(registry, "google__update_event")
+    assert "only provided fields are changed" not in text
+    assert "end moves with it" in text
+    assert "duration" in text
+
+
+def test_update_description_and_hint_name_the_calendar(registry) -> None:
+    """After a list on another calendar, update(event_id) alone goes to primary and 404s."""
+    assert "(and calendar_id, if not primary)" in _description(registry, "google__update_event")
+    assert "(and calendar_id, if not primary)" in EDIT_HINT
+
+
+def test_ranking_fixture_matches_the_registered_calendar_descriptions(registry) -> None:
+    """The ranking test indexes a snapshot: it must be the registry's text, or it measures nothing."""
+    registered = {s["name"]: s["description"] for s in registry.get_schemas()}
+    snapshot = {t["name"]: t["description"] for t in json.loads(FIXTURE.read_text()) if t["name"] in registered}
+    assert len(snapshot) >= 4, snapshot  # list, search, create, update at least
+    assert snapshot == {name: registered[name] for name in snapshot}
 
 
 def test_move_description_is_only_for_changing_calendars(registry) -> None:

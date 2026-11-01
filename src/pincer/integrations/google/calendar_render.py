@@ -47,7 +47,7 @@ CONFIGURED_ZONE_LABEL = "the configured timezone"
 # model "changed" events by creating a second one ("Meeting (updated)").
 EDIT_HINT = (
     "To change one of these events (rename, reschedule, new time or details), call google__update_event "
-    "with its ID; never create a new event for a change."
+    "with its ID (and calendar_id, if not primary); never create a new event for a change."
 )
 
 # Human-facing renderers (briefing, reminder).

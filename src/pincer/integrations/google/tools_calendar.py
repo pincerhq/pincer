@@ -849,11 +849,12 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
     registry.register(
         name="google__update_event",
         description=(
-            "Edit an existing calendar event (meeting or appointment) by its ID: reschedule or move it to "
-            "another time or day, rename it, change the time, or change details such as description or "
-            "location. Only provided fields are changed and the event keeps its ID. Use this — not "
-            "google__create_event — for any change to an event; without the ID, find it first with "
-            "google__search_events. "
+            "Edit an existing calendar event (meeting or appointment) by its ID (and calendar_id, if not "
+            "primary): reschedule or move it to another time or day, rename it, change the time, or change "
+            "details such as description or location. Fields left empty stay as they are, except that when "
+            "only a new start is given, the end moves with it (duration kept); the event keeps its ID. Use "
+            "this — not google__create_event — for any change to an event; without the ID, find it first "
+            "with google__search_events. "
             "Times without a UTC offset are read in the event's own timezone, else the calendar's timezone."
         ),
         handler=_h(google__update_event),
