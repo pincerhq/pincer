@@ -421,6 +421,21 @@ async def test_a_booking_on_a_call_is_stored_in_the_voice_zone(
     )
 
 
+async def test_a_zone_the_model_names_on_a_call_is_kept(tmp_path, fake, berlin_settings, registry, costs) -> None:
+    """The voice zone fills in a missing timezone only: an explicit one is never overridden."""
+    berlin_settings.voice_tool_approval = "off"
+    day = _tomorrow()
+    llm = _OneCallLLM(
+        "google__create_event",
+        {"summary": "Dentist", "start": f"{day}T14:00:00", "end": f"{day}T15:00:00", "timezone": "Europe/Kyiv"},
+    )
+
+    await _on_a_call(tmp_path, berlin_settings, llm, costs, registry, "appointment")
+
+    (event,) = fake.events_on("primary")
+    assert fake.start_of("primary", event["id"]) == _kyiv(day, "14:00")
+
+
 async def test_a_move_on_a_call_reads_the_new_time_in_the_voice_zone(
     tmp_path, fake, berlin_settings, registry, costs
 ) -> None:
@@ -437,6 +452,8 @@ async def test_a_move_on_a_call_reads_the_new_time_in_the_voice_zone(
     await _on_a_call(tmp_path, berlin_settings, llm, costs, registry, "generic")
 
     assert "google__update_event" in llm.offered[0]  # precondition: the call offered the tool
+    # The update also sends the voice zone as the event's timeZone (Kyiv → Berlin): accepted, the
+    # instant is what the caller asked for and what is asserted.
     assert fake.start_of("primary", event_id) == datetime.fromisoformat(f"{day}T14:00:00").replace(
         tzinfo=ZoneInfo("Europe/Berlin")
     )

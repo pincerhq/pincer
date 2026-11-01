@@ -45,6 +45,7 @@ from pincer.memory.base import (
     PINCER_MEMORY_USER_REQUEST_PREFIX,
 )
 from pincer.tools.path_sandbox import SandboxDenied
+from pincer.voice.localtime import with_voice_zone
 
 # Signature: (tool_name, arguments, user_id, channel) -> approved?
 ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool]]
@@ -1997,8 +1998,6 @@ class Agent:
         """
         if call_gate is None:
             return await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id, turn=turn)
-
-        from pincer.voice.localtime import with_voice_zone
 
         # Calendar writes on a call: times are in the voice zone (as the call prompt says).
         tool_call = ToolCall(
