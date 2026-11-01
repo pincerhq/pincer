@@ -21,14 +21,16 @@ port         = 18800
 path         = "/mcp"
 expose_tools = [
     "email_check",
-    "calendar_today",
+    "calendar_today",          # alias: today's events, in the calendar's timezone
+    "google__list_events",
+    "google__search_events",
     "memory_search",
     # Uncomment to expose more tools:
     # "web_browse",
     # "file_read",
-    # "email_send",     # requires approval
-    # "shell_exec",     # requires approval
-    # "calendar_create", # requires approval
+    # "email_send",            # requires approval
+    # "shell_exec",            # requires approval
+    # "google__create_event",  # requires approval
 ]
 
 # ── MCP Client: connect Pincer to external MCP servers ────────────────────────

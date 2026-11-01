@@ -14,6 +14,7 @@ import contextlib
 import importlib.util
 import logging
 import pathlib
+import tomllib
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -250,3 +251,16 @@ async def test_alias_without_a_factory_is_not_connected(registry, fake, monkeypa
 
     assert "google__list_events" in registry.list_tools()
     assert await fmcp.tools["pincer_calendar_today"]() == NOT_CONNECTED
+
+
+def test_shipped_pincer_toml_exports_the_workspace_calendar_reads() -> None:
+    """pincer.toml (copied into the Docker image) overrides the defaults: it must carry the reads too."""
+    shipped = (SRC.parent / "pincer.toml").read_text(encoding="utf-8")
+    exposed = tomllib.loads(shipped)["mcp"]["server"]["expose_tools"]
+    assert {"calendar_today", "google__list_events", "google__search_events"} <= set(exposed)
+    assert not {"calendar_week", "calendar_create"} & set(exposed)
+    assert "calendar_create" not in shipped  # not even as a commented-out suggestion
+
+
+def test_no_config_names_the_deleted_builtin_module() -> None:
+    assert "builtin.calendar_tool" not in (SRC.parent / "pyproject.toml").read_text(encoding="utf-8")

@@ -219,7 +219,6 @@ module = [
     "pincer.llm.grok_provider",
     "pincer.llm._openai_common",
     "pincer.tools.builtin.email_tool",
-    "pincer.tools.builtin.calendar_tool",
     "pincer.tools.builtin.image_gen",
     "pincer.core.agent",
     "pincer.costs.budget",
