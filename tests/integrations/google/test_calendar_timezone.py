@@ -539,3 +539,31 @@ async def test_dst_gap_time_shifts_forward_by_the_gap(fake_factory, fake):
     [insert] = fake.sent("events.insert")
     assert insert["body"]["start"]["dateTime"] == "2026-03-29T03:30:00+02:00"
     assert fake.events_on("primary")[0]["start"]["dateTime"] == "2026-03-29T04:30:00+03:00"
+
+
+async def test_a_failing_zone_lookup_warns_once_per_outage(fake, caplog):
+    """The reminder ticks every 60 s and failures are retried after 60 s: one WARNING, not one a minute."""
+    from pincer.integrations.google.calendar_tz import CalendarTimezoneResolver
+
+    now = [1000.0]
+    resolver = CalendarTimezoneResolver(ttl_s=300, clock=lambda: now[0])
+    fake.calendar_get_error = 503
+
+    def _levels() -> list[str]:
+        found = [r.levelname for r in caplog.records if "Could not read the timezone" in r.getMessage()]
+        caplog.clear()
+        return found
+
+    with caplog.at_level("DEBUG", logger="pincer.integrations.google.calendar_tz"):
+        for _ in range(3):
+            await resolver.resolve(fake, "primary")
+            now[0] += 61
+        assert len(fake.sent("calendars.get")) == 3  # precondition: each call really looked up the zone
+        assert _levels() == ["WARNING", "DEBUG", "DEBUG"]
+
+        fake.calendar_get_error = None
+        assert await resolver.resolve(fake, "primary") == (KYIV, "calendar")
+        now[0] += 301
+        fake.calendar_get_error = 503
+        await resolver.resolve(fake, "primary")
+        assert _levels() == ["WARNING"]

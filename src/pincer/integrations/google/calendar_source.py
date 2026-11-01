@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from pincer.integrations.google.log_once import LogOnce
+
 if TYPE_CHECKING:
     from pincer.integrations.google.service_factory import GoogleServiceFactory
 
@@ -35,7 +37,7 @@ class CalendarSource:
         self._resolved = False
         self._factory: GoogleServiceFactory | None = None
         self._reason = ""
-        self._reason_logged = False
+        self._unavailable_log = LogOnce(logger, logging.INFO)
 
     def factory(self) -> GoogleServiceFactory | None:
         """The factory, or None when calendar reads are off (the reason is logged)."""
@@ -43,9 +45,7 @@ class CalendarSource:
             self._resolved = True
             self._factory, self._reason = _resolve()
         if self._factory is None:
-            level = logging.DEBUG if self._reason_logged else logging.INFO
-            logger.log(level, "Calendar unavailable for %s: %s", self._reader, self._reason)
-            self._reason_logged = True
+            self._unavailable_log.log("Calendar unavailable for %s: %s", self._reader, self._reason)
         return self._factory
 
 

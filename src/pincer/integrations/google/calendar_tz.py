@@ -31,6 +31,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from pincer.core.clock import load_zone, resolve_timezone
+from pincer.integrations.google.log_once import LogOnce
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -159,6 +160,8 @@ class CalendarTimezoneResolver:
         self._cache: dict[str, tuple[str, float]] = {}
         # calendar id → when its last lookup failed
         self._failed_at: dict[str, float] = {}
+        # calendar id → its lookup-failure log: one WARNING per outage, then DEBUG
+        self._failure_logs: dict[str, LogOnce] = {}
 
     async def resolve(self, svc: Any, calendar_id: str, user_timezone: str = "") -> tuple[ZoneInfo, str]:
         """``(zone, source)`` — source is ``calendar`` | ``identity`` | ``settings``."""
@@ -185,7 +188,7 @@ class CalendarTimezoneResolver:
             calendar = await asyncio.to_thread(lambda: svc.calendars().get(calendarId=calendar_id).execute())
         except Exception as exc:
             self._failed_at[calendar_id] = now
-            logger.warning(
+            self._failure_logs.setdefault(calendar_id, LogOnce(logger)).log(
                 "Could not read the timezone of calendar %r (%s); using %s",
                 calendar_id,
                 exc,
@@ -198,6 +201,8 @@ class CalendarTimezoneResolver:
             self._failed_at[calendar_id] = now
             return stale
         self._failed_at.pop(calendar_id, None)
+        if calendar_id in self._failure_logs:
+            self._failure_logs[calendar_id].clear()
         self._cache[calendar_id] = (zone.key, now)
         return zone
 

@@ -23,6 +23,7 @@ from pincer.config import get_settings
 from pincer.db.engine import get_database_url
 from pincer.integrations.google.calendar_render import render_reminder, start_instant
 from pincer.integrations.google.calendar_source import CalendarSource
+from pincer.integrations.google.log_once import LogOnce
 from pincer.integrations.google.tools_calendar import fetch_events
 from pincer.services.scheduler import EventTriggerService
 
@@ -51,7 +52,7 @@ class EventTriggerManager:
         self._seen_email_uids: set[str] | None = None
         self._dedupe: EventTriggerService | None = None
         self._calendar = CalendarSource("upcoming-event reminders")
-        self._calendar_read_failing = False
+        self._calendar_read_log = LogOnce(logger)
 
     async def ensure_table(self) -> None:
         """Ensure the event_triggers table is at head (see pincer.db.migrations)."""
@@ -184,19 +185,15 @@ class EventTriggerManager:
         try:
             page = await fetch_events(factory, REMINDER_CALENDAR, now.isoformat(), horizon.isoformat())
         except Exception as exc:
-            level = logging.DEBUG if self._calendar_read_failing else logging.WARNING
-            logger.log(
-                level,
+            self._calendar_read_log.log(
                 "Calendar reminders paused: reading the calendar failed (%s: %s); retrying every %d s",
                 type(exc).__name__,
                 exc,
                 CALENDAR_TICK_S,
             )
-            self._calendar_read_failing = True
             return
-        if self._calendar_read_failing:
+        if self._calendar_read_log.clear():
             logger.info("Calendar reminders resumed: the calendar can be read again")
-            self._calendar_read_failing = False
         for event in page.events:
             start = start_instant(event)
             if start is None or not (now <= start <= horizon) or not _wants_reminder(event):
