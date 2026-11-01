@@ -66,11 +66,12 @@ def _seed(fake: FakeCalendarService, name: str, day: date, start: int, end: int)
 
 
 def _good_run(fake: FakeCalendarService, tomorrow: date, far_day: date) -> dict[str, str]:
-    """What a correct run leaves: Alpha moved to 17:00, Beta 12 days out, Meeting renamed in place."""
+    """What a correct run leaves: Alpha moved to 17:00, Beta 12 days out, Meeting and Kunde renamed in place."""
     alpha = _seed(fake, "Alpha", tomorrow, 17, 18)
     _seed(fake, "Beta", far_day, 15, 16)
     meeting = _seed(fake, "Meeting (updated)", tomorrow, 10, 11)
-    return {"Alpha": alpha, "Meeting": meeting}
+    kunde = _seed(fake, "Kunde neu", tomorrow, 12, 13)
+    return {"Alpha": alpha, "Meeting": meeting, "Kunde": kunde}
 
 
 def _dates(today: date | None = None) -> tuple[date, date]:
@@ -100,9 +101,9 @@ def test_a_good_run_passes_every_automatic_row(served, tmp_path, capsys) -> None
     tomorrow, far_day = _dates()
     snap = _good_run(served, tomorrow, far_day)
     rows = _rows(served, tomorrow, far_day, snap)
-    assert [r.status for r in rows if r.status != "MANUAL"] == ["PASS"] * 9
+    assert [r.status for r in rows if r.status != "MANUAL"] == ["PASS"] * 13
     assert _check(tmp_path, tomorrow, far_day, snap) == 0
-    assert "9/9 automatic checks passed; 3 manual." in capsys.readouterr().out
+    assert "13/13 automatic checks passed; 3 manual." in capsys.readouterr().out
 
 
 def test_alpha_moved_with_the_wrong_end_fails(served, tmp_path) -> None:
@@ -139,7 +140,7 @@ def test_cleanup_never_deletes_a_near_miss(served) -> None:
     assert sorted(e["id"] for e in served.events_on("primary")) == sorted([near, other])
 
 
-@pytest.mark.parametrize("missing", ["Alpha", "Meeting"])
+@pytest.mark.parametrize("missing", ["Alpha", "Meeting", "Kunde"])
 def test_a_snapshot_missing_an_id_fails(served, tmp_path, missing) -> None:
     """S3: an ID that was never recorded cannot be shown unchanged."""
     tomorrow, far_day = _dates()
@@ -147,7 +148,12 @@ def test_a_snapshot_missing_an_id_fails(served, tmp_path, missing) -> None:
     del snap[missing]
     rows = _rows(served, tomorrow, far_day, snap)
     id_rows = [r for r in rows if "ID" in r.check]
-    assert [r.status for r in id_rows] == (["FAIL", "PASS"] if missing == "Alpha" else ["PASS", "FAIL"])
+    expected = {
+        "Alpha": ["FAIL", "PASS", "PASS"],
+        "Meeting": ["PASS", "FAIL", "PASS"],
+        "Kunde": ["PASS", "PASS", "FAIL"],
+    }
+    assert [r.status for r in id_rows] == expected[missing]
     assert "MANUAL" not in {r.status for r in id_rows}
     assert _check(tmp_path, tomorrow, far_day, snap) == 1
 
@@ -156,7 +162,7 @@ def test_no_snapshot_fails_the_id_rows(served, tmp_path) -> None:
     tomorrow, far_day = _dates()
     _good_run(served, tomorrow, far_day)
     rows = _rows(served, tomorrow, far_day, None)
-    assert [r.status for r in rows if "ID" in r.check] == ["FAIL", "FAIL"]
+    assert [r.status for r in rows if "ID" in r.check] == ["FAIL", "FAIL", "FAIL"]
     assert _check(tmp_path, tomorrow, far_day, None) == 1
 
 
@@ -167,8 +173,74 @@ def test_check_and_cleanup_find_a_run_days_later(served, tmp_path, capsys) -> No
     assert _check(tmp_path, tomorrow, far_day, snap) == 0
     assert smoke.main(["cleanup", "--tag", TAG, "--tomorrow", tomorrow.isoformat()]) == 0
     out = capsys.readouterr().out
-    assert f"Events tagged {TAG} (3):" in out
-    assert len(served.events_on("primary")) == 3  # dry run
+    assert f"Events tagged {TAG} (4):" in out
+    assert len(served.events_on("primary")) == 4  # dry run
+
+
+def test_a_german_rename_that_created_a_second_event_fails(served, tmp_path, capsys) -> None:
+    """Step 7: "Benenne das Meeting … um" must rename Kunde in place, not add "Kunde neu" beside it."""
+    tomorrow, far_day = _dates()
+    snap = _good_run(served, tomorrow, far_day)
+    served.event("primary", snap["Kunde"])["summary"] = f"{TAG} Kunde"  # the original, never renamed
+    _seed(served, "Kunde neu", tomorrow, 12, 13)  # a second event under the new title
+    rows = _rows(served, tomorrow, far_day, snap)
+    step7 = [(r.check, r.status, r.detail) for r in rows if r.step == "7"]
+    assert step7[:3] == [
+        (f'exactly one "{TAG} Kunde neu" after the German rename', "PASS", "1 event(s)"),
+        (f'no "{TAG} Kunde" left under the old title', "FAIL", "1 event(s)"),
+        (
+            "renamed Kunde keeps its original ID",
+            "FAIL",
+            f"now {_named_id(served, 'Kunde neu')}, snapshot {snap['Kunde']}",
+        ),
+    ]
+    assert _row(rows, "no other tagged events").status == "FAIL"
+    assert _check(tmp_path, tomorrow, far_day, snap) == 1
+    assert "10/13 automatic checks passed; 3 manual." in capsys.readouterr().out
+
+
+def test_a_good_german_rename_passes_the_step_7_rows(served) -> None:
+    tomorrow, far_day = _dates()
+    snap = _good_run(served, tomorrow, far_day)
+    rows = [r for r in _rows(served, tomorrow, far_day, snap) if r.step == "7"]
+    assert [(r.status, r.detail) for r in rows] == [
+        ("PASS", "1 event(s)"),
+        ("PASS", "0 event(s)"),
+        ("PASS", f"now {snap['Kunde']}, snapshot {snap['Kunde']}"),
+        ("PASS", f"{tomorrow.isoformat()} 12:00–13:00"),
+    ]
+    assert rows[3].check == f'"{TAG} Kunde neu" time unchanged stored at {tomorrow.isoformat()} 12:00–13:00 {ZONE}'
+
+
+def test_snapshot_records_the_german_event(served, tmp_path) -> None:
+    tomorrow, far_day = _dates()
+    alpha = _seed(served, "Alpha", tomorrow, 15, 16)
+    _seed(served, "Beta", far_day, 15, 16)
+    meeting = _seed(served, "Meeting", tomorrow, 10, 11)
+    out = tmp_path / "snap.json"
+    argv = ["snapshot", "--tag", TAG, "--tomorrow", tomorrow.isoformat(), "--far-day", far_day.isoformat()]
+    assert smoke.main([*argv, "--out", str(out)]) == 1  # Kunde not created yet
+    kunde = _seed(served, "Kunde", tomorrow, 12, 13)
+    assert smoke.main([*argv, "--out", str(out)]) == 0
+    assert json.loads(out.read_text()) == {"Alpha": alpha, "Meeting": meeting, "Kunde": kunde}
+
+
+def test_plan_prints_the_german_rename(served, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(smoke, "new_tag", lambda: TAG)
+    tomorrow = _today() + timedelta(days=1)
+    assert smoke.main(["plan"]) == 0
+    out = capsys.readouterr().out
+    assert (
+        f'[7a] channel A: Erstelle morgen ({tomorrow.isoformat()}) um 12:00 einen Termin "{TAG} Kunde" für eine Stunde.'
+        in out
+    )
+    assert f'[7b] channel A: Benenne das Meeting "{TAG} Kunde" in "{TAG} Kunde neu" um.' in out
+    assert "send 1, 2, 6a and 7a" in out
+
+
+def _named_id(fake: FakeCalendarService, name: str) -> str:
+    (event,) = [e for e in fake.events_on("primary") if e.get("summary") == f"{TAG} {name}"]
+    return str(event["id"])
 
 
 def test_a_tag_with_a_trailing_newline_is_refused() -> None:

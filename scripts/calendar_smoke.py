@@ -24,7 +24,7 @@ Usage:
     #    channel B = e.g. Telegram — two different chats with Pincer)
     uv run python scripts/calendar_smoke.py plan
 
-    # 2. After sending messages 1, 2 and 6a: record the event IDs
+    # 2. After sending messages 1, 2, 6a and 7a: record the event IDs
     uv run python scripts/calendar_smoke.py snapshot --tag Smoke-7F3A2C --tomorrow 2026-11-02 \\
         --far-day 2026-11-13 --out smoke-7F3A2C.json
 
@@ -68,11 +68,18 @@ ALPHA = "Alpha"
 BETA = "Beta"
 MEETING = "Meeting"
 MEETING_RENAMED = "Meeting (updated)"
+# Step 7: the German rename phrasing the tool ranking misses (a strict known miss), checked live.
+KUNDE = "Kunde"
+KUNDE_RENAMED = "Kunde neu"
 
 ALPHA_FIRST = time(15, 0)
 ALPHA_MOVED = time(17, 0)
 BETA_AT = time(15, 0)
 MEETING_AT = time(10, 0)
+KUNDE_AT = time(12, 0)
+
+# Recorded by `snapshot` before the move and the renames.
+SNAPSHOT_NAMES = (ALPHA, MEETING, KUNDE)
 
 
 @dataclass(frozen=True)
@@ -98,6 +105,7 @@ def messages(tag: str, tomorrow: date, far_day: date) -> list[tuple[str, str, st
     """(step, channel, text) for every message the owner sends."""
     alpha, beta = title(tag, ALPHA), title(tag, BETA)
     meeting, renamed = title(tag, MEETING), title(tag, MEETING_RENAMED)
+    kunde, kunde_neu = title(tag, KUNDE), title(tag, KUNDE_RENAMED)
     return [
         ("1", "A", f'Create an event "{alpha}" tomorrow ({tomorrow.isoformat()}) at 15:00 for one hour.'),
         ("2", "A", f'Create an event "{beta}" on {far_day.isoformat()} at 15:00 for one hour.'),
@@ -106,6 +114,8 @@ def messages(tag: str, tomorrow: date, far_day: date) -> list[tuple[str, str, st
         ("5", "A", "What's on my calendar tomorrow?"),
         ("6a", "A", f'Create an event "{meeting}" tomorrow ({tomorrow.isoformat()}) at 10:00 for one hour.'),
         ("6b", "B", f'Rename "{meeting}" to "{renamed}".'),
+        ("7a", "A", f'Erstelle morgen ({tomorrow.isoformat()}) um 12:00 einen Termin "{kunde}" für eine Stunde.'),
+        ("7b", "A", f'Benenne das Meeting "{kunde}" in "{kunde_neu}" um.'),
     ]
 
 
@@ -174,6 +184,8 @@ def evaluate(
     beta = _named(ours, tag, BETA)
     meeting = _named(ours, tag, MEETING)
     renamed = _named(ours, tag, MEETING_RENAMED)
+    kunde = _named(ours, tag, KUNDE)
+    kunde_neu = _named(ours, tag, KUNDE_RENAMED)
     snap = snapshot or {}
     rows = [
         _time_row("1+4", f'"{title(tag, ALPHA)}" (moved)', alpha, zone, tomorrow, ALPHA_MOVED),
@@ -194,9 +206,23 @@ def evaluate(
         _id_row("6", "renamed Meeting keeps its original ID", renamed, snap.get(MEETING)),
         _time_row("6", f'"{title(tag, MEETING_RENAMED)}" time unchanged', renamed, zone, tomorrow, MEETING_AT),
         Row(
+            "7",
+            f'exactly one "{title(tag, KUNDE_RENAMED)}" after the German rename',
+            "PASS" if len(kunde_neu) == 1 else "FAIL",
+            f"{len(kunde_neu)} event(s)",
+        ),
+        Row(
+            "7",
+            f'no "{title(tag, KUNDE)}" left under the old title',
+            "FAIL" if kunde else "PASS",
+            f"{len(kunde)} event(s)",
+        ),
+        _id_row("7", "renamed Kunde keeps its original ID", kunde_neu, snap.get(KUNDE)),
+        _time_row("7", f'"{title(tag, KUNDE_RENAMED)}" time unchanged', kunde_neu, zone, tomorrow, KUNDE_AT),
+        Row(
             "all",
             "no other tagged events (no duplicates)",
-            "PASS" if len(ours) == 3 else "FAIL",
+            "PASS" if len(ours) == 4 else "FAIL",
             f"{len(ours)} tagged event(s): " + ", ".join(sorted(str(e.get("summary")) for e in ours)),
         ),
         Row(
@@ -205,16 +231,16 @@ def evaluate(
             "FAIL" if near else "PASS",
             ", ".join(sorted(repr(str(e.get("summary"))) for e in near)) or "none",
         ),
-        Row("1-6", "Pincer's replies quote the stored times and name the zone", "MANUAL", f"expect {zone.key}"),
-        Row("1-6", "log: turn= and call= on every Tool call / Tool result line", "MANUAL", "grep 'Tool result'"),
-        Row("1-6", "log: one calendar_write line per write", "MANUAL", "expect 5: 3 creates, the move, the rename"),
+        Row("1-7", "Pincer's replies quote the stored times and name the zone", "MANUAL", f"expect {zone.key}"),
+        Row("1-7", "log: turn= and call= on every Tool call / Tool result line", "MANUAL", "grep 'Tool result'"),
+        Row("1-7", "log: one calendar_write line per write", "MANUAL", "expect 7: 4 creates, the move, 2 renames"),
     ]
     return rows
 
 
 def _id_row(step: str, what: str, found: list[dict[str, Any]], snapped: str | None) -> Row:
     if snapped is None:
-        return Row(step, what, "FAIL", "no ID in the snapshot (run `snapshot` after steps 1, 2, 6a)")
+        return Row(step, what, "FAIL", "no ID in the snapshot (run `snapshot` after steps 1, 2, 6a, 7a)")
     if len(found) != 1:
         return Row(step, what, "FAIL", f"{len(found)} matching event(s); snapshot ID {snapped}")
     got = str(found[0].get("id"))
@@ -222,10 +248,10 @@ def _id_row(step: str, what: str, found: list[dict[str, Any]], snapped: str | No
 
 
 def snapshot_ids(events: list[dict[str, Any]], tag: str) -> dict[str, str]:
-    """IDs of Alpha and Meeting as created (before the move and the rename)."""
+    """IDs of Alpha, Meeting and Kunde as created (before the move and the renames)."""
     ours = [e for e in events if is_tagged(e, tag)]
     found: dict[str, str] = {}
-    for name in (ALPHA, MEETING):
+    for name in SNAPSHOT_NAMES:
         named = _named(ours, tag, name)
         if len(named) == 1:
             found[name] = str(named[0]["id"])
@@ -312,9 +338,9 @@ async def cmd_plan() -> int:
     args = f"--tag {tag} --tomorrow {tomorrow} --far-day {far_day}"
     for step, channel, text in messages(tag, tomorrow, far_day):
         print(f"  [{step:>2}] channel {channel}: {text}")
-    print("\nOrder: send 1, 2 and 6a; then record the IDs before the move and the rename:")
+    print("\nOrder: send 1, 2, 6a and 7a; then record the IDs before the move and the renames:")
     print(f"  uv run python scripts/calendar_smoke.py snapshot {args} --out {tag.lower()}.json")
-    print("Then send 3, 4, 5 and 6b (6b on channel B), and check:")
+    print("Then send 3, 4, 5, 6b (6b on channel B) and 7b, and check:")
     print(f"  uv run python scripts/calendar_smoke.py check {args} --snapshot {tag.lower()}.json")
     cleanup = f"uv run python scripts/calendar_smoke.py cleanup --tag {tag} --tomorrow {tomorrow}"
     print(f"  {cleanup}            # dry run")
@@ -328,9 +354,9 @@ async def cmd_snapshot(tag: str, tomorrow: date, far_day: date, out: Path) -> in
     ids = snapshot_ids(await _run_events(svc, tag, search_window(zone, tomorrow, far_day)), tag)
     out.write_text(json.dumps(ids, indent=2) + "\n")
     print(f"Recorded {ids} → {out}")
-    missing = {ALPHA, MEETING} - set(ids)
+    missing = set(SNAPSHOT_NAMES) - set(ids)
     if missing:
-        print(f"WARNING: no single event found for {sorted(missing)} — send steps 1 and 6a first.")
+        print(f"WARNING: no single event found for {sorted(missing)} — send steps 1, 6a and 7a first.")
         return 1
     return 0
 
