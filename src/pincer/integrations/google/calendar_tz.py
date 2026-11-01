@@ -58,8 +58,9 @@ def zone_or_none(name: object) -> ZoneInfo | None:
         return None
 
 
-def _settings_zone() -> ZoneInfo:
-    """``PINCER_TIMEZONE`` (then the clock's default) — the last resort."""
+def clock_zone(user_timezone: str = "") -> ZoneInfo:
+    """The agent clock zone — identity zone, then ``PINCER_TIMEZONE``, then the
+    clock's default: the same source as the system-prompt clock."""
     from pincer.core.clock import resolve_timezone
 
     try:
@@ -68,7 +69,12 @@ def _settings_zone() -> ZoneInfo:
         settings: Any = get_settings_relaxed()
     except Exception:  # pragma: no cover - settings that cannot load at all
         settings = None
-    return resolve_timezone(settings)
+    return resolve_timezone(settings, user_timezone)
+
+
+def _settings_zone() -> ZoneInfo:
+    """``PINCER_TIMEZONE`` (then the clock's default) — the resolver's last resort."""
+    return clock_zone("")
 
 
 def _parse(value: str) -> datetime | None:

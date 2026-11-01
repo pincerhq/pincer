@@ -10,8 +10,10 @@ tools depend on:
   offset or ``Z`` — otherwise HTTP 400, like Google.
 - An event ``dateTime`` without an offset is read in the event's ``timeZone``;
   without either it is a 400 ("Missing time zone definition").
-- Stored times come back rendered in the calendar's zone, with the event's own
-  ``timeZone`` kept.
+- Stored times come back rendered in the event's own ``timeZone`` when it has
+  one (kept on the event), else in the calendar's zone.
+- A write's response is the stored copy (``on_store`` can alter what is stored,
+  ``drop_id_on_write`` strips the ``id`` from the response).
 
 Errors are real ``googleapiclient.errors.HttpError`` instances so the tools'
 retry and error paths behave as they would against Google.
@@ -23,11 +25,14 @@ import copy
 import itertools
 import json
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httplib2
 from googleapiclient.errors import HttpError
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def http_error(status: int, message: str) -> HttpError:
@@ -121,7 +126,7 @@ class _Events:
             event_id = f"evt{next(self._fake._ids)}"
             event = self._fake.store(cal, {**copy.deepcopy(body), "id": event_id})
             cal["events"][event_id] = event
-            return copy.deepcopy(event)
+            return self._fake.write_response(event)
 
         return _Request(_run)
 
@@ -134,7 +139,7 @@ class _Events:
             self._fake.event(calendarId, eventId)
             event = self._fake.store(cal, {**copy.deepcopy(body), "id": eventId})
             cal["events"][eventId] = event
-            return copy.deepcopy(event)
+            return self._fake.write_response(event)
 
         return _Request(_run)
 
@@ -191,6 +196,11 @@ class FakeCalendarService:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         #: When set, calendars.get raises an HttpError with this status.
         self.calendar_get_error: int | None = None
+        #: Called with each event stored by insert/update (may alter it, like
+        #: Google normalising a value) before the response is built.
+        self.on_store: Callable[[dict[str, Any]], None] | None = None
+        #: When True, insert/update store the event but answer without its id.
+        self.drop_id_on_write = False
         self._ids = itertools.count(1)
 
     # ── API surface ──────────────────────────────────────────────────────
@@ -233,6 +243,24 @@ class FakeCalendarService:
         )
         return event_id
 
+    def seed_all_day(self, calendar_id: str, summary: str, first_day: str, end_day_exclusive: str) -> str:
+        """An all-day event (Google's end date is exclusive)."""
+        cal = self.calendar(calendar_id)
+        event_id = f"evt{next(self._ids)}"
+        cal["events"][event_id] = self.store(
+            cal,
+            {"id": event_id, "summary": summary, "start": {"date": first_day}, "end": {"date": end_day_exclusive}},
+        )
+        return event_id
+
+    def write_response(self, event: dict[str, Any]) -> dict[str, Any]:
+        if self.on_store is not None:
+            self.on_store(event)
+        response = copy.deepcopy(event)
+        if self.drop_id_on_write:
+            response.pop("id", None)
+        return response
+
     def events_on(self, calendar_id: str) -> list[dict[str, Any]]:
         return list(self.calendar(calendar_id)["events"].values())
 
@@ -268,7 +296,7 @@ class FakeCalendarService:
                 parsed = parsed.replace(tzinfo=ZoneInfo(tz_name))
             except (KeyError, ValueError, ZoneInfoNotFoundError):
                 raise http_error(400, f"Invalid time zone definition for {key} time.") from None
-        stored: dict[str, Any] = {"dateTime": parsed.astimezone(ZoneInfo(cal_tz)).isoformat()}
+        stored: dict[str, Any] = {"dateTime": parsed.astimezone(ZoneInfo(tz_name or cal_tz)).isoformat()}
         if tz_name:
             stored["timeZone"] = tz_name
         return stored

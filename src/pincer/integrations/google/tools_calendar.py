@@ -9,14 +9,21 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from pincer.integrations.google import calendar_writer
+from pincer.integrations.google.calendar_render import (
+    render_event_details,
+    render_events,
+    render_write,
+)
 from pincer.integrations.google.calendar_tz import (
+    clock_zone,
     localize,
     localize_bound,
     needs_zone,
     resolver_for,
     zone_or_none,
 )
-from pincer.integrations.google.models import fmt_event, fmt_list
+from pincer.integrations.google.models import fmt_list
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
@@ -64,6 +71,20 @@ async def _bounds(
     return localize_bound(time_min, zone), localize_bound(time_max, zone, end=True)
 
 
+def _clock(context: dict[str, Any] | None) -> ZoneInfo:
+    """The agent clock zone for this user (for the renderer's mismatch note)."""
+    return clock_zone(_user_timezone(context))
+
+
+def _local_day(bound: str, zone: ZoneInfo) -> str:
+    """A bound's calendar date in ``zone`` (for list headers)."""
+    try:
+        parsed = datetime.fromisoformat(bound)
+    except ValueError:
+        return bound[:10]
+    return (parsed.astimezone(zone) if parsed.tzinfo else parsed).date().isoformat()
+
+
 # ── Tool implementations ──────────────────────────────────────────────────────
 
 
@@ -88,9 +109,9 @@ async def google__list_events(
 ) -> str:
     """List calendar events in a date range (default: today + 7 days)."""
     svc = await factory.get("calendar")
-    t_min, t_max = await _bounds(
-        factory, svc, calendar_id, context, time_min or _now_iso(), time_max or _week_end_iso()
-    )
+    zone = await _calendar_zone(factory, svc, calendar_id, context)
+    t_min = localize_bound(time_min or _now_iso(), zone)
+    t_max = localize_bound(time_max or _week_end_iso(), zone, end=True)
     result = await with_backoff(
         lambda: (
             svc.events()
@@ -106,38 +127,29 @@ async def google__list_events(
         )
     )
     events = result.get("items", [])
+    day_min, day_max = _local_day(t_min, zone), _local_day(t_max, zone)
     if not events:
-        return f"No events between {t_min[:10]} and {t_max[:10]}."
-    lines = [fmt_event(e) for e in events]
-    more = bool(result.get("nextPageToken"))
-    return fmt_list(lines, header=f"{len(lines)} event(s) ({t_min[:10]} – {t_max[:10]}):", more=more)
+        return f"No events between {day_min} and {day_max}."
+    return render_events(
+        events,
+        zone,
+        header=f"{len(events)} event(s) ({day_min} – {day_max})",
+        clock_zone=_clock(context),
+        more=bool(result.get("nextPageToken")),
+    )
 
 
 async def google__get_event(
     factory: GoogleServiceFactory,
     event_id: str,
     calendar_id: str = "primary",
+    context: dict[str, Any] | None = None,
 ) -> str:
-    """Get full event details."""
+    """Get full event details, times in the calendar's zone."""
     svc = await factory.get("calendar")
     event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
-    lines = [
-        f"Title:       {event.get('summary', '(no title)')}",
-        f"Start:       {event.get('start', {}).get('dateTime', event.get('start', {}).get('date', ''))}",
-        f"End:         {event.get('end', {}).get('dateTime', event.get('end', {}).get('date', ''))}",
-        f"Location:    {event.get('location', '')}",
-        f"Description: {event.get('description', '')}",
-        f"Status:      {event.get('status', '')}",
-        f"Organizer:   {event.get('organizer', {}).get('email', '')}",
-        f"ID:          {event.get('id', '')}",
-        f"Link:        {event.get('htmlLink', '')}",
-    ]
-    attendees = event.get("attendees", [])
-    if attendees:
-        lines.append(f"Attendees ({len(attendees)}):")
-        for att in attendees:
-            lines.append(f"  {att.get('email', '')} [{att.get('responseStatus', '?')}]")
-    return "\n".join(lines)
+    zone = await _calendar_zone(factory, svc, calendar_id, context)
+    return render_event_details(event, zone, clock_zone=_clock(context))
 
 
 async def google__search_events(
@@ -151,7 +163,8 @@ async def google__search_events(
 ) -> str:
     """Search calendar events by text query, optionally within a date range."""
     svc = await factory.get("calendar")
-    t_min, t_max = await _bounds(factory, svc, calendar_id, context, time_min, time_max)
+    zone = await _calendar_zone(factory, svc, calendar_id, context)
+    t_min, t_max = localize_bound(time_min, zone), localize_bound(time_max, zone, end=True)
     kw: dict[str, Any] = {
         "calendarId": calendar_id,
         "q": query,
@@ -167,8 +180,7 @@ async def google__search_events(
     events = result.get("items", [])
     if not events:
         return f"No events found for: {query}"
-    lines = [fmt_event(e) for e in events]
-    return fmt_list(lines, header=f"Found {len(lines)} event(s):")
+    return render_events(events, zone, header=f"Found {len(events)} event(s)", clock_zone=_clock(context))
 
 
 async def google__check_freebusy(
@@ -219,6 +231,18 @@ async def _write_zone(
     return zone.key, zone
 
 
+async def _shown_zone(
+    factory: GoogleServiceFactory,
+    svc: Any,
+    calendar_id: str,
+    context: dict[str, Any] | None,
+    given: str,
+) -> ZoneInfo:
+    """The zone a write confirmation shows: the caller's zone when valid, else the calendar's."""
+    zone = zone_or_none(given) if given.strip() else None
+    return zone or await _calendar_zone(factory, svc, calendar_id, context)
+
+
 async def google__create_event(
     factory: GoogleServiceFactory,
     summary: str,
@@ -265,10 +289,12 @@ async def google__create_event(
         items = existing.get("items", [])
         if items:
             ev = items[0]
-            return (
-                f"Event already exists (idempotent): '{ev.get('summary', '')}'\n"
-                f"ID: {ev.get('id', '')}\n"
-                f"Link: {ev.get('htmlLink', '')}"
+            shown = await _shown_zone(factory, svc, calendar_id, context, timezone)
+            return render_write(
+                f"Event already exists (idempotent): '{ev.get('summary', '')}'",
+                ev,
+                shown,
+                clock_zone=_clock(context),
             )
 
     tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone)
@@ -300,36 +326,29 @@ async def google__create_event(
         }
         conf_data_version = 1
 
-    _cal = calendar_id
-    _body = body
-    _cdv = conf_data_version
+    insert_kw: dict[str, Any] = {}
+    if conf_data_version:
+        insert_kw["conferenceDataVersion"] = conf_data_version
+    if send_updates.strip() in ("all", "externalOnly", "none"):
+        insert_kw["sendUpdates"] = send_updates.strip()
 
-    _send_updates = send_updates.strip()
-
-    def _insert() -> dict[str, Any]:
-        kw: dict[str, Any] = {"calendarId": _cal, "body": _body}
-        if _cdv:
-            kw["conferenceDataVersion"] = _cdv
-        if _send_updates in ("all", "externalOnly", "none"):
-            kw["sendUpdates"] = _send_updates
-        return svc.events().insert(**kw).execute()  # type: ignore[no-any-return]
-
-    created = await with_backoff(_insert)
+    created = await calendar_writer.create(svc, calendar_id, body, **insert_kw)
 
     extra = ""
     if meet_link:
-        extra = f"\nMeet link: {meet_link}"
+        extra = f"Meet link: {meet_link}"
     elif add_meet_link:
         uri = created.get("conferenceData", {}).get("entryPoints", [{}])[0].get("uri", "")
         if uri:
-            extra = f"\nMeet link: {uri}"
+            extra = f"Meet link: {uri}"
 
-    return (
-        f"Event created: '{summary}'\n"
-        f"Start: {start} | End: {end}\n"
-        f"ID: {created.get('id', '')}\n"
-        f"Link: {created.get('htmlLink', '')}"
-        f"{extra}"
+    shown = zone or await _calendar_zone(factory, svc, calendar_id, context)
+    return render_write(
+        f"Event created: '{created.get('summary', summary)}'",
+        created,
+        shown,
+        clock_zone=_clock(context),
+        extra=extra,
     )
 
 
@@ -364,10 +383,14 @@ async def google__update_event(
         stored_zone = str(event.get(key, {}).get("timeZone") or "")
         tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone or stored_zone)
         event[key] = {"dateTime": localize(value, zone) if zone else value, "timeZone": tz_name}
-    updated = await with_backoff(
-        lambda: svc.events().update(calendarId=calendar_id, eventId=event_id, body=event).execute()
+    updated = await calendar_writer.update(svc, calendar_id, event_id, event)
+    shown = await _shown_zone(factory, svc, calendar_id, context, timezone)
+    return render_write(
+        f"Event updated: '{updated.get('summary', '')}'",
+        updated,
+        shown,
+        clock_zone=_clock(context),
     )
-    return f"Event updated: '{updated.get('summary', '')}' (id={event_id})"
 
 
 async def google__delete_event(

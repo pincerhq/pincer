@@ -319,11 +319,15 @@ async def test_voice_booking_sends_offset_aware_times_and_explicit_zone_unchange
     assert insert["sendUpdates"] == "all"
     assert first == (
         "Event created: 'Zahnreinigung — Dr. Müller'\n"
-        "Start: 2026-08-25T14:00:00+02:00 | End: 2026-08-25T14:30:00+02:00\n"
+        "Start: 2026-08-25T14:00:00+02:00 | End: 2026-08-25T14:30:00+02:00 (Europe/Berlin)\n"
         "ID: evt1\n"
         "Link: https://calendar.google.com/calendar/event?eid=evt1"
     )
-    assert again.startswith("Event already exists (idempotent): 'Zahnreinigung — Dr. Müller'\nID: evt1")
+    assert again.startswith(
+        "Event already exists (idempotent): 'Zahnreinigung — Dr. Müller'\n"
+        "Start: 2026-08-25T14:00:00+02:00 | End: 2026-08-25T14:30:00+02:00 (Europe/Berlin)\n"
+        "ID: evt1\n"
+    )
     assert len(fake.events_on("primary")) == 1
     assert fake.sent("calendars.get") == []
 

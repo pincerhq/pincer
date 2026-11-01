@@ -59,25 +59,6 @@ def fmt_message_full(msg: dict[str, Any], body: str) -> str:
     return "\n".join(lines)
 
 
-# ── Calendar ──────────────────────────────────────────────────────────────────
-
-
-def fmt_event(event: dict[str, Any]) -> str:
-    """Format a single calendar event for display."""
-    start = event.get("start", {})
-    end = event.get("end", {})
-    start_str = start.get("dateTime", start.get("date", ""))
-    end_str = end.get("dateTime", end.get("date", ""))
-    summary = event.get("summary", "(no title)")
-    location = event.get("location", "")
-    attendee_count = len(event.get("attendees", []))
-    event_id = event.get("id", "")
-
-    loc_part = f" | {location}" if location else ""
-    att_part = f" | {attendee_count} attendee(s)" if attendee_count else ""
-    return f"  {start_str} → {end_str} — {summary}{loc_part}{att_part}\n  ID: {event_id}"
-
-
 # ── Drive ─────────────────────────────────────────────────────────────────────
 
 
