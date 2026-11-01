@@ -230,8 +230,22 @@ EDIT_REQUESTS: dict[str, tuple[str, str, str]] = {
     "uk": ("Перейменуй зустріч", "Перенеси мою зустріч о 10", "Зміни час зустрічі"),
     "de": ("Benenne das Meeting um", "Verschieb meinen 10-Uhr-Termin", "Ändere die Uhrzeit des Meetings"),
 }
+# Known exception, accepted by the owner on 2026-11-01. strict: a description change
+# that fixes it turns this red, so the marker has to come off.
+EDIT_KNOWN_MISSES: dict[str, str] = {
+    "Benenne das Meeting um": (
+        "update tool ranks 6 of 23 in this fixture and 38 of 124 in the real registry (2026-11-01, MCP tools "
+        'not indexed), inside the ~90-100 ranked slots a turn sends; "Meeting" pulls toward '
+        "google__create_meet_space"
+    ),
+}
 EDIT_CASES = [
-    pytest.param(lang, query, id=f"{lang}-edit-{n}")
+    pytest.param(
+        lang,
+        query,
+        id=f"{lang}-edit-{n}",
+        marks=[pytest.mark.xfail(strict=True, reason=EDIT_KNOWN_MISSES[query])] if query in EDIT_KNOWN_MISSES else [],
+    )
     for lang, queries in EDIT_REQUESTS.items()
     for n, query in enumerate(queries, start=1)
 ]
