@@ -52,6 +52,8 @@ EDIT_HINT = (
 
 # Human-facing renderers (briefing, reminder).
 CLOCK_FORMAT = "%H:%M"
+#: An agenda time on another day than the briefing's (a multi-day event).
+DATED_CLOCK_FORMAT = "%a %d %b %H:%M"
 AGENDA_DAY_FORMAT = "%A %d %B"
 AGENDA_RANGE = "–"
 NO_EVENTS_TODAY = "No events today."
@@ -275,17 +277,22 @@ def render_write(
     return "\n".join(lines)
 
 
-def _clock_time(field: dict[str, Any], zone: ZoneInfo) -> str:
+def _agenda_time(field: dict[str, Any], zone: ZoneInfo, day: date, *, end: bool = False) -> str:
+    """A clock time, dated when it falls on another day than ``day`` (an end at midnight is still ``day``)."""
     instant = _instant(field)
-    return instant.astimezone(zone).strftime(CLOCK_FORMAT) if instant is not None else "?"
+    if instant is None:
+        return "?"
+    local = instant.astimezone(zone)
+    on_day = (local - timedelta(microseconds=1)).date() if end else local.date()
+    return local.strftime(CLOCK_FORMAT if on_day == day else DATED_CLOCK_FORMAT)
 
 
-def _agenda_line(event: dict[str, Any], zone: ZoneInfo) -> str:
+def _agenda_line(event: dict[str, Any], zone: ZoneInfo, day: date) -> str:
     if _all_day_span(event) is not None:
         when = ALL_DAY
     else:
-        start = _clock_time(event.get("start") or {}, zone)
-        when = f"{start}{AGENDA_RANGE}{_clock_time(event.get('end') or {}, zone)}"
+        start = _agenda_time(event.get("start") or {}, zone, day)
+        when = f"{start}{AGENDA_RANGE}{_agenda_time(event.get('end') or {}, zone, day, end=True)}"
     location = f" | {event['location']}" if event.get("location") else ""
     return f"  {when}  {_title(event)}{location}"
 
@@ -294,7 +301,7 @@ def render_agenda(events: list[dict[str, Any]], zone: ZoneInfo, day: date) -> st
     """A day's events for a person (the briefing): one header naming the zone, then one line each."""
     lines = [f"Calendar — {day.strftime(AGENDA_DAY_FORMAT)} ({zone.key})"]
     if events:
-        lines.extend(_agenda_line(e, zone) for e in events)
+        lines.extend(_agenda_line(e, zone, day) for e in events)
     else:
         lines.append(f"  {NO_EVENTS_TODAY}")
     return "\n".join(lines)

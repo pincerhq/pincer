@@ -585,3 +585,41 @@ def test_fake_freebusy_returns_nothing_for_an_inverted_range(fake):
     )
 
     assert result["calendars"]["primary"]["busy"] == []
+
+
+# ── Agenda (briefing) lines for events that cross the day ───────────────────
+
+
+def _timed(title: str, start: str, end: str) -> dict:
+    return {"summary": title, "start": {"dateTime": start}, "end": {"dateTime": end}}
+
+
+def test_agenda_dates_an_event_that_starts_and_ends_on_other_days() -> None:
+    """A Mon 09:00 → Wed 17:00 conference in Tuesday's briefing is not "09:00–17:00"."""
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    from pincer.integrations.google.calendar_render import render_agenda
+
+    conference = _timed("Conference", "2026-11-02T09:00:00+02:00", "2026-11-04T17:00:00+02:00")
+    text = render_agenda([conference], ZoneInfo("Europe/Kyiv"), date(2026, 11, 3))
+    assert text.splitlines()[1] == "  Mon 02 Nov 09:00–Wed 04 Nov 17:00  Conference"
+
+
+def test_agenda_dates_only_the_end_that_falls_on_another_day() -> None:
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    from pincer.integrations.google.calendar_render import render_agenda
+
+    zone, day = ZoneInfo("Europe/Kyiv"), date(2026, 11, 3)
+    events = [
+        _timed("Night shift", "2026-11-03T22:00:00+02:00", "2026-11-04T06:00:00+02:00"),
+        _timed("Late call", "2026-11-03T23:00:00+02:00", "2026-11-04T00:00:00+02:00"),
+        _timed("Standup", "2026-11-03T10:00:00+02:00", "2026-11-03T10:15:00+02:00"),
+    ]
+    assert render_agenda(events, zone, day).splitlines()[1:] == [
+        "  22:00–Wed 04 Nov 06:00  Night shift",
+        "  23:00–00:00  Late call",  # ending at midnight is still this day
+        "  10:00–10:15  Standup",
+    ]
