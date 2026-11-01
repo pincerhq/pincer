@@ -39,6 +39,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
+from test_voice_safety import BUILTIN_CALENDAR_TOOLS
 
 from integrations.google.fake_calendar import FakeCalendarFactory, FakeCalendarService
 from pincer.config import Settings
@@ -50,7 +51,6 @@ from pincer.tools.bootstrap import register_default_tools
 from pincer.tools.registry import ToolRegistry
 
 KYIV = ZoneInfo("Europe/Kyiv")
-BUILTIN_CALENDAR_TOOLS = {"calendar_today", "calendar_week", "calendar_create"}
 OWNER = "owner"
 
 _CREATE = re.compile(r'^create "(?P<title>[^"]+)" on (?P<day>\d{4}-\d{2}-\d{2}) at (?P<at>\d{2}:\d{2})$')
@@ -85,21 +85,18 @@ class ScriptedLLM(BaseLLMProvider):
     (all of them for event IDs, this turn's to know what it already did), and
     the tool schemas offered this turn.
 
-    - ``create "T" on D at HH:MM`` → create (builtin ``calendar_create`` when
-      ``prefer_builtins`` and it is offered, else ``google__create_event``).
+    - ``create "T" on D at HH:MM`` → ``google__create_event``.
     - ``move "T" to HH:MM`` / ``rename "T" to "N"``:
       an ID for T in context → ``google__update_event``;
-      no ID and nothing read yet this turn → read: ``calendar_week`` when
-      ``prefer_builtins`` and offered; else ``google__search_events`` if the
-      offered descriptions steer edits to the update tool; else no read —
+      no ID and nothing read yet this turn → read: ``google__search_events`` if
+      the offered descriptions steer edits to the update tool; else no read —
       create a copy (the production behaviour);
       after a read that showed no ID → create a copy.
     - a tool result already answering the request → final text.
     - anything else → small talk.
     """
 
-    def __init__(self, *, prefer_builtins: bool = False) -> None:
-        self.prefer_builtins = prefer_builtins
+    def __init__(self) -> None:
         self.offered: list[set[str]] = []
         self.called: list[str] = []
         self._ids = itertools.count(1)
@@ -119,7 +116,7 @@ class ScriptedLLM(BaseLLMProvider):
         text = messages[last_user].content
         all_results = [m.content for m in messages if m.role == MessageRole.TOOL_RESULT]
         turn_calls = [tc.name for m in messages[last_user:] for tc in m.tool_calls]
-        if turn_calls and turn_calls[-1] in {"google__update_event", "google__create_event", "calendar_create"}:
+        if turn_calls and turn_calls[-1] in {"google__update_event", "google__create_event"}:
             return self._say("Done.")
 
         if m := _CREATE.match(text):
@@ -132,12 +129,9 @@ class ScriptedLLM(BaseLLMProvider):
         event_id = _event_id_in(all_results, title)
         if event_id is not None:
             return self._update(event_id, changes)
-        read_done = bool({"calendar_week", "google__search_events"} & set(turn_calls))
-        if not read_done:
-            if self.prefer_builtins and "calendar_week" in offered:
-                return self._call("calendar_week", {})
-            if "google__search_events" in offered and _steers_edits_to_update(offered):
-                return self._call("google__search_events", {"query": title})
+        read_done = "google__search_events" in turn_calls
+        if not read_done and "google__search_events" in offered and _steers_edits_to_update(offered):
+            return self._call("google__search_events", {"query": title})
         return self._copy(offered, title, changes)
 
     def stream(
@@ -169,8 +163,6 @@ class ScriptedLLM(BaseLLMProvider):
         return LLMResponse(tool_calls=[call], model="scripted", input_tokens=1, output_tokens=1, stop_reason="tool_use")
 
     def _create(self, offered: dict[str, str], title: str, day: str, at: str) -> LLMResponse:
-        if self.prefer_builtins and "calendar_create" in offered:
-            return self._call("calendar_create", {"title": title, "start_time": f"{day}T{at}:00"})
         start = datetime.fromisoformat(f"{day}T{at}:00")
         end = start + timedelta(hours=1)
         return self._call(
@@ -273,12 +265,10 @@ def test_cancelling_an_event_still_needs_approval(registry: ToolRegistry) -> Non
 
 
 async def test_create_then_move_updates_the_one_event(tmp_path, fake, berlin_settings, registry, costs) -> None:
-    """A model that reaches for the builtins whenever they are offered.
-
-    Pre-slice: calendar_create (no ID) → calendar_week (no IDs) → calendar_create
-    again — two events. After: create and update the same Workspace event.
-    """
-    llm = ScriptedLLM(prefer_builtins=True)
+    """Pre-slice the model reached for the offered builtins: calendar_create (no ID) →
+    calendar_week (no IDs) → calendar_create again — two events. Now no builtin is
+    offered, and create then move updates the same Workspace event."""
+    llm = ScriptedLLM()
     sessions = await _sessions(tmp_path, 50)
     try:
         agent = _agent(berlin_settings, llm, sessions, costs, registry)

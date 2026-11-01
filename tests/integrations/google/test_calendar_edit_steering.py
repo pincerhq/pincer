@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -24,13 +23,7 @@ from pincer.tools.registry import ToolRegistry
 DAY = "2026-11-12"
 FIXTURE = Path(__file__).resolve().parents[2] / "fixtures" / "tool_index_tools.json"
 
-
-@pytest.fixture(autouse=True)
-def berlin_deployment(monkeypatch):
-    monkeypatch.setattr(
-        "pincer.config.get_settings_relaxed",
-        lambda: SimpleNamespace(timezone="Europe/Berlin", voice_timezone="Europe/Berlin"),
-    )
+pytestmark = pytest.mark.usefixtures("berlin_deployment")
 
 
 @pytest.fixture
