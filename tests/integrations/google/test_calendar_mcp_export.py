@@ -59,6 +59,12 @@ def _seed_today(fake: FakeCalendarService) -> None:
 
 
 def _fmcp() -> MagicMock:
+    """A FastMCP stand-in that keeps each registered handler so a test can call it directly.
+
+    Direct calls, not FastMCP's call_tool: the exporter registers registry tools as
+    ``_handler(**kwargs)``, which FastMCP turns into one required "kwargs" argument, so
+    real call_tool cannot reach them (pre-existing; an out-of-scope follow-up in the PRD).
+    """
     fmcp = MagicMock()
     fmcp.tools = {}
 
@@ -84,6 +90,7 @@ async def test_exporter_keeps_pincer_calendar_today_by_default(registry, fake) -
     PincerToolExporter(registry, expose_tools=MCPServerExportConfig().expose_tools).export_to(fmcp)
 
     assert "pincer_calendar_today" in fmcp.tools
+    # Calls the exporter's handler directly (see _fmcp for why not FastMCP's call_tool).
     text = await fmcp.tools["pincer_calendar_today"]()
     assert "Lunch with Ana" in text
     assert "Tomorrow's call" not in text
@@ -101,6 +108,7 @@ async def test_alias_day_is_the_calendar_zone_day_not_the_clock_day(registry, fa
     fmcp = _fmcp()
     PincerToolExporter(registry, expose_tools=["calendar_today"]).export_to(fmcp)
 
+    # Calls the exporter's handler directly (see _fmcp for why not FastMCP's call_tool).
     text = await fmcp.tools["pincer_calendar_today"]()
 
     assert "Kyiv 13th" in text
@@ -236,6 +244,7 @@ async def test_pincer_run_export_strips_the_edit_hint(registry, fake) -> None:
     fmcp = _fmcp()
     expose = ["calendar_today", "google__list_events", "google__search_events", "google__get_event"]
     PincerToolExporter(registry, expose_tools=expose).export_to(fmcp)
+    # Calls the exporter's handler directly (see _fmcp for why not FastMCP's call_tool).
     texts = {
         "list": await fmcp.tools["pincer_google__list_events"](time_min=datetime.now(KYIV).date().isoformat()),
         "search": await fmcp.tools["pincer_google__search_events"](query="Lunch"),
@@ -255,6 +264,7 @@ async def test_alias_without_a_factory_is_not_connected(registry, fake, monkeypa
     PincerToolExporter(registry, expose_tools=["calendar_today"]).export_to(fmcp)
 
     assert "google__list_events" in registry.list_tools()
+    # Calls the exporter's handler directly (see _fmcp for why not FastMCP's call_tool).
     assert await fmcp.tools["pincer_calendar_today"]() == NOT_CONNECTED
 
 
