@@ -1,9 +1,9 @@
 """Tool index ranking with the real multilingual model, across European languages.
 
-Indexes the real descriptions of 26 Pincer tools (tests/fixtures/tool_index_tools.json,
+Indexes the real descriptions of 23 Pincer tools (tests/fixtures/tool_index_tools.json,
 a snapshot of the registry's text) exactly as ToolSelector does, then checks
 that a request for each task, in each language, ranks a tool for that task in
-the top 5 of 26; edit requests (en/uk/de) must rank the Workspace update tool
+the top 5 of 23; edit requests (en/uk/de) must rank the Workspace update tool
 there. Production fills ~110 slots from the ranking, so this is a much stricter
 bar than the selector needs. (Top 3 fails only for "draw a picture" in
 uk/fr/it, where generate_image comes 4th behind send_image, send_file and
@@ -41,7 +41,7 @@ TASKS: dict[str, set[str]] = {
     "call": {"make_phone_call"},
     "image": {"generate_image"},
     "email": {"email_send", "google__send_message"},
-    "calendar": {"calendar_create", "google__create_event"},
+    "calendar": {"google__create_event"},
     "drive": {"google__search_drive_files", "google__list_drive_files"},
 }
 
