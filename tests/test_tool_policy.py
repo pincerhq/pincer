@@ -285,3 +285,39 @@ def test_doctor_override_unknown_tool(tmp_path):
     assert "nope_tool" in result.message
     ok = doc._check_voice_override_unknown_tool(_settings(voice_tool_approval_overrides="memory_note:user"))
     assert ok.status == CheckStatus.PASS
+
+
+# ── Calendar tools on a live call (issue #297, owner ruling 2026-11-01) ─────────
+# The live authority is TIERS (safety_gates' helpers have no callers in src/):
+# calendar search/get stay blocked on calls, so "rename my meeting" on a call
+# cannot look up an event ID.
+
+
+@pytest.mark.parametrize(
+    ("tool", "tier"),
+    [
+        ("google__list_events", "R"),
+        ("google__check_freebusy", "R"),
+        ("google__create_event", "W"),
+        ("google__update_event", "W"),
+        ("google__delete_event", "X"),
+        ("google__search_events", "X"),
+        ("google__get_event", "X"),
+    ],
+)
+def test_live_call_tier_of_workspace_calendar_tools(tool, tier) -> None:
+    assert tp.tier_of(tool) == tier
+
+
+def test_calendar_search_and_get_fall_to_the_default_tier() -> None:
+    assert "google__search_events" not in tp.TIERS
+    assert "google__get_event" not in tp.TIERS
+    assert tp.DEFAULT_TIER == "X"
+
+
+def test_inbound_receptionist_reads_no_event_contents() -> None:
+    allowed = tp.allowed_tools_for_call(SimpleNamespace(voice_tools_extra=""), kind="receptionist")
+    contents = {"google__list_events", "google__search_events", "google__get_event"}
+    assert "google__check_freebusy" in allowed  # the set is real, not empty
+    assert not contents & allowed
+    assert not contents & tp.INBOUND_RECEPTIONIST_TOOLS
