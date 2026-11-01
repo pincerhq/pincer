@@ -1903,7 +1903,8 @@ class Agent:
             )
             return inner.content, inner.is_error
 
-        gate_result = await call_gate.run(tool_call.name, tool_call.arguments, _run)
+        # The model's arguments: an idempotency key in them is never trusted.
+        gate_result = await call_gate.run(tool_call.name, tool_call.arguments, _run, trusted_key=False)
         return ToolResult(tool_call_id=tool_call.id, content=gate_result.content, is_error=gate_result.is_error)
 
     async def _fire_tool_event(

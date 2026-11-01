@@ -44,6 +44,9 @@ class ChannelRouter:
         rather than hanging every channel's guest check.
         """
         try:
+            # First and on its own: a phone removed from the config must stop
+            # identifying its owner on calls even when seeding fails below.
+            await self._identity.cleanup_phones()
             await self._identity.seed_from_config(self._channels)
             await self._identity.cleanup(self._channels)
         except Exception:

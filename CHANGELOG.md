@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+#### Voice calls: registered callers can book appointments, guests confirm every write (#299) — **breaking config change**
+
+A caller on a generic voice call (`make_phone_call`, inbound without the
+receptionist) never saw a calendar-write tool, and the call prompt told the
+model to ask for a yes itself. The result was a confirmation loop: the agent
+asked again and again, re-read the calendar, and invented a reason ("the
+calendar has no appointments") instead of creating the event.
+
+- **Identity phones.** `[identity.<key>]` takes `phones = ["+49…"]`. Config
+  phones are stored as confirmed phones of the identity (new table
+  `pincer_identity_phones`, migration `0025`); a number may belong to one
+  identity only. `/api/identity` returns them.
+- **Registered users and guests.** At call start the other party's number is
+  looked up. A confirmed phone makes the call that identity's own: every Tier
+  R/W tool, approved by the standard `PINCER_APPROVAL_POLICY` (a tool that needs
+  approval is confirmed out loud, the rest run directly — calendar writes run
+  at once under the default `critical` mode). Any other number, or a failed
+  lookup, is a guest: today's generic set, and every write is confirmed out
+  loud. A registered user's write that ran without confirmation is listed in
+  the post-call report under "Executed autonomously during the call:". An
+  inbound call from a confirmed phone belongs to that identity (call row,
+  transcript, memory, threads); an outbound call stays with the user who placed
+  it. Receptionist booking approvals still go to the owner, never the caller.
+- **`PINCER_VOICE_GUESTS_TOOLS_ALLOWED`** replaces `PINCER_VOICE_TOOLS_EXTRA`:
+  a CSV of tool names and patterns (`google__*`) that, when set, *replaces* the
+  guest scope. Only Tier R/W tools match; Tier X stays out.
+- **Removed:** `PINCER_VOICE_TOOL_APPROVAL`, `PINCER_VOICE_TOOL_APPROVAL_OVERRIDES`,
+  `PINCER_VOICE_TOOLS_EXTRA`. Deployments that set `off` or `user` change
+  behaviour: guests now always confirm verbally, registered users follow
+  `PINCER_APPROVAL_POLICY`. `pincer doctor` warns while one is still set.
+  Appointment calls and the receptionist keep their fixed tool sets;
+  `PINCER_RECEPTIONIST_BOOKING_APPROVAL` is unchanged.
+- **Prompt.** The model calls the tool and never asks for confirmation itself;
+  an empty calendar is never a reason not to book; a request it has no tool for
+  is declined plainly (and passed on via `send_owner_message` when available).
+- **No duplicates.** A calendar create on a call carries an idempotency key
+  derived from the call and the action, so a repeated yes or a retried turn
+  answers "already in the calendar". A key the model puts in its own call is
+  replaced, so it cannot reuse one from an earlier booking.
+- **Startup.** Phones removed from the config are dropped in their own step,
+  before seeding, so a seeding failure cannot leave an old number trusted.
+  With voice enabled and no identity listing `phones`, startup logs a warning
+  and `pincer doctor` reports `voice_registered_phones`: on a stock install
+  everyone on a call is a guest, and the agent cannot book on a generic call
+  until you add your number (or allow guests to).
+
+Caller ID can be spoofed: a confirmed phone grants the full R/W scope on
+inbound calls too. Tier X, the call scope and the write budget still hold.
+
 #### Group triggers: replies on both channels, Telegram @-mentions behind a flag
 
 Group messages on WhatsApp and Telegram now follow one rule set. Pincer is

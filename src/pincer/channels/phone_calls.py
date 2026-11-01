@@ -177,6 +177,8 @@ class VoiceChannel(BaseChannel):
 
     async def _handle_call_start(self, call_sid: str, state: CallState) -> None:
         """Engine registered a call: start tracking now (silence rule, receptionist greeting)."""
+        # Before the tool gate exists: who is on the line decides its scope.
+        await self._resolve_caller(call_sid, state)
         try:
             self._ensure_call_tracking(call_sid, state)
         except Exception:
@@ -191,6 +193,41 @@ class VoiceChannel(BaseChannel):
         from pincer.voice.briefing import briefing_from_state, record_briefing
 
         record_briefing(self._transcripts.get(call_sid), briefing_from_state(state))
+
+    async def _resolve_caller(self, call_sid: str, state: CallState) -> None:
+        """Mark the call as a registered user's or a guest's.
+
+        The remote party — the caller on an inbound call, the callee on an
+        outbound one — is a registered user when their number is a confirmed
+        phone of an identity. Anything else, a failed lookup included, is a
+        guest: the narrower scope is the safe default.
+
+        Only an inbound call becomes the caller's own (`pincer_user_id`: its
+        row, transcript, memory). An outbound call stays with the user who
+        placed it; the callee's identity only widens the tool scope.
+        """
+        from pincer.voice.tool_policy import CALLER_GUEST, CALLER_USER, META_CALLER_CLASS
+
+        state.metadata[META_CALLER_CLASS] = CALLER_GUEST
+        outbound = state.direction == CallDirection.OUTBOUND
+        number = (state.target_number or state.caller_number) if outbound else state.caller_number
+        if not number:
+            return
+        try:
+            from pincer.db.engine import get_database_url
+            from pincer.services.identity import IdentityService
+
+            owner = await IdentityService(get_database_url(self._settings.db_path)).user_for_confirmed_phone(number)
+        except Exception:
+            logger.warning(
+                "Caller identity lookup failed [%s] — treating the caller as a guest", call_sid, exc_info=True
+            )
+            return
+        if owner:
+            state.metadata[META_CALLER_CLASS] = CALLER_USER
+            if not outbound:
+                state.pincer_user_id = owner
+        logger.info("Call party [%s]: %s", call_sid, f"registered user {owner}" if owner else "guest")
 
     @staticmethod
     def _session_key(state: CallState) -> str:
@@ -436,13 +473,14 @@ class VoiceChannel(BaseChannel):
         """Sprint 11: per-call tool scope (§5.3) + the gate that enforces it.
 
         Set once at call creation: appointment calls (Sprint 6) get the fixed
-        scheduling set; everything else the generic set (reads + owner-facing
-        writes). The initiating user (never the callee) is the approval target
-        for `user` mode.
+        scheduling set, the receptionist its own; a generic call's scope
+        depends on whether the other party is a registered user (see
+        `_resolve_caller`). The initiating user (never the callee) is the
+        approval target for `user` mode.
         """
         from pincer.voice import scheduling, status_notify
         from pincer.voice.in_call_tools import InCallToolGate
-        from pincer.voice.tool_policy import allowed_tools_for_call
+        from pincer.voice.tool_policy import allowed_tools_for_call, caller_class_of
 
         if self._receptionist_call(state):
             kind = "receptionist"  # Sprint 12 §9: the public line's exact, minimal tool set
@@ -450,15 +488,19 @@ class VoiceChannel(BaseChannel):
             kind = "appointment"
         else:
             kind = "generic"
-        allowed = allowed_tools_for_call(self._settings, kind=kind, direction=str(state.direction))
+        caller = caller_class_of(state)
+        allowed = allowed_tools_for_call(self._settings, kind=kind, direction=str(state.direction), caller_class=caller)
         info = status_notify.get_call_info(call_sid)
         if info is not None and info.user_id:
             target: tuple[str, str] = (info.user_id, info.channel)
         else:
-            # Inbound: the OWNER (never the caller) approves `user`-mode writes
-            fallback_user = state.pincer_user_id or str(getattr(self._settings, "default_user_id", "") or "")
-            target = (fallback_user, "")
-        logger.info("In-call tool scope [%s]: %s (%s) -> %s", call_sid, kind, state.direction, sorted(allowed))
+            # Inbound: the OWNER (never the caller) approves `user`-mode writes —
+            # not state.pincer_user_id, which is the caller's identity on a
+            # call from a confirmed phone.
+            target = (str(getattr(self._settings, "default_user_id", "") or ""), "")
+        logger.info(
+            "In-call tool scope [%s]: %s (%s, %s) -> %s", call_sid, kind, state.direction, caller, sorted(allowed)
+        )
         return InCallToolGate(
             call_sid=call_sid,
             state=state,
@@ -468,7 +510,20 @@ class VoiceChannel(BaseChannel):
             engine=self._engine,
             approval_target=target,
             allowed_tools=allowed,
+            requires_approval=self._call_requires_approval,
         )
+
+    def _call_requires_approval(self, name: str) -> bool:
+        """The standard approval policy for a registered caller's write.
+
+        Fail closed: a tool the registry does not know (or no registry at
+        all) is confirmed out loud — `ToolRegistry.requires_approval` alone
+        would answer False for it.
+        """
+        tools = self._tools
+        if tools is None or name not in tools.list_tools():
+            return True
+        return bool(tools.requires_approval(name))
 
     def get_tool_gate(self, call_sid: str) -> InCallToolGate | None:
         return self._tool_gates.get(call_sid)

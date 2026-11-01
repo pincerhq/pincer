@@ -18,6 +18,7 @@ import pytest
 from pincer.channels.phone_calls import VoiceChannel
 from pincer.voice import approvals, scheduling, status_notify
 from pincer.voice import in_call_tools as ict
+from pincer.voice import tool_policy as tp
 from pincer.voice.engine import CallDirection
 from pincer.voice.prompts import get_prompt
 from pincer.voice.tool_speech import RAW_DATA_RE
@@ -97,7 +98,7 @@ def _clean():
     approvals._reset_for_tests()
 
 
-async def _start(language: str, settings: Any):
+async def _start(language: str, settings: Any, modes: dict[str, str] | None = None):
     engine = FakeVoiceEngine(settings)
     channel = VoiceChannel(settings)
     channel.set_engine(engine)
@@ -126,6 +127,10 @@ async def _start(language: str, settings: Any):
     )
     state = await engine.on_call_start(CALL, "+4930", CallDirection.OUTBOUND, language=language)
     channel._ensure_call_tracking(CALL, state)
+    if modes:
+        # `user` and `off` are only reachable as a per-call mode pinned by
+        # trusted code (the receptionist's booking approval).
+        state.metadata[tp.META_MODE_OVERRIDES] = dict(modes)
     return channel, engine, agent, state
 
 
@@ -196,7 +201,7 @@ async def test_verbal_unclear_twice(language):
 @pytest.mark.parametrize("answer", ["approve", "deny", "timeout"])
 async def test_user_mode(language, answer, monkeypatch):
     monkeypatch.setattr(ict, "HOLD_REASSURE_INTERVAL_S", 0.03)
-    settings = _settings(language, voice_tool_approval="user")
+    settings = _settings(language)
     settings.voice_approval_timeout_s = 0.15
     requests: list = []
     finals: list = []
@@ -210,7 +215,7 @@ async def test_user_mode(language, answer, monkeypatch):
 
     approvals.set_presenter(presenter)
     approvals.set_finalizer(finalizer)
-    channel, engine, agent, state = await _start(language, settings)
+    channel, engine, agent, state = await _start(language, settings, {"google__create_event": "user"})
 
     async def _answer():
         while not requests:
@@ -248,7 +253,7 @@ async def test_user_mode(language, answer, monkeypatch):
 
 @pytest.mark.parametrize("language", LANGS)
 async def test_off_mode(language):
-    channel, engine, agent, state = await _start(language, _settings(language, voice_tool_approval="off"))
+    channel, engine, agent, state = await _start(language, _settings(language), {"google__create_event": "off"})
     await engine.on_speech_input(CALL, "Please book it." if language == "en" else "Bitte eintragen.")
     assert agent.executed == [("google__create_event", CREATE_ARGS)]
     from pincer.voice.postcall import PostCallProcessor
@@ -267,8 +272,8 @@ async def test_off_mode(language):
     ids=["tool_abuse_off_mode", "tool_abuse_off_mode_de"],
 )
 async def test_tool_abuse_off_mode(language, persona_cls):
-    settings = _settings(language, voice_tool_approval="off", voice_max_writes_per_call=3)
-    channel, engine, agent, state = await _start(language, settings)
+    settings = _settings(language, voice_max_writes_per_call=3)
+    channel, engine, agent, state = await _start(language, settings, {"google__create_event": "off"})
     persona = persona_cls()
 
     # The legitimate write first (uses 1 of 3 budget), then the attacks.

@@ -1256,6 +1256,14 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
     identity_map_config, identity_profiles = resolve_identity_map_config(settings.identity_map)
     identity = IdentityResolver(settings.db_path, identity_map_config, identity_profiles)
     await identity.ensure_table()
+    if getattr(settings, "voice_enabled", False) and not any(p.phones for p in identity_profiles.values()):
+        # #299: without a confirmed phone every call party is a guest, and a
+        # guest gets no calendar writes on a generic call by default.
+        logger.warning(
+            "Voice is enabled but no identity lists `phones`: everyone on a call is a guest, so the agent "
+            "cannot create calendar events on a generic call. Add your number as `phones` to your "
+            "[identity.<key>] in pincer.toml, or allow guests via PINCER_VOICE_GUESTS_TOOLS_ALLOWED."
+        )
     # Lets the per-turn clock in the system prompt read in each user's own
     # timezone instead of the deployment-wide one (see core/clock.py).
     agent.identity_resolver = identity

@@ -20,6 +20,7 @@ from pincer.repositories.identity import (
     AuthSessionRepository,
     ChannelIdentityRepository,
     IdentityCredentialRepository,
+    IdentityPhoneRepository,
     IdentityProfileRepository,
 )
 from pincer.repositories.onboarding import OnboardingRepository
@@ -45,13 +46,15 @@ class SeedEntry:
 
     `insert` is what a brand-new profile gets (its `preferred_channel` falls
     back to the entry's first channel). `backfill` is only what the config
-    states, so an identity that already exists keeps what it has.
+    states, so an identity that already exists keeps what it has. `phones`
+    (`+E.164`) are stored confirmed: the config is trusted.
     """
 
     pincer_user_id: str
     channels: Sequence[tuple[str, str]]
     insert: dict[str, Any]
     backfill: dict[str, Any]
+    phones: Sequence[str] = ()
 
 
 @dataclass(frozen=True)
@@ -63,7 +66,11 @@ class NewApiKey:
     last4: str
 
 
-def _with_channels(profile: Any, links: Sequence[tuple[str, str, str | None]]) -> dict[str, Any]:
+def _with_channels(
+    profile: Any,
+    links: Sequence[tuple[str, str, str | None]],
+    phones: Sequence[tuple[str, bool]] = (),
+) -> dict[str, Any]:
     return {
         "pincer_user_id": profile.pincer_user_id,
         "preferred_channel": profile.preferred_channel,
@@ -77,6 +84,7 @@ def _with_channels(profile: Any, links: Sequence[tuple[str, str, str | None]]) -
             {"channel": channel, "channel_user_id": channel_user_id, "linked_at": linked_at}
             for channel, channel_user_id, linked_at in links
         ],
+        "phones": [{"phone": phone, "confirmed": confirmed} for phone, confirmed in phones],
     }
 
 
@@ -91,6 +99,19 @@ class IdentityService(DatabaseService):
     async def user_for_channel(self, channel: str, channel_user_id: str) -> str | None:
         async with session_scope(self._url) as session:
             return await ChannelIdentityRepository(session).user_for(channel, channel_user_id)
+
+    async def user_for_confirmed_phone(self, phone: str) -> str | None:
+        """The identity this number is a confirmed phone of, if any.
+
+        `phone` is normalised first; a number that is not E.164 has no owner.
+        """
+        from pincer.core.phone import normalize_e164
+
+        normalized = normalize_e164(phone)
+        if normalized is None:
+            return None
+        async with session_scope(self._url) as session:
+            return await IdentityPhoneRepository(session).owner_of_confirmed(normalized)
 
     async def profile(self, pincer_user_id: str) -> dict[str, Any] | None:
         async with session_scope(self._url) as session:
@@ -110,7 +131,11 @@ class IdentityService(DatabaseService):
         async with session_scope(self._url) as session:
             profiles = await IdentityProfileRepository(session).search(search, limit)
             links = ChannelIdentityRepository(session)
-            return [_with_channels(row, await links.links_for(row.pincer_user_id)) for row in profiles]
+            phones = await IdentityPhoneRepository(session).phones_for_many([row.pincer_user_id for row in profiles])
+            return [
+                _with_channels(row, await links.links_for(row.pincer_user_id), phones.get(row.pincer_user_id, ()))
+                for row in profiles
+            ]
 
     async def profile_with_channels(self, pincer_user_id: str) -> dict[str, Any] | None:
         async with session_scope(self._url) as session:
@@ -118,7 +143,8 @@ class IdentityService(DatabaseService):
             if row is None:
                 return None
             links = await ChannelIdentityRepository(session).links_for(pincer_user_id)
-        return _with_channels(row, links)
+            phones = await IdentityPhoneRepository(session).phones_for(pincer_user_id)
+        return _with_channels(row, links, phones)
 
     # ── writes ───────────────────────────────────────────────────────
 
@@ -203,7 +229,7 @@ class IdentityService(DatabaseService):
         return None
 
     async def rename_identity(self, old_id: str, new_id: str) -> None:
-        """Move an identity to a new id: profile, links, credentials, its sessions and onboarding.
+        """Move an identity to a new id: profile, links, phones, credentials, its sessions and onboarding.
 
         One transaction — a half-applied rename would leave channel links
         pointing at a profile that no longer exists.
@@ -212,6 +238,7 @@ class IdentityService(DatabaseService):
             profiles = IdentityProfileRepository(session)
             await profiles.copy_to(old_id, new_id)
             await ChannelIdentityRepository(session).reassign(old_id, new_id)
+            await IdentityPhoneRepository(session).reassign(old_id, new_id)
             # Before the old profile goes: on Postgres its deletion cascades to
             # the credentials, and SQLite (foreign keys off) would strand them.
             credentials = IdentityCredentialRepository(session)
@@ -239,9 +266,11 @@ class IdentityService(DatabaseService):
         channels linked and its profile fields backfilled. One transaction, so
         a failure part-way leaves no half-seeded identity.
         """
+        now = datetime.now(UTC).isoformat()
         async with session_scope(self._url) as session:
             profiles = IdentityProfileRepository(session)
             links = ChannelIdentityRepository(session)
+            phones = IdentityPhoneRepository(session)
             for entry in identities:
                 await profiles.add_if_new({"pincer_user_id": entry.pincer_user_id, **entry.insert})
                 if any(value is not None for value in entry.backfill.values()):
@@ -251,6 +280,8 @@ class IdentityService(DatabaseService):
                     await profiles.backfill(entry.pincer_user_id, entry.backfill)
                 for channel, channel_user_id in entry.channels:
                     await links.link(channel, channel_user_id, entry.pincer_user_id)
+                for phone in entry.phones:
+                    await phones.upsert(phone, entry.pincer_user_id, confirmed=True, source="config", now=now)
 
     async def prune(self, keep: Iterable[tuple[str, str]]) -> tuple[int, int]:
         """Unlink every channel pair outside `keep`, then drop profiles left
@@ -272,7 +303,18 @@ class IdentityService(DatabaseService):
             await IdentityCredentialRepository(session).delete_unlinked_empty()
             await AuthSessionRepository(session).delete_orphaned()
             orphaned = await IdentityProfileRepository(session).delete_unlinked()
+            # After the profiles: a phone does not keep its identity alive, and
+            # on SQLite nothing cascades to the numbers of a deleted profile.
+            await IdentityPhoneRepository(session).delete_orphaned()
         return removed, orphaned
+
+    async def prune_config_phones(self, keep: Iterable[str]) -> int:
+        """Drop the numbers the config once listed but no longer does.
+
+        Numbers stored any other way are left alone.
+        """
+        async with session_scope(self._url) as session:
+            return await IdentityPhoneRepository(session).delete_config_phones_not_in(keep)
 
 
 async def get_identity_service() -> IdentityService:

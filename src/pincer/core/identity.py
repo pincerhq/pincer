@@ -86,6 +86,8 @@ class IdentityProfile:
     preferred_channel: str | None = None
     email: str | None = None
     timezone: str | None = None
+    # `+E.164` numbers, stored as confirmed phones of the identity.
+    phones: tuple[str, ...] = ()
 
 
 class IdentityResolver:
@@ -575,6 +577,9 @@ class IdentityResolver:
         so it is when any entry does not parse or names an unknown channel: a
         whitelist with a hole in it must not be enforced. A pair whose lookup fails is a smaller hole,
         filled by `_unresolved_keep`.
+
+        Phones are not handled here but by `cleanup_phones`, which startup
+        runs on its own so a failure in seeding or here cannot skip it.
         """
         if not self._identity_map_config:
             return
@@ -627,6 +632,22 @@ class IdentityResolver:
                 unlisted,
                 channelless,
             )
+
+    async def cleanup_phones(self) -> None:
+        """Remove the phones the config once listed and no longer does.
+
+        A number that leaves the config must stop identifying its old owner on
+        a call, whatever else fails at startup, so this never raises. The
+        configured numbers are known without resolving any channel.
+        """
+        keep = {phone for profile in self._profiles.values() for phone in profile.phones}
+        try:
+            removed = await self._store.prune_config_phones(keep)
+        except Exception:
+            logger.debug("Identity phone cleanup skipped: table unavailable", exc_info=True)
+            return
+        if removed:
+            logger.info("Identity cleanup: removed %d phone(s) no longer in the config", removed)
 
     async def _unresolved_keep(
         self,
@@ -739,6 +760,13 @@ class IdentityResolver:
         for name, resolved in resolved_entries:
             resolved, keeper, existing_uids = await self._claim_pairs(name, resolved, pending, rename_targets)
             if not resolved:
+                skipped = self._profiles.get(name or "")
+                if skipped is not None and skipped.phones:
+                    logger.warning(
+                        "Identity %s: no channel resolved, so its phone(s) are not stored yet — "
+                        "calls from or to them count as guests until a restart where a channel resolves",
+                        name,
+                    )
                 continue
 
             # Determine or create the canonical pincer_user_id. Every existing
@@ -774,6 +802,7 @@ class IdentityResolver:
                     channels=[(ch_str, norm) for ch_str, _ch_type, norm in resolved],
                     insert={**config_fields, "preferred_channel": profile.preferred_channel or first_channel},
                     backfill=config_fields,
+                    phones=profile.phones,
                 )
             )
             for _ch_str, ch_type, norm in resolved:
