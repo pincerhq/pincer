@@ -19,6 +19,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import httplib2
+from google.auth.exceptions import GoogleAuthError
+from googleapiclient.errors import HttpError
+
 from pincer.config import get_settings
 from pincer.db.engine import get_database_url
 from pincer.integrations.google.calendar_render import render_reminder, start_instant
@@ -37,6 +41,9 @@ REMINDER_CALENDAR = "primary"
 # Status entries, not meetings (owner ruling, #297): no "Reminder: Home starts at 09:00".
 # A missing eventType means "default" and is reminded.
 NO_REMINDER_EVENT_TYPES = frozenset({"workingLocation", "outOfOffice", "focusTime"})
+# A calendar read failing with these is an outage (token revoked, Google or the
+# network down): logged once, quietly retried. Anything else is a bug and gets a traceback.
+CALENDAR_OUTAGE_ERRORS = (HttpError, GoogleAuthError, OSError, httplib2.HttpLib2Error)
 
 logger = logging.getLogger(__name__)
 
@@ -170,8 +177,10 @@ class EventTriggerManager:
         All-day, cancelled and self-declined events, and working-location,
         out-of-office and focus-time entries get no reminder.
 
-        A failing calendar read (e.g. a token revoked after startup) logs one
-        WARNING, then DEBUG on every tick until a read succeeds again.
+        A calendar outage (a token revoked after startup, a Google HTTP error,
+        a dropped connection) logs one WARNING, then DEBUG on every tick until
+        a read succeeds again; any other error propagates to the loop's
+        ``logger.exception``.
         """
         user_id = get_settings().default_user_id
         if not user_id:
@@ -184,7 +193,7 @@ class EventTriggerManager:
         horizon = now + REMINDER_WINDOW
         try:
             page = await fetch_events(factory, REMINDER_CALENDAR, now.isoformat(), horizon.isoformat())
-        except Exception as exc:
+        except CALENDAR_OUTAGE_ERRORS as exc:
             self._calendar_read_log.log(
                 "Calendar reminders paused: reading the calendar failed (%s: %s); retrying every %d s",
                 type(exc).__name__,

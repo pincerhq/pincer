@@ -303,6 +303,67 @@ async def test_failing_reads_warn_once_then_debug_until_a_read_succeeds(triggers
         assert _levels() == [logging.WARNING]
 
 
+async def test_an_unexpected_read_error_is_logged_with_its_traceback(triggers, fake, monkeypatch, caplog) -> None:
+    """Only Google auth/HTTP errors mean "the calendar is unreachable"; a bug must not hide as a WARNING."""
+    monkeypatch.setattr("pincer.scheduler.triggers.CALENDAR_TICK_S", 0)
+
+    async def _broken(*_args, **_kwargs):
+        triggers._running = False
+        raise ValueError("bad event payload")
+
+    monkeypatch.setattr("pincer.scheduler.triggers.fetch_events", _broken)
+    triggers._running = True
+    with caplog.at_level(logging.DEBUG, logger="pincer.scheduler.triggers"):
+        await triggers._calendar_loop()
+
+    records = [r for r in caplog.records if r.name == "pincer.scheduler.triggers"]
+    assert [(r.levelno, r.getMessage()) for r in records] == [(logging.ERROR, "Calendar trigger error")]
+    assert records[0].exc_info is not None and records[0].exc_info[0] is ValueError
+
+
+async def test_a_google_http_error_still_pauses_reminders_quietly(triggers, fake, monkeypatch, caplog) -> None:
+    from googleapiclient.errors import HttpError
+
+    monkeypatch.setattr("pincer.scheduler.triggers.CALENDAR_TICK_S", 0)
+
+    async def _unavailable(*_args, **_kwargs):
+        triggers._running = False
+        raise HttpError(SimpleNamespace(status=503, reason="Backend Error"), b"{}")
+
+    monkeypatch.setattr("pincer.scheduler.triggers.fetch_events", _unavailable)
+    triggers._running = True
+    with caplog.at_level(logging.DEBUG, logger="pincer.scheduler.triggers"):
+        await triggers._calendar_loop()
+
+    records = [r for r in caplog.records if r.name == "pincer.scheduler.triggers"]
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "Calendar reminders paused" in records[0].getMessage() and records[0].exc_info is None
+
+
+async def test_a_dropped_connection_warns_once_then_debug_without_a_traceback(
+    triggers, fake, monkeypatch, caplog
+) -> None:
+    """A connection to Google timing out is an outage like a revoked token, not a bug."""
+    monkeypatch.setattr("pincer.scheduler.triggers.CALENDAR_TICK_S", 0)
+    calls = {"n": 0}
+
+    async def _timeout(*_args, **_kwargs):
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            triggers._running = False
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr("pincer.scheduler.triggers.fetch_events", _timeout)
+    triggers._running = True
+    with caplog.at_level(logging.DEBUG, logger="pincer.scheduler.triggers"):
+        await triggers._calendar_loop()
+
+    records = [r for r in caplog.records if r.name == "pincer.scheduler.triggers"]
+    assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    assert all(r.exc_info is None for r in records)
+    assert "TimeoutError" in records[0].getMessage()
+
+
 # ── Briefing ─────────────────────────────────────────────────────────────────
 
 
