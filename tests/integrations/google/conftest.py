@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from integrations.google.fake_calendar import FakeCalendarFactory
+from integrations.google.fake_calendar import FakeCalendarFactory, FakeCalendarService
 from pincer.integrations.google.auth import SERVICE_SCOPES, GoogleAuth
 from pincer.integrations.google.service_factory import GoogleServiceFactory
 from pincer.integrations.google.tools_calendar import register_calendar_tools
@@ -256,8 +256,19 @@ def berlin_deployment(monkeypatch):
 
 
 @pytest.fixture
-def fake_factory(fake):
-    """A GoogleServiceFactory stand-in serving the module's fake Calendar service."""
+def fake():
+    """A fake Calendar with a Europe/Kiev primary calendar (Google's name for the
+    owner's zone); modules needing other calendars override this fixture."""
+    return FakeCalendarService({"primary": "Europe/Kiev"})
+
+
+@pytest.fixture
+def fake_factory(fake, berlin_deployment):
+    """A GoogleServiceFactory stand-in serving the module's fake Calendar service.
+
+    Depends on ``berlin_deployment`` so no fake-calendar test can silently read
+    the machine's real settings.
+    """
     return FakeCalendarFactory(fake)
 
 

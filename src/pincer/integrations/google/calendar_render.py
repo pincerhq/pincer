@@ -173,9 +173,9 @@ def _when_labelled(event: dict[str, Any], zone: ZoneInfo) -> tuple[str, str]:
     return start, end
 
 
-def _own_zone_name(event: dict[str, Any]) -> str:
-    """The event's own stored ``timeZone`` ("" if it has none)."""
-    return str((event.get("start") or {}).get("timeZone") or "")
+def stored_zone_name(event: dict[str, Any], key: str = "start") -> str:
+    """The event's own stored ``timeZone`` for its start/end ("" if it has none)."""
+    return str((event.get(key) or {}).get("timeZone") or "")
 
 
 def _same_zone_name(name: str, zone: ZoneInfo, instants: list[datetime]) -> bool:
@@ -198,7 +198,7 @@ def render_event_details(
         f"End:         {end or STORED_TIMES_UNAVAILABLE}",
         f"Times shown in: {zone.key}",
     ]
-    own = _own_zone_name(event)
+    own = stored_zone_name(event)
     if own and not _same_zone_name(own, zone, event_instants([event])):
         # Kept on purpose (an update keeps it too). This — not the display
         # zone above — is the zone to pass when changing the event's times.
@@ -236,7 +236,8 @@ def render_write(
     if not start and not end:
         lines = [headline, f"Start: {STORED_TIMES_UNAVAILABLE}"]
     else:
-        lines = [headline, f"Start: {start} | End: {end} ({zone.key})"]
+        shown_start, shown_end = start or STORED_TIMES_UNAVAILABLE, end or STORED_TIMES_UNAVAILABLE
+        lines = [headline, f"Start: {shown_start} | End: {shown_end} ({zone.key})"]
     note = mismatch_note(zone, clock_zone, event_instants([event]), zone_label)
     if note:
         lines.append(note)

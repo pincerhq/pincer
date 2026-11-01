@@ -9,6 +9,7 @@ import logging
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from pincer.core.clock import load_zone
 from pincer.integrations.google import calendar_writer
 from pincer.integrations.google.calendar_render import (
     CALENDAR_ZONE_LABEL,
@@ -18,6 +19,7 @@ from pincer.integrations.google.calendar_render import (
     render_event_details,
     render_events,
     render_write,
+    stored_zone_name,
     zones_equivalent,
 )
 from pincer.integrations.google.calendar_tz import (
@@ -28,9 +30,9 @@ from pincer.integrations.google.calendar_tz import (
     localize,
     localize_bound,
     needs_zone,
+    parse_iso,
     resolver_for,
     rfc3339,
-    zone_or_none,
 )
 from pincer.integrations.google.models import fmt_list
 from pincer.integrations.google.quota import with_backoff
@@ -58,10 +60,8 @@ def _now_iso() -> str:
 
 def _days_after(bound: str, days: int) -> str:
     """``bound`` plus ``days`` (an instant), or now plus ``days`` if it can't be parsed."""
-    try:
-        return (datetime.fromisoformat(bound) + timedelta(days=days)).isoformat()
-    except ValueError:
-        return (datetime.now(UTC) + timedelta(days=days)).isoformat()
+    parsed = parse_iso(bound)
+    return ((parsed or datetime.now(UTC)) + timedelta(days=days)).isoformat()
 
 
 def _user_timezone(context: dict[str, Any] | None) -> str:
@@ -85,10 +85,14 @@ def _range(time_min: str, time_max: str, zone: ZoneInfo | None, *, defaults: boo
     "now + 7 days", which can land before a future start and return nothing.
     Without ``defaults`` (search) a missing bound stays missing.
     """
+
+    def _bound(value: str, *, end: bool = False) -> str:
+        return localize_bound(value, zone, end=end) if zone else rfc3339(value)
+
     start = time_min or (_now_iso() if defaults else "")
-    t_min = (localize_bound(start, zone) if zone else rfc3339(start)) if start else ""
+    t_min = _bound(start) if start else ""
     if time_max:
-        t_max = localize_bound(time_max, zone, end=True) if zone else rfc3339(time_max)
+        t_max = _bound(time_max, end=True)
     elif not defaults:
         t_max = ""
     elif zone is not None and is_date_only(start):
@@ -258,7 +262,7 @@ async def _write_zone(
     (Google reports it) but cannot localize anything.
     """
     if given.strip():
-        return given.strip(), zone_or_none(given)
+        return given.strip(), load_zone(given)
     zone = await _calendar_zone(factory, svc, calendar_id, context)
     return zone.key, zone
 
@@ -278,8 +282,8 @@ async def _confirmation_zone(
     the caller set a zone and Google stored exactly that one, it is the event's
     zone without a calendar lookup (the voice booking path).
     """
-    own = zone_or_none((saved.get("start") or {}).get("timeZone") or "")
-    given_zone = zone_or_none(given) if given.strip() else None
+    own = load_zone(stored_zone_name(saved))
+    given_zone = load_zone(given) if given.strip() else None
     if own is not None and given_zone is not None and own.key == given_zone.key:
         return own, EVENT_ZONE_LABEL
     zone, label = await _labeled_zone(factory, svc, calendar_id, context)
@@ -390,12 +394,16 @@ async def google__create_event(
 
 
 def _end_keeping_duration(
-    old_start: dict[str, Any], old_end: dict[str, Any], new_start: dict[str, Any]
+    old_start: dict[str, Any], old_end: dict[str, Any], new_start: dict[str, Any], caller_zone: str = ""
 ) -> dict[str, Any]:
     """The end that keeps the event's stored duration after its start moves.
 
     Without this, "move it to 17:00" on a 10:00–11:00 event would send
-    17:00–11:00, which Google rejects as an empty range.
+    17:00–11:00, which Google rejects as an empty range. The duration is kept
+    in WALL-CLOCK time of the start's zone (Fri 09:00 → Mon 09:00 stays
+    "Monday 09:00" across a DST change, as in Google's own UI), and the end
+    keeps its own stored zone (a Kyiv → New York flight still lands in New
+    York time) unless the caller named a zone for this update.
     """
     if "date" in new_start:
         if not (old_start.get("date") and old_end.get("date")):
@@ -404,12 +412,25 @@ def _end_keeping_duration(
         return {"date": (date.fromisoformat(new_start["date"]) + days).isoformat()}
     if not (old_start.get("dateTime") and old_end.get("dateTime")):
         raise ValueError(KIND_CHANGE_MESSAGE)
-    duration = datetime.fromisoformat(old_end["dateTime"]) - datetime.fromisoformat(old_start["dateTime"])
-    moved = datetime.fromisoformat(new_start["dateTime"]) + duration
-    zone = zone_or_none(new_start.get("timeZone") or "")
-    end: dict[str, Any] = {"dateTime": (moved.astimezone(zone) if zone else moved).isoformat()}
-    if new_start.get("timeZone"):
-        end["timeZone"] = new_start["timeZone"]
+    was_start, was_end = parse_iso(old_start["dateTime"]), parse_iso(old_end["dateTime"])
+    starts = parse_iso(new_start["dateTime"])
+    if was_start is None or was_end is None or starts is None or starts.tzinfo is None:
+        raise ValueError(f"Could not read the new start {new_start.get('dateTime')!r}; pass end as well.")
+    start_zone = load_zone(stored_zone_name({"start": new_start}))
+    if start_zone is not None:
+        wall = was_end.astimezone(start_zone).replace(tzinfo=None) - was_start.astimezone(start_zone).replace(
+            tzinfo=None
+        )
+        moved = (starts.astimezone(start_zone).replace(tzinfo=None) + wall).replace(tzinfo=start_zone)
+    else:
+        moved = starts + (was_end - was_start)
+    end_name = (
+        caller_zone.strip() or stored_zone_name({"end": old_end}, "end") or stored_zone_name({"start": new_start})
+    )
+    end_zone = load_zone(end_name) if end_name else None
+    end: dict[str, Any] = {"dateTime": (moved.astimezone(end_zone) if end_zone else moved).isoformat()}
+    if end_name:
+        end["timeZone"] = end_name
     return end
 
 
@@ -447,12 +468,17 @@ async def google__update_event(
         if is_date_only(value):
             changed[key] = {"date": value.strip()}
             continue
-        stored_zone = str(event.get(key, {}).get("timeZone") or "")
+        stored_zone = stored_zone_name(event, key)
         tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone or stored_zone)
         changed[key] = {"dateTime": localize(value, zone) if zone else rfc3339(value), "timeZone": tz_name}
     if "start" in changed and "end" not in changed:
-        changed["end"] = _end_keeping_duration(event.get("start") or {}, event.get("end") or {}, changed["start"])
+        changed["end"] = _end_keeping_duration(
+            event.get("start") or {}, event.get("end") or {}, changed["start"], timezone
+        )
     event.update(changed)
+    if ("date" in (event.get("start") or {})) != ("date" in (event.get("end") or {})):
+        # A mixed all-day/timed body is a raw 400 from Google; say what to do instead.
+        raise ValueError(KIND_CHANGE_MESSAGE)
     updated = await calendar_writer.update(
         svc, calendar_id, event_id, event, trace=calendar_writer.Trace.from_context(context)
     )

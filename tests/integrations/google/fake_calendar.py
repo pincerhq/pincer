@@ -17,7 +17,10 @@ tools depend on:
 - A bare date in ``dateTime`` is a 400; all-day events span midnight to
   midnight in the calendar's zone.
 - An inverted range (timeMax before timeMin) lists nothing, without an error.
-- An event whose end is not after its start is a 400 ("time range is empty").
+- An end BEFORE the start is a 400 timeRangeEmpty ("The specified time range is
+  empty."); end == start is stored as a zero-length event — both measured live on
+  the owner's calendar (2026-11-01).
+- An inverted range lists nothing and free/busy reports nothing, without an error.
 - A write's response is the stored copy (``on_store`` can alter what is stored,
   ``drop_id_on_write`` strips the ``id`` from the response).
 - Insert honours a client-supplied ``id`` (base32hex, 5–1024 chars, else 400);
@@ -213,6 +216,7 @@ class _FreeBusy:
             self._fake.calls.append(("freebusy.query", {"body": copy.deepcopy(body)}))
             t_min = _parse_bound("timeMin", body.get("timeMin"))
             t_max = _parse_bound("timeMax", body.get("timeMax"))
+            inverted = t_max <= t_min
             calendars: dict[str, Any] = {}
             for item in body.get("items", []):
                 cal_id = item["id"]
@@ -221,7 +225,7 @@ class _FreeBusy:
                     calendars[cal_id] = {"errors": [{"domain": "global", "reason": "notFound"}], "busy": []}
                     continue
                 busy = []
-                for event in cal["events"].values():
+                for event in [] if inverted else cal["events"].values():
                     if event.get("status") == "cancelled":
                         continue
                     start, end = self._fake.instants(event, cal["timeZone"])
@@ -344,8 +348,8 @@ class FakeCalendarService:
         for key in ("start", "end"):
             event[key] = self._normalize(cal["timeZone"], key, event.get(key) or {})
         start, end = self.instants(event, cal["timeZone"])
-        if end <= start:
-            # Google: "The specified time range is empty." (e.g. a moved start past the old end)
+        if end < start:
+            # Google (measured): end < start → 400 timeRangeEmpty; end == start is allowed.
             raise http_error(400, "The specified time range is empty.")
         event.setdefault("status", "confirmed")
         event["htmlLink"] = f"https://calendar.google.com/calendar/event?eid={event['id']}"

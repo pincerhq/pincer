@@ -470,3 +470,116 @@ async def test_moving_between_all_day_and_timed_needs_an_end(fake_factory, fake)
         await google__update_event(fake_factory, event_id="evt1", start="2026-11-25T10:00:00")
 
     assert fake.events_on("primary")[0]["start"] == {"date": "2026-11-20"}
+
+
+# ── Update review fixes (FR1–FR5) ────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("seed_all_day", "changes"),
+    [
+        (False, {"end": "2026-11-07"}),  # timed event, bare-date end
+        (True, {"end": "2026-11-21T12:00:00"}),  # all-day event, timed end
+        (False, {"start": "2026-11-13", "end": "2026-11-13T12:00:00"}),  # date start, timed end
+    ],
+)
+async def test_mixed_all_day_and_timed_start_end_is_refused_before_writing(fake_factory, fake, seed_all_day, changes):
+    if seed_all_day:
+        fake.seed_all_day("primary", "Trip", "2026-11-20", "2026-11-21")
+    else:
+        fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00+02:00", "2026-11-12T11:00:00+02:00")
+
+    with pytest.raises(ValueError, match="needs both a new start and a new end"):
+        await google__update_event(fake_factory, event_id="evt1", **changes)
+
+    assert fake.sent("events.update") == []
+
+
+def _seed_flight(fake: FakeCalendarService) -> None:
+    """Kyiv 10:00 → New York 14:00 (= 21:00 Kyiv): start and end in different zones."""
+    body = {
+        "summary": "Flight",
+        "start": {"dateTime": "2026-11-12T10:00:00", "timeZone": "Europe/Kiev"},
+        "end": {"dateTime": "2026-11-12T14:00:00", "timeZone": "America/New_York"},
+    }
+    fake.events().insert(calendarId="primary", body=body).execute()
+
+
+async def test_moving_the_start_keeps_the_ends_own_zone(fake_factory, fake):
+    _seed_flight(fake)
+
+    await google__update_event(fake_factory, event_id="evt1", start="2026-11-13T10:00:00")
+
+    [update] = fake.sent("events.update")
+    assert update["body"]["end"] == {"dateTime": "2026-11-13T14:00:00-05:00", "timeZone": "America/New_York"}
+    assert fake.event("primary", "evt1")["end"] == {
+        "dateTime": "2026-11-13T21:00:00+02:00",
+        "timeZone": "America/New_York",
+    }
+
+
+async def test_kept_duration_is_wall_clock_across_a_dst_change(fake_factory, fake):
+    """Fri 09:00 → Mon 09:00 across 25 Oct (73 h elapsed) moved a week on still ends Mon 09:00."""
+    fake.seed_event("primary", "Long weekend", "2026-10-23T09:00:00", "2026-10-26T09:00:00", time_zone="Europe/Kiev")
+
+    await google__update_event(fake_factory, event_id="evt1", start="2026-10-30T09:00:00")
+
+    event = fake.event("primary", "evt1")
+    assert (event["start"]["dateTime"], event["end"]["dateTime"]) == (
+        "2026-10-30T09:00:00+02:00",
+        "2026-11-02T09:00:00+02:00",
+    )
+
+
+async def test_confirmation_marks_a_single_missing_stored_time(fake_factory, fake):
+    def _response_without_end(event):
+        event.pop("end", None)
+
+    fake.on_store = _response_without_end
+
+    result = await google__create_event(
+        fake_factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00"
+    )
+
+    assert "Start: 2026-11-12T10:00:00+02:00 | End: (stored times unavailable) (Europe/Kiev)" in result.splitlines()
+
+
+async def test_start_only_move_of_a_zero_length_event_works(fake_factory, fake):
+    """Measured live: Google stores end == start (10:00→10:00) and rejects only end < start."""
+    fake.seed_event("primary", "Reminder", "2026-11-12T10:00:00+02:00", "2026-11-12T10:00:00+02:00")
+
+    await google__update_event(fake_factory, event_id="evt1", start="2026-11-12T17:00:00")
+
+    event = fake.event("primary", "evt1")
+    assert (event["start"]["dateTime"], event["end"]["dateTime"]) == (
+        "2026-11-12T17:00:00+02:00",
+        "2026-11-12T17:00:00+02:00",
+    )
+
+
+def test_fake_rejects_an_end_before_the_start(fake):
+    from googleapiclient.errors import HttpError
+
+    with pytest.raises(HttpError) as raised:
+        fake.seed_event("primary", "Backwards", "2026-11-12T11:00:00+02:00", "2026-11-12T10:00:00+02:00")
+
+    assert raised.value.status_code == 400
+
+
+def test_fake_freebusy_returns_nothing_for_an_inverted_range(fake):
+    # 08:00–13:00 overlaps both bounds, so only the inverted-range rule can empty the result.
+    fake.seed_event("primary", "Workshop", "2026-11-12T08:00:00+02:00", "2026-11-12T13:00:00+02:00")
+
+    result = (
+        fake.freebusy()
+        .query(
+            body={
+                "timeMin": "2026-11-12T12:00:00+02:00",
+                "timeMax": "2026-11-12T09:00:00+02:00",
+                "items": [{"id": "primary"}],
+            }
+        )
+        .execute()
+    )
+
+    assert result["calendars"]["primary"]["busy"] == []

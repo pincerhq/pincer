@@ -53,11 +53,6 @@ _DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _RESOLVERS: weakref.WeakKeyDictionary[Any, CalendarTimezoneResolver] = weakref.WeakKeyDictionary()
 
 
-def zone_or_none(name: object) -> ZoneInfo | None:
-    """``ZoneInfo(name)`` for a valid IANA name, else None (never raises)."""
-    return load_zone(name) if isinstance(name, str) else None
-
-
 def clock_zone(user_timezone: str = "") -> ZoneInfo:
     """The agent clock zone — identity zone, then ``PINCER_TIMEZONE``, then the
     clock's default: the same source as the system-prompt clock."""
@@ -76,7 +71,8 @@ def _settings_zone() -> ZoneInfo:
     return clock_zone("")
 
 
-def _parse(value: str) -> datetime | None:
+def parse_iso(value: str) -> datetime | None:
+    """``datetime.fromisoformat`` that returns None instead of raising."""
     try:
         return datetime.fromisoformat(value.strip())
     except ValueError:
@@ -90,13 +86,13 @@ def is_date_only(value: str) -> bool:
 
 def needs_zone(value: str) -> bool:
     """True when ``value`` is a date/time without an offset (so a zone is needed)."""
-    parsed = _parse(value) if value else None
+    parsed = parse_iso(value) if value else None
     return parsed is not None and parsed.tzinfo is None
 
 
 def rfc3339(value: str) -> str:
     """An offset-bearing value re-serialised as RFC 3339; anything else unchanged."""
-    parsed = _parse(value) if value else None
+    parsed = parse_iso(value) if value else None
     if parsed is None or parsed.tzinfo is None:
         return value
     return parsed.isoformat()
@@ -110,7 +106,7 @@ def localize(value: str, zone: ZoneInfo) -> str:
     """
     if not value or _DATE_ONLY_RE.match(value.strip()):
         return value
-    parsed = _parse(value)
+    parsed = parse_iso(value)
     if parsed is None:
         return value
     if parsed.tzinfo is not None:
@@ -139,7 +135,7 @@ def local_day_span(time_min: str, time_max: str, zone: ZoneInfo) -> tuple[str, s
     local midnight belongs to the day before."""
 
     def _local(bound: str) -> datetime | None:
-        parsed = _parse(bound) if bound else None
+        parsed = parse_iso(bound) if bound else None
         if parsed is None:
             return None
         return parsed.astimezone(zone) if parsed.tzinfo else parsed
@@ -169,7 +165,7 @@ class CalendarTimezoneResolver:
         zone = await self._calendar_zone(svc, calendar_id or "primary")
         if zone is not None:
             return zone, SOURCE_CALENDAR
-        zone = zone_or_none(user_timezone) if user_timezone else None
+        zone = load_zone(user_timezone) if user_timezone else None
         if zone is not None:
             return zone, SOURCE_IDENTITY
         return _settings_zone(), SOURCE_SETTINGS
@@ -177,7 +173,7 @@ class CalendarTimezoneResolver:
     async def _calendar_zone(self, svc: Any, calendar_id: str) -> ZoneInfo | None:
         now = self._clock()
         cached = self._cache.get(calendar_id)
-        stale = zone_or_none(cached[0]) if cached is not None else None
+        stale = load_zone(cached[0]) if cached is not None else None
         if cached is not None and now - cached[1] < self._ttl_s:
             return stale
         failed_at = self._failed_at.get(calendar_id)
@@ -197,7 +193,7 @@ class CalendarTimezoneResolver:
             )
             return stale
         name = calendar.get("timeZone") if isinstance(calendar, dict) else None
-        zone = zone_or_none(name)
+        zone = load_zone(name) if isinstance(name, str) else None
         if zone is None:
             self._failed_at[calendar_id] = now
             return stale
