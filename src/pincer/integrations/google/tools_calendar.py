@@ -610,11 +610,6 @@ async def google__move_event(
     return f"Event {event_id} moved to {destination_calendar_id} (new id={result.get('id', '')})"
 
 
-def _as_event(value: Any) -> dict[str, Any] | None:
-    """A Google response as an event dict for logging (None if it isn't one)."""
-    return value if isinstance(value, dict) else None
-
-
 async def google__accept_event(
     factory: GoogleServiceFactory,
     event_id: str,
@@ -630,15 +625,13 @@ async def google__accept_event(
     for att in event.get("attendees", []):
         if att.get("self") or att.get("email") == self_email:
             att["responseStatus"] = "accepted"
-    patched = await with_backoff(
-        lambda: (
-            svc.events()
-            .patch(calendarId=calendar_id, eventId=event_id, body={"attendees": event.get("attendees", [])})
-            .execute()
-        )
-    )
-    calendar_writer.log_write(
-        "accept", calendar_writer.Trace.from_context(context), calendar_id, _as_event(patched), event_id=event_id
+    await calendar_writer.patch(
+        svc,
+        calendar_id,
+        event_id,
+        {"attendees": event.get("attendees", [])},
+        op="accept",
+        trace=calendar_writer.Trace.from_context(context),
     )
     return f"Accepted event: {event.get('summary', event_id)}"
 
@@ -655,15 +648,13 @@ async def google__decline_event(
     for att in event.get("attendees", []):
         if att.get("self"):
             att["responseStatus"] = "declined"
-    patched = await with_backoff(
-        lambda: (
-            svc.events()
-            .patch(calendarId=calendar_id, eventId=event_id, body={"attendees": event.get("attendees", [])})
-            .execute()
-        )
-    )
-    calendar_writer.log_write(
-        "decline", calendar_writer.Trace.from_context(context), calendar_id, _as_event(patched), event_id=event_id
+    await calendar_writer.patch(
+        svc,
+        calendar_id,
+        event_id,
+        {"attendees": event.get("attendees", [])},
+        op="decline",
+        trace=calendar_writer.Trace.from_context(context),
     )
     return f"Declined event: {event.get('summary', event_id)}"
 
@@ -684,20 +675,14 @@ async def google__add_google_meet(
             }
         }
     }
-    updated = await with_backoff(
-        lambda: (
-            svc.events()
-            .patch(
-                calendarId=calendar_id,
-                eventId=event_id,
-                body=body,
-                conferenceDataVersion=1,
-            )
-            .execute()
-        )
-    )
-    calendar_writer.log_write(
-        "add_meet", calendar_writer.Trace.from_context(context), calendar_id, _as_event(updated), event_id=event_id
+    updated = await calendar_writer.patch(
+        svc,
+        calendar_id,
+        event_id,
+        body,
+        op="add_meet",
+        trace=calendar_writer.Trace.from_context(context),
+        conferenceDataVersion=1,
     )
     meet_link = updated.get("conferenceData", {}).get("entryPoints", [{}])[0].get("uri", "pending")
     return f"Google Meet added to event {event_id}: {meet_link}"

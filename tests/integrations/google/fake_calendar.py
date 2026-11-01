@@ -100,6 +100,19 @@ class _Calendars:
         return _Request(_run)
 
 
+class _CalendarList:
+    def __init__(self, fake: FakeCalendarService) -> None:
+        self._fake = fake
+
+    def get(self, calendarId: str) -> _Request:  # noqa: N803
+        def _run() -> dict[str, Any]:
+            self._fake.calls.append(("calendarList.get", {"calendarId": calendarId}))
+            self._fake.calendar(calendarId)
+            return {"id": "owner@example.com" if calendarId == "primary" else calendarId}
+
+        return _Request(_run)
+
+
 class _Events:
     def __init__(self, fake: FakeCalendarService) -> None:
         self._fake = fake
@@ -178,6 +191,19 @@ class _Events:
             self._fake.event(calendarId, eventId)
             event = self._fake.store(cal, {**copy.deepcopy(body), "id": eventId})
             cal["events"][eventId] = event
+            return self._fake.write_response(event)
+
+        return _Request(_run)
+
+    def patch(self, calendarId: str, eventId: str, body: dict[str, Any], **kwargs: Any) -> _Request:  # noqa: N803
+        def _run() -> dict[str, Any]:
+            self._fake.calls.append(
+                ("events.patch", {"calendarId": calendarId, "eventId": eventId, "body": copy.deepcopy(body), **kwargs})
+            )
+            event = self._fake.event(calendarId, eventId)
+            event.update(copy.deepcopy(body))
+            if "conferenceData" in body:
+                event["conferenceData"] = {"entryPoints": [{"uri": f"https://meet.google.com/{eventId}"}]}
             return self._fake.write_response(event)
 
         return _Request(_run)
@@ -276,6 +302,9 @@ class FakeCalendarService:
 
     def events(self) -> _Events:  # noqa: D102
         return _Events(self)
+
+    def calendarList(self) -> _CalendarList:  # noqa: D102, N802
+        return _CalendarList(self)
 
     def freebusy(self) -> _FreeBusy:  # noqa: D102
         return _FreeBusy(self)

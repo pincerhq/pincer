@@ -166,7 +166,8 @@ async def test_decline_event(mock_factory, mock_calendar_service):
 
 async def test_add_google_meet(mock_factory, mock_calendar_service):
     mock_calendar_service.events().patch().execute.return_value = {
-        "conferenceData": {"entryPoints": [{"uri": "https://meet.google.com/abc-defg-hij"}]}
+        "id": "evt1",  # Google's stored copy carries the ID; without it the write is unconfirmed
+        "conferenceData": {"entryPoints": [{"uri": "https://meet.google.com/abc-defg-hij"}]},
     }
     result = await google__add_google_meet(mock_factory, event_id="evt1")
     assert "meet.google.com" in result

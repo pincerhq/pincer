@@ -28,6 +28,7 @@ KIEV_NOTE = (
     "Note: times are in this calendar's timezone (Europe/Kiev), which differs from your clock timezone (Europe/Berlin)."
 )
 LINK1 = "https://calendar.google.com/calendar/event?eid=evt1"
+PATCH_TOOLS = {"google__accept_event", "google__decline_event", "google__add_google_meet"}
 
 
 pytestmark = pytest.mark.usefixtures("berlin_deployment")
@@ -219,6 +220,9 @@ async def test_create_then_get_by_returned_id_returns_the_same_event(fake_factor
     [
         ("google__create_event", {"summary": "Dentist", "start": "2026-11-12T10:00:00", "end": "2026-11-12T11:00:00"}),
         ("google__update_event", {"event_id": "evt1", "summary": "Dentist (moved)", "start": "2026-11-12T17:00:00"}),
+        ("google__accept_event", {"event_id": "evt1"}),
+        ("google__decline_event", {"event_id": "evt1"}),
+        ("google__add_google_meet", {"event_id": "evt1"}),
     ],
 )
 async def test_write_response_without_id_is_an_unconfirmed_error(
@@ -237,6 +241,9 @@ async def test_write_response_without_id_is_an_unconfirmed_error(
     assert "may or may not exist" in result.content
     assert "created" not in result.content.lower()
     assert "updated" not in result.content.lower()
+    assert not result.content.startswith(("Accepted", "Declined", "Google Meet added"))
+    if tool in PATCH_TOOLS:  # precondition: the write really reached Google
+        assert [name for name, _kw in fake.calls if name == "events.patch"] == ["events.patch"]
 
 
 # ── Voice format contract on real renderer output ────────────────────────────

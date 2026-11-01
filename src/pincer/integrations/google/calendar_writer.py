@@ -255,6 +255,25 @@ async def update(
     return confirmed
 
 
+async def patch(
+    svc: Any,
+    calendar_id: str,
+    event_id: str,
+    body: dict[str, Any],
+    *,
+    op: str,
+    trace: Trace | None = None,
+    **patch_kwargs: Any,
+) -> dict[str, Any]:
+    """Patch event ``event_id`` (accept, decline, add Meet) and return Google's stored copy (raises if unconfirmed)."""
+    saved = await with_backoff(
+        lambda: svc.events().patch(calendarId=calendar_id, eventId=event_id, body=body, **patch_kwargs).execute()
+    )
+    confirmed = _confirmed(saved)
+    log_write(op, trace or Trace(), calendar_id, confirmed)
+    return confirmed
+
+
 async def _attempted(fn: Any) -> tuple[Any, int]:
     """Run ``fn`` under the retry wrapper; return its result and how many attempts were made.
 
