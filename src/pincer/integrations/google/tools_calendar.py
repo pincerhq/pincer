@@ -55,6 +55,9 @@ KIND_CHANGE_MESSAGE = (
     "Moving an event between all-day and timed needs both a new start and a new end — "
     "pass end as well (a date for all-day, a time otherwise)."
 )
+ALL_DAY_CREATE_MESSAGE = (
+    "An all-day event needs both start and end as dates (YYYY-MM-DD); a timed event needs both as date-times."
+)
 #: Appended when a same-turn re-call found the event but asked for other details (dedup covers
 #: title and times only, so those details were dropped).
 UNAPPLIED_NOTE = (
@@ -377,14 +380,16 @@ async def google__create_event(
 
     Offset-less start/end are read in ``timezone`` when given, else in the
     calendar's own zone (see calendar_tz); offset-bearing ones pass unchanged.
+    Two bare dates make an all-day event (Google's end date is exclusive; an
+    end on or before the start means that one day).
     """
+    if is_date_only(start) != is_date_only(end):
+        raise ValueError(ALL_DAY_CREATE_MESSAGE)
     svc = await factory.get("calendar")
 
-    tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone)
     body: dict[str, Any] = {
         "summary": summary,
-        "start": {"dateTime": localize(start, zone) if zone else rfc3339(start), "timeZone": tz_name},
-        "end": {"dateTime": localize(end, zone) if zone else rfc3339(end), "timeZone": tz_name},
+        **await _created_span(factory, svc, calendar_id, context, start, end, timezone),
     }
     if idempotency_key:
         # Not used for dedup any more (the client-supplied ID is); kept as a
@@ -455,6 +460,26 @@ async def google__create_event(
         zone_label=label,
         extra=extra,
     )
+
+
+async def _created_span(
+    factory: GoogleServiceFactory,
+    svc: Any,
+    calendar_id: str,
+    context: dict[str, Any] | None,
+    start: str,
+    end: str,
+    timezone: str,
+) -> dict[str, dict[str, Any]]:
+    """The ``start``/``end`` fields of a new event: all-day for bare dates, else zoned date-times."""
+    if is_date_only(start):
+        first, last = date.fromisoformat(start.strip()), date.fromisoformat(end.strip())
+        return {"start": {"date": first.isoformat()}, "end": {"date": max(last, first + timedelta(days=1)).isoformat()}}
+    tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone)
+    return {
+        "start": {"dateTime": localize(start, zone) if zone else rfc3339(start), "timeZone": tz_name},
+        "end": {"dateTime": localize(end, zone) if zone else rfc3339(end), "timeZone": tz_name},
+    }
 
 
 def _unapplied_fields(requested: dict[str, Any], existing: dict[str, Any]) -> list[str]:

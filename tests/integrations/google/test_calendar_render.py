@@ -441,6 +441,38 @@ async def test_write_response_with_id_but_no_times_says_stored_times_unavailable
     assert result == (f"Event created: 'Dentist'\nStart: (stored times unavailable)\nID: {event_id}\nLink: {link}")
 
 
+# ── Creating an all-day event (PR #316 review) ──────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("end", "stored_end", "shown_end"),
+    [
+        ("2026-11-14", "2026-11-14", "2026-11-13"),  # Google's exclusive end, as given: the 12th and 13th
+        ("2026-11-12", "2026-11-13", "2026-11-12"),  # the same day as the start: that one day
+    ],
+)
+async def test_create_with_bare_dates_makes_an_all_day_event(fake_factory, fake, end, stored_end, shown_end):
+    result = await google__create_event(fake_factory, summary="Holiday", start="2026-11-12", end=end)
+
+    event_id, _link = _created(fake)
+    stored = fake.event("primary", event_id)
+    assert (stored["start"], stored["end"]) == ({"date": "2026-11-12"}, {"date": stored_end})
+    assert result.splitlines()[:2] == [
+        "Event created: 'Holiday'",
+        f"Start: 2026-11-12 (all day) | End: {shown_end} (all day) (Europe/Kiev)",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("start", "end"), [("2026-11-12", "2026-11-12T12:00:00"), ("2026-11-12T10:00:00", "2026-11-13")]
+)
+async def test_create_with_one_bare_date_is_refused_before_writing(fake_factory, fake, start, end):
+    with pytest.raises(ValueError, match="both start and end as dates"):
+        await google__create_event(fake_factory, summary="Holiday", start=start, end=end)
+
+    assert fake.sent("events.insert") == []
+
+
 # ── Moving an event keeps its duration (pre-existing bug, in scope) ──────────
 
 
