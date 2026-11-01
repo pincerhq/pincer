@@ -31,8 +31,8 @@ def test_run_all_returns_report(doctor_env):
     # + 1 ElevenLabs + 4 voice security (Sprint 8) + 2 observability (Sprint 9)
     # + 3 in-call tool execution (Sprint 11) + 2 receptionist (Sprint 12)
     # + 1 live listen-in announce gate (Sprint 15) + 1 schedule action types (issue #217)
-    # + 1 leftover shared API tokens (issue #228)
-    assert len(report.checks) == 63
+    # + 1 leftover shared API tokens (issue #228) + 1 Google Workspace token (issue #297)
+    assert len(report.checks) == 64
 
     assert 0 <= report.score <= 100
 
@@ -1724,3 +1724,46 @@ def test_schedule_action_types_warns_when_only_disabled_unknown(tmp_path):
     result = SecurityDoctor()._check_schedule_action_types(_sched_cfg(tmp_path))
     assert result.status == CheckStatus.WARNING
     assert "webhook_retry" in result.message
+
+
+@pytest.mark.parametrize(
+    ("enabled", "status", "expected", "hint"),
+    [
+        (
+            True,
+            {"status": "disabled", "enabled_services": [], "missing_scopes": [], "source": None},
+            CheckStatus.SKIPPED,
+            "pincer google setup",
+        ),
+        (
+            True,
+            {"status": "partial", "enabled_services": ["gmail"], "missing_scopes": ["x"], "source": "file"},
+            CheckStatus.WARNING,
+            "pincer google setup",
+        ),
+        (
+            True,
+            {"status": "active", "enabled_services": ["calendar"], "missing_scopes": [], "source": "file"},
+            CheckStatus.PASS,
+            "",
+        ),
+        (
+            False,
+            {"status": "disabled", "enabled_services": [], "missing_scopes": [], "source": None},
+            CheckStatus.SKIPPED,
+            "",
+        ),
+    ],
+)
+def test_google_workspace_check(monkeypatch, enabled, status, expected, hint):
+    """No token: calendar tools are off, and the doctor says how to connect (issue #297)."""
+    from pincer.integrations.google.config import GoogleIntegrationConfig
+
+    monkeypatch.setattr(
+        "pincer.integrations.google.config.load_config", lambda: GoogleIntegrationConfig(enabled=enabled)
+    )
+    monkeypatch.setattr("pincer.integrations.google.google_status", lambda: status)
+    result = SecurityDoctor()._check_google_workspace()
+    assert result.status == expected
+    assert result.category == "google"
+    assert (hint in result.fix_hint) if hint else result.fix_hint == ""

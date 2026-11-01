@@ -57,6 +57,21 @@ def test_workspace_registration_failure_logs_a_warning(settings, monkeypatch, ca
     assert "boom" in caplog.text
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_no_google_token_points_at_google_setup(settings, monkeypatch, caplog, enabled) -> None:
+    """Without a token there are no calendar tools: startup says how to connect (unless switched off)."""
+    from pincer.integrations.google.config import GoogleIntegrationConfig
+
+    monkeypatch.setattr("pincer.integrations.google.get_google_factory", lambda: None)
+    monkeypatch.setattr(
+        "pincer.integrations.google.config.load_config", lambda: GoogleIntegrationConfig(enabled=enabled)
+    )
+    with caplog.at_level(logging.DEBUG, logger="pincer.tools.bootstrap"):
+        register_default_tools(ToolRegistry(), settings)
+    hints = [r for r in caplog.records if "pincer google setup" in r.getMessage()]
+    assert [r.levelno for r in hints] == ([logging.INFO] if enabled else [])
+
+
 class TestScheduleToolRegistration:
     def test_registered_by_default(self, settings) -> None:
         registry = ToolRegistry()

@@ -23,6 +23,12 @@ if TYPE_CHECKING:
     from pincer.config import Settings
     from pincer.tools.registry import ToolRegistry
 
+#: Logged at startup when the Google integration is on but no usable token exists.
+GOOGLE_SETUP_HINT = (
+    "Google Workspace tools off (no calendar, Gmail or Drive): no usable Google token — "
+    "run `pincer google setup` to connect"
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -325,6 +331,10 @@ def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> N
 
         factory = get_google_factory()
         if factory is None:
+            from pincer.integrations.google.config import load_config
+
+            if load_config().enabled:
+                logger.info(GOOGLE_SETUP_HINT)
             return
         report["google"] = register_all_tools(tools, factory)
     except RuntimeError as e:

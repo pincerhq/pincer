@@ -184,6 +184,8 @@ class SecurityDoctor:
         report.checks.append(self._check_skill_sandbox_enabled(settings))
         report.checks.append(self._check_tool_approval_mode(settings))
         report.checks.append(self._check_schedule_action_types(settings))
+        # Google Workspace (1 check, issue #297)
+        report.checks.append(self._check_google_workspace())
         # MCP (8 checks, Sprint 8)
         report.checks.append(self._check_mcp_config_valid())
         report.checks.append(self._check_mcp_sandbox_enabled())
@@ -2016,6 +2018,34 @@ class SecurityDoctor:
         )
 
     # ── Signal (Sprint 7.5) ───────────────────────────────
+
+    def _check_google_workspace(self) -> CheckResult:
+        """Whether the Google token is usable — without it there are no calendar, Gmail or Drive tools."""
+        from pincer.integrations import google
+        from pincer.integrations.google.config import load_config
+
+        name, setup = "google_workspace_token", "Run `pincer google setup`"
+        if not load_config().enabled:
+            return CheckResult(name, CheckStatus.SKIPPED, "Google integration disabled in config", category="google")
+        state = google.google_status()
+        if state["status"] == "active":
+            services = ", ".join(state["enabled_services"])
+            return CheckResult(name, CheckStatus.PASS, f"Google token covers: {services}", category="google")
+        if state["status"] == "partial":
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"Google token is missing scopes; only {', '.join(state['enabled_services'])} enabled",
+                fix_hint=f"{setup} to re-consent",
+                category="google",
+            )
+        return CheckResult(
+            name,
+            CheckStatus.SKIPPED,
+            "No usable Google token — no calendar, Gmail or Drive tools",
+            fix_hint=f"{setup} to connect",
+            category="google",
+        )
 
     def _check_signal_phone_set(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)
