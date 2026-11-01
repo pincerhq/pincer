@@ -140,6 +140,27 @@ def test_cleanup_never_deletes_a_near_miss(served) -> None:
     assert sorted(e["id"] for e in served.events_on("primary")) == sorted([near, other])
 
 
+async def test_the_delete_step_re_checks_every_event_it_is_handed(served, capsys) -> None:
+    """Defence in depth: even a list that wrongly holds a near miss deletes only tagged events."""
+    tomorrow, far_day = _dates()
+    snap = _good_run(served, tomorrow, far_day)
+    near = served.seed_event("primary", f"{TAG}: Alpha", _at(tomorrow, 15), _at(tomorrow, 16))
+    handed = [served.event("primary", near), served.event("primary", snap["Alpha"])]
+
+    await smoke._delete_ours(served, handed, TAG)
+
+    assert [e["id"] for e in served.events_on("primary") if e["id"] in (near, snap["Alpha"])] == [near]
+    assert f"skipped {near} (not tagged {TAG})" in capsys.readouterr().out
+
+
+def test_plan_says_what_the_script_cannot_see(served, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(smoke, "new_tag", lambda: TAG)
+    assert smoke.main(["plan"]) == 0
+    out = capsys.readouterr().out
+    assert "invisible to this script" in out
+    assert "dropped the tag" in out and "outside the window" in out
+
+
 @pytest.mark.parametrize("missing", ["Alpha", "Meeting", "Kunde"])
 def test_a_snapshot_missing_an_id_fails(served, tmp_path, missing) -> None:
     """S3: an ID that was never recorded cannot be shown unchanged."""

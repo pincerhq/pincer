@@ -15,7 +15,11 @@ START with "<tag> " (case-sensitive) count as the run's events and only those
 are ever deleted; a title that merely contains the tag in another form
 ("Smoke-7F3A2C: Alpha") is a near miss: `check` FAILs and lists it, `cleanup`
 lists it and leaves it alone. The window follows --tomorrow, so `check` and
-`cleanup` still find the events when run days later. It uses the
+`cleanup` still find the events when run days later.
+
+Blind spots: a duplicate whose title dropped the tag entirely ("Alpha"), or one
+dated outside the window, is invisible to this script — check the calendar by
+eye around the run's dates. It uses the
 existing Google token location (PINCER_GOOGLE_TOKEN_JSON or the token file),
 the same one `pincer run` uses — run it from the Pincer checkout.
 
@@ -63,6 +67,10 @@ FAR_DAYS = 12  # step 2: an event 12 days out (the old builtin only looked 7 day
 WINDOW_BEFORE_DAYS = 1
 WINDOW_AFTER_DAYS = 2
 EVENT_MINUTES = 60
+BLIND_SPOTS = (
+    "Not checked: a duplicate whose title dropped the tag, or one dated outside the window, is invisible "
+    "to this script — look at the calendar around these dates yourself."
+)
 
 ALPHA = "Alpha"
 BETA = "Beta"
@@ -345,6 +353,7 @@ async def cmd_plan() -> int:
     cleanup = f"uv run python scripts/calendar_smoke.py cleanup --tag {tag} --tomorrow {tomorrow}"
     print(f"  {cleanup}            # dry run")
     print(f"  {cleanup} --confirm  # delete")
+    print(f"\n{BLIND_SPOTS}")
     return 0
 
 
@@ -393,10 +402,18 @@ async def cmd_cleanup(tag: str, tomorrow: date, far_day: date, confirm: bool) ->
     if not confirm:
         print("\nDry run — nothing deleted. Re-run with --confirm to delete exactly these events.")
         return 0
+    await _delete_ours(svc, events, tag)
+    return 0
+
+
+async def _delete_ours(svc: Any, events: list[dict[str, Any]], tag: str) -> None:
+    """Delete each event only if it is ours by the exact prefix — checked again here, per event."""
     for e in events:
+        if not is_tagged(e, tag):
+            print(f"  skipped {e['id']} (not tagged {tag})  {e.get('summary')}")
+            continue
         await asyncio.to_thread(svc.events().delete(calendarId=CALENDAR_ID, eventId=e["id"]).execute)
         print(f"  deleted {e['id']}  {e.get('summary')}")
-    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
