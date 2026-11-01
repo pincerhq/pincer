@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from pincer.integrations.google import calendar_writer
@@ -46,6 +46,10 @@ logger = logging.getLogger(__name__)
 
 #: Google's ``sendUpdates`` values; anything else leaves the API default.
 SEND_UPDATES_MODES = ("all", "externalOnly", "none")
+KIND_CHANGE_MESSAGE = (
+    "Moving an event between all-day and timed needs both a new start and a new end — "
+    "pass end as well (a date for all-day, a time otherwise)."
+)
 
 
 def _now_iso() -> str:
@@ -396,6 +400,30 @@ async def google__create_event(
     )
 
 
+def _end_keeping_duration(
+    old_start: dict[str, Any], old_end: dict[str, Any], new_start: dict[str, Any]
+) -> dict[str, Any]:
+    """The end that keeps the event's stored duration after its start moves.
+
+    Without this, "move it to 17:00" on a 10:00–11:00 event would send
+    17:00–11:00, which Google rejects as an empty range.
+    """
+    if "date" in new_start:
+        if not (old_start.get("date") and old_end.get("date")):
+            raise ValueError(KIND_CHANGE_MESSAGE)
+        days = date.fromisoformat(old_end["date"]) - date.fromisoformat(old_start["date"])
+        return {"date": (date.fromisoformat(new_start["date"]) + days).isoformat()}
+    if not (old_start.get("dateTime") and old_end.get("dateTime")):
+        raise ValueError(KIND_CHANGE_MESSAGE)
+    duration = datetime.fromisoformat(old_end["dateTime"]) - datetime.fromisoformat(old_start["dateTime"])
+    moved = datetime.fromisoformat(new_start["dateTime"]) + duration
+    zone = zone_or_none(new_start.get("timeZone") or "")
+    end: dict[str, Any] = {"dateTime": (moved.astimezone(zone) if zone else moved).isoformat()}
+    if new_start.get("timeZone"):
+        end["timeZone"] = new_start["timeZone"]
+    return end
+
+
 async def google__update_event(
     factory: GoogleServiceFactory,
     event_id: str,
@@ -411,7 +439,9 @@ async def google__update_event(
     """Update fields on an existing calendar event.
 
     Offset-less start/end are read in ``timezone`` when given, else in the
-    event's own stored zone, else in the calendar's zone.
+    event's own stored zone, else in the calendar's zone. A bare date moves an
+    all-day event. Given only a new start, the end moves with it (the stored
+    duration is kept); given only a new end, the start stays.
     """
     svc = await factory.get("calendar")
     event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
@@ -421,12 +451,19 @@ async def google__update_event(
         event["description"] = description
     if location:
         event["location"] = location
+    changed: dict[str, dict[str, Any]] = {}
     for key, value in (("start", start), ("end", end)):
         if not value:
             continue
+        if is_date_only(value):
+            changed[key] = {"date": value.strip()}
+            continue
         stored_zone = str(event.get(key, {}).get("timeZone") or "")
         tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone or stored_zone)
-        event[key] = {"dateTime": localize(value, zone) if zone else rfc3339(value), "timeZone": tz_name}
+        changed[key] = {"dateTime": localize(value, zone) if zone else rfc3339(value), "timeZone": tz_name}
+    if "start" in changed and "end" not in changed:
+        changed["end"] = _end_keeping_duration(event.get("start") or {}, event.get("end") or {}, changed["start"])
+    event.update(changed)
     updated = await calendar_writer.update(svc, calendar_id, event_id, event)
     shown, label = await _confirmation_zone(factory, svc, calendar_id, context, updated, timezone)
     return render_write(
@@ -726,10 +763,15 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 "summary": {"type": "string", "default": ""},
                 "start": {
                     "type": "string",
-                    "description": "New start, ISO 8601 local wall-clock time (e.g. 2026-03-28T17:00:00)",
+                    "description": "New start, ISO 8601 local wall-clock time (e.g. 2026-03-28T17:00:00), or a date "
+                    "for an all-day event. Given without end, the end moves with it (duration kept)",
                     "default": "",
                 },
-                "end": {"type": "string", "description": "New end, same rules as start", "default": ""},
+                "end": {
+                    "type": "string",
+                    "description": "New end, same rules as start. Given without start, the start stays",
+                    "default": "",
+                },
                 "description": {"type": "string", "default": ""},
                 "location": {"type": "string", "default": ""},
                 "timezone": {

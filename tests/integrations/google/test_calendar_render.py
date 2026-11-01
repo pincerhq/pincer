@@ -412,3 +412,49 @@ async def test_write_response_with_id_but_no_times_says_stored_times_unavailable
     )
 
     assert result == (f"Event created: 'Dentist'\nStart: (stored times unavailable)\nID: evt1\nLink: {LINK1}")
+
+
+# ── Moving an event keeps its duration (pre-existing bug, in scope) ──────────
+
+
+async def test_moving_only_the_start_keeps_the_duration(fake_factory, fake):
+    fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00+02:00", "2026-11-12T11:00:00+02:00")
+
+    result = await google__update_event(fake_factory, event_id="evt1", start="2026-11-12T17:00:00")
+
+    [event] = fake.events_on("primary")
+    assert (event["start"]["dateTime"], event["end"]["dateTime"]) == (
+        "2026-11-12T17:00:00+02:00",
+        "2026-11-12T18:00:00+02:00",
+    )
+    assert "Start: 2026-11-12T17:00:00+02:00 | End: 2026-11-12T18:00:00+02:00 (Europe/Kiev)" in result.splitlines()
+
+
+async def test_moving_only_the_start_of_an_all_day_event_keeps_its_days(fake_factory, fake):
+    fake.seed_all_day("primary", "Trip", "2026-11-20", "2026-11-23")
+
+    await google__update_event(fake_factory, event_id="evt1", start="2026-11-25")
+
+    [event] = fake.events_on("primary")
+    assert (event["start"], event["end"]) == ({"date": "2026-11-25"}, {"date": "2026-11-28"})
+
+
+async def test_changing_only_the_end_keeps_the_start(fake_factory, fake):
+    fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00+02:00", "2026-11-12T11:00:00+02:00")
+
+    await google__update_event(fake_factory, event_id="evt1", end="2026-11-12T12:00:00")
+
+    [event] = fake.events_on("primary")
+    assert (event["start"]["dateTime"], event["end"]["dateTime"]) == (
+        "2026-11-12T10:00:00+02:00",
+        "2026-11-12T12:00:00+02:00",
+    )
+
+
+async def test_moving_between_all_day_and_timed_needs_an_end(fake_factory, fake):
+    fake.seed_all_day("primary", "Trip", "2026-11-20", "2026-11-21")
+
+    with pytest.raises(ValueError, match="needs both a new start and a new end"):
+        await google__update_event(fake_factory, event_id="evt1", start="2026-11-25T10:00:00")
+
+    assert fake.events_on("primary")[0]["start"] == {"date": "2026-11-20"}

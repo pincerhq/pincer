@@ -17,6 +17,7 @@ tools depend on:
 - A bare date in ``dateTime`` is a 400; all-day events span midnight to
   midnight in the calendar's zone.
 - An inverted range (timeMax before timeMin) lists nothing, without an error.
+- An event whose end is not after its start is a 400 ("time range is empty").
 - A write's response is the stored copy (``on_store`` can alter what is stored,
   ``drop_id_on_write`` strips the ``id`` from the response).
 
@@ -283,6 +284,10 @@ class FakeCalendarService:
     def store(self, cal: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
         for key in ("start", "end"):
             event[key] = self._normalize(cal["timeZone"], key, event.get(key) or {})
+        start, end = self.instants(event, cal["timeZone"])
+        if end <= start:
+            # Google: "The specified time range is empty." (e.g. a moved start past the old end)
+            raise http_error(400, "The specified time range is empty.")
         event.setdefault("status", "confirmed")
         event["htmlLink"] = f"https://calendar.google.com/calendar/event?eid={event['id']}"
         return event
