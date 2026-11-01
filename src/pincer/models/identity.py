@@ -1,8 +1,8 @@
 """Cross-channel identity: one profile per Pincer user, the channel ids linked
-to it, and the credentials it signs in to the API with."""
+to it, its phone numbers, and the credentials it signs in to the API with."""
 
 import sqlalchemy as sa
-from sqlalchemy import Column, ForeignKey, Index, Integer, Text
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, Text
 from sqlmodel import Field, SQLModel
 
 from pincer.db.ids import new_id
@@ -69,6 +69,35 @@ class IdentityCredential(SQLModel, table=True):
     api_key_last4: str | None = Field(default=None, sa_column=Column(Text()))
     api_key_created_at: str | None = Field(default=None, sa_column=Column(IsoText()))
     token_version: int = Field(default=0, sa_column=Column(Integer(), nullable=False, server_default=sa.text("0")))
+    created_at: str | None = Field(
+        default=None, sa_column=Column(IsoText(), server_default=sa.text("CURRENT_TIMESTAMP"))
+    )
+
+
+class IdentityPhone(SQLModel, table=True):
+    """A phone number that belongs to an identity.
+
+    A table of its own for the same reason as `IdentityCredential`: the
+    profile is reflected field by field. The number is the key, so one number
+    has one owner. Only a `confirmed` number tells a voice call that the
+    person on the line is this identity; numbers from the config are
+    confirmed, anything else starts unconfirmed.
+    """
+
+    __tablename__ = "pincer_identity_phones"
+    __table_args__ = (Index("idx_identity_phones_user", "pincer_user_id"),)
+
+    phone: str = Field(sa_column=Column(Text(), primary_key=True))  # +E.164
+    pincer_user_id: str = Field(
+        sa_column=Column(
+            Text(),
+            ForeignKey("pincer_identity_profiles.pincer_user_id", ondelete="CASCADE"),
+            nullable=False,
+        )
+    )
+    confirmed: bool = Field(default=False, sa_column=Column(Boolean(), nullable=False, server_default=sa.text("FALSE")))
+    confirmed_at: str | None = Field(default=None, sa_column=Column(IsoText()))
+    source: str = Field(default="api", sa_column=Column(Text(), nullable=False))  # "config" | "api"
     created_at: str | None = Field(
         default=None, sa_column=Column(IsoText(), server_default=sa.text("CURRENT_TIMESTAMP"))
     )

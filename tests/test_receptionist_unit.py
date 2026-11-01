@@ -243,9 +243,10 @@ def test_inbound_toolset_exact(settings):
     assert scope == {"google__check_freebusy", "business_profile_lookup", "google__create_event", "send_owner_message"}
     for absent in ("memory_search", "contact_lookup", "google__list_events", "memory_note", "email_send"):
         assert absent not in scope
-    # extras never widen the public line
-    settings.voice_tools_extra = "google__list_events,memory_search"
+    # the guest list never widens the public line, nor does a registered caller
+    settings.voice_guests_tools_allowed = "google__list_events,memory_search"
     assert allowed_tools_for_call(settings, kind="receptionist", direction="inbound") == scope
+    assert allowed_tools_for_call(settings, kind="receptionist", direction="inbound", caller_class="user") == scope
 
 
 def test_freebusy_returns_windows_only():
@@ -664,9 +665,7 @@ class TestReceptionistBookingMode:
 
         state = CallState(call_sid="CA1", direction=CallDirection.INBOUND, caller_number="+49")
         state.metadata[tool_policy.META_ALLOWED_TOOLS] = frozenset({"google__create_event"})
-        settings = SimpleNamespace(
-            voice_max_writes_per_call=5, voice_tool_approval="off", voice_tool_approval_overrides=""
-        )
+        settings = SimpleNamespace(voice_max_writes_per_call=5)
         args = {"summary": "x"}
 
         state.metadata[tool_policy.META_MODE_OVERRIDES] = {"google__create_event": "verbal"}

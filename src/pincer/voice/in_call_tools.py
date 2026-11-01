@@ -10,14 +10,19 @@ spoke the outcome).
 
 Flows (§6):
 - Tier R: optional filler → execute → ``[TOOL RESULT: …]`` into the LLM context.
-- Tier W / verbal: speak VERIFY_ACTION, park the pending write; the next caller
-  utterance is parsed (yes/no/unclear), a YES sets the fingerprinted verbal
-  confirmation and the LLM is told to re-emit the tool call, which then
-  executes.
-- Tier W / user: speak TOOL_HOLD, post the approval card to the initiating
-  user, reassure every 8s, then approved → execute / denied → TOOL_DECLINED /
-  timeout → TOOL_TIMEOUT_DEFER + post-call follow-up.
-- Tier W / off: execute immediately (budgeted), disclosed in the report.
+- Tier W / verbal (every guest write; a registered caller's write that the
+  approval policy gates): speak VERIFY_ACTION, park the pending write; the
+  next caller utterance is parsed (yes/no/unclear), a YES sets the
+  fingerprinted verbal confirmation and the LLM is told to re-emit the tool
+  call, which then executes.
+- Tier W / auto (a registered caller's write the approval policy lets
+  through): execute immediately (budgeted).
+- Tier W / user (only when trusted code pins it, e.g. the receptionist's
+  booking approval): speak TOOL_HOLD, post the approval card to the
+  initiating user, reassure every 8s, then approved → execute / denied →
+  TOOL_DECLINED / timeout → TOOL_TIMEOUT_DEFER + post-call follow-up.
+- Tier W / off (pinned the same way): execute immediately (budgeted),
+  disclosed in the report.
 
 The gate is bound to the turn through a ContextVar (``bind_gate``) so both
 agent paths — streaming and blocking — find it without new plumbing, exactly
@@ -28,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import time
@@ -122,6 +128,18 @@ REASON_CALL_ENDED = "call_ended"
 
 META_DEFERRED = "deferred_actions"
 
+# Tools whose create is made idempotent per call: a yes said twice, or a turn
+# retried, finds the event made the first time instead of booking it again.
+IDEMPOTENT_CREATE_TOOLS = frozenset({"google__create_event"})
+
+
+def call_idempotency_key(call_sid: str, tool_name: str, args: dict[str, Any]) -> str:
+    """Stable key for one action on one call (``sha1(call_sid + fingerprint)``)."""
+    fingerprint = tool_policy.action_fingerprint(tool_name, args)
+    digest = hashlib.sha1((call_sid + fingerprint).encode("utf-8"), usedforsecurity=False).hexdigest()
+    return f"pincer-call-{digest[:20]}"
+
+
 _current_gate: ContextVar[InCallToolGate | None] = ContextVar("pincer_in_call_tool_gate", default=None)
 
 
@@ -188,6 +206,7 @@ class InCallToolGate:
         engine: VoiceEngine | None = None,
         approval_target: tuple[str, str] | None = None,
         allowed_tools: frozenset[str] | set[str] | None = None,
+        requires_approval: Callable[[str], bool] | None = None,
     ) -> None:
         self.call_sid = call_sid
         self.state = state
@@ -196,6 +215,9 @@ class InCallToolGate:
         self.transcript = transcript
         self.engine = engine
         self.approval_target = approval_target  # (user_id, channel) of the initiating user
+        # The standard tool approval policy (ToolRegistry.requires_approval);
+        # decides a registered caller's writes.
+        self.requires_approval = requires_approval
         if allowed_tools is not None:
             state.metadata[tool_policy.META_ALLOWED_TOOLS] = frozenset(allowed_tools)
         state.metadata.setdefault(tool_policy.META_WRITES_USED, 0)
@@ -303,12 +325,34 @@ class InCallToolGate:
         tool_name: str,
         arguments: dict[str, Any] | None,
         execute: Callable[[], Awaitable[tuple[str, bool]]],
+        *,
+        trusted_key: bool = True,
     ) -> GateResult:
         """Decide and act on one LLM tool_use. ``execute`` runs the real tool
         and returns ``(content, is_error)``; it is only awaited when the policy
-        says execute."""
+        says execute.
+
+        An idempotent create gets a key derived from the call and the action.
+        It is written into ``arguments`` in place — that dict is what
+        ``execute`` sends — and left out of the decision, so the fingerprint a
+        verbal yes authorized still matches the model's re-emitted call. With
+        ``trusted_key=False`` (the model's own tool calls) any key in the
+        arguments is replaced: the model can see a key in its history and copy
+        it onto a different booking, which the calendar would then answer with
+        "already exists". Trusted code (the receptionist) keeps its own key.
+        """
         args = dict(arguments or {})
-        decision = tool_policy.decide(tool_name, self.state, self.settings, args)
+        if not trusted_key:
+            args.pop("idempotency_key", None)
+        # Before any branch: every path that can reach `execute` (direct,
+        # confirmed, owner-approved) sends `arguments`, so the key must be
+        # settled there first — never a key the model copied from history.
+        if tool_name in IDEMPOTENT_CREATE_TOOLS and isinstance(arguments, dict):
+            if not trusted_key:
+                arguments.pop("idempotency_key", None)
+            if not arguments.get("idempotency_key"):
+                arguments["idempotency_key"] = call_idempotency_key(self.call_sid, tool_name, args)
+        decision = tool_policy.decide(tool_name, self.state, self.settings, args, self.requires_approval)
         logger.info(
             "In-call tool decision [%s]: %s -> %s (%s, tier=%s, mode=%s)",
             self.call_sid,

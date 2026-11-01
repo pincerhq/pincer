@@ -650,6 +650,27 @@ class TestRepeatedToolCalls:
         assert guard.is_repeat(repeat)
         assert guard.repeat_result(repeat).is_error
 
+    async def test_a_repeated_create_matches_despite_the_gate_idempotency_key(
+        self, settings, session_manager, cost_tracker, tool_registry
+    ):
+        """The gate adds an idempotency key to the create's arguments (#299);
+        the model's identical retry, without it, is still a repeat."""
+        from pincer.core.agent import _RepeatedCallGuard
+        from pincer.llm.base import ToolCall, ToolResult
+
+        gate = _call_gate(settings, {"google__create_event"})
+        guard = _RepeatedCallGuard(gate)
+        args = {"summary": "Arzt", "start": "2026-11-02T12:00:00+01:00", "end": "2026-11-02T12:30:00+01:00"}
+        first = ToolCall(id="tc1", name="google__create_event", arguments=dict(args))
+
+        async def _run() -> tuple[str, bool]:
+            return "Event created: 'Arzt'", False
+
+        await gate.run(first.name, first.arguments, _run, trusted_key=False)
+        assert "idempotency_key" in first.arguments
+        guard.record(first, ToolResult(tool_call_id="tc1", content="ok", is_error=False))
+        assert guard.is_repeat(ToolCall(id="tc2", name="google__create_event", arguments=dict(args)))
+
     async def test_chat_turns_are_not_guarded(self, settings, session_manager, cost_tracker, tool_registry, mock_llm):
         calls: list[str] = []
         _register(tool_registry, "google__list_events", calls=calls)

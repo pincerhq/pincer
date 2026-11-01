@@ -4,15 +4,16 @@ agent may do with tools while a stranger is on the phone.
 
 Three tiers, no exceptions:
 
-- **R** (read-only) executes in every mode, from any conversational phase,
-  without approval.
-- **W** (reversible writes) follows the configured approval mode — ``verbal``
-  (the call partner confirms the exact commitment), ``user`` (the initiating
-  Pincer user approves on their own channel), or ``off`` (autonomous, with a
-  per-call write budget and post-call disclosure).
-- **X** is never callable from call context. Not via overrides, not via
-  ``PINCER_VOICE_TOOLS_EXTRA``, not by any configuration. Anything not listed
-  in :data:`TIERS` is X — unknown means denied.
+- **R** (read-only) executes from any conversational phase, without approval.
+- **W** (reversible writes) depends on who is on the phone. A **guest** (the
+  remote number is no confirmed phone of an identity) always confirms the
+  exact commitment out loud (``verbal``). A **registered user** follows the
+  standard tool approval policy (``PINCER_APPROVAL_POLICY``): a tool that
+  needs approval is confirmed out loud, any other runs directly. Trusted code
+  may pin a mode per call (the receptionist's booking approval).
+- **X** is never callable from call context. Not via
+  ``PINCER_VOICE_GUESTS_TOOLS_ALLOWED``, not by any configuration. Anything
+  not listed in :data:`TIERS` is X — unknown means denied.
 
 The tier table also drives schema filtering: the LLM only ever sees the
 schemas of R+W tools that are additionally inside the call's purpose scope
@@ -22,15 +23,16 @@ call a tool that was never in its tool array.
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from pincer.exceptions import ConfigError
-
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from pincer.voice.engine import CallState
 
 logger = logging.getLogger(__name__)
@@ -54,14 +56,14 @@ TIERS: dict[str, str] = {
     # excludes it — enforced by allowed_tools_for_call (§5.3).
     "memory_search": TIER_R,
     "business_profile_lookup": TIER_R,
-    # Web search (issue #300): opt-in only, see CALL_OPT_IN_TOOLS.
+    # Web search (issue #300): not in the guest default, see CALL_OPT_IN_TOOLS.
     "websearch__search": TIER_R,
-    # ── Tier W: reversible writes, follow the approval mode
+    # ── Tier W: reversible writes, approved per caller class (see decide())
     "google__create_event": TIER_W,
     "google__update_event": TIER_W,
     "send_owner_message": TIER_W,  # report/notify the initiating user's channel
     "memory_note": TIER_W,
-    # ── Tier X: NEVER callable from call context (also not via overrides/extra)
+    # ── Tier X: NEVER callable from call context (also not via the guest list)
     "email_send": TIER_X,
     "google__delete_event": TIER_X,
     "file_read": TIER_X,
@@ -82,7 +84,17 @@ TIERS: dict[str, str] = {
 # Any tool not listed is EXCLUDED. Unknown = denied. MUST NOT default to allow.
 DEFAULT_TIER = TIER_X
 
+# Modes trusted code may pin per call (META_MODE_OVERRIDES).
 APPROVAL_MODES: tuple[str, ...] = ("verbal", "user", "off")
+
+# Mode recorded for a registered caller's write that the approval policy let
+# run without confirmation (never configurable; see decide()).
+MODE_POLICY = "policy"
+
+# Who is on the phone (CallState.metadata[META_CALLER_CLASS]). Anything but
+# "user" is a guest: an unknown class fails closed.
+CALLER_USER = "user"
+CALLER_GUEST = "guest"
 
 # Deny reason codes (§5.2) — stable strings: logged, persisted, metric labels.
 REASON_TIER_X = "tier_x"
@@ -105,9 +117,10 @@ DENY_REASONS: tuple[str, ...] = (
     REASON_REPEATED_CALL,
 )
 
-# Per-purpose narrowing (§5.3). The appointment set is fixed; the generic set
-# is "all Tier R + the two owner-facing writes" — calendar writes are NOT
-# default on a generic call and must be added via PINCER_VOICE_TOOLS_EXTRA.
+# Per-purpose narrowing (§5.3). The appointment set is fixed. On a generic
+# call a registered user gets every R+W tool; a guest gets "all Tier R except
+# CALL_OPT_IN_TOOLS + the two owner-facing writes", or exactly what
+# PINCER_VOICE_GUESTS_TOOLS_ALLOWED lists when it is set.
 APPOINTMENT_CALL_TOOLS: frozenset[str] = frozenset(
     {
         "google__check_freebusy",
@@ -119,8 +132,8 @@ APPOINTMENT_CALL_TOOLS: frozenset[str] = frozenset(
     }
 )
 GENERIC_CALL_WRITE_TOOLS: frozenset[str] = frozenset({"send_owner_message", "memory_note"})
-# Tier R/W tools that no call gets by default: they join a generic or
-# appointment call only when PINCER_VOICE_TOOLS_EXTRA names them.
+# Tier R/W tools left out of the guest default set: a registered user gets
+# them, a guest only when PINCER_VOICE_GUESTS_TOOLS_ALLOWED lists them.
 CALL_OPT_IN_TOOLS: frozenset[str] = frozenset({"websearch__search"})
 # Sprint 12 §9: the inbound receptionist's EXACT tool set. Explicitly absent
 # vs outbound: memory_search, contact_lookup, google__list_events (event
@@ -133,6 +146,7 @@ INBOUND_EXCLUDED_TOOLS: frozenset[str] = frozenset({"memory_search"})
 
 # Metadata keys on CallState.metadata used by the policy
 META_ALLOWED_TOOLS = "allowed_tools"
+META_CALLER_CLASS = "caller_class"
 META_WRITES_USED = "writes_used"
 META_VERBAL_CONFIRMED = "verbal_confirmed_action"
 META_PENDING_ARGS = "pending_args"
@@ -192,91 +206,34 @@ def callable_tools() -> frozenset[str]:
 # ── Config parsing ───────────────────────────────────────────────────
 
 
-def parse_overrides(raw: str) -> dict[str, str]:
-    """Parse ``tool:mode,tool:mode`` into a dict. Malformed entries raise
-    ConfigError (fail fast — never a silent fallback)."""
-    overrides: dict[str, str] = {}
-    for chunk in str(raw or "").split(","):
-        entry = chunk.strip()
-        if not entry:
-            continue
-        name, sep, mode = entry.partition(":")
-        name, mode = name.strip(), mode.strip().lower()
-        if not sep or not name or not mode:
-            raise ConfigError(
-                f"PINCER_VOICE_TOOL_APPROVAL_OVERRIDES entry {entry!r} is not 'tool_name:mode' "
-                f"(modes: {', '.join(APPROVAL_MODES)})"
-            )
-        if mode not in APPROVAL_MODES:
-            raise ConfigError(
-                f"PINCER_VOICE_TOOL_APPROVAL_OVERRIDES: unknown mode {mode!r} for tool {name!r} "
-                f"(allowed: {', '.join(APPROVAL_MODES)})"
-            )
-        overrides[name] = mode
-    return overrides
-
-
 def parse_csv(raw: str) -> list[str]:
     return [item.strip() for item in str(raw or "").split(",") if item.strip()]
 
 
-def validate_approval_mode(mode: str) -> str:
-    """Global mode string → normalized; unknown → ConfigError (fail fast)."""
-    normalized = str(mode or "").strip().lower()
-    if normalized not in APPROVAL_MODES:
-        raise ConfigError(
-            f"PINCER_VOICE_TOOL_APPROVAL={mode!r} is not a valid mode (allowed: {', '.join(APPROVAL_MODES)})"
-        )
-    return normalized
+def _entry_matches(entry: str) -> frozenset[str]:
+    return frozenset(name for name, tier in TIERS.items() if tier != TIER_X and fnmatch.fnmatchcase(name, entry))
 
 
-def validate_overrides(raw: str) -> dict[str, str]:
-    """Parse + policy-check the overrides CSV.
+def match_tool_patterns(raw: str) -> frozenset[str]:
+    """The R/W tools named by a CSV of tool names and fnmatch patterns.
 
-    - unknown mode → ConfigError
-    - override for a Tier X tool → ConfigError (the tier table cannot be
-      widened by configuration)
-    - override for a name not in the tier table → accepted here (doctor
-      WARNING ``voice_override_unknown_tool``; ignored at runtime)
+    ``google__*`` expands to the calendar tools the tier table classes R or W;
+    a Tier X or unlisted name never matches, whatever the pattern.
     """
-    overrides = parse_overrides(raw)
-    for name in overrides:
-        if tier_of(name) == TIER_X and name in TIERS:
-            raise ConfigError(f"tool {name} is excluded from calls and cannot be configured")
-    return overrides
+    matched: set[str] = set()
+    for entry in parse_csv(raw):
+        matched |= _entry_matches(entry)
+    return frozenset(matched)
 
 
-def unknown_override_tools(raw: str) -> list[str]:
-    """Override entries naming tools outside the tier table (doctor WARNING)."""
-    try:
-        overrides = parse_overrides(raw)
-    except ConfigError:
-        return []
-    return [name for name in overrides if name not in TIERS]
+def unmatched_guest_tool_entries(raw: str) -> list[str]:
+    """``PINCER_VOICE_GUESTS_TOOLS_ALLOWED`` entries that match no R/W tool (doctor WARNING)."""
+    return [entry for entry in parse_csv(raw) if not _entry_matches(entry)]
 
 
-def ignored_extra_tools(raw: str) -> list[str]:
-    """``PINCER_VOICE_TOOLS_EXTRA`` names that are not tier R/W (ignored)."""
-    return [name for name in parse_csv(raw) if tier_of(name) == TIER_X]
-
-
-def tool_overrides(settings: Any) -> dict[str, str]:
-    """Resolved per-tool overrides from settings (lenient: a bad value here
-    would already have failed at startup; at runtime we ignore garbage)."""
-    try:
-        return parse_overrides(str(getattr(settings, "voice_tool_approval_overrides", "") or ""))
-    except ConfigError:
-        return {}
-
-
-def global_mode(settings: Any) -> str:
-    mode = str(getattr(settings, "voice_tool_approval", "verbal") or "verbal").strip().lower()
-    return mode if mode in APPROVAL_MODES else "verbal"
-
-
-def resolve_mode(tool_name: str, settings: Any) -> str:
-    """Override > global. Only meaningful for Tier W."""
-    return tool_overrides(settings).get(tool_name, global_mode(settings))
+def caller_class_of(state: CallState) -> str:
+    """``user`` for a registered caller, else ``guest`` (fail closed)."""
+    return CALLER_USER if state.metadata.get(META_CALLER_CLASS) == CALLER_USER else CALLER_GUEST
 
 
 def max_writes_per_call(settings: Any) -> int:
@@ -294,25 +251,35 @@ def allowed_tools_for_call(
     *,
     kind: str = "generic",
     direction: str = "outbound",
+    caller_class: str = CALLER_GUEST,
 ) -> frozenset[str]:
     """The call's tool scope, computed once at call creation.
 
-    ``kind``: ``"appointment"`` (Sprint 6 scheduling call) or ``"generic"``
-    (make_phone_call / inbound). ``PINCER_VOICE_TOOLS_EXTRA`` widens the scope
-    with R/W names only; X names are ignored (doctor WARNING).
+    ``kind``: ``"receptionist"`` (Sprint 12 inbound line), ``"appointment"``
+    (Sprint 6 scheduling call) or ``"generic"`` (make_phone_call / inbound).
+    Receptionist and appointment calls have fixed sets. On a generic call a
+    registered ``user`` gets every R+W tool; a guest gets the default generic
+    set (without ``CALL_OPT_IN_TOOLS``), or — when ``PINCER_VOICE_GUESTS_TOOLS_ALLOWED`` is set — exactly the
+    R/W tools it matches, minus the inbound exclusions.
     """
     if kind == "receptionist":
-        # Fixed by spec; PINCER_VOICE_TOOLS_EXTRA does NOT widen the public line.
+        # Fixed by spec; the guest list does NOT widen the public line.
         return frozenset(name for name in INBOUND_RECEPTIONIST_TOOLS if tier_of(name) != TIER_X)
     if kind == "appointment":
         scope = set(APPOINTMENT_CALL_TOOLS)
+    elif caller_class == CALLER_USER:
+        scope = set(callable_tools())
     else:
-        scope = (set(tier_r_tools()) - CALL_OPT_IN_TOOLS) | set(GENERIC_CALL_WRITE_TOOLS)
-    for name in parse_csv(str(getattr(settings, "voice_tools_extra", "") or "")):
-        if tier_of(name) != TIER_X:
-            scope.add(name)
-    if str(direction).lower().endswith("inbound"):
-        scope -= INBOUND_EXCLUDED_TOOLS
+        # Only a real CSV string replaces the default set; anything else (an
+        # unset field on a settings stand-in) must not empty the guest scope.
+        raw = getattr(settings, "voice_guests_tools_allowed", "")
+        guest_list = raw if isinstance(raw, str) else ""
+        if parse_csv(guest_list):
+            scope = set(match_tool_patterns(guest_list))
+        else:
+            scope = (set(tier_r_tools()) - CALL_OPT_IN_TOOLS) | set(GENERIC_CALL_WRITE_TOOLS)
+        if str(direction).lower().endswith("inbound"):
+            scope -= INBOUND_EXCLUDED_TOOLS
     # The scope can never contain an X tool, whatever the inputs were.
     return frozenset(name for name in scope if tier_of(name) != TIER_X)
 
@@ -404,11 +371,15 @@ def decide(
     state: CallState,
     settings: Any,
     arguments: dict[str, Any] | None = None,
+    requires_approval: Callable[[str], bool] | None = None,
 ) -> ToolDecision:
-    """The decision algorithm, exactly as specified (§5).
+    """The decision algorithm (§5).
 
     ``arguments`` are the tool_use arguments being decided on; when omitted the
     pending args stored on the call are used for the fingerprint check.
+    ``requires_approval`` is the standard tool approval policy
+    (``ToolRegistry.requires_approval``); it only decides for a registered
+    caller. Without it, a registered caller confirms out loud as a guest does.
     """
     # Step 1 — tier lookup; unknown → X
     tier = tier_of(tool_name)
@@ -424,11 +395,20 @@ def decide(
     # Step 4 — Tier W: write budget first
     if int(state.metadata.get(META_WRITES_USED, 0) or 0) >= max_writes_per_call(settings):
         return ToolDecision("deny", REASON_WRITE_BUDGET, tier, "")
-    # Step 5 — resolve mode: per-call override (trusted code) > settings override > global
+    # Step 5 — resolve mode: per-call override (trusted code) > caller class
     call_overrides = state.metadata.get(META_MODE_OVERRIDES) or {}
     mode = str(call_overrides.get(tool_name) or "") if isinstance(call_overrides, dict) else ""
     if mode not in APPROVAL_MODES:
-        mode = resolve_mode(tool_name, settings)
+        if caller_class_of(state) != CALLER_USER:
+            # Step 6 — a guest's write is always confirmed out loud
+            mode = "verbal"
+        elif requires_approval is not None and not requires_approval(tool_name):
+            # Step 7 — a registered caller follows the standard approval policy.
+            # Its own mode: these writes ran without anyone confirming, so the
+            # post-call report discloses them like `off` writes.
+            return ToolDecision("execute", "policy_auto", tier, MODE_POLICY)
+        else:
+            mode = "verbal"
     if mode == "off":
         return ToolDecision("execute", "mode_off", tier, mode)
     if mode == "verbal":
@@ -441,28 +421,11 @@ def decide(
     return ToolDecision("need_user_approval", "user", tier, mode)
 
 
-# ── Startup validation (config + doctor) ─────────────────────────────
-
-
-def validate_settings(settings: Any) -> list[str]:
-    """Fail-fast validation of the Sprint 11 settings; returns doctor-level
-    warnings (unknown override tools, ignored extras). Raises ConfigError on
-    the hard errors (§3 parsing rules 1 and 3)."""
-    validate_approval_mode(str(getattr(settings, "voice_tool_approval", "verbal") or "verbal"))
-    validate_overrides(str(getattr(settings, "voice_tool_approval_overrides", "") or ""))
-    warnings: list[str] = []
-    unknown = unknown_override_tools(str(getattr(settings, "voice_tool_approval_overrides", "") or ""))
-    if unknown:
-        warnings.append("voice_override_unknown_tool: " + ", ".join(unknown))
-    ignored = ignored_extra_tools(str(getattr(settings, "voice_tools_extra", "") or ""))
-    if ignored:
-        warnings.append("voice_tools_extra ignored (tier X): " + ", ".join(ignored))
-    return warnings
-
-
 __all__ = [
     "APPOINTMENT_CALL_TOOLS",
     "APPROVAL_MODES",
+    "CALLER_GUEST",
+    "CALLER_USER",
     "CALL_OPT_IN_TOOLS",
     "DEFAULT_TIER",
     "DENY_REASONS",
@@ -470,7 +433,9 @@ __all__ = [
     "INBOUND_EXCLUDED_TOOLS",
     "INBOUND_RECEPTIONIST_TOOLS",
     "RECEPTIONIST_BOOKING_MODES",
+    "MODE_POLICY",
     "META_ALLOWED_TOOLS",
+    "META_CALLER_CLASS",
     "META_MODE_OVERRIDES",
     "META_PENDING_ARGS",
     "META_TURN_NO",
@@ -488,22 +453,17 @@ __all__ = [
     "begin_turn",
     "call_context_schemas",
     "callable_tools",
+    "caller_class_of",
     "canonical_json",
     "clear_verbal_confirmation",
     "decide",
-    "global_mode",
-    "ignored_extra_tools",
+    "match_tool_patterns",
     "max_writes_per_call",
-    "parse_overrides",
+    "parse_csv",
     "receptionist_booking_mode",
-    "resolve_mode",
     "set_verbal_confirmation",
     "tier_of",
     "tier_r_tools",
     "tier_w_tools",
-    "tool_overrides",
-    "unknown_override_tools",
-    "validate_approval_mode",
-    "validate_overrides",
-    "validate_settings",
+    "unmatched_guest_tool_entries",
 ]

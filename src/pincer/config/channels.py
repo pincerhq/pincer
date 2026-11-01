@@ -422,17 +422,8 @@ class ChannelSettings(BaseModel):
     )
 
     # ── In-call tool execution (Sprint 11) ────────────────
-    voice_tool_approval: str = Field(
-        default="verbal",
-        description="Approval mode for Tier W (write) tools during a live call: "
-        "verbal (call partner confirms the exact commitment) | user (initiating user approves on their "
-        "channel) | off (autonomous within the write budget, disclosed in the post-call report)",
-    )
-    voice_tool_approval_overrides: str = Field(
-        default="",
-        description="Per-tool mode overrides, CSV of tool_name:mode "
-        "(e.g. 'google__create_event:off,send_owner_message:user'). Tier X tools cannot be configured.",
-    )
+    # Write approval on a call: a guest always confirms out loud; a caller
+    # whose number is a confirmed identity phone follows PINCER_APPROVAL_POLICY.
     voice_tool_timeout_s: int = Field(
         default=10,
         ge=3,
@@ -451,9 +442,11 @@ class ChannelSettings(BaseModel):
         le=20,
         description="Tier W write budget per call (0 = writes disabled)",
     )
-    voice_tools_extra: str = Field(
+    voice_guests_tools_allowed: str = Field(
         default="",
-        description="CSV of tool names added to the per-call tool scope (Tier R/W only; never widens the allowlist)",
+        description="CSV of tool names and fnmatch patterns (e.g. 'google__*') a guest on a generic call may use. "
+        "Empty = the default guest set (reads + send_owner_message/memory_note); set = replaces it. "
+        "Only Tier R/W tools match; Tier X and unlisted tools stay denied. Guest writes always need a spoken yes.",
     )
 
     # ── Inbound receptionist (Sprint 12) ──────────────────
@@ -535,24 +528,6 @@ class ChannelSettings(BaseModel):
                 return []
             return [uid.strip() for uid in v.split(",") if uid.strip()]
         return v
-
-    @field_validator("voice_tool_approval", mode="before")
-    @classmethod
-    def validate_voice_tool_approval(cls, v: str) -> str:
-        """Sprint 11 §3: an unknown mode is a startup ConfigError, never a fallback."""
-        from pincer.voice.tool_policy import validate_approval_mode
-
-        return validate_approval_mode(str(v))
-
-    @field_validator("voice_tool_approval_overrides", mode="before")
-    @classmethod
-    def validate_voice_tool_overrides(cls, v: str) -> str:
-        """Sprint 11 §3: malformed entries / unknown modes fail fast; a Tier X
-        tool can never be configured ("excluded from calls")."""
-        from pincer.voice.tool_policy import validate_overrides
-
-        validate_overrides(str(v or ""))
-        return str(v or "")
 
     @field_validator("thread_inbound_context", mode="before")
     @classmethod

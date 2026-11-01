@@ -320,7 +320,10 @@ class _RepeatedCallGuard:
     def _key(tool_call: ToolCall) -> tuple[str, str]:
         from pincer.voice.tool_policy import canonical_json
 
-        return tool_call.name, canonical_json(tool_call.arguments)
+        # Without the idempotency key: the gate sets it on the recorded call's
+        # arguments, so the model's identical retry would never match.
+        args = {k: v for k, v in (tool_call.arguments or {}).items() if k != "idempotency_key"}
+        return tool_call.name, canonical_json(args)
 
     def is_repeat(self, tool_call: ToolCall) -> bool:
         return self._key(tool_call) in self._errors
@@ -2027,7 +2030,8 @@ class Agent:
             )
             return inner.content, inner.is_error
 
-        gate_result = await call_gate.run(tool_call.name, tool_call.arguments, _run)
+        # The model's arguments: an idempotency key in them is never trusted.
+        gate_result = await call_gate.run(tool_call.name, tool_call.arguments, _run, trusted_key=False)
         return ToolResult(tool_call_id=tool_call.id, content=gate_result.content, is_error=gate_result.is_error)
 
     async def _fire_tool_event(
