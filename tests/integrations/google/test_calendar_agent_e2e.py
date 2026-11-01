@@ -338,3 +338,115 @@ async def test_move_after_history_trim_searches_then_updates(tmp_path, fake, ber
     assert len(events) == 1, [(e["summary"], e["start"]) for e in events]
     assert events[0]["id"] == original["id"]
     assert fake.start_of("primary", original["id"]) == _kyiv(day, "17:00")
+
+
+# ── calls: the voice zone (B1) ───────────────────────────────────────────────
+
+
+class _OneCallLLM(BaseLLMProvider):
+    """Emits one tool call (offset-less times, no ``timezone``, as the voice prompt asks), then "Done."."""
+
+    def __init__(self, name: str, arguments: dict[str, Any]) -> None:
+        self._call = ToolCall(id="call_voice_1", name=name, arguments=arguments)
+        self.offered: list[set[str]] = []
+
+    async def complete(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        system: str | None = None,
+    ) -> LLMResponse:
+        self.offered.append({t["name"] for t in tools or []})
+        last_user = max(i for i, m in enumerate(messages) if m.role == MessageRole.USER)
+        if any(m.role == MessageRole.TOOL_RESULT for m in messages[last_user:]):
+            return LLMResponse(
+                content="Done.", model="scripted", input_tokens=1, output_tokens=1, stop_reason="end_turn"
+            )
+        return LLMResponse(
+            tool_calls=[self._call], model="scripted", input_tokens=1, output_tokens=1, stop_reason="tool_use"
+        )
+
+    def stream(self, messages, tools=None, model=None, max_tokens=None, temperature=None, system=None):  # type: ignore[no-untyped-def]
+        async def _tokens() -> AsyncIterator[str]:
+            response = await self.complete(messages, tools=tools, system=system)
+            if response.content:
+                yield response.content
+
+        return _tokens()
+
+    async def close(self) -> None:
+        return None
+
+
+def _call_gate(settings: Settings, kind: str):
+    from pincer.voice.engine import CallDirection, CallState
+    from pincer.voice.in_call_tools import InCallToolGate
+    from pincer.voice.state_machine import CallStateMachine
+    from pincer.voice.tool_policy import allowed_tools_for_call
+
+    state = CallState(call_sid="CA-B1", direction=CallDirection.OUTBOUND, caller_number="+4930123")
+    return InCallToolGate(
+        call_sid="CA-B1",
+        state=state,
+        sm=CallStateMachine("CA-B1", is_outbound=True),
+        settings=settings,
+        allowed_tools=allowed_tools_for_call(settings, kind=kind),
+    )
+
+
+async def _on_a_call(tmp_path, settings: Settings, llm: _OneCallLLM, costs, registry, kind: str) -> None:
+    from pincer.voice.in_call_tools import bind_gate
+
+    sessions = await _sessions(tmp_path, 50)
+    try:
+        agent = Agent(settings, llm, sessions, costs, registry, approval_callback=_approve)
+        with bind_gate(_call_gate(settings, kind)):
+            await agent.handle_message(OWNER, "voice", "book it", memory=False)
+    finally:
+        await sessions.close()
+
+
+@pytest.mark.parametrize("voice_zone", ["Europe/Berlin", "Europe/London"])
+async def test_a_booking_on_a_call_is_stored_in_the_voice_zone(
+    tmp_path, fake, berlin_settings, registry, costs, voice_zone
+) -> None:
+    """The call prompt says "pass calendar times as local wall-clock time in <voice zone>": a caller's
+    14:00 must be 14:00 there, not 14:00 in the (Kyiv) calendar's zone."""
+    berlin_settings.voice_timezone = voice_zone
+    berlin_settings.voice_tool_approval = "off"
+    day = _tomorrow()
+    llm = _OneCallLLM(
+        "google__create_event", {"summary": "Dentist", "start": f"{day}T14:00:00", "end": f"{day}T15:00:00"}
+    )
+
+    await _on_a_call(tmp_path, berlin_settings, llm, costs, registry, "appointment")
+
+    assert "google__create_event" in llm.offered[0]  # precondition: the call offered the tool
+    (event,) = fake.events_on("primary")
+    assert fake.start_of("primary", event["id"]) == datetime.fromisoformat(f"{day}T14:00:00").replace(
+        tzinfo=ZoneInfo(voice_zone)
+    )
+
+
+async def test_a_move_on_a_call_reads_the_new_time_in_the_voice_zone(
+    tmp_path, fake, berlin_settings, registry, costs
+) -> None:
+    """Update reads offset-less times in the event's stored zone (Kyiv here) unless given one: on a call
+    the voice zone is that given zone."""
+    berlin_settings.voice_tool_approval = "off"
+    berlin_settings.voice_tools_extra = "google__update_event"
+    day = _tomorrow()
+    event_id = fake.seed_event(
+        "primary", "Dentist", _kyiv(day, "10:00").isoformat(), _kyiv(day, "11:00").isoformat(), time_zone="Europe/Kyiv"
+    )
+    llm = _OneCallLLM("google__update_event", {"event_id": event_id, "start": f"{day}T14:00:00"})
+
+    await _on_a_call(tmp_path, berlin_settings, llm, costs, registry, "generic")
+
+    assert "google__update_event" in llm.offered[0]  # precondition: the call offered the tool
+    assert fake.start_of("primary", event_id) == datetime.fromisoformat(f"{day}T14:00:00").replace(
+        tzinfo=ZoneInfo("Europe/Berlin")
+    )

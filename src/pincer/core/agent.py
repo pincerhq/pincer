@@ -1998,6 +1998,14 @@ class Agent:
         if call_gate is None:
             return await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id, turn=turn)
 
+        from pincer.voice.localtime import with_voice_zone
+
+        # Calendar writes on a call: times are in the voice zone (as the call prompt says).
+        tool_call = ToolCall(
+            id=tool_call.id,
+            name=tool_call.name,
+            arguments=with_voice_zone(tool_call.name, tool_call.arguments, self._settings),
+        )
         call_turn = turn or await self._begin_turn(user_id)
 
         async def _run() -> tuple[str, bool]:

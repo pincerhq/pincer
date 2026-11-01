@@ -9,13 +9,16 @@ call summary must be rendered in the configured zone
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from pincer.config import Settings
 
 DEFAULT_VOICE_TIMEZONE = "Europe/Berlin"
+# Calendar writes whose offset-less times the call prompt (TIME_CONTEXT) tells the
+# model to give "as local wall-clock time in <voice zone>".
+VOICE_ZONED_CALENDAR_WRITES = frozenset({"google__create_event", "google__update_event"})
 
 
 def get_voice_timezone(settings: Settings) -> ZoneInfo:
@@ -32,6 +35,18 @@ def get_voice_timezone(settings: Settings) -> ZoneInfo:
         except (KeyError, ValueError):
             continue
     return ZoneInfo(DEFAULT_VOICE_TIMEZONE)
+
+
+def with_voice_zone(tool_name: str, arguments: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    """A call's calendar-write arguments with ``timezone`` set to the voice zone unless the model gave one.
+
+    Without it the calendar tools read offset-less times in the calendar's own
+    zone: a caller's "14:00" on a Kyiv calendar of a Berlin deployment would be
+    booked at 14:00 Kyiv (13:00 Berlin). Other tools' arguments are returned as is.
+    """
+    if tool_name not in VOICE_ZONED_CALENDAR_WRITES or str(arguments.get("timezone") or "").strip():
+        return arguments
+    return {**arguments, "timezone": get_voice_timezone(settings).key}
 
 
 def to_voice_local(dt: datetime, settings: Settings) -> datetime:
