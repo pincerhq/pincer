@@ -65,7 +65,7 @@ def test_shell_safe_commands() -> None:
 @pytest.fixture
 def fresh_registration_log(monkeypatch):
     """The registration failure is logged once per outage: give each test a fresh process's state."""
-    from pincer.integrations.google.log_once import LogOnce
+    from pincer.core.log_once import LogOnce
     from pincer.tools import bootstrap
 
     monkeypatch.setattr(bootstrap, "_REGISTRATION_FAILURE_LOG", LogOnce(bootstrap.logger))
@@ -86,7 +86,7 @@ def test_workspace_registration_failure_warns_once_with_a_traceback(settings, mo
             register_default_tools(ToolRegistry(), settings)
     failures = [r for r in caplog.records if "Google Workspace tools" in r.getMessage()]
     assert [r.levelno for r in failures] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
-    assert [r.exc_info is not None for r in failures] == [True, False, False]
+    assert [r.exc_info is not None for r in failures] == [True, True, True]
     assert "boom" in failures[0].getMessage()
 
     caplog.clear()
@@ -102,7 +102,7 @@ def test_workspace_registration_failure_warns_once_with_a_traceback(settings, mo
 @pytest.fixture
 def fresh_setup_hint(monkeypatch):
     """The setup hint is logged once per process: give each test a fresh process's state."""
-    from pincer.integrations.google.log_once import LogOnce
+    from pincer.core.log_once import LogOnce
     from pincer.tools import bootstrap
 
     monkeypatch.setattr(bootstrap, "_SETUP_HINT_LOG", LogOnce(bootstrap.logger, logging.INFO))

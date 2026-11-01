@@ -24,11 +24,11 @@ from google.auth.exceptions import GoogleAuthError
 from googleapiclient.errors import HttpError
 
 from pincer.config import get_settings
+from pincer.core.log_once import LogOnce
 from pincer.db.engine import get_database_url
 from pincer.integrations.google.auth import GoogleTokenError
 from pincer.integrations.google.calendar_render import render_reminder, start_instant
 from pincer.integrations.google.calendar_source import CalendarSource
-from pincer.integrations.google.log_once import LogOnce
 from pincer.integrations.google.tools_calendar import fetch_events
 from pincer.services.scheduler import EventTriggerService
 

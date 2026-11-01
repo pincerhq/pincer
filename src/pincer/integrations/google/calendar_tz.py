@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from pincer.core.clock import load_zone, resolve_timezone
-from pincer.integrations.google.log_once import LogOnce
+from pincer.core.log_once import LogOnce
 
 if TYPE_CHECKING:
     from collections.abc import Callable

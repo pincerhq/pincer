@@ -22,6 +22,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
+from pincer.core.log_once import LogOnce
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
     ONBOARDING_FOLLOWUP_INSTRUCTION,
@@ -388,32 +389,6 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
     return clean if changed else messages
 
 
-class _OutageLog:
-    """Logs a dependency that fails on every message once per outage, not once per message.
-
-    The first failure is a WARNING with its traceback; repeats are DEBUG until
-    a call succeeds, which is logged at INFO. Call `failed()` from inside the
-    `except` block, so the traceback is the current exception's.
-    """
-
-    def __init__(self, failure: str, recovery: str) -> None:
-        self._failure = failure
-        self._recovery = recovery
-        self._down = False
-
-    def failed(self) -> None:
-        if self._down:
-            logger.debug(self._failure, exc_info=True)
-            return
-        self._down = True
-        logger.warning(self._failure, exc_info=True)
-
-    def succeeded(self) -> None:
-        if self._down:
-            self._down = False
-            logger.info(self._recovery)
-
-
 @dataclass(frozen=True)
 class _Turn:
     """One chat turn's tool context: a UUID7 for log tracing (and calendar
@@ -465,12 +440,10 @@ class Agent:
         self._onboarding_reserved: set[tuple[str, str]] = set()
         # Injected by cli.py: (user_id, channel_name, question) -> answer
         self._ask_user_callback: Callable[[str, str, str], Awaitable[str]] | None = None
-        self._mcp_list_outage = _OutageLog(
-            "Failed to fetch MCP server list for prompt", "Fetching the MCP server list for prompt recovered"
-        )
-        self._memory_outage = _OutageLog(
-            "Failed to fetch memories for prompt", "Fetching memories for prompt recovered"
-        )
+        # A dependency failing on every message logs once per outage (WARNING with its traceback,
+        # DEBUG repeats, INFO on recovery), not once per message.
+        self._mcp_list_outage = LogOnce(logger, recovery="Fetching the MCP server list for prompt recovered")
+        self._memory_outage = LogOnce(logger, recovery="Fetching memories for prompt recovered")
 
     async def _repair_tool_pairs(self, session: Session) -> bool:
         """Strip orphaned tool pairs from the session and persist it.
@@ -1613,9 +1586,9 @@ class Agent:
                     base_prompt += "\n\n[Connected MCP servers — use their prefixed tools when relevant]\n" + "\n".join(
                         server_lines
                     )
-                self._mcp_list_outage.succeeded()
+                self._mcp_list_outage.clear()
             except Exception:
-                self._mcp_list_outage.failed()
+                self._mcp_list_outage.log("Failed to fetch MCP server list for prompt", exc_info=True)
 
         # The model has no clock and will invent today's date if nothing states
         # it (see core/clock.py). Appended on every return path below, and last
@@ -1638,9 +1611,9 @@ class Agent:
             memories = await self._memory.search_text(user_text, user_id=user_id, limit=3)
             memory_block = "\n".join(f"- {m.content}" for m in memories)
         except Exception:
-            self._memory_outage.failed()
+            self._memory_outage.log("Failed to fetch memories for prompt", exc_info=True)
             return _with_extra(base_prompt)
-        self._memory_outage.succeeded()
+        self._memory_outage.clear()
         if not memories:
             return _with_extra(base_prompt)
         return _with_extra(f"{base_prompt}\n\n[Relevant memories about this user]\n{memory_block}")

@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from pincer.integrations.google.log_once import LogOnce
+from pincer.core.log_once import LogOnce
 
 if TYPE_CHECKING:
     from pincer.config import Settings
