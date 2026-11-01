@@ -18,6 +18,7 @@ the calendar.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import MappingProxyType
 
 from pincer.integrations.google.calendar_render import EDIT_HINT_KEY
 from pincer.integrations.google.calendar_source import CalendarSource
@@ -27,7 +28,8 @@ CALENDAR_TODAY = "calendar_today"
 DESCRIPTION = "List today's Google Calendar events (today and times in the calendar's own timezone)."
 NOT_CONNECTED = "Google Calendar is not connected."
 #: The tool context of every MCP call: no edit hint (it names a tool clients lack).
-MCP_TOOL_CONTEXT = {EDIT_HINT_KEY: False}
+#: Read-only (shared by every call); each use site passes its own copy.
+MCP_TOOL_CONTEXT = MappingProxyType({EDIT_HINT_KEY: False})
 
 
 def _now() -> datetime:

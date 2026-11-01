@@ -25,15 +25,14 @@ if TYPE_CHECKING:
     from pincer.config import Settings
     from pincer.tools.registry import ToolRegistry
 
+logger = logging.getLogger(__name__)
+
 #: Logged when the Google integration is on but no token is found (a token without usable
 #: scopes gets get_google_factory's own warning instead).
 GOOGLE_SETUP_HINT = (
     "Google Workspace tools off (no calendar, Gmail or Drive): no Google token found — "
     "run `pincer google setup` to connect"
 )
-
-logger = logging.getLogger(__name__)
-
 # Once per process at INFO: register_default_tools also runs on every GET /api/integrations.
 _SETUP_HINT_LOG = LogOnce(logger, logging.INFO)
 

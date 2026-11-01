@@ -39,7 +39,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
-from test_voice_safety import BUILTIN_CALENDAR_TOOLS
+from calendar_support import BUILTIN_CALENDAR_TOOLS
 
 from integrations.google.fake_calendar import FakeCalendarFactory, FakeCalendarService
 from pincer.config import Settings

@@ -23,10 +23,10 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from integrations.google.fake_calendar import FakeCalendarFactory, FakeCalendarService
-from pincer.integrations.google.calendar_render import EDIT_HINT
+from pincer.integrations.google.calendar_render import EDIT_HINT, EDIT_HINT_KEY
 from pincer.integrations.google.tools_calendar import google__list_events, register_calendar_tools
 from pincer.mcp.auth.scopes import check_tool_scope
-from pincer.mcp.calendar_alias import NOT_CONNECTED
+from pincer.mcp.calendar_alias import MCP_TOOL_CONTEXT, NOT_CONNECTED
 from pincer.mcp.config import MCPServerExportConfig
 from pincer.mcp.embedded import EmbeddedMCPShell
 from pincer.mcp.exporter import PincerToolExporter
@@ -320,3 +320,10 @@ def test_shipped_pincer_toml_exports_the_workspace_calendar_reads() -> None:
 
 def test_no_config_names_the_deleted_builtin_module() -> None:
     assert "builtin.calendar_tool" not in (SRC.parent / "pyproject.toml").read_text(encoding="utf-8")
+
+
+def test_the_mcp_tool_context_cannot_be_changed_in_place() -> None:
+    """Shared by every MCP call: a tool writing to it would leak into the next call."""
+    with pytest.raises(TypeError):
+        MCP_TOOL_CONTEXT[EDIT_HINT_KEY] = True  # type: ignore[index]
+    assert dict(MCP_TOOL_CONTEXT) == {EDIT_HINT_KEY: False}

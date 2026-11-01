@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from calendar_support import BUILTIN_CALENDAR_TOOLS
 
 from pincer.voice.safety_gates import (
     ActionCategory,
@@ -30,7 +31,6 @@ CALENDAR_ON_A_CALL = {
     "google__create_event",
     "google__update_event",
 }
-BUILTIN_CALENDAR_TOOLS = {"calendar_today", "calendar_week", "calendar_create"}
 
 
 class TestParseConfirmation:

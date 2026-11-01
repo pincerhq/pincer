@@ -83,7 +83,7 @@ def fresh_setup_hint(monkeypatch):
     from pincer.integrations.google.log_once import LogOnce
     from pincer.tools import bootstrap
 
-    monkeypatch.setattr(bootstrap, "_SETUP_HINT_LOG", LogOnce(bootstrap.logger, logging.INFO), raising=False)
+    monkeypatch.setattr(bootstrap, "_SETUP_HINT_LOG", LogOnce(bootstrap.logger, logging.INFO))
 
 
 def _no_token_located(monkeypatch, enabled: bool = True) -> None:
