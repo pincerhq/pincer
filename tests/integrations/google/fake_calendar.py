@@ -149,9 +149,11 @@ class _Events:
             )
             cal = self._fake.calendar(calendarId)
             self._fake.fault("events.insert", "before-commit")
-            event_id = body.get("id") or f"evt{next(self._fake._ids)}"
-            if not _EVENT_ID_RE.match(str(event_id)):
+            client_id = body.get("id")
+            if client_id is not None and not _EVENT_ID_RE.match(str(client_id)):
+                # Only a client-supplied ID is checked; Google mints its own otherwise.
                 raise http_error(400, "Invalid resource id value.")
+            event_id = client_id or f"evt{next(self._fake._ids)}"
             if event_id in cal["events"]:
                 raise http_error(409, "The requested identifier already exists.")
             event = self._fake.store(cal, {**copy.deepcopy(body), "id": event_id})
