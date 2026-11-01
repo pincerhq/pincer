@@ -17,13 +17,11 @@ from pincer.integrations.google.calendar_render import (
     CALENDAR_ZONE_LABEL,
     CONFIGURED_ZONE_LABEL,
     EVENT_ZONE_LABEL,
-    event_instants,
     render_event_details,
     render_events,
     render_write,
     stored_zone_name,
     with_edit_hint,
-    zones_equivalent,
 )
 from pincer.integrations.google.calendar_tz import (
     SOURCE_CALENDAR,
@@ -361,24 +359,19 @@ async def _confirmation_zone(
     saved: dict[str, Any],
     given: str,
 ) -> tuple[ZoneInfo, str]:
-    """The zone a write confirmation shows, taken from Google's STORED copy.
+    """The zone a write confirmation shows: the one offset-less input was read in.
 
-    The event's own stored ``timeZone`` is shown (labelled as the event's)
-    when it differs from the calendar's; otherwise the calendar's zone is. When
-    the caller set a zone and Google stored exactly that one, it is the event's
-    zone without a calendar lookup (the voice booking path).
+    When the caller set a zone and Google stored exactly that one (Google's
+    STORED copy decides), it is shown as the event's zone, without a calendar
+    lookup (the voice booking path). Otherwise the working zone is shown — the
+    calendar's, or the call's on a phone call — so "15:00" after a list in that
+    zone is confirmed as 15:00; the renderer names a differing stored zone.
     """
     own = load_zone(stored_zone_name(saved))
     given_zone = load_zone(given) if given.strip() else None
     if own is not None and given_zone is not None and own.key == given_zone.key:
         return own, EVENT_ZONE_LABEL
-    call = _call_zone(context)
-    if call is not None:  # on a call, times are told in the call's zone
-        return call, CONFIGURED_ZONE_LABEL
-    zone, label = await _labeled_zone(factory, svc, calendar_id, _user_timezone(context))
-    if own is not None and not zones_equivalent(own, zone, event_instants([saved])):
-        return own, EVENT_ZONE_LABEL
-    return zone, label
+    return await _working_zone(factory, svc, calendar_id, context)
 
 
 async def google__create_event(

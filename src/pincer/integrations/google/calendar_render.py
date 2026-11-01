@@ -250,6 +250,16 @@ def _same_zone_name(name: str, zone: ZoneInfo) -> bool:
     return own is not None and same_zone(own, zone)
 
 
+def _own_zone_line(event: dict[str, Any], zone: ZoneInfo) -> list[str]:
+    """The event's own stored zone, when it is not the zone its times are shown in.
+
+    Kept on purpose (an update keeps it too); offset-less times passed to an
+    update are read in the shown zone, not this one.
+    """
+    own = stored_zone_name(event)
+    return [f"Event's own timezone: {own}"] if own and not _same_zone_name(own, zone) else []
+
+
 def render_event_details(
     event: dict[str, Any],
     zone: ZoneInfo,
@@ -265,11 +275,7 @@ def render_event_details(
         f"End:         {end or STORED_TIMES_UNAVAILABLE}",
         f"Times shown in: {zone.key}",
     ]
-    own = stored_zone_name(event)
-    if own and not _same_zone_name(own, zone):
-        # Kept on purpose (an update keeps it too). This — not the display
-        # zone above — is the zone to pass when changing the event's times.
-        lines.append(f"Event's own timezone: {own}")
+    lines += _own_zone_line(event, zone)
     note = mismatch_note(zone, clock_zone, event_instants([event]), zone_label)
     if note:
         lines.append(note)
@@ -304,7 +310,7 @@ def render_write(
         lines = [headline, f"Start: {STORED_TIMES_UNAVAILABLE}"]
     else:
         shown_start, shown_end = start or STORED_TIMES_UNAVAILABLE, end or STORED_TIMES_UNAVAILABLE
-        lines = [headline, f"Start: {shown_start} | End: {shown_end} ({zone.key})"]
+        lines = [headline, f"Start: {shown_start} | End: {shown_end} ({zone.key})", *_own_zone_line(event, zone)]
     note = mismatch_note(zone, clock_zone, event_instants([event]), zone_label)
     if note:
         lines.append(note)

@@ -370,6 +370,25 @@ async def test_get_shows_the_events_own_zone_when_it_differs_from_the_calendars(
     assert "own timezone" not in equivalent
 
 
+async def test_offset_less_move_of_a_legacy_event_is_confirmed_in_the_listed_zone(fake_factory, fake):
+    """PR #316 live check: a Berlin-zoned event on the Kiev calendar is listed in Kiev time; "move it to
+    15:00" is stored as 15:00 Kiev (T1) and must be CONFIRMED as 15:00 there, not as 14:00 Berlin — the
+    model relays the confirmation. The event's own zone (kept) is named, as get names it."""
+    fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00", "2026-11-12T11:00:00", time_zone="Europe/Berlin")
+    listed = await google__list_events(fake_factory, time_min="2026-11-12", time_max="2026-11-12")
+    assert "  2026-11-12T11:00:00+02:00 → 2026-11-12T12:00:00+02:00 — Dentist | event zone Europe/Berlin" in (
+        listed.splitlines()
+    ), listed  # precondition: the listed zone is Kiev
+
+    result = await google__update_event(fake_factory, event_id="evt1", start="2026-11-12T15:00:00")
+
+    assert fake.event("primary", "evt1")["start"]["timeZone"] == "Europe/Berlin"  # what is stored is unchanged
+    assert result.splitlines()[1:3] == [
+        "Start: 2026-11-12T15:00:00+02:00 | End: 2026-11-12T16:00:00+02:00 (Europe/Kiev)",
+        "Event's own timezone: Europe/Berlin",
+    ]
+
+
 # ── Confirmation zone comes from the stored copy (B review R1) ───────────────
 
 
