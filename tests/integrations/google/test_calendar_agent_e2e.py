@@ -371,19 +371,23 @@ class _OneCallLLM(BaseLLMProvider):
         return None
 
 
-def _call_gate(settings: Settings, kind: str):
+def _call_gate(settings: Settings, kind: str, registry: ToolRegistry):
+    """The gate of a call with a registered caller: writes follow the standard approval policy, as
+    ``PhoneCallManager`` wires it (a tool the registry does not know is confirmed out loud)."""
     from pincer.voice.engine import CallDirection, CallState
     from pincer.voice.in_call_tools import InCallToolGate
     from pincer.voice.state_machine import CallStateMachine
-    from pincer.voice.tool_policy import allowed_tools_for_call
+    from pincer.voice.tool_policy import CALLER_USER, META_CALLER_CLASS, allowed_tools_for_call
 
     state = CallState(call_sid="CA-B1", direction=CallDirection.OUTBOUND, caller_number="+4930123")
+    state.metadata[META_CALLER_CLASS] = CALLER_USER
     return InCallToolGate(
         call_sid="CA-B1",
         state=state,
         sm=CallStateMachine("CA-B1", is_outbound=True),
         settings=settings,
-        allowed_tools=allowed_tools_for_call(settings, kind=kind),
+        allowed_tools=allowed_tools_for_call(settings, kind=kind, caller_class=CALLER_USER),
+        requires_approval=lambda name: name not in registry.list_tools() or registry.requires_approval(name),
     )
 
 
@@ -393,7 +397,7 @@ async def _on_a_call(tmp_path, settings: Settings, llm: _OneCallLLM, costs, regi
     sessions = await _sessions(tmp_path, 50)
     try:
         agent = Agent(settings, llm, sessions, costs, registry, approval_callback=_approve)
-        with bind_gate(_call_gate(settings, kind)):
+        with bind_gate(_call_gate(settings, kind, registry)):
             await agent.handle_message(OWNER, "voice", "book it", memory=False)
     finally:
         await sessions.close()
@@ -406,7 +410,6 @@ async def test_a_booking_on_a_call_is_stored_in_the_voice_zone(
     """The call prompt says "pass calendar times as local wall-clock time in <voice zone>": a caller's
     14:00 must be 14:00 there, not 14:00 in the (Kyiv) calendar's zone."""
     berlin_settings.voice_timezone = voice_zone
-    berlin_settings.voice_tool_approval = "off"
     day = _tomorrow()
     llm = _OneCallLLM(
         "google__create_event", {"summary": "Dentist", "start": f"{day}T14:00:00", "end": f"{day}T15:00:00"}
@@ -423,7 +426,6 @@ async def test_a_booking_on_a_call_is_stored_in_the_voice_zone(
 
 async def test_a_zone_the_model_names_on_a_call_is_kept(tmp_path, fake, berlin_settings, registry, costs) -> None:
     """The voice zone fills in a missing timezone only: an explicit one is never overridden."""
-    berlin_settings.voice_tool_approval = "off"
     day = _tomorrow()
     llm = _OneCallLLM(
         "google__create_event",
@@ -441,8 +443,6 @@ async def test_a_move_on_a_call_reads_the_new_time_in_the_voice_zone(
 ) -> None:
     """Update reads offset-less times in the event's stored zone (Kyiv here) unless given one: on a call
     the new time gets the voice zone's offset instead, and the event keeps its zone."""
-    berlin_settings.voice_tool_approval = "off"
-    berlin_settings.voice_tools_extra = "google__update_event"
     day = _tomorrow()
     event_id = fake.seed_event(
         "primary", "Dentist", _kyiv(day, "10:00").isoformat(), _kyiv(day, "11:00").isoformat(), time_zone="Europe/Kyiv"
@@ -491,8 +491,6 @@ async def test_an_availability_read_on_a_call_queries_the_voice_zone(
 async def test_a_move_on_a_call_keeps_the_events_own_zone(tmp_path, fake, berlin_settings, registry, costs) -> None:
     """A New York event moved on a call to "17:00" (start only) lands at 17:00 in the voice zone (Berlin),
     keeps its 90 minutes and stays a New York event: the call's zone says when, not where the event lives."""
-    berlin_settings.voice_tool_approval = "off"
-    berlin_settings.voice_tools_extra = "google__update_event"
     day = _tomorrow()
     new_york = ZoneInfo("America/New_York")
     event_id = fake.seed_event(

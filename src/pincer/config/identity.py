@@ -20,6 +20,7 @@ Schema — one person per `[identity.<key>]` table, `<key>` becomes the
     email             = "john.doe@domain.tld"
     timezone          = "Europe/Berlin"
     preferred_channel = "telegram"
+    phones            = ["+4915112345678"]
 
     [[identity.johndoe.channels]]
     channel         = "telegram"
@@ -29,11 +30,16 @@ Unlike `PINCER_IDENTITY_MAP`, a person may have just one `[[...channels]]`
 entry — useful for pre-registering a roster incrementally as new channel IDs
 become known.
 
+`phones` are the person's own numbers in E.164. They are stored as confirmed
+phones of the identity: a voice call from or to one of them is that person's
+call, with their tools and approval rules, not a guest's. A number may belong
+to one person only.
+
 Entries are converted into `PINCER_IDENTITY_MAP`'s own string grammar
 (`name@ch1:id1=ch2:id2...`) so `IdentityResolver._parse_mapping` and its
-callers need no changes. `email`/`timezone` have no slot in that grammar, so
-they're returned separately as a `pincer_user_id -> (email, timezone)` dict —
-see `resolve_identity_map_config`.
+callers need no changes. `email`/`timezone`/`phones` have no slot in that
+grammar, so they're returned separately as `IdentityProfile`s — see
+`resolve_identity_map_config`.
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ from typing import Any
 from pincer.channels.base import ChannelType
 from pincer.config.toml_loader import read_toml_raw
 from pincer.core.identity import RESERVED_IDENTITY_NAMES, IdentityProfile
+from pincer.core.phone import normalize_e164
 
 _KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 
@@ -60,6 +67,7 @@ class IdentityTomlEntry:
     email: str | None = None
     timezone: str | None = None
     channels: list[tuple[str, str]] = field(default_factory=list)
+    phones: list[str] = field(default_factory=list)
 
 
 def _merge_identity_raw(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -83,8 +91,9 @@ def load_identity_config(config_dir: Path | None = None) -> dict[str, IdentityTo
     """Load and merge the [identity] section from pincer.toml + pincer.local.toml.
 
     Returns entries keyed by pincer_user_id, in TOML definition order.
-    Raises ValueError on an invalid or reserved person key, an unknown channel, or a
-    (channel, channel_user_id) pair reused across two different people —
+    Raises ValueError on an invalid or reserved person key, an unknown channel, a
+    (channel, channel_user_id) pair reused across two different people, or a
+    phone that is not E.164 or is listed for two people —
     config mistakes should fail loudly at startup, not be silently absorbed.
     """
     base_dir = config_dir or Path.cwd()
@@ -99,6 +108,7 @@ def load_identity_config(config_dir: Path | None = None) -> dict[str, IdentityTo
 
     entries: dict[str, IdentityTomlEntry] = {}
     seen_pairs: dict[tuple[str, str], str] = {}
+    seen_phones: dict[str, str] = {}
 
     for person_key, person_raw in identity_raw.items():
         if not _KEY_PATTERN.match(person_key):
@@ -142,6 +152,22 @@ def load_identity_config(config_dir: Path | None = None) -> dict[str, IdentityTo
         if not channels:
             raise ValueError(f"identity.{person_key}: needs at least one [[identity.{person_key}.channels]] entry")
 
+        phones_raw = person_raw.get("phones", [])
+        if isinstance(phones_raw, str) or not isinstance(phones_raw, list):
+            raise ValueError(f"identity.{person_key}: phones must be a list of E.164 numbers")
+        phones: list[str] = []
+        for phone_raw in phones_raw:
+            phone = normalize_e164(str(phone_raw))
+            if phone is None:
+                raise ValueError(f"identity.{person_key}: phone '{phone_raw}' is not an E.164 number")
+            if phone in seen_phones and seen_phones[phone] != person_key:
+                raise ValueError(
+                    f"identity.{person_key}: phone '{phone}' is already used by identity.{seen_phones[phone]}"
+                )
+            if phone not in phones:
+                phones.append(phone)
+            seen_phones[phone] = person_key
+
         entries[person_key] = IdentityTomlEntry(
             pincer_user_id=person_key,
             display_name=person_raw.get("display_name"),
@@ -149,6 +175,7 @@ def load_identity_config(config_dir: Path | None = None) -> dict[str, IdentityTo
             email=person_raw.get("email"),
             timezone=person_raw.get("timezone"),
             channels=channels,
+            phones=phones,
         )
 
     return entries
@@ -170,7 +197,7 @@ def resolve_identity_map_config(
       ready to pass straight to `IdentityResolver`.
     - profiles: pincer_user_id -> IdentityProfile, carrying the fields that
       grammar has no room for (display_name, preferred_channel, email,
-      timezone). Always empty when PINCER_IDENTITY_MAP is used, since that
+      timezone, phones). Always empty when PINCER_IDENTITY_MAP is used, since that
       grammar has no field for any of these.
 
     PINCER_IDENTITY_MAP, when non-empty, is returned as-is — the TOML
@@ -193,6 +220,7 @@ def resolve_identity_map_config(
             preferred_channel=entry.preferred_channel,
             email=entry.email,
             timezone=entry.timezone,
+            phones=tuple(entry.phones),
         )
         for entry in entries.values()
     }

@@ -38,6 +38,20 @@ class CallRepository(BaseRepository[VoiceCall, str]):
             )
         )
 
+    async def insert_if_absent(self, values: dict[str, Any]) -> None:
+        """Insert the call row unless one exists for its `call_sid`."""
+        await self.session.exec(upsert(dialect_of(self.session), VoiceCall, dict(values), index_elements=["call_sid"]))
+
+    async def close_open(self, failure_code: str) -> int:
+        """End every row left without `ended_at`. The end is unknown, so it is
+        set to the start: a duration of 0 rather than one that keeps growing."""
+        stmt = (
+            update(VoiceCall)
+            .where(col(VoiceCall.ended_at).is_(None))
+            .values(ended_at=col(VoiceCall.started_at), failure_code=failure_code)
+        )
+        return int((await self.session.exec(stmt)).rowcount)
+
     async def by_sid(self, call_sid: str) -> VoiceCall | None:
         stmt = select(VoiceCall).where(col(VoiceCall.call_sid) == call_sid)
         return (await self.session.exec(stmt)).first()

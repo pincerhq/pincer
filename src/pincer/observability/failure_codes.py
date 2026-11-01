@@ -68,6 +68,8 @@ class FailureCode(StrEnum):
     # A caller back from a failed transfer whose call state was lost (restart
     # while the target rang) could not be reconnected and was hung up.
     TRANSFER_RECOVERY_FAILED = "transfer_recovery_failed"
+    # The owner hung up from the dashboard before anyone answered.
+    ENDED_BY_OWNER = "ended_by_owner"
     INTERNAL = "internal"
     UNKNOWN = "unknown"
 
@@ -108,8 +110,11 @@ NOT_CONNECTED_STATUS: dict[str, FailureCode] = {
     "canceled": FailureCode.CALL_SETUP,
 }
 
+# Ended on purpose by the owner: nothing failed, so no error budget burns.
+OWNER_ENDED: frozenset[FailureCode] = frozenset({FailureCode.ENDED_BY_OWNER})
+
 # Everything else that is not NONE is ours to fix.
-EXCLUDED_FROM_SLO: frozenset[FailureCode] = CALLEE_UNREACHABLE | POLICY_BLOCKED
+EXCLUDED_FROM_SLO: frozenset[FailureCode] = CALLEE_UNREACHABLE | POLICY_BLOCKED | OWNER_ENDED
 
 # Codes that should wake someone up rather than merely be reported.
 PAGEABLE: frozenset[FailureCode] = frozenset(
@@ -163,6 +168,7 @@ DESCRIPTIONS: dict[FailureCode, str] = {
     FailureCode.SHUTDOWN: "Call ended by a deploy/restart drain",
     FailureCode.STUCK: "Call exceeded max duration and had to be reaped",
     FailureCode.TRANSFER_RECOVERY_FAILED: "Caller back from a failed transfer could not be reconnected (state lost)",
+    FailureCode.ENDED_BY_OWNER: "The owner hung up from the dashboard before anyone answered",
     FailureCode.INTERNAL: "Unhandled internal error",
     FailureCode.UNKNOWN: "Failed for a reason we do not yet classify",
 }

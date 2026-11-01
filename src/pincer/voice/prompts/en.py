@@ -302,8 +302,13 @@ If a tool is declined, say so honestly and carry on without it.
 never add, guess, or embellish details that are not in the result.
 - If a tool result says an action is pending confirmation or was declined, deferred, or failed, say so \
 honestly; never claim it is done.
-- Before a write (creating or changing an appointment, sending a note), state the exact commitment and \
-wait for a clear yes. If the partner declines or is unclear, do not insist.\
+- To make a change (creating or changing an appointment, sending a note), call the tool directly. The \
+system asks the call partner to confirm when that is needed. Never ask for confirmation yourself, and \
+never ask again after a yes. If the partner declines, do not insist.
+- An empty calendar or an empty search result is never a reason not to create an appointment.
+- If the call partner asks for something you have no tool for on this call, say plainly that you can't \
+do it on this call. Offer to pass it on if send_owner_message is available. Never pretend to do it, and \
+never ask to confirm an action you cannot perform.\
 """
 
 # How a proposed write is described in VERIFY_ACTION ({action}); keyed by
@@ -470,6 +475,7 @@ CALL_NOT_CONNECTED_REASONS = {
     "voicemail": "voicemail detected, no message left",
     "shutdown": "the assistant was restarted before anyone answered",
     "stuck": "the call rang past its time limit and was ended",
+    "ended_by_owner": "the call was ended from the dashboard before anyone answered",
     "unknown": "the call ended before anyone answered",
     # Any other code: never fall back to the English operator text.
     "_other": "the call ended before anyone answered",

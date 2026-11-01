@@ -51,12 +51,10 @@ def apply_in_call_tool_defaults(settings: Any, **overrides: Any) -> Any:
     into 1s — so every voice test that reaches the gate sets these for real.
     """
     values: dict[str, Any] = {
-        "voice_tool_approval": "verbal",
-        "voice_tool_approval_overrides": "",
         "voice_tool_timeout_s": 10,
         "voice_approval_timeout_s": 25,
         "voice_max_writes_per_call": 3,
-        "voice_tools_extra": "",
+        "voice_guests_tools_allowed": "",
         "default_user_id": "",
     }
     values.update(overrides)

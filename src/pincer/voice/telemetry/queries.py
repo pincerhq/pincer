@@ -309,6 +309,11 @@ async def overview(
     return agg
 
 
+#: Calls that never were a connection attempt that could fail: a policy
+#: declined them before dialling, or the owner hung up before anyone answered.
+_NOT_ATTEMPTED = frozenset({FailureCategory.POLICY_DECLINED, FailureCategory.ENDED_BY_OWNER})
+
+
 def _call_counts(rows: list[Any]) -> dict[str, Any]:
     attempted = 0
     declined = 0
@@ -325,7 +330,7 @@ def _call_counts(rows: list[Any]) -> dict[str, Any]:
             active += 1
         if category == FailureCategory.POLICY_DECLINED:
             declined += 1
-        else:
+        elif category != FailureCategory.ENDED_BY_OWNER:
             attempted += 1
         if row["answered_at"]:
             connected += 1
@@ -352,7 +357,7 @@ def _call_counts(rows: list[Any]) -> dict[str, Any]:
 
 
 def _rates(rows: list[Any]) -> dict[str, Any]:
-    attempted = [r for r in rows if str(r["failure_category"] or "") != FailureCategory.POLICY_DECLINED]
+    attempted = [r for r in rows if str(r["failure_category"] or "") not in _NOT_ATTEMPTED]
     terminated = [r for r in rows if str(r["status"] or "") not in ("active", "")]
     connected = [r for r in attempted if r["answered_at"]]
     technical = [r for r in terminated if str(r["failure_category"] or "") == FailureCategory.TECHNICAL]

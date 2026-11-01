@@ -25,6 +25,7 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
+from pincer.channels.approval_text import parse_yes_no
 from pincer.channels.base import BaseChannel, ChannelType, IncomingMessage, MessageHandler
 
 if TYPE_CHECKING:
@@ -320,7 +321,7 @@ class MicrosoftTeamsChannel(BaseChannel):
         # Intercept approval/input responses before routing to the agent.
         approval_fut = self._pending_approvals.get(user_id)
         if approval_fut and not approval_fut.done():
-            decision = self._parse_yes_no(text)
+            decision = parse_yes_no(text)
             if decision is None:
                 try:
                     await ctx.send("Please reply **yes** or **no**.")
@@ -381,15 +382,6 @@ class MicrosoftTeamsChannel(BaseChannel):
                 await reply_fn(chunk)
         else:
             await self.send(user_id, text)
-
-    @staticmethod
-    def _parse_yes_no(text: str) -> bool | None:
-        t = (text or "").strip().lower()
-        if t in {"yes", "y", "ok", "okay", "sure", "approve", "approved", "allow", "👍", "✅"}:
-            return True
-        if t in {"no", "n", "deny", "denied", "cancel", "stop", "abort", "👎", "❌"}:
-            return False
-        return None
 
     async def request_approval(self, user_id: str, tool_name: str, arguments: dict[str, Any]) -> bool:
         """Send an approval prompt and wait up to 120 s for a yes/no reply."""

@@ -321,8 +321,13 @@ Wird ein Tool abgelehnt, sagen Sie das ehrlich und machen ohne es weiter.
 was darin steht — niemals Details ergänzen, raten oder ausschmücken.
 - Sagt ein Tool-Ergebnis, dass eine Aktion noch bestätigt werden muss, abgelehnt, verschoben oder \
 fehlgeschlagen ist, sagen Sie das ehrlich; behaupten Sie nie, es sei erledigt.
-- Vor einem Schreibzugriff (Termin anlegen oder ändern, Notiz weitergeben) nennen Sie die genaue \
-Zusage und warten auf ein klares Ja. Lehnt der Partner ab oder bleibt unklar, nicht insistieren.\
+- Für eine Änderung (Termin anlegen oder ändern, Notiz weitergeben) rufen Sie das Tool direkt auf. \
+Das System holt die Bestätigung des Gesprächspartners ein, wenn sie nötig ist. Fragen Sie nie selbst \
+nach einer Bestätigung, und fragen Sie nach einem Ja nie noch einmal. Lehnt der Partner ab, nicht insistieren.
+- Ein leerer Kalender oder ein leeres Suchergebnis ist nie ein Grund, einen Termin nicht anzulegen.
+- Verlangt der Gesprächspartner etwas, wofür Sie in diesem Gespräch kein Tool haben, sagen Sie klar, \
+dass Sie das in diesem Gespräch nicht können. Bieten Sie an, es weiterzugeben, wenn send_owner_message \
+verfügbar ist. Tun Sie nie so, als ob, und lassen Sie nie eine Aktion bestätigen, die Sie nicht ausführen können.\
 """
 
 ACTION_DESCRIPTIONS = {
@@ -518,6 +523,7 @@ CALL_NOT_CONNECTED_REASONS = {
     "voicemail": "Anrufbeantworter erkannt, keine Nachricht hinterlassen",
     "shutdown": "der Assistent wurde neu gestartet, bevor jemand abgenommen hat",
     "stuck": "der Anruf klingelte über das Zeitlimit hinaus und wurde beendet",
+    "ended_by_owner": "der Anruf wurde im Dashboard beendet, bevor jemand abgenommen hat",
     "unknown": "der Anruf endete, bevor jemand abgenommen hat",
     # Any other code: never fall back to the English operator text.
     "_other": "der Anruf endete, bevor jemand abgenommen hat",

@@ -420,6 +420,7 @@ display_name      = "John Doe"
 email             = "john.doe@domain.tld"
 timezone          = "Europe/Berlin"
 preferred_channel = "telegram"
+phones            = ["+4915112345678"]
 
 [[identity.johndoe.channels]]
 channel         = "telegram"
@@ -439,6 +440,8 @@ channel_user_id = "491111111111"
 ```
 
 Unlike `PINCER_IDENTITY_MAP`, a person may have just one `[[...channels]]` entry — useful for pre-registering a roster incrementally as new channel IDs become known. `pincer.local.toml`'s `[identity]` section merges into `pincer.toml`'s per person, per field, appending new person keys and leaving unspecified fields inherited from the base entry — see [Local overrides — pincer.local.toml](../guides/mcp-guide.md#local-overrides--pincerlocaltoml) for the same merge pattern applied to `[[mcp.servers]]`. As with those entries, `channels` is replaced wholesale by an override rather than merged per-channel.
+
+`phones` lists the person's own numbers in E.164 (spaces, dashes and brackets are dropped). They are stored as **confirmed** phones of the identity: a voice call with one of these numbers — inbound or outbound — is that person's call, with every calendar tool and the standard `PINCER_APPROVAL_POLICY`, instead of a guest's (see [Voice calling](../core-components/voice-calling.md#registered-users-and-guests)). A number may belong to one person only; listing it twice is a startup error. A number removed from the config stops identifying its person at the next start. `/api/identity` returns each identity's `phones` as `[{"phone", "confirmed"}]`. `PINCER_IDENTITY_MAP` has no slot for phones.
 
 **`PINCER_IDENTITY_MAP`, when set (non-empty), always fully overrides the TOML `[identity]` section** — the two are not merged; the TOML section is simply ignored while the env var is set.
 

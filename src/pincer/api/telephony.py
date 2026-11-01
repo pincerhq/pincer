@@ -175,6 +175,7 @@ async def failure_categories() -> list[dict[str, str]]:
         {"value": str(FailureCategory.CALLEE_UNAVAILABLE), "label": "Callee unavailable"},
         {"value": str(FailureCategory.POLICY_DECLINED), "label": "Declined by policy"},
         {"value": str(FailureCategory.ENDED_BY_PARTY), "label": "Ended by a party"},
+        {"value": str(FailureCategory.ENDED_BY_OWNER), "label": "Ended by the owner"},
         {"value": str(FailureCategory.UNKNOWN), "label": "Unclassified"},
     ]
 

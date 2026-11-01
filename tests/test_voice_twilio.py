@@ -157,6 +157,29 @@ class TestStatusEndpoint:
         )
         assert response.status_code == 200
 
+    @pytest.mark.parametrize(
+        ("metadata", "reason"),
+        [
+            ({}, ""),
+            # A failed transfer handed back to the AI keeps its record: a plain
+            # hang-up afterwards is not a transfer end.
+            ({"transfer": {"target": "+4930"}}, ""),
+            ({"transfer": {"target": "+4930"}, "transferring": True}, "provider_completed"),
+        ],
+    )
+    def test_completed_reason_only_during_a_transfer(self, client, mock_engine, metadata, reason):
+        from pincer.voice.engine import CallDirection, CallState
+
+        state = CallState(call_sid="CA123", direction=CallDirection.INBOUND, caller_number="+14155551234")
+        state.metadata.update(metadata)
+        mock_engine.get_call_state = MagicMock(return_value=state)
+        response = client.post(
+            "/api/apps/twilio/status",
+            data={"CallSid": "CA123", "CallStatus": "completed", "CallDuration": "30"},
+        )
+        assert response.status_code == 200
+        mock_engine.finish_remote_ended.assert_awaited_once_with("CA123", reason=reason)
+
 
 class TestFallbackEndpoint:
     def test_fallback(self, client):
