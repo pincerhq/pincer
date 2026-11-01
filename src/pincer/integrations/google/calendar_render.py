@@ -18,6 +18,8 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from pincer.core.clock import load_zone
+
 if TYPE_CHECKING:
     from zoneinfo import ZoneInfo
 
@@ -154,6 +156,16 @@ def _when(event: dict[str, Any], zone: ZoneInfo) -> tuple[str, str]:
     return _local(event.get("start") or {}, zone), _local(event.get("end") or {}, zone)
 
 
+def _own_zone_name(event: dict[str, Any]) -> str:
+    """The event's own stored ``timeZone`` ("" if it has none)."""
+    return str((event.get("start") or {}).get("timeZone") or "")
+
+
+def _same_zone_name(name: str, zone: ZoneInfo, instants: list[datetime]) -> bool:
+    own = load_zone(name)
+    return own is not None and zones_equivalent(own, zone, instants)
+
+
 def render_event_details(
     event: dict[str, Any],
     zone: ZoneInfo,
@@ -169,6 +181,10 @@ def render_event_details(
         f"End:         {end}",
         f"Time zone:   {zone.key}",
     ]
+    own = _own_zone_name(event)
+    if own and not _same_zone_name(own, zone, event_instants([event])):
+        # Kept on purpose (an update keeps it too) — so say so.
+        lines.append(f"Event zone:  {own}")
     note = mismatch_note(zone, clock_zone, event_instants([event]), zone_label)
     if note:
         lines.append(note)

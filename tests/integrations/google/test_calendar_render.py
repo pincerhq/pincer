@@ -349,3 +349,15 @@ async def test_list_header_shows_the_inclusive_last_local_day(factory, fake):
     assert two_days.splitlines()[0] == "1 event(s) (2026-11-12 – 2026-11-13), times in Europe/Kiev:"
     assert midday_end.splitlines()[0] == "1 event(s) (2026-11-12 – 2026-11-13), times in Europe/Kiev:"
     assert empty_day == "No events on 2026-11-20."
+
+
+async def test_get_shows_the_events_own_zone_when_it_differs_from_the_calendars(factory, fake):
+    _seed_day(fake)  # evt1 is America/New_York on the Europe/Kiev calendar
+    same = fake.seed_event("primary", "Local", "2026-11-12T12:00:00", "2026-11-12T13:00:00", time_zone="Europe/Kyiv")
+
+    differs = await google__get_event(factory, event_id="evt1")
+    equivalent = await google__get_event(factory, event_id=same)
+
+    assert "Time zone:   Europe/Kiev" in differs.splitlines()
+    assert "Event zone:  America/New_York" in differs.splitlines()
+    assert "Event zone:" not in equivalent
