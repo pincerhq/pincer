@@ -195,14 +195,16 @@ class CalendarTimezoneResolver:
                 f"the last known zone {stale.key}" if stale else "the fallback zone",
             )
             return stale
+        # Google answered (with or without a zone): any outage is over, the next failure is a new one.
+        failure_log = self._failure_logs.get(calendar_id)
+        if failure_log is not None:
+            failure_log.clear()
         name = calendar.get("timeZone") if isinstance(calendar, dict) else None
         zone = load_zone(name) if isinstance(name, str) else None
         if zone is None:
             self._failed_at[calendar_id] = now
             return stale
         self._failed_at.pop(calendar_id, None)
-        if calendar_id in self._failure_logs:
-            self._failure_logs[calendar_id].clear()
         self._cache[calendar_id] = (zone.key, now)
         return zone
 

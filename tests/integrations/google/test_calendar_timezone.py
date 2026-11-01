@@ -567,3 +567,31 @@ async def test_a_failing_zone_lookup_warns_once_per_outage(fake, caplog):
         fake.calendar_get_error = 503
         await resolver.resolve(fake, "primary")
         assert _levels() == ["WARNING"]
+
+
+async def test_a_zoneless_answer_ends_the_outage_for_the_lookup_log(fake, caplog):
+    """Google answering — even without a zone — means the calendar is reachable again, so the next
+    failure is a new outage and gets its WARNING."""
+    from pincer.integrations.google.calendar_tz import CalendarTimezoneResolver
+
+    now = [1000.0]
+    resolver = CalendarTimezoneResolver(ttl_s=300, clock=lambda: now[0])
+
+    def _levels() -> list[str]:
+        found = [r.levelname for r in caplog.records if "Could not read the timezone" in r.getMessage()]
+        caplog.clear()
+        return found
+
+    with caplog.at_level("DEBUG", logger="pincer.integrations.google.calendar_tz"):
+        fake.calendar_get_error = 503
+        await resolver.resolve(fake, "primary")
+        now[0] += 61
+        fake.calendar_get_error = None
+        fake.calendar("primary")["timeZone"] = None
+        assert await resolver.resolve(fake, "primary") != (KYIV, "calendar")  # precondition: zoneless answer
+        now[0] += 61
+        fake.calendar_get_error = 503
+        await resolver.resolve(fake, "primary")
+
+        assert len(fake.sent("calendars.get")) == 3  # precondition: each call really looked up the zone
+        assert _levels() == ["WARNING", "WARNING"]
