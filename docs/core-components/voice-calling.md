@@ -511,8 +511,13 @@ only when `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` lists it (by name or a pattern
 such as `websearch__*`). Appointment calls and the receptionist never get it.
 It runs without approval — the server's chat-side `approval_required` does not
 apply in a call, where the tier table is the authority — and the model hears
-the top results as "According to <site>: …". If it times out, the caller hears
-"I can't find that out right now" and nothing is queued for after the call.
+the top two snippets as "According to <site>: …" (the page title only when a
+snippet is empty), then "These snippets carry no date, current figures may
+differ": the search server returns no publication date, so the result carries
+a source but no freshness. Output the MCP bridge flags as possible prompt
+injection is dropped, not passed on. If the search times out or fails, the
+caller hears "I can't find that out right now" and nothing is queued for after
+the call.
 
 The system prompt follows the call's tool set: tool hints and the
 connected-MCP-server list name only the tools the call actually offers, so a

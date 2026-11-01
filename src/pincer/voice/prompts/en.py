@@ -351,6 +351,7 @@ TOOL_SPEECH = {
     "websearch.some": "According to {source}: {text}",
     "websearch.none": "I found nothing about that on the web.",
     "websearch.unknown_source": "a website",
+    "websearch.undated": "These snippets carry no date, current figures may differ.",
     "duplicate": "This tool was already called with the same arguments. Answer with what you have, "
     "or say honestly that you cannot find it out. Do not call it again.",
     "default.ok": "Done.",

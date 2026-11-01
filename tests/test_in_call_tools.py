@@ -767,8 +767,8 @@ async def test_websearch_on_the_guest_list_plays_the_filler_and_logs_r_auto():
     result = agent.gate_results[0]
     assert result.executed
     assert (
-        result.content
-        == "[TOOL RESULT: Laut clever-tanken.de: Spritpreise Bünde: E10 ab 1,62 Euro bei der Tankstelle am Markt.]"
+        result.content == "[TOOL RESULT: Laut clever-tanken.de: E10 ab 1,62 Euro bei der Tankstelle am Markt. "
+        "Die Auszüge tragen kein Datum, aktuelle Werte können abweichen.]"
     )
     actions = channel.get_transcript(CALL).actions
     assert actions[-1].action_type == "tool_execute"
@@ -798,6 +798,19 @@ async def test_websearch_timeout_says_so_and_queues_no_follow_up():
     assert agent.gate_results[0].deny_reason == "tool_timeout"
     assert de_pack.TOOL_NO_PROGRESS in engine.spoken[CALL]
     assert de_pack.TOOL_TIMEOUT_DEFER not in engine.spoken[CALL]
+    assert state.metadata.get("deferred_actions", []) == []
+    await channel.stop()
+
+
+async def test_websearch_error_says_so_and_queues_no_follow_up():
+    settings = _settings(voice_guests_tools_allowed="websearch__search")
+    agent = ToolAgent([[Tool("websearch__search", WEBSEARCH_ARGS, result="Error: provider down", is_error=True)]])
+    channel, engine, state = await _start(agent, settings=settings)
+    await engine.on_speech_input(CALL, "Wo tanke ich in Bünde am günstigsten?")
+
+    assert agent.gate_results[0].deny_reason == "tool_error"
+    assert de_pack.TOOL_NO_PROGRESS in engine.spoken[CALL]
+    assert de_pack.TOOL_ERROR not in engine.spoken[CALL]
     assert state.metadata.get("deferred_actions", []) == []
     await channel.stop()
 

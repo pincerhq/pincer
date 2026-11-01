@@ -70,7 +70,11 @@ _MONTHS = {
 
 MAX_LIST_ITEMS = 3
 # Web search results are read back from snippets: cap what reaches the model.
+# Two results leave each snippet ~140 characters, enough for the figure the
+# caller asked about.
 WEBSEARCH_MAX_CHARS = 400
+WEBSEARCH_MAX_RESULTS = 2
+_SECURITY_NOTE = "[SECURITY NOTE"
 
 _URL_RE = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 _MARKUP_RE = re.compile(r"<[^>]*>|[*_`#|\[\]{}]+")
@@ -304,42 +308,52 @@ def _truncate_words(text: str, limit: int) -> str:
 
 def _render_websearch(result: str, language: str) -> str:
     """The websearch MCP returns JSON ``{"answer", "results": [{title, url,
-    snippet}]}`` or ``{"error": ...}``; the bridge may put a ``[SECURITY
-    NOTE: ...]`` line in front of it. Each of the top results becomes
-    'According to <domain>: <title>: <snippet>', all of them together within
-    WEBSEARCH_MAX_CHARS; the unsourced Tavily ``answer`` summary is left out."""
+    snippet}]}`` or ``{"error": ...}``. Each of the top results becomes
+    'According to <domain>: <snippet>' (the title only stands in for an empty
+    snippet), followed by the note that the snippets carry no date, all within
+    WEBSEARCH_MAX_CHARS. The unsourced Tavily ``answer`` summary is left out.
+
+    A failure is TOOL_NO_PROGRESS, not TOOL_ERROR: nothing is queued for a
+    live lookup, so there's no "I'll sort that out afterwards" to promise.
+    Output the bridge flagged with a ``[SECURITY NOTE: ...]`` is dropped:
+    web text that looks like prompt injection never reaches the model."""
+    no_progress = str(get_prompt("TOOL_NO_PROGRESS", language) or "")
     start = result.find("{")
+    if start < 0:
+        return no_progress
+    if _SECURITY_NOTE in result[:start]:
+        logger.warning("Web search result flagged as possible prompt injection; dropped")
+        return no_progress
     try:
-        data = json.loads(result[start:]) if start >= 0 else None
+        data = json.loads(result[start:])
     except ValueError:
         data = None
     if not isinstance(data, dict) or data.get("error"):
-        return str(get_prompt("TOOL_ERROR", language) or "")
+        return no_progress
     found: list[tuple[str, str]] = []
     for item in data.get("results") or []:
         if not isinstance(item, dict):
             continue
-        title = _clean_web_text(item.get("title"))
-        snippet = _clean_web_text(item.get("snippet"))
-        text = f"{title}: {snippet}" if title and snippet else title or snippet
+        text = _clean_web_text(item.get("snippet")) or _clean_web_text(item.get("title"))
         if not text:
             continue
         source = _source_domain(item.get("url")) or _tpl("websearch.unknown_source", language)
         found.append((source, text))
-        if len(found) == MAX_LIST_ITEMS:
+        if len(found) == WEBSEARCH_MAX_RESULTS:
             break
     if not found:
         return _tpl("websearch.none", language)
     template = _tpl("websearch.some", language)
-    # Each line gets an equal share of the cap, its "According to <domain>: "
-    # and the separating space included.
-    share = WEBSEARCH_MAX_CHARS // len(found) - 1
+    undated = _tpl("websearch.undated", language)
+    # Each line gets an equal share of what the date note leaves, its
+    # "According to <domain>: " and the separating space included.
+    share = (WEBSEARCH_MAX_CHARS - len(undated) - 1) // len(found) - 1
     lines = []
     for source, text in found:
         room = share - len(template.format(source=source, text="")) - 1
         line = template.format(source=source, text=_truncate_words(text, max(room, 0)))
         lines.append(line if line.endswith((".", "!", "?", "…")) else f"{line}.")
-    return " ".join(lines)
+    return " ".join([*lines, undated])
 
 
 def render(tool_name: str, result: str, language: str, args: dict[str, Any] | None = None) -> str:
@@ -347,7 +361,9 @@ def render(tool_name: str, result: str, language: str, args: dict[str, Any] | No
     args = args or {}
     result = str(result or "")
     try:
-        if _is_error(result):
+        if tool_name == "websearch__search":
+            text = _render_websearch(result, language)
+        elif _is_error(result):
             text = str(get_prompt("TOOL_ERROR", language) or "")
         elif tool_name == "google__check_freebusy":
             text = _render_freebusy(result, args, language)
@@ -367,8 +383,6 @@ def render(tool_name: str, result: str, language: str, args: dict[str, Any] | No
             text = _render_memory_search(result, language)
         elif tool_name == "business_profile_lookup":
             text = _render_profile(result, language)
-        elif tool_name == "websearch__search":
-            text = _render_websearch(result, language)
         else:
             text = _tpl("default.ok", language)
     except Exception:

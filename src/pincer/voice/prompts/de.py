@@ -367,6 +367,7 @@ TOOL_SPEECH = {
     "websearch.some": "Laut {source}: {text}",
     "websearch.none": "Dazu habe ich im Web nichts gefunden.",
     "websearch.unknown_source": "einer Webseite",
+    "websearch.undated": "Die Auszüge tragen kein Datum, aktuelle Werte können abweichen.",
     "duplicate": "Dieses Tool wurde mit denselben Angaben schon aufgerufen. Antworten Sie mit dem, was Sie haben, "
     "oder sagen Sie ehrlich, dass Sie es nicht herausfinden können. Nicht erneut aufrufen.",
     "default.ok": "Erledigt.",

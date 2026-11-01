@@ -117,8 +117,8 @@ TOOL_LATENCY_HINTS_S: dict[str, float] = {
     "memory_note": 0.5,
     "websearch__search": 3.0,
 }
-# Reads only worth anything while the caller is on the line: a timeout says so
-# instead of promising a post-call follow-up nobody would act on.
+# Reads only worth anything while the caller is on the line: a timeout or an
+# error says so instead of promising a post-call follow-up nobody would act on.
 NO_FOLLOW_UP_TOOLS: frozenset[str] = frozenset({"websearch__search"})
 
 # Deny reason used when the callee hangs up while a `user` approval is open
@@ -465,7 +465,7 @@ class InCallToolGate:
                 args,
                 decision,
                 tool_policy.REASON_TOOL_ERROR,
-                speak_key="TOOL_ERROR",
+                speak_key="TOOL_NO_PROGRESS" if tool_name in NO_FOLLOW_UP_TOOLS else "TOOL_ERROR",
                 approval_mode=approval_mode,
             )
             if decision.tier == tool_policy.TIER_W:
