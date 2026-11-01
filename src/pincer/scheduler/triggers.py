@@ -43,11 +43,27 @@ REMINDER_CALENDAR = "primary"
 # A missing eventType means "default" and is reminded.
 NO_REMINDER_EVENT_TYPES = frozenset({"workingLocation", "outOfOffice", "focusTime"})
 # A calendar read failing with these is an outage (token revoked — raw, or wrapped by
-# GoogleAuth once the service cache expires — Google or the network down): logged once,
-# quietly retried. Anything else is a bug and gets a traceback.
-CALENDAR_OUTAGE_ERRORS = (HttpError, GoogleAuthError, GoogleTokenError, OSError, httplib2.HttpLib2Error)
+# GoogleAuth once the service cache expires — or the network down): logged once, quietly
+# retried. A Google HTTP error is an outage only when Google is down or rate-limiting
+# (see is_calendar_outage); anything else, a 4xx included, is a bug and gets a traceback.
+CALENDAR_OUTAGE_ERRORS = (GoogleAuthError, GoogleTokenError, OSError, httplib2.HttpLib2Error)
+RATE_LIMITED_STATUS = 429
+RATE_LIMIT_FORBIDDEN_STATUS = 403
+RATE_LIMIT_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
 
 logger = logging.getLogger(__name__)
+
+
+def is_calendar_outage(exc: BaseException) -> bool:
+    """True when a calendar read failed because Google or the way to it is down, not because of a bug."""
+    if isinstance(exc, CALENDAR_OUTAGE_ERRORS):
+        return True
+    if not isinstance(exc, HttpError):
+        return False
+    if exc.status_code >= 500 or exc.status_code == RATE_LIMITED_STATUS:
+        return True
+    reasons = {d.get("reason") for d in exc.error_details or [] if isinstance(d, dict)}
+    return exc.status_code == RATE_LIMIT_FORBIDDEN_STATUS and bool(reasons & RATE_LIMIT_REASONS)
 
 
 class EventTriggerManager:
@@ -179,8 +195,8 @@ class EventTriggerManager:
         All-day, cancelled and self-declined events, and working-location,
         out-of-office and focus-time entries get no reminder.
 
-        A calendar outage (a token revoked after startup, a Google HTTP error,
-        a dropped connection) logs one WARNING, then DEBUG on every tick until
+        A calendar outage (a token revoked after startup, Google down or
+        rate-limiting, a dropped connection) logs one WARNING, then DEBUG on every tick until
         a read succeeds again; any other error propagates to the loop's
         ``logger.exception``.
         """
@@ -195,7 +211,9 @@ class EventTriggerManager:
         horizon = now + REMINDER_WINDOW
         try:
             page = await fetch_events(factory, REMINDER_CALENDAR, now.isoformat(), horizon.isoformat())
-        except CALENDAR_OUTAGE_ERRORS as exc:
+        except Exception as exc:
+            if not is_calendar_outage(exc):
+                raise
             self._calendar_read_log.log(
                 "Calendar reminders paused: reading the calendar failed (%s: %s); retrying every %d s",
                 type(exc).__name__,

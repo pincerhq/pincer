@@ -321,23 +321,53 @@ async def test_an_unexpected_read_error_is_logged_with_its_traceback(triggers, f
     assert records[0].exc_info is not None and records[0].exc_info[0] is ValueError
 
 
-async def test_a_google_http_error_still_pauses_reminders_quietly(triggers, fake, monkeypatch, caplog) -> None:
+def _http_error(status: int, reason: str = ""):
+    import json
+
     from googleapiclient.errors import HttpError
 
+    errors = [{"reason": reason, "message": reason}] if reason else []
+    body = {"error": {"code": status, "message": f"HTTP {status}", "errors": errors}}
+    return HttpError(SimpleNamespace(status=status, reason=f"HTTP {status}"), json.dumps(body).encode())
+
+
+async def _reminder_tick_failing_with(triggers, monkeypatch, caplog, exc: Exception) -> list[logging.LogRecord]:
     monkeypatch.setattr("pincer.scheduler.triggers.CALENDAR_TICK_S", 0)
 
-    async def _unavailable(*_args, **_kwargs):
+    async def _failing(*_args, **_kwargs):
         triggers._running = False
-        raise HttpError(SimpleNamespace(status=503, reason="Backend Error"), b"{}")
+        raise exc
 
-    monkeypatch.setattr("pincer.scheduler.triggers.fetch_events", _unavailable)
+    monkeypatch.setattr("pincer.scheduler.triggers.fetch_events", _failing)
     triggers._running = True
     with caplog.at_level(logging.DEBUG, logger="pincer.scheduler.triggers"):
         await triggers._calendar_loop()
+    return [r for r in caplog.records if r.name == "pincer.scheduler.triggers"]
 
-    records = [r for r in caplog.records if r.name == "pincer.scheduler.triggers"]
+
+@pytest.mark.parametrize(
+    ("status", "reason"), [(503, ""), (500, ""), (429, ""), (403, "rateLimitExceeded"), (403, "userRateLimitExceeded")]
+)
+async def test_a_google_outage_still_pauses_reminders_quietly(triggers, fake, monkeypatch, caplog, status, reason):
+    """Google down or rate-limiting us: one WARNING, no traceback."""
+    records = await _reminder_tick_failing_with(triggers, monkeypatch, caplog, _http_error(status, reason))
+
     assert [r.levelno for r in records] == [logging.WARNING]
     assert "Calendar reminders paused" in records[0].getMessage() and records[0].exc_info is None
+
+
+@pytest.mark.parametrize(("status", "reason"), [(400, "badRequest"), (404, "notFound"), (403, "forbidden")])
+async def test_a_client_side_google_error_is_logged_with_its_traceback(
+    triggers, fake, monkeypatch, caplog, status, reason
+):
+    """PR #316 review: a 4xx (a malformed timeMin, a missing calendar) is a bug, not an outage — it must
+    not stop reminders behind one quiet WARNING."""
+    from googleapiclient.errors import HttpError
+
+    records = await _reminder_tick_failing_with(triggers, monkeypatch, caplog, _http_error(status, reason))
+
+    assert [(r.levelno, r.getMessage()) for r in records] == [(logging.ERROR, "Calendar trigger error")]
+    assert records[0].exc_info is not None and records[0].exc_info[0] is HttpError
 
 
 async def test_a_token_revoked_after_the_service_cache_expires_warns_once_without_a_traceback(
