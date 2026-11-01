@@ -9,11 +9,19 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from pincer.integrations.google.calendar_tz import (
+    localize,
+    localize_bound,
+    needs_zone,
+    resolver_for,
+    zone_or_none,
+)
 from pincer.integrations.google.models import fmt_event, fmt_list
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from zoneinfo import ZoneInfo
 
     from pincer.integrations.google.service_factory import GoogleServiceFactory
     from pincer.tools.registry import ToolRegistry
@@ -27,6 +35,33 @@ def _now_iso() -> str:
 
 def _week_end_iso() -> str:
     return (datetime.now(UTC) + timedelta(days=7)).isoformat()
+
+
+def _user_timezone(context: dict[str, Any] | None) -> str:
+    """The per-user identity zone the agent put in the tool context ("" if none)."""
+    return str((context or {}).get("timezone") or "")
+
+
+async def _calendar_zone(
+    factory: GoogleServiceFactory, svc: Any, calendar_id: str, context: dict[str, Any] | None
+) -> ZoneInfo:
+    zone, _source = await resolver_for(factory).resolve(svc, calendar_id, _user_timezone(context))
+    return zone
+
+
+async def _bounds(
+    factory: GoogleServiceFactory,
+    svc: Any,
+    calendar_id: str,
+    context: dict[str, Any] | None,
+    time_min: str,
+    time_max: str,
+) -> tuple[str, str]:
+    """Range bounds as RFC 3339 with an offset — Google 400s offset-less ones."""
+    if not (needs_zone(time_min) or needs_zone(time_max)):
+        return time_min, time_max
+    zone = await _calendar_zone(factory, svc, calendar_id, context)
+    return localize_bound(time_min, zone), localize_bound(time_max, zone, end=True)
 
 
 # ── Tool implementations ──────────────────────────────────────────────────────
@@ -49,11 +84,13 @@ async def google__list_events(
     time_min: str = "",
     time_max: str = "",
     max_results: int = 50,
+    context: dict[str, Any] | None = None,
 ) -> str:
     """List calendar events in a date range (default: today + 7 days)."""
     svc = await factory.get("calendar")
-    t_min = time_min or _now_iso()
-    t_max = time_max or _week_end_iso()
+    t_min, t_max = await _bounds(
+        factory, svc, calendar_id, context, time_min or _now_iso(), time_max or _week_end_iso()
+    )
     result = await with_backoff(
         lambda: (
             svc.events()
@@ -108,22 +145,25 @@ async def google__search_events(
     query: str,
     calendar_id: str = "primary",
     max_results: int = 20,
+    time_min: str = "",
+    time_max: str = "",
+    context: dict[str, Any] | None = None,
 ) -> str:
-    """Search calendar events by text query."""
+    """Search calendar events by text query, optionally within a date range."""
     svc = await factory.get("calendar")
-    result = await with_backoff(
-        lambda: (
-            svc.events()
-            .list(
-                calendarId=calendar_id,
-                q=query,
-                singleEvents=True,
-                orderBy="startTime",
-                maxResults=max_results,
-            )
-            .execute()
-        )
-    )
+    t_min, t_max = await _bounds(factory, svc, calendar_id, context, time_min, time_max)
+    kw: dict[str, Any] = {
+        "calendarId": calendar_id,
+        "q": query,
+        "singleEvents": True,
+        "orderBy": "startTime",
+        "maxResults": max_results,
+    }
+    if t_min:
+        kw["timeMin"] = t_min
+    if t_max:
+        kw["timeMax"] = t_max
+    result = await with_backoff(lambda: svc.events().list(**kw).execute())
     events = result.get("items", [])
     if not events:
         return f"No events found for: {query}"
@@ -136,11 +176,14 @@ async def google__check_freebusy(
     emails: str,
     time_min: str = "",
     time_max: str = "",
+    context: dict[str, Any] | None = None,
 ) -> str:
-    """Check free/busy status for one or more email addresses."""
+    """Check free/busy status for one or more email addresses.
+
+    Offset-less bounds are read in the user's own (primary) calendar zone.
+    """
     svc = await factory.get("calendar")
-    t_min = time_min or _now_iso()
-    t_max = time_max or _week_end_iso()
+    t_min, t_max = await _bounds(factory, svc, "primary", context, time_min or _now_iso(), time_max or _week_end_iso())
     items = [{"id": e.strip()} for e in emails.split(",") if e.strip()]
     body: dict[str, Any] = {"timeMin": t_min, "timeMax": t_max, "items": items}
     result = await with_backoff(lambda: svc.freebusy().query(body=body).execute())
@@ -157,17 +200,23 @@ async def google__check_freebusy(
     return "\n".join(lines) if lines else "No free/busy data returned."
 
 
-def _default_timezone() -> str:
-    """Timezone for start/end values without a UTC offset: the configured
-    voice timezone, then the general one, UTC only if settings can't load."""
-    try:
-        from pincer.config import get_settings_relaxed
+async def _write_zone(
+    factory: GoogleServiceFactory,
+    svc: Any,
+    calendar_id: str,
+    context: dict[str, Any] | None,
+    given: str,
+) -> tuple[str, ZoneInfo | None]:
+    """The ``timeZone`` to send with a start/end, and the zone to localize in.
 
-        settings = get_settings_relaxed()
-        tz = str(getattr(settings, "voice_timezone", "") or getattr(settings, "timezone", "") or "").strip()
-        return tz or "UTC"
-    except Exception:  # pragma: no cover
-        return "UTC"
+    A given zone name (the caller's, or the event's stored one on update) wins;
+    otherwise the resolver decides. An unknown given name is still sent as is
+    (Google reports it) but cannot localize anything.
+    """
+    if given.strip():
+        return given.strip(), zone_or_none(given)
+    zone = await _calendar_zone(factory, svc, calendar_id, context)
+    return zone.key, zone
 
 
 async def google__create_event(
@@ -184,6 +233,7 @@ async def google__create_event(
     meet_link: str = "",
     send_updates: str = "",
     idempotency_key: str = "",
+    context: dict[str, Any] | None = None,
 ) -> str:
     """Create a new calendar event, optionally with a Google Meet link.
 
@@ -192,6 +242,9 @@ async def google__create_event(
     idempotency_key: stored as the private extended property ``pincer_key``;
         when an event with the same key already exists on the calendar, it is
         returned instead of creating a duplicate (safe retries).
+
+    Offset-less start/end are read in ``timezone`` when given, else in the
+    calendar's own zone (see calendar_tz); offset-bearing ones pass unchanged.
     """
     import uuid
 
@@ -218,11 +271,11 @@ async def google__create_event(
                 f"Link: {ev.get('htmlLink', '')}"
             )
 
-    timezone = timezone or _default_timezone()
+    tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone)
     body: dict[str, Any] = {
         "summary": summary,
-        "start": {"dateTime": start, "timeZone": timezone},
-        "end": {"dateTime": end, "timeZone": timezone},
+        "start": {"dateTime": localize(start, zone) if zone else start, "timeZone": tz_name},
+        "end": {"dateTime": localize(end, zone) if zone else end, "timeZone": tz_name},
     }
     if idempotency_key:
         body["extendedProperties"] = {"private": {"pincer_key": idempotency_key}}
@@ -290,8 +343,13 @@ async def google__update_event(
     description: str = "",
     location: str = "",
     timezone: str = "",
+    context: dict[str, Any] | None = None,
 ) -> str:
-    """Update fields on an existing calendar event."""
+    """Update fields on an existing calendar event.
+
+    Offset-less start/end are read in ``timezone`` when given, else in the
+    event's own stored zone, else in the calendar's zone.
+    """
     svc = await factory.get("calendar")
     event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
     if summary:
@@ -300,12 +358,12 @@ async def google__update_event(
         event["description"] = description
     if location:
         event["location"] = location
-    if start:
-        tz = timezone or event.get("start", {}).get("timeZone") or _default_timezone()
-        event["start"] = {"dateTime": start, "timeZone": tz}
-    if end:
-        tz = timezone or event.get("end", {}).get("timeZone") or _default_timezone()
-        event["end"] = {"dateTime": end, "timeZone": tz}
+    for key, value in (("start", start), ("end", end)):
+        if not value:
+            continue
+        stored_zone = str(event.get(key, {}).get("timeZone") or "")
+        tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone or stored_zone)
+        event[key] = {"dateTime": localize(value, zone) if zone else value, "timeZone": tz_name}
     updated = await with_backoff(
         lambda: svc.events().update(calendarId=calendar_id, eventId=event_id, body=event).execute()
     )
@@ -444,14 +502,25 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
     )
     registry.register(
         name="google__list_events",
-        description="List calendar events in a date range (default: next 7 days).",
+        description=(
+            "List calendar events in a date range (default: next 7 days). "
+            "Times without a UTC offset are read in the calendar's timezone."
+        ),
         handler=_h(google__list_events),
         parameters={
             "type": "object",
             "properties": {
                 "calendar_id": {"type": "string", "default": "primary"},
-                "time_min": {"type": "string", "description": "ISO 8601 start (default: now)", "default": ""},
-                "time_max": {"type": "string", "description": "ISO 8601 end (default: +7d)", "default": ""},
+                "time_min": {
+                    "type": "string",
+                    "description": "ISO 8601 start, or a date for that whole local day (default: now)",
+                    "default": "",
+                },
+                "time_max": {
+                    "type": "string",
+                    "description": "ISO 8601 end, or a date to include that whole local day (default: +7d)",
+                    "default": "",
+                },
                 "max_results": {"type": "integer", "default": 50},
             },
             "required": [],
@@ -472,7 +541,10 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
     )
     registry.register(
         name="google__search_events",
-        description="Search calendar events by text (title, description, location).",
+        description=(
+            "Search calendar events by text (title, description, location), optionally within a date range. "
+            "Times without a UTC offset are read in the calendar's timezone."
+        ),
         handler=_h(google__search_events),
         parameters={
             "type": "object",
@@ -480,13 +552,26 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 "query": {"type": "string"},
                 "calendar_id": {"type": "string", "default": "primary"},
                 "max_results": {"type": "integer", "default": 20},
+                "time_min": {
+                    "type": "string",
+                    "description": "Optional ISO 8601 start, or a date for that whole local day",
+                    "default": "",
+                },
+                "time_max": {
+                    "type": "string",
+                    "description": "Optional ISO 8601 end, or a date to include that whole local day",
+                    "default": "",
+                },
             },
             "required": ["query"],
         },
     )
     registry.register(
         name="google__check_freebusy",
-        description="Check free/busy status for one or more people by email (comma-separated).",
+        description=(
+            "Check free/busy status for one or more people by email (comma-separated). "
+            "Times without a UTC offset are read in your primary calendar's timezone."
+        ),
         handler=_h(google__check_freebusy),
         parameters={
             "type": "object",
@@ -513,9 +598,9 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 "start": {
                     "type": "string",
                     "description": "Start time ISO 8601 as LOCAL wall-clock time (e.g. 2026-03-28T14:00:00); "
-                    "the timezone parameter (or the configured default) interprets it",
+                    "without a UTC offset it is read in the calendar's timezone (or the timezone parameter)",
                 },
-                "end": {"type": "string", "description": "End time ISO 8601"},
+                "end": {"type": "string", "description": "End time ISO 8601, same rules as start"},
                 "calendar_id": {"type": "string", "default": "primary"},
                 "description": {"type": "string", "default": ""},
                 "location": {"type": "string", "default": ""},
@@ -523,7 +608,7 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 "timezone": {
                     "type": "string",
                     "description": "IANA timezone for start/end when they carry no UTC offset "
-                    "(default: the agent's configured local timezone, e.g. Europe/Berlin)",
+                    "(default: the calendar's timezone). Leave empty unless the user names another zone",
                     "default": "",
                 },
                 "add_meet_link": {
@@ -554,7 +639,10 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
     )
     registry.register(
         name="google__update_event",
-        description="Update fields on an existing calendar event. Only provided fields are changed.",
+        description=(
+            "Update fields on an existing calendar event. Only provided fields are changed. "
+            "Times without a UTC offset are read in the event's own timezone, else the calendar's timezone."
+        ),
         handler=_h(google__update_event),
         parameters={
             "type": "object",
@@ -562,11 +650,20 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 "event_id": {"type": "string"},
                 "calendar_id": {"type": "string", "default": "primary"},
                 "summary": {"type": "string", "default": ""},
-                "start": {"type": "string", "default": ""},
-                "end": {"type": "string", "default": ""},
+                "start": {
+                    "type": "string",
+                    "description": "New start, ISO 8601 local wall-clock time (e.g. 2026-03-28T17:00:00)",
+                    "default": "",
+                },
+                "end": {"type": "string", "description": "New end, same rules as start", "default": ""},
                 "description": {"type": "string", "default": ""},
                 "location": {"type": "string", "default": ""},
-                "timezone": {"type": "string", "default": ""},
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone for offset-less start/end (default: the event's own, "
+                    "else the calendar's timezone). Leave empty unless the user names another zone",
+                    "default": "",
+                },
             },
             "required": ["event_id"],
         },

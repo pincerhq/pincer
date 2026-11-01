@@ -331,7 +331,13 @@ async def test_tool_context_prefers_channel_user_id(settings, mock_llm, session_
     )
 
     assert seen_contexts == [
-        {"user_id": "123456789", "channel": "test", "pincer_user_id": "canonical-r_lutsiv", "channel_name": "test"}
+        {
+            "user_id": "123456789",
+            "channel": "test",
+            "pincer_user_id": "canonical-r_lutsiv",
+            "channel_name": "test",
+            "timezone": "",
+        }
     ]
 
 
@@ -362,7 +368,41 @@ async def test_tool_context_falls_back_to_user_id_when_no_channel_user_id(
     agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
     await agent.handle_message(user_id="user1", channel="test", text="who am i")
 
-    assert seen_contexts == [{"user_id": "user1", "channel": "test", "pincer_user_id": "user1", "channel_name": "test"}]
+    assert seen_contexts == [
+        {"user_id": "user1", "channel": "test", "pincer_user_id": "user1", "channel_name": "test", "timezone": ""}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tool_context_carries_the_users_identity_timezone(settings, mock_llm, session_manager, cost_tracker):
+    """Calendar tools read offset-less times in the user's zone when the calendar's is unknown."""
+    registry, seen_contexts = _context_capturing_registry()
+    mock_llm.complete.side_effect = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="tc1", name="whoami", arguments={})],
+            model="test",
+            input_tokens=50,
+            output_tokens=30,
+            stop_reason="tool_use",
+        ),
+        LLMResponse(content="done", model="test", input_tokens=80, output_tokens=20, stop_reason="end_turn"),
+    ]
+    looked_up: list[str] = []
+
+    class _Identity:
+        async def get_timezone(self, pincer_user_id: str) -> str:
+            looked_up.append(pincer_user_id)
+            return "Europe/Kyiv"
+
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+    agent.identity_resolver = _Identity()
+    await agent.handle_message(
+        user_id="canonical-r_lutsiv", channel="test", text="who am i", channel_user_id="123456789"
+    )
+
+    assert [ctx.get("timezone") for ctx in seen_contexts] == ["Europe/Kyiv"]
+    assert "canonical-r_lutsiv" in looked_up
 
 
 @pytest.mark.asyncio
@@ -397,7 +437,13 @@ async def test_stream_tool_context_prefers_channel_user_id(settings, mock_llm, s
         pass
 
     assert seen_contexts == [
-        {"user_id": "123456789", "channel": "test", "pincer_user_id": "canonical-r_lutsiv", "channel_name": "test"}
+        {
+            "user_id": "123456789",
+            "channel": "test",
+            "pincer_user_id": "canonical-r_lutsiv",
+            "channel_name": "test",
+            "timezone": "",
+        }
     ]
 
 

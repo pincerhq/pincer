@@ -1841,6 +1841,10 @@ class Agent:
                         "channel": channel,
                         "pincer_user_id": user_id,
                         "channel_name": channel_name or channel,
+                        # Per-user identity zone: calendar tools read
+                        # offset-less times in it when the calendar's own
+                        # zone is unavailable ("" = use PINCER_TIMEZONE).
+                        "timezone": await self._user_timezone(user_id),
                     },
                 )
                 if tool_call.name == "make_phone_call":
