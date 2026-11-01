@@ -24,7 +24,7 @@ Complete command reference across all sprints (1–13). For the full list of too
 | `pincer chat` | CLI chat interface (no messaging app needed) | 4 |
 | `pincer config` | Show current configuration (masked secrets) | 1 |
 | `pincer whatsapp setup` | Pair WhatsApp via QR code | 3 |
-| `pincer google auth` | Google Calendar OAuth consent flow (legacy, 3 tools) | 3 |
+| `pincer google auth` | Google Calendar OAuth consent flow (legacy calendar-only token: the 12 calendar tools) | 3 |
 | `pincer google setup` | Google Workspace OAuth consent flow (113 tools incl. Meet v2) | 9 |
 | `ms365-mcp-setup` | Microsoft 365 device code auth flow, default identity (62 tools) | 10 |
 | `pincer signal setup` | Open the Signal QR-code link to register/link a device (signal-cli sidecar) | 7.5 |

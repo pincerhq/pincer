@@ -6,21 +6,21 @@ This is the complete, authoritative catalog of every tool Pincer can call. It is
 
 | Category | Tools | Module | How to enable |
 |---|---:|---|---|
-| **Core built-ins** (incl. `generate_image`, `make_phone_call`, `load_skill`, `load_skill_reference`, `run_skill_script`) | 26 | `src/pincer/tools/builtin/` + `src/pincer/cli/run.py` | Always on (voice/image need their API key) |
+| **Core built-ins** (incl. `generate_image`, `make_phone_call`, `load_skill`, `load_skill_reference`, `run_skill_script`) | 23 | `src/pincer/tools/builtin/` + `src/pincer/cli/run.py` | Always on (voice/image need their API key) |
 | **Bundled skills** | 5 (progressive disclosure, no fixed tool count) | `src/pincer/skills/` (SKILL.md) | Always on (bundled) |
 | **Google Workspace** | 113 | `src/pincer/integrations/google/` | `pincer google setup` |
 | **Microsoft 365** | 69 | `src/ms365-mcp/ms365/` | `ms365-mcp-setup` |
 | **Slack (native)** | 71 | `src/pincer/integrations/slack/` | `PINCER_SLACK_BOT_TOKEN` |
 | **MCP servers (external)** | unlimited | `src/pincer/mcp/` | `pincer.toml` `[[mcp.servers]]` |
 | **Custom skills** | unlimited | `~/.pincer/skills/` (SKILL.md) | No install step — filesystem discovery |
-| **Native tools (first-party)** | **~279** | — | — |
+| **Native tools (first-party)** | **~276** | — | — |
 | **Available out of the box with popular MCP servers** | **550+** | — | — |
 
-> **"550+"** refers to the practical total when Pincer is paired with the most common MCP servers (GitHub, Postgres, Filesystem, Notion, Linear, Stripe, etc.) plus the ~279 native Pincer tools. Pincer itself ships ~279 first-party tools; MCP multiplies that arbitrarily.
+> **"550+"** refers to the practical total when Pincer is paired with the most common MCP servers (GitHub, Postgres, Filesystem, Notion, Linear, Stripe, etc.) plus the ~276 native Pincer tools. Pincer itself ships ~276 first-party tools; MCP multiplies that arbitrarily.
 
 ---
 
-## Core built-ins (26)
+## Core built-ins (23)
 
 Registered in `src/pincer/cli/run.py::_run_agent()`. These are always available.
 

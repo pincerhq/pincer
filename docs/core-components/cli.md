@@ -32,7 +32,7 @@ pincer
 ├── doctor                  # Security health check
 ├── google
 │   ├── setup               # Google Workspace OAuth (113 tools)
-│   └── auth                # Google Calendar OAuth (legacy, 3 tools)
+│   └── auth                # Google Calendar OAuth (legacy calendar-only token: the 12 calendar tools)
 ├── signal
 │   ├── setup               # Pair Signal via QR code
 │   ├── status              # Signal API health + registered accounts
@@ -338,7 +338,7 @@ Score: 88/100  🟢 20 passed  🟡 3 warnings  🔴 1 critical
 Google integration setup, split into two commands:
 
 - **`pincer google setup`** — one-time Google Workspace OAuth (opens browser for consent). Registers 113 tools across Gmail, Calendar, Drive, Docs, Sheets, Slides, Meet, Tasks, and Contacts. Saves the token to `~/.pincer/google_workspace_token.json`.
-- **`pincer google auth`** — legacy Google Calendar-only OAuth consent flow (3 tools). Saves the token to `~/.pincer/google_token.json`.
+- **`pincer google auth`** — legacy Google Calendar-only OAuth consent flow. Saves the token to `~/.pincer/google_token.json`, which enables only the 12 Workspace calendar tools.
 
 ```bash
 pincer google setup

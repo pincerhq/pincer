@@ -467,7 +467,7 @@ pincer/
 | `pincer run` | Start the agent (all channels + scheduler) |
 | `pincer config` | Show current configuration |
 | `pincer cost` | Show today's spend |
-| `pincer google auth` | Run Google Calendar OAuth consent flow (legacy, 3 tools) |
+| `pincer google auth` | Run Google Calendar OAuth consent flow (legacy calendar-only token: the 12 calendar tools) |
 | `pincer google setup` | Run Google Workspace OAuth consent flow (113 tools) |
 | `pincer whatsapp setup` | Pair WhatsApp via QR code |
 | `python main.py` | Start the agent (alternative) |
@@ -528,7 +528,7 @@ enables random failover.
 ### First-Time Setup
 
 1. `cp .env.example .env` — fill in API keys
-2. `pincer google auth` — one-time Google Calendar consent (legacy, 3 tools)
+2. `pincer google auth` — one-time Google Calendar consent (legacy calendar-only token: the 12 calendar tools)
    — **or** —
    `pincer google setup` — one-time Google Workspace consent (full 113-tool suite incl. Meet v2)
 3. `pincer run` — scan WhatsApp QR on first launch
