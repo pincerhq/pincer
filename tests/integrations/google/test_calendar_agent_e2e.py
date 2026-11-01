@@ -216,7 +216,6 @@ def berlin_settings(tmp_path, monkeypatch) -> Settings:
     )
     relaxed = SimpleNamespace(timezone="Europe/Berlin", voice_timezone="Europe/Berlin")
     monkeypatch.setattr("pincer.config.get_settings_relaxed", lambda: relaxed)
-    monkeypatch.setattr("pincer.tools.builtin.calendar_tool.get_settings", lambda: settings)
     return settings
 
 
@@ -226,7 +225,6 @@ def registry(fake, berlin_settings, monkeypatch) -> ToolRegistry:
     factory = FakeCalendarFactory(fake)
     factory.auth = SimpleNamespace(services=["calendar"])  # type: ignore[attr-defined]
     monkeypatch.setattr("pincer.integrations.google.get_google_factory", lambda: factory)
-    monkeypatch.setattr("pincer.tools.builtin.calendar_tool._get_service", lambda: fake)
     reg = ToolRegistry()
     register_default_tools(reg, berlin_settings)
     assert "google__update_event" in reg.list_tools()  # Workspace tools really registered

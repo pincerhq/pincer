@@ -7,6 +7,7 @@ from __future__ import annotations
 import functools
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -131,17 +132,33 @@ async def google__list_calendars(factory: GoogleServiceFactory) -> str:
     return fmt_list(lines, header=f"{len(lines)} calendar(s):")
 
 
-async def google__list_events(
+@dataclass(frozen=True)
+class EventPage:
+    """Events of one list call, with the zone and RFC 3339 range they were read in."""
+
+    events: list[dict[str, Any]]
+    zone: ZoneInfo
+    zone_label: str
+    time_min: str
+    time_max: str
+    more: bool
+
+
+async def fetch_events(
     factory: GoogleServiceFactory,
     calendar_id: str = "primary",
     time_min: str = "",
     time_max: str = "",
     max_results: int = 50,
-    context: dict[str, Any] | None = None,
-) -> str:
-    """List calendar events in a date range (default: now + 7 days; a bare date alone = that day)."""
+    user_timezone: str = "",
+) -> EventPage:
+    """Structured events in a range — the one list path behind the list tool, briefing and reminder.
+
+    Bounds follow ``_range`` with defaults (offset-less ones read in the
+    calendar's zone; a bare date alone is that whole local day).
+    """
     svc = await factory.get("calendar")
-    zone, label = await _labeled_zone(factory, svc, calendar_id, context)
+    zone, label = await _labeled_zone(factory, svc, calendar_id, {"timezone": user_timezone})
     t_min, t_max = _range(time_min, time_max, zone, defaults=True)
     result = await with_backoff(
         lambda: (
@@ -157,18 +174,49 @@ async def google__list_events(
             .execute()
         )
     )
-    events = result.get("items", [])
-    first, last = local_day_span(t_min, t_max, zone)
+    return EventPage(
+        events=result.get("items", []),
+        zone=zone,
+        zone_label=label,
+        time_min=t_min,
+        time_max=t_max,
+        more=bool(result.get("nextPageToken")),
+    )
+
+
+async def calendar_today(
+    factory: GoogleServiceFactory,
+    calendar_id: str = "primary",
+    user_timezone: str = "",
+    now: datetime | None = None,
+) -> date:
+    """Today's date in the calendar's own zone (not the deployment clock's)."""
+    svc = await factory.get("calendar")
+    zone, _label = await _labeled_zone(factory, svc, calendar_id, {"timezone": user_timezone})
+    return (now or datetime.now(UTC)).astimezone(zone).date()
+
+
+async def google__list_events(
+    factory: GoogleServiceFactory,
+    calendar_id: str = "primary",
+    time_min: str = "",
+    time_max: str = "",
+    max_results: int = 50,
+    context: dict[str, Any] | None = None,
+) -> str:
+    """List calendar events in a date range (default: now + 7 days; a bare date alone = that day)."""
+    page = await fetch_events(factory, calendar_id, time_min, time_max, max_results, _user_timezone(context))
+    first, last = local_day_span(page.time_min, page.time_max, page.zone)
     span = first if first == last else f"{first} – {last}"
-    if not events:
+    if not page.events:
         return f"No events on {first}." if first == last else f"No events between {first} and {last}."
     listed = render_events(
-        events,
-        zone,
-        header=f"{len(events)} event(s) ({span})",
+        page.events,
+        page.zone,
+        header=f"{len(page.events)} event(s) ({span})",
         clock_zone=_clock(context),
-        zone_label=label,
-        more=bool(result.get("nextPageToken")),
+        zone_label=page.zone_label,
+        more=page.more,
     )
     return f"{listed}\n{EDIT_HINT}"
 

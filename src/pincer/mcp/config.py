@@ -152,6 +152,8 @@ class MCPServerExportConfig:
         default_factory=lambda: [
             "email_check",
             "calendar_today",
+            "google__list_events",
+            "google__search_events",
             "memory_search",
             "load_skill",
             "load_skill_reference",
@@ -343,6 +345,8 @@ def _parse_mcp_config(mcp_raw: dict[str, Any], pincer_vars: dict[str, str] | Non
             [
                 "email_check",
                 "calendar_today",
+                "google__list_events",
+                "google__search_events",
                 "memory_search",
                 "load_skill",
                 "load_skill_reference",

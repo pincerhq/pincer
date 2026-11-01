@@ -42,9 +42,6 @@ Registered in `src/pincer/cli/run.py::_run_agent()`. These are always available.
 | `email_move` | No | Move email to another folder |
 | `email_trash` | No | Move email to Trash |
 | `email_empty_folder` | **Yes** | Empty Spam / Trash folder |
-| `calendar_today` | No | Today's calendar events |
-| `calendar_week` | No | This week's calendar events |
-| `calendar_create` | No | Create a calendar event |
 | `send_file` | No | Send a file to the current channel |
 | `send_image` | No | Send an image to the current channel |
 | `generate_image` | No | Generate an image via fal.ai or Gemini |

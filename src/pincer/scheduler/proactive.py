@@ -3,7 +3,7 @@ Proactive agent — morning briefing and custom actions.
 
 Generates a daily briefing with:
 1. Weather (OpenWeatherMap API)
-2. Calendar (reuses tools/builtin/calendar_tool.py)
+2. Calendar (today's events through the Google service factory, in the calendar's zone)
 3. Email (reuses tools/builtin/email_tool.py)
 4. News (NewsAPI)
 
@@ -22,6 +22,7 @@ import httpx
 
 from pincer.config import get_settings
 from pincer.db.engine import get_database_url
+from pincer.integrations.google.calendar_source import CalendarSource
 from pincer.services.scheduler import BriefingConfigService
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ class ProactiveAgent:
         self._briefing_config: BriefingConfigService | None = None
         self._http = httpx.AsyncClient(timeout=15)
         self._agent = agent
+        self._calendar_source = CalendarSource("the morning briefing")
 
     async def close(self) -> None:
         await self._http.aclose()
@@ -113,13 +115,17 @@ class ProactiveAgent:
             return "Weather: Unavailable\n"
 
     async def _calendar(self) -> str:
+        """Today's events (the calendar's own day and zone), or why there are none."""
+        factory = self._calendar_source.factory()
+        if factory is None:
+            return "Calendar: Not connected\n"
         try:
-            from pincer.tools.builtin.calendar_tool import calendar_today
+            from pincer.integrations.google.calendar_render import render_agenda
+            from pincer.integrations.google.tools_calendar import calendar_today, fetch_events
 
-            result = await calendar_today()
-            if isinstance(result, str):
-                return f"Calendar\n{result}\n"
-            return "Calendar: No data\n"
+            day = await calendar_today(factory)
+            page = await fetch_events(factory, time_min=day.isoformat(), time_max=day.isoformat())
+            return render_agenda(page.events, page.zone, day) + "\n"
         except Exception as e:
             logger.error("Briefing calendar failed: %s", e)
             return "Calendar: Unavailable\n"

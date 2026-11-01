@@ -3,12 +3,15 @@ PincerToolExporter — maps Pincer ToolRegistry entries to FastMCP tool registra
 
 Only tools in the `expose_tools` whitelist are exported.
 `pincer_ask_user` is always registered regardless of the whitelist.
+`calendar_today` is an MCP-only alias (see `pincer.mcp.calendar_alias`).
 """
 
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING, Any
+
+from pincer.mcp.calendar_alias import CALENDAR_TODAY, DESCRIPTION, CalendarTodayAlias
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -76,6 +79,9 @@ class PincerToolExporter:
         registered_tools = self._registry.list_tools()
 
         for pincer_name in self._expose_tools:
+            if pincer_name == CALENDAR_TODAY and pincer_name not in registered_tools:
+                self._register_calendar_today(fmcp)
+                continue
             if pincer_name not in registered_tools:
                 logger.warning("MCP export: tool '%s' not in registry — skipping", pincer_name)
                 continue
@@ -144,6 +150,25 @@ class PincerToolExporter:
             else mcp_name
         )
         fmcp.add_tool(_handler, name=mcp_name)
+
+    def _register_calendar_today(self, fmcp: FastMCP) -> None:
+        """The MCP-only ``pincer_calendar_today`` alias (read-only, no approval)."""
+        alias = CalendarTodayAlias(self._registry)
+        security = self._security_gate
+        mcp_name = f"{_TOOL_PREFIX}{CALENDAR_TODAY}"
+
+        async def pincer_calendar_today(calendar_id: str = "primary") -> str:
+            if security and not security.check_rate_limit("pincer_server", CALENDAR_TODAY):
+                return f"[RateLimited] Too many calls to {CALENDAR_TODAY} — slow down"
+            try:
+                return await alias(calendar_id)
+            except Exception as e:
+                logger.exception("MCP server tool '%s' failed", mcp_name)
+                return f"[Error] {CALENDAR_TODAY}: {type(e).__name__}: {e}"
+
+        pincer_calendar_today.__doc__ = DESCRIPTION
+        fmcp.add_tool(pincer_calendar_today, name=mcp_name)
+        self._registered.append(mcp_name)
 
     def _register_ask_user(self, fmcp: FastMCP) -> None:
         """Always register pincer_ask_user regardless of the expose_tools list."""

@@ -8,6 +8,10 @@ clock a time belongs to. All-day events say "all day"; every event keeps an
 the agent's clock zone (the zone the system-prompt clock uses), one note line
 says so — otherwise "10:00" in a Kyiv calendar reads as 10:00 Berlin.
 
+``render_agenda`` and ``render_reminder`` are for people, not the model (the
+morning briefing and the upcoming-event reminder): 24-hour local times, the
+zone named once, no ISO stamps and no ``ID:`` lines.
+
 Format contract (parsed by the voice flow, keep verbatim):
 - event lines: ``  <start ISO> → <end ISO> — <title>[ | …]`` (voice tool speech);
 - write confirmations: a ``Link: <url>`` line (voice booking link extraction).
@@ -15,6 +19,7 @@ Format contract (parsed by the voice flow, keep verbatim):
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +49,12 @@ EDIT_HINT = (
     "To change one of these events (rename, reschedule, new time or details), call google__update_event "
     "with its ID; never create a new event for a change."
 )
+
+# Human-facing renderers (briefing, reminder).
+CLOCK_FORMAT = "%H:%M"
+AGENDA_DAY_FORMAT = "%A %d %B"
+AGENDA_RANGE = "–"
+NO_EVENTS_TODAY = "No events today."
 
 
 def _instant(field: dict[str, Any]) -> datetime | None:
@@ -83,6 +94,11 @@ def _all_day_span(event: dict[str, Any]) -> tuple[date, date] | None:
     end = _all_day(event.get("end") or {})
     last = end - timedelta(days=1) if end is not None and end > first else first
     return first, last
+
+
+def start_instant(event: dict[str, Any]) -> datetime | None:
+    """A timed event's start as an aware instant (None for all-day or unparseable)."""
+    return _instant(event.get("start") or {})
 
 
 def event_instants(events: list[dict[str, Any]]) -> list[datetime]:
@@ -252,3 +268,40 @@ def render_write(
     if extra:
         lines.append(extra)
     return "\n".join(lines)
+
+
+def _clock_time(field: dict[str, Any], zone: ZoneInfo) -> str:
+    instant = _instant(field)
+    return instant.astimezone(zone).strftime(CLOCK_FORMAT) if instant is not None else "?"
+
+
+def _agenda_line(event: dict[str, Any], zone: ZoneInfo) -> str:
+    if _all_day_span(event) is not None:
+        when = ALL_DAY
+    else:
+        start = _clock_time(event.get("start") or {}, zone)
+        when = f"{start}{AGENDA_RANGE}{_clock_time(event.get('end') or {}, zone)}"
+    location = f" | {event['location']}" if event.get("location") else ""
+    return f"  {when}  {_title(event)}{location}"
+
+
+def render_agenda(events: list[dict[str, Any]], zone: ZoneInfo, day: date) -> str:
+    """A day's events for a person (the briefing): one header naming the zone, then one line each."""
+    lines = [f"Calendar — {day.strftime(AGENDA_DAY_FORMAT)} ({zone.key})"]
+    if events:
+        lines.extend(_agenda_line(e, zone) for e in events)
+    else:
+        lines.append(f"  {NO_EVENTS_TODAY}")
+    return "\n".join(lines)
+
+
+def render_reminder(event: dict[str, Any], zone: ZoneInfo, now: datetime) -> str:
+    """One upcoming-event reminder for a person, its start in the calendar's zone."""
+    start = start_instant(event)
+    at = start.astimezone(zone).strftime(CLOCK_FORMAT) if start is not None else "?"
+    minutes = math.ceil((start - now).total_seconds() / 60) if start is not None else 0
+    when = f"in {minutes} min" if minutes > 0 else "now"
+    text = f"Reminder: {_title(event)} starts at {at} ({zone.key}), {when}."
+    if event.get("location"):
+        text += f" Location: {event['location']}."
+    return text

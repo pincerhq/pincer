@@ -292,3 +292,29 @@ def instant_backoff(monkeypatch):
         return None
 
     monkeypatch.setattr(quota, "asyncio", SimpleNamespace(sleep=_no_sleep, to_thread=asyncio.to_thread))
+
+
+@pytest.fixture
+def google_token(monkeypatch, mock_credentials, fake, berlin_deployment):
+    """A configured Google token whose Calendar API is the module's ``fake``.
+
+    Goes through the real ``get_google_factory`` path (config, token location,
+    scope probe, service factory); only ``googleapiclient.discovery.build`` is
+    swapped. Returns a switch: set ``.config`` to change ``[integrations.google]``.
+    """
+    from types import SimpleNamespace
+
+    from pincer.integrations.google.config import GoogleIntegrationConfig
+
+    creds_path, token_path = mock_credentials
+    location = {"credentials_path": str(creds_path), "token_path": str(token_path)}
+    monkeypatch.setattr("pincer.integrations.google.token_source.locate_token", lambda _settings: location)
+
+    def _build(api, version, **_kwargs):
+        assert api == "calendar", api
+        return fake
+
+    monkeypatch.setattr("googleapiclient.discovery.build", _build)
+    state = SimpleNamespace(config=GoogleIntegrationConfig())
+    monkeypatch.setattr("pincer.integrations.google.config.load_config", lambda: state.config)
+    return state

@@ -186,7 +186,7 @@ class GoogleAuth:
         if self._token_info is not None:
             return f"Run 'pincer google setup --print-env' and update {TOKEN_ENV}"
         if self._token_path.name == "google_token.json":
-            # Legacy calendar token — the built-in calendar_* tools still use it, don't delete it.
+            # Legacy calendar-only token — locate_token still falls back to it for the calendar tools.
             return "Run 'pincer google setup' (creates google_workspace_token.json; keep google_token.json)"
         return f"Run 'pincer google setup' (re-authorises and replaces {self._token_path})"
 

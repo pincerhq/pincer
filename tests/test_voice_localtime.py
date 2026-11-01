@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -71,25 +71,24 @@ class TestFormatVoiceTime:
 
 
 class TestCalendarEventRendering:
-    def test_format_event_converts_to_local_zone(self):
-        from pincer.tools.builtin.calendar_tool import _format_event
+    def test_agenda_converts_to_local_zone(self):
+        from pincer.integrations.google.calendar_render import render_agenda
 
         event = {
             "summary": "Zahnarzt",
             "start": {"dateTime": "2025-03-30T01:30:00+00:00"},
             "end": {"dateTime": "2025-03-30T02:00:00+00:00"},
         }
-        line = _format_event(event, ZoneInfo("Europe/Berlin"))
+        text = render_agenda([event], ZoneInfo("Europe/Berlin"), date(2025, 3, 30))
         # 01:30 UTC is 03:30 CEST after the spring-forward transition
-        assert "03:30 - 04:00" in line
-        assert "Zahnarzt" in line
+        assert "03:30–04:00  Zahnarzt" in text
 
-    def test_format_event_all_day_unchanged(self):
-        from pincer.tools.builtin.calendar_tool import _format_event
+    def test_agenda_all_day_unchanged(self):
+        from pincer.integrations.google.calendar_render import render_agenda
 
         event = {"summary": "Feiertag", "start": {"date": "2025-10-03"}, "end": {"date": "2025-10-04"}}
-        line = _format_event(event, ZoneInfo("Europe/Berlin"))
-        assert "All day" in line
+        text = render_agenda([event], ZoneInfo("Europe/Berlin"), date(2025, 10, 3))
+        assert "all day  Feiertag" in text
 
 
 def test_voice_today_str_uses_voice_zone():

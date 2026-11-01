@@ -3,7 +3,7 @@ Event triggers — reactive actions on external events.
 
 Trigger types:
 1. New email -> notify user
-2. Calendar reminder -> 15 min before event notification
+2. Calendar reminder -> one message per event starting within 15 minutes
 3. Custom webhooks -> trigger agent actions
 
 Deduplication via event_triggers table prevents duplicate notifications.
@@ -15,15 +15,22 @@ import asyncio
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from pincer.config import get_settings
 from pincer.db.engine import get_database_url
+from pincer.integrations.google.calendar_source import CalendarSource
 from pincer.services.scheduler import EventTriggerService
 
 _UID_RE = re.compile(r"UID:\s*(\d+)")
+
+# Upcoming-event reminder (Q11): checked every tick, one message per event.
+CALENDAR_TICK_S = 60
+REMINDER_WINDOW = timedelta(minutes=15)
+REMINDER_TRIGGER = "calendar_reminder"
+REMINDER_CALENDAR = "primary"
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +45,7 @@ class EventTriggerManager:
         self._tasks: list[asyncio.Task[None]] = []
         self._seen_email_uids: set[str] | None = None
         self._dedupe: EventTriggerService | None = None
+        self._calendar = CalendarSource("upcoming-event reminders")
 
     async def ensure_table(self) -> None:
         """Ensure the event_triggers table is at head (see pincer.db.migrations)."""
@@ -145,37 +153,37 @@ class EventTriggerManager:
                 await self._check_upcoming()
             except Exception:
                 logger.exception("Calendar trigger error")
-            await asyncio.sleep(60)
+            await asyncio.sleep(CALENDAR_TICK_S)
 
     async def _check_upcoming(self) -> None:
-        settings = get_settings()
-        user_id = settings.default_user_id
+        """Remind about each event starting within the window, once per (event, start).
+
+        Keyed on event ID plus start time, so a moved event is reminded again at
+        its new time; the key is persisted, so a restart does not repeat one.
+        All-day, cancelled and self-declined events get no reminder.
+        """
+        from pincer.integrations.google.calendar_render import render_reminder, start_instant
+        from pincer.integrations.google.tools_calendar import fetch_events
+
+        user_id = get_settings().default_user_id
         if not user_id:
             return
+        factory = self._calendar.factory()
+        if factory is None:
+            return
 
-        try:
-            from pincer.tools.builtin.calendar_tool import calendar_today
-
-            result = await calendar_today()
-            if not isinstance(result, str) or "Error" in result or "clear" in result.lower():
-                return
-
-            # The calendar_today returns formatted text; we look for events
-            # starting within the next 10-15 minutes by checking current time
-            # against the schedule (simplified approach)
-            now = datetime.now(UTC)
-            trigger_key = f"cal_reminder_{now.strftime('%Y%m%d%H')}"
-            if await self._is_processed("calendar_reminder", trigger_key):
-                return
-
-            # Only send one reminder per hour as a digest
-            # A more sophisticated approach would parse event start times
-            notification = f"Upcoming events reminder:\n{result}"
-            await self._router.send_to_user(user_id, notification)
-            await self._mark_processed("calendar_reminder", trigger_key, user_id)
-
-        except Exception as e:
-            logger.error("Calendar trigger check failed: %s", e)
+        now = datetime.now(UTC)
+        horizon = now + REMINDER_WINDOW
+        page = await fetch_events(factory, REMINDER_CALENDAR, now.isoformat(), horizon.isoformat())
+        for event in page.events:
+            start = start_instant(event)
+            if start is None or not (now <= start <= horizon) or not _wants_reminder(event):
+                continue
+            key = f"{event.get('id', '')}@{start.astimezone(UTC).isoformat()}"
+            if await self._is_processed(REMINDER_TRIGGER, key):
+                continue
+            await self._router.send_to_user(user_id, render_reminder(event, page.zone, now))
+            await self._mark_processed(REMINDER_TRIGGER, key, user_id, "reminded")
 
     # ── Webhook handler ──────────────────────────
 
@@ -197,3 +205,10 @@ class EventTriggerManager:
         await self._router.send_to_user(pincer_user_id, notification)
         await self._mark_processed("webhook", trigger_key, pincer_user_id, event_type)
         return notification
+
+
+def _wants_reminder(event: dict[str, Any]) -> bool:
+    """Not cancelled, and not declined by the calendar's owner."""
+    if event.get("status") == "cancelled":
+        return False
+    return not any(a.get("self") and a.get("responseStatus") == "declined" for a in event.get("attendees") or [])

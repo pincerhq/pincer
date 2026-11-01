@@ -125,10 +125,12 @@ def _print_env_line(token_json: str) -> None:
 
 @google_app.command(name="auth")
 def google_auth() -> None:
-    """Run Google Calendar OAuth consent flow (legacy, 3 tools)."""
+    """Run the legacy calendar-only OAuth consent flow (google_token.json, used by the calendar tools)."""
 
     from pincer.config import get_settings
-    from pincer.tools.builtin.calendar_tool import SCOPES
+    from pincer.integrations.google.auth import SERVICE_SCOPES
+
+    scopes = SERVICE_SCOPES["calendar"]
 
     settings = get_settings()
     oauth_dir = settings.google_oauth_dir()
@@ -158,7 +160,7 @@ def google_auth() -> None:
         console.print("[red]google-auth-oauthlib is not installed.[/red]\nRun:  uv pip install google-auth-oauthlib")
         raise typer.Exit(1) from None
 
-    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), scopes)
 
     console.print("Opening browser for Google consent...\n")
     try:

@@ -66,13 +66,12 @@
 - Gmail App Password support (required since Google disabled plain passwords)
 - Credential validation before connection attempts
 
-### Google Calendar Tools (`tools/builtin/calendar_tool.py`)
-- `calendar_today` — List today's events
-- `calendar_week` — List this week's events
-- `calendar_create` — Create new calendar events
-- OAuth2 flow with automatic token refresh
-- Dedicated `pincer google auth` CLI command for one-time consent
-- Actionable error messages for missing credentials
+### Google Calendar
+- Calendar is part of the Google Workspace integration (`integrations/google/tools_calendar.py`):
+  `google__list_events`, `google__search_events`, `google__get_event`, `google__create_event`,
+  `google__update_event`, `google__delete_event` and more — the only calendar toolset
+- Times are read and shown in the calendar's own timezone
+- One-time consent with `pincer google setup`
 - **Strict response validation:** Success only when API returns both `id` and `htmlLink`; otherwise returns error (no silent failure)
 - **IANA timezone handling:** Naive datetimes use `settings.timezone`; fixed offsets fall back to IANA; ZoneInfo preserved
 - **Success message:** Always includes `htmlLink` for user verification; includes `calendar_id` when non-primary
@@ -293,7 +292,6 @@ pincer/
 │   │   ├── sandbox.py              # Tool sandboxing (stub)
 │   │   └── builtin/
 │   │       ├── browser.py          # Playwright-based web browsing
-│   │       ├── calendar_tool.py    # Google Calendar (OAuth2, today/week/create)
 │   │       ├── email_tool.py       # IMAP/SMTP (check/send/search)
 │   │       ├── files.py            # File read/write/list
 │   │       ├── python_exec.py      # Python code execution
@@ -342,7 +340,6 @@ pincer/
 └── tests/                          # Test suite (~3,500 lines)
     ├── conftest.py                 # Shared fixtures
     ├── test_agent.py               # Agent core tests
-    ├── test_calendar_tool.py       # Calendar tool tests
     ├── test_config.py              # Configuration tests
     ├── test_email_tool.py          # Email tool tests
     ├── test_identity.py            # Cross-channel identity tests
@@ -392,7 +389,6 @@ pincer/
 | `memory/summarizer.py` | Conversation summarization with pair-safe splitting |
 | `tools/registry.py` | Tool registration, auto-schema from type hints, execution dispatch |
 | `tools/builtin/browser.py` | Playwright-based web browsing |
-| `tools/builtin/calendar_tool.py` | Google Calendar — OAuth2, today/week/create |
 | `tools/builtin/email_tool.py` | IMAP/SMTP — check/send/search with credential validation |
 | `tools/builtin/files.py` | File read, write, list operations |
 | `tools/builtin/python_exec.py` | Sandboxed Python code execution |
