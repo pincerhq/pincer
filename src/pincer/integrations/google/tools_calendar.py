@@ -849,12 +849,11 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
     registry.register(
         name="google__update_event",
         description=(
-            "Edit an existing calendar event (meeting or appointment) by its ID (and calendar_id, if not "
-            "primary): reschedule or move it to another time or day, rename it, change the time, or change "
-            "details such as description or location. Fields left empty stay as they are, except that when "
-            "only a new start is given, the end moves with it (duration kept); the event keeps its ID. Use "
-            "this — not google__create_event — for any change to an event; without the ID, find it first "
-            "with google__search_events. "
+            "Edit an existing calendar event (meeting or appointment) by its ID: reschedule or move it to "
+            "another time or day, rename it, change the time, or change details such as description or "
+            "location. Empty fields are kept, but a new start alone moves the end too (duration kept); the "
+            "event keeps its ID. Use this — not google__create_event — for any change to an event; without "
+            "the ID, find it first with google__search_events (and calendar_id, if not primary). "
             "Times without a UTC offset are read in the event's own timezone, else the calendar's timezone."
         ),
         handler=_h(google__update_event),
@@ -862,7 +861,11 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
             "type": "object",
             "properties": {
                 "event_id": {"type": "string"},
-                "calendar_id": {"type": "string", "default": "primary"},
+                "calendar_id": {
+                    "type": "string",
+                    "description": "The calendar the event was listed or found on (default: primary)",
+                    "default": "primary",
+                },
                 "summary": {"type": "string", "default": ""},
                 "start": {
                     "type": "string",

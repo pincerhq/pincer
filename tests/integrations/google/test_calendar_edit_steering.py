@@ -77,14 +77,15 @@ def test_update_description_says_a_start_alone_moves_the_end(registry) -> None:
     sends only start and gets 9:30–10:30 (the end moves with the start)."""
     text = _description(registry, "google__update_event")
     assert "only provided fields are changed" not in text
-    assert "end moves with it" in text
-    assert "duration" in text
+    assert "a new start alone moves the end too (duration kept)" in text
 
 
 def test_update_description_and_hint_name_the_calendar(registry) -> None:
     """After a list on another calendar, update(event_id) alone goes to primary and 404s."""
     assert "(and calendar_id, if not primary)" in _description(registry, "google__update_event")
     assert "(and calendar_id, if not primary)" in EDIT_HINT
+    (schema,) = [s for s in registry.get_schemas() if s["name"] == "google__update_event"]
+    assert "listed or found on" in schema["input_schema"]["properties"]["calendar_id"]["description"]
 
 
 def test_ranking_fixture_matches_the_registered_calendar_descriptions(registry) -> None:
