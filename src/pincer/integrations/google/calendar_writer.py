@@ -349,8 +349,9 @@ async def _live_on(svc: Any, calendar_id: str, event_id: str) -> dict[str, Any] 
 async def move(
     svc: Any, calendar_id: str, event_id: str, destination: str, *, trace: Trace | None = None
 ) -> dict[str, Any]:
-    """Move an event to ``destination``. A 404/410 on a retry is checked against the
-    destination: the event being there means the lost first attempt committed."""
+    """Move an event to ``destination`` and return Google's stored copy (raises if unconfirmed).
+    A 404/410 on a retry is checked against the destination: the event being there
+    means the lost first attempt committed."""
     recovered = False
     try:
         moved, _attempts = await _attempted(
@@ -359,6 +360,6 @@ async def move(
     except _AttemptError as failed:
         moved = await _recovered_after_retry(failed, lambda: _live_on(svc, destination, event_id))
         recovered = True
-    event = moved if isinstance(moved, dict) else None
-    log_write("move", trace or Trace(), destination, event, event_id=event_id, existed=recovered)
-    return event or {}
+    confirmed = _confirmed(moved)
+    log_write("move", trace or Trace(), destination, confirmed, event_id=event_id, existed=recovered)
+    return confirmed

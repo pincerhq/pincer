@@ -223,6 +223,7 @@ async def test_create_then_get_by_returned_id_returns_the_same_event(fake_factor
         ("google__accept_event", {"event_id": "evt1"}),
         ("google__decline_event", {"event_id": "evt1"}),
         ("google__add_google_meet", {"event_id": "evt1"}),
+        ("google__move_event", {"event_id": "evt1", "destination_calendar_id": "berlin@group.calendar.google.com"}),
     ],
 )
 async def test_write_response_without_id_is_an_unconfirmed_error(
@@ -241,9 +242,11 @@ async def test_write_response_without_id_is_an_unconfirmed_error(
     assert "may or may not exist" in result.content
     assert "created" not in result.content.lower()
     assert "updated" not in result.content.lower()
-    assert not result.content.startswith(("Accepted", "Declined", "Google Meet added"))
+    assert not result.content.startswith(("Accepted", "Declined", "Google Meet added", "Event evt1 moved"))
     if tool in PATCH_TOOLS:  # precondition: the write really reached Google
         assert [name for name, _kw in fake.calls if name == "events.patch"] == ["events.patch"]
+    if tool == "google__move_event":  # precondition: the move really committed
+        assert [e["id"] for e in fake.events_on("berlin@group.calendar.google.com")] == ["evt1"]
 
 
 # ── Voice format contract on real renderer output ────────────────────────────

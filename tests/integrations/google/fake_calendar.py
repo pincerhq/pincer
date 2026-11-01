@@ -233,7 +233,7 @@ class _Events:
                 raise http_error(404, f"Not Found: event {eventId}")
             del source["events"][eventId]
             target["events"][eventId] = event
-            response = copy.deepcopy(event)
+            response = self._fake.write_response(event)
             self._fake.fault("events.move", "after-commit")
             return response
 

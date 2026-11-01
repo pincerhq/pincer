@@ -608,7 +608,7 @@ async def google__move_event(
         destination_calendar_id,
         trace=calendar_writer.Trace.from_context(context),
     )
-    return f"Event {event_id} moved to {destination_calendar_id} (new id={result.get('id', '')})"
+    return f"Event {event_id} moved to {destination_calendar_id} (new id={result['id']})"
 
 
 async def google__accept_event(
