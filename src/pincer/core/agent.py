@@ -16,7 +16,6 @@ import asyncio
 import json
 import logging
 import time
-import uuid
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from enum import StrEnum
@@ -29,6 +28,7 @@ from pincer.core.onboarding import (
     ONBOARDING_QUESTION_EN,
     PROFILE_USAGE_INSTRUCTION,
 )
+from pincer.db.ids import new_id
 from pincer.exceptions import BudgetExceededError, LLMError, ToolNotFoundError
 from pincer.llm.base import (
     BaseLLMProvider,
@@ -1547,7 +1547,7 @@ class Agent:
 
     async def _begin_turn(self, user_id: str) -> _Turn:
         """Mint this turn's ID and resolve the user's zone once for all its tool calls."""
-        return _Turn(turn_id=str(uuid.uuid7()), timezone=await self._user_timezone(user_id))
+        return _Turn(turn_id=new_id(), timezone=await self._user_timezone(user_id))
 
     async def _build_system_prompt(
         self,
@@ -1810,15 +1810,23 @@ class Agent:
         turn (tests, one-off paths) gets a fresh one for this call.
         """
         turn = turn or await self._begin_turn(user_id)
+        return await self._traced(
+            tool_call,
+            turn,
+            lambda: self._run_tool_call(
+                tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=skip_approval, turn=turn
+            ),
+        )
+
+    async def _traced(self, tool_call: ToolCall, turn: _Turn, run: Callable[[], Awaitable[ToolResult]]) -> ToolResult:
+        """One "Tool call" and one matching "Tool result" log line around ``run``."""
         logger.info(
             "Tool call: %s(%s) [turn=%s call=%s]", tool_call.name, tool_call.arguments, turn.turn_id, tool_call.id
         )
         started = time.monotonic()
         result: ToolResult | None = None
         try:
-            result = await self._run_tool_call(
-                tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=skip_approval, turn=turn
-            )
+            result = await run()
             return result
         finally:
             logger.info(
@@ -1990,14 +1998,21 @@ class Agent:
         if call_gate is None:
             return await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id, turn=turn)
 
+        call_turn = turn or await self._begin_turn(user_id)
+
         async def _run() -> tuple[str, bool]:
-            inner = await self._execute_tool(
-                tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True, turn=turn
+            # Untraced here: the pair around the gate below covers the call,
+            # including tools the gate denies or times out without running.
+            inner = await self._run_tool_call(
+                tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True, turn=call_turn
             )
             return inner.content, inner.is_error
 
-        gate_result = await call_gate.run(tool_call.name, tool_call.arguments, _run)
-        return ToolResult(tool_call_id=tool_call.id, content=gate_result.content, is_error=gate_result.is_error)
+        async def _gated() -> ToolResult:
+            gate_result = await call_gate.run(tool_call.name, tool_call.arguments, _run)
+            return ToolResult(tool_call_id=tool_call.id, content=gate_result.content, is_error=gate_result.is_error)
+
+        return await self._traced(tool_call, call_turn, _gated)
 
     async def _fire_tool_event(
         self,
