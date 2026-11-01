@@ -14,12 +14,15 @@ and declined events are skipped; times are shown in the calendar's zone.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
+from google.auth.exceptions import RefreshError
 
 from integrations.google.fake_calendar import FakeCalendarService
 from pincer.integrations.google.config import GoogleIntegrationConfig
@@ -195,6 +198,64 @@ async def test_reminder_reads_nothing_when_calendar_is_not_a_configured_service(
 
     assert fake.calls == []
     assert _sent(triggers) == []
+
+
+class _RevocableList:
+    """The fake's events().list, failing like a token revoked after startup while ``failing``;
+    stops the reminder loop after ``ticks`` list calls."""
+
+    def __init__(self, fake: FakeCalendarService, mgr: EventTriggerManager) -> None:
+        self._events = fake.events
+        self._mgr = mgr
+        self.failing = True
+        self.ticks = 0
+
+    def events(self):
+        real = self._events()
+        proxy = MagicMock()
+        proxy.list = lambda **kw: SimpleNamespace(execute=lambda: self._execute(real.list(**kw)))
+        return proxy
+
+    def _execute(self, request):
+        self.ticks -= 1
+        if self.ticks <= 0:
+            self._mgr._running = False
+        if self.failing:
+            raise RefreshError("invalid_grant: Token has been expired or revoked.")
+        return request.execute()
+
+
+async def _loop(mgr: EventTriggerManager, revocable: _RevocableList, ticks: int) -> None:
+    revocable.ticks, mgr._running = ticks, True
+    await mgr._calendar_loop()
+
+
+async def test_failing_reads_warn_once_then_debug_until_a_read_succeeds(triggers, fake, monkeypatch, caplog) -> None:
+    """Not a traceback every 60 s (~1440 a day): one WARNING, DEBUG repeats, INFO on recovery."""
+    monkeypatch.setattr("pincer.scheduler.triggers.CALENDAR_TICK_S", 0)
+    revocable = _RevocableList(fake, triggers)
+    monkeypatch.setattr(fake, "events", revocable.events)
+
+    def _levels() -> list[int]:
+        found = [r for r in caplog.records if r.name == "pincer.scheduler.triggers"]
+        caplog.clear()
+        return [r.levelno for r in found]
+
+    with caplog.at_level(logging.DEBUG, logger="pincer.scheduler.triggers"):
+        await _loop(triggers, revocable, 3)
+        first = [r for r in caplog.records if r.name == "pincer.scheduler.triggers"]
+        assert [r.levelno for r in first] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+        assert all(r.exc_info is None for r in first)
+        assert "reminders" in first[0].getMessage() and "RefreshError" in first[0].getMessage()
+        caplog.clear()
+
+        revocable.failing = False
+        await _loop(triggers, revocable, 1)
+        assert _levels() == [logging.INFO]
+
+        revocable.failing = True
+        await _loop(triggers, revocable, 1)
+        assert _levels() == [logging.WARNING]
 
 
 # ── Briefing ─────────────────────────────────────────────────────────────────

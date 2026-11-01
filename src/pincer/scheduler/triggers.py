@@ -21,7 +21,9 @@ from typing import Any
 
 from pincer.config import get_settings
 from pincer.db.engine import get_database_url
+from pincer.integrations.google.calendar_render import render_reminder, start_instant
 from pincer.integrations.google.calendar_source import CalendarSource
+from pincer.integrations.google.tools_calendar import fetch_events
 from pincer.services.scheduler import EventTriggerService
 
 _UID_RE = re.compile(r"UID:\s*(\d+)")
@@ -46,6 +48,7 @@ class EventTriggerManager:
         self._seen_email_uids: set[str] | None = None
         self._dedupe: EventTriggerService | None = None
         self._calendar = CalendarSource("upcoming-event reminders")
+        self._calendar_read_failing = False
 
     async def ensure_table(self) -> None:
         """Ensure the event_triggers table is at head (see pincer.db.migrations)."""
@@ -161,10 +164,10 @@ class EventTriggerManager:
         Keyed on event ID plus start time, so a moved event is reminded again at
         its new time; the key is persisted, so a restart does not repeat one.
         All-day, cancelled and self-declined events get no reminder.
-        """
-        from pincer.integrations.google.calendar_render import render_reminder, start_instant
-        from pincer.integrations.google.tools_calendar import fetch_events
 
+        A failing calendar read (e.g. a token revoked after startup) logs one
+        WARNING, then DEBUG on every tick until a read succeeds again.
+        """
         user_id = get_settings().default_user_id
         if not user_id:
             return
@@ -174,7 +177,22 @@ class EventTriggerManager:
 
         now = datetime.now(UTC)
         horizon = now + REMINDER_WINDOW
-        page = await fetch_events(factory, REMINDER_CALENDAR, now.isoformat(), horizon.isoformat())
+        try:
+            page = await fetch_events(factory, REMINDER_CALENDAR, now.isoformat(), horizon.isoformat())
+        except Exception as exc:
+            level = logging.DEBUG if self._calendar_read_failing else logging.WARNING
+            logger.log(
+                level,
+                "Calendar reminders paused: reading the calendar failed (%s: %s); retrying every %d s",
+                type(exc).__name__,
+                exc,
+                CALENDAR_TICK_S,
+            )
+            self._calendar_read_failing = True
+            return
+        if self._calendar_read_failing:
+            logger.info("Calendar reminders resumed: the calendar can be read again")
+            self._calendar_read_failing = False
         for event in page.events:
             start = start_instant(event)
             if start is None or not (now <= start <= horizon) or not _wants_reminder(event):
