@@ -10,21 +10,18 @@ from __future__ import annotations
 
 import re
 from datetime import timedelta
-from types import SimpleNamespace
 
 import pytest
 
-from integrations.google.fake_calendar import FakeCalendarFactory, FakeCalendarService
+from integrations.google.fake_calendar import FakeCalendarService
 from pincer.integrations.google.tools_calendar import (
     google__create_event,
     google__get_event,
     google__list_events,
     google__search_events,
     google__update_event,
-    register_calendar_tools,
 )
 from pincer.llm.base import ToolCall
-from pincer.tools.registry import ToolRegistry
 
 KIEV_NOTE = (
     "Note: times are in this calendar's timezone (Europe/Kiev), which differs from your clock timezone (Europe/Berlin)."
@@ -32,30 +29,12 @@ KIEV_NOTE = (
 LINK1 = "https://calendar.google.com/calendar/event?eid=evt1"
 
 
-@pytest.fixture(autouse=True)
-def berlin_deployment(monkeypatch):
-    """PINCER_TIMEZONE=Europe/Berlin — the agent clock zone when no identity zone is set."""
-    monkeypatch.setattr(
-        "pincer.config.get_settings_relaxed",
-        lambda: SimpleNamespace(timezone="Europe/Berlin", voice_timezone="Europe/Berlin"),
-    )
+pytestmark = pytest.mark.usefixtures("berlin_deployment")
 
 
 @pytest.fixture
 def fake():
     return FakeCalendarService({"primary": "Europe/Kiev", "berlin@group.calendar.google.com": "Europe/Berlin"})
-
-
-@pytest.fixture
-def factory(fake):
-    return FakeCalendarFactory(fake)
-
-
-@pytest.fixture
-def registry(factory):
-    reg = ToolRegistry()
-    register_calendar_tools(reg, factory)
-    return reg
 
 
 def _seed_day(fake: FakeCalendarService) -> None:
@@ -67,10 +46,10 @@ def _seed_day(fake: FakeCalendarService) -> None:
 # ── Reads ────────────────────────────────────────────────────────────────────
 
 
-async def test_list_shows_local_times_zone_header_all_day_ids_and_note(factory, fake):
+async def test_list_shows_local_times_zone_header_all_day_ids_and_note(fake_factory, fake):
     _seed_day(fake)
 
-    result = await google__list_events(factory, time_min="2026-11-12", time_max="2026-11-12")
+    result = await google__list_events(fake_factory, time_min="2026-11-12", time_max="2026-11-12")
 
     assert result == (
         "2 event(s) (2026-11-12), times in Europe/Kiev:\n"
@@ -82,19 +61,19 @@ async def test_list_shows_local_times_zone_header_all_day_ids_and_note(factory, 
     )
 
 
-async def test_search_shows_local_times_and_zone_header(factory, fake):
+async def test_search_shows_local_times_and_zone_header(fake_factory, fake):
     _seed_day(fake)
 
-    result = await google__search_events(factory, query="Standup")
+    result = await google__search_events(fake_factory, query="Standup")
 
     assert result.splitlines()[0] == "Found 1 event(s), times in Europe/Kiev:"
     assert "  2026-11-12T10:00:00+02:00 → 2026-11-12T11:00:00+02:00 — Standup" in result.splitlines()
 
 
-async def test_get_shows_local_time_and_zone(factory, fake):
+async def test_get_shows_local_time_and_zone(fake_factory, fake):
     _seed_day(fake)
 
-    result = await google__get_event(factory, event_id="evt1")
+    result = await google__get_event(fake_factory, event_id="evt1")
 
     lines = result.splitlines()
     assert "Start:       2026-11-12T10:00:00+02:00" in lines
@@ -103,28 +82,28 @@ async def test_get_shows_local_time_and_zone(factory, fake):
     assert KIEV_NOTE in lines
 
 
-async def test_get_all_day_event_says_all_day(factory, fake):
+async def test_get_all_day_event_says_all_day(fake_factory, fake):
     _seed_day(fake)
 
-    result = await google__get_event(factory, event_id="evt2")
+    result = await google__get_event(fake_factory, event_id="evt2")
 
     assert "Start:       2026-11-12 (all day)" in result.splitlines()
     assert "End:         2026-11-12 (all day)" in result.splitlines()
 
 
-async def test_multi_day_all_day_event_shows_its_last_day_not_googles_exclusive_end(factory, fake):
+async def test_multi_day_all_day_event_shows_its_last_day_not_googles_exclusive_end(fake_factory, fake):
     fake.seed_all_day("primary", "Trip", "2026-11-12", "2026-11-15")
 
-    result = await google__list_events(factory, time_min="2026-11-12", time_max="2026-11-14")
+    result = await google__list_events(fake_factory, time_min="2026-11-12", time_max="2026-11-14")
 
     assert "  2026-11-12 → 2026-11-14 — Trip | all day" in result.splitlines()
 
 
-async def test_every_listed_event_carries_its_id_line(factory, fake):
+async def test_every_listed_event_carries_its_id_line(fake_factory, fake):
     _seed_day(fake)
     fake.seed_event("primary", "Lunch", "2026-11-12T13:00:00+02:00", "2026-11-12T14:00:00+02:00")
 
-    result = await google__list_events(factory, time_min="2026-11-12", time_max="2026-11-12")
+    result = await google__list_events(fake_factory, time_min="2026-11-12", time_max="2026-11-12")
 
     ids = [line.strip() for line in result.splitlines() if line.startswith("  ID: ")]
     assert ids == ["ID: evt2", "ID: evt1", "ID: evt3"]
@@ -133,11 +112,11 @@ async def test_every_listed_event_carries_its_id_line(factory, fake):
 # ── Mismatch note ────────────────────────────────────────────────────────────
 
 
-async def test_kiev_calendar_under_kyiv_identity_clock_shows_no_note(registry, fake):
+async def test_kiev_calendar_under_kyiv_identity_clock_shows_no_note(fake_registry, fake):
     """Europe/Kiev (Google's legacy alias) and Europe/Kyiv are one zone."""
     _seed_day(fake)
 
-    result = await registry.execute(
+    result = await fake_registry.execute(
         "google__list_events",
         {"time_min": "2026-11-12", "time_max": "2026-11-12"},
         context={"timezone": "Europe/Kyiv"},
@@ -147,11 +126,11 @@ async def test_kiev_calendar_under_kyiv_identity_clock_shows_no_note(registry, f
     assert "Note:" not in result
 
 
-async def test_matching_zones_show_no_note(factory, fake):
+async def test_matching_zones_show_no_note(fake_factory, fake):
     fake.seed_event("berlin@group.calendar.google.com", "Gym", "2026-11-12T18:00:00+01:00", "2026-11-12T19:00:00+01:00")
 
     result = await google__list_events(
-        factory, calendar_id="berlin@group.calendar.google.com", time_min="2026-11-12", time_max="2026-11-12"
+        fake_factory, calendar_id="berlin@group.calendar.google.com", time_min="2026-11-12", time_max="2026-11-12"
     )
 
     assert result.splitlines()[0] == "1 event(s) (2026-11-12), times in Europe/Berlin:"
@@ -161,9 +140,9 @@ async def test_matching_zones_show_no_note(factory, fake):
 # ── Writes ───────────────────────────────────────────────────────────────────
 
 
-async def test_create_confirmation_quotes_stored_times_zone_id_and_link(factory, fake):
+async def test_create_confirmation_quotes_stored_times_zone_id_and_link(fake_factory, fake):
     result = await google__create_event(
-        factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00"
+        fake_factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00"
     )
 
     assert result == (
@@ -175,28 +154,28 @@ async def test_create_confirmation_quotes_stored_times_zone_id_and_link(factory,
     )
 
 
-async def test_create_reports_what_google_stored_not_what_was_requested(factory, fake):
+async def test_create_reports_what_google_stored_not_what_was_requested(fake_factory, fake):
     def _google_shifts_it(event):
         for key in ("start", "end"):
             moved = (
-                FakeCalendarService.instants(event)[0 if key == "start" else 1] + timedelta(minutes=30)
+                FakeCalendarService.instants(event, "Europe/Kiev")[0 if key == "start" else 1] + timedelta(minutes=30)
             ).isoformat()
             event[key]["dateTime"] = moved
 
     fake.on_store = _google_shifts_it
 
     result = await google__create_event(
-        factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00"
+        fake_factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00"
     )
 
     assert "Start: 2026-11-12T10:30:00+02:00 | End: 2026-11-12T11:30:00+02:00 (Europe/Kiev)" in result.splitlines()
 
 
-async def test_update_confirmation_quotes_stored_times_zone_id_and_link(factory, fake):
-    await google__create_event(factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00")
+async def test_update_confirmation_quotes_stored_times_zone_id_and_link(fake_factory, fake):
+    await google__create_event(fake_factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00")
 
     result = await google__update_event(
-        factory, event_id="evt1", start="2026-11-12T17:00:00", end="2026-11-12T18:00:00"
+        fake_factory, event_id="evt1", start="2026-11-12T17:00:00", end="2026-11-12T18:00:00"
     )
 
     assert result == (
@@ -208,14 +187,14 @@ async def test_update_confirmation_quotes_stored_times_zone_id_and_link(factory,
     )
 
 
-async def test_create_then_get_by_returned_id_returns_the_same_event(factory, fake):
+async def test_create_then_get_by_returned_id_returns_the_same_event(fake_factory, fake):
     created = await google__create_event(
-        factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00"
+        fake_factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00"
     )
     event_id = re.search(r"^ID: (\S+)$", created, re.MULTILINE).group(1)
     created_start = re.search(r"^Start: (\S+) \|", created, re.MULTILINE).group(1)
 
-    fetched = await google__get_event(factory, event_id=event_id)
+    fetched = await google__get_event(fake_factory, event_id=event_id)
 
     assert "Title:       Dentist" in fetched.splitlines()
     assert f"Start:       {created_start}" in fetched.splitlines()
@@ -230,13 +209,13 @@ async def test_create_then_get_by_returned_id_returns_the_same_event(factory, fa
     ],
 )
 async def test_write_response_without_id_is_an_unconfirmed_error(
-    registry, fake, settings, mock_llm, session_manager, cost_tracker, tool, arguments
+    fake_registry, fake, settings, mock_llm, session_manager, cost_tracker, tool, arguments
 ):
     from pincer.core.agent import Agent
 
     fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00+02:00", "2026-11-12T11:00:00+02:00")
     fake.drop_id_on_write = True
-    agent = Agent(settings, mock_llm, session_manager, cost_tracker, registry)
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, fake_registry)
 
     result = await agent._execute_tool(ToolCall(id="tc1", name=tool, arguments=dict(arguments)), "u1", "test")
 
@@ -250,8 +229,8 @@ async def test_write_response_without_id_is_an_unconfirmed_error(
 # ── Voice format contract on real renderer output ────────────────────────────
 
 
-async def test_voice_link_extraction_reads_real_create_output(registry):
-    result = await registry.execute(
+async def test_voice_link_extraction_reads_real_create_output(fake_registry):
+    result = await fake_registry.execute(
         "google__create_event",
         {
             "summary": "Zahnreinigung",
@@ -266,12 +245,12 @@ async def test_voice_link_extraction_reads_real_create_output(registry):
     assert re.search(r"Link:\s*(\S+)", result).group(1) == LINK1
 
 
-async def test_voice_tool_speech_reads_real_list_output(registry, fake):
+async def test_voice_tool_speech_reads_real_list_output(fake_registry, fake):
     from pincer.voice import tool_speech
 
     fake.seed_event("primary", "Beratung", "2026-11-12T14:00:00+02:00", "2026-11-12T15:00:00+02:00")
     fake.seed_event("primary", "Termin", "2026-11-12T16:00:00+02:00", "2026-11-12T17:00:00+02:00")
-    result = await registry.execute("google__list_events", {"time_min": "2026-11-12", "time_max": "2026-11-12"})
+    result = await fake_registry.execute("google__list_events", {"time_min": "2026-11-12", "time_max": "2026-11-12"})
 
     spoken = tool_speech.render("google__list_events", result, "en")
 
@@ -283,13 +262,17 @@ async def test_voice_tool_speech_reads_real_list_output(registry, fake):
 # ── Live-measured Google behaviour and review fixes ──────────────────────────
 
 
-async def test_fake_stores_datetime_in_the_calendar_offset_keeping_the_events_zone(factory, fake):
+async def test_fake_stores_datetime_in_the_calendar_offset_keeping_the_events_zone(fake_factory, fake):
     """Measured on the owner's real calendar (2026-11-01): an event created on the Europe/Kiev
     calendar with timeZone America/New_York at 10:00 came back from events().get as
     start={'dateTime': '2026-11-21T17:00:00+02:00', 'timeZone': 'America/New_York'} — the
     calendar's offset, the event's zone. The fake must do the same."""
     await google__create_event(
-        factory, summary="NY call", start="2026-11-21T10:00:00", end="2026-11-21T11:00:00", timezone="America/New_York"
+        fake_factory,
+        summary="NY call",
+        start="2026-11-21T10:00:00",
+        end="2026-11-21T11:00:00",
+        timezone="America/New_York",
     )
 
     assert fake.event("primary", "evt1")["start"] == {
@@ -298,8 +281,8 @@ async def test_fake_stores_datetime_in_the_calendar_offset_keeping_the_events_zo
     }
 
 
-async def test_caller_zone_confirmation_names_the_events_zone_not_the_calendars(registry, fake):
-    result = await registry.execute(
+async def test_caller_zone_confirmation_names_the_events_zone_not_the_calendars(fake_registry, fake):
+    result = await fake_registry.execute(
         "google__create_event",
         {
             "summary": "NY call",
@@ -320,8 +303,8 @@ async def test_caller_zone_confirmation_names_the_events_zone_not_the_calendars(
     )
 
 
-async def test_voice_style_booking_note_names_the_events_zone_without_a_calendar_lookup(registry, fake):
-    result = await registry.execute(
+async def test_voice_style_booking_note_names_the_events_zone_without_a_calendar_lookup(fake_registry, fake):
+    result = await fake_registry.execute(
         "google__create_event",
         {
             "summary": "Zahnreinigung",
@@ -339,24 +322,24 @@ async def test_voice_style_booking_note_names_the_events_zone_without_a_calendar
     assert fake.sent("calendars.get") == []
 
 
-async def test_list_header_shows_the_inclusive_last_local_day(factory, fake):
+async def test_list_header_shows_the_inclusive_last_local_day(fake_factory, fake):
     fake.seed_event("primary", "Lunch", "2026-11-13T13:00:00+02:00", "2026-11-13T14:00:00+02:00")
 
-    two_days = await google__list_events(factory, time_min="2026-11-12", time_max="2026-11-13")
-    midday_end = await google__list_events(factory, time_min="2026-11-12", time_max="2026-11-13T15:00:00")
-    empty_day = await google__list_events(factory, time_min="2026-11-20", time_max="2026-11-20")
+    two_days = await google__list_events(fake_factory, time_min="2026-11-12", time_max="2026-11-13")
+    midday_end = await google__list_events(fake_factory, time_min="2026-11-12", time_max="2026-11-13T15:00:00")
+    empty_day = await google__list_events(fake_factory, time_min="2026-11-20", time_max="2026-11-20")
 
     assert two_days.splitlines()[0] == "1 event(s) (2026-11-12 – 2026-11-13), times in Europe/Kiev:"
     assert midday_end.splitlines()[0] == "1 event(s) (2026-11-12 – 2026-11-13), times in Europe/Kiev:"
     assert empty_day == "No events on 2026-11-20."
 
 
-async def test_get_shows_the_events_own_zone_when_it_differs_from_the_calendars(factory, fake):
+async def test_get_shows_the_events_own_zone_when_it_differs_from_the_calendars(fake_factory, fake):
     _seed_day(fake)  # evt1 is America/New_York on the Europe/Kiev calendar
     same = fake.seed_event("primary", "Local", "2026-11-12T12:00:00", "2026-11-12T13:00:00", time_zone="Europe/Kyiv")
 
-    differs = await google__get_event(factory, event_id="evt1")
-    equivalent = await google__get_event(factory, event_id=same)
+    differs = await google__get_event(fake_factory, event_id="evt1")
+    equivalent = await google__get_event(fake_factory, event_id=same)
 
     assert "Time zone:   Europe/Kiev" in differs.splitlines()
     assert "Event zone:  America/New_York" in differs.splitlines()

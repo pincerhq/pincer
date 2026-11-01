@@ -12,8 +12,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from integrations.google.fake_calendar import FakeCalendarFactory
 from pincer.integrations.google.auth import SERVICE_SCOPES, GoogleAuth
 from pincer.integrations.google.service_factory import GoogleServiceFactory
+from pincer.integrations.google.tools_calendar import register_calendar_tools
+from pincer.tools.registry import ToolRegistry
 
 # ── Auth & factory fixtures ───────────────────────────────────────────────────
 
@@ -234,3 +237,33 @@ def mock_meet_beta_service(mock_factory):
 
     mock_factory.get = _get
     return svc
+
+
+# ── Stateful fake Calendar fixtures ──────────────────────────────────────────
+# Each calendar test module defines its own ``fake`` (a FakeCalendarService
+# with the calendars and zones it needs); these build on it.
+
+
+@pytest.fixture
+def berlin_deployment(monkeypatch):
+    """PINCER_TIMEZONE=Europe/Berlin — the deployment zone, not the calendar's."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "pincer.config.get_settings_relaxed",
+        lambda: SimpleNamespace(timezone="Europe/Berlin", voice_timezone="Europe/Berlin"),
+    )
+
+
+@pytest.fixture
+def fake_factory(fake):
+    """A GoogleServiceFactory stand-in serving the module's fake Calendar service."""
+    return FakeCalendarFactory(fake)
+
+
+@pytest.fixture
+def fake_registry(fake_factory):
+    """A real ToolRegistry with the real calendar tools wired to the fake."""
+    reg = ToolRegistry()
+    register_calendar_tools(reg, fake_factory)
+    return reg

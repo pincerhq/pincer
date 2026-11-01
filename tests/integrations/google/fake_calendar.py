@@ -14,6 +14,9 @@ tools depend on:
   has its own ``timeZone`` (which is kept) — measured on a real Europe/Kiev
   calendar on 2026-11-01: a 10:00 America/New_York event read back as
   ``{'dateTime': '2026-11-21T17:00:00+02:00', 'timeZone': 'America/New_York'}``.
+- A bare date in ``dateTime`` is a 400; all-day events span midnight to
+  midnight in the calendar's zone.
+- An inverted range (timeMax before timeMin) lists nothing, without an error.
 - A write's response is the stored copy (``on_store`` can alter what is stored,
   ``drop_id_on_write`` strips the ``id`` from the response).
 
@@ -88,9 +91,12 @@ class _Events:
             cal = self._fake.calendar(calendarId)
             t_min = _parse_bound("timeMin", kwargs["timeMin"]) if "timeMin" in kwargs else None
             t_max = _parse_bound("timeMax", kwargs["timeMax"]) if "timeMax" in kwargs else None
+            if t_min is not None and t_max is not None and t_max <= t_min:
+                # Measured live: an inverted range is not a 400, just an empty result.
+                return {"items": [], "timeZone": cal["timeZone"]}
             items = []
             for event in cal["events"].values():
-                start, end = self._fake.instants(event)
+                start, end = self._fake.instants(event, cal["timeZone"])
                 if t_min is not None and end <= t_min:
                     continue
                 if t_max is not None and start >= t_max:
@@ -106,7 +112,7 @@ class _Events:
                     if event.get("extendedProperties", {}).get("private", {}).get(key) != value:
                         continue
                 items.append(event)
-            items.sort(key=lambda e: self._fake.instants(e)[0])
+            items.sort(key=lambda e: self._fake.instants(e, cal["timeZone"])[0])
             limit = int(kwargs.get("maxResults") or 250)
             return {"items": copy.deepcopy(items[:limit]), "timeZone": cal["timeZone"]}
 
@@ -172,7 +178,7 @@ class _FreeBusy:
                     continue
                 busy = []
                 for event in cal["events"].values():
-                    start, end = self._fake.instants(event)
+                    start, end = self._fake.instants(event, cal["timeZone"])
                     if end > t_min and start < t_max:
                         busy.append(
                             {
@@ -267,7 +273,7 @@ class FakeCalendarService:
         return list(self.calendar(calendar_id)["events"].values())
 
     def start_of(self, calendar_id: str, event_id: str) -> datetime:
-        return self.instants(self.event(calendar_id, event_id))[0]
+        return self.instants(self.event(calendar_id, event_id), self.calendar(calendar_id)["timeZone"])[0]
 
     def sent(self, method: str) -> list[dict[str, Any]]:
         """The keyword arguments of every call to ``method`` (e.g. "events.list")."""
@@ -287,6 +293,9 @@ class FakeCalendarService:
             return dict(field)
         raw = field.get("dateTime")
         tz_name = field.get("timeZone")
+        if "T" not in str(raw):
+            # Google rejects a bare date (or anything without a time) in dateTime.
+            raise http_error(400, f"Bad Request: invalid {key}.dateTime {raw!r}")
         try:
             parsed = datetime.fromisoformat(str(raw))
         except ValueError:
@@ -304,11 +313,13 @@ class FakeCalendarService:
         return stored
 
     @staticmethod
-    def instants(event: dict[str, Any]) -> tuple[datetime, datetime]:
+    def instants(event: dict[str, Any], time_zone: str) -> tuple[datetime, datetime]:
+        """Start/end instants; an all-day date is midnight in the calendar's zone ``time_zone``."""
+
         def _one(field: dict[str, Any]) -> datetime:
             if "dateTime" in field:
                 return datetime.fromisoformat(field["dateTime"])
-            return datetime.fromisoformat(field["date"]).replace(tzinfo=UTC)
+            return datetime.fromisoformat(field["date"]).replace(tzinfo=ZoneInfo(time_zone))
 
         return _one(event["start"]), _one(event["end"])
 
