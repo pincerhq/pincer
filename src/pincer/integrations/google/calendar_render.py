@@ -19,8 +19,10 @@ Format contract (parsed by the voice flow, keep verbatim):
 
 from __future__ import annotations
 
+import functools
 import math
 from datetime import UTC, date, datetime, timedelta
+from importlib import resources
 from typing import TYPE_CHECKING, Any
 
 from pincer.core.clock import load_zone
@@ -119,6 +121,27 @@ def event_instants(events: list[dict[str, Any]]) -> list[datetime]:
     return found
 
 
+@functools.cache
+def _tzif(key: str) -> bytes | None:
+    """The zone's compiled rules from the ``tzdata`` package (aliases are byte-identical copies)."""
+    try:
+        return resources.files("tzdata.zoneinfo").joinpath(*key.split("/")).read_bytes()
+    except (OSError, ValueError, ModuleNotFoundError):
+        return None
+
+
+def same_zone(a: ZoneInfo, b: ZoneInfo) -> bool:
+    """One zone under one or two names: the same key, or an alias (``Europe/Kiev`` = ``Europe/Kyiv``).
+
+    Not "the same offset now": Europe/Istanbul and Europe/Kyiv agree in July
+    and differ in winter, so a time read in one is not a time read in the other.
+    """
+    if a.key == b.key:
+        return True
+    rules = _tzif(a.key)
+    return rules is not None and rules == _tzif(b.key)
+
+
 def zones_equivalent(a: ZoneInfo, b: ZoneInfo, instants: list[datetime]) -> bool:
     """Same zone by key, or the same UTC offset at every instant that matters.
 
@@ -208,9 +231,9 @@ def stored_zone_name(event: dict[str, Any], key: str = "start") -> str:
     return str((event.get(key) or {}).get("timeZone") or "")
 
 
-def _same_zone_name(name: str, zone: ZoneInfo, instants: list[datetime]) -> bool:
+def _same_zone_name(name: str, zone: ZoneInfo) -> bool:
     own = load_zone(name)
-    return own is not None and zones_equivalent(own, zone, instants)
+    return own is not None and same_zone(own, zone)
 
 
 def render_event_details(
@@ -229,7 +252,7 @@ def render_event_details(
         f"Times shown in: {zone.key}",
     ]
     own = stored_zone_name(event)
-    if own and not _same_zone_name(own, zone, event_instants([event])):
+    if own and not _same_zone_name(own, zone):
         # Kept on purpose (an update keeps it too). This — not the display
         # zone above — is the zone to pass when changing the event's times.
         lines.append(f"Event's own timezone: {own}")

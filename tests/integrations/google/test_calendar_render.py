@@ -623,3 +623,19 @@ def test_agenda_dates_only_the_end_that_falls_on_another_day() -> None:
         "  23:00–00:00  Late call",  # ending at midnight is still this day
         "  10:00–10:15  Standup",
     ]
+
+
+async def test_get_shows_an_event_zone_with_the_same_offset_but_another_identity(fake_factory, fake):
+    """Istanbul and Kyiv are both +03:00 in July, but Istanbul stays +03:00 in winter: a time
+    rewritten in "the event's zone" would move. Only aliases of one zone (Kiev/Kyiv) are the same."""
+    istanbul = fake.seed_event(
+        "primary", "Ferry", "2026-07-15T10:00:00", "2026-07-15T11:00:00", time_zone="Europe/Istanbul"
+    )
+    alias = fake.seed_event("primary", "Lunch", "2026-07-15T12:00:00", "2026-07-15T13:00:00", time_zone="Europe/Kyiv")
+
+    shown = (await google__get_event(fake_factory, event_id=istanbul)).splitlines()
+    hidden = (await google__get_event(fake_factory, event_id=alias)).splitlines()
+
+    assert "Start:       2026-07-15T10:00:00+03:00" in shown  # precondition: same offset as Kyiv in July
+    assert "Event's own timezone: Europe/Istanbul" in shown
+    assert not [line for line in hidden if line.startswith("Event's own timezone")]
