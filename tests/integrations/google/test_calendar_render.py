@@ -37,6 +37,12 @@ def fake():
     return FakeCalendarService({"primary": "Europe/Kiev", "berlin@group.calendar.google.com": "Europe/Berlin"})
 
 
+def _created(fake: FakeCalendarService) -> tuple[str, str]:
+    """ID and link of the event the last insert created (its client-supplied ID)."""
+    event_id = fake.sent("events.insert")[-1]["body"]["id"]
+    return event_id, f"https://calendar.google.com/calendar/event?eid={event_id}"
+
+
 def _seed_day(fake: FakeCalendarService) -> None:
     """A New-York-zoned standup (03:00 NY = 10:00 Kyiv) and an all-day holiday on 2026-11-12."""
     fake.seed_event("primary", "Standup", "2026-11-12T03:00:00", "2026-11-12T04:00:00", time_zone="America/New_York")
@@ -145,12 +151,13 @@ async def test_create_confirmation_quotes_stored_times_zone_id_and_link(fake_fac
         fake_factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00"
     )
 
+    event_id, link = _created(fake)
     assert result == (
         "Event created: 'Dentist'\n"
         "Start: 2026-11-12T10:00:00+02:00 | End: 2026-11-12T11:00:00+02:00 (Europe/Kiev)\n"
         f"{KIEV_NOTE}\n"
-        "ID: evt1\n"
-        f"Link: {LINK1}"
+        f"ID: {event_id}\n"
+        f"Link: {link}"
     )
 
 
@@ -173,17 +180,18 @@ async def test_create_reports_what_google_stored_not_what_was_requested(fake_fac
 
 async def test_update_confirmation_quotes_stored_times_zone_id_and_link(fake_factory, fake):
     await google__create_event(fake_factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00")
+    event_id, link = _created(fake)
 
     result = await google__update_event(
-        fake_factory, event_id="evt1", start="2026-11-12T17:00:00", end="2026-11-12T18:00:00"
+        fake_factory, event_id=event_id, start="2026-11-12T17:00:00", end="2026-11-12T18:00:00"
     )
 
     assert result == (
         "Event updated: 'Dentist'\n"
         "Start: 2026-11-12T17:00:00+02:00 | End: 2026-11-12T18:00:00+02:00 (Europe/Kiev)\n"
         f"{KIEV_NOTE}\n"
-        "ID: evt1\n"
-        f"Link: {LINK1}"
+        f"ID: {event_id}\n"
+        f"Link: {link}"
     )
 
 
@@ -229,7 +237,7 @@ async def test_write_response_without_id_is_an_unconfirmed_error(
 # ── Voice format contract on real renderer output ────────────────────────────
 
 
-async def test_voice_link_extraction_reads_real_create_output(fake_registry):
+async def test_voice_link_extraction_reads_real_create_output(fake_registry, fake):
     result = await fake_registry.execute(
         "google__create_event",
         {
@@ -241,8 +249,9 @@ async def test_voice_link_extraction_reads_real_create_output(fake_registry):
     )
 
     # The exact patterns voice/scheduling.py and voice/receptionist/session.py use.
-    assert re.search(r"Link: (\S+)", result).group(1) == LINK1
-    assert re.search(r"Link:\s*(\S+)", result).group(1) == LINK1
+    _event_id, link = _created(fake)
+    assert re.search(r"Link: (\S+)", result).group(1) == link
+    assert re.search(r"Link:\s*(\S+)", result).group(1) == link
 
 
 async def test_voice_tool_speech_reads_real_list_output(fake_registry, fake):
@@ -275,7 +284,7 @@ async def test_fake_stores_datetime_in_the_calendar_offset_keeping_the_events_zo
         timezone="America/New_York",
     )
 
-    assert fake.event("primary", "evt1")["start"] == {
+    assert fake.event("primary", _created(fake)[0])["start"] == {
         "dateTime": "2026-11-21T17:00:00+02:00",
         "timeZone": "America/New_York",
     }
@@ -298,8 +307,8 @@ async def test_caller_zone_confirmation_names_the_events_zone_not_the_calendars(
         "Start: 2026-11-21T10:00:00-05:00 | End: 2026-11-21T11:00:00-05:00 (America/New_York)\n"
         "Note: times are in the event's timezone (America/New_York), which differs from "
         "your clock timezone (Europe/Kyiv).\n"
-        "ID: evt1\n"
-        f"Link: {LINK1}"
+        f"ID: {_created(fake)[0]}\n"
+        f"Link: {_created(fake)[1]}"
     )
 
 
@@ -370,17 +379,19 @@ async def test_idempotent_hit_shows_the_existing_events_stored_zone(fake_factory
         fake_factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00", idempotency_key="k1"
     )
 
+    # The same instant, asked for in New York time: same key + same details = the same event.
     again = await google__create_event(
         fake_factory,
         summary="Dentist",
-        start="2026-11-12T10:00:00",
-        end="2026-11-12T11:00:00",
+        start="2026-11-12T03:00:00",
+        end="2026-11-12T04:00:00",
         timezone="America/New_York",
         idempotency_key="k1",
     )
 
+    assert len(fake.events_on("primary")) == 1
     assert again.splitlines()[:2] == [
-        "Event already exists (idempotent): 'Dentist'",
+        "Event already created: 'Dentist' (it already exists — not duplicated)",
         "Start: 2026-11-12T10:00:00+02:00 | End: 2026-11-12T11:00:00+02:00 (Europe/Kiev)",
     ]
     assert "event's timezone" not in again
@@ -411,7 +422,8 @@ async def test_write_response_with_id_but_no_times_says_stored_times_unavailable
         fake_factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00"
     )
 
-    assert result == (f"Event created: 'Dentist'\nStart: (stored times unavailable)\nID: evt1\nLink: {LINK1}")
+    event_id, link = _created(fake)
+    assert result == (f"Event created: 'Dentist'\nStart: (stored times unavailable)\nID: {event_id}\nLink: {link}")
 
 
 # ── Moving an event keeps its duration (pre-existing bug, in scope) ──────────

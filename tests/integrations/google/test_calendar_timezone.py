@@ -299,21 +299,23 @@ async def test_voice_booking_sends_offset_aware_times_and_explicit_zone_unchange
     first = await scheduling._write_calendar_event(fake_registry, settings, task, "CA_1")
     again = await scheduling._write_calendar_event(fake_registry, settings, task, "CA_1")
 
-    [insert] = fake.sent("events.insert")
-    assert insert["body"]["start"] == {"dateTime": "2026-08-25T14:00:00+02:00", "timeZone": "Europe/Berlin"}
-    assert insert["body"]["end"] == {"dateTime": "2026-08-25T14:30:00+02:00", "timeZone": "Europe/Berlin"}
-    assert insert["body"]["extendedProperties"] == {"private": {"pincer_key": "pincer-appointment-task-1"}}
-    assert insert["sendUpdates"] == "all"
+    first_insert, second_insert = fake.sent("events.insert")
+    assert first_insert["body"]["start"] == {"dateTime": "2026-08-25T14:00:00+02:00", "timeZone": "Europe/Berlin"}
+    assert first_insert["body"]["end"] == {"dateTime": "2026-08-25T14:30:00+02:00", "timeZone": "Europe/Berlin"}
+    assert first_insert["body"]["extendedProperties"] == {"private": {"pincer_key": "pincer-appointment-task-1"}}
+    assert first_insert["sendUpdates"] == "all"
+    assert second_insert["body"]["id"] == first_insert["body"]["id"]
+    event_id = first_insert["body"]["id"]
     assert first == (
         "Event created: 'Zahnreinigung — Dr. Müller'\n"
         "Start: 2026-08-25T14:00:00+02:00 | End: 2026-08-25T14:30:00+02:00 (Europe/Berlin)\n"
-        "ID: evt1\n"
-        "Link: https://calendar.google.com/calendar/event?eid=evt1"
+        f"ID: {event_id}\n"
+        f"Link: https://calendar.google.com/calendar/event?eid={event_id}"
     )
     assert again.startswith(
-        "Event already exists (idempotent): 'Zahnreinigung — Dr. Müller'\n"
+        "Event already created: 'Zahnreinigung — Dr. Müller' (it already exists — not duplicated)\n"
         "Start: 2026-08-25T14:00:00+02:00 | End: 2026-08-25T14:30:00+02:00 (Europe/Berlin)\n"
-        "ID: evt1\n"
+        f"ID: {event_id}\n"
     )
     assert len(fake.events_on("primary")) == 1
     assert fake.sent("calendars.get") == []

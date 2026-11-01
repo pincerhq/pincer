@@ -20,6 +20,13 @@ tools depend on:
 - An event whose end is not after its start is a 400 ("time range is empty").
 - A write's response is the stored copy (``on_store`` can alter what is stored,
   ``drop_id_on_write`` strips the ``id`` from the response).
+- Insert honours a client-supplied ``id`` (base32hex, 5–1024 chars, else 400);
+  an ID already used on the calendar — even by a deleted event — is a 409.
+- Delete leaves a ``cancelled`` tombstone, like Google: get still returns it,
+  list/free-busy skip it, a second delete is a 410.
+- ``fail_next(method, "before-commit" | "after-commit")`` makes the next call of
+  ``events.insert`` / ``events.delete`` / ``events.move`` raise a 503 — before
+  changing anything, or after the change was made (a lost response).
 
 Errors are real ``googleapiclient.errors.HttpError`` instances so the tools'
 retry and error paths behave as they would against Google.
@@ -30,6 +37,7 @@ from __future__ import annotations
 import copy
 import itertools
 import json
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -39,6 +47,9 @@ from googleapiclient.errors import HttpError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+
+_EVENT_ID_RE = re.compile(r"^[0-9a-v]{5,1024}$")
 
 
 def http_error(status: int, message: str) -> HttpError:
@@ -97,6 +108,8 @@ class _Events:
                 return {"items": [], "timeZone": cal["timeZone"]}
             items = []
             for event in cal["events"].values():
+                if event.get("status") == "cancelled":
+                    continue
                 start, end = self._fake.instants(event, cal["timeZone"])
                 if t_min is not None and end <= t_min:
                     continue
@@ -132,10 +145,17 @@ class _Events:
                 ("events.insert", {"calendarId": calendarId, "body": copy.deepcopy(body), **kwargs})
             )
             cal = self._fake.calendar(calendarId)
-            event_id = f"evt{next(self._fake._ids)}"
+            self._fake.fault("events.insert", "before-commit")
+            event_id = body.get("id") or f"evt{next(self._fake._ids)}"
+            if not _EVENT_ID_RE.match(str(event_id)):
+                raise http_error(400, "Invalid resource id value.")
+            if event_id in cal["events"]:
+                raise http_error(409, "The requested identifier already exists.")
             event = self._fake.store(cal, {**copy.deepcopy(body), "id": event_id})
             cal["events"][event_id] = event
-            return self._fake.write_response(event)
+            response = self._fake.write_response(event)
+            self._fake.fault("events.insert", "after-commit")
+            return response
 
         return _Request(_run)
 
@@ -155,8 +175,31 @@ class _Events:
     def delete(self, calendarId: str, eventId: str, **kwargs: Any) -> _Request:  # noqa: N803
         def _run() -> None:
             self._fake.calls.append(("events.delete", {"calendarId": calendarId, "eventId": eventId, **kwargs}))
-            self._fake.event(calendarId, eventId)
-            del self._fake.calendar(calendarId)["events"][eventId]
+            self._fake.fault("events.delete", "before-commit")
+            event = self._fake.event(calendarId, eventId)
+            if event.get("status") == "cancelled":
+                raise http_error(410, "Resource has been deleted")
+            event["status"] = "cancelled"
+            self._fake.fault("events.delete", "after-commit")
+
+        return _Request(_run)
+
+    def move(self, calendarId: str, eventId: str, destination: str, **kwargs: Any) -> _Request:  # noqa: N803
+        def _run() -> dict[str, Any]:
+            self._fake.calls.append(
+                ("events.move", {"calendarId": calendarId, "eventId": eventId, "destination": destination, **kwargs})
+            )
+            self._fake.fault("events.move", "before-commit")
+            source = self._fake.calendar(calendarId)
+            target = self._fake.calendar(destination)
+            event = source["events"].get(eventId)
+            if event is None or event.get("status") == "cancelled":
+                raise http_error(404, f"Not Found: event {eventId}")
+            del source["events"][eventId]
+            target["events"][eventId] = event
+            response = copy.deepcopy(event)
+            self._fake.fault("events.move", "after-commit")
+            return response
 
         return _Request(_run)
 
@@ -179,6 +222,8 @@ class _FreeBusy:
                     continue
                 busy = []
                 for event in cal["events"].values():
+                    if event.get("status") == "cancelled":
+                        continue
                     start, end = self._fake.instants(event, cal["timeZone"])
                     if end > t_min and start < t_max:
                         busy.append(
@@ -210,6 +255,8 @@ class FakeCalendarService:
         self.on_store: Callable[[dict[str, Any]], None] | None = None
         #: When True, insert/update store the event but answer without its id.
         self.drop_id_on_write = False
+        #: method → queued fault phases ("before-commit" / "after-commit"), see fail_next.
+        self.faults: dict[str, list[str]] = {}
         self._ids = itertools.count(1)
 
     # ── API surface ──────────────────────────────────────────────────────
@@ -271,7 +318,19 @@ class FakeCalendarService:
         return response
 
     def events_on(self, calendar_id: str) -> list[dict[str, Any]]:
-        return list(self.calendar(calendar_id)["events"].values())
+        """Live (not cancelled) events on the calendar."""
+        return [e for e in self.calendar(calendar_id)["events"].values() if e.get("status") != "cancelled"]
+
+    def fail_next(self, method: str, phase: str) -> None:
+        """The next ``method`` call raises a 503 ``before-commit`` or ``after-commit``."""
+        assert phase in ("before-commit", "after-commit"), phase
+        self.faults.setdefault(method, []).append(phase)
+
+    def fault(self, method: str, phase: str) -> None:
+        queued = self.faults.get(method)
+        if queued and queued[0] == phase:
+            queued.pop(0)
+            raise http_error(503, f"Backend Error ({phase})")
 
     def start_of(self, calendar_id: str, event_id: str) -> datetime:
         return self.instants(self.event(calendar_id, event_id), self.calendar(calendar_id)["timeZone"])[0]

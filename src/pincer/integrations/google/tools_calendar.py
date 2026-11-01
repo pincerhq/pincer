@@ -308,9 +308,10 @@ async def google__create_event(
 
     send_updates: 'all' | 'externalOnly' | 'none' — whether Google emails
         invitations to attendees (empty = API default, none).
-    idempotency_key: stored as the private extended property ``pincer_key``;
-        when an event with the same key already exists on the calendar, it is
-        returned instead of creating a duplicate (safe retries).
+    idempotency_key: replaces the chat turn's ID as the dedup seed of the
+        client-supplied event ID, so the same key with the same details finds
+        the existing event across turns (safe retries; see calendar_writer).
+        Also stored as the private extended property ``pincer_key``.
 
     Offset-less start/end are read in ``timezone`` when given, else in the
     calendar's own zone (see calendar_tz); offset-bearing ones pass unchanged.
@@ -318,30 +319,6 @@ async def google__create_event(
     import uuid
 
     svc = await factory.get("calendar")
-
-    if idempotency_key:
-        existing = await with_backoff(
-            lambda: (
-                svc.events()
-                .list(
-                    calendarId=calendar_id,
-                    privateExtendedProperty=f"pincer_key={idempotency_key}",
-                    maxResults=1,
-                )
-                .execute()
-            )
-        )
-        items = existing.get("items", [])
-        if items:
-            ev = items[0]
-            shown, label = await _confirmation_zone(factory, svc, calendar_id, context, ev, timezone)
-            return render_write(
-                f"Event already exists (idempotent): '{ev.get('summary', '')}'",
-                ev,
-                shown,
-                clock_zone=_clock(context),
-                zone_label=label,
-            )
 
     tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone)
     body: dict[str, Any] = {
@@ -379,7 +356,13 @@ async def google__create_event(
     if send_mode in SEND_UPDATES_MODES:
         insert_kw["sendUpdates"] = send_mode
 
-    created = await calendar_writer.create(svc, calendar_id, body, **insert_kw)
+    # Dedup seed: the explicit key, else this chat turn; outside any turn
+    # (no context) a fresh seed still keeps the retry wrapper's resends safe.
+    seed = idempotency_key or str((context or {}).get("turn_id") or "") or uuid.uuid4().hex
+    outcome = await calendar_writer.create(
+        svc, calendar_id, body, seed=seed, trace=calendar_writer.Trace.from_context(context), **insert_kw
+    )
+    created = outcome.event
 
     extra = ""
     if meet_link:
@@ -390,8 +373,14 @@ async def google__create_event(
             extra = f"Meet link: {uri}"
 
     shown, label = await _confirmation_zone(factory, svc, calendar_id, context, created, timezone)
+    title = created.get("summary", summary)
+    headline = (
+        f"Event already created: '{title}' (it already exists — not duplicated)"
+        if outcome.existed
+        else f"Event created: '{title}'"
+    )
     return render_write(
-        f"Event created: '{created.get('summary', summary)}'",
+        headline,
         created,
         shown,
         clock_zone=_clock(context),
@@ -464,7 +453,9 @@ async def google__update_event(
     if "start" in changed and "end" not in changed:
         changed["end"] = _end_keeping_duration(event.get("start") or {}, event.get("end") or {}, changed["start"])
     event.update(changed)
-    updated = await calendar_writer.update(svc, calendar_id, event_id, event)
+    updated = await calendar_writer.update(
+        svc, calendar_id, event_id, event, trace=calendar_writer.Trace.from_context(context)
+    )
     shown, label = await _confirmation_zone(factory, svc, calendar_id, context, updated, timezone)
     return render_write(
         f"Event updated: '{updated.get('summary', '')}'",
@@ -479,10 +470,11 @@ async def google__delete_event(
     factory: GoogleServiceFactory,
     event_id: str,
     calendar_id: str = "primary",
+    context: dict[str, Any] | None = None,
 ) -> str:
     """Delete (cancel) a calendar event."""
     svc = await factory.get("calendar")
-    await with_backoff(lambda: svc.events().delete(calendarId=calendar_id, eventId=event_id).execute())
+    await calendar_writer.delete(svc, calendar_id, event_id, trace=calendar_writer.Trace.from_context(context))
     return f"Event {event_id} deleted."
 
 
@@ -491,19 +483,16 @@ async def google__move_event(
     event_id: str,
     destination_calendar_id: str,
     source_calendar_id: str = "primary",
+    context: dict[str, Any] | None = None,
 ) -> str:
     """Move an event to a different calendar."""
     svc = await factory.get("calendar")
-    result = await with_backoff(
-        lambda: (
-            svc.events()
-            .move(
-                calendarId=source_calendar_id,
-                eventId=event_id,
-                destination=destination_calendar_id,
-            )
-            .execute()
-        )
+    result = await calendar_writer.move(
+        svc,
+        source_calendar_id,
+        event_id,
+        destination_calendar_id,
+        trace=calendar_writer.Trace.from_context(context),
     )
     return f"Event {event_id} moved to {destination_calendar_id} (new id={result.get('id', '')})"
 

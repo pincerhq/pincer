@@ -267,3 +267,17 @@ def fake_registry(fake_factory):
     reg = ToolRegistry()
     register_calendar_tools(reg, fake_factory)
     return reg
+
+
+@pytest.fixture
+def instant_backoff(monkeypatch):
+    """The quota retry wrapper without its real back-off sleeps (503 retry tests)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from pincer.integrations.google import quota
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(quota, "asyncio", SimpleNamespace(sleep=_no_sleep, to_thread=asyncio.to_thread))
