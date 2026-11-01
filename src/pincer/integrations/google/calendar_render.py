@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 
 ALL_DAY = "all day"
 
+# What the zone a result is rendered in actually is — the mismatch note names it.
+CALENDAR_ZONE_LABEL = "this calendar's timezone"
+EVENT_ZONE_LABEL = "the event's timezone"
+CONFIGURED_ZONE_LABEL = "the configured timezone"
+
 
 def _instant(field: dict[str, Any]) -> datetime | None:
     raw = field.get("dateTime")
@@ -87,14 +92,20 @@ def zones_equivalent(a: ZoneInfo, b: ZoneInfo, instants: list[datetime]) -> bool
     return all(m.astimezone(a).utcoffset() == m.astimezone(b).utcoffset() for m in moments)
 
 
-def mismatch_note(zone: ZoneInfo, clock_zone: ZoneInfo | None, instants: list[datetime]) -> str:
-    """One note line when the calendar zone is not the agent clock zone, else ""."""
+def mismatch_note(
+    zone: ZoneInfo,
+    clock_zone: ZoneInfo | None,
+    instants: list[datetime],
+    zone_label: str = CALENDAR_ZONE_LABEL,
+) -> str:
+    """One note line when the render zone is not the agent clock zone, else "".
+
+    ``zone_label`` says what the render zone is (the calendar's, a caller-given
+    event zone, or the configured fallback) so the note never misnames it.
+    """
     if clock_zone is None or zones_equivalent(zone, clock_zone, instants):
         return ""
-    return (
-        f"Note: times are in this calendar's timezone ({zone.key}), which differs from "
-        f"your clock timezone ({clock_zone.key})."
-    )
+    return f"Note: times are in {zone_label} ({zone.key}), which differs from your clock timezone ({clock_zone.key})."
 
 
 def render_event_line(event: dict[str, Any], zone: ZoneInfo) -> str:
@@ -122,11 +133,12 @@ def render_events(
     *,
     header: str,
     clock_zone: ZoneInfo | None = None,
+    zone_label: str = CALENDAR_ZONE_LABEL,
     more: bool = False,
 ) -> str:
     """A list/search result: header naming the zone, optional note, one entry per event."""
     parts = [f"{header}, times in {zone.key}:"]
-    note = mismatch_note(zone, clock_zone, event_instants(events))
+    note = mismatch_note(zone, clock_zone, event_instants(events), zone_label)
     if note:
         parts.append(note)
     parts.extend(render_event_line(e, zone) for e in events)
@@ -142,7 +154,13 @@ def _when(event: dict[str, Any], zone: ZoneInfo) -> tuple[str, str]:
     return _local(event.get("start") or {}, zone), _local(event.get("end") or {}, zone)
 
 
-def render_event_details(event: dict[str, Any], zone: ZoneInfo, *, clock_zone: ZoneInfo | None = None) -> str:
+def render_event_details(
+    event: dict[str, Any],
+    zone: ZoneInfo,
+    *,
+    clock_zone: ZoneInfo | None = None,
+    zone_label: str = CALENDAR_ZONE_LABEL,
+) -> str:
     """A single event (get)."""
     start, end = _when(event, zone)
     lines = [
@@ -151,7 +169,7 @@ def render_event_details(event: dict[str, Any], zone: ZoneInfo, *, clock_zone: Z
         f"End:         {end}",
         f"Time zone:   {zone.key}",
     ]
-    note = mismatch_note(zone, clock_zone, event_instants([event]))
+    note = mismatch_note(zone, clock_zone, event_instants([event]), zone_label)
     if note:
         lines.append(note)
     lines += [
@@ -176,12 +194,13 @@ def render_write(
     zone: ZoneInfo,
     *,
     clock_zone: ZoneInfo | None = None,
+    zone_label: str = CALENDAR_ZONE_LABEL,
     extra: str = "",
 ) -> str:
     """A write confirmation from Google's stored copy: stored start/end + zone, ID, link."""
     start, end = _when(event, zone)
     lines = [headline, f"Start: {start} | End: {end} ({zone.key})"]
-    note = mismatch_note(zone, clock_zone, event_instants([event]))
+    note = mismatch_note(zone, clock_zone, event_instants([event]), zone_label)
     if note:
         lines.append(note)
     lines += [f"ID: {event.get('id', '')}", f"Link: {event.get('htmlLink', '')}"]

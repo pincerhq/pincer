@@ -10,8 +10,10 @@ tools depend on:
   offset or ``Z`` — otherwise HTTP 400, like Google.
 - An event ``dateTime`` without an offset is read in the event's ``timeZone``;
   without either it is a 400 ("Missing time zone definition").
-- Stored times come back rendered in the event's own ``timeZone`` when it has
-  one (kept on the event), else in the calendar's zone.
+- Stored ``dateTime`` comes back with the CALENDAR's offset even when the event
+  has its own ``timeZone`` (which is kept) — measured on a real Europe/Kiev
+  calendar on 2026-11-01: a 10:00 America/New_York event read back as
+  ``{'dateTime': '2026-11-21T17:00:00+02:00', 'timeZone': 'America/New_York'}``.
 - A write's response is the stored copy (``on_store`` can alter what is stored,
   ``drop_id_on_write`` strips the ``id`` from the response).
 
@@ -296,7 +298,7 @@ class FakeCalendarService:
                 parsed = parsed.replace(tzinfo=ZoneInfo(tz_name))
             except (KeyError, ValueError, ZoneInfoNotFoundError):
                 raise http_error(400, f"Invalid time zone definition for {key} time.") from None
-        stored: dict[str, Any] = {"dateTime": parsed.astimezone(ZoneInfo(tz_name or cal_tz)).isoformat()}
+        stored: dict[str, Any] = {"dateTime": parsed.astimezone(ZoneInfo(cal_tz)).isoformat()}
         if tz_name:
             stored["timeZone"] = tz_name
         return stored

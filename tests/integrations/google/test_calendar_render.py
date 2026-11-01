@@ -73,7 +73,7 @@ async def test_list_shows_local_times_zone_header_all_day_ids_and_note(factory, 
     result = await google__list_events(factory, time_min="2026-11-12", time_max="2026-11-12")
 
     assert result == (
-        "2 event(s) (2026-11-12 – 2026-11-13), times in Europe/Kiev:\n"
+        "2 event(s) (2026-11-12), times in Europe/Kiev:\n"
         f"{KIEV_NOTE}\n"
         "  2026-11-12 → 2026-11-12 — Holiday | all day\n"
         "  ID: evt2\n"
@@ -143,7 +143,7 @@ async def test_kiev_calendar_under_kyiv_identity_clock_shows_no_note(registry, f
         context={"timezone": "Europe/Kyiv"},
     )
 
-    assert result.splitlines()[0] == "2 event(s) (2026-11-12 – 2026-11-13), times in Europe/Kiev:"
+    assert result.splitlines()[0] == "2 event(s) (2026-11-12), times in Europe/Kiev:"
     assert "Note:" not in result
 
 
@@ -154,7 +154,7 @@ async def test_matching_zones_show_no_note(factory, fake):
         factory, calendar_id="berlin@group.calendar.google.com", time_min="2026-11-12", time_max="2026-11-12"
     )
 
-    assert result.splitlines()[0] == "1 event(s) (2026-11-12 – 2026-11-13), times in Europe/Berlin:"
+    assert result.splitlines()[0] == "1 event(s) (2026-11-12), times in Europe/Berlin:"
     assert "Note:" not in result
 
 
@@ -278,3 +278,74 @@ async def test_voice_tool_speech_reads_real_list_output(registry, fake):
     assert spoken.startswith("There are 2 appointment(s): ")
     assert "Beratung" in spoken
     assert "Termin" in spoken
+
+
+# ── Live-measured Google behaviour and review fixes ──────────────────────────
+
+
+async def test_fake_stores_datetime_in_the_calendar_offset_keeping_the_events_zone(factory, fake):
+    """Measured on the owner's real calendar (2026-11-01): an event created on the Europe/Kiev
+    calendar with timeZone America/New_York at 10:00 came back from events().get as
+    start={'dateTime': '2026-11-21T17:00:00+02:00', 'timeZone': 'America/New_York'} — the
+    calendar's offset, the event's zone. The fake must do the same."""
+    await google__create_event(
+        factory, summary="NY call", start="2026-11-21T10:00:00", end="2026-11-21T11:00:00", timezone="America/New_York"
+    )
+
+    assert fake.event("primary", "evt1")["start"] == {
+        "dateTime": "2026-11-21T17:00:00+02:00",
+        "timeZone": "America/New_York",
+    }
+
+
+async def test_caller_zone_confirmation_names_the_events_zone_not_the_calendars(registry, fake):
+    result = await registry.execute(
+        "google__create_event",
+        {
+            "summary": "NY call",
+            "start": "2026-11-21T10:00:00",
+            "end": "2026-11-21T11:00:00",
+            "timezone": "America/New_York",
+        },
+        context={"timezone": "Europe/Kyiv"},
+    )
+
+    assert result == (
+        "Event created: 'NY call'\n"
+        "Start: 2026-11-21T10:00:00-05:00 | End: 2026-11-21T11:00:00-05:00 (America/New_York)\n"
+        "Note: times are in the event's timezone (America/New_York), which differs from "
+        "your clock timezone (Europe/Kyiv).\n"
+        "ID: evt1\n"
+        f"Link: {LINK1}"
+    )
+
+
+async def test_voice_style_booking_note_names_the_events_zone_without_a_calendar_lookup(registry, fake):
+    result = await registry.execute(
+        "google__create_event",
+        {
+            "summary": "Zahnreinigung",
+            "start": "2026-08-25T14:00:00+02:00",
+            "end": "2026-08-25T14:30:00+02:00",
+            "timezone": "Europe/Berlin",
+        },
+        context={"timezone": "Europe/Kyiv"},
+    )
+
+    assert (
+        "Note: times are in the event's timezone (Europe/Berlin), which differs from your clock timezone (Europe/Kyiv)."
+    ) in result.splitlines()
+    assert "this calendar's timezone" not in result
+    assert fake.sent("calendars.get") == []
+
+
+async def test_list_header_shows_the_inclusive_last_local_day(factory, fake):
+    fake.seed_event("primary", "Lunch", "2026-11-13T13:00:00+02:00", "2026-11-13T14:00:00+02:00")
+
+    two_days = await google__list_events(factory, time_min="2026-11-12", time_max="2026-11-13")
+    midday_end = await google__list_events(factory, time_min="2026-11-12", time_max="2026-11-13T15:00:00")
+    empty_day = await google__list_events(factory, time_min="2026-11-20", time_max="2026-11-20")
+
+    assert two_days.splitlines()[0] == "1 event(s) (2026-11-12 – 2026-11-13), times in Europe/Kiev:"
+    assert midday_end.splitlines()[0] == "1 event(s) (2026-11-12 – 2026-11-13), times in Europe/Kiev:"
+    assert empty_day == "No events on 2026-11-20."
