@@ -11,7 +11,6 @@ from pincer.voice.localtime import (
     get_voice_timezone,
     to_voice_local,
     voice_today_str,
-    with_voice_zone,
 )
 
 
@@ -98,30 +97,3 @@ def test_voice_today_str_uses_voice_zone():
     today = voice_today_str(settings)
     expected = datetime.now(ZoneInfo("Pacific/Kiritimati")).strftime("%Y-%m-%d")
     assert today == expected
-
-
-def test_call_read_bounds_take_the_voice_zone_offset_and_leave_the_rest():
-    """Date-time bounds get the voice zone's offset (DST-correct); a bare date, an offset-bearing bound
-    and other arguments are passed through for the tool to read as before."""
-    args = {
-        "time_min": "2026-07-01T14:00:00",
-        "time_max": "2026-11-12",
-        "calendar_id": "primary",
-    }
-    assert with_voice_zone("google__list_events", args, _settings(voice_timezone="Europe/Berlin")) == {
-        "time_min": "2026-07-01T14:00:00+02:00",
-        "time_max": "2026-11-12",
-        "calendar_id": "primary",
-    }
-    fixed = {"time_min": "2026-11-12T14:00:00+05:00", "time_max": "2026-11-12T15:00:00Z", "emails": "a@b.c"}
-    assert with_voice_zone("google__check_freebusy", fixed, _settings()) is fixed
-
-
-def test_a_call_update_gets_voice_zone_offsets_not_a_timezone_and_a_named_zone_wins():
-    berlin = _settings(voice_timezone="Europe/Berlin")
-    moved = with_voice_zone("google__update_event", {"event_id": "e1", "start": "2026-11-12T16:00:00"}, berlin)
-    assert moved == {"event_id": "e1", "start": "2026-11-12T16:00:00+01:00"}
-    named = {"event_id": "e1", "start": "2026-11-12T16:00:00", "timezone": "Asia/Tokyo"}
-    assert with_voice_zone("google__update_event", named, berlin) is named
-    booked = with_voice_zone("google__create_event", {"start": "2026-11-12T16:00:00"}, berlin)
-    assert booked == {"start": "2026-11-12T16:00:00", "timezone": "Europe/Berlin"}

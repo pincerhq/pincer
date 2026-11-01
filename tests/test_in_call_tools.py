@@ -718,9 +718,11 @@ async def test_agent_passes_model_tool_calls_as_untrusted(owner_phone):
     agent = object.__new__(Agent)  # only _execute_call_tool is under test
     agent._settings = SimpleNamespace(voice_timezone="Europe/Berlin", timezone="Europe/Berlin")
     sent: list[dict] = []
+    zones: list[str] = []
 
     async def _run_tool_call(tool_call, *args, **kwargs):
         sent.append(dict(tool_call.arguments))
+        zones.append(kwargs["turn"].call_timezone)
         return ToolResult(tool_call_id=tool_call.id, content=CREATE_RESULT, is_error=False)
 
     agent._run_tool_call = _run_tool_call  # type: ignore[method-assign]
@@ -728,10 +730,55 @@ async def test_agent_passes_model_tool_calls_as_untrusted(owner_phone):
     turn = _Turn(turn_id="turn-1", timezone="")
     result = await agent._execute_call_tool(call, "owner", "voice", None, gate, turn=turn)
     assert not result.is_error
-    # The gate keys the action it decides on, which includes the voice zone the agent fills in for a
-    # create on a call (calendar reliability, #297).
-    gated = {**CREATE_ARGS, "timezone": "Europe/Berlin"}
-    assert sent[0]["idempotency_key"] == ict.call_idempotency_key(CALL, "google__create_event", gated)
+    # The gate keys the model's own arguments (a re-emit after a verbal confirmation gives the same key
+    # and fingerprint); the voice zone reaches the tool through the turn's context, not the arguments.
+    assert sent[0]["idempotency_key"] == ict.call_idempotency_key(CALL, "google__create_event", CREATE_ARGS)
+    assert "timezone" not in sent[0]
+    assert zones == ["Europe/Berlin"]
+    await channel.stop()
+
+
+async def test_a_verbally_confirmed_re_emit_through_the_agent_runs_the_proposed_booking():
+    """The voice zone travels in the tool context, not the arguments: the YES note asks the model to
+    re-emit the arguments the gate proposed, and that re-emit matches the proposal (same fingerprint,
+    same key) — offset-less times included, as the call prompt has the model send them."""
+    import json
+    from types import SimpleNamespace
+
+    from pincer.core.agent import Agent, _Turn
+    from pincer.llm.base import ToolCall, ToolResult
+
+    channel, engine, state = await _start(ToolAgent([]), appointment=True, tools=_Registry())
+    gate = channel.get_tool_gate(CALL)
+    agent = object.__new__(Agent)  # only _execute_call_tool is under test
+    agent._settings = SimpleNamespace(voice_timezone="Europe/Berlin", timezone="Europe/Berlin")
+    sent: list[tuple[dict, str]] = []
+
+    async def _run_tool_call(tool_call, *args, **kwargs):
+        sent.append((dict(tool_call.arguments), kwargs["turn"].call_timezone))
+        return ToolResult(tool_call_id=tool_call.id, content=CREATE_RESULT, is_error=False)
+
+    agent._run_tool_call = _run_tool_call  # type: ignore[method-assign]
+    proposed = {**CREATE_ARGS, "start": "2026-08-18T14:00:00", "end": "2026-08-18T14:30:00"}
+    turn = _Turn(turn_id="turn-1", timezone="")
+
+    first = await agent._execute_call_tool(
+        ToolCall("t1", "google__create_event", dict(proposed)), "o", "voice", None, gate, turn=turn
+    )
+    assert sent == []  # nothing ran before the YES
+    assert "pending" in first.content.lower() or "wartet" in first.content.lower()
+    verdict = await gate.handle_caller_utterance("Ja, genau.")
+    assert verdict.status == "confirmed"
+    re_emitted = json.loads(verdict.system_note.split("exactly these arguments: ", 1)[1].split(". Do not ask")[0])
+    assert re_emitted == proposed  # the proposal is the model's own arguments, no zone filled in
+
+    second = await agent._execute_call_tool(
+        ToolCall("t2", "google__create_event", re_emitted), "o", "voice", None, gate, turn=turn
+    )
+
+    assert not second.is_error
+    key = ict.call_idempotency_key(CALL, "google__create_event", proposed)
+    assert sent == [({**proposed, "idempotency_key": key}, "Europe/Berlin")]
     await channel.stop()
 
 

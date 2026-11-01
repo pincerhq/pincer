@@ -22,9 +22,11 @@ in the calendar's own timezone.
   event instead of making another one. An insert that fails on a dropped
   connection but was saved anyway is reported as created.
 - Offset-less times are read in the target calendar's zone, then the person's
-  zone, then `PINCER_TIMEZONE`. On a phone call they are read in the voice zone
-  (`PINCER_VOICE_TIMEZONE`), as the call prompt tells the model, unless the
-  model names a zone.
+  zone, then `PINCER_TIMEZONE`. On a phone call every calendar tool reads them,
+  and shows its times, in the voice zone (`PINCER_VOICE_TIMEZONE`), as the call
+  prompt tells the model, unless the model names a zone. Moving an event reads
+  the new time in the zone the times were shown in; the event keeps its own
+  timezone.
 - List and search lines name an event's own timezone when it differs from the
   calendar's. Deleting an event that is already deleted reports that, instead
   of an error.

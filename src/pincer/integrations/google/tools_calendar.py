@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from pincer.core.clock import load_zone
+from pincer.core.clock import CALL_TIMEZONE_KEY, load_zone
 from pincer.integrations.google import calendar_writer
 from pincer.integrations.google.calendar_render import (
     CALENDAR_ZONE_LABEL,
@@ -80,11 +80,27 @@ def _user_timezone(context: dict[str, Any] | None) -> str:
     return str((context or {}).get("timezone") or "")
 
 
+def _call_zone(context: dict[str, Any] | None) -> ZoneInfo | None:
+    """On a phone call, the call's (voice) zone the agent put in the tool context; else None."""
+    return load_zone(str((context or {}).get(CALL_TIMEZONE_KEY) or ""))
+
+
 async def _calendar_zone(
     factory: GoogleServiceFactory, svc: Any, calendar_id: str, context: dict[str, Any] | None
 ) -> ZoneInfo:
     zone, _label = await _labeled_zone(factory, svc, calendar_id, _user_timezone(context))
     return zone
+
+
+async def _working_zone(
+    factory: GoogleServiceFactory, svc: Any, calendar_id: str, context: dict[str, Any] | None
+) -> tuple[ZoneInfo, str]:
+    """The zone offset-less input is read in and times are shown in: the call's zone on a
+    phone call (as the call prompt tells the model), else the calendar's (resolved) zone."""
+    call = _call_zone(context)
+    if call is not None:
+        return call, CONFIGURED_ZONE_LABEL
+    return await _labeled_zone(factory, svc, calendar_id, _user_timezone(context))
 
 
 def _range(time_min: str, time_max: str, zone: ZoneInfo | None, *, defaults: bool) -> tuple[str, str]:
@@ -114,8 +130,8 @@ def _range(time_min: str, time_max: str, zone: ZoneInfo | None, *, defaults: boo
 
 
 def _clock(context: dict[str, Any] | None) -> ZoneInfo:
-    """The agent clock zone for this user (for the renderer's mismatch note)."""
-    return clock_zone(_user_timezone(context))
+    """The agent clock zone for this user (for the renderer's mismatch note); on a call, the call's zone."""
+    return _call_zone(context) or clock_zone(_user_timezone(context))
 
 
 async def _labeled_zone(
@@ -159,14 +175,19 @@ async def fetch_events(
     time_max: str = "",
     max_results: int = 50,
     user_timezone: str = "",
+    working_zone: ZoneInfo | None = None,
 ) -> EventPage:
     """Structured events in a range — the one list path behind the list tool, briefing and reminder.
 
     Bounds follow ``_range`` with defaults (offset-less ones read in the
-    calendar's zone; a bare date alone is that whole local day).
+    calendar's zone, or ``working_zone`` when given; a bare date alone is
+    that whole local day).
     """
     svc = await factory.get("calendar")
-    zone, label = await _labeled_zone(factory, svc, calendar_id, user_timezone)
+    if working_zone is not None:
+        zone, label = working_zone, CONFIGURED_ZONE_LABEL
+    else:
+        zone, label = await _labeled_zone(factory, svc, calendar_id, user_timezone)
     t_min, t_max = _range(time_min, time_max, zone, defaults=True)
     result = await with_backoff(
         lambda: (
@@ -213,7 +234,9 @@ async def google__list_events(
     context: dict[str, Any] | None = None,
 ) -> str:
     """List calendar events in a date range (default: now + 7 days; a bare date alone = that day)."""
-    page = await fetch_events(factory, calendar_id, time_min, time_max, max_results, _user_timezone(context))
+    page = await fetch_events(
+        factory, calendar_id, time_min, time_max, max_results, _user_timezone(context), _call_zone(context)
+    )
     first, last = local_day_span(page.time_min, page.time_max, page.zone)
     span = first if first == last else f"{first} – {last}"
     if not page.events:
@@ -235,10 +258,10 @@ async def google__get_event(
     calendar_id: str = "primary",
     context: dict[str, Any] | None = None,
 ) -> str:
-    """Get full event details, times in the calendar's zone."""
+    """Get full event details, times in the calendar's zone (on a call, the call's)."""
     svc = await factory.get("calendar")
     event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
-    zone, label = await _labeled_zone(factory, svc, calendar_id, _user_timezone(context))
+    zone, label = await _working_zone(factory, svc, calendar_id, context)
     details = render_event_details(event, zone, clock_zone=_clock(context), zone_label=label)
     return with_edit_hint(details, context)
 
@@ -254,7 +277,7 @@ async def google__search_events(
 ) -> str:
     """Search calendar events by text query, optionally within a date range."""
     svc = await factory.get("calendar")
-    zone, label = await _labeled_zone(factory, svc, calendar_id, _user_timezone(context))
+    zone, label = await _working_zone(factory, svc, calendar_id, context)
     t_min, t_max = _range(time_min, time_max, zone, defaults=False)
     kw: dict[str, Any] = {
         "calendarId": calendar_id,
@@ -286,11 +309,13 @@ async def google__check_freebusy(
 ) -> str:
     """Check free/busy status for one or more email addresses.
 
-    Offset-less bounds are read in the user's own (primary) calendar zone.
+    Offset-less bounds are read in the user's own (primary) calendar zone (on a call, the call's).
     """
     svc = await factory.get("calendar")
     zone = (
-        await _calendar_zone(factory, svc, "primary", context) if needs_zone(time_min) or needs_zone(time_max) else None
+        (await _working_zone(factory, svc, "primary", context))[0]
+        if needs_zone(time_min) or needs_zone(time_max)
+        else None
     )
     t_min, t_max = _range(time_min, time_max, zone, defaults=True)
     items = [{"id": e.strip()} for e in emails.split(",") if e.strip()]
@@ -318,13 +343,13 @@ async def _write_zone(
 ) -> tuple[str, ZoneInfo | None]:
     """The ``timeZone`` to send with a start/end, and the zone to localize in.
 
-    A given zone name (the caller's, or the event's stored one on update) wins;
-    otherwise the resolver decides. An unknown given name is still sent as is
-    (Google reports it) but cannot localize anything.
+    A given zone name (the caller's) wins; otherwise the working zone (the
+    call's on a phone call, else the resolver's). An unknown given name is
+    still sent as is (Google reports it) but cannot localize anything.
     """
     if given.strip():
         return given.strip(), load_zone(given)
-    zone = await _calendar_zone(factory, svc, calendar_id, context)
+    zone, _label = await _working_zone(factory, svc, calendar_id, context)
     return zone.key, zone
 
 
@@ -347,6 +372,9 @@ async def _confirmation_zone(
     given_zone = load_zone(given) if given.strip() else None
     if own is not None and given_zone is not None and own.key == given_zone.key:
         return own, EVENT_ZONE_LABEL
+    call = _call_zone(context)
+    if call is not None:  # on a call, times are told in the call's zone
+        return call, CONFIGURED_ZONE_LABEL
     zone, label = await _labeled_zone(factory, svc, calendar_id, _user_timezone(context))
     if own is not None and not zones_equivalent(own, zone, event_instants([saved])):
         return own, EVENT_ZONE_LABEL
@@ -379,7 +407,8 @@ async def google__create_event(
         Also stored as the private extended property ``pincer_key``.
 
     Offset-less start/end are read in ``timezone`` when given, else in the
-    calendar's own zone (see calendar_tz); offset-bearing ones pass unchanged.
+    calendar's own zone (see calendar_tz; on a call, the call's zone, which is
+    then also the event's stored zone); offset-bearing ones pass unchanged.
     Two bare dates make an all-day event (Google's end date is exclusive; an
     end on or before the start means that one day).
     """
@@ -562,7 +591,7 @@ async def google__update_event(
     """Update fields on an existing calendar event.
 
     Offset-less start/end are read in ``timezone`` when given, else in the
-    calendar's zone (the zone list/search/get show times in); the event keeps
+    zone list/search/get show times in (the calendar's; on a call, the call's); the event keeps
     its own stored ``timeZone`` unless ``timezone`` is given. A bare date moves an
     all-day event. Given only a new start, the end moves with it (the stored
     duration is kept); given only a new end, the start stays.
@@ -584,7 +613,11 @@ async def google__update_event(
             continue
         # Read in the zone the times were shown in (or the caller's); keep the event's own zone.
         tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone)
-        kept_zone = timezone.strip() or stored_zone_name(event, key) or tz_name
+        kept_zone = (
+            timezone.strip()
+            or stored_zone_name(event, key)
+            or (await _calendar_zone(factory, svc, calendar_id, context)).key
+        )
         changed[key] = {"dateTime": localize(value, zone) if zone else rfc3339(value), "timeZone": kept_zone}
     if "start" in changed and "end" not in changed:
         changed["end"] = _end_keeping_duration(

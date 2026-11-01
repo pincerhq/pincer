@@ -17,11 +17,11 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable, Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from pincer.core.clock import current_time_block
+from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
     ONBOARDING_FOLLOWUP_INSTRUCTION,
@@ -45,7 +45,7 @@ from pincer.memory.base import (
     PINCER_MEMORY_USER_REQUEST_PREFIX,
 )
 from pincer.tools.path_sandbox import SandboxDenied
-from pincer.voice.localtime import with_voice_zone
+from pincer.voice.localtime import get_voice_timezone
 
 # Signature: (tool_name, arguments, user_id, channel) -> approved?
 ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool]]
@@ -417,10 +417,12 @@ class _OutageLog:
 @dataclass(frozen=True)
 class _Turn:
     """One chat turn's tool context: a UUID7 for log tracing (and calendar
-    dedup), plus the user's identity timezone, looked up once per turn."""
+    dedup), plus the user's identity timezone, looked up once per turn, and
+    on a phone call the call's (voice) zone."""
 
     turn_id: str
     timezone: str
+    call_timezone: str = ""
 
 
 class Agent:
@@ -1939,6 +1941,8 @@ class Agent:
                         # offset-less times in it when the calendar's own
                         # zone is unavailable ("" = use PINCER_TIMEZONE).
                         "timezone": turn.timezone,
+                        # On a call: the voice zone the calendar tools work in.
+                        **({CALL_TIMEZONE_KEY: turn.call_timezone} if turn.call_timezone else {}),
                         # Tracing (log lines) and calendar create dedup.
                         "turn_id": turn.turn_id,
                         "tool_call_id": tool_call.id,
@@ -1996,16 +2000,13 @@ class Agent:
         user / off modes, write budget, timeouts) — so the registry's generic
         approval prompt is skipped; without a gate the normal path applies.
         """
-        if call_gate is None:
-            return await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id, turn=turn)
-
-        # Calendar writes on a call: times are in the voice zone (as the call prompt says).
-        tool_call = ToolCall(
-            id=tool_call.id,
-            name=tool_call.name,
-            arguments=with_voice_zone(tool_call.name, tool_call.arguments, self._settings),
+        # Times on a call are in the voice zone (as the call prompt says): the calendar
+        # tools read and show times in it, gated or not.
+        call_turn = replace(
+            turn or await self._begin_turn(user_id), call_timezone=get_voice_timezone(self._settings).key
         )
-        call_turn = turn or await self._begin_turn(user_id)
+        if call_gate is None:
+            return await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id, turn=call_turn)
 
         async def _run() -> tuple[str, bool]:
             # Untraced here: the pair around the gate below covers the call,

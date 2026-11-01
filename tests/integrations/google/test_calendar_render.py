@@ -473,6 +473,29 @@ async def test_create_with_one_bare_date_is_refused_before_writing(fake_factory,
     assert fake.sent("events.insert") == []
 
 
+# ── On a call, times are read and shown in the call's zone (PR #316 review) ───
+
+
+async def test_on_a_call_create_and_get_show_times_in_the_calls_zone(fake_factory, fake):
+    from pincer.core.clock import CALL_TIMEZONE_KEY
+
+    on_call = {"timezone": "Europe/Kyiv", CALL_TIMEZONE_KEY: "Europe/Berlin"}
+
+    created = await google__create_event(
+        fake_factory, summary="Dentist", start="2026-11-12T14:00:00", end="2026-11-12T15:00:00", context=on_call
+    )
+    event_id, _link = _created(fake)
+    got = await google__get_event(fake_factory, event_id=event_id, context=on_call)
+
+    assert fake.event("primary", event_id)["start"] == {
+        "dateTime": "2026-11-12T15:00:00+02:00",  # 14:00 Berlin, stored in the Kyiv calendar's offset
+        "timeZone": "Europe/Berlin",
+    }
+    assert "Start: 2026-11-12T14:00:00+01:00 | End: 2026-11-12T15:00:00+01:00 (Europe/Berlin)" in created
+    assert "Start:       2026-11-12T14:00:00+01:00" in got.splitlines()
+    assert "Note:" not in created and "Note:" not in got
+
+
 # ── Moving an event keeps its duration (pre-existing bug, in scope) ──────────
 
 

@@ -339,6 +339,7 @@ class _OneCallLLM(BaseLLMProvider):
     def __init__(self, name: str, arguments: dict[str, Any]) -> None:
         self._call = ToolCall(id="call_voice_1", name=name, arguments=arguments)
         self.offered: list[set[str]] = []
+        self.results: list[str] = []
 
     async def complete(
         self,
@@ -351,7 +352,8 @@ class _OneCallLLM(BaseLLMProvider):
     ) -> LLMResponse:
         self.offered.append({t["name"] for t in tools or []})
         last_user = max(i for i, m in enumerate(messages) if m.role == MessageRole.USER)
-        if any(m.role == MessageRole.TOOL_RESULT for m in messages[last_user:]):
+        if results := [m.content for m in messages[last_user:] if m.role == MessageRole.TOOL_RESULT]:
+            self.results = results
             return LLMResponse(
                 content="Done.", model="scripted", input_tokens=1, output_tokens=1, stop_reason="end_turn"
             )
@@ -441,8 +443,8 @@ async def test_a_zone_the_model_names_on_a_call_is_kept(tmp_path, fake, berlin_s
 async def test_a_move_on_a_call_reads_the_new_time_in_the_voice_zone(
     tmp_path, fake, berlin_settings, registry, costs
 ) -> None:
-    """Update reads offset-less times in the event's stored zone (Kyiv here) unless given one: on a call
-    the new time gets the voice zone's offset instead, and the event keeps its zone."""
+    """On a call, update reads an offset-less time in the voice zone (the zone the call shows times in),
+    and the event keeps its own stored zone (Kyiv here)."""
     day = _tomorrow()
     event_id = fake.seed_event(
         "primary", "Dentist", _kyiv(day, "10:00").isoformat(), _kyiv(day, "11:00").isoformat(), time_zone="Europe/Kyiv"
@@ -509,3 +511,49 @@ async def test_a_move_on_a_call_keeps_the_events_own_zone(tmp_path, fake, berlin
     assert (stored["start"].get("timeZone"), stored["end"].get("timeZone")) == ("America/New_York", "America/New_York")
     starts = datetime.fromisoformat(f"{day}T17:00:00").replace(tzinfo=ZoneInfo("Europe/Berlin"))
     assert fake.instants(stored, "Europe/Kyiv") == (starts, starts + timedelta(minutes=90))
+
+
+async def test_a_search_on_a_call_without_a_gate_reads_its_bounds_in_the_voice_zone(
+    tmp_path, fake, berlin_settings, registry, costs
+) -> None:
+    """PR #316 review: "is my dentist appointment between 14:00 and 16:00?" on a call (the no-gate
+    voice path, which offers search) must search 14:00-16:00 Berlin, not Kyiv: an event at 15:30
+    Berlin (16:30 Kyiv) is otherwise missed."""
+    day = _tomorrow()
+    berlin = ZoneInfo("Europe/Berlin")
+    at = datetime.fromisoformat(f"{day}T15:30:00").replace(tzinfo=berlin)
+    fake.seed_event("primary", "Dentist", at.isoformat(), (at + timedelta(minutes=30)).isoformat())
+    llm = _OneCallLLM(
+        "google__search_events", {"query": "Dentist", "time_min": f"{day}T14:00:00", "time_max": f"{day}T16:00:00"}
+    )
+    sessions = await _sessions(tmp_path, 50)
+    try:
+        agent = Agent(berlin_settings, llm, sessions, costs, registry, approval_callback=_approve)
+        async for _chunk in agent.stream_voice_turn(OWNER, "voice", "is my dentist between two and four?"):
+            pass
+    finally:
+        await sessions.close()
+
+    assert "google__search_events" in llm.offered[0]  # precondition: the no-gate call path offered it
+    (sent,) = fake.sent("events.list")
+    assert (sent["timeMin"], sent["timeMax"]) == (
+        datetime.fromisoformat(f"{day}T14:00:00").replace(tzinfo=berlin).isoformat(),
+        datetime.fromisoformat(f"{day}T16:00:00").replace(tzinfo=berlin).isoformat(),
+    )
+    assert "Found 1 event(s)" in llm.results[0], llm.results
+
+
+async def test_a_list_on_a_call_is_spoken_in_the_voice_zone(tmp_path, fake, berlin_settings, registry, costs) -> None:
+    """PR #316 review: on a Kyiv calendar with a Berlin voice zone, an event at 10:00 Berlin must be
+    listed, and so spoken, as 10 AM — not 11 AM (its Kyiv wall clock). The gate hands the model the
+    spoken rendering (voice/tool_speech.py) of the list result."""
+    day = _tomorrow()
+    at = datetime.fromisoformat(f"{day}T10:00:00").replace(tzinfo=ZoneInfo("Europe/Berlin"))
+    fake.seed_event("primary", "Dentist", at.isoformat(), (at + timedelta(hours=1)).isoformat())
+    llm = _OneCallLLM("google__list_events", {"time_min": day, "time_max": day})
+
+    await _on_a_call(tmp_path, berlin_settings, llm, costs, registry, "generic")
+
+    assert "google__list_events" in llm.offered[0]  # precondition: the call offered the tool
+    assert "There are 1 appointment(s)" in llm.results[0], llm.results  # precondition: spoken list text
+    assert "at 10:00 AM: Dentist" in llm.results[0], llm.results

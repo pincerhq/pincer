@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 #: Matches the default of `Settings.timezone`; used only if that is unset too.
 DEFAULT_TIMEZONE = "Europe/Berlin"
+#: Tool-context key for the zone of a phone call (the voice zone): calendar tools read
+#: offset-less times in it and show times in it. Set only on calls; ``timezone`` in the
+#: same context stays the user's identity zone.
+CALL_TIMEZONE_KEY = "call_timezone"
 
 
 def load_zone(name: str) -> ZoneInfo | None:
