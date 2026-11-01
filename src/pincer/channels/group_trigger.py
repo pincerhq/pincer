@@ -65,3 +65,11 @@ def matches_group_trigger(text: str, raw: str) -> bool:
         return False
     pattern = _compile_group_triggers(raw)
     return bool(pattern and pattern.search(text))
+
+
+def strip_group_triggers(text: str, raw: str) -> str:
+    """Return *text* with every trigger from the *raw* setting replaced by a space."""
+    if not text or not raw:
+        return text
+    pattern = _compile_group_triggers(raw)
+    return pattern.sub(" ", text) if pattern else text

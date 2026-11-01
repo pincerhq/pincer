@@ -1150,6 +1150,365 @@ class TestGroupReplyTarget:
         assert ch._reply_targets[TOM_LID] == (TOM_LID, "lid")
 
 
+GROUP = "120363000000000000"
+PROMPT_ID = "3EB0PROMPT"
+
+
+def _reaction_event(*, sender_user: str, emoji: str, target_id: str = PROMPT_ID, chat_user: str = GROUP, **kwargs):
+    """A reaction on *target_id*, built on a text event with the text cleared."""
+    event, _, _ = _make_message_event(
+        chat_user=chat_user,
+        sender_user=sender_user,
+        is_group=kwargs.pop("is_group", True),
+        from_me=kwargs.pop("from_me", False),
+        **kwargs,
+    )
+    msg = event.Message
+    msg.conversation = ""
+    msg.reactionMessage.key.ID = target_id
+    msg.reactionMessage.text = emoji
+    msg.HasField = MagicMock(side_effect=lambda f: f == "reactionMessage")
+    return event
+
+
+def _group_text(text: str, *, sender_user: str = OTHER_PHONE, chat_user: str = GROUP, **kwargs):
+    event, _, _ = _make_message_event(
+        from_me=kwargs.pop("from_me", False),
+        chat_user=chat_user,
+        chat_server="g.us",
+        sender_user=sender_user,
+        is_group=True,
+        message_text=text,
+        **kwargs,
+    )
+    return event
+
+
+async def _pending_approval(ch, requester: str = OTHER_PHONE, group: str | None = GROUP) -> asyncio.Task:
+    """Start request_approval as if the agent were handling *requester*'s message in *group*."""
+    ch._client = MagicMock()
+    ch._client.send_message = AsyncMock(return_value=MagicMock(ID=PROMPT_ID))
+    token = _active_group.set((requester, (group, "g.us"))) if group else None
+    try:
+        task = asyncio.create_task(ch.request_approval(requester, "google__send_message", {"to": "me"}))
+    finally:
+        if token is not None:
+            _active_group.reset(token)
+    for _ in range(100):
+        if requester in ch._pending_approvals:
+            break
+        await asyncio.sleep(0)
+    assert requester in ch._pending_approvals
+    return task
+
+
+async def _still_pending(task: asyncio.Task) -> bool:
+    await asyncio.sleep(0.01)
+    pending = not task.done()
+    task.cancel()
+    return pending
+
+
+@pytest.mark.asyncio
+class TestGroupApproval:
+    """Answers to an approval prompt in a group reach it without a trigger word,
+    and only from the member who asked."""
+
+    async def test_prompt_explains_how_to_answer_in_a_group(self, routing_channel):
+        task = await _pending_approval(routing_channel)
+        prompt = routing_channel._client.send_message.await_args.args[1]
+        assert "react 👍 / 👎 (within 2 min)" in prompt
+        assert routing_channel._pending_approvals[OTHER_PHONE].chat == (GROUP, "g.us")
+        await _still_pending(task)
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("yes", True),
+            ("Yes!", True),
+            ("pincer yes", True),
+            (f"@{OWNER_PHONE} yes", True),
+            ("no", False),
+            ("pincer, no thanks", False),
+        ],
+    )
+    async def test_text_answer_from_requester_resolves(self, routing_channel, text, expected):
+        ch = routing_channel
+        task = await _pending_approval(ch)
+        mention = f"{OWNER_PHONE}@s.whatsapp.net" if text.startswith("@") else None
+
+        await ch._on_message(ch._client, _group_text(text, mentioned_jid=mention))
+
+        assert await asyncio.wait_for(task, 1) is expected
+        ch._handler.assert_not_called()
+        assert OTHER_PHONE not in ch._pending_approvals
+
+    @pytest.mark.parametrize("emoji", ["👍", "👍🏽", "❤️", "🙏"])
+    async def test_reaction_from_requester_approves(self, routing_channel, emoji):
+        ch = routing_channel
+        task = await _pending_approval(ch)
+
+        await ch._on_message(ch._client, _reaction_event(sender_user=OTHER_PHONE, emoji=emoji))
+
+        assert await asyncio.wait_for(task, 1) is True
+        assert PROMPT_ID not in ch._approval_prompt_ids
+
+    async def test_thumbs_down_reaction_denies(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch)
+
+        await ch._on_message(ch._client, _reaction_event(sender_user=OTHER_PHONE, emoji="👎🏿"))
+
+        assert await asyncio.wait_for(task, 1) is False
+
+    async def test_reaction_from_another_member_is_ignored(self, routing_channel, caplog):
+        ch = routing_channel
+        task = await _pending_approval(ch)
+
+        with caplog.at_level("INFO", logger="pincer.channels.whatsapp"):
+            await ch._on_message(ch._client, _reaction_event(sender_user="4915100000000", emoji="👍"))
+
+        assert await _still_pending(task)
+        assert any("only" in r.getMessage() and OTHER_PHONE in r.getMessage() for r in caplog.records)
+
+    async def test_text_from_another_member_is_ignored(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch)
+
+        await ch._on_message(ch._client, _group_text("yes", sender_user="4915100000000"))
+
+        assert await _still_pending(task)
+        ch._handler.assert_not_called()
+
+    async def test_owner_reaction_from_own_number_approves(self, routing_channel):
+        """Pincer on the owner's own number: the owner's reaction is from_me."""
+        ch = routing_channel
+        task = await _pending_approval(ch, requester=OWNER_PHONE)
+
+        await ch._on_message(ch._client, _reaction_event(sender_user=OWNER_PHONE, emoji="👍", from_me=True))
+
+        assert await asyncio.wait_for(task, 1) is True
+
+    async def test_owner_plain_yes_from_own_number_approves(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch, requester=OWNER_PHONE)
+
+        await ch._on_message(ch._client, _group_text("yes", sender_user=OWNER_PHONE, from_me=True))
+
+        assert await asyncio.wait_for(task, 1) is True
+
+    async def test_yes_in_another_group_does_not_answer(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch)
+
+        await ch._on_message(ch._client, _group_text("yes", chat_user="120363999999999999"))
+
+        assert await _still_pending(task)
+        ch._handler.assert_not_called()
+
+    async def test_unrelated_text_goes_through_the_gate(self, routing_channel, caplog):
+        ch = routing_channel
+        task = await _pending_approval(ch)
+
+        with caplog.at_level("INFO", logger="pincer.channels.whatsapp"):
+            await ch._on_message(ch._client, _group_text("see you all tomorrow"))
+        ch._handler.assert_not_called()
+        assert any("approval is pending" in r.getMessage() for r in caplog.records)
+        assert ch._client.send_message.await_count == 1  # just the prompt
+
+        assert await _still_pending(task)
+
+    @pytest.mark.parametrize("text", ["ok guys, see you at 8", "no idea what you mean, Anna"])
+    async def test_group_chatter_starting_with_yes_or_no_does_not_answer(self, routing_channel, text):
+        ch = routing_channel
+        task = await _pending_approval(ch)
+
+        await ch._on_message(ch._client, _group_text(text))
+
+        assert await _still_pending(task)
+        ch._handler.assert_not_called()
+
+    async def test_message_to_pincer_while_pending_reasks(self, routing_channel):
+        """A triggered message that isn't an answer re-asks instead of starting a second run."""
+        ch = routing_channel
+        task = await _pending_approval(ch)
+
+        await ch._on_message(ch._client, _group_text("pincer, what does that tool do?"))
+
+        ch._handler.assert_not_called()
+        assert ch._client.send_message.await_args.args[1] == "Please reply *yes* or *no*."
+        assert await _still_pending(task)
+
+    async def test_reaction_from_requesters_other_id_approves(self, routing_channel):
+        """The requester asked under their phone number; the reaction arrives LID-addressed."""
+        ch = routing_channel
+        task = await _pending_approval(ch, requester=OTHER_PHONE)
+
+        event = _reaction_event(
+            sender_user=TOM_LID,
+            sender_server="lid",
+            sender_alt_user=OTHER_PHONE,
+            sender_alt_server="s.whatsapp.net",
+            emoji="👍",
+        )
+        await ch._on_message(ch._client, event)
+
+        assert await asyncio.wait_for(task, 1) is True
+
+    async def test_voice_note_answer_in_group(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch)
+        ch._extract_message.return_value = IncomingMessage(
+            user_id=OTHER_PHONE, channel="whatsapp", text="Yes.", channel_type=ChannelType.WHATSAPP
+        )
+        event = _group_text("")
+        event.Message.audioMessage.mimetype = "audio/ogg"
+        event.Message.HasField = MagicMock(side_effect=lambda f: f == "audioMessage")
+
+        await ch._on_message(ch._client, event)
+
+        assert await asyncio.wait_for(task, 1) is True
+        ch._handler.assert_not_called()
+
+    async def test_captioned_image_answer_in_group(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch)
+        event = _group_text("")
+        event.Message.imageMessage.caption = "yes"
+        event.Message.HasField = MagicMock(side_effect=lambda f: f == "imageMessage")
+
+        await ch._on_message(ch._client, event)
+
+        assert await asyncio.wait_for(task, 1) is True
+        ch._extract_message.assert_not_called()
+
+    async def test_echo_of_the_question_does_not_answer_it(self, routing_channel):
+        """Pincer on the owner's own number: the question comes back from the owner."""
+        ch = routing_channel
+        ch._client = MagicMock()
+        ch._client.send_message = AsyncMock(return_value=MagicMock(ID="3EB0QUESTION"))
+        token = _active_group.set((OWNER_PHONE, (GROUP, "g.us")))
+        try:
+            task = asyncio.create_task(ch.request_input(OWNER_PHONE, "Which address?"))
+        finally:
+            _active_group.reset(token)
+        for _ in range(100):
+            if OWNER_PHONE in ch._pending_inputs:
+                break
+            await asyncio.sleep(0)
+
+        echo = _group_text("Which address?", sender_user=OWNER_PHONE, from_me=True, msg_id="3EB0QUESTION")
+        await ch._on_message(ch._client, echo)
+        assert not task.done()
+
+        await ch._on_message(ch._client, _group_text("Home", sender_user=OWNER_PHONE, from_me=True))
+        assert await asyncio.wait_for(task, 1) == "Home"
+
+    async def test_second_approval_waits_for_the_first(self, routing_channel):
+        ch = routing_channel
+        first = await _pending_approval(ch)
+        token = _active_group.set((OTHER_PHONE, (GROUP, "g.us")))
+        try:
+            second = asyncio.create_task(ch.request_approval(OTHER_PHONE, "google__send_message", {"to": "boss"}))
+        finally:
+            _active_group.reset(token)
+        await asyncio.sleep(0.01)
+        assert ch._client.send_message.await_count == 1  # only the first prompt so far
+
+        await ch._on_message(ch._client, _group_text("yes"))
+        assert await asyncio.wait_for(first, 1) is True
+        for _ in range(100):
+            if ch._client.send_message.await_count == 2 and OTHER_PHONE in ch._pending_approvals:
+                break
+            await asyncio.sleep(0)
+        assert "to=boss" in ch._client.send_message.await_args.args[1]
+
+        await ch._on_message(ch._client, _group_text("no", msg_id="second-answer"))
+        assert await asyncio.wait_for(second, 1) is False
+        assert OTHER_PHONE not in ch._pending_approvals
+
+    async def test_approval_and_question_in_different_chats(self, routing_channel):
+        """A question in the DM and an approval in a group are answered each in its own chat."""
+        ch = routing_channel
+        approval = await _pending_approval(ch)
+        question = asyncio.create_task(ch.request_input(OTHER_PHONE, "Which address?"))
+        for _ in range(100):
+            if OTHER_PHONE in ch._pending_inputs:
+                break
+            await asyncio.sleep(0)
+        assert ch._pending_inputs[OTHER_PHONE].chat is None
+
+        dm, _, _ = _make_message_event(
+            from_me=False, chat_user=OTHER_PHONE, sender_user=OTHER_PHONE, message_text="Home", msg_id="dm-answer"
+        )
+        await ch._on_message(ch._client, dm)
+        assert await asyncio.wait_for(question, 1) == "Home"
+
+        await ch._on_message(ch._client, _group_text("yes"))
+        assert await asyncio.wait_for(approval, 1) is True
+
+    async def test_group_yes_does_not_answer_a_direct_chat_prompt(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch, group=None)
+
+        await ch._on_message(ch._client, _group_text("yes"))
+
+        assert await _still_pending(task)
+
+
+@pytest.mark.asyncio
+class TestDirectChatApproval:
+    """The self-chat behaviour is unchanged."""
+
+    def _self_chat(self, text: str):
+        event, _, _ = _make_message_event(
+            from_me=True,
+            chat_user=OWNER_PHONE,
+            sender_user=OWNER_PHONE,
+            message_text=text,
+        )
+        return event
+
+    async def test_yes_resolves(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch, requester=OWNER_PHONE, group=None)
+        prompt = ch._client.send_message.await_args.args[1]
+        assert "Reply *yes* / *no*, or react with 👍 / 👎." in prompt
+
+        await ch._on_message(ch._client, self._self_chat("yes please"))
+
+        assert await asyncio.wait_for(task, 1) is True
+        ch._handler.assert_not_called()
+
+    async def test_other_text_reprompts(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch, requester=OWNER_PHONE, group=None)
+
+        await ch._on_message(ch._client, self._self_chat("maybe later"))
+
+        assert ch._client.send_message.await_args.args[1] == "Please reply *yes* or *no*."
+        ch._handler.assert_not_called()
+        assert await _still_pending(task)
+
+    async def test_reprompt_echo_does_not_reprompt_again(self, routing_channel):
+        ch = routing_channel
+        task = await _pending_approval(ch, requester=OWNER_PHONE, group=None)
+        ch._client.send_message.return_value = MagicMock(ID="3EB0REASK")
+
+        await ch._on_message(ch._client, self._self_chat("maybe later"))
+        echo, _, _ = _make_message_event(
+            from_me=True,
+            chat_user=OWNER_PHONE,
+            sender_user=OWNER_PHONE,
+            message_text="Please reply *yes* or *no*.",
+            msg_id="3EB0REASK",
+        )
+        await ch._on_message(ch._client, echo)
+
+        assert ch._client.send_message.await_count == 2  # the prompt and one re-ask
+        assert await _still_pending(task)
+
+
 @pytest.mark.asyncio
 class TestJidForBareLid:
     """Sends with no inbound message this run (scheduler, notifications)."""
