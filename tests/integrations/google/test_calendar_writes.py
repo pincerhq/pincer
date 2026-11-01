@@ -282,3 +282,33 @@ async def test_retried_delete_verification_survives_a_transient_get_failure(fake
     result = await fake_registry.execute("google__delete_event", {"event_id": event_id}, context=_turn("turn-a"))
 
     assert result == f"Event {event_id} deleted."
+
+
+# ── Full-branch review N5: a same-turn re-call with other details ────────────
+
+
+async def test_a_same_turn_re_call_with_other_details_says_they_were_not_applied(fake_registry, fake):
+    """The dedup ID covers title and times only: new attendees/description on the re-call are dropped,
+    and the model must hear that rather than a plain "already created"."""
+    await _create(fake_registry, "turn-a", "c1")
+
+    again = await _create(
+        fake_registry, "turn-a", "c2", description="Bring the X-ray", attendees="ana@example.com", add_meet_link=True
+    )
+
+    (event,) = fake.events_on("primary")
+    assert "description" not in event and "attendees" not in event  # precondition: nothing was applied
+    assert again.startswith("Event already created: 'Dentist'")
+    assert (
+        "Not applied: description, attendees, Google Meet link differ from the existing event; "
+        "call google__update_event with its ID to change them."
+    ) in again
+
+
+async def test_an_identical_same_turn_re_call_says_nothing_about_unapplied_fields(fake_registry, fake):
+    await _create(fake_registry, "turn-a", "c1", description="Bring the X-ray")
+
+    again = await _create(fake_registry, "turn-a", "c2", description="Bring the X-ray")
+
+    assert again.startswith("Event already created: 'Dentist'")
+    assert "Not applied" not in again

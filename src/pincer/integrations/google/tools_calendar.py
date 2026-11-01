@@ -55,6 +55,11 @@ KIND_CHANGE_MESSAGE = (
     "Moving an event between all-day and timed needs both a new start and a new end — "
     "pass end as well (a date for all-day, a time otherwise)."
 )
+#: Appended when a same-turn re-call found the event but asked for other details (dedup covers
+#: title and times only, so those details were dropped).
+UNAPPLIED_NOTE = (
+    " Not applied: {fields} differ from the existing event; call google__update_event with its ID to change them."
+)
 
 
 def _now_iso() -> str:
@@ -438,6 +443,9 @@ async def google__create_event(
         if outcome.existed
         else f"Event created: '{title}'"
     )
+    unapplied = _unapplied_fields(body, created) if outcome.existed else []
+    if unapplied:
+        headline += UNAPPLIED_NOTE.format(fields=", ".join(unapplied))
     return render_write(
         headline,
         created,
@@ -446,6 +454,21 @@ async def google__create_event(
         zone_label=label,
         extra=extra,
     )
+
+
+def _unapplied_fields(requested: dict[str, Any], existing: dict[str, Any]) -> list[str]:
+    """Details a deduplicated create asked for that the existing event does not have."""
+    fields: list[str] = []
+    for key in ("description", "location"):
+        if key in requested and requested[key] != existing.get(key, ""):
+            fields.append(key)
+    if "attendees" in requested:
+        wanted = {a["email"].lower() for a in requested["attendees"]}
+        if wanted != {str(a.get("email", "")).lower() for a in existing.get("attendees") or []}:
+            fields.append("attendees")
+    if "conferenceData" in requested and not existing.get("conferenceData"):
+        fields.append("Google Meet link")
+    return fields
 
 
 def _dedup_seed(idempotency_key: str, context: dict[str, Any] | None) -> str:
