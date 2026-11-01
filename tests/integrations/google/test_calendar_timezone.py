@@ -408,3 +408,22 @@ async def test_fake_returns_nothing_for_an_inverted_range_like_google(fake):
     )
 
     assert result["items"] == []
+
+
+def test_legacy_kiev_name_resolves_without_a_system_zone_database():
+    """Google reports the owner's calendar as Europe/Kiev; python:3.14-slim (Debian 13)
+    has no such system file, so zoneinfo must fall back to the PyPI tzdata package
+    (an unconditional dependency), which carries the backward links."""
+    import zoneinfo
+
+    saved = zoneinfo.TZPATH
+    zoneinfo.reset_tzpath([])
+    try:
+        zone = zoneinfo.ZoneInfo.no_cache("Europe/Kiev")
+    finally:
+        zoneinfo.reset_tzpath(saved)
+
+    assert zone.key == "Europe/Kiev"
+    assert (
+        datetime(2026, 11, 12, 12, 0, tzinfo=zone).utcoffset() == datetime(2026, 11, 12, 12, 0, tzinfo=KYIV).utcoffset()
+    )
