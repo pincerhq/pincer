@@ -457,3 +457,33 @@ async def test_a_move_on_a_call_reads_the_new_time_in_the_voice_zone(
     assert fake.start_of("primary", event_id) == datetime.fromisoformat(f"{day}T14:00:00").replace(
         tzinfo=ZoneInfo("Europe/Berlin")
     )
+
+
+def _read_bounds(fake: FakeCalendarService, tool: str) -> tuple[str, str]:
+    """The ``timeMin``/``timeMax`` the read tool really sent to Google."""
+    if tool == "google__list_events":
+        (sent,) = fake.sent("events.list")
+        return sent["timeMin"], sent["timeMax"]
+    (sent,) = fake.sent("freebusy.query")
+    return sent["body"]["timeMin"], sent["body"]["timeMax"]
+
+
+@pytest.mark.parametrize(
+    ("tool", "extra"), [("google__list_events", {}), ("google__check_freebusy", {"emails": "primary"})]
+)
+async def test_an_availability_read_on_a_call_queries_the_voice_zone(
+    tmp_path, fake, berlin_settings, registry, costs, tool, extra
+) -> None:
+    """The call prompt gives times in the voice zone, so "is 14:00-15:00 free?" must check 14:00 Berlin,
+    not 14:00 in the (Kyiv) calendar's zone — else the check and the booking disagree by an hour."""
+    day = _tomorrow()
+    llm = _OneCallLLM(tool, {"time_min": f"{day}T14:00:00", "time_max": f"{day}T15:00:00", **extra})
+
+    await _on_a_call(tmp_path, berlin_settings, llm, costs, registry, "generic")
+
+    assert tool in llm.offered[0]  # precondition: the call offered the tool
+    berlin = ZoneInfo("Europe/Berlin")
+    assert _read_bounds(fake, tool) == (
+        datetime.fromisoformat(f"{day}T14:00:00").replace(tzinfo=berlin).isoformat(),
+        datetime.fromisoformat(f"{day}T15:00:00").replace(tzinfo=berlin).isoformat(),
+    )

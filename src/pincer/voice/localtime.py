@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
+from pincer.integrations.google.calendar_tz import is_date_only, localize, needs_zone
+
 if TYPE_CHECKING:
     from pincer.config import Settings
 
@@ -19,6 +21,12 @@ DEFAULT_VOICE_TIMEZONE = "Europe/Berlin"
 # Calendar writes whose offset-less times the call prompt (TIME_CONTEXT) tells the
 # model to give "as local wall-clock time in <voice zone>".
 VOICE_ZONED_CALENDAR_WRITES = frozenset({"google__create_event", "google__update_event"})
+# Calendar reads whose offset-less bounds are the caller's (voice-zone) times: they get the
+# voice zone's offset, so an availability check covers the slot a booking would take.
+VOICE_LOCAL_TIME_ARGS: dict[str, tuple[str, ...]] = {
+    "google__list_events": ("time_min", "time_max"),
+    "google__check_freebusy": ("time_min", "time_max"),
+}
 
 
 def get_voice_timezone(settings: Settings) -> ZoneInfo:
@@ -38,15 +46,26 @@ def get_voice_timezone(settings: Settings) -> ZoneInfo:
 
 
 def with_voice_zone(tool_name: str, arguments: dict[str, Any], settings: Settings) -> dict[str, Any]:
-    """A call's calendar-write arguments with ``timezone`` set to the voice zone unless the model gave one.
+    """A call's calendar arguments with offset-less times read in the voice zone, as the call prompt says.
 
     Without it the calendar tools read offset-less times in the calendar's own
     zone: a caller's "14:00" on a Kyiv calendar of a Berlin deployment would be
-    booked at 14:00 Kyiv (13:00 Berlin). Other tools' arguments are returned as is.
+    booked (or checked) at 14:00 Kyiv (13:00 Berlin). Writes get ``timezone``
+    set to the voice zone unless the model gave one; reads get the voice zone's
+    offset on their date-time bounds (a bare date stays the calendar's day).
+    Other tools' arguments are returned as is.
     """
-    if tool_name not in VOICE_ZONED_CALENDAR_WRITES or str(arguments.get("timezone") or "").strip():
-        return arguments
-    return {**arguments, "timezone": get_voice_timezone(settings).key}
+    zone = get_voice_timezone(settings)
+    if tool_name in VOICE_ZONED_CALENDAR_WRITES:
+        if str(arguments.get("timezone") or "").strip():
+            return arguments
+        return {**arguments, "timezone": zone.key}
+    pinned = {
+        key: localize(value, zone)
+        for key in VOICE_LOCAL_TIME_ARGS.get(tool_name, ())
+        if isinstance(value := arguments.get(key), str) and needs_zone(value) and not is_date_only(value)
+    }
+    return {**arguments, **pinned} if pinned else arguments
 
 
 def to_voice_local(dt: datetime, settings: Settings) -> datetime:
