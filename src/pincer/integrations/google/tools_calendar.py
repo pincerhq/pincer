@@ -24,6 +24,7 @@ from pincer.integrations.google.calendar_tz import (
     SOURCE_CALENDAR,
     clock_zone,
     is_date_only,
+    local_day_span,
     localize,
     localize_bound,
     needs_zone,
@@ -42,6 +43,9 @@ if TYPE_CHECKING:
     from pincer.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+#: Google's ``sendUpdates`` values; anything else leaves the API default.
+SEND_UPDATES_MODES = ("all", "externalOnly", "none")
 
 
 def _now_iso() -> str:
@@ -64,31 +68,25 @@ def _user_timezone(context: dict[str, Any] | None) -> str:
 async def _calendar_zone(
     factory: GoogleServiceFactory, svc: Any, calendar_id: str, context: dict[str, Any] | None
 ) -> ZoneInfo:
-    zone, _source = await resolver_for(factory).resolve(svc, calendar_id, _user_timezone(context))
+    zone, _label = await _labeled_zone(factory, svc, calendar_id, context)
     return zone
 
 
-async def _bounds(
-    factory: GoogleServiceFactory,
-    svc: Any,
-    calendar_id: str,
-    context: dict[str, Any] | None,
-    time_min: str,
-    time_max: str,
-    zone: ZoneInfo | None = None,
-) -> tuple[str, str]:
-    """A list/free-busy range as RFC 3339 with offsets — Google 400s offset-less ones.
+def _range(time_min: str, time_max: str, zone: ZoneInfo | None, *, defaults: bool) -> tuple[str, str]:
+    """A list/search/free-busy range as RFC 3339 with offsets (Google 400s offset-less ones).
 
-    Defaults: the start is now; a missing end is the whole local day for a bare
-    date start, else 7 days after the start (never "now + 7 days", which can
-    land before a future start and silently return nothing).
+    ``zone`` must be the resolved zone whenever a bound lacks an offset. With
+    ``defaults`` (list, free/busy) the start is now and a missing end is the
+    whole local day for a bare-date start, else 7 days after the start — never
+    "now + 7 days", which can land before a future start and return nothing.
+    Without ``defaults`` (search) a missing bound stays missing.
     """
-    start = time_min or _now_iso()
-    if zone is None and (needs_zone(start) or needs_zone(time_max)):
-        zone = await _calendar_zone(factory, svc, calendar_id, context)
-    t_min = localize_bound(start, zone) if zone else rfc3339(start)
+    start = time_min or (_now_iso() if defaults else "")
+    t_min = (localize_bound(start, zone) if zone else rfc3339(start)) if start else ""
     if time_max:
         t_max = localize_bound(time_max, zone, end=True) if zone else rfc3339(time_max)
+    elif not defaults:
+        t_max = ""
     elif zone is not None and is_date_only(start):
         t_max = localize_bound(start, zone, end=True)
     else:
@@ -107,26 +105,6 @@ async def _labeled_zone(
     """The resolved zone plus what it is — the calendar's own, or the configured fallback."""
     zone, source = await resolver_for(factory).resolve(svc, calendar_id, _user_timezone(context))
     return zone, CALENDAR_ZONE_LABEL if source == SOURCE_CALENDAR else CONFIGURED_ZONE_LABEL
-
-
-def _day_span(time_min: str, time_max: str, zone: ZoneInfo) -> tuple[str, str]:
-    """First and last local day a range covers (inclusive): an end bound at
-    local midnight belongs to the day before."""
-
-    def _local(bound: str) -> datetime | None:
-        try:
-            parsed = datetime.fromisoformat(bound)
-        except ValueError:
-            return None
-        return parsed.astimezone(zone) if parsed.tzinfo else parsed
-
-    lo, hi = _local(time_min), _local(time_max)
-    if lo is None or hi is None:
-        return time_min[:10], time_max[:10]
-    first, last = lo.date(), hi.date()
-    if hi.time() == datetime.min.time() and last > first:
-        last -= timedelta(days=1)
-    return first.isoformat(), last.isoformat()
 
 
 # ── Tool implementations ──────────────────────────────────────────────────────
@@ -154,7 +132,7 @@ async def google__list_events(
     """List calendar events in a date range (default: now + 7 days; a bare date alone = that day)."""
     svc = await factory.get("calendar")
     zone, label = await _labeled_zone(factory, svc, calendar_id, context)
-    t_min, t_max = await _bounds(factory, svc, calendar_id, context, time_min, time_max, zone)
+    t_min, t_max = _range(time_min, time_max, zone, defaults=True)
     result = await with_backoff(
         lambda: (
             svc.events()
@@ -170,7 +148,7 @@ async def google__list_events(
         )
     )
     events = result.get("items", [])
-    first, last = _day_span(t_min, t_max, zone)
+    first, last = local_day_span(t_min, t_max, zone)
     span = first if first == last else f"{first} – {last}"
     if not events:
         return f"No events on {first}." if first == last else f"No events between {first} and {last}."
@@ -209,7 +187,7 @@ async def google__search_events(
     """Search calendar events by text query, optionally within a date range."""
     svc = await factory.get("calendar")
     zone, label = await _labeled_zone(factory, svc, calendar_id, context)
-    t_min, t_max = localize_bound(time_min, zone), localize_bound(time_max, zone, end=True)
+    t_min, t_max = _range(time_min, time_max, zone, defaults=False)
     kw: dict[str, Any] = {
         "calendarId": calendar_id,
         "q": query,
@@ -242,7 +220,10 @@ async def google__check_freebusy(
     Offset-less bounds are read in the user's own (primary) calendar zone.
     """
     svc = await factory.get("calendar")
-    t_min, t_max = await _bounds(factory, svc, "primary", context, time_min, time_max)
+    zone = (
+        await _calendar_zone(factory, svc, "primary", context) if needs_zone(time_min) or needs_zone(time_max) else None
+    )
+    t_min, t_max = _range(time_min, time_max, zone, defaults=True)
     items = [{"id": e.strip()} for e in emails.split(",") if e.strip()]
     body: dict[str, Any] = {"timeMin": t_min, "timeMax": t_max, "items": items}
     result = await with_backoff(lambda: svc.freebusy().query(body=body).execute())
@@ -390,8 +371,9 @@ async def google__create_event(
     insert_kw: dict[str, Any] = {}
     if conf_data_version:
         insert_kw["conferenceDataVersion"] = conf_data_version
-    if send_updates.strip() in ("all", "externalOnly", "none"):
-        insert_kw["sendUpdates"] = send_updates.strip()
+    send_mode = send_updates.strip()
+    if send_mode in SEND_UPDATES_MODES:
+        insert_kw["sendUpdates"] = send_mode
 
     created = await calendar_writer.create(svc, calendar_id, body, **insert_kw)
 

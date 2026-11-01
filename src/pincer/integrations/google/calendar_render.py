@@ -24,6 +24,12 @@ if TYPE_CHECKING:
     from zoneinfo import ZoneInfo
 
 ALL_DAY = "all day"
+NO_TITLE = "(no title)"
+# Literals the voice flow parses (tool speech's event-line regex, the booking
+# flow's ``Link: (\S+)``) — change them only together with those parsers.
+RANGE_ARROW = " → "
+TITLE_DASH = " — "
+LINK_PREFIX = "Link: "
 #: Shown when a write response carries an id but no start/end.
 STORED_TIMES_UNAVAILABLE = "(stored times unavailable)"
 
@@ -115,21 +121,16 @@ def mismatch_note(
 
 def render_event_line(event: dict[str, Any], zone: ZoneInfo) -> str:
     """One list entry: the time line plus its ``ID:`` line."""
-    summary = event.get("summary") or "(no title)"
-    span = _all_day_span(event)
-    if span is not None:
-        when = f"{span[0].isoformat()} → {span[1].isoformat()}"
-        extras = [ALL_DAY]
-    else:
-        when = f"{_local(event.get('start') or {}, zone)} → {_local(event.get('end') or {}, zone)}"
-        extras = []
+    start, end, all_day = _when(event, zone)
+    when = f"{start or STORED_TIMES_UNAVAILABLE}{RANGE_ARROW}{end or STORED_TIMES_UNAVAILABLE}"
+    extras = [ALL_DAY] if all_day else []
     if event.get("location"):
         extras.append(str(event["location"]))
     attendees = len(event.get("attendees") or [])
     if attendees:
         extras.append(f"{attendees} attendee(s)")
     suffix = "".join(f" | {x}" for x in extras)
-    return f"  {when} — {summary}{suffix}\n  ID: {event.get('id', '')}"
+    return f"  {when}{TITLE_DASH}{_title(event)}{suffix}\n  ID: {event.get('id', '')}"
 
 
 def render_events(
@@ -152,11 +153,24 @@ def render_events(
     return "\n".join(parts)
 
 
-def _when(event: dict[str, Any], zone: ZoneInfo) -> tuple[str, str]:
+def _title(event: dict[str, Any]) -> str:
+    return str(event.get("summary") or NO_TITLE)
+
+
+def _when(event: dict[str, Any], zone: ZoneInfo) -> tuple[str, str, bool]:
+    """Start, end ("" when absent) and whether the event is all-day (inclusive last day)."""
     span = _all_day_span(event)
     if span is not None:
-        return f"{span[0].isoformat()} ({ALL_DAY})", f"{span[1].isoformat()} ({ALL_DAY})"
-    return _local(event.get("start") or {}, zone), _local(event.get("end") or {}, zone)
+        return span[0].isoformat(), span[1].isoformat(), True
+    return _local(event.get("start") or {}, zone), _local(event.get("end") or {}, zone), False
+
+
+def _when_labelled(event: dict[str, Any], zone: ZoneInfo) -> tuple[str, str]:
+    """Start/end for details and confirmations: all-day values say so."""
+    start, end, all_day = _when(event, zone)
+    if all_day:
+        return f"{start} ({ALL_DAY})", f"{end} ({ALL_DAY})"
+    return start, end
 
 
 def _own_zone_name(event: dict[str, Any]) -> str:
@@ -177,11 +191,11 @@ def render_event_details(
     zone_label: str = CALENDAR_ZONE_LABEL,
 ) -> str:
     """A single event (get)."""
-    start, end = _when(event, zone)
+    start, end = _when_labelled(event, zone)
     lines = [
-        f"Title:       {event.get('summary', '(no title)')}",
-        f"Start:       {start}",
-        f"End:         {end}",
+        f"Title:       {_title(event)}",
+        f"Start:       {start or STORED_TIMES_UNAVAILABLE}",
+        f"End:         {end or STORED_TIMES_UNAVAILABLE}",
         f"Times shown in: {zone.key}",
     ]
     own = _own_zone_name(event)
@@ -218,7 +232,7 @@ def render_write(
     extra: str = "",
 ) -> str:
     """A write confirmation from Google's stored copy: stored start/end + zone, ID, link."""
-    start, end = _when(event, zone)
+    start, end = _when_labelled(event, zone)
     if not start and not end:
         lines = [headline, f"Start: {STORED_TIMES_UNAVAILABLE}"]
     else:
@@ -226,7 +240,7 @@ def render_write(
     note = mismatch_note(zone, clock_zone, event_instants([event]), zone_label)
     if note:
         lines.append(note)
-    lines += [f"ID: {event.get('id', '')}", f"Link: {event.get('htmlLink', '')}"]
+    lines += [f"ID: {event.get('id', '')}", f"{LINK_PREFIX}{event.get('htmlLink', '')}"]
     if extra:
         lines.append(extra)
     return "\n".join(lines)

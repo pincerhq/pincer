@@ -134,6 +134,25 @@ def localize_bound(value: str, zone: ZoneInfo, *, end: bool = False) -> str:
     return localize(value, zone)
 
 
+def local_day_span(time_min: str, time_max: str, zone: ZoneInfo) -> tuple[str, str]:
+    """First and last local day a range covers (inclusive): an end bound at
+    local midnight belongs to the day before."""
+
+    def _local(bound: str) -> datetime | None:
+        parsed = _parse(bound) if bound else None
+        if parsed is None:
+            return None
+        return parsed.astimezone(zone) if parsed.tzinfo else parsed
+
+    lo, hi = _local(time_min), _local(time_max)
+    if lo is None or hi is None:
+        return time_min[:10], time_max[:10]
+    first, last = lo.date(), hi.date()
+    if hi.time() == datetime.min.time() and last > first:
+        last -= timedelta(days=1)
+    return first.isoformat(), last.isoformat()
+
+
 class CalendarTimezoneResolver:
     """Resolve the zone for a calendar and user, caching calendar zones."""
 
