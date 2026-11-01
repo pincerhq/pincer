@@ -33,6 +33,9 @@ CALENDAR_TICK_S = 60
 REMINDER_WINDOW = timedelta(minutes=15)
 REMINDER_TRIGGER = "calendar_reminder"
 REMINDER_CALENDAR = "primary"
+# Status entries, not meetings (owner ruling, #297): no "Reminder: Home starts at 09:00".
+# A missing eventType means "default" and is reminded.
+NO_REMINDER_EVENT_TYPES = frozenset({"workingLocation", "outOfOffice", "focusTime"})
 
 logger = logging.getLogger(__name__)
 
@@ -163,7 +166,8 @@ class EventTriggerManager:
 
         Keyed on event ID plus start time, so a moved event is reminded again at
         its new time; the key is persisted, so a restart does not repeat one.
-        All-day, cancelled and self-declined events get no reminder.
+        All-day, cancelled and self-declined events, and working-location,
+        out-of-office and focus-time entries get no reminder.
 
         A failing calendar read (e.g. a token revoked after startup) logs one
         WARNING, then DEBUG on every tick until a read succeeds again.
@@ -226,7 +230,9 @@ class EventTriggerManager:
 
 
 def _wants_reminder(event: dict[str, Any]) -> bool:
-    """Not cancelled, and not declined by the calendar's owner."""
+    """A normal event: not a status entry, not cancelled, not declined by the calendar's owner."""
+    if event.get("eventType") in NO_REMINDER_EVENT_TYPES:
+        return False
     if event.get("status") == "cancelled":
         return False
     return not any(a.get("self") and a.get("responseStatus") == "declined" for a in event.get("attendees") or [])

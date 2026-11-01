@@ -170,6 +170,51 @@ async def test_all_day_cancelled_declined_and_later_events_get_no_reminder(trigg
     assert _sent(triggers) == []
 
 
+def _typed(fake: FakeCalendarService, title: str, start: datetime, event_type: str | None) -> str:
+    event_id = _seed(fake, title, start)
+    if event_type is not None:
+        fake.event("primary", event_id)["eventType"] = event_type
+    return event_id
+
+
+@pytest.mark.parametrize("event_type", ["workingLocation", "outOfOffice", "focusTime"])
+async def test_status_events_get_no_reminder(triggers, fake, event_type) -> None:
+    """Owner ruling (#11): no daily "Reminder: Home starts at 09:00" for working location,
+    out-of-office or focus-time entries."""
+    _typed(fake, "Home", _in_minutes(10), event_type)
+    listed = fake.events().list(calendarId="primary").execute()["items"]
+    assert [e.get("eventType") for e in listed] == [event_type]  # the fake keeps the type
+
+    await _tick(triggers, TICKS)
+
+    assert _sent(triggers) == []
+
+
+async def test_default_events_are_reminded_with_or_without_an_event_type(triggers, fake) -> None:
+    start = _in_minutes(10)
+    _typed(fake, "Untyped", start, None)
+    _typed(fake, "Typed", start, "default")
+    _typed(fake, "Home", start, "workingLocation")
+
+    await _tick(triggers, TICKS)
+
+    sent = _sent(triggers)
+    assert len(sent) == 2, sent
+    assert sorted("Untyped" in s for s in sent) == [False, True]
+    assert sorted("Typed" in s and "Untyped" not in s for s in sent) == [False, True]
+
+
+async def test_status_events_still_show_in_the_listing(fake_registry, fake) -> None:
+    """Only the reminder skips them; list/agenda keep showing the entry."""
+    start = _in_minutes(10)
+    _typed(fake, "Home", start, "workingLocation")
+    day = start.date().isoformat()
+
+    text = await fake_registry.execute("google__list_events", {"time_min": day, "time_max": day})
+
+    assert "Home" in text
+
+
 async def test_no_whole_day_digest_is_sent(triggers, fake) -> None:
     _seed(fake, "Board meeting", _in_minutes(120))
     _seed(fake, "Dinner", _in_minutes(300))
