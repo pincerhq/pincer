@@ -562,6 +562,25 @@ async def test_rates_carry_their_denominators_and_exclude_policy_declines(teleme
     assert aggregate.rates["unexpected_disconnect_rate"]["numerator"] == 1
 
 
+async def test_an_owner_hang_up_before_an_answer_is_neither_an_attempt_nor_a_failure(telemetry):
+    ended = runtime.start_call(provider_call_id="CA_owner", direction="outbound", engine="media_streams")
+    await ended.finish(status="failed", failure_code="ended_by_owner")
+
+    connected = runtime.start_call(provider_call_id="CA_ok", direction="outbound", engine="media_streams")
+    connected.answered()
+    await connected.finish(status="completed", failure_code="none")
+    await _settle()
+
+    call = await queries.get_call(telemetry, "CA_owner")
+    assert call is not None and call["failure_category"] == "ended_by_owner"
+    aggregate = await queries.overview(telemetry, queries.CallFilters.for_hours(1))
+    assert aggregate.calls["attempted"] == 1
+    assert aggregate.calls["technical_failures"] == 0
+    assert aggregate.rates["connection_rate"]["denominator"] == 1
+    assert aggregate.rates["connection_rate"]["value"] == pytest.approx(1.0)
+    assert aggregate.rates["technical_failure_rate"]["numerator"] == 0
+
+
 async def test_empty_window_reports_none_rather_than_zero_percent(telemetry):
     aggregate = await queries.overview(telemetry, queries.CallFilters.for_hours(1))
     assert aggregate.rates["connection_rate"]["value"] is None

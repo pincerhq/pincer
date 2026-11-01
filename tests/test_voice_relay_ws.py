@@ -35,6 +35,7 @@ class FakeEngine:
         self.media_closed: list[str] = []
         self.stt_closed: list[str] = []  # close_media_stream (Media Streams STT)
         self.answered: list[str] = []
+        self.media_connected: list[str] = []  # on_media_connected (status callback for inbound)
         # what VoiceEngine.end_transfer reads
         self._active_calls = self.states
         self._on_transfer_end_callback: Any = None
@@ -51,6 +52,9 @@ class FakeEngine:
         self.states[call_sid] = state
         self.started.append((call_sid, caller, direction))
         return state
+
+    def on_media_connected(self, call_sid: str) -> None:
+        self.media_connected.append(call_sid)
 
     async def mark_call_answered(self, call_sid: str) -> CallState | None:
         """Twilio's `setup` = the callee picked up. Mirrors VoiceEngine: this
@@ -140,6 +144,7 @@ class TestRelayWebSocket:
             ws.send_text(json.dumps({"type": "prompt", "voicePrompt": "Second turn"}))
 
         assert engine.answered == ["CA_ws"]
+        assert engine.media_connected == ["CA_ws"]  # the inbound status callback is asked for here
         assert ("CA_ws", "Hello there") in engine.speech_inputs
         assert ("CA_ws", "Second turn") in engine.speech_inputs
         assert engine.interrupts == ["CA_ws"]
@@ -466,6 +471,7 @@ class TestRelayWebSocketAuth:
             ws.send_text(json.dumps({"event": "stop"}))
 
         assert seen == [media_format]
+        assert engine.media_connected == ["CA_fmt"]
 
     def test_auth_disabled_allows_unsigned_connect(self):
         """Dev escape hatch still works — and doctor reports it CRITICAL."""

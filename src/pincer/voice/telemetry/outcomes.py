@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pincer.observability.failure_codes import CALLEE_UNREACHABLE, POLICY_BLOCKED, FailureCode
+from pincer.observability.failure_codes import CALLEE_UNREACHABLE, OWNER_ENDED, POLICY_BLOCKED, FailureCode
 
 
 class FailureCategory(StrEnum):
@@ -30,6 +30,9 @@ class FailureCategory(StrEnum):
     POLICY_DECLINED = "policy_declined"
     #: A party hung up. Normal in conversation phases; see `unexpected_disconnect`.
     ENDED_BY_PARTY = "ended_by_party"
+    #: The owner hung up from the dashboard before anyone answered. Not a
+    #: failure and not a connection attempt that failed: out of both rates.
+    ENDED_BY_OWNER = "ended_by_owner"
     #: We could not classify it — counted as technical until proven otherwise.
     UNKNOWN = "unknown"
 
@@ -77,6 +80,8 @@ def categorise(code: FailureCode | str | None) -> FailureCategory:
         return FailureCategory.POLICY_DECLINED
     if parsed in _ENDED_BY_PARTY:
         return FailureCategory.ENDED_BY_PARTY
+    if parsed in OWNER_ENDED:
+        return FailureCategory.ENDED_BY_OWNER
     return FailureCategory.TECHNICAL
 
 
@@ -103,11 +108,12 @@ def is_unexpected_disconnect(code: FailureCode | str | None) -> bool:
 DENOMINATORS: dict[str, str] = {
     "connection_rate": (
         "connected ÷ attempted, where attempted excludes calls a policy declined before dialling "
-        "(do-not-call, quiet hours, blocklist, capacity) — those were never attempts."
+        "(do-not-call, quiet hours, blocklist, capacity) and calls the owner hung up before anyone "
+        "answered — neither was an attempt that could fail."
     ),
     "technical_failure_rate": (
         "calls whose failure category is `technical` ÷ all terminated calls. Callee-unavailable, "
-        "policy-declined and party-ended calls are in the denominator but never the numerator."
+        "policy-declined, party-ended and owner-ended calls are in the denominator but never the numerator."
     ),
     "unexpected_disconnect_rate": (
         "calls terminated with ws_drop / no_audio / stuck / twilio_api / twiml_error / call_setup "

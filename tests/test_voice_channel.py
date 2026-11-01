@@ -165,3 +165,120 @@ async def test_a_sentence_cancelled_mid_send_is_marked_by_what_the_caller_heard(
     assert [e.state for e in lines] == [expected]
     engine.speech_blocker = None  # the shutdown goodbye must not wait on it
     await channel.stop()
+
+
+async def _channel_with_fake_engine(tmp_path):
+    from voice_harness.fake_engine import FakeVoiceEngine
+    from voice_harness.settings import apply_test_paths
+
+    settings = apply_test_paths(MagicMock(), tmp_path)
+    settings.voice_default_language = "en"
+    settings.voice_supported_languages = "en,de"
+    engine = FakeVoiceEngine(settings)
+    channel = VoiceChannel(settings)
+    channel.set_engine(engine)
+    await channel.start(AsyncMock(return_value=""))
+    return settings, engine, channel
+
+
+async def _settle_rows(channel):
+    import asyncio
+
+    while channel._call_row_tasks:
+        await asyncio.wait(set(channel._call_row_tasks.values()))
+
+
+async def test_call_row_is_written_at_start_and_closed_at_teardown(tmp_path):
+    """Without a post-call processor nothing else writes the history row: the
+    call must still be in it, open while live and with `ended_at` once over."""
+    from pathlib import Path
+
+    from pincer.services.voice.calls import CallsService
+
+    settings, engine, channel = await _channel_with_fake_engine(tmp_path)
+    await engine.on_call_start("CA_row", "+4930123456", CallDirection.INBOUND, language="en")
+    await _settle_rows(channel)
+    calls = await CallsService.for_path(Path(settings.db_path))
+    row = await calls.get("CA_row")
+    assert row is not None
+    assert row["direction"] == "inbound" and row["from_number"] == "+4930123456"
+    assert row["engine"] == "fake" and row["started_at"]
+    assert row["ended_at"] is None
+
+    state = engine.get_call_state("CA_row")
+    await engine.end_call("CA_row")
+    await _settle_rows(channel)
+    row = await calls.get("CA_row")
+    assert row is not None and row["ended_at"] is not None
+    assert row["failure_code"] == state.metadata["failure_code"]  # the classified code, not ""
+    await channel.stop()
+
+
+async def test_a_re_registered_call_keeps_its_row_start(tmp_path):
+    """Lost-state recovery registers the call again with a fresh CallState:
+    the row keeps its real start and numbers."""
+    from pathlib import Path
+
+    from pincer.services.voice.calls import CallsService
+
+    settings, engine, channel = await _channel_with_fake_engine(tmp_path)
+    await engine.on_call_start("CA_re", "+4930123456", CallDirection.INBOUND, language="en")
+    await _settle_rows(channel)
+    calls = await CallsService.for_path(Path(settings.db_path))
+    first = await calls.get("CA_re")
+
+    engine._active_calls.pop("CA_re")
+    await engine.on_call_start("CA_re", "+4930999999", CallDirection.INBOUND, language="en")
+    await _settle_rows(channel)
+    again = await calls.get("CA_re")
+    assert again["started_at"] == first["started_at"] and again["from_number"] == "+4930123456"
+
+    await engine.end_call("CA_re")
+    await _settle_rows(channel)
+    closed = await calls.get("CA_re")
+    assert closed["started_at"] == first["started_at"] and closed["ended_at"] is not None
+    await channel.stop()
+
+
+async def test_rows_left_open_by_a_previous_run_are_closed_at_start(tmp_path):
+    from pathlib import Path
+
+    from voice_harness.settings import apply_test_paths
+
+    from pincer.services.voice.calls import CallsService
+
+    settings = apply_test_paths(MagicMock(), tmp_path)
+    calls = await CallsService.for_path(Path(settings.db_path))
+    await calls.save_call({"call_sid": "CA_orphan", "direction": "inbound", "started_at": "2026-10-01T10:00:00+00:00"})
+    await calls.save_call(
+        {
+            "call_sid": "CA_done",
+            "direction": "inbound",
+            "started_at": "2026-10-01T09:00:00+00:00",
+            "ended_at": "2026-10-01T09:05:00+00:00",
+            "failure_code": "none",
+        }
+    )
+
+    channel = VoiceChannel(settings)
+    await channel.start(AsyncMock())
+    orphan = await calls.get("CA_orphan")
+    assert orphan["ended_at"] == orphan["started_at"] and orphan["failure_code"] == "shutdown"
+    done = await calls.get("CA_done")
+    assert done["ended_at"] == "2026-10-01T09:05:00+00:00" and done["failure_code"] == "none"
+
+
+async def test_a_dashboard_hangup_mid_action_is_not_a_failure(tmp_path):
+    from pincer.voice.engine import ENDED_BY_DASHBOARD, ENDED_BY_KEY
+    from pincer.voice.state_machine import CallPhase
+
+    _settings, engine, channel = await _channel_with_fake_engine(tmp_path)
+    state = await engine.on_call_start("CA_own", "+4930123456", CallDirection.INBOUND, language="en")
+    sm = channel.get_state_machine("CA_own")
+    assert sm is not None and sm.phase not in (CallPhase.COMPLETED, CallPhase.FAILED)
+    state.metadata[ENDED_BY_KEY] = ENDED_BY_DASHBOARD
+    await engine.end_call("CA_own")
+    assert sm.phase == CallPhase.COMPLETED
+    assert state.metadata["failure_code"] == "none"
+    await _settle_rows(channel)
+    await channel.stop()
