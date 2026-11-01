@@ -204,29 +204,32 @@ async def test_freebusy_with_offset_less_bounds_covers_the_local_day(factory, fa
 # ── Offset-bearing input passes through ──────────────────────────────────────
 
 
-async def test_bound_with_offset_or_z_is_sent_unchanged_next_to_a_resolved_one(factory, fake):
+async def test_bound_with_offset_or_z_is_sent_normalised_next_to_a_resolved_one(factory, fake):
     await google__list_events(factory, time_min="2026-11-12T08:00:00Z", time_max="2026-11-13T00:00:00")
 
     [sent] = fake.sent("events.list")
-    assert sent["timeMin"] == "2026-11-12T08:00:00Z"
+    assert sent["timeMin"] == "2026-11-12T08:00:00+00:00"
     assert sent["timeMax"] == "2026-11-13T00:00:00+02:00"
 
 
-async def test_freebusy_bounds_with_offsets_are_sent_unchanged(factory, fake):
+async def test_freebusy_bounds_with_offsets_keep_their_instant_in_rfc3339(factory, fake):
     await google__check_freebusy(
         factory, emails="primary", time_min="2026-11-12T08:00:00Z", time_max="2026-11-12T20:00:00+01:00"
     )
 
     [sent] = fake.sent("freebusy.query")
-    assert (sent["body"]["timeMin"], sent["body"]["timeMax"]) == ("2026-11-12T08:00:00Z", "2026-11-12T20:00:00+01:00")
+    assert (sent["body"]["timeMin"], sent["body"]["timeMax"]) == (
+        "2026-11-12T08:00:00+00:00",
+        "2026-11-12T20:00:00+01:00",
+    )
 
 
-async def test_create_with_offset_or_z_sends_times_unchanged_in_the_calendar_zone(factory, fake):
+async def test_create_with_offset_or_z_keeps_the_instant_in_the_calendar_zone(factory, fake):
     await google__create_event(factory, summary="Offset", start="2026-11-12T10:00:00+05:00", end="2026-11-12T08:00:00Z")
 
     [insert] = fake.sent("events.insert")
     assert insert["body"]["start"] == {"dateTime": "2026-11-12T10:00:00+05:00", "timeZone": "Europe/Kyiv"}
-    assert insert["body"]["end"] == {"dateTime": "2026-11-12T08:00:00Z", "timeZone": "Europe/Kyiv"}
+    assert insert["body"]["end"] == {"dateTime": "2026-11-12T08:00:00+00:00", "timeZone": "Europe/Kyiv"}
 
 
 # ── Resolver order ───────────────────────────────────────────────────────────
@@ -427,3 +430,80 @@ def test_legacy_kiev_name_resolves_without_a_system_zone_database():
     assert (
         datetime(2026, 11, 12, 12, 0, tzinfo=zone).utcoffset() == datetime(2026, 11, 12, 12, 0, tzinfo=KYIV).utcoffset()
     )
+
+
+# ── Resolver hardening (review R2, R4, R10, R12) ─────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("given", "sent"),
+    [
+        ("2026-11-12T10:00:00+0200", "2026-11-12T10:00:00+02:00"),
+        ("2026-11-12T10:00+02", "2026-11-12T10:00:00+02:00"),
+        ("2026-11-12T10:00+02:00", "2026-11-12T10:00:00+02:00"),
+    ],
+)
+async def test_offset_bearing_values_are_sent_as_rfc3339(factory, fake, given, sent):
+    await google__list_events(factory, time_min=given, time_max="2026-11-13T00:00:00+02:00")
+    await google__create_event(factory, summary="Norm", start=given, end="2026-11-12T11:00:00+02:00")
+
+    assert fake.sent("events.list")[0]["timeMin"] == sent
+    assert fake.sent("events.insert")[0]["body"]["start"]["dateTime"] == sent
+
+
+async def test_stale_calendar_zone_is_kept_when_a_refetch_fails(fake):
+    from pincer.integrations.google.calendar_tz import CalendarTimezoneResolver
+
+    now = [1000.0]
+    resolver = CalendarTimezoneResolver(ttl_s=300, clock=lambda: now[0])
+    assert await resolver.resolve(fake, "primary") == (KYIV, "calendar")
+
+    now[0] += 301
+    fake.calendar_get_error = 503
+    zone, source = await resolver.resolve(fake, "primary")
+
+    assert (zone.key, source) == ("Europe/Kyiv", "calendar")
+    assert len(fake.sent("calendars.get")) == 2
+
+
+async def test_failed_calendar_zone_lookup_is_not_retried_for_a_minute(fake):
+    from pincer.integrations.google.calendar_tz import CalendarTimezoneResolver
+
+    now = [1000.0]
+    resolver = CalendarTimezoneResolver(ttl_s=300, clock=lambda: now[0])
+    fake.calendar_get_error = 503
+
+    assert (await resolver.resolve(fake, "primary"))[1] == "settings"
+    now[0] += 59
+    assert (await resolver.resolve(fake, "primary"))[1] == "settings"
+    assert len(fake.sent("calendars.get")) == 1
+
+    fake.calendar_get_error = None
+    now[0] += 2
+    assert await resolver.resolve(fake, "primary") == (KYIV, "calendar")
+    assert len(fake.sent("calendars.get")) == 2
+
+
+async def test_failed_calendar_zone_lookup_logs_no_error(fake, caplog):
+    from pincer.integrations.google.calendar_tz import CalendarTimezoneResolver
+
+    fake.calendar_get_error = 503
+    with caplog.at_level("DEBUG"):
+        await CalendarTimezoneResolver().resolve(fake, "primary")
+
+    assert [r for r in caplog.records if r.levelname == "ERROR"] == []
+    assert any("Could not read the timezone of calendar" in r.getMessage() for r in caplog.records)
+
+
+def test_clock_zone_warns_when_settings_cannot_load(monkeypatch, caplog):
+    from pincer.integrations.google.calendar_tz import clock_zone
+
+    def _broken():
+        raise RuntimeError("settings exploded")
+
+    monkeypatch.setattr("pincer.config.get_settings_relaxed", _broken)
+    with caplog.at_level("WARNING"):
+        zone = clock_zone("")
+
+    assert zone.key == "Europe/Berlin"
+    assert any(r.levelname == "WARNING" and "settings exploded" in r.getMessage() for r in caplog.records)

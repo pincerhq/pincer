@@ -13,29 +13,35 @@ timezone → ``PINCER_TIMEZONE``. A failed calendar fetch falls through to the
 next source and never fails the tool call.
 
 Conversion: offset-less inputs get the resolved zone's offset *for that
-instant* (DST-correct); inputs that already carry an offset or ``Z`` are
-returned unchanged, byte for byte.
+instant* (DST-correct); inputs that already carry an offset or ``Z`` keep their
+instant and are re-serialised as RFC 3339 (``+0200``, ``+02``, ``Z`` and minute
+precision all become ``…:SS+HH:MM``). A wall-clock time that does not exist
+(the spring-forward gap, e.g. 03:30 in Kyiv on 2026-03-29) takes the offset in
+force before the gap, so it lands one hour later in local time (04:30).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
 import weakref
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pincer.integrations.google.quota import with_backoff
+from pincer.core.clock import load_zone, resolve_timezone
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
 #: How long a fetched calendar zone is trusted before it is fetched again.
 ZONE_CACHE_TTL_S = 300.0
+#: How long a failed calendar-zone lookup is not retried.
+ZONE_FAILURE_TTL_S = 60.0
 
 SOURCE_CALENDAR = "calendar"
 SOURCE_IDENTITY = "identity"
@@ -49,25 +55,18 @@ _RESOLVERS: weakref.WeakKeyDictionary[Any, CalendarTimezoneResolver] = weakref.W
 
 def zone_or_none(name: object) -> ZoneInfo | None:
     """``ZoneInfo(name)`` for a valid IANA name, else None (never raises)."""
-    if not isinstance(name, str) or not name.strip():
-        return None
-    try:
-        return ZoneInfo(name.strip())
-    except (KeyError, ValueError, ZoneInfoNotFoundError):
-        logger.warning("Unknown timezone %r — falling back to the next source", name)
-        return None
+    return load_zone(name) if isinstance(name, str) else None
 
 
 def clock_zone(user_timezone: str = "") -> ZoneInfo:
     """The agent clock zone — identity zone, then ``PINCER_TIMEZONE``, then the
     clock's default: the same source as the system-prompt clock."""
-    from pincer.core.clock import resolve_timezone
-
     try:
         from pincer.config import get_settings_relaxed
 
         settings: Any = get_settings_relaxed()
-    except Exception:  # pragma: no cover - settings that cannot load at all
+    except Exception as exc:
+        logger.warning("Could not load settings for the timezone (%s); using the default zone", exc)
         settings = None
     return resolve_timezone(settings, user_timezone)
 
@@ -95,16 +94,27 @@ def needs_zone(value: str) -> bool:
     return parsed is not None and parsed.tzinfo is None
 
 
+def rfc3339(value: str) -> str:
+    """An offset-bearing value re-serialised as RFC 3339; anything else unchanged."""
+    parsed = _parse(value) if value else None
+    if parsed is None or parsed.tzinfo is None:
+        return value
+    return parsed.isoformat()
+
+
 def localize(value: str, zone: ZoneInfo) -> str:
     """An event time as RFC 3339: offset-less → ``zone``'s offset at that instant.
 
-    Offset-bearing, date-only (all-day) and unparseable values pass unchanged.
+    Offset-bearing values keep their instant (re-serialised as RFC 3339);
+    date-only (all-day) and unparseable values pass unchanged.
     """
     if not value or _DATE_ONLY_RE.match(value.strip()):
         return value
     parsed = _parse(value)
-    if parsed is None or parsed.tzinfo is not None:
+    if parsed is None:
         return value
+    if parsed.tzinfo is not None:
+        return parsed.isoformat()
     return parsed.replace(tzinfo=zone).isoformat()
 
 
@@ -132,6 +142,8 @@ class CalendarTimezoneResolver:
         self._clock = clock
         # calendar id → (zone name, fetched-at)
         self._cache: dict[str, tuple[str, float]] = {}
+        # calendar id → when its last lookup failed
+        self._failed_at: dict[str, float] = {}
 
     async def resolve(self, svc: Any, calendar_id: str, user_timezone: str = "") -> tuple[ZoneInfo, str]:
         """``(zone, source)`` — source is ``calendar`` | ``identity`` | ``settings``."""
@@ -144,23 +156,34 @@ class CalendarTimezoneResolver:
         return _settings_zone(), SOURCE_SETTINGS
 
     async def _calendar_zone(self, svc: Any, calendar_id: str) -> ZoneInfo | None:
+        now = self._clock()
         cached = self._cache.get(calendar_id)
-        if cached is not None and self._clock() - cached[1] < self._ttl_s:
-            return zone_or_none(cached[0])
+        stale = zone_or_none(cached[0]) if cached is not None else None
+        if cached is not None and now - cached[1] < self._ttl_s:
+            return stale
+        failed_at = self._failed_at.get(calendar_id)
+        if failed_at is not None and now - failed_at < ZONE_FAILURE_TTL_S:
+            return stale
         try:
-            # One attempt only: this lookup is best-effort and must not stall
-            # the tool behind quota back-off.
-            calendar = await with_backoff(
-                lambda: svc.calendars().get(calendarId=calendar_id).execute(),
-                max_retries=0,
-            )
+            # Best-effort and single-shot: no quota back-off (and its error
+            # logs) for a lookup whose failure only means "use the fallback".
+            calendar = await asyncio.to_thread(lambda: svc.calendars().get(calendarId=calendar_id).execute())
         except Exception as exc:
-            logger.warning("Could not read the timezone of calendar %r: %s", calendar_id, exc)
-            return None
+            self._failed_at[calendar_id] = now
+            logger.warning(
+                "Could not read the timezone of calendar %r (%s); using %s",
+                calendar_id,
+                exc,
+                f"the last known zone {stale.key}" if stale else "the fallback zone",
+            )
+            return stale
         name = calendar.get("timeZone") if isinstance(calendar, dict) else None
         zone = zone_or_none(name)
-        if zone is not None:
-            self._cache[calendar_id] = (zone.key, self._clock())
+        if zone is None:
+            self._failed_at[calendar_id] = now
+            return stale
+        self._failed_at.pop(calendar_id, None)
+        self._cache[calendar_id] = (zone.key, now)
         return zone
 
 

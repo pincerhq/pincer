@@ -25,6 +25,22 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEZONE = "Europe/Berlin"
 
 
+def load_zone(name: str) -> ZoneInfo | None:
+    """``ZoneInfo`` for one IANA name, or None for a blank or unknown one.
+
+    Never raises: an unknown or misspelled name is logged, so callers can fall
+    back to their next candidate.
+    """
+    cleaned = str(name or "").strip()
+    if not cleaned:
+        return None
+    try:
+        return ZoneInfo(cleaned)
+    except (KeyError, ValueError, ZoneInfoNotFoundError):
+        logger.warning("Unknown timezone %r — falling back to the next candidate", cleaned)
+        return None
+
+
 def resolve_timezone(settings: Any, override: str = "") -> ZoneInfo:
     """The zone to render times in: per-user override > settings > default.
 
@@ -32,13 +48,9 @@ def resolve_timezone(settings: Any, override: str = "") -> ZoneInfo:
     a bad `timezone` value costs accuracy, not the whole conversation.
     """
     for name in (override, getattr(settings, "timezone", "") or "", DEFAULT_TIMEZONE):
-        cleaned = str(name or "").strip()
-        if not cleaned:
-            continue
-        try:
-            return ZoneInfo(cleaned)
-        except (KeyError, ValueError, ZoneInfoNotFoundError):
-            logger.warning("Unknown timezone %r — falling back to the next candidate", cleaned)
+        zone = load_zone(name)
+        if zone is not None:
+            return zone
     return ZoneInfo(DEFAULT_TIMEZONE)
 
 

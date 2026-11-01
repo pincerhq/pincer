@@ -26,6 +26,7 @@ from pincer.integrations.google.calendar_tz import (
     localize_bound,
     needs_zone,
     resolver_for,
+    rfc3339,
     zone_or_none,
 )
 from pincer.integrations.google.models import fmt_list
@@ -83,9 +84,9 @@ async def _bounds(
     start = time_min or _now_iso()
     if zone is None and (needs_zone(start) or needs_zone(time_max)):
         zone = await _calendar_zone(factory, svc, calendar_id, context)
-    t_min = localize_bound(start, zone) if zone else start
+    t_min = localize_bound(start, zone) if zone else rfc3339(start)
     if time_max:
-        t_max = localize_bound(time_max, zone, end=True) if zone else time_max
+        t_max = localize_bound(time_max, zone, end=True) if zone else rfc3339(time_max)
     elif zone is not None and is_date_only(start):
         t_max = localize_bound(start, zone, end=True)
     else:
@@ -348,8 +349,8 @@ async def google__create_event(
     tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone)
     body: dict[str, Any] = {
         "summary": summary,
-        "start": {"dateTime": localize(start, zone) if zone else start, "timeZone": tz_name},
-        "end": {"dateTime": localize(end, zone) if zone else end, "timeZone": tz_name},
+        "start": {"dateTime": localize(start, zone) if zone else rfc3339(start), "timeZone": tz_name},
+        "end": {"dateTime": localize(end, zone) if zone else rfc3339(end), "timeZone": tz_name},
     }
     if idempotency_key:
         body["extendedProperties"] = {"private": {"pincer_key": idempotency_key}}
@@ -431,7 +432,7 @@ async def google__update_event(
             continue
         stored_zone = str(event.get(key, {}).get("timeZone") or "")
         tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone or stored_zone)
-        event[key] = {"dateTime": localize(value, zone) if zone else value, "timeZone": tz_name}
+        event[key] = {"dateTime": localize(value, zone) if zone else rfc3339(value), "timeZone": tz_name}
     updated = await calendar_writer.update(svc, calendar_id, event_id, event)
     shown, label = await _shown_zone(factory, svc, calendar_id, context, timezone)
     return render_write(
