@@ -84,6 +84,11 @@ def _parse(value: str) -> datetime | None:
         return None
 
 
+def is_date_only(value: str) -> bool:
+    """True for a bare ``YYYY-MM-DD`` (a whole day, no time)."""
+    return bool(value) and bool(_DATE_ONLY_RE.match(value.strip()))
+
+
 def needs_zone(value: str) -> bool:
     """True when ``value`` is a date/time without an offset (so a zone is needed)."""
     parsed = _parse(value) if value else None

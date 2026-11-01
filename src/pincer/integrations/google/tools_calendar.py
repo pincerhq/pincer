@@ -21,6 +21,7 @@ from pincer.integrations.google.calendar_render import (
 from pincer.integrations.google.calendar_tz import (
     SOURCE_CALENDAR,
     clock_zone,
+    is_date_only,
     localize,
     localize_bound,
     needs_zone,
@@ -44,8 +45,12 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _week_end_iso() -> str:
-    return (datetime.now(UTC) + timedelta(days=7)).isoformat()
+def _days_after(bound: str, days: int) -> str:
+    """``bound`` plus ``days`` (an instant), or now plus ``days`` if it can't be parsed."""
+    try:
+        return (datetime.fromisoformat(bound) + timedelta(days=days)).isoformat()
+    except ValueError:
+        return (datetime.now(UTC) + timedelta(days=days)).isoformat()
 
 
 def _user_timezone(context: dict[str, Any] | None) -> str:
@@ -67,12 +72,25 @@ async def _bounds(
     context: dict[str, Any] | None,
     time_min: str,
     time_max: str,
+    zone: ZoneInfo | None = None,
 ) -> tuple[str, str]:
-    """Range bounds as RFC 3339 with an offset — Google 400s offset-less ones."""
-    if not (needs_zone(time_min) or needs_zone(time_max)):
-        return time_min, time_max
-    zone = await _calendar_zone(factory, svc, calendar_id, context)
-    return localize_bound(time_min, zone), localize_bound(time_max, zone, end=True)
+    """A list/free-busy range as RFC 3339 with offsets — Google 400s offset-less ones.
+
+    Defaults: the start is now; a missing end is the whole local day for a bare
+    date start, else 7 days after the start (never "now + 7 days", which can
+    land before a future start and silently return nothing).
+    """
+    start = time_min or _now_iso()
+    if zone is None and (needs_zone(start) or needs_zone(time_max)):
+        zone = await _calendar_zone(factory, svc, calendar_id, context)
+    t_min = localize_bound(start, zone) if zone else start
+    if time_max:
+        t_max = localize_bound(time_max, zone, end=True) if zone else time_max
+    elif zone is not None and is_date_only(start):
+        t_max = localize_bound(start, zone, end=True)
+    else:
+        t_max = _days_after(t_min, 7)
+    return t_min, t_max
 
 
 def _clock(context: dict[str, Any] | None) -> ZoneInfo:
@@ -130,11 +148,10 @@ async def google__list_events(
     max_results: int = 50,
     context: dict[str, Any] | None = None,
 ) -> str:
-    """List calendar events in a date range (default: today + 7 days)."""
+    """List calendar events in a date range (default: now + 7 days; a bare date alone = that day)."""
     svc = await factory.get("calendar")
     zone, label = await _labeled_zone(factory, svc, calendar_id, context)
-    t_min = localize_bound(time_min or _now_iso(), zone)
-    t_max = localize_bound(time_max or _week_end_iso(), zone, end=True)
+    t_min, t_max = await _bounds(factory, svc, calendar_id, context, time_min, time_max, zone)
     result = await with_backoff(
         lambda: (
             svc.events()
@@ -222,7 +239,7 @@ async def google__check_freebusy(
     Offset-less bounds are read in the user's own (primary) calendar zone.
     """
     svc = await factory.get("calendar")
-    t_min, t_max = await _bounds(factory, svc, "primary", context, time_min or _now_iso(), time_max or _week_end_iso())
+    t_min, t_max = await _bounds(factory, svc, "primary", context, time_min, time_max)
     items = [{"id": e.strip()} for e in emails.split(",") if e.strip()]
     body: dict[str, Any] = {"timeMin": t_min, "timeMax": t_max, "items": items}
     result = await with_backoff(lambda: svc.freebusy().query(body=body).execute())
@@ -574,7 +591,8 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 },
                 "time_max": {
                     "type": "string",
-                    "description": "ISO 8601 end, or a date to include that whole local day (default: +7d)",
+                    "description": "ISO 8601 end, or a date to include that whole local day "
+                    "(default: the start's whole day when the start is a bare date, else start + 7 days)",
                     "default": "",
                 },
                 "max_results": {"type": "integer", "default": 50},
@@ -634,7 +652,12 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
             "properties": {
                 "emails": {"type": "string", "description": "Comma-separated email addresses"},
                 "time_min": {"type": "string", "description": "ISO 8601 start (default: now)", "default": ""},
-                "time_max": {"type": "string", "description": "ISO 8601 end (default: +7d)", "default": ""},
+                "time_max": {
+                    "type": "string",
+                    "description": "ISO 8601 end (default: the start's whole day when the start is a bare date, "
+                    "else start + 7 days)",
+                    "default": "",
+                },
             },
             "required": ["emails"],
         },

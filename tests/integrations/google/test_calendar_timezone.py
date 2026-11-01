@@ -353,3 +353,58 @@ async def test_voice_freebusy_parser_reads_real_tool_output_unchanged(registry, 
         (datetime(2026, 8, 25, 7, 0, tzinfo=ZoneInfo("UTC")), datetime(2026, 8, 25, 8, 0, tzinfo=ZoneInfo("UTC")))
     ]
     assert fake.sent("calendars.get") == []
+
+
+# ── Default range end (review R1) ────────────────────────────────────────────
+# Dates are in 2027 so the old "now + 7 days" default can never reach them by
+# accident; live on 2026-11-01, list_events(time_min="2026-11-12") answered
+# "No events between 2026-11-12 and 2026-11-08" (an inverted range, no 400).
+
+
+async def test_list_with_only_a_date_lists_that_whole_local_day(factory, fake):
+    fake.seed_event("primary", "Repro B", "2027-03-15T15:00:00+02:00", "2027-03-15T16:00:00+02:00")
+    fake.seed_event("primary", "Next day", "2027-03-16T09:00:00+02:00", "2027-03-16T10:00:00+02:00")
+
+    result = await google__list_events(factory, time_min="2027-03-15")
+
+    [sent] = fake.sent("events.list")
+    assert (sent["timeMin"], sent["timeMax"]) == ("2027-03-15T00:00:00+02:00", "2027-03-16T00:00:00+02:00")
+    assert "Repro B" in result
+    assert "Next day" not in result
+
+
+async def test_list_with_only_a_start_time_covers_seven_days_from_it(factory, fake):
+    fake.seed_event("primary", "Day six", "2027-03-21T09:00:00+02:00", "2027-03-21T10:00:00+02:00")
+    fake.seed_event("primary", "Day eight", "2027-03-23T11:00:00+02:00", "2027-03-23T12:00:00+02:00")
+
+    result = await google__list_events(factory, time_min="2027-03-15T10:00:00")
+
+    [sent] = fake.sent("events.list")
+    assert (sent["timeMin"], sent["timeMax"]) == ("2027-03-15T10:00:00+02:00", "2027-03-22T10:00:00+02:00")
+    assert "Day six" in result
+    assert "Day eight" not in result
+
+
+async def test_freebusy_with_only_a_date_covers_that_whole_local_day(factory, fake):
+    fake.seed_event("primary", "Repro B", "2027-03-15T15:00:00+02:00", "2027-03-15T16:00:00+02:00")
+
+    result = await google__check_freebusy(factory, emails="primary", time_min="2027-03-15")
+
+    [sent] = fake.sent("freebusy.query")
+    assert (sent["body"]["timeMin"], sent["body"]["timeMax"]) == (
+        "2027-03-15T00:00:00+02:00",
+        "2027-03-16T00:00:00+02:00",
+    )
+    assert "2027-03-15T13:00:00Z → 2027-03-15T14:00:00Z" in result
+
+
+async def test_fake_returns_nothing_for_an_inverted_range_like_google(fake):
+    fake.seed_event("primary", "Repro B", "2026-11-12T15:00:00+02:00", "2026-11-12T16:00:00+02:00")
+
+    result = (
+        fake.events()
+        .list(calendarId="primary", timeMin="2026-11-12T00:00:00+02:00", timeMax="2026-11-08T00:00:00Z")
+        .execute()
+    )
+
+    assert result["items"] == []
