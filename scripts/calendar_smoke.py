@@ -6,8 +6,16 @@ running Pincer. YOU send the messages from your phone; this script prints them
 and then reads the real calendar to check what Pincer actually stored. It never
 talks to Pincer and never runs in CI (not a test module, not collected).
 
-Every event it reads or deletes carries a unique run tag in its title (e.g.
-"Smoke-7F3A2C Alpha"); events without the tag are never touched. It uses the
+Each run has a unique tag (e.g. "Smoke-7F3A2C") that starts every title it
+asks for ("Smoke-7F3A2C Alpha"). The script LISTS every event on the primary
+calendar in a window around the run's dates (from the day before --tomorrow to
+two days after --far-day) and keeps in memory only the events whose title
+contains the tag; nothing else is stored, printed or written. Only titles that
+START with "<tag> " (case-sensitive) count as the run's events and only those
+are ever deleted; a title that merely contains the tag in another form
+("Smoke-7F3A2C: Alpha") is a near miss: `check` FAILs and lists it, `cleanup`
+lists it and leaves it alone. The window follows --tomorrow, so `check` and
+`cleanup` still find the events when run days later. It uses the
 existing Google token location (PINCER_GOOGLE_TOKEN_JSON or the token file),
 the same one `pincer run` uses — run it from the Pincer checkout.
 
@@ -25,11 +33,12 @@ Usage:
         --far-day 2026-11-13 --snapshot smoke-7F3A2C.json
 
     # 4. Clean up: list the tagged events (dry run), then delete them
-    uv run python scripts/calendar_smoke.py cleanup --tag Smoke-7F3A2C
-    uv run python scripts/calendar_smoke.py cleanup --tag Smoke-7F3A2C --confirm
+    uv run python scripts/calendar_smoke.py cleanup --tag Smoke-7F3A2C --tomorrow 2026-11-02
+    uv run python scripts/calendar_smoke.py cleanup --tag Smoke-7F3A2C --tomorrow 2026-11-02 --confirm
 
-Exit code of `check`: 0 when every automatic row passes, 1 otherwise. Rows
-marked MANUAL (Pincer's reply wording, log lines) are for you to tick.
+Exit code of `check`: 0 when every automatic row passes, 1 otherwise. A missing
+or incomplete snapshot FAILs the ID rows. Rows marked MANUAL (Pincer's reply
+wording, log lines) are for you to tick.
 """
 
 from __future__ import annotations
@@ -50,8 +59,9 @@ TAG_PREFIX = "Smoke-"
 TAG_RE = re.compile(r"^Smoke-[0-9A-F]{6}$")
 CALENDAR_ID = "primary"
 FAR_DAYS = 12  # step 2: an event 12 days out (the old builtin only looked 7 days ahead)
-SEARCH_BEFORE_DAYS = 2
-SEARCH_AFTER_DAYS = 40
+# The listing window around the run's dates: the day before --tomorrow to two days after --far-day.
+WINDOW_BEFORE_DAYS = 1
+WINDOW_AFTER_DAYS = 2
 EVENT_MINUTES = 60
 
 ALPHA = "Alpha"
@@ -104,12 +114,26 @@ def is_tagged(event: dict[str, Any], tag: str) -> bool:
     return str(event.get("summary") or "").startswith(f"{tag} ")
 
 
-def _start(event: dict[str, Any]) -> datetime | None:
-    raw = (event.get("start") or {}).get("dateTime")
+def mentions_tag(event: dict[str, Any], tag: str) -> bool:
+    """The title contains the tag in any case — ours, or a near miss ("Smoke-7F3A2C: Alpha")."""
+    return tag.lower() in str(event.get("summary") or "").lower()
+
+
+def near_misses(events: list[dict[str, Any]], tag: str) -> list[dict[str, Any]]:
+    """Events that mention the tag but are not ours: reported, never deleted."""
+    return [e for e in events if mentions_tag(e, tag) and not is_tagged(e, tag)]
+
+
+def _instant(event: dict[str, Any], key: str) -> datetime | None:
+    raw = (event.get(key) or {}).get("dateTime")
     if not raw:
         return None
     parsed = datetime.fromisoformat(str(raw))
     return parsed if parsed.tzinfo else None
+
+
+def _start(event: dict[str, Any]) -> datetime | None:
+    return _instant(event, "start")
 
 
 def _named(events: list[dict[str, Any]], tag: str, name: str) -> list[dict[str, Any]]:
@@ -120,19 +144,18 @@ def _wall_clock(event: dict[str, Any], zone: ZoneInfo) -> str:
     start = _start(event)
     if start is None:
         return "(no start)"
-    end_raw = (event.get("end") or {}).get("dateTime")
-    end = datetime.fromisoformat(str(end_raw)).astimezone(zone) if end_raw else None
+    end = _instant(event, "end")
     span = f"{start.astimezone(zone):%Y-%m-%d %H:%M}"
-    return f"{span}–{end:%H:%M}" if end else span
+    return f"{span}–{end.astimezone(zone):%H:%M}" if end else span
 
 
 def _time_row(step: str, what: str, found: list[dict[str, Any]], zone: ZoneInfo, day: date, at: time) -> Row:
     want = datetime.combine(day, at, zone)
-    want_text = f"{want:%Y-%m-%d %H:%M}–{want + timedelta(minutes=EVENT_MINUTES):%H:%M} {zone.key}"
+    want_end = want + timedelta(minutes=EVENT_MINUTES)
+    want_text = f"{want:%Y-%m-%d %H:%M}–{want_end:%H:%M} {zone.key}"
     if len(found) != 1:
         return Row(step, f"{what} stored at {want_text}", "FAIL", f"{len(found)} matching event(s)")
-    start = _start(found[0])
-    ok = start is not None and start == want
+    ok = _start(found[0]) == want and _instant(found[0], "end") == want_end
     return Row(step, f"{what} stored at {want_text}", "PASS" if ok else "FAIL", _wall_clock(found[0], zone))
 
 
@@ -146,6 +169,7 @@ def evaluate(
 ) -> list[Row]:
     """The PASS/FAIL table for one run (pure: ``events`` are what Google returned)."""
     ours = [e for e in events if is_tagged(e, tag)]
+    near = near_misses(events, tag)
     alpha = _named(ours, tag, ALPHA)
     beta = _named(ours, tag, BETA)
     meeting = _named(ours, tag, MEETING)
@@ -175,6 +199,12 @@ def evaluate(
             "PASS" if len(ours) == 3 else "FAIL",
             f"{len(ours)} tagged event(s): " + ", ".join(sorted(str(e.get("summary")) for e in ours)),
         ),
+        Row(
+            "all",
+            "no near-miss titles (tag in another form; never deleted)",
+            "FAIL" if near else "PASS",
+            ", ".join(sorted(repr(str(e.get("summary"))) for e in near)) or "none",
+        ),
         Row("1-6", "Pincer's replies quote the stored times and name the zone", "MANUAL", f"expect {zone.key}"),
         Row("1-6", "log: turn= and call= on every Tool call / Tool result line", "MANUAL", "grep 'Tool result'"),
         Row("1-6", "log: one calendar_write line per write", "MANUAL", "expect 5: 3 creates, the move, the rename"),
@@ -184,7 +214,7 @@ def evaluate(
 
 def _id_row(step: str, what: str, found: list[dict[str, Any]], snapped: str | None) -> Row:
     if snapped is None:
-        return Row(step, what, "MANUAL", "no snapshot given (run `snapshot` after steps 1, 2, 6a)")
+        return Row(step, what, "FAIL", "no ID in the snapshot (run `snapshot` after steps 1, 2, 6a)")
     if len(found) != 1:
         return Row(step, what, "FAIL", f"{len(found)} matching event(s); snapshot ID {snapped}")
     got = str(found[0].get("id"))
@@ -231,17 +261,23 @@ async def _zone(svc: Any) -> ZoneInfo:
     return ZoneInfo(str(cal["timeZone"]))
 
 
-async def _tagged_events(svc: Any, tag: str) -> list[dict[str, Any]]:
-    """Every event in the search window whose title starts with ``tag`` (filtered here,
-    not by Google's free-text ``q``, whose tokenising of "Smoke-…" is not guaranteed)."""
-    now = datetime.now(UTC)
+def search_window(zone: ZoneInfo, tomorrow: date, far_day: date) -> tuple[datetime, datetime]:
+    """The listing window: midnight of the day before ``tomorrow`` to the end of two days after ``far_day``."""
+    first = min(tomorrow, far_day) - timedelta(days=WINDOW_BEFORE_DAYS)
+    last = max(tomorrow, far_day) + timedelta(days=WINDOW_AFTER_DAYS + 1)
+    return datetime.combine(first, time(0), zone), datetime.combine(last, time(0), zone)
+
+
+async def _run_events(svc: Any, tag: str, window: tuple[datetime, datetime]) -> list[dict[str, Any]]:
+    """Lists every event in ``window`` and keeps only those whose title mentions ``tag`` (filtered
+    here, not by Google's free-text ``q``, whose tokenising of "Smoke-…" is not guaranteed)."""
     found: list[dict[str, Any]] = []
     page_token: str | None = None
     while True:
         kwargs: dict[str, Any] = {
             "calendarId": CALENDAR_ID,
-            "timeMin": (now - timedelta(days=SEARCH_BEFORE_DAYS)).isoformat(),
-            "timeMax": (now + timedelta(days=SEARCH_AFTER_DAYS)).isoformat(),
+            "timeMin": window[0].astimezone(UTC).isoformat(),
+            "timeMax": window[1].astimezone(UTC).isoformat(),
             "singleEvents": True,
             "orderBy": "startTime",
             "maxResults": 250,
@@ -249,7 +285,7 @@ async def _tagged_events(svc: Any, tag: str) -> list[dict[str, Any]]:
         if page_token:
             kwargs["pageToken"] = page_token
         result = await asyncio.to_thread(svc.events().list(**kwargs).execute)
-        found.extend(e for e in result.get("items", []) if is_tagged(e, tag))
+        found.extend(e for e in result.get("items", []) if mentions_tag(e, tag))
         page_token = result.get("nextPageToken")
         if not page_token:
             return found
@@ -259,7 +295,7 @@ async def _tagged_events(svc: Any, tag: str) -> list[dict[str, Any]]:
 
 
 def _checked_tag(tag: str) -> str:
-    if not TAG_RE.match(tag):
+    if not TAG_RE.fullmatch(tag):
         sys.exit(f"Refusing tag {tag!r}: expected {TAG_PREFIX}XXXXXX (6 hex digits), as printed by `plan`.")
     return tag
 
@@ -280,14 +316,16 @@ async def cmd_plan() -> int:
     print(f"  uv run python scripts/calendar_smoke.py snapshot {args} --out {tag.lower()}.json")
     print("Then send 3, 4, 5 and 6b (6b on channel B), and check:")
     print(f"  uv run python scripts/calendar_smoke.py check {args} --snapshot {tag.lower()}.json")
-    print(f"  uv run python scripts/calendar_smoke.py cleanup --tag {tag}            # dry run")
-    print(f"  uv run python scripts/calendar_smoke.py cleanup --tag {tag} --confirm  # delete")
+    cleanup = f"uv run python scripts/calendar_smoke.py cleanup --tag {tag} --tomorrow {tomorrow}"
+    print(f"  {cleanup}            # dry run")
+    print(f"  {cleanup} --confirm  # delete")
     return 0
 
 
-async def cmd_snapshot(tag: str, out: Path) -> int:
+async def cmd_snapshot(tag: str, tomorrow: date, far_day: date, out: Path) -> int:
     svc = await _service()
-    ids = snapshot_ids(await _tagged_events(svc, tag), tag)
+    zone = await _zone(svc)
+    ids = snapshot_ids(await _run_events(svc, tag, search_window(zone, tomorrow, far_day)), tag)
     out.write_text(json.dumps(ids, indent=2) + "\n")
     print(f"Recorded {ids} → {out}")
     missing = {ALPHA, MEETING} - set(ids)
@@ -301,16 +339,25 @@ async def cmd_check(tag: str, tomorrow: date, far_day: date, snapshot: Path | No
     svc = await _service()
     zone = await _zone(svc)
     snap = json.loads(snapshot.read_text()) if snapshot else None
-    rows = evaluate(await _tagged_events(svc, tag), zone, tag, tomorrow, far_day, snap)
+    events = await _run_events(svc, tag, search_window(zone, tomorrow, far_day))
+    rows = evaluate(events, zone, tag, tomorrow, far_day, snap)
     print(f"Run {tag} — calendar zone {zone.key}\n")
     print(render_table(rows))
     return 0 if all(r.status != "FAIL" for r in rows) else 1
 
 
-async def cmd_cleanup(tag: str, confirm: bool) -> int:
+async def cmd_cleanup(tag: str, tomorrow: date, far_day: date, confirm: bool) -> int:
     svc = await _service()
     zone = await _zone(svc)
-    events = await _tagged_events(svc, tag)
+    start, end = search_window(zone, tomorrow, far_day)
+    listed = await _run_events(svc, tag, (start, end))
+    events = [e for e in listed if is_tagged(e, tag)]
+    near = near_misses(listed, tag)
+    print(f"Searched {start:%Y-%m-%d} to {end - timedelta(days=1):%Y-%m-%d} ({zone.key}).")
+    if near:
+        print(f"Near misses — NOT deleted, check and remove them by hand ({len(near)}):")
+        for e in near:
+            print(f"  {e['id']}  {_wall_clock(e, zone)}  {e.get('summary')}")
     if not events:
         print(f"No events tagged {tag}.")
         return 0
@@ -321,8 +368,6 @@ async def cmd_cleanup(tag: str, confirm: bool) -> int:
         print("\nDry run — nothing deleted. Re-run with --confirm to delete exactly these events.")
         return 0
     for e in events:
-        if not is_tagged(e, tag):  # belt and braces: never delete an untagged event
-            continue
         await asyncio.to_thread(svc.events().delete(calendarId=CALENDAR_ID, eventId=e["id"]).execute)
         print(f"  deleted {e['id']}  {e.get('summary')}")
     return 0
@@ -343,6 +388,12 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--snapshot", type=Path)
     p = sub.add_parser("cleanup", help="list (dry run) or delete the tagged events")
     p.add_argument("--tag", required=True)
+    p.add_argument("--tomorrow", required=True, type=date.fromisoformat, help="the run's tomorrow, as `plan` printed")
+    p.add_argument(
+        "--far-day",
+        type=date.fromisoformat,
+        help=f"the run's far day (default: --tomorrow + {FAR_DAYS - 1} days, as `plan` prints it)",
+    )
     p.add_argument("--confirm", action="store_true", help="actually delete the listed events")
     args = parser.parse_args(argv)
 
@@ -350,10 +401,11 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(cmd_plan())
     tag = _checked_tag(args.tag)
     if args.command == "snapshot":
-        return asyncio.run(cmd_snapshot(tag, args.out))
+        return asyncio.run(cmd_snapshot(tag, args.tomorrow, args.far_day, args.out))
     if args.command == "check":
         return asyncio.run(cmd_check(tag, args.tomorrow, args.far_day, args.snapshot))
-    return asyncio.run(cmd_cleanup(tag, args.confirm))
+    far_day = args.far_day or args.tomorrow + timedelta(days=FAR_DAYS - 1)
+    return asyncio.run(cmd_cleanup(tag, args.tomorrow, far_day, args.confirm))
 
 
 if __name__ == "__main__":
