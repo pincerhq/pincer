@@ -24,7 +24,7 @@ import pytest
 
 from integrations.google.fake_calendar import FakeCalendarFactory, FakeCalendarService
 from pincer.integrations.google.calendar_render import EDIT_HINT
-from pincer.integrations.google.tools_calendar import register_calendar_tools
+from pincer.integrations.google.tools_calendar import google__list_events, register_calendar_tools
 from pincer.mcp.auth.scopes import check_tool_scope
 from pincer.mcp.calendar_alias import NOT_CONNECTED
 from pincer.mcp.config import MCPServerExportConfig
@@ -254,6 +254,47 @@ async def test_pincer_run_export_strips_the_edit_hint(registry, fake) -> None:
     for name, text in texts.items():
         assert "Lunch with Ana" in text, (name, text)
         assert EDIT_HINT not in text and "google__update_event" not in text, (name, text)
+
+
+async def _long_listing(fake: FakeCalendarService, day: str) -> str:
+    """Seed ``day`` so the list text before the hint is ~7850 chars (the registry cuts at 7900, inside the hint)."""
+    first = datetime.fromisoformat(f"{day}T08:00:00").replace(tzinfo=KYIV)
+    ids = [
+        fake.seed_event(
+            "primary",
+            f"Event {n:02d} " + "x" * 140,
+            (first + timedelta(minutes=15 * n)).isoformat(),
+            (first + timedelta(minutes=15 * n + 10)).isoformat(),
+        )
+        for n in range(35)
+    ]
+    for _ in range(3):
+        full = await google__list_events(FakeCalendarFactory(fake), time_min=day, time_max=day)
+        body = full.removesuffix(f"\n{EDIT_HINT}")
+        short = 7850 - len(body)
+        if short == 0:
+            return body
+        event = fake.event("primary", ids[-1])
+        event["summary"] = event["summary"][:short] if short < 0 else event["summary"] + "x" * short
+    raise AssertionError(f"could not size the listing: {len(body)} chars")
+
+
+async def test_a_truncated_listing_leaks_no_part_of_the_edit_hint_to_mcp(registry, fake) -> None:
+    """The registry cuts results over 8000 chars at 7900: a hint appended and then stripped by exact
+    suffix would leave its first words behind. MCP calls never get the hint in the first place."""
+    day = "2026-11-20"
+    body = await _long_listing(fake, day)
+    llm_text = await registry.execute("google__list_events", {"time_min": day, "time_max": day})
+    assert len(body) + 1 + len(EDIT_HINT) > 8000 and EDIT_HINT[:30] in llm_text  # precondition: the cut is in the hint
+    assert EDIT_HINT not in llm_text
+    fmcp = _fmcp()
+    PincerToolExporter(registry, expose_tools=["google__list_events"]).export_to(fmcp)
+
+    # Calls the exporter's handler directly (see _fmcp for why not FastMCP's call_tool).
+    text = await fmcp.tools["pincer_google__list_events"](time_min=day, time_max=day)
+
+    assert "Event 34" in text, text[-300:]
+    assert EDIT_HINT[:30] not in text, text[-300:]
 
 
 async def test_alias_without_a_factory_is_not_connected(registry, fake, monkeypatch) -> None:

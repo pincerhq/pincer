@@ -19,13 +19,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from pincer.integrations.google.calendar_render import strip_edit_hint
+from pincer.integrations.google.calendar_render import EDIT_HINT_KEY
 from pincer.integrations.google.calendar_source import CalendarSource
 from pincer.integrations.google.tools_calendar import calendar_today, google__list_events
 
 CALENDAR_TODAY = "calendar_today"
 DESCRIPTION = "List today's Google Calendar events (today and times in the calendar's own timezone)."
 NOT_CONNECTED = "Google Calendar is not connected."
+#: The tool context of every MCP call: no edit hint (it names a tool clients lack).
+MCP_TOOL_CONTEXT = {EDIT_HINT_KEY: False}
 
 
 def _now() -> datetime:
@@ -43,4 +45,6 @@ class CalendarTodayAlias:
         if factory is None:
             return NOT_CONNECTED
         day = (await calendar_today(factory, calendar_id, now=_now())).isoformat()
-        return strip_edit_hint(await google__list_events(factory, calendar_id, time_min=day, time_max=day))
+        return await google__list_events(
+            factory, calendar_id, time_min=day, time_max=day, context=dict(MCP_TOOL_CONTEXT)
+        )

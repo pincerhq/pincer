@@ -16,13 +16,13 @@ from pincer.integrations.google import calendar_writer
 from pincer.integrations.google.calendar_render import (
     CALENDAR_ZONE_LABEL,
     CONFIGURED_ZONE_LABEL,
-    EDIT_HINT,
     EVENT_ZONE_LABEL,
     event_instants,
     render_event_details,
     render_events,
     render_write,
     stored_zone_name,
+    with_edit_hint,
     zones_equivalent,
 )
 from pincer.integrations.google.calendar_tz import (
@@ -223,7 +223,7 @@ async def google__list_events(
         zone_label=page.zone_label,
         more=page.more,
     )
-    return f"{listed}\n{EDIT_HINT}"
+    return with_edit_hint(listed, context)
 
 
 async def google__get_event(
@@ -237,7 +237,7 @@ async def google__get_event(
     event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
     zone, label = await _labeled_zone(factory, svc, calendar_id, _user_timezone(context))
     details = render_event_details(event, zone, clock_zone=_clock(context), zone_label=label)
-    return f"{details}\n{EDIT_HINT}"
+    return with_edit_hint(details, context)
 
 
 async def google__search_events(
@@ -271,7 +271,7 @@ async def google__search_events(
     found = render_events(
         events, zone, header=f"Found {len(events)} event(s)", clock_zone=_clock(context), zone_label=label
     )
-    return f"{found}\n{EDIT_HINT}"
+    return with_edit_hint(found, context)
 
 
 async def google__check_freebusy(

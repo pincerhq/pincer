@@ -54,6 +54,8 @@ EDIT_HINT = (
     "To change one of these events (rename, reschedule, new time or details), call google__update_event "
     "with its ID (and calendar_id, if not primary); never create a new event for a change."
 )
+#: Tool-context key: False leaves ``EDIT_HINT`` off (MCP calls — clients lack the update tool).
+EDIT_HINT_KEY = "calendar_edit_hint"
 
 # Human-facing renderers (briefing, reminder).
 CLOCK_FORMAT = "%H:%M"
@@ -64,9 +66,15 @@ AGENDA_RANGE = "–"
 NO_EVENTS_TODAY = "No events today."
 
 
-def strip_edit_hint(text: str) -> str:
-    """A read result without its trailing ``EDIT_HINT`` — for MCP clients, which lack the update tool."""
-    return text.removesuffix(f"\n{EDIT_HINT}")
+def with_edit_hint(text: str, context: dict[str, Any] | None) -> str:
+    """A read result with ``EDIT_HINT`` as its last line, unless the context turns it off.
+
+    Left off at the source, not stripped afterwards: the registry truncates
+    long results, which would leave a stripped hint's first words behind.
+    """
+    if (context or {}).get(EDIT_HINT_KEY, True) is False:
+        return text
+    return f"{text}\n{EDIT_HINT}"
 
 
 def _instant(field: dict[str, Any]) -> datetime | None:

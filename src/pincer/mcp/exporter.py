@@ -4,7 +4,8 @@ PincerToolExporter — maps Pincer ToolRegistry entries to FastMCP tool registra
 Only tools in the `expose_tools` whitelist are exported.
 `pincer_ask_user` is always registered regardless of the whitelist.
 `calendar_today` is an MCP-only alias (see `pincer.mcp.calendar_alias`).
-Results never carry the model's calendar edit hint (it names a tool MCP clients lack).
+Results never carry the model's calendar edit hint (it names a tool MCP clients lack):
+every call passes ``MCP_TOOL_CONTEXT``, which leaves it off at the source.
 """
 
 from __future__ import annotations
@@ -12,8 +13,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from pincer.integrations.google.calendar_render import strip_edit_hint
-from pincer.mcp.calendar_alias import CALENDAR_TODAY, DESCRIPTION, CalendarTodayAlias
+from pincer.mcp.calendar_alias import CALENDAR_TODAY, DESCRIPTION, MCP_TOOL_CONTEXT, CalendarTodayAlias
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -134,7 +134,7 @@ class PincerToolExporter:
                     approved = False
                 if not approved:
                     return f"[Denied] User declined to execute {pincer_name}"
-            return strip_edit_hint(await registry.execute(pincer_name, kwargs))
+            return await registry.execute(pincer_name, kwargs, context=dict(MCP_TOOL_CONTEXT))
 
         async def _handler(**kwargs: Any) -> str:
             return await self._guarded(pincer_name, mcp_name, lambda: _call(kwargs))
