@@ -32,6 +32,8 @@ tools depend on:
 - ``fail_next(method, "before-commit" | "after-commit")`` makes the next call of
   ``events.insert`` / ``events.delete`` / ``events.move`` / ``events.get`` raise
   a 503 — before changing anything, or after the change was made (a lost response).
+  The ``-reset`` phases (``"before-commit-reset"`` / ``"after-commit-reset"``)
+  raise ``ConnectionResetError`` instead: a non-HTTP failure, never retried.
 
 Errors are real ``googleapiclient.errors.HttpError`` instances so the tools'
 retry and error paths behave as they would against Google.
@@ -337,8 +339,9 @@ class FakeCalendarService:
         cal["purged"].add(event_id)
 
     def fail_next(self, method: str, phase: str) -> None:
-        """The next ``method`` call raises a 503 ``before-commit`` or ``after-commit``."""
-        assert phase in ("before-commit", "after-commit"), phase
+        """The next ``method`` call fails ``before-commit`` or ``after-commit``: a 503, or with
+        the ``-reset`` suffix a ``ConnectionResetError`` (no HTTP status)."""
+        assert phase in ("before-commit", "after-commit", "before-commit-reset", "after-commit-reset"), phase
         self.faults.setdefault(method, []).append(phase)
 
     def fault(self, method: str, phase: str) -> None:
@@ -346,6 +349,9 @@ class FakeCalendarService:
         if queued and queued[0] == phase:
             queued.pop(0)
             raise http_error(503, f"Backend Error ({phase})")
+        if queued and queued[0] == f"{phase}-reset":
+            queued.pop(0)
+            raise ConnectionResetError(f"Connection reset by peer ({phase})")
 
     def start_of(self, calendar_id: str, event_id: str) -> datetime:
         return self.instants(self.event(calendar_id, event_id), self.calendar(calendar_id)["timeZone"])[0]

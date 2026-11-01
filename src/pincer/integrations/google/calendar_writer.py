@@ -19,8 +19,14 @@ and a retried write never duplicates or falsely fails.
   times rather than the requested values; no read-back GET is needed. A
   response without an ``id`` proves nothing: it raises, the agent marks the
   result ``is_error``, and the wording says the event may or may not exist.
+- An insert that fails without an HTTP status (a timeout or connection reset,
+  never retried) may still have committed: the deterministic ID is looked up,
+  and a live event there is reported as created rather than raising (which
+  made the model create again).
 - **Delete/move** retried after a lost-but-committed first attempt get 404/410;
-  on a retry (never on the first attempt) the event's actual state decides.
+  on a retry the event's actual state decides. A delete whose FIRST attempt is
+  410 (Google's "already deleted") is a success, reported as such; a first 404
+  (wrong ID, no access) stays an error.
 - Every write logs one ``calendar_write`` line (operation, turn, call, calendar,
   event ID, stored start/end, timezone, dedup hit).
 """
@@ -45,6 +51,8 @@ NOT_CONFIRMED_MESSAGE = (
 #: Google's "already exists" (insert) and "not found"/"gone" statuses.
 _CONFLICT = 409
 _GONE = (404, 410)
+#: "Gone": the event existed and is deleted (unlike 404, which may be a wrong ID).
+_DELETED = 410
 #: How many deterministic IDs a create tries when earlier ones belong to deleted events.
 MAX_ID_GENERATIONS = 3
 ALL_IDS_TAKEN_MESSAGE = (
@@ -204,7 +212,10 @@ async def _insert_or_fetch(
         )
         return saved, False
     except _AttemptError as failed:
-        if _status(failed.error) != _CONFLICT:
+        status = _status(failed.error)
+        if status is None:
+            return await _committed_despite(failed, svc, calendar_id, event_id)
+        if status != _CONFLICT:
             raise failed.error from None
         conflict_on_first_attempt = failed.attempts < 2
     try:
@@ -216,6 +227,20 @@ async def _insert_or_fetch(
     if existing.get("status") == "cancelled":
         return None
     return existing, conflict_on_first_attempt
+
+
+async def _committed_despite(
+    failed: _AttemptError, svc: Any, calendar_id: str, event_id: str
+) -> tuple[dict[str, Any], bool]:
+    """A non-HTTP insert failure: the event under ``event_id`` if it is live (created now), else the error."""
+    try:
+        existing = await _live_on(svc, calendar_id, event_id)
+    except Exception:
+        raise failed.error from None
+    if existing is None:
+        raise failed.error from None
+    logger.info("An insert failed with %s, but the event is in place: created", type(failed.error).__name__)
+    return existing, False
 
 
 async def update(
@@ -261,15 +286,22 @@ async def _recovered_after_retry(failed: _AttemptError, committed: Any) -> Any:
     return result
 
 
-async def delete(svc: Any, calendar_id: str, event_id: str, *, trace: Trace | None = None) -> None:
-    """Delete an event. A 404/410 on a retry is checked against the event's real state:
-    gone or ``cancelled`` means the lost first attempt committed."""
-    recovered = False
+async def delete(svc: Any, calendar_id: str, event_id: str, *, trace: Trace | None = None) -> bool:
+    """Delete an event; True when it was already deleted (a 410 on the first attempt).
+
+    A 404/410 on a retry is checked against the event's real state: gone or
+    ``cancelled`` means the lost first attempt committed (deleted now).
+    """
+    already_gone = recovered = False
     try:
         await _attempted(lambda: svc.events().delete(calendarId=calendar_id, eventId=event_id).execute())
     except _AttemptError as failed:
-        recovered = await _recovered_after_retry(failed, lambda: _is_gone(svc, calendar_id, event_id))
-    log_write("delete", trace or Trace(), calendar_id, None, event_id=event_id, existed=recovered)
+        if failed.attempts < 2 and _status(failed.error) == _DELETED:
+            already_gone = True
+        else:
+            recovered = await _recovered_after_retry(failed, lambda: _is_gone(svc, calendar_id, event_id))
+    log_write("delete", trace or Trace(), calendar_id, None, event_id=event_id, existed=already_gone or recovered)
+    return already_gone
 
 
 async def _is_gone(svc: Any, calendar_id: str, event_id: str) -> bool:

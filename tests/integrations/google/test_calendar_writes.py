@@ -57,6 +57,29 @@ async def test_insert_that_fails_before_commit_is_retried_into_one_event(fake_re
     assert result.startswith("Event created: 'Dentist'")
 
 
+async def test_insert_whose_connection_resets_after_commit_reports_the_event(fake_registry, fake):
+    """No HTTP status, no retry: the deterministic ID is looked up before giving up (the duplicate bug:
+    an error here made the model create again)."""
+    fake.fail_next("events.insert", "after-commit-reset")
+
+    result = await fake_registry.execute("google__create_event", dict(DENTIST), context=_turn("turn-a"))
+
+    (event,) = fake.events_on("primary")
+    assert len(fake.sent("events.insert")) == 1
+    assert [g["eventId"] for g in fake.sent("events.get")] == [event["id"]]
+    assert result.startswith("Event created: 'Dentist'"), result
+
+
+async def test_insert_whose_connection_resets_before_commit_still_fails(fake_registry, fake):
+    fake.fail_next("events.insert", "before-commit-reset")
+
+    with pytest.raises(ConnectionResetError):
+        await fake_registry.execute("google__create_event", dict(DENTIST), context=_turn("turn-a"))
+
+    assert fake.events_on("primary") == []
+    assert len(fake.sent("events.get")) == 1  # it looked, found nothing, and kept the error
+
+
 async def test_same_details_twice_in_one_turn_make_one_event(fake_registry, fake):
     first = await fake_registry.execute("google__create_event", dict(DENTIST), context=_turn("turn-a", "toolu_1"))
     second = await fake_registry.execute("google__create_event", dict(DENTIST), context=_turn("turn-a", "toolu_2"))
@@ -125,6 +148,29 @@ async def test_delete_whose_first_response_is_lost_reports_success(fake_registry
     assert result == f"Event {event_id} deleted."
     assert len(fake.sent("events.delete")) == 2
     assert fake.events_on("primary") == []
+
+
+def _delete_status(fake: FakeCalendarService, event_id: str) -> int | None:
+    try:
+        fake.events().delete(calendarId="primary", eventId=event_id).execute()
+    except HttpError as exc:
+        return exc.status_code
+    return None
+
+
+async def test_deleting_an_already_deleted_event_reports_it_gone(fake_registry, fake):
+    """A first-attempt 410 is Google's "already deleted": the outcome asked for, not an error.
+    (A first-attempt 404 — wrong ID or no access — stays an error: see the test below.)"""
+    gone = fake.seed_event("primary", "Old", "2026-11-12T09:00:00+02:00", "2026-11-12T10:00:00+02:00")
+    assert (_delete_status(fake, gone), _delete_status(fake, gone)) == (None, 410)  # precondition: the fake's 410
+    assert _delete_status(fake, "nosuchevent1") == 404  # precondition: and its 404
+    event_id = fake.seed_event("primary", "Dentist", "2026-11-12T15:00:00+02:00", "2026-11-12T16:00:00+02:00")
+    await fake_registry.execute("google__delete_event", {"event_id": event_id}, context=_turn("turn-a"))
+
+    again = await fake_registry.execute("google__delete_event", {"event_id": event_id}, context=_turn("turn-b"))
+
+    assert again == f"Event {event_id} was already deleted."
+    assert [d["eventId"] for d in fake.sent("events.delete")].count(event_id) == 2
 
 
 async def test_move_whose_first_response_is_lost_reports_success(fake_registry, fake):

@@ -564,8 +564,8 @@ async def google__delete_event(
 ) -> str:
     """Delete (cancel) a calendar event."""
     svc = await factory.get("calendar")
-    await calendar_writer.delete(svc, calendar_id, event_id, trace=calendar_writer.Trace.from_context(context))
-    return f"Event {event_id} deleted."
+    gone = await calendar_writer.delete(svc, calendar_id, event_id, trace=calendar_writer.Trace.from_context(context))
+    return f"Event {event_id} was already deleted." if gone else f"Event {event_id} deleted."
 
 
 async def google__move_event(
