@@ -21,8 +21,13 @@ class LogOnce:
         self._level = level
         self._logged = False
 
-    def log(self, msg: str, *args: object) -> None:
-        self._logger.log(logging.DEBUG if self._logged else self._level, msg, *args)
+    def log(self, msg: str, *args: object, exc_info: bool = False) -> None:
+        """Log ``msg``; with ``exc_info`` the first occurrence carries the traceback, repeats do not."""
+        first = not self._logged
+        if exc_info and first:
+            self._logger.log(self._level, msg, *args, exc_info=True)
+        else:
+            self._logger.log(self._level if first else logging.DEBUG, msg, *args)
         self._logged = True
 
     def clear(self) -> bool:

@@ -35,6 +35,8 @@ GOOGLE_SETUP_HINT = (
 )
 # Once per process at INFO: register_default_tools also runs on every GET /api/integrations.
 _SETUP_HINT_LOG = LogOnce(logger, logging.INFO)
+# A failing Workspace registration: WARNING with its traceback once, DEBUG until it registers again.
+_REGISTRATION_FAILURE_LOG = LogOnce(logger)
 
 
 def register_default_tools(tools: ToolRegistry, settings: Settings) -> dict[str, int]:
@@ -344,10 +346,11 @@ def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> N
                 _SETUP_HINT_LOG.log(GOOGLE_SETUP_HINT)
             return
         report["google"] = register_all_tools(tools, factory)
+        _REGISTRATION_FAILURE_LOG.clear()
     except RuntimeError as e:
         logger.warning("Google Workspace tools disabled: %s", e)
     except Exception as e:
-        logger.warning("Google Workspace tools not loaded: %s", e, exc_info=True)
+        _REGISTRATION_FAILURE_LOG.log("Google Workspace tools not loaded: %s", e, exc_info=True)
 
 
 def _register_slack(tools: ToolRegistry, report: dict[str, int]) -> None:

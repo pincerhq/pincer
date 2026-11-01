@@ -62,8 +62,19 @@ def test_shell_safe_commands() -> None:
     assert is_blocked("echo hello") is None
 
 
-def test_workspace_registration_failure_logs_a_warning(settings, monkeypatch, caplog) -> None:
-    """A broken Google integration is visible, not hidden at debug level."""
+@pytest.fixture
+def fresh_registration_log(monkeypatch):
+    """The registration failure is logged once per outage: give each test a fresh process's state."""
+    from pincer.integrations.google.log_once import LogOnce
+    from pincer.tools import bootstrap
+
+    monkeypatch.setattr(bootstrap, "_REGISTRATION_FAILURE_LOG", LogOnce(bootstrap.logger))
+
+
+@pytest.mark.usefixtures("fresh_registration_log")
+def test_workspace_registration_failure_warns_once_with_a_traceback(settings, monkeypatch, caplog) -> None:
+    """A broken Google integration is visible, not hidden at debug level — but register_default_tools runs
+    on every GET /api/integrations: one WARNING with its traceback, then DEBUG, not one per request."""
 
     def _broken(*_args, **_kwargs):
         raise ValueError("boom")
@@ -71,10 +82,21 @@ def test_workspace_registration_failure_logs_a_warning(settings, monkeypatch, ca
     monkeypatch.setattr("pincer.integrations.google.get_google_factory", lambda: object())
     monkeypatch.setattr("pincer.integrations.google.register_all_tools", _broken)
     with caplog.at_level(logging.DEBUG, logger="pincer.tools.bootstrap"):
-        register_default_tools(ToolRegistry(), settings)
+        for _ in range(3):
+            register_default_tools(ToolRegistry(), settings)
     failures = [r for r in caplog.records if "Google Workspace tools" in r.getMessage()]
-    assert [r.levelno for r in failures] == [logging.WARNING]
-    assert "boom" in caplog.text
+    assert [r.levelno for r in failures] == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    assert [r.exc_info is not None for r in failures] == [True, False, False]
+    assert "boom" in failures[0].getMessage()
+
+    caplog.clear()
+    monkeypatch.setattr("pincer.integrations.google.register_all_tools", lambda *_a, **_k: 0)
+    register_default_tools(ToolRegistry(), settings)  # registers again: the failure has cleared
+    monkeypatch.setattr("pincer.integrations.google.register_all_tools", _broken)
+    with caplog.at_level(logging.DEBUG, logger="pincer.tools.bootstrap"):
+        register_default_tools(ToolRegistry(), settings)
+    again = [r for r in caplog.records if "Google Workspace tools" in r.getMessage()]
+    assert [r.levelno for r in again] == [logging.WARNING]
 
 
 @pytest.fixture
