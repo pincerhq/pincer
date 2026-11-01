@@ -78,7 +78,7 @@ async def test_get_shows_local_time_and_zone(fake_factory, fake):
     lines = result.splitlines()
     assert "Start:       2026-11-12T10:00:00+02:00" in lines
     assert "End:         2026-11-12T11:00:00+02:00" in lines
-    assert "Time zone:   Europe/Kiev" in lines
+    assert "Times shown in: Europe/Kiev" in lines
     assert KIEV_NOTE in lines
 
 
@@ -341,6 +341,46 @@ async def test_get_shows_the_events_own_zone_when_it_differs_from_the_calendars(
     differs = await google__get_event(fake_factory, event_id="evt1")
     equivalent = await google__get_event(fake_factory, event_id=same)
 
-    assert "Time zone:   Europe/Kiev" in differs.splitlines()
-    assert "Event zone:  America/New_York" in differs.splitlines()
-    assert "Event zone:" not in equivalent
+    assert "Times shown in: Europe/Kiev" in differs.splitlines()
+    assert "Event's own timezone: America/New_York" in differs.splitlines()
+    assert "own timezone" not in equivalent
+
+
+# ── Confirmation zone comes from the stored copy (B review R1) ───────────────
+
+
+async def test_update_confirmation_zone_is_the_stored_one_not_the_requested_one(fake_factory, fake):
+    """update(summary only, timezone="America/New_York") leaves Google storing Europe/Kiev."""
+    fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00", "2026-11-12T11:00:00", time_zone="Europe/Kiev")
+
+    result = await google__update_event(fake_factory, event_id="evt1", summary="Renamed", timezone="America/New_York")
+
+    assert fake.event("primary", "evt1")["start"]["timeZone"] == "Europe/Kiev"
+    assert result == (
+        "Event updated: 'Renamed'\n"
+        "Start: 2026-11-12T10:00:00+02:00 | End: 2026-11-12T11:00:00+02:00 (Europe/Kiev)\n"
+        f"{KIEV_NOTE}\n"
+        "ID: evt1\n"
+        f"Link: {LINK1}"
+    )
+
+
+async def test_idempotent_hit_shows_the_existing_events_stored_zone(fake_factory, fake):
+    await google__create_event(
+        fake_factory, summary="Dentist", start="2026-11-12T10:00:00", end="2026-11-12T11:00:00", idempotency_key="k1"
+    )
+
+    again = await google__create_event(
+        fake_factory,
+        summary="Dentist",
+        start="2026-11-12T10:00:00",
+        end="2026-11-12T11:00:00",
+        timezone="America/New_York",
+        idempotency_key="k1",
+    )
+
+    assert again.splitlines()[:2] == [
+        "Event already exists (idempotent): 'Dentist'",
+        "Start: 2026-11-12T10:00:00+02:00 | End: 2026-11-12T11:00:00+02:00 (Europe/Kiev)",
+    ]
+    assert "event's timezone" not in again

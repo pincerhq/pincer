@@ -14,9 +14,11 @@ from pincer.integrations.google.calendar_render import (
     CALENDAR_ZONE_LABEL,
     CONFIGURED_ZONE_LABEL,
     EVENT_ZONE_LABEL,
+    event_instants,
     render_event_details,
     render_events,
     render_write,
+    zones_equivalent,
 )
 from pincer.integrations.google.calendar_tz import (
     SOURCE_CALENDAR,
@@ -276,19 +278,29 @@ async def _write_zone(
     return zone.key, zone
 
 
-async def _shown_zone(
+async def _confirmation_zone(
     factory: GoogleServiceFactory,
     svc: Any,
     calendar_id: str,
     context: dict[str, Any] | None,
+    saved: dict[str, Any],
     given: str,
 ) -> tuple[ZoneInfo, str]:
-    """The zone a write confirmation shows, and what it is: a valid caller-given
-    zone is the event's zone (no calendar lookup); otherwise the resolved one."""
-    zone = zone_or_none(given) if given.strip() else None
-    if zone is not None:
-        return zone, EVENT_ZONE_LABEL
-    return await _labeled_zone(factory, svc, calendar_id, context)
+    """The zone a write confirmation shows, taken from Google's STORED copy.
+
+    The event's own stored ``timeZone`` is shown (labelled as the event's)
+    when it differs from the calendar's; otherwise the calendar's zone is. When
+    the caller set a zone and Google stored exactly that one, it is the event's
+    zone without a calendar lookup (the voice booking path).
+    """
+    own = zone_or_none((saved.get("start") or {}).get("timeZone") or "")
+    given_zone = zone_or_none(given) if given.strip() else None
+    if own is not None and given_zone is not None and own.key == given_zone.key:
+        return own, EVENT_ZONE_LABEL
+    zone, label = await _labeled_zone(factory, svc, calendar_id, context)
+    if own is not None and not zones_equivalent(own, zone, event_instants([saved])):
+        return own, EVENT_ZONE_LABEL
+    return zone, label
 
 
 async def google__create_event(
@@ -337,7 +349,7 @@ async def google__create_event(
         items = existing.get("items", [])
         if items:
             ev = items[0]
-            shown, label = await _shown_zone(factory, svc, calendar_id, context, timezone)
+            shown, label = await _confirmation_zone(factory, svc, calendar_id, context, ev, timezone)
             return render_write(
                 f"Event already exists (idempotent): '{ev.get('summary', '')}'",
                 ev,
@@ -391,7 +403,7 @@ async def google__create_event(
         if uri:
             extra = f"Meet link: {uri}"
 
-    shown, label = await _shown_zone(factory, svc, calendar_id, context, timezone)
+    shown, label = await _confirmation_zone(factory, svc, calendar_id, context, created, timezone)
     return render_write(
         f"Event created: '{created.get('summary', summary)}'",
         created,
@@ -434,7 +446,7 @@ async def google__update_event(
         tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone or stored_zone)
         event[key] = {"dateTime": localize(value, zone) if zone else rfc3339(value), "timeZone": tz_name}
     updated = await calendar_writer.update(svc, calendar_id, event_id, event)
-    shown, label = await _shown_zone(factory, svc, calendar_id, context, timezone)
+    shown, label = await _confirmation_zone(factory, svc, calendar_id, context, updated, timezone)
     return render_write(
         f"Event updated: '{updated.get('summary', '')}'",
         updated,

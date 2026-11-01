@@ -179,12 +179,13 @@ def render_event_details(
         f"Title:       {event.get('summary', '(no title)')}",
         f"Start:       {start}",
         f"End:         {end}",
-        f"Time zone:   {zone.key}",
+        f"Times shown in: {zone.key}",
     ]
     own = _own_zone_name(event)
     if own and not _same_zone_name(own, zone, event_instants([event])):
-        # Kept on purpose (an update keeps it too) — so say so.
-        lines.append(f"Event zone:  {own}")
+        # Kept on purpose (an update keeps it too). This — not the display
+        # zone above — is the zone to pass when changing the event's times.
+        lines.append(f"Event's own timezone: {own}")
     note = mismatch_note(zone, clock_zone, event_instants([event]), zone_label)
     if note:
         lines.append(note)
