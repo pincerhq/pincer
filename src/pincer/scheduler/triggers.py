@@ -25,6 +25,7 @@ from googleapiclient.errors import HttpError
 
 from pincer.config import get_settings
 from pincer.db.engine import get_database_url
+from pincer.integrations.google.auth import GoogleTokenError
 from pincer.integrations.google.calendar_render import render_reminder, start_instant
 from pincer.integrations.google.calendar_source import CalendarSource
 from pincer.integrations.google.log_once import LogOnce
@@ -41,9 +42,10 @@ REMINDER_CALENDAR = "primary"
 # Status entries, not meetings (owner ruling, #297): no "Reminder: Home starts at 09:00".
 # A missing eventType means "default" and is reminded.
 NO_REMINDER_EVENT_TYPES = frozenset({"workingLocation", "outOfOffice", "focusTime"})
-# A calendar read failing with these is an outage (token revoked, Google or the
-# network down): logged once, quietly retried. Anything else is a bug and gets a traceback.
-CALENDAR_OUTAGE_ERRORS = (HttpError, GoogleAuthError, OSError, httplib2.HttpLib2Error)
+# A calendar read failing with these is an outage (token revoked — raw, or wrapped by
+# GoogleAuth once the service cache expires — Google or the network down): logged once,
+# quietly retried. Anything else is a bug and gets a traceback.
+CALENDAR_OUTAGE_ERRORS = (HttpError, GoogleAuthError, GoogleTokenError, OSError, httplib2.HttpLib2Error)
 
 logger = logging.getLogger(__name__)
 

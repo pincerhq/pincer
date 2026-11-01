@@ -340,6 +340,43 @@ async def test_a_google_http_error_still_pauses_reminders_quietly(triggers, fake
     assert "Calendar reminders paused" in records[0].getMessage() and records[0].exc_info is None
 
 
+async def test_a_token_revoked_after_the_service_cache_expires_warns_once_without_a_traceback(
+    triggers, fake, google_token, mock_credentials, monkeypatch, caplog
+) -> None:
+    """Past the factory's 30-minute service cache every tick refreshes the token through GoogleAuth,
+    which wraps Google's RefreshError in its own error: still an outage, not a traceback a minute."""
+    import json
+
+    from google.oauth2.credentials import Credentials
+
+    monkeypatch.setattr("pincer.scheduler.triggers.CALENDAR_TICK_S", 0)
+    factory = triggers._calendar.factory()
+    assert factory is not None  # precondition: the real Workspace factory, not a stub
+    _creds_path, token_path = mock_credentials
+    token = json.loads(token_path.read_text())
+    token_path.write_text(json.dumps({**token, "expiry": "2000-01-01T00:00:00Z"}))
+    factory.invalidate()  # the cached service has expired
+    factory.auth._credentials = None
+    refreshes = {"n": 0}
+
+    def _revoked(_self, _request):
+        refreshes["n"] += 1
+        if refreshes["n"] >= 2:
+            triggers._running = False
+        raise RefreshError("invalid_grant: Token has been expired or revoked.")
+
+    monkeypatch.setattr(Credentials, "refresh", _revoked)
+    triggers._running = True
+    with caplog.at_level(logging.DEBUG, logger="pincer.scheduler.triggers"):
+        await triggers._calendar_loop()
+
+    assert refreshes["n"] == 2  # precondition: both ticks really went through GoogleAuth's refresh
+    records = [r for r in caplog.records if r.name == "pincer.scheduler.triggers"]
+    assert [r.levelno for r in records] == [logging.WARNING, logging.DEBUG]
+    assert all(r.exc_info is None for r in records)
+    assert "GoogleTokenError" in records[0].getMessage() and "invalid_grant" in records[0].getMessage()
+
+
 async def test_a_dropped_connection_warns_once_then_debug_without_a_traceback(
     triggers, fake, monkeypatch, caplog
 ) -> None:
