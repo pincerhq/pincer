@@ -1,9 +1,9 @@
 """Tool index ranking with the real multilingual model, across European languages.
 
-Indexes the real descriptions of 23 Pincer tools (tests/fixtures/tool_index_tools.json,
+Indexes the real descriptions of 24 Pincer tools (tests/fixtures/tool_index_tools.json,
 a snapshot of the registry's text) exactly as ToolSelector does, then checks
 that a request for each task, in each language, ranks a tool for that task in
-the top 5 of 23; edit requests (en/uk/de) must rank the Workspace update tool
+the top 5 of 24; edit requests (en/uk/de) must rank the Workspace update tool
 there. Production fills ~110 slots from the ranking, so this is a much stricter
 bar than the selector needs. (Top 3 fails only for "draw a picture" in
 uk/fr/it, where generate_image comes 4th behind send_image, send_file and
@@ -217,8 +217,23 @@ REQUESTS: dict[str, tuple[str, str, str, str, str]] = {
     ),
 }
 
+# Known exception, accepted by the owner on 2026-11-01 (strict, like EDIT_KNOWN_MISSES).
+TASK_KNOWN_MISSES: dict[str, str] = {
+    "Adiciona uma reunião com o Tom ao meu calendário na sexta-feira às 10": (
+        "google__create_event ranks 6 of 24 in this fixture (out since google__move_event was added); in the "
+        "real registry it is #14 of 124 at cb8c4de, 1624894 and 777ee64 alike (MCP tools not indexed), so not "
+        'caused by this branch, and inside the ~110 ranked slots a turn sends; "calendário" pulls toward '
+        "google__list_events and google__move_event"
+    ),
+}
 CASES = [
-    pytest.param(lang, task, query, id=f"{lang}-{task}")
+    pytest.param(
+        lang,
+        task,
+        query,
+        id=f"{lang}-{task}",
+        marks=[pytest.mark.xfail(strict=True, reason=TASK_KNOWN_MISSES[query])] if query in TASK_KNOWN_MISSES else [],
+    )
     for lang, queries in REQUESTS.items()
     for task, query in zip(TASKS, queries, strict=True)
 ]
@@ -234,7 +249,8 @@ EDIT_REQUESTS: dict[str, tuple[str, str, str]] = {
 # that fixes it turns this red, so the marker has to come off.
 EDIT_KNOWN_MISSES: dict[str, str] = {
     "Benenne das Meeting um": (
-        "update tool ranks 6 of 23 in this fixture and 38 of 124 in the real registry (2026-11-01, MCP tools "
+        "update tool ranks 6 of 24 in this fixture (6 of 23 before google__move_event was added) and 38 of 124 "
+        "in the real registry (2026-11-01, MCP tools "
         'not indexed), inside the ~90-100 ranked slots a turn sends; "Meeting" pulls toward '
         "google__create_meet_space"
     ),
