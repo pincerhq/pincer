@@ -13,7 +13,8 @@ morning briefing and the upcoming-event reminder): 24-hour local times, the
 zone named once, no ISO stamps and no ``ID:`` lines.
 
 Format contract (parsed by the voice flow, keep verbatim):
-- event lines: ``  <start ISO> → <end ISO> — <title>[ | …]`` (voice tool speech);
+- event lines: ``  <start ISO> → <end ISO> — <title>[ | …]`` (voice tool speech); an
+  event whose own zone is not the calendar's adds `` | event zone <IANA name>``;
 - write confirmations: a ``Link: <url>`` line (voice booking link extraction).
 """
 
@@ -37,6 +38,8 @@ NO_TITLE = "(no title)"
 RANGE_ARROW = " → "
 TITLE_DASH = " — "
 LINK_PREFIX = "Link: "
+#: On a list/search line: the event's own zone, where update reads offset-less times.
+EVENT_ZONE_PREFIX = "event zone "
 #: Shown when a write response carries an id but no start/end.
 STORED_TIMES_UNAVAILABLE = "(stored times unavailable)"
 
@@ -177,6 +180,9 @@ def render_event_line(event: dict[str, Any], zone: ZoneInfo) -> str:
     start, end, all_day = _when(event, zone)
     when = f"{start or STORED_TIMES_UNAVAILABLE}{RANGE_ARROW}{end or STORED_TIMES_UNAVAILABLE}"
     extras = [ALL_DAY] if all_day else []
+    own = stored_zone_name(event)
+    if own and not _same_zone_name(own, zone):
+        extras.append(f"{EVENT_ZONE_PREFIX}{own}")
     if event.get("location"):
         extras.append(str(event["location"]))
     attendees = len(event.get("attendees") or [])

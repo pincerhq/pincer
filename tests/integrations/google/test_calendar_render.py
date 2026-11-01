@@ -63,7 +63,7 @@ async def test_list_shows_local_times_zone_header_all_day_ids_and_note(fake_fact
         f"{KIEV_NOTE}\n"
         "  2026-11-12 → 2026-11-12 — Holiday | all day\n"
         "  ID: evt2\n"
-        "  2026-11-12T10:00:00+02:00 → 2026-11-12T11:00:00+02:00 — Standup\n"
+        "  2026-11-12T10:00:00+02:00 → 2026-11-12T11:00:00+02:00 — Standup | event zone America/New_York\n"
         "  ID: evt1\n"
         f"{EDIT_HINT}"
     )
@@ -75,7 +75,10 @@ async def test_search_shows_local_times_and_zone_header(fake_factory, fake):
     result = await google__search_events(fake_factory, query="Standup")
 
     assert result.splitlines()[0] == "Found 1 event(s), times in Europe/Kiev:"
-    assert "  2026-11-12T10:00:00+02:00 → 2026-11-12T11:00:00+02:00 — Standup" in result.splitlines()
+    assert (
+        "  2026-11-12T10:00:00+02:00 → 2026-11-12T11:00:00+02:00 — Standup | event zone America/New_York"
+        in result.splitlines()
+    )
 
 
 async def test_get_shows_local_time_and_zone(fake_factory, fake):
@@ -639,3 +642,32 @@ async def test_get_shows_an_event_zone_with_the_same_offset_but_another_identity
     assert "Start:       2026-07-15T10:00:00+03:00" in shown  # precondition: same offset as Kyiv in July
     assert "Event's own timezone: Europe/Istanbul" in shown
     assert not [line for line in hidden if line.startswith("Event's own timezone")]
+
+
+async def test_list_and_search_lines_name_an_event_zone_that_is_not_the_calendars(fake_factory, fake):
+    """update reads offset-less times in the event's own zone: list/search must show it when it differs."""
+    fake.seed_event("primary", "Ferry", "2026-07-15T10:00:00", "2026-07-15T11:00:00", time_zone="Europe/Istanbul")
+    fake.seed_event("primary", "Lunch", "2026-07-15T12:00:00", "2026-07-15T13:00:00", time_zone="Europe/Kyiv")
+
+    listed = await google__list_events(fake_factory, time_min="2026-07-15", time_max="2026-07-15")
+    found = await google__search_events(fake_factory, query="Ferry")
+
+    for text in (listed, found):
+        assert "  2026-07-15T10:00:00+03:00 → 2026-07-15T11:00:00+03:00 — Ferry | event zone Europe/Istanbul" in (
+            text.splitlines()
+        ), text
+    lunch = [line for line in listed.splitlines() if "— Lunch" in line]
+    assert lunch == ["  2026-07-15T12:00:00+03:00 → 2026-07-15T13:00:00+03:00 — Lunch"]  # an alias: no zone shown
+
+
+async def test_voice_speech_still_reads_a_line_that_names_the_event_zone(fake_factory, fake):
+    from pincer.voice import tool_speech
+
+    fake.seed_event("primary", "Ferry", "2026-07-15T10:00:00", "2026-07-15T11:00:00", time_zone="Europe/Istanbul")
+    listed = await google__list_events(fake_factory, time_min="2026-07-15", time_max="2026-07-15")
+    assert "| event zone Europe/Istanbul" in listed  # precondition: the line carries the zone
+
+    spoken = tool_speech.render("google__list_events", listed, "en")
+
+    assert "Wednesday, July 15 at 10:00 AM: Ferry" in spoken, spoken
+    assert "zone" not in spoken and "|" not in spoken
