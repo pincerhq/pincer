@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import uuid
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -320,8 +321,6 @@ async def google__create_event(
     Offset-less start/end are read in ``timezone`` when given, else in the
     calendar's own zone (see calendar_tz); offset-bearing ones pass unchanged.
     """
-    import uuid
-
     svc = await factory.get("calendar")
 
     tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone)
@@ -331,6 +330,8 @@ async def google__create_event(
         "end": {"dateTime": localize(end, zone) if zone else rfc3339(end), "timeZone": tz_name},
     }
     if idempotency_key:
+        # Not used for dedup any more (the client-supplied ID is); kept as a
+        # trace marker linking the event to the booking task in Google's UI/API.
         body["extendedProperties"] = {"private": {"pincer_key": idempotency_key}}
     if description:
         body["description"] = description
@@ -360,11 +361,13 @@ async def google__create_event(
     if send_mode in SEND_UPDATES_MODES:
         insert_kw["sendUpdates"] = send_mode
 
-    # Dedup seed: the explicit key, else this chat turn; outside any turn
-    # (no context) a fresh seed still keeps the retry wrapper's resends safe.
-    seed = idempotency_key or str((context or {}).get("turn_id") or "") or uuid.uuid4().hex
     outcome = await calendar_writer.create(
-        svc, calendar_id, body, seed=seed, trace=calendar_writer.Trace.from_context(context), **insert_kw
+        svc,
+        calendar_id,
+        body,
+        seed=_dedup_seed(idempotency_key, context),
+        trace=calendar_writer.Trace.from_context(context),
+        **insert_kw,
     )
     created = outcome.event
 
@@ -393,6 +396,12 @@ async def google__create_event(
     )
 
 
+def _dedup_seed(idempotency_key: str, context: dict[str, Any] | None) -> str:
+    """The create dedup seed: the explicit key, else this chat turn's ID. Outside any
+    turn (no context) a fresh seed still keeps the retry wrapper's resends safe."""
+    return idempotency_key or str((context or {}).get("turn_id") or "") or uuid.uuid4().hex
+
+
 def _end_keeping_duration(
     old_start: dict[str, Any], old_end: dict[str, Any], new_start: dict[str, Any], caller_zone: str = ""
 ) -> dict[str, Any]:
@@ -403,7 +412,10 @@ def _end_keeping_duration(
     in WALL-CLOCK time of the start's zone (Fri 09:00 → Mon 09:00 stays
     "Monday 09:00" across a DST change, as in Google's own UI), and the end
     keeps its own stored zone (a Kyiv → New York flight still lands in New
-    York time) unless the caller named a zone for this update.
+    York time) unless the caller named a zone for this update. A wall-clock
+    end that falls in the repeated fall-back hour takes its first occurrence
+    (fold=0, still summer time); one in the skipped spring-forward hour shifts
+    forward by the gap, as calendar_tz.localize does.
     """
     if "date" in new_start:
         if not (old_start.get("date") and old_end.get("date")):
@@ -523,10 +535,16 @@ async def google__move_event(
     return f"Event {event_id} moved to {destination_calendar_id} (new id={result.get('id', '')})"
 
 
+def _as_event(value: Any) -> dict[str, Any] | None:
+    """A Google response as an event dict for logging (None if it isn't one)."""
+    return value if isinstance(value, dict) else None
+
+
 async def google__accept_event(
     factory: GoogleServiceFactory,
     event_id: str,
     calendar_id: str = "primary",
+    context: dict[str, Any] | None = None,
 ) -> str:
     """Accept a calendar invitation."""
     svc = await factory.get("calendar")
@@ -537,12 +555,15 @@ async def google__accept_event(
     for att in event.get("attendees", []):
         if att.get("self") or att.get("email") == self_email:
             att["responseStatus"] = "accepted"
-    await with_backoff(
+    patched = await with_backoff(
         lambda: (
             svc.events()
             .patch(calendarId=calendar_id, eventId=event_id, body={"attendees": event.get("attendees", [])})
             .execute()
         )
+    )
+    calendar_writer.log_write(
+        "accept", calendar_writer.Trace.from_context(context), calendar_id, _as_event(patched), event_id=event_id
     )
     return f"Accepted event: {event.get('summary', event_id)}"
 
@@ -551,6 +572,7 @@ async def google__decline_event(
     factory: GoogleServiceFactory,
     event_id: str,
     calendar_id: str = "primary",
+    context: dict[str, Any] | None = None,
 ) -> str:
     """Decline a calendar invitation."""
     svc = await factory.get("calendar")
@@ -558,12 +580,15 @@ async def google__decline_event(
     for att in event.get("attendees", []):
         if att.get("self"):
             att["responseStatus"] = "declined"
-    await with_backoff(
+    patched = await with_backoff(
         lambda: (
             svc.events()
             .patch(calendarId=calendar_id, eventId=event_id, body={"attendees": event.get("attendees", [])})
             .execute()
         )
+    )
+    calendar_writer.log_write(
+        "decline", calendar_writer.Trace.from_context(context), calendar_id, _as_event(patched), event_id=event_id
     )
     return f"Declined event: {event.get('summary', event_id)}"
 
@@ -572,10 +597,9 @@ async def google__add_google_meet(
     factory: GoogleServiceFactory,
     event_id: str,
     calendar_id: str = "primary",
+    context: dict[str, Any] | None = None,
 ) -> str:
     """Add a Google Meet link to an existing event."""
-    import uuid
-
     svc = await factory.get("calendar")
     body = {
         "conferenceData": {
@@ -596,6 +620,9 @@ async def google__add_google_meet(
             )
             .execute()
         )
+    )
+    calendar_writer.log_write(
+        "add_meet", calendar_writer.Trace.from_context(context), calendar_id, _as_event(updated), event_id=event_id
     )
     meet_link = updated.get("conferenceData", {}).get("entryPoints", [{}])[0].get("uri", "pending")
     return f"Google Meet added to event {event_id}: {meet_link}"
@@ -754,8 +781,9 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 },
                 "idempotency_key": {
                     "type": "string",
-                    "description": "Optional dedup key: if an event with this key exists, it is returned "
-                    "instead of creating a duplicate",
+                    "description": "Optional dedup key for EXACT re-calls: the same key with the same calendar, "
+                    "title, start and end returns the existing event instead of a duplicate (safe retries). "
+                    "It does not match an event whose details differ — a changed time creates a new event",
                     "default": "",
                 },
             },
