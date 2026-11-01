@@ -471,22 +471,37 @@ class TestCreateEventIdempotency:
         factory.get = get
         return factory, svc
 
-    async def test_existing_key_returns_without_insert(self):
+    async def test_existing_key_returns_the_existing_event_without_a_duplicate(self):
+        """Same key + same details = same client-supplied event ID: Google answers the
+        insert with 409 and the existing event is returned (no list lookup any more)."""
+        import httplib2
+        from googleapiclient.errors import HttpError
+
         from pincer.integrations.google.tools_calendar import google__create_event
 
-        factory, svc = self._factory(
-            existing_items=[{"id": "old-ev", "summary": "Zahnreinigung", "htmlLink": "https://cal.example/old-ev"}]
+        factory, svc = self._factory()
+        svc.events.return_value.insert.return_value.execute.side_effect = HttpError(
+            httplib2.Response({"status": 409}), b'{"error": {"code": 409, "message": "duplicate"}}'
         )
+        svc.events.return_value.get.return_value.execute.return_value = {
+            "id": "old-ev",
+            "summary": "Zahnreinigung",
+            "htmlLink": "https://cal.example/old-ev",
+            "start": {"dateTime": "2026-08-25T14:00:00+02:00", "timeZone": "Europe/Berlin"},
+            "end": {"dateTime": "2026-08-25T14:30:00+02:00", "timeZone": "Europe/Berlin"},
+        }
         result = await google__create_event(
             factory,
             summary="Zahnreinigung",
             start="2026-08-25T14:00:00+02:00",
             end="2026-08-25T14:30:00+02:00",
+            timezone="Europe/Berlin",
             idempotency_key="pincer-appointment-task-1",
         )
         assert "already exists" in result
         assert "old-ev" in result
-        svc.events.return_value.insert.assert_not_called()
+        assert svc.events.return_value.insert.call_count == 1
+        svc.events.return_value.list.assert_not_called()
 
     async def test_new_event_carries_key_and_send_updates(self):
         from pincer.integrations.google.tools_calendar import google__create_event
