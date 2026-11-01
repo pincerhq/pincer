@@ -14,7 +14,6 @@ import pytest
 from googleapiclient.errors import HttpError
 
 from integrations.google.fake_calendar import FakeCalendarService
-from pincer.integrations.google.calendar_writer import client_event_id
 
 WORK_CAL = "work@group.calendar.google.com"
 DENTIST = {"summary": "Dentist", "start": "2026-11-12T15:00:00", "end": "2026-11-12T16:00:00"}
@@ -103,6 +102,8 @@ async def test_same_instant_written_differently_is_the_same_event(fake_registry,
 
 
 async def test_generated_event_ids_are_base32hex_within_googles_length_limits(fake_registry, fake):
+    from pincer.integrations.google.calendar_writer import client_event_id
+
     await fake_registry.execute("google__create_event", dict(DENTIST), context=_turn("turn-a"))
     [event] = fake.events_on("primary")
     direct = client_event_id("seed", "primary", {"summary": "x", "start": {"date": "2026-11-12"}})
