@@ -152,3 +152,87 @@ async def test_not_found_on_the_first_attempt_is_still_an_error(fake_registry, f
         await fake_registry.execute(tool, dict(arguments), context=_turn("turn-a"))
 
     assert raised.value.status_code == 404
+
+
+# ── Review fixes CR1, CR2, minors 4 and 8 ────────────────────────────────────
+
+
+async def _create(fake_registry, turn: str, call: str, **overrides) -> str:
+    return await fake_registry.execute("google__create_event", {**DENTIST, **overrides}, context=_turn(turn, call))
+
+
+async def test_recreate_after_delete_survives_a_lost_insert_response(fake_registry, fake):
+    """create X → delete X → create again (→ Y) whose response is lost after commit."""
+    await _create(fake_registry, "turn-a", "c1")
+    [first] = fake.events_on("primary")
+    await fake_registry.execute("google__delete_event", {"event_id": first["id"]}, context=_turn("turn-a", "c2"))
+    # X's insert is a 409 (raised before any commit), so this fault lands on Y's insert.
+    fake.fail_next("events.insert", "after-commit")
+
+    result = await _create(fake_registry, "turn-a", "c3")
+
+    [live] = fake.events_on("primary")
+    assert live["id"] != first["id"]
+    assert fake.faults["events.insert"] == []  # the fault was consumed by Y's insert
+    assert result.startswith("Event created: 'Dentist'")
+    assert f"ID: {live['id']}" in result.splitlines()
+
+
+async def test_identical_call_after_a_recreate_finds_the_live_event(fake_registry, fake):
+    await _create(fake_registry, "turn-a", "c1")
+    [first] = fake.events_on("primary")
+    await fake_registry.execute("google__delete_event", {"event_id": first["id"]}, context=_turn("turn-a", "c2"))
+    await _create(fake_registry, "turn-a", "c3")
+    [live] = fake.events_on("primary")
+
+    again = await _create(fake_registry, "turn-a", "c4")
+
+    assert len(fake.events_on("primary")) == 1
+    assert again.startswith("Event already created: 'Dentist'")
+    assert f"ID: {live['id']}" in again.splitlines()
+
+
+async def test_a_reserved_but_purged_id_does_not_block_a_keyed_booking(fake_registry, fake):
+    """Google keeps a purged event's ID reserved (409) but no longer serves it (GET 404)."""
+    keyed = {"idempotency_key": "pincer-appointment-task-9"}
+    await _create(fake_registry, "turn-a", "c1", **keyed)
+    [first] = fake.events_on("primary")
+    fake.purge("primary", first["id"])
+
+    result = await _create(fake_registry, "turn-b", "c2", **keyed)
+
+    [live] = fake.events_on("primary")
+    assert live["id"] != first["id"]
+    assert result.startswith("Event created: 'Dentist'")
+
+
+async def test_ids_exhausted_by_deleted_events_give_a_clear_error(fake_registry, fake):
+    for call in ("c1", "c3", "c5"):
+        await _create(fake_registry, "turn-a", call)
+        [event] = fake.events_on("primary")
+        await fake_registry.execute(
+            "google__delete_event", {"event_id": event["id"]}, context=_turn("turn-a", call + "d")
+        )
+
+    with pytest.raises(RuntimeError, match="Google keeps their IDs reserved"):
+        await _create(fake_registry, "turn-a", "c7")
+
+    assert fake.events_on("primary") == []
+
+
+async def test_title_whitespace_does_not_defeat_dedup(fake_registry, fake):
+    await _create(fake_registry, "turn-a", "c1", summary="Dentist ")
+    again = await _create(fake_registry, "turn-a", "c2", summary="  Dentist")
+
+    assert len(fake.events_on("primary")) == 1
+    assert again.startswith("Event already created:")
+
+
+async def test_retried_delete_verification_survives_a_transient_get_failure(fake_registry, fake):
+    event_id = fake.seed_event("primary", "Dentist", "2026-11-12T15:00:00+02:00", "2026-11-12T16:00:00+02:00")
+    fake.fail_next("events.delete", "after-commit")
+    fake.fail_next("events.get", "before-commit")
+
+    result = await fake_registry.execute("google__delete_event", {"event_id": event_id}, context=_turn("turn-a"))
+
+    assert result == f"Event {event_id} deleted."

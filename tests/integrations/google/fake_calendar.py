@@ -27,9 +27,11 @@ tools depend on:
   an ID already used on the calendar — even by a deleted event — is a 409.
 - Delete leaves a ``cancelled`` tombstone, like Google: get still returns it,
   list/free-busy skip it, a second delete is a 410.
+- ``purge(calendar, id)`` drops a deleted event entirely while Google keeps its
+  ID reserved: insert with that ID is still a 409, but get is a 404.
 - ``fail_next(method, "before-commit" | "after-commit")`` makes the next call of
-  ``events.insert`` / ``events.delete`` / ``events.move`` raise a 503 — before
-  changing anything, or after the change was made (a lost response).
+  ``events.insert`` / ``events.delete`` / ``events.move`` / ``events.get`` raise
+  a 503 — before changing anything, or after the change was made (a lost response).
 
 Errors are real ``googleapiclient.errors.HttpError`` instances so the tools'
 retry and error paths behave as they would against Google.
@@ -138,6 +140,7 @@ class _Events:
     def get(self, calendarId: str, eventId: str) -> _Request:  # noqa: N803
         def _run() -> dict[str, Any]:
             self._fake.calls.append(("events.get", {"calendarId": calendarId, "eventId": eventId}))
+            self._fake.fault("events.get", "before-commit")
             return copy.deepcopy(self._fake.event(calendarId, eventId))
 
         return _Request(_run)
@@ -154,7 +157,7 @@ class _Events:
                 # Only a client-supplied ID is checked; Google mints its own otherwise.
                 raise http_error(400, "Invalid resource id value.")
             event_id = client_id or f"evt{next(self._fake._ids)}"
-            if event_id in cal["events"]:
+            if event_id in cal["events"] or event_id in cal["purged"]:
                 raise http_error(409, "The requested identifier already exists.")
             event = self._fake.store(cal, {**copy.deepcopy(body), "id": event_id})
             cal["events"][event_id] = event
@@ -277,7 +280,7 @@ class FakeCalendarService:
 
     # ── Test helpers ─────────────────────────────────────────────────────
     def add_calendar(self, calendar_id: str, time_zone: str) -> None:
-        self.calendar_data[calendar_id] = {"timeZone": time_zone, "events": {}}
+        self.calendar_data[calendar_id] = {"timeZone": time_zone, "events": {}, "purged": set()}
 
     def calendar(self, calendar_id: str) -> dict[str, Any]:
         cal = self.calendar_data.get(calendar_id)
@@ -326,6 +329,12 @@ class FakeCalendarService:
     def events_on(self, calendar_id: str) -> list[dict[str, Any]]:
         """Live (not cancelled) events on the calendar."""
         return [e for e in self.calendar(calendar_id)["events"].values() if e.get("status") != "cancelled"]
+
+    def purge(self, calendar_id: str, event_id: str) -> None:
+        """Forget an event but keep its ID reserved (409 on insert, 404 on get)."""
+        cal = self.calendar(calendar_id)
+        cal["events"].pop(event_id, None)
+        cal["purged"].add(event_id)
 
     def fail_next(self, method: str, phase: str) -> None:
         """The next ``method`` call raises a 503 ``before-commit`` or ``after-commit``."""

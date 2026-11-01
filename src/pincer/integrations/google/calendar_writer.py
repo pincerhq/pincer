@@ -8,7 +8,13 @@ and a retried write never duplicates or falsely fails.
   refuses a second insert with the same ID (409), so the retry wrapper resending
   an insert whose first response was lost, or the model re-calling create in the
   same turn, finds the existing event instead of making another — atomically on
-  Google's side, unlike a check-then-insert lookup.
+  Google's side, unlike a check-then-insert lookup. Dedup covers EXACT re-calls
+  only: same seed, same calendar id as written ("primary" is not resolved to an
+  address), same title (whitespace-normalised), same start/end instants.
+- An ID whose event was deleted stays reserved by Google (409 again), and a
+  purged one may no longer even be served (the GET after the 409 is 404/410).
+  Both mean "not live": the next deterministic ID is tried, a bounded number of
+  times, each through the same 409 → GET handling.
 - The insert/update response *is* Google's stored copy, so tools report its
   times rather than the requested values; no read-back GET is needed. A
   response without an ``id`` proves nothing: it raises, the agent marks the
@@ -21,7 +27,6 @@ and a retried write never duplicates or falsely fails.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import hashlib
 import logging
@@ -40,6 +45,12 @@ NOT_CONFIRMED_MESSAGE = (
 #: Google's "already exists" (insert) and "not found"/"gone" statuses.
 _CONFLICT = 409
 _GONE = (404, 410)
+#: How many deterministic IDs a create tries when earlier ones belong to deleted events.
+MAX_ID_GENERATIONS = 3
+ALL_IDS_TAKEN_MESSAGE = (
+    "Could not create the event: earlier events with exactly these details were deleted, and Google keeps "
+    "their IDs reserved. Change a detail (for example the title) and try again."
+)
 
 
 class CalendarWriteNotConfirmedError(RuntimeError):
@@ -60,6 +71,15 @@ class Trace:
     def from_context(cls, context: dict[str, Any] | None) -> Trace:
         ctx = context or {}
         return cls(turn_id=str(ctx.get("turn_id") or ""), call_id=str(ctx.get("tool_call_id") or ""))
+
+
+class _AttemptError(Exception):
+    """A call under the retry wrapper failed; carries how many attempts were made."""
+
+    def __init__(self, error: Exception, attempts: int) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.attempts = attempts
 
 
 @dataclass(frozen=True)
@@ -100,7 +120,7 @@ def client_event_id(seed: str, calendar_id: str, body: dict[str, Any]) -> str:
     parts = [
         seed,
         calendar_id,
-        str(body.get("summary") or ""),
+        " ".join(str(body.get("summary") or "").split()),
         _instant_key(body.get("start") or {}),
         _instant_key(body.get("end") or {}),
     ]
@@ -114,7 +134,7 @@ def _confirmed(saved: Any) -> dict[str, Any]:
     return saved
 
 
-def _log_write(
+def log_write(
     op: str, trace: Trace, calendar_id: str, event: dict[str, Any] | None, *, event_id: str = "", existed: bool = False
 ) -> None:
     ev = event or {}
@@ -148,35 +168,54 @@ async def create(
     trace: Trace | None = None,
     **insert_kwargs: Any,
 ) -> CreateResult:
-    """Insert ``body`` under its client-supplied ID; an existing event with that ID is returned instead."""
+    """Insert ``body`` under its client-supplied ID; a live event with that ID is returned instead.
+
+    ``existed`` is True when a 409 arrived on the FIRST attempt (an earlier call
+    made the event — same turn or same key). A 409 on the wrapper's own retry
+    means this call's first attempt committed and only its response was lost,
+    so it counts as created now. (Wording edge: if a layer below the wrapper
+    retried invisibly, a first-attempt 409 can be this call's own write; it is
+    then reported as "already created", which is still one event, correctly.)
+    """
     trace = trace or Trace()
     event_id = client_event_id(seed, calendar_id, body)
+    for _generation in range(MAX_ID_GENERATIONS):
+        outcome = await _insert_or_fetch(svc, calendar_id, body, event_id, insert_kwargs)
+        if outcome is not None:
+            saved, existed = outcome
+            break
+        # That ID belongs to a deleted (or purged) event: derive the next one.
+        event_id = client_event_id(f"{seed}\x1fafter-cancelled:{event_id}", calendar_id, body)
+    else:
+        raise RuntimeError(ALL_IDS_TAKEN_MESSAGE)
+    result = CreateResult(event=_confirmed(saved), existed=existed)
+    log_write("create", trace, calendar_id, result.event, existed=existed)
+    return result
+
+
+async def _insert_or_fetch(
+    svc: Any, calendar_id: str, body: dict[str, Any], event_id: str, insert_kwargs: dict[str, Any]
+) -> tuple[Any, bool] | None:
+    """Insert under ``event_id``: (saved, existed), or None when the ID is taken by a non-live event."""
     payload = {**body, "id": event_id}
-    existed = False
     try:
         saved, _attempts = await _attempted(
             lambda: svc.events().insert(calendarId=calendar_id, body=payload, **insert_kwargs).execute()
         )
+        return saved, False
+    except _AttemptError as failed:
+        if _status(failed.error) != _CONFLICT:
+            raise failed.error from None
+        conflict_on_first_attempt = failed.attempts < 2
+    try:
+        existing = await _get(svc, calendar_id, event_id)
     except Exception as exc:
-        if _status(exc) != _CONFLICT:
-            raise
-        saved = await _get(svc, calendar_id, event_id)
-        # A 409 on the wrapper's own retry means our first attempt committed and
-        # only its response was lost: this call created it. On the first attempt
-        # it means an earlier call (same turn or same key) already did.
-        existed = getattr(exc, "pincer_attempts", 1) < 2
-        if saved.get("status") == "cancelled":
-            # Same details as an event deleted earlier: Google keeps that ID
-            # reserved, so this one gets its own (still deterministic) ID.
-            retry_id = client_event_id(f"{seed}\x1fafter-cancelled:{event_id}", calendar_id, body)
-            payload = {**body, "id": retry_id}
-            saved = await with_backoff(
-                lambda: svc.events().insert(calendarId=calendar_id, body=payload, **insert_kwargs).execute()
-            )
-            existed = False
-    result = CreateResult(event=_confirmed(saved), existed=existed)
-    _log_write("create", trace, calendar_id, result.event, existed=existed)
-    return result
+        if _status(exc) in _GONE:
+            return None  # reserved but no longer served: treat like a deleted event
+        raise
+    if existing.get("status") == "cancelled":
+        return None
+    return existing, conflict_on_first_attempt
 
 
 async def update(
@@ -187,14 +226,14 @@ async def update(
         lambda: svc.events().update(calendarId=calendar_id, eventId=event_id, body=body).execute()
     )
     confirmed = _confirmed(saved)
-    _log_write("update", trace or Trace(), calendar_id, confirmed)
+    log_write("update", trace or Trace(), calendar_id, confirmed)
     return confirmed
 
 
 async def _attempted(fn: Any) -> tuple[Any, int]:
     """Run ``fn`` under the retry wrapper; return its result and how many attempts were made.
 
-    On failure the exception carries the attempt count as ``pincer_attempts``.
+    A failure is raised as ``_AttemptError`` carrying the original error and the count.
     """
     attempts = 0
 
@@ -206,27 +245,36 @@ async def _attempted(fn: Any) -> tuple[Any, int]:
     try:
         return await with_backoff(_counted), attempts
     except Exception as exc:
-        exc.pincer_attempts = attempts  # type: ignore[attr-defined]
-        raise
+        raise _AttemptError(exc, attempts) from exc
+
+
+async def _recovered_after_retry(failed: _AttemptError, committed: Any) -> Any:
+    """For delete/move: a 404/410 on a RETRY (never the first attempt) may mean the
+    first attempt committed and only its response was lost. ``committed()`` checks
+    the real state and returns a truthy result if so; otherwise the error stands."""
+    if _status(failed.error) not in _GONE or failed.attempts < 2:
+        raise failed.error from None
+    result = await committed()
+    if not result:
+        raise failed.error from None
+    logger.info("A retried calendar write got %s, but the change is in place: success", _status(failed.error))
+    return result
 
 
 async def delete(svc: Any, calendar_id: str, event_id: str, *, trace: Trace | None = None) -> None:
     """Delete an event. A 404/410 on a retry is checked against the event's real state:
     gone or ``cancelled`` means the lost first attempt committed."""
+    recovered = False
     try:
         await _attempted(lambda: svc.events().delete(calendarId=calendar_id, eventId=event_id).execute())
-    except Exception as exc:
-        if _status(exc) not in _GONE or getattr(exc, "pincer_attempts", 1) < 2:
-            raise
-        if not await _is_gone(svc, calendar_id, event_id):
-            raise
-        logger.info("Delete of %s returned %s on a retry; the event is gone, so it succeeded", event_id, _status(exc))
-    _log_write("delete", trace or Trace(), calendar_id, None, event_id=event_id)
+    except _AttemptError as failed:
+        recovered = await _recovered_after_retry(failed, lambda: _is_gone(svc, calendar_id, event_id))
+    log_write("delete", trace or Trace(), calendar_id, None, event_id=event_id, existed=recovered)
 
 
 async def _is_gone(svc: Any, calendar_id: str, event_id: str) -> bool:
     try:
-        event = await asyncio.to_thread(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
+        event = await _get(svc, calendar_id, event_id)
     except Exception as exc:
         if _status(exc) in _GONE:
             return True
@@ -234,28 +282,29 @@ async def _is_gone(svc: Any, calendar_id: str, event_id: str) -> bool:
     return isinstance(event, dict) and event.get("status") == "cancelled"
 
 
+async def _live_on(svc: Any, calendar_id: str, event_id: str) -> dict[str, Any] | None:
+    try:
+        event = await _get(svc, calendar_id, event_id)
+    except Exception as exc:
+        if _status(exc) in _GONE:
+            return None
+        raise
+    return event if isinstance(event, dict) and event.get("status") != "cancelled" else None
+
+
 async def move(
     svc: Any, calendar_id: str, event_id: str, destination: str, *, trace: Trace | None = None
 ) -> dict[str, Any]:
     """Move an event to ``destination``. A 404/410 on a retry is checked against the
     destination: the event being there means the lost first attempt committed."""
+    recovered = False
     try:
         moved, _attempts = await _attempted(
             lambda: svc.events().move(calendarId=calendar_id, eventId=event_id, destination=destination).execute()
         )
-    except Exception as exc:
-        if _status(exc) not in _GONE or getattr(exc, "pincer_attempts", 1) < 2:
-            raise
-        try:
-            moved = await asyncio.to_thread(
-                lambda: svc.events().get(calendarId=destination, eventId=event_id).execute()
-            )
-        except Exception:
-            raise exc from None
-        if not isinstance(moved, dict) or moved.get("status") == "cancelled":
-            raise
-        logger.info(
-            "Move of %s returned %s on a retry; it is on %s, so it succeeded", event_id, _status(exc), destination
-        )
-    _log_write("move", trace or Trace(), destination, moved if isinstance(moved, dict) else None, event_id=event_id)
-    return moved if isinstance(moved, dict) else {}
+    except _AttemptError as failed:
+        moved = await _recovered_after_retry(failed, lambda: _live_on(svc, destination, event_id))
+        recovered = True
+    event = moved if isinstance(moved, dict) else None
+    log_write("move", trace or Trace(), destination, event, event_id=event_id, existed=recovered)
+    return event or {}
