@@ -38,6 +38,13 @@ CALENDAR_ZONE_LABEL = "this calendar's timezone"
 EVENT_ZONE_LABEL = "the event's timezone"
 CONFIGURED_ZONE_LABEL = "the configured timezone"
 
+# Last line of every read result that shows events: without an ID in hand the
+# model "changed" events by creating a second one ("Meeting (updated)").
+EDIT_HINT = (
+    "To change one of these events (rename, reschedule, new time or details), call google__update_event "
+    "with its ID; never create a new event for a change."
+)
+
 
 def _instant(field: dict[str, Any]) -> datetime | None:
     raw = field.get("dateTime")

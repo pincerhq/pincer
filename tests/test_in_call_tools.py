@@ -638,7 +638,7 @@ async def test_call_context_tool_schemas_exact_at_agent_level(settings, session_
         "email_send",
         "send_owner_message",
         "memory_note",
-        "calendar_today",
+        "google__search_events",
         "make_phone_call",
     ):
         tool_registry.register(name, "d", noop, {"type": "object", "properties": {}})
@@ -668,7 +668,7 @@ async def test_call_context_tool_schemas_exact_at_agent_level(settings, session_
     async for _ in agent.stream_voice_turn(user_id="u", channel="voice", text="hi"):
         pass
     names = {t["name"] for t in provider.tools}
-    assert "calendar_today" in names and "shell_exec" not in names
+    assert "google__search_events" in names and "shell_exec" not in names
 
 
 def test_time_context_gives_local_clock_and_timezone():

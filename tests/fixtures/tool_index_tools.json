@@ -86,5 +86,21 @@
   {
     "name": "google__create_contact",
     "description": "Create a new Google Contact."
+  },
+  {
+    "name": "google__list_events",
+    "description": "List calendar events in a date range (default: next 7 days). Times without a UTC offset are read in the calendar's timezone."
+  },
+  {
+    "name": "google__search_events",
+    "description": "Search calendar events by text (title, description, location), optionally within a date range. Times without a UTC offset are read in the calendar's timezone."
+  },
+  {
+    "name": "google__create_event",
+    "description": "Create a new Google Calendar event with optional attendees, location, and description. Only for a new event that does not exist yet: never use it to change, rename or reschedule an existing event — call google__update_event with the event's ID for that (find the ID with google__search_events or google__list_events). Set add_meet_link=True to auto-create a new Google Meet conference. Or set meet_link to the URI of an existing Meet space."
+  },
+  {
+    "name": "google__update_event",
+    "description": "Change an existing calendar event by its ID: rename it, reschedule it or change the time, or change details (description, location). Only provided fields are changed and the event keeps its ID. Use this — not google__create_event — for any change to an event; without the ID, find it first with google__search_events. Times without a UTC offset are read in the event's own timezone, else the calendar's timezone."
   }
 ]

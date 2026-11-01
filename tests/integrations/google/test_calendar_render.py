@@ -14,6 +14,7 @@ from datetime import timedelta
 import pytest
 
 from integrations.google.fake_calendar import FakeCalendarService
+from pincer.integrations.google.calendar_render import EDIT_HINT
 from pincer.integrations.google.tools_calendar import (
     google__create_event,
     google__get_event,
@@ -63,7 +64,8 @@ async def test_list_shows_local_times_zone_header_all_day_ids_and_note(fake_fact
         "  2026-11-12 → 2026-11-12 — Holiday | all day\n"
         "  ID: evt2\n"
         "  2026-11-12T10:00:00+02:00 → 2026-11-12T11:00:00+02:00 — Standup\n"
-        "  ID: evt1"
+        "  ID: evt1\n"
+        f"{EDIT_HINT}"
     )
 
 

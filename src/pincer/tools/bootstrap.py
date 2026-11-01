@@ -1,8 +1,8 @@
 """Shared tool-registration helper.
 
 Builds a ToolRegistry containing all *channel-independent* tools the agent
-can use: file IO, Python/shell exec, browser, email, calendar builtins,
-and the full Google Workspace / Microsoft 365 / Slack integrations when
+can use: file IO, Python/shell exec, browser, email, and the full Google
+Workspace (the only calendar toolset) / Microsoft 365 / Slack integrations when
 configured.
 
 Used by both `cli._run_agent` (for terminal/messaging-channel agents) and
@@ -171,8 +171,6 @@ def _register_builtins(tools: ToolRegistry, settings: Settings, report: dict[str
     if settings.email_imap_host and settings.email_username:
         _register_email_tools(tools, report)
 
-    _register_calendar_builtins(tools, report)
-
 
 def _register_email_tools(tools: ToolRegistry, report: dict[str, int]) -> None:
     from pincer.tools.builtin.email_tool import (
@@ -321,69 +319,6 @@ def _register_email_tools(tools: ToolRegistry, report: dict[str, int]) -> None:
     report["builtins"] += 9
 
 
-def _register_calendar_builtins(tools: ToolRegistry, report: dict[str, int]) -> None:
-    try:
-        from pincer.tools.builtin.calendar_tool import (
-            calendar_create,
-            calendar_today,
-            calendar_week,
-        )
-    except ImportError:
-        logger.debug("Google Calendar dependencies not installed, calendar builtins disabled")
-        return
-
-    tools.register(
-        name="calendar_today",
-        description=(
-            "Get today's calendar events. Use when user asks about their schedule, meetings, or agenda today."
-        ),
-        handler=calendar_today,
-        parameters={
-            "type": "object",
-            "properties": {
-                "calendar_id": {"type": "string", "default": "primary"},
-            },
-            "required": [],
-        },
-    )
-    tools.register(
-        name="calendar_week",
-        description="Get this week's calendar events. Use when user asks about their week or upcoming schedule.",
-        handler=calendar_week,
-        parameters={
-            "type": "object",
-            "properties": {
-                "calendar_id": {"type": "string", "default": "primary"},
-            },
-            "required": [],
-        },
-    )
-    tools.register(
-        name="calendar_create",
-        description=(
-            "Create a new Google Calendar event. Use when user asks to "
-            "schedule, add, or book a meeting or event. "
-            "On success, the tool returns the event's direct URL (htmlLink). "
-            "You MUST include this URL in your final response so the user can open the event."
-        ),
-        handler=calendar_create,
-        parameters={
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "start_time": {"type": "string"},
-                "duration_minutes": {"type": "integer", "default": 60},
-                "description": {"type": "string", "default": ""},
-                "location": {"type": "string", "default": ""},
-                "calendar_id": {"type": "string", "default": "primary"},
-            },
-            "required": ["title", "start_time"],
-        },
-        require_approval=True,
-    )
-    report["builtins"] += 3
-
-
 def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> None:
     try:
         from pincer.integrations.google import get_google_factory, register_all_tools
@@ -394,8 +329,8 @@ def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> N
         report["google"] = register_all_tools(tools, factory)
     except RuntimeError as e:
         logger.warning("Google Workspace tools disabled: %s", e)
-    except Exception:
-        logger.debug("Google Workspace tools not loaded", exc_info=True)
+    except Exception as e:
+        logger.warning("Google Workspace tools not loaded: %s", e, exc_info=True)
 
 
 def _register_slack(tools: ToolRegistry, report: dict[str, int]) -> None:

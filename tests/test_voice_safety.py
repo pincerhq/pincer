@@ -13,6 +13,24 @@ from pincer.voice.safety_gates import (
     parse_confirmation,
     requires_confirmation,
 )
+from pincer.voice.voice_tools import VOICE_ALLOWED_TOOLS, VOICE_DENYLIST_EXEMPT, is_denied_in_voice, is_voice_compatible
+
+CALENDAR_READS = (
+    "google__list_events",
+    "google__search_events",
+    "google__get_event",
+    "google__check_freebusy",
+    "google__list_calendars",
+)
+CALENDAR_ON_A_CALL = {
+    "google__list_events",
+    "google__search_events",
+    "google__get_event",
+    "google__check_freebusy",
+    "google__create_event",
+    "google__update_event",
+}
+BUILTIN_CALENDAR_TOOLS = {"calendar_today", "calendar_week", "calendar_create"}
 
 
 class TestParseConfirmation:
@@ -162,8 +180,9 @@ class TestClassifyAction:
     def test_calling(self):
         assert classify_action("make_phone_call", {}) == ActionCategory.CALLING
 
-    def test_scheduling(self):
-        assert classify_action("calendar_create", {}) == ActionCategory.SCHEDULING
+    @pytest.mark.parametrize("tool", ["google__create_event", "google__update_event"])
+    def test_scheduling(self, tool):
+        assert classify_action(tool, {}) == ActionCategory.SCHEDULING
 
     def test_messaging(self):
         assert classify_action("email_send", {}) == ActionCategory.MESSAGING
@@ -174,7 +193,7 @@ class TestClassifyAction:
 
 class TestConfirmationGate:
     def test_create_gate(self):
-        gate = create_gate("calendar_create", {"title": "Meeting"}, "book a meeting")
+        gate = create_gate("google__create_event", {"summary": "Meeting"}, "book a meeting")
         assert gate.category == ActionCategory.SCHEDULING
         assert "confirm" in gate.prompt.lower() or "book" in gate.prompt.lower()
         assert gate.status == ConfirmationStatus.PENDING
@@ -187,10 +206,30 @@ class TestConfirmationGate:
 class TestRequiresConfirmation:
     def test_read_tools_no_confirm(self):
         assert not requires_confirmation("file_read")
-        assert not requires_confirmation("calendar_today")
         assert not requires_confirmation("email_check")
 
+    @pytest.mark.parametrize("tool", CALENDAR_READS)
+    def test_calendar_reads_no_confirm(self, tool):
+        assert not requires_confirmation(tool)
+
+    @pytest.mark.parametrize("tool", ["google__create_event", "google__update_event", "google__delete_event"])
+    def test_calendar_writes_require_confirm(self, tool):
+        assert requires_confirmation(tool)
+
     def test_write_tools_require_confirm(self):
-        assert requires_confirmation("calendar_create")
         assert requires_confirmation("email_send")
         assert requires_confirmation("make_phone_call")
+
+
+class TestCalendarToolsOnACall:
+    def test_allowlist_names_the_workspace_calendar_tools(self):
+        assert CALENDAR_ON_A_CALL <= VOICE_ALLOWED_TOOLS
+        assert not BUILTIN_CALENDAR_TOOLS & (VOICE_ALLOWED_TOOLS | VOICE_DENYLIST_EXEMPT)
+
+    @pytest.mark.parametrize("tool", sorted(CALENDAR_ON_A_CALL))
+    def test_allowed_calendar_tools_are_voice_compatible(self, tool):
+        assert is_voice_compatible(tool)
+
+    def test_delete_event_stays_denied(self):
+        assert is_denied_in_voice("google__delete_event")
+        assert not is_voice_compatible("google__delete_event")

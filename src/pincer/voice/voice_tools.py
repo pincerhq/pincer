@@ -20,9 +20,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 VOICE_ALLOWED_TOOLS = {
-    "calendar_today",
-    "calendar_week",
-    "calendar_create",
+    "google__list_events",
+    "google__search_events",
+    "google__get_event",
+    "google__check_freebusy",
+    "google__create_event",
+    "google__update_event",
     "email_check",
     "email_read",
     "email_send",
@@ -119,11 +122,10 @@ VOICE_DENIED_KEYWORDS = (
 )
 
 # Exact names that survive the keyword scan but must still be reachable:
-# the curated call tools whose names collide with a denied substring.
+# the curated call tools whose names collide with a denied substring. No
+# Workspace calendar tool collides except google__delete_event, which must
+# stay denied on a call.
 VOICE_DENYLIST_EXEMPT = {
-    "calendar_today",
-    "calendar_week",
-    "calendar_create",
     "send_file",
 }
 

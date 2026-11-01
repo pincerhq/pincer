@@ -15,6 +15,7 @@ from pincer.integrations.google import calendar_writer
 from pincer.integrations.google.calendar_render import (
     CALENDAR_ZONE_LABEL,
     CONFIGURED_ZONE_LABEL,
+    EDIT_HINT,
     EVENT_ZONE_LABEL,
     event_instants,
     render_event_details,
@@ -161,7 +162,7 @@ async def google__list_events(
     span = first if first == last else f"{first} – {last}"
     if not events:
         return f"No events on {first}." if first == last else f"No events between {first} and {last}."
-    return render_events(
+    listed = render_events(
         events,
         zone,
         header=f"{len(events)} event(s) ({span})",
@@ -169,6 +170,7 @@ async def google__list_events(
         zone_label=label,
         more=bool(result.get("nextPageToken")),
     )
+    return f"{listed}\n{EDIT_HINT}"
 
 
 async def google__get_event(
@@ -181,7 +183,8 @@ async def google__get_event(
     svc = await factory.get("calendar")
     event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
     zone, label = await _labeled_zone(factory, svc, calendar_id, context)
-    return render_event_details(event, zone, clock_zone=_clock(context), zone_label=label)
+    details = render_event_details(event, zone, clock_zone=_clock(context), zone_label=label)
+    return f"{details}\n{EDIT_HINT}"
 
 
 async def google__search_events(
@@ -212,9 +215,10 @@ async def google__search_events(
     events = result.get("items", [])
     if not events:
         return f"No events found for: {query}"
-    return render_events(
+    found = render_events(
         events, zone, header=f"Found {len(events)} event(s)", clock_zone=_clock(context), zone_label=label
     )
+    return f"{found}\n{EDIT_HINT}"
 
 
 async def google__check_freebusy(
@@ -740,6 +744,9 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
         name="google__create_event",
         description=(
             "Create a new Google Calendar event with optional attendees, location, and description. "
+            "Only for a new event that does not exist yet: never use it to change, rename or reschedule "
+            "an existing event — call google__update_event with the event's ID for that (find the ID with "
+            "google__search_events or google__list_events). "
             "Set add_meet_link=True to auto-create a new Google Meet conference. "
             "Or set meet_link to the URI of an existing Meet space."
         ),
@@ -794,7 +801,10 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
     registry.register(
         name="google__update_event",
         description=(
-            "Update fields on an existing calendar event. Only provided fields are changed. "
+            "Change an existing calendar event by its ID: rename it, reschedule it or change the time, "
+            "or change details (description, location). Only provided fields are changed and the event "
+            "keeps its ID. Use this — not google__create_event — for any change to an event; without the ID, "
+            "find it first with google__search_events. "
             "Times without a UTC offset are read in the event's own timezone, else the calendar's timezone."
         ),
         handler=_h(google__update_event),

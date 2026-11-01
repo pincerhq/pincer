@@ -1,5 +1,6 @@
 """Tests for tool registry and built-in tools."""
 
+import logging
 import os
 from pathlib import Path
 
@@ -39,6 +40,21 @@ def test_shell_blocked_commands() -> None:
 def test_shell_safe_commands() -> None:
     assert is_blocked("ls -la") is None
     assert is_blocked("echo hello") is None
+
+
+def test_workspace_registration_failure_logs_a_warning(settings, monkeypatch, caplog) -> None:
+    """A broken Google integration is visible, not hidden at debug level."""
+
+    def _broken(*_args, **_kwargs):
+        raise ValueError("boom")
+
+    monkeypatch.setattr("pincer.integrations.google.get_google_factory", lambda: object())
+    monkeypatch.setattr("pincer.integrations.google.register_all_tools", _broken)
+    with caplog.at_level(logging.DEBUG, logger="pincer.tools.bootstrap"):
+        register_default_tools(ToolRegistry(), settings)
+    failures = [r for r in caplog.records if "Google Workspace tools" in r.getMessage()]
+    assert [r.levelno for r in failures] == [logging.WARNING]
+    assert "boom" in caplog.text
 
 
 class TestScheduleToolRegistration:

@@ -164,7 +164,7 @@ def _is_negated(text: str, match_start: int) -> bool:
 def classify_action(tool_name: str, arguments: dict) -> ActionCategory:
     """Classify a tool call into an action category for confirmation."""
     spending_tools = {"make_payment", "purchase", "order", "buy"}
-    scheduling_tools = {"calendar_create", "schedule", "book", "reschedule"}
+    scheduling_tools = {"google__create_event", "google__update_event", "schedule", "book", "reschedule"}
     messaging_tools = {"email_send", "send_message", "sms_send"}
     calling_tools = {"make_phone_call"}
     cancel_tools = {"cancel", "delete", "remove", "unsubscribe"}
@@ -233,8 +233,11 @@ def create_gate(tool_name: str, arguments: dict, description: str = "") -> Confi
 def requires_confirmation(tool_name: str) -> bool:
     """Check if a tool call requires verbal confirmation during a voice call."""
     no_confirm_tools = {
-        "calendar_today",
-        "calendar_week",
+        "google__list_events",
+        "google__search_events",
+        "google__get_event",
+        "google__check_freebusy",
+        "google__list_calendars",
         "email_check",
         "email_read",
         "email_search",

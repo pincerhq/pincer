@@ -1,10 +1,11 @@
 """Tool index ranking with the real multilingual model, across European languages.
 
-Indexes the real descriptions of 22 Pincer tools (tests/fixtures/tool_index_tools.json,
+Indexes the real descriptions of 26 Pincer tools (tests/fixtures/tool_index_tools.json,
 a snapshot of the registry's text) exactly as ToolSelector does, then checks
 that a request for each task, in each language, ranks a tool for that task in
-the top 5 of 22. Production fills ~110 slots from the ranking, so this is a much
-stricter bar than the selector needs. (Top 3 fails only for "draw a picture" in
+the top 5 of 26; edit requests (en/uk/de) must rank the Workspace update tool
+there. Production fills ~110 slots from the ranking, so this is a much stricter
+bar than the selector needs. (Top 3 fails only for "draw a picture" in
 uk/fr/it, where generate_image comes 4th behind send_image, send_file and
 google__upload_file — the first two are always sent anyway.)
 
@@ -40,7 +41,7 @@ TASKS: dict[str, set[str]] = {
     "call": {"make_phone_call"},
     "image": {"generate_image"},
     "email": {"email_send", "google__send_message"},
-    "calendar": {"calendar_create"},
+    "calendar": {"calendar_create", "google__create_event"},
     "drive": {"google__search_drive_files", "google__list_drive_files"},
 }
 
@@ -222,6 +223,19 @@ CASES = [
     for task, query in zip(TASKS, queries, strict=True)
 ]
 
+# Edits must reach the update tool, not a create (the "Meeting (updated)" duplicate).
+EDIT_TOOLS = {"google__update_event"}
+EDIT_REQUESTS: dict[str, tuple[str, str, str]] = {
+    "en": ("Rename the meeting", "Move my 10am", "Change the meeting time"),
+    "uk": ("Перейменуй зустріч", "Перенеси мою зустріч о 10", "Зміни час зустрічі"),
+    "de": ("Benenne das Meeting um", "Verschieb meinen 10-Uhr-Termin", "Ändere die Uhrzeit des Meetings"),
+}
+EDIT_CASES = [
+    pytest.param(lang, query, id=f"{lang}-edit-{n}")
+    for lang, queries in EDIT_REQUESTS.items()
+    for n, query in enumerate(queries, start=1)
+]
+
 
 @pytest.fixture(scope="module")
 def server(memory_server_module: ModuleType) -> Iterator[ModuleType]:
@@ -239,3 +253,10 @@ def test_request_ranks_a_matching_tool_in_top_5(server: ModuleType, lang: str, t
     results = server.tool_index_search(query, _TOP_K, "v1")["results"]
     ranked = [r["name"] for r in results]
     assert TASKS[task] & set(ranked), f"{lang} {task}: {query!r} ranked {ranked}"
+
+
+@pytest.mark.parametrize(("lang", "query"), EDIT_CASES)
+def test_edit_request_ranks_the_update_tool_in_top_5(server: ModuleType, lang: str, query: str) -> None:
+    results = server.tool_index_search(query, _TOP_K, "v1")["results"]
+    ranked = [r["name"] for r in results]
+    assert EDIT_TOOLS & set(ranked), f"{lang} edit: {query!r} ranked {ranked}"
