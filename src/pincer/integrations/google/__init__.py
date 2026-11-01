@@ -30,7 +30,7 @@ if TYPE_CHECKING:
     from pincer.tools.registry import ToolRegistry
 
 
-def _resolve_auth() -> tuple[GoogleAuth, list[str], list[str]] | None:
+def _resolve_auth(settings: Any = None) -> tuple[GoogleAuth, list[str], list[str]] | None:
     """Build a GoogleAuth limited to the services the cached token covers.
 
     Returns ``(auth, skipped_services, missing_scopes)``, or None when the
@@ -52,7 +52,7 @@ def _resolve_auth() -> tuple[GoogleAuth, list[str], list[str]] | None:
         logging.getLogger(__name__).warning("Ignoring unknown [integrations.google] services: %s", unknown)
     configured = [s for s in cfg.services if s in SERVICE_SCOPES]
 
-    location = locate_token(get_settings_relaxed())
+    location = locate_token(settings if settings is not None else get_settings_relaxed())
     if location is None:
         return None
 
@@ -64,13 +64,14 @@ def _resolve_auth() -> tuple[GoogleAuth, list[str], list[str]] | None:
     return auth, skipped, probe.missing_scopes()
 
 
-def google_status() -> dict[str, Any]:
-    """Summarise the integration state for the UI/API.
+def google_status(settings: Any = None) -> dict[str, Any]:
+    """Summarise the integration state for the UI/API (the token is looked up via ``settings``,
+    default: the process settings).
 
     ``status`` is ``active`` (every configured service enabled), ``partial``
     (the token lacks scopes for some services) or ``disabled``.
     """
-    resolved = _resolve_auth()
+    resolved = _resolve_auth(settings)
     if resolved is None:
         return {"status": "disabled", "enabled_services": [], "missing_scopes": [], "source": None}
     auth, skipped, missing = resolved

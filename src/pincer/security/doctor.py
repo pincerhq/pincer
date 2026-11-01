@@ -185,7 +185,7 @@ class SecurityDoctor:
         report.checks.append(self._check_tool_approval_mode(settings))
         report.checks.append(self._check_schedule_action_types(settings))
         # Google Workspace (1 check, issue #297)
-        report.checks.append(self._check_google_workspace())
+        report.checks.append(self._check_google_workspace(settings))
         # MCP (8 checks, Sprint 8)
         report.checks.append(self._check_mcp_config_valid())
         report.checks.append(self._check_mcp_sandbox_enabled())
@@ -2017,20 +2017,28 @@ class SecurityDoctor:
             category="voice",
         )
 
-    # ── Signal (Sprint 7.5) ───────────────────────────────
+    # ── Google Workspace (issue #297) ─────────────────────
 
-    def _check_google_workspace(self) -> CheckResult:
-        """Whether the Google token is usable — without it there are no calendar, Gmail or Drive tools."""
+    def _check_google_workspace(self, cfg: Settings | None = None) -> CheckResult:
+        """Whether a Google token is present with scopes — without it there are no calendar, Gmail or
+        Drive tools. Read from the token file or env only: a revoked token still passes here."""
         from pincer.integrations import google
         from pincer.integrations.google.config import load_config
 
+        settings = self._cfg(cfg)
         name, setup = "google_workspace_token", "Run `pincer google setup`"
         if not load_config().enabled:
             return CheckResult(name, CheckStatus.SKIPPED, "Google integration disabled in config", category="google")
-        state = google.google_status()
+        state = google.google_status(settings)
         if state["status"] == "active":
             services = ", ".join(state["enabled_services"])
-            return CheckResult(name, CheckStatus.PASS, f"Google token covers: {services}", category="google")
+            return CheckResult(
+                name,
+                CheckStatus.PASS,
+                f"Google token found with scopes for: {services} (not checked against Google; "
+                "a revoked token still shows here)",
+                category="google",
+            )
         if state["status"] == "partial":
             return CheckResult(
                 name,
@@ -2046,6 +2054,8 @@ class SecurityDoctor:
             fix_hint=f"{setup} to connect",
             category="google",
         )
+
+    # ── Signal (Sprint 7.5) ───────────────────────────────
 
     def _check_signal_phone_set(self, cfg: Settings | None = None) -> CheckResult:
         cfg = self._cfg(cfg)

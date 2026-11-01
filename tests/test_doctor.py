@@ -1726,6 +1726,37 @@ def test_schedule_action_types_warns_when_only_disabled_unknown(tmp_path):
     assert "webhook_retry" in result.message
 
 
+def test_google_workspace_check_reads_the_token_of_the_settings_it_is_given(monkeypatch, tmp_path):
+    """The check follows the doctor's cfg pattern: the cfg's oauth dir decides, not the process settings."""
+    from pydantic import SecretStr
+
+    from pincer.integrations.google.config import GoogleIntegrationConfig
+
+    monkeypatch.setattr(
+        "pincer.integrations.google.config.load_config",
+        lambda: GoogleIntegrationConfig(enabled=True, services=["calendar"]),
+    )
+
+    def _cfg(oauth_dir):
+        return SimpleNamespace(
+            google_token_json=SecretStr(""), google_credentials_json=SecretStr(""), google_oauth_dir=lambda: oauth_dir
+        )
+
+    with_token, without = tmp_path / "with", tmp_path / "without"
+    with_token.mkdir()
+    without.mkdir()
+    (with_token / "google_workspace_token.json").write_text("{}")
+
+    found = SecurityDoctor()._check_google_workspace(_cfg(with_token))
+    missing = SecurityDoctor()._check_google_workspace(_cfg(without))
+
+    assert (found.status, missing.status) == (CheckStatus.PASS, CheckStatus.SKIPPED)
+    # Present, not proven valid: a revoked token passes this check too.
+    assert "covers" not in found.message
+    assert found.message.startswith("Google token found with scopes for: calendar")
+    assert "not checked against Google" in found.message
+
+
 @pytest.mark.parametrize(
     ("enabled", "status", "expected", "hint"),
     [
@@ -1762,7 +1793,7 @@ def test_google_workspace_check(monkeypatch, enabled, status, expected, hint):
     monkeypatch.setattr(
         "pincer.integrations.google.config.load_config", lambda: GoogleIntegrationConfig(enabled=enabled)
     )
-    monkeypatch.setattr("pincer.integrations.google.google_status", lambda: status)
+    monkeypatch.setattr("pincer.integrations.google.google_status", lambda settings=None: status)
     result = SecurityDoctor()._check_google_workspace()
     assert result.status == expected
     assert result.category == "google"
