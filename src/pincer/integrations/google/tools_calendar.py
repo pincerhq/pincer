@@ -75,7 +75,7 @@ def _user_timezone(context: dict[str, Any] | None) -> str:
 async def _calendar_zone(
     factory: GoogleServiceFactory, svc: Any, calendar_id: str, context: dict[str, Any] | None
 ) -> ZoneInfo:
-    zone, _label = await _labeled_zone(factory, svc, calendar_id, context)
+    zone, _label = await _labeled_zone(factory, svc, calendar_id, _user_timezone(context))
     return zone
 
 
@@ -111,10 +111,10 @@ def _clock(context: dict[str, Any] | None) -> ZoneInfo:
 
 
 async def _labeled_zone(
-    factory: GoogleServiceFactory, svc: Any, calendar_id: str, context: dict[str, Any] | None
+    factory: GoogleServiceFactory, svc: Any, calendar_id: str, user_timezone: str
 ) -> tuple[ZoneInfo, str]:
     """The resolved zone plus what it is — the calendar's own, or the configured fallback."""
-    zone, source = await resolver_for(factory).resolve(svc, calendar_id, _user_timezone(context))
+    zone, source = await resolver_for(factory).resolve(svc, calendar_id, user_timezone)
     return zone, CALENDAR_ZONE_LABEL if source == SOURCE_CALENDAR else CONFIGURED_ZONE_LABEL
 
 
@@ -158,7 +158,7 @@ async def fetch_events(
     calendar's zone; a bare date alone is that whole local day).
     """
     svc = await factory.get("calendar")
-    zone, label = await _labeled_zone(factory, svc, calendar_id, {"timezone": user_timezone})
+    zone, label = await _labeled_zone(factory, svc, calendar_id, user_timezone)
     t_min, t_max = _range(time_min, time_max, zone, defaults=True)
     result = await with_backoff(
         lambda: (
@@ -192,7 +192,7 @@ async def calendar_today(
 ) -> date:
     """Today's date in the calendar's own zone (not the deployment clock's)."""
     svc = await factory.get("calendar")
-    zone, _label = await _labeled_zone(factory, svc, calendar_id, {"timezone": user_timezone})
+    zone, _label = await _labeled_zone(factory, svc, calendar_id, user_timezone)
     return (now or datetime.now(UTC)).astimezone(zone).date()
 
 
@@ -230,7 +230,7 @@ async def google__get_event(
     """Get full event details, times in the calendar's zone."""
     svc = await factory.get("calendar")
     event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
-    zone, label = await _labeled_zone(factory, svc, calendar_id, context)
+    zone, label = await _labeled_zone(factory, svc, calendar_id, _user_timezone(context))
     details = render_event_details(event, zone, clock_zone=_clock(context), zone_label=label)
     return f"{details}\n{EDIT_HINT}"
 
@@ -246,7 +246,7 @@ async def google__search_events(
 ) -> str:
     """Search calendar events by text query, optionally within a date range."""
     svc = await factory.get("calendar")
-    zone, label = await _labeled_zone(factory, svc, calendar_id, context)
+    zone, label = await _labeled_zone(factory, svc, calendar_id, _user_timezone(context))
     t_min, t_max = _range(time_min, time_max, zone, defaults=False)
     kw: dict[str, Any] = {
         "calendarId": calendar_id,
@@ -339,7 +339,7 @@ async def _confirmation_zone(
     given_zone = load_zone(given) if given.strip() else None
     if own is not None and given_zone is not None and own.key == given_zone.key:
         return own, EVENT_ZONE_LABEL
-    zone, label = await _labeled_zone(factory, svc, calendar_id, context)
+    zone, label = await _labeled_zone(factory, svc, calendar_id, _user_timezone(context))
     if own is not None and not zones_equivalent(own, zone, event_instants([saved])):
         return own, EVENT_ZONE_LABEL
     return zone, label

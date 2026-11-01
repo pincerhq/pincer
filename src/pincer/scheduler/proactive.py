@@ -22,7 +22,9 @@ import httpx
 
 from pincer.config import get_settings
 from pincer.db.engine import get_database_url
+from pincer.integrations.google.calendar_render import render_agenda
 from pincer.integrations.google.calendar_source import CalendarSource
+from pincer.integrations.google.tools_calendar import calendar_today, fetch_events
 from pincer.services.scheduler import BriefingConfigService
 
 if TYPE_CHECKING:
@@ -120,14 +122,11 @@ class ProactiveAgent:
         if factory is None:
             return "Calendar: Not connected\n"
         try:
-            from pincer.integrations.google.calendar_render import render_agenda
-            from pincer.integrations.google.tools_calendar import calendar_today, fetch_events
-
             day = await calendar_today(factory)
             page = await fetch_events(factory, time_min=day.isoformat(), time_max=day.isoformat())
             return render_agenda(page.events, page.zone, day) + "\n"
-        except Exception as e:
-            logger.error("Briefing calendar failed: %s", e)
+        except Exception:
+            logger.exception("Briefing calendar failed")
             return "Calendar: Unavailable\n"
 
     async def _email(self) -> str:

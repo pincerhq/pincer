@@ -22,9 +22,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pincer.integrations.google.service_factory import GoogleServiceFactory
 
-logger = logging.getLogger(__name__)
-
 CALENDAR_SERVICE = "calendar"
+
+logger = logging.getLogger(__name__)
 
 
 class CalendarSource:
