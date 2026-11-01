@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from pincer.db.engine import get_engine
-from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityProfile
+from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import ChatSession
 from pincer.services import onboarding as onboarding_module
@@ -17,6 +17,7 @@ _TABLES = [
     IdentityProfile.__table__,
     ChannelIdentity.__table__,
     IdentityCredential.__table__,
+    IdentityPhone.__table__,
     AuthSession.__table__,
     ChatSession.__table__,
     Onboarding.__table__,

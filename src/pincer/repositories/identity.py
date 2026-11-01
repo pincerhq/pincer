@@ -1,8 +1,9 @@
-"""Cross-channel identity: `identity_profiles`, `channel_identities` and
-`identity_credentials`.
+"""Cross-channel identity: `identity_profiles`, `channel_identities`,
+`identity_phones` and `identity_credentials`.
 
 One profile per Pincer user; one `channel_identities` row per (channel,
-channel user id) pair pointing at it; at most one credentials row per profile.
+channel user id) pair pointing at it; one `identity_phones` row per number;
+at most one credentials row per profile.
 """
 
 from __future__ import annotations
@@ -14,11 +15,11 @@ from sqlalchemy import delete, func, update
 from sqlmodel import col, select
 
 from pincer.db.dialect import dialect_of, upsert
-from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityProfile
+from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.repositories.base import BaseRepository
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
 
 
 class IdentityProfileRepository(BaseRepository[IdentityProfile, str]):
@@ -162,6 +163,77 @@ class ChannelIdentityRepository(BaseRepository[ChannelIdentity, tuple[str, str]]
         return await self.delete_where(
             col(ChannelIdentity.channel) == channel, col(ChannelIdentity.channel_user_id) == channel_user_id
         )
+
+
+class IdentityPhoneRepository(BaseRepository[IdentityPhone, str]):
+    model = IdentityPhone
+
+    async def owner_of_confirmed(self, phone: str) -> str | None:
+        """The identity whose confirmed number this is; None for an unknown or unconfirmed one."""
+        stmt = select(IdentityPhone.pincer_user_id).where(
+            col(IdentityPhone.phone) == phone, col(IdentityPhone.confirmed).is_(True)
+        )
+        return (await self.session.exec(stmt)).first()
+
+    async def phones_for(self, pincer_user_id: str) -> Sequence[tuple[str, bool]]:
+        """(phone, confirmed) of this identity, oldest first."""
+        stmt = (
+            select(IdentityPhone.phone, IdentityPhone.confirmed)
+            .where(col(IdentityPhone.pincer_user_id) == pincer_user_id)
+            .order_by(col(IdentityPhone.created_at), col(IdentityPhone.phone))
+        )
+        return [(phone, bool(confirmed)) for phone, confirmed in (await self.session.exec(stmt)).all()]
+
+    async def phones_for_many(self, pincer_user_ids: Sequence[str]) -> dict[str, list[tuple[str, bool]]]:
+        """`phones_for` of several identities in one query."""
+        if not pincer_user_ids:
+            return {}
+        stmt = (
+            select(IdentityPhone.pincer_user_id, IdentityPhone.phone, IdentityPhone.confirmed)
+            .where(col(IdentityPhone.pincer_user_id).in_(list(pincer_user_ids)))
+            .order_by(col(IdentityPhone.created_at), col(IdentityPhone.phone))
+        )
+        phones: dict[str, list[tuple[str, bool]]] = {}
+        for uid, phone, confirmed in (await self.session.exec(stmt)).all():
+            phones.setdefault(uid, []).append((phone, bool(confirmed)))
+        return phones
+
+    async def upsert(self, phone: str, pincer_user_id: str, *, confirmed: bool, source: str, now: str) -> None:
+        """Store the number for `pincer_user_id`; an existing row is taken over.
+
+        A number that was confirmed already keeps the time it was first confirmed.
+        """
+        values = {"pincer_user_id": pincer_user_id, "confirmed": confirmed, "source": source}
+        await self.session.exec(
+            upsert(
+                dialect_of(self.session),
+                IdentityPhone,
+                {"phone": phone, "confirmed_at": now if confirmed else None, **values},
+                index_elements=["phone"],
+                set_={
+                    **values,
+                    "confirmed_at": func.coalesce(col(IdentityPhone.confirmed_at), now) if confirmed else None,
+                },
+            )
+        )
+
+    async def reassign(self, old_id: str, new_id: str) -> int:
+        stmt = update(IdentityPhone).where(col(IdentityPhone.pincer_user_id) == old_id).values(pincer_user_id=new_id)
+        return int((await self.session.exec(stmt)).rowcount)
+
+    async def delete_config_phones_not_in(self, keep: Iterable[str]) -> int:
+        """Drop the config-sourced numbers the config no longer lists."""
+        conditions = [col(IdentityPhone.source) == "config"]
+        kept = list(keep)
+        if kept:
+            conditions.append(col(IdentityPhone.phone).notin_(kept))
+        return await self.delete_where(*conditions)
+
+    async def delete_orphaned(self) -> int:
+        """Drop numbers whose profile is gone (SQLite has no cascade)."""
+        owners = select(col(IdentityProfile.pincer_user_id))
+        stmt = delete(IdentityPhone).where(col(IdentityPhone.pincer_user_id).notin_(owners))
+        return int((await self.session.exec(stmt)).rowcount)
 
 
 def _has_credentials() -> Any:

@@ -477,35 +477,62 @@ tools. The allowlist is a tier table in `src/pincer/voice/tool_policy.py`
 | Tier | Tools | Behaviour |
 |------|-------|-----------|
 | **R** read-only | `google__list_events`, `google__check_freebusy`, `contact_lookup`, `memory_search` (outbound only), `business_profile_lookup` | Runs instantly in every mode, from any phase; a slow read gets a spoken filler first |
-| **W** reversible writes | `google__create_event`, `google__update_event`, `send_owner_message`, `memory_note` | Follows the approval mode below; counted against `PINCER_VOICE_MAX_WRITES_PER_CALL` |
-| **X** never on a call | `email_send`, `google__delete_event`, `make_phone_call`, `schedule_appointment_call`, `file_*`, `config_*`, `memory_dump`, `do_not_call_*`, **and every unlisted tool** | Not callable — its schema is never passed to the model. No override or extra can change this. |
+| **W** reversible writes | `google__create_event`, `google__update_event`, `send_owner_message`, `memory_note` | Approved per caller (below); counted against `PINCER_VOICE_MAX_WRITES_PER_CALL` |
+| **X** never on a call | `email_send`, `google__delete_event`, `make_phone_call`, `schedule_appointment_call`, `file_*`, `config_*`, `memory_dump`, `do_not_call_*`, **and every unlisted tool** | Not callable — its schema is never passed to the model. No setting can change this. |
 
-The LLM only sees the R+W tools inside the call's **purpose scope**:
-appointment calls (`schedule_appointment_call`) get the fixed scheduling set;
-generic calls (`make_phone_call`, inbound) get all reads plus the two
-owner-facing writes — calendar writes are *not* default there and must be
-added with `PINCER_VOICE_TOOLS_EXTRA=google__create_event`.
+#### Registered users and guests
 
-`PINCER_VOICE_TOOL_APPROVAL` sets the mode for Tier W:
+At call start Pincer looks up the other party's number — the caller on an
+inbound call, the callee on an outbound one — among the **confirmed phones**
+of the identities. Phones are confirmed by listing them in the identity
+config:
 
-| Mode | What the call partner hears | Who decides |
-|------|-----------------------------|-------------|
-| `verbal` (default) | "Just to confirm: I would now create the appointment … Is that right?" — the yes/no is parsed deterministically; a YES authorizes exactly those arguments (fingerprinted) and expires after two turns | The call partner, for *that exact* action |
-| `user` | "One moment please, I'm just checking that with my colleague." + a reassurance every 8 s | **You**, on your own channel — Telegram inline card `[✅ Erlauben] [❌ Ablehnen]` or `POST /api/voice/approvals/:id`. Denied → spoken decline; no answer within `PINCER_VOICE_APPROVAL_TIMEOUT_S` → "I'll sort that out afterwards" and a post-call follow-up; callee hangs up → card edited to "call ended", nothing runs |
-| `off` | Nothing — the write just happens (filler if slow) | Nobody, within the per-call write budget |
+```toml
+[identity.johndoe]
+phones = ["+4915112345678"]
+```
 
-!!! warning "`off` means autonomous writes while a stranger is on the phone"
-    With `PINCER_VOICE_TOOL_APPROVAL=off` the agent creates/updates calendar
-    events and sends you notes without anyone confirming. Three guards still
-    hold — the tier table (no deletes, no email, no calls-from-calls), the
-    per-call scope, and `PINCER_VOICE_MAX_WRITES_PER_CALL` (default 3) — and
-    the system prompt states that *the agent may never perform an action
-    solely because the call partner requested it*. Every autonomous action
-    is listed verbatim in the post-call report under **"Executed
-    autonomously during the call:"**, and `pincer doctor` warns
-    (`voice_autonomy_on`). Prefer a per-tool override
-    (`PINCER_VOICE_TOOL_APPROVAL_OVERRIDES=memory_note:off`) over the global
-    switch.
+| Caller | Tool scope on a generic call | Tier W approval |
+|--------|------------------------------|-----------------|
+| **Registered user** (confirmed phone) | Every Tier R/W tool | The standard tool approval policy (`PINCER_APPROVAL_POLICY`): a tool that needs approval is confirmed out loud, anything else runs directly. Under the default `critical` mode, calendar writes run at once; `send_owner_message` is confirmed. |
+| **Guest** (any other number, or a failed lookup) | All reads plus `send_owner_message` and `memory_note` — or, when `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` is set, exactly the R/W tools it lists (it replaces the default set, so list the reads guests need too) (`google__*` patterns allowed; Tier X never matches). Inbound guests never get `memory_search`. | Always out loud |
+
+Appointment calls (`schedule_appointment_call`) and the inbound receptionist
+keep their own fixed tool sets whoever is on the line. The receptionist's
+bookings follow `PINCER_RECEPTIONIST_BOOKING_APPROVAL`.
+
+An **inbound** call from a confirmed phone belongs to that identity: its call
+row, transcript, memory and threads. An outbound call stays with the user who
+placed it, even when the callee is registered. A registered user's write that
+ran without confirmation is listed in the post-call report under "Executed
+autonomously during the call:".
+
+!!! warning "Caller ID can be spoofed"
+    On an inbound call, a confirmed phone grants the full R/W scope to whoever
+    presents that number. Tier X, the per-call scope and the write budget still
+    hold. Only list numbers you are prepared to trust that far.
+
+**Spoken confirmation** ("Just to confirm: I would now create the
+appointment … Is that right?"): the yes/no is parsed deterministically; a
+YES authorizes exactly those arguments (fingerprinted) and expires after two
+turns. The model never asks for confirmation itself — it calls the tool and
+the gate asks when needed. A calendar create made on a call carries an
+idempotency key derived from the call and the action, so a repeated yes or a
+retried turn finds the event instead of booking it twice.
+
+**Owner approval (`user`)**, only for receptionist bookings with
+`PINCER_RECEPTIONIST_BOOKING_APPROVAL=user`: "One moment please, I'm just
+checking that with my colleague." + a reassurance every 8 s; **you** decide
+on your own channel — Telegram inline card `[✅ Erlauben] [❌ Ablehnen]` or
+`POST /api/voice/approvals/:id`. Denied → spoken decline; no answer within
+`PINCER_VOICE_APPROVAL_TIMEOUT_S` → "I'll sort that out afterwards" and a
+post-call follow-up; callee hangs up → card edited to "call ended", nothing
+runs.
+
+!!! note "Removed settings"
+    `PINCER_VOICE_TOOL_APPROVAL`, `PINCER_VOICE_TOOL_APPROVAL_OVERRIDES` and
+    `PINCER_VOICE_TOOLS_EXTRA` no longer exist (#299). `pincer doctor` warns
+    when one is still set.
 
 Tool results never reach the voice as raw data: `voice/tool_speech.py`
 renders each result into one speakable sentence per language ("Frei wäre:
@@ -853,12 +880,10 @@ The `phone_contacts` bundled skill provides tools for managing a contact directo
 | `PINCER_VOICE_OUTBOUND_ENABLED` | No | `false` | Enable outbound calls |
 | `PINCER_VOICE_OUTBOUND_MAX_DAILY` | No | `10` | Daily outbound limit |
 | `PINCER_VOICE_ALLOWED_CALLERS` | No | `*` | Caller allowlist |
-| `PINCER_VOICE_TOOL_APPROVAL` | No | `verbal` | Tier W approval mode on calls: `verbal` / `user` / `off` (Sprint 11) |
-| `PINCER_VOICE_TOOL_APPROVAL_OVERRIDES` | No | — | Per-tool modes, CSV `tool:mode` (Tier X tools cannot be configured) |
 | `PINCER_VOICE_TOOL_TIMEOUT_S` | No | `10` | Per-tool execution timeout on calls (3–60) |
-| `PINCER_VOICE_APPROVAL_TIMEOUT_S` | No | `25` | Max hold time for a `user` approval (10–120) |
+| `PINCER_VOICE_APPROVAL_TIMEOUT_S` | No | `25` | Max hold time for a `user` approval of a receptionist booking (10–120) |
 | `PINCER_VOICE_MAX_WRITES_PER_CALL` | No | `3` | Tier W write budget per call (0 = writes disabled) |
-| `PINCER_VOICE_TOOLS_EXTRA` | No | — | Extra R/W tools added to the call scope (never widens the allowlist) |
+| `PINCER_VOICE_GUESTS_TOOLS_ALLOWED` | No | — | Tools a guest may use on a generic call, CSV of names and patterns (`google__*`); replaces the default guest set. Tier R/W only. |
 | `PINCER_RECEPTIONIST_ENABLED` | No | `false` | Inbound AI receptionist (Sprint 12) |
 | `PINCER_BUSINESS_PROFILE` | No | `./business_profile.yaml` | Business profile, validated at startup |
 | `PINCER_RECEPTIONIST_BOOKING_APPROVAL` | No | `off` | `off` / `user` for inbound bookings |

@@ -26,6 +26,12 @@ if TYPE_CHECKING:
 #: The shared API tokens removed in favour of per-identity auth (issue #228).
 #: Named here only so `pincer doctor` can point out a leftover one.
 _REMOVED_TOKEN_VARS = ("PINCER_DASHBOARD_TOKEN", "PINCER_WEB_CHAT_TOKEN")
+# Replaced by PINCER_VOICE_GUESTS_TOOLS_ALLOWED and the standard approval policy (#299).
+_REMOVED_VOICE_TOOL_VARS = (
+    "PINCER_VOICE_TOOLS_EXTRA",
+    "PINCER_VOICE_TOOL_APPROVAL",
+    "PINCER_VOICE_TOOL_APPROVAL_OVERRIDES",
+)
 
 
 class CheckStatus(StrEnum):
@@ -165,10 +171,9 @@ class SecurityDoctor:
         report.checks.append(self._check_voice_ws_auth(settings))
         report.checks.append(self._check_voice_abuse_limits(settings))
         report.checks.append(self._check_voice_do_not_call_enforced())
-        # Voice in-call tool execution (3 checks, Sprint 11)
-        report.checks.append(self._check_voice_autonomy_on(settings))
+        # Voice in-call tool execution (2 checks, Sprint 11 / #299)
+        report.checks.append(self._check_voice_legacy_tool_vars())
         report.checks.append(self._check_voice_tier_x_reachable(settings))
-        report.checks.append(self._check_voice_override_unknown_tool(settings))
         # Inbound receptionist (2 checks, Sprint 12)
         report.checks.append(self._check_receptionist_profile(settings))
         report.checks.append(self._check_inbound_recording_consent(settings))
@@ -683,43 +688,24 @@ class SecurityDoctor:
 
     # ── In-call tool execution (Sprint 11) ────────────────
 
-    def _check_voice_autonomy_on(self, cfg: Settings | None = None) -> CheckResult:
-        """§10.1: WARN when Tier W writes run autonomously (mode `off`) on outbound calls."""
-        settings = self._cfg(cfg)
-        from pincer.voice.tool_policy import global_mode, tool_overrides
-
-        if not getattr(settings, "voice_outbound_enabled", False):
+    def _check_voice_legacy_tool_vars(self) -> CheckResult:
+        """The voice approval variables were removed; a leftover one silently does nothing."""
+        stale = self._removed_vars_set(_REMOVED_VOICE_TOOL_VARS)
+        if stale:
             return CheckResult(
-                name="voice_autonomy_on",
-                status=CheckStatus.SKIPPED,
-                message="Outbound calling disabled",
-                category="voice",
-            )
-        mode = global_mode(settings)
-        off_overrides = sorted(name for name, m in tool_overrides(settings).items() if m == "off")
-        if mode == "off":
-            return CheckResult(
-                name="voice_autonomy_on",
+                name="voice_legacy_tool_vars",
                 status=CheckStatus.WARNING,
-                message="Autonomous writes during calls are enabled — intended? "
-                "(PINCER_VOICE_TOOL_APPROVAL=off: Tier W tools run without any confirmation, "
-                f"budget {getattr(settings, 'voice_max_writes_per_call', 3)}/call)",
-                fix_hint="Use PINCER_VOICE_TOOL_APPROVAL=verbal (default) or user; "
-                "narrow autonomy to single tools with PINCER_VOICE_TOOL_APPROVAL_OVERRIDES=tool:off",
-                category="voice",
-            )
-        if off_overrides:
-            return CheckResult(
-                name="voice_autonomy_on",
-                status=CheckStatus.WARNING,
-                message="Autonomous writes during calls are enabled for: " + ", ".join(off_overrides) + " — intended?",
-                fix_hint="Remove the ':off' entries from PINCER_VOICE_TOOL_APPROVAL_OVERRIDES if not intended",
+                message=f"{', '.join(sorted(stale))} set but no longer used: guests confirm every write out loud, "
+                "callers with a confirmed identity phone follow PINCER_APPROVAL_POLICY",
+                fix_hint="Remove it. To change what guests may use on a call, set PINCER_VOICE_GUESTS_TOOLS_ALLOWED "
+                "(tool names or patterns such as google__*) — it REPLACES the default guest set, so list the reads "
+                "guests still need too",
                 category="voice",
             )
         return CheckResult(
-            name="voice_autonomy_on",
+            name="voice_legacy_tool_vars",
             status=CheckStatus.PASS,
-            message=f"In-call writes require {mode} approval",
+            message="No removed voice tool approval variables set",
             category="voice",
         )
 
@@ -728,30 +714,40 @@ class SecurityDoctor:
         kind and assert no Tier X tool is in it. FAIL (critical) if one is."""
         settings = self._cfg(cfg)
         from pincer.voice.tool_policy import (
+            CALLER_GUEST,
+            CALLER_USER,
             TIER_X,
             TIERS,
             allowed_tools_for_call,
             call_context_schemas,
             callable_tools,
-            ignored_extra_tools,
+            match_tool_patterns,
+            parse_csv,
+            unmatched_guest_tool_entries,
         )
 
-        # The probe registry: every known tool plus the configured extras and
-        # a few never-listed names (unknown must be denied, never admitted).
+        guest_list = str(getattr(settings, "voice_guests_tools_allowed", "") or "")
+        # The probe registry: every known tool, what the guest list expands to,
+        # its literal entries, and a few never-listed names (unknown must be
+        # denied, never admitted).
         probe_names = set(TIERS) | set(callable_tools()) | {"shell_exec", "python_exec", "unknown__tool"}
-        probe_names |= set(
-            n.strip() for n in str(getattr(settings, "voice_tools_extra", "") or "").split(",") if n.strip()
-        )
+        probe_names |= set(match_tool_patterns(guest_list)) | set(parse_csv(guest_list))
         schemas = [{"name": name} for name in sorted(probe_names)]
 
+        probes = [("receptionist", "inbound", CALLER_GUEST)]
+        probes += [("appointment", direction, CALLER_GUEST) for direction in ("outbound", "inbound")]
+        probes += [
+            ("generic", direction, caller)
+            for caller in (CALLER_USER, CALLER_GUEST)
+            for direction in ("outbound", "inbound")
+        ]
         leaks: list[str] = []
-        for kind in ("appointment", "generic"):
-            for direction in ("outbound", "inbound"):
-                allowed = allowed_tools_for_call(settings, kind=kind, direction=direction)
-                visible = {str(s["name"]) for s in call_context_schemas(schemas, allowed)}
-                for name in sorted(visible):
-                    if TIERS.get(name, TIER_X) == TIER_X:
-                        leaks.append(f"{name} ({kind}/{direction})")
+        for kind, direction, caller in probes:
+            allowed = allowed_tools_for_call(settings, kind=kind, direction=direction, caller_class=caller)
+            visible = {str(s["name"]) for s in call_context_schemas(schemas, allowed)}
+            for name in sorted(visible):
+                if TIERS.get(name, TIER_X) == TIER_X:
+                    leaks.append(f"{name} ({kind}/{direction}/{caller})")
         if leaks:
             return CheckResult(
                 name="voice_tier_x_reachable",
@@ -760,58 +756,21 @@ class SecurityDoctor:
                 fix_hint="pincer.voice.tool_policy must never admit a Tier X or unlisted tool — fix the code",
                 category="voice",
             )
-        ignored = ignored_extra_tools(str(getattr(settings, "voice_tools_extra", "") or ""))
-        if ignored:
+        unmatched = unmatched_guest_tool_entries(guest_list)
+        if unmatched:
             return CheckResult(
                 name="voice_tier_x_reachable",
                 status=CheckStatus.WARNING,
-                message="PINCER_VOICE_TOOLS_EXTRA names Tier X / unknown tools that are ignored: " + ", ".join(ignored),
-                fix_hint="Only Tier R/W tools can be added to the call scope; remove the others",
+                message="PINCER_VOICE_GUESTS_TOOLS_ALLOWED entries match no call tool and are ignored: "
+                + ", ".join(unmatched),
+                fix_hint="Only Tier R/W tools can be given to guests (see pincer.voice.tool_policy.TIERS); "
+                "Tier X and unlisted tools never are",
                 category="voice",
             )
         return CheckResult(
             name="voice_tier_x_reachable",
             status=CheckStatus.PASS,
             message="Call-context tool schemas contain no Tier X tool (all call kinds)",
-            category="voice",
-        )
-
-    def _check_voice_override_unknown_tool(self, cfg: Settings | None = None) -> CheckResult:
-        """§10.3 / §3.2: overrides naming tools outside the tier table are ignored at runtime."""
-        settings = self._cfg(cfg)
-        from pincer.voice.tool_policy import parse_overrides, unknown_override_tools
-
-        raw = str(getattr(settings, "voice_tool_approval_overrides", "") or "")
-        if not raw.strip():
-            return CheckResult(
-                name="voice_override_unknown_tool",
-                status=CheckStatus.PASS,
-                message="No per-tool approval overrides configured",
-                category="voice",
-            )
-        try:
-            parse_overrides(raw)
-        except Exception as e:
-            return CheckResult(
-                name="voice_override_unknown_tool",
-                status=CheckStatus.CRITICAL,
-                message=f"PINCER_VOICE_TOOL_APPROVAL_OVERRIDES is invalid: {e}",
-                fix_hint="Use tool_name:mode entries with mode in verbal|user|off",
-                category="voice",
-            )
-        unknown = unknown_override_tools(raw)
-        if unknown:
-            return CheckResult(
-                name="voice_override_unknown_tool",
-                status=CheckStatus.WARNING,
-                message="Override(s) reference tools not in the in-call tier table (ignored): " + ", ".join(unknown),
-                fix_hint="Check the spelling against pincer.voice.tool_policy.TIERS",
-                category="voice",
-            )
-        return CheckResult(
-            name="voice_override_unknown_tool",
-            status=CheckStatus.PASS,
-            message="All approval overrides reference known in-call tools",
             category="voice",
         )
 
@@ -1337,21 +1296,29 @@ class SecurityDoctor:
             category="access",
         )
 
+    def _removed_vars_set(self, names: tuple[str, ...]) -> set[str]:
+        """Which of `names` are set to a value, in the process environment or a project `.env`.
+
+        `Settings` ignores unknown variables, so a removed one is only found here.
+        """
+        from dotenv import dotenv_values
+
+        stale = {name for name in names if os.environ.get(name)}
+        for env_file in (self.config_dir / ".env", self.config_dir.parent / ".env"):
+            try:
+                if env_file.is_file():
+                    stale |= {name for name in names if dotenv_values(env_file).get(name)}
+            except OSError:
+                continue
+        return stale
+
     def _check_stale_shared_tokens(self) -> CheckResult:
         """The shared API tokens were removed; a leftover one protects nothing.
 
         `Settings` ignores unknown variables, so these are looked for where
         they would be set: the process environment and the project `.env`.
         """
-        from dotenv import dotenv_values
-
-        stale = {name for name in _REMOVED_TOKEN_VARS if os.environ.get(name)}
-        for env_file in (self.config_dir / ".env", self.config_dir.parent / ".env"):
-            try:
-                if env_file.is_file():
-                    stale |= {name for name in _REMOVED_TOKEN_VARS if dotenv_values(env_file).get(name)}
-            except OSError:
-                continue
+        stale = self._removed_vars_set(_REMOVED_TOKEN_VARS)
         if stale:
             return CheckResult(
                 "stale_shared_tokens",

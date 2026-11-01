@@ -228,6 +228,10 @@ timeout = 120
 # email             = "john.doe@domain.tld"
 # timezone          = "Europe/Berlin"
 # preferred_channel = "telegram"
+# # Own phone numbers (E.164). A voice call with one of them is John's call:
+# # all calendar tools, with the normal PINCER_APPROVAL_POLICY. Any other
+# # number is a guest (see PINCER_VOICE_GUESTS_TOOLS_ALLOWED).
+# phones            = ["+4915112345678"]
 #
 # [[identity.johndoe.channels]]
 # channel         = "telegram"

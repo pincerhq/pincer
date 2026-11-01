@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from pincer.core.phone import normalize_e164
 from pincer.voice.briefing import BriefingError, CallBriefing, log_briefing_bound
 from pincer.voice.engine import CLAIMED_SID_KEY
 from pincer.voice.threads import KIND_FOLLOWUP, KIND_ORIGIN, ThreadError, truncate
@@ -21,7 +22,6 @@ from pincer.voice.twilio_rest import DialOutcomeUnknown
 
 logger = logging.getLogger(__name__)
 
-E164_PATTERN = re.compile(r"^\+[1-9]\d{6,14}$")
 
 #: SGR/CSI sequences. `TwilioRestException.__str__` colours its output whenever
 #: stderr is a tty, and its own source notes the hazard: "someone might catch
@@ -106,12 +106,7 @@ def _increment_daily_count(user_id: str) -> None:
 
 def validate_e164(number: str) -> str | None:
     """Validate and normalize a phone number to E.164 format."""
-    cleaned = re.sub(r"[\s\-\(\)]", "", number)
-    if not cleaned.startswith("+"):
-        cleaned = "+" + cleaned
-    if E164_PATTERN.match(cleaned):
-        return cleaned
-    return None
+    return normalize_e164(number)
 
 
 async def _audit_block(decision: Any, number: str, user_id: str, channel: str) -> None:

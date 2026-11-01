@@ -14,7 +14,7 @@ from pincer.core.session import SessionManager
 from pincer.db.engine import get_engine
 from pincer.db.session import session_scope
 from pincer.llm.base import LLMMessage, MessageRole
-from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityProfile
+from pincer.models.identity import AuthSession, ChannelIdentity, IdentityCredential, IdentityPhone, IdentityProfile
 from pincer.models.onboarding import Onboarding
 from pincer.models.sessions import ChatSession
 from pincer.repositories.identity import (
@@ -30,6 +30,7 @@ _TABLES = [
     IdentityProfile.__table__,
     ChannelIdentity.__table__,
     IdentityCredential.__table__,
+    IdentityPhone.__table__,
     AuthSession.__table__,
     ChatSession.__table__,
     Onboarding.__table__,

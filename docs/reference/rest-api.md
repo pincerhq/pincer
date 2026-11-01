@@ -637,7 +637,8 @@ carry `inbound_intent` (`question|message|appointment|human|unknown|after_hours`
 
 ### `GET /api/voice/approvals?call_sid=CA…`
 
-Open in-call approval requests (Sprint 11, `PINCER_VOICE_TOOL_APPROVAL=user`).
+Open in-call approval requests (Sprint 11; receptionist bookings with
+`PINCER_RECEPTIONIST_BOOKING_APPROVAL=user`).
 While the call partner is on hold, the initiating user is asked whether a
 Tier W action may run. Each entry is the §6.5 payload:
 

@@ -522,10 +522,13 @@ class PostCallProcessor:
 
     @staticmethod
     def _render_autonomous_actions(transcript: TranscriptLogger | None, language: str) -> str:
-        """§6.4: every `off`-mode write, verbatim, under a fixed heading."""
+        """§6.4: every write nobody confirmed — `off` mode, and a registered
+        caller's write the approval policy let through (`policy`) — verbatim,
+        under a fixed heading."""
         if transcript is None:
             return ""
-        rows = [a for a in transcript.actions if a.action_type == "tool_execute" and a.approval_mode == "off"]
+        unconfirmed = ("off", "policy")
+        rows = [a for a in transcript.actions if a.action_type == "tool_execute" and a.approval_mode in unconfirmed]
         if not rows:
             return ""
         if language.startswith("de"):
