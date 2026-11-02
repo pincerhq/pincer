@@ -60,6 +60,7 @@ REVERSED_ALL_DAY_MESSAGE = (
     "An all-day event's end date is before its start. The end date is exclusive: "
     "pass the day after the last day (Nov 3 to Nov 5 -> end 2026-11-06)."
 )
+INVALID_DATE_MESSAGE = "{value} is not a real date (check the day and month). Pass an existing date as YYYY-MM-DD."
 #: The all-day end rule in the create and update schemas' ``end`` descriptions (one wording for both).
 ALL_DAY_END_RULE = (
     "For an all-day event the end date is EXCLUSIVE: pass the day after the last day (Nov 3 to Nov 5 -> end 2026-11-06)"
@@ -524,6 +525,15 @@ async def google__create_event(
     )
 
 
+def _bare_day(value: str) -> date:
+    """A bare ``YYYY-MM-DD`` the caller gave, as a date; one that matches the pattern but does
+    not exist (``2026-02-30``) is refused by name, not with Python's "day is out of range"."""
+    try:
+        return date.fromisoformat(value.strip())
+    except ValueError:
+        raise ValueError(INVALID_DATE_MESSAGE.format(value=value.strip())) from None
+
+
 def _all_day_span(start: str, end: str) -> dict[str, dict[str, Any]]:
     """The ``start``/``end`` fields of an all-day event from two bare dates (create and update).
 
@@ -531,7 +541,7 @@ def _all_day_span(start: str, end: str) -> dict[str, dict[str, Any]]:
     (sent as start+1; Google refuses an empty range), and an end before the start
     is refused before anything is written (a model mistake, not "that one day").
     """
-    first, last = date.fromisoformat(start.strip()), date.fromisoformat(end.strip())
+    first, last = _bare_day(start), _bare_day(end)
     if last < first:
         raise ValueError(REVERSED_ALL_DAY_MESSAGE)
     return {"start": {"date": first.isoformat()}, "end": {"date": max(last, first + timedelta(days=1)).isoformat()}}
@@ -594,7 +604,7 @@ def _end_keeping_duration(
         if not (old_start.get("date") and old_end.get("date")):
             raise ValueError(KIND_CHANGE_MESSAGE)
         days = date.fromisoformat(old_end["date"]) - date.fromisoformat(old_start["date"])
-        return {"date": (date.fromisoformat(new_start["date"]) + days).isoformat()}
+        return {"date": (_bare_day(new_start["date"]) + days).isoformat()}
     if not (old_start.get("dateTime") and old_end.get("dateTime")):
         raise ValueError(KIND_CHANGE_MESSAGE)
     was_start, was_end = parse_iso(old_start["dateTime"]), parse_iso(old_end["dateTime"])

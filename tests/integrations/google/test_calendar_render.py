@@ -20,6 +20,7 @@ from integrations.google.fake_calendar import FakeCalendarService
 from pincer.integrations.google.calendar_render import EDIT_HINT
 from pincer.integrations.google.calendar_writer import CalendarWriteNotConfirmedError
 from pincer.integrations.google.tools_calendar import (
+    INVALID_DATE_MESSAGE,
     REVERSED_ALL_DAY_MESSAGE,
     google__create_event,
     google__get_event,
@@ -703,6 +704,41 @@ async def test_a_lone_all_day_end_before_the_stored_start_is_refused_before_writ
         await google__update_event(fake_factory, event_id=event_id, end="2026-11-01")
 
     assert str(refused.value) == REVERSED_ALL_DAY_MESSAGE
+    assert fake.sent("events.update") == []
+
+
+@pytest.mark.parametrize(
+    ("bad", "arguments"),
+    [
+        ("2026-02-30", {"start": "2026-02-30", "end": "2026-03-02"}),
+        ("2026-02-29", {"start": "2026-02-27", "end": "2026-02-29"}),
+    ],
+)
+async def test_create_with_an_impossible_bare_date_names_it(fake_factory, fake, bad, arguments):
+    """Review 4: a date that passes the YYYY-MM-DD pattern but does not exist surfaced as
+    Python's "day is out of range for month"."""
+    with pytest.raises(ValueError) as refused:
+        await google__create_event(fake_factory, summary="Vacation", **arguments)
+
+    assert str(refused.value) == INVALID_DATE_MESSAGE.format(value=bad)
+    assert fake.sent("events.insert") == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"start": "2026-02-30", "end": "2026-03-02"},  # both bare (_all_day_span)
+        {"end": "2026-02-30"},  # a lone end against the stored start (_all_day_span)
+        {"start": "2026-02-30"},  # a lone start keeping the stored length (_end_keeping_duration)
+    ],
+)
+async def test_update_with_an_impossible_bare_date_names_it(fake_factory, fake, arguments):
+    event_id = fake.seed_all_day("primary", "Vacation", "2026-02-20", "2026-02-21")
+
+    with pytest.raises(ValueError) as refused:
+        await google__update_event(fake_factory, event_id=event_id, **arguments)
+
+    assert str(refused.value) == INVALID_DATE_MESSAGE.format(value="2026-02-30")
     assert fake.sent("events.update") == []
 
 
