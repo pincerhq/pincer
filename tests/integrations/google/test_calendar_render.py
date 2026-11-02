@@ -558,6 +558,37 @@ async def test_on_a_call_create_and_get_show_times_in_the_calls_zone(fake_factor
 # ── Moving an event keeps its duration (pre-existing bug, in scope) ──────────
 
 
+@pytest.mark.parametrize(
+    ("context", "lookups"),
+    [
+        (None, 1),
+        # On a call the times are read in the call's zone; the calendar's own zone is looked up once
+        # for the zone an event without a stored one keeps.
+        ({"timezone": "Europe/Kyiv", "call_timezone": "Europe/Berlin"}, 1),
+    ],
+)
+async def test_an_update_resolves_the_calendar_zone_once(fake_factory, fake, monkeypatch, context, lookups):
+    """PR #316 review: the zone was resolved per start/end key and again for the confirmation."""
+    from pincer.integrations.google import tools_calendar
+
+    fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00+02:00", "2026-11-12T11:00:00+02:00")
+    real = tools_calendar._labeled_zone
+    calls: list[str] = []
+
+    async def _counted(*args, **kwargs):
+        calls.append("resolve")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(tools_calendar, "_labeled_zone", _counted)
+
+    await google__update_event(
+        fake_factory, event_id="evt1", start="2026-11-12T17:00:00", end="2026-11-12T18:00:00", context=context
+    )
+
+    assert fake.event("primary", "evt1")["start"]["timeZone"] == "Europe/Kiev"  # kept: the calendar's own zone
+    assert len(calls) == lookups
+
+
 async def test_moving_only_the_start_keeps_the_duration(fake_factory, fake):
     fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00+02:00", "2026-11-12T11:00:00+02:00")
 

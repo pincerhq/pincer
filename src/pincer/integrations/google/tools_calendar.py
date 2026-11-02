@@ -39,7 +39,7 @@ from pincer.integrations.google.models import fmt_list
 from pincer.integrations.google.quota import with_backoff
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from zoneinfo import ZoneInfo
 
     from pincer.integrations.google.service_factory import GoogleServiceFactory
@@ -332,6 +332,33 @@ async def google__check_freebusy(
     return "\n".join(lines) if lines else "No free/busy data returned."
 
 
+class _UpdateZones:
+    """An update's zones, each resolved at most once: the working zone (offset-less input is
+    read in it) and the calendar's own (kept by an event without a stored zone). Off a call
+    they are the same lookup."""
+
+    def __init__(
+        self, factory: GoogleServiceFactory, svc: Any, calendar_id: str, context: dict[str, Any] | None
+    ) -> None:
+        self._args = (factory, svc, calendar_id)
+        self._context = context
+        self._working: tuple[ZoneInfo, str] | None = None
+        self._calendar: ZoneInfo | None = None
+
+    async def working(self) -> tuple[ZoneInfo, str]:
+        if self._working is None:
+            self._working = await _working_zone(*self._args, self._context)
+        return self._working
+
+    async def calendar(self) -> ZoneInfo:
+        if self._calendar is None:
+            if _call_zone(self._context) is None:
+                self._calendar = (await self.working())[0]
+            else:
+                self._calendar = await _calendar_zone(*self._args, self._context)
+        return self._calendar
+
+
 async def _write_zone(
     factory: GoogleServiceFactory,
     svc: Any,
@@ -358,6 +385,7 @@ async def _confirmation_zone(
     context: dict[str, Any] | None,
     saved: dict[str, Any],
     given: str,
+    working: Callable[[], Awaitable[tuple[ZoneInfo, str]]] | None = None,
 ) -> tuple[ZoneInfo, str]:
     """The zone a write confirmation shows: the one offset-less input was read in.
 
@@ -371,6 +399,8 @@ async def _confirmation_zone(
     given_zone = load_zone(given) if given.strip() else None
     if own is not None and given_zone is not None and own.key == given_zone.key:
         return own, EVENT_ZONE_LABEL
+    if working is not None:
+        return await working()
     return await _working_zone(factory, svc, calendar_id, context)
 
 
@@ -597,6 +627,7 @@ async def google__update_event(
         event["description"] = description
     if location:
         event["location"] = location
+    zones = _UpdateZones(factory, svc, calendar_id, context)
     changed: dict[str, dict[str, Any]] = {}
     for key, value in (("start", start), ("end", end)):
         if not value:
@@ -605,12 +636,11 @@ async def google__update_event(
             changed[key] = {"date": value.strip()}
             continue
         # Read in the zone the times were shown in (or the caller's); keep the event's own zone.
-        tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone)
-        kept_zone = (
-            timezone.strip()
-            or stored_zone_name(event, key)
-            or (await _calendar_zone(factory, svc, calendar_id, context)).key
-        )
+        if timezone.strip():
+            zone: ZoneInfo | None = load_zone(timezone)
+        else:
+            zone, _label = await zones.working()
+        kept_zone = timezone.strip() or stored_zone_name(event, key) or (await zones.calendar()).key
         changed[key] = {"dateTime": localize(value, zone) if zone else rfc3339(value), "timeZone": kept_zone}
     if "start" in changed and "end" not in changed:
         changed["end"] = _end_keeping_duration(
@@ -623,7 +653,7 @@ async def google__update_event(
     updated = await calendar_writer.update(
         svc, calendar_id, event_id, event, trace=calendar_writer.Trace.from_context(context)
     )
-    shown, label = await _confirmation_zone(factory, svc, calendar_id, context, updated, timezone)
+    shown, label = await _confirmation_zone(factory, svc, calendar_id, context, updated, timezone, zones.working)
     return render_write(
         f"Event updated: '{updated.get('summary', '')}'",
         updated,
