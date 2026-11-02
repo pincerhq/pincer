@@ -64,8 +64,8 @@ Tools are classified at registration time:
 
 | Risk Level | Example Tools | Approval Required |
 |------------|--------------|-------------------|
-| **Safe** | memory_search, calendar_today, file_read | No |
-| **Moderate** | gmail_send, calendar_create | Configurable |
+| **Safe** | memory_search, google__list_events, file_read | No |
+| **Moderate** | gmail_send, google__create_event | Configurable |
 | **Dangerous** | shell_exec, file_write, python_exec | Always |
 
 #### File access policy: workspace-only, by design
@@ -86,7 +86,7 @@ You can override the approval policy per tool in your config:
 PINCER_APPROVE_ALL_TOOLS=true
 
 # Skip approval for specific tools
-PINCER_SKIP_APPROVAL=gmail_send,calendar_create
+PINCER_SKIP_APPROVAL=gmail_send,google__create_event
 ```
 
 ### Layer 3: Skill Sandboxing

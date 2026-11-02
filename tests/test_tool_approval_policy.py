@@ -34,6 +34,13 @@ def _registry(policy: ApprovalPolicy | None = None) -> ToolRegistry:
 # ── Classification ────────────────────────────────────────
 
 
+def test_builtin_calendar_create_is_not_classified() -> None:
+    """The builtin calendar tools are gone from the registry; the Workspace create/update stay non-critical."""
+    assert "calendar_create" not in NON_CRITICAL_TOOLS
+    assert {"google__create_event", "google__update_event"} <= NON_CRITICAL_TOOLS
+    assert "google__delete_event" not in NON_CRITICAL_TOOLS
+
+
 def test_unknown_tools_are_critical() -> None:
     """Fail-closed: a tool nobody classified keeps its gate."""
     assert is_critical("some__brand_new_tool")

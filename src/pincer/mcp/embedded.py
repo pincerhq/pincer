@@ -23,6 +23,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from pincer.mcp.calendar_alias import CALENDAR_TODAY
+from pincer.mcp.config import missing_export_log_level
+
 if TYPE_CHECKING:
     from pincer.core.agent import Agent
     from pincer.mcp.config import MCPConfig
@@ -128,8 +131,14 @@ class EmbeddedMCPShell:
         registered_tools = agent.tool_registry.list_tools()
 
         for tool_name in expose_tools:
+            if tool_name == CALENDAR_TODAY and tool_name not in registered_tools:
+                continue  # the MCP-only alias: PincerToolExporter serves it on every server
             if tool_name not in registered_tools:
-                logger.debug("EmbeddedMCPShell: tool '%s' not in registry — skipping export", tool_name)
+                logger.log(
+                    missing_export_log_level(tool_name),
+                    "EmbeddedMCPShell: tool '%s' not in registry — skipping export",
+                    tool_name,
+                )
                 continue
 
             tool_def = agent.tool_registry._tools.get(tool_name)  # noqa: SLF001

@@ -19,16 +19,21 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from pincer.integrations.google.calendar_tz import is_date_only, localize_bound
 from pincer.voice.prompts import get_prompt
+
+if TYPE_CHECKING:
+    from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
 # Anything that looks like machine data: JSON braces and ISO-8601 timestamps.
 ISO_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 RAW_DATA_RE = re.compile(r"[{}]|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+_RANGE_JOINERS = {"de": " bis ", "uk": " до ", "en": " to "}
 
 # Tool results whose first line starts like this are failures.
 _ERROR_PREFIXES = ("error", "[error", "failed", "exception")
@@ -142,7 +147,7 @@ def spoken_time(dt: datetime, language: str) -> str:
 def spoken_range(start: datetime, end: datetime, language: str) -> str:
     """Same-day ranges collapse to 'day, from A to B'."""
     lang = _lang(language)
-    joiner = {"de": " bis ", "uk": " до ", "en": " to "}.get(lang, " to ")
+    joiner = _RANGE_JOINERS.get(lang, " to ")
     if start.date() == end.date():
         day = spoken_datetime(start, language, include_time=False)
         prefix = {"de": " von ", "uk": " з ", "en": " from "}.get(lang, " from ")
@@ -177,14 +182,37 @@ def _is_error(result: str) -> bool:
 # ── Per-tool renderers ───────────────────────────────────────────────
 
 
-def _render_freebusy(result: str, args: dict[str, Any], language: str) -> str:
+def _freebusy_window(args: dict[str, Any], zone: ZoneInfo | None) -> tuple[datetime | None, datetime | None]:
+    """The free/busy window as the tool read it (tools_calendar._range, through the same
+    calendar_tz helpers): on a call (``zone``), offset-less times are in the call's zone, a bare
+    date is that whole local day, and a bare-date ``time_min`` alone is that one day. Without a
+    zone, as given."""
+    time_min, time_max = args.get("time_min"), args.get("time_max")
+    if zone is None:
+        return parse_iso(time_min), parse_iso(time_max)
+
+    def _bound(value: Any, *, end: bool = False) -> datetime | None:
+        if not isinstance(value, str) or parse_iso(value) is None:
+            return None
+        bound = parse_iso(localize_bound(value, zone, end=end))
+        return bound.astimezone(zone) if bound is not None else None
+
+    if time_max:
+        return _bound(time_min), _bound(time_max, end=True)
+    if _is_date_only(time_min):
+        return _bound(time_min), _bound(time_min, end=True)
+    return _bound(time_min), None
+
+
+def _render_freebusy(result: str, args: dict[str, Any], language: str, zone: ZoneInfo | None = None) -> str:
     from pincer.voice.scheduling import parse_freebusy_output
 
     busy = parse_freebusy_output(result)
     if busy is None:
         return str(get_prompt("TOOL_ERROR", language) or "")
-    window_start = parse_iso(args.get("time_min"))
-    window_end = parse_iso(args.get("time_max"))
+    if zone is not None:  # Google's slots are UTC; the caller hears the call's wall clock
+        busy = [(start.astimezone(zone), end.astimezone(zone)) for start, end in busy]
+    window_start, window_end = _freebusy_window(args, zone)
     if not busy:
         return _tpl("google__check_freebusy.all_free", language)
     if window_start is None or window_end is None:
@@ -356,8 +384,11 @@ def _render_websearch(result: str, language: str) -> str:
     return " ".join([*lines, undated])
 
 
-def render(tool_name: str, result: str, language: str, args: dict[str, Any] | None = None) -> str:
-    """Deterministic, speakable rendering of a tool result (§7)."""
+def render(
+    tool_name: str, result: str, language: str, args: dict[str, Any] | None = None, zone: ZoneInfo | None = None
+) -> str:
+    """Deterministic, speakable rendering of a tool result (§7). On a call, ``zone`` is the call's
+    zone: offset-less times in ``args`` are read, and times spoken, in it."""
     args = args or {}
     result = str(result or "")
     try:
@@ -366,7 +397,7 @@ def render(tool_name: str, result: str, language: str, args: dict[str, Any] | No
         elif _is_error(result):
             text = str(get_prompt("TOOL_ERROR", language) or "")
         elif tool_name == "google__check_freebusy":
-            text = _render_freebusy(result, args, language)
+            text = _render_freebusy(result, args, language, zone)
         elif tool_name == "google__list_events":
             text = _render_list_events(result, language)
         elif tool_name == "google__create_event":
@@ -414,7 +445,14 @@ def describe_action(tool_name: str, args: dict[str, Any] | None, language: str) 
     table = get_prompt("ACTION_DESCRIPTIONS", language) or {}
     template = str(table.get(tool_name) or table.get("default") or "{tool}")
     start = parse_iso(args.get("start"))
-    when = spoken_datetime(start, language) if start else _spoken_fallback_when(args, language)
+    if start and _is_date_only(args.get("start")) and tool_name == "google__update_event" and not args.get("end"):
+        # A new start alone keeps the stored duration, which the caller has not heard: no length.
+        when = _tpl("when.from_day", language).format(day=spoken_datetime(start, language, include_time=False))
+    elif start and _is_date_only(args.get("start")):
+        end = parse_iso(args.get("end")) if _is_date_only(args.get("end")) else None
+        when = _spoken_all_day(start, end, language)
+    else:
+        when = spoken_datetime(start, language) if start else _spoken_fallback_when(args, language)
     title = str(args.get("summary") or args.get("title") or "").strip()
     text = str(args.get("text") or args.get("message") or "").strip()
     note = str(args.get("note") or args.get("content") or text).strip()
@@ -430,6 +468,19 @@ def describe_action(tool_name: str, args: dict[str, Any] | None, language: str) 
         rendered = tool_name.replace("__", " ").replace("_", " ")
     rendered = re.sub(r"\s{2,}", " ", rendered).strip()
     return ensure_speakable(rendered, language, fallback_key="TOOL_ERROR")
+
+
+def _is_date_only(value: Any) -> bool:
+    return isinstance(value, str) and is_date_only(value)
+
+
+def _spoken_all_day(first: datetime, end: datetime | None, language: str) -> str:
+    """Bare dates (an all-day event): the days it covers. Google's end date is exclusive."""
+    last = end - timedelta(days=1) if end is not None and end - first > timedelta(days=1) else first
+    days = spoken_datetime(first, language, include_time=False)
+    if last.date() != first.date():
+        days += _RANGE_JOINERS.get(_lang(language), " to ") + spoken_datetime(last, language, include_time=False)
+    return _tpl("when.all_day", language).format(days=days)
 
 
 def _spoken_fallback_when(args: dict[str, Any], language: str) -> str:

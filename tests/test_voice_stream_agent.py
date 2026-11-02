@@ -214,7 +214,7 @@ class TestStreamVoiceTurn:
         async def noop() -> str:
             return ""
 
-        tool_registry.register("calendar_today", "d", noop, {"type": "object", "properties": {}})
+        tool_registry.register("google__list_events", "d", noop, {"type": "object", "properties": {}})
         tool_registry.register("shell_exec", "d", noop, {"type": "object", "properties": {}})
         provider = ScriptedProvider([_text_turn("Gerne, kein Problem.")])
         agent = Agent(settings, provider, session_manager, cost_tracker, tool_registry)
@@ -222,7 +222,7 @@ class TestStreamVoiceTurn:
         await _collect(agent, user_id="u1", channel="voice", text="Hallo")
 
         tool_names = {t["name"] for t in provider.calls[0]["tools"]}
-        assert "calendar_today" in tool_names
+        assert "google__list_events" in tool_names
         assert "shell_exec" not in tool_names  # excluded from live calls
 
     async def test_cost_recorded(self, settings, session_manager, cost_tracker, tool_registry):
@@ -335,7 +335,7 @@ class TestVoiceToolCap:
         call-relevant tools (regression for the gpt-4o-mini switch failure)."""
         from pincer.voice.voice_tools import MAX_VOICE_TOOLS, filter_voice_tools
 
-        schemas = [{"name": "make_phone_call"}, {"name": "calendar_today"}]
+        schemas = [{"name": "make_phone_call"}, {"name": "google__list_events"}]
         schemas += [{"name": f"google__manage_slide_deck_{i}"} for i in range(120)]
         schemas += [{"name": "google__check_freebusy"}, {"name": "google__create_event"}]
         schemas += [{"name": f"doctr__ocr_variant_{i}"} for i in range(40)]
@@ -350,7 +350,7 @@ class TestVoiceToolCap:
         # curated builtins and call-relevant tools survive the cut
         for keeper in (
             "make_phone_call",
-            "calendar_today",
+            "google__list_events",
             "google__check_freebusy",
             "google__create_event",
             "openweathermap__get_current_weather",
@@ -361,8 +361,8 @@ class TestVoiceToolCap:
     def test_small_registry_untouched(self):
         from pincer.voice.voice_tools import filter_voice_tools
 
-        schemas = [{"name": "calendar_today"}, {"name": "google__create_event"}, {"name": "shell_exec"}]
-        assert [s["name"] for s in filter_voice_tools(schemas)] == ["calendar_today", "google__create_event"]
+        schemas = [{"name": "google__list_events"}, {"name": "google__create_event"}, {"name": "shell_exec"}]
+        assert [s["name"] for s in filter_voice_tools(schemas)] == ["google__list_events", "google__create_event"]
 
     def test_openai_converter_enforces_hard_limit(self):
         from pincer.llm.openai_common import OPENAI_MAX_TOOLS, convert_tools_to_openai

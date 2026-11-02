@@ -28,18 +28,6 @@
     "description": "Check emails in a folder. By default shows unread (UNSEEN) emails. Set status='ALL' to list all emails regardless of read status — use this when checking Spam, Trash, or counting total emails in a folder. Returns UID, sender, subject, and date for each."
   },
   {
-    "name": "calendar_create",
-    "description": "Create a new Google Calendar event. Use when user asks to schedule, add, or book a meeting or event. On success, the tool returns the event's direct URL (htmlLink). You MUST include this URL in your final response so the user can open the event."
-  },
-  {
-    "name": "calendar_today",
-    "description": "Get today's calendar events. Use when user asks about their schedule, meetings, or agenda today."
-  },
-  {
-    "name": "calendar_week",
-    "description": "Get this week's calendar events. Use when user asks about their week or upcoming schedule."
-  },
-  {
     "name": "schedule_create",
     "description": "Create a scheduled job that runs a prompt through the agent later and delivers the result to the user's channel. Pass EXACTLY ONE of cron_expr or run_in_minutes:\n- run_in_minutes: for a ONE-TIME request relative to now (e.g. 'in 10 minutes', 'in an hour') — the exact future time is computed from the real clock, not guessed, so you never need to know or compute the current date/time yourself.\n- cron_expr: for a RECURRING request with a stated clock time (e.g. 'every day at 8am', 'every Monday at 9') — a standard 5-field cron expression.\nNever invent a cron_expr to approximate 'soon' or 'in N minutes' — that produces wrong, often dangerously frequent schedules (e.g. '* * * * *' fires every minute forever). Use run_in_minutes for anything relative to 'now'.\nTimezone defaults to this app's configured timezone. If the user's timezone is genuinely ambiguous or important for a recurring job (e.g. crosses regions), ask them rather than guessing.\nThe prompt runs later with NO conversation context or memory, so it must be fully self-contained — e.g. 'search the web for the latest news about X and summarize it', not 'the thing we discussed'."
   },
@@ -86,5 +74,25 @@
   {
     "name": "google__create_contact",
     "description": "Create a new Google Contact."
+  },
+  {
+    "name": "google__list_events",
+    "description": "List calendar events in a date range (default: next 7 days). Times without a UTC offset are read in the calendar's timezone."
+  },
+  {
+    "name": "google__search_events",
+    "description": "Search calendar events by text (title, description, location), optionally within a date range. Times without a UTC offset are read in the calendar's timezone."
+  },
+  {
+    "name": "google__create_event",
+    "description": "Create a new Google Calendar event with optional attendees, location, and description. Only for a new event that does not exist yet: never use it to change, rename or reschedule an existing event — call google__update_event with the event's ID for that (find the ID with google__search_events or google__list_events). Set add_meet_link=True to auto-create a new Google Meet conference. Or set meet_link to the URI of an existing Meet space."
+  },
+  {
+    "name": "google__update_event",
+    "description": "Edit an existing calendar event (meeting or appointment) by its ID: reschedule or move it to another time or day, rename it, change the time, or change details such as description or location. Empty fields are kept, but a new start alone moves the end too (duration kept); the event keeps its ID. Use this — not google__create_event — for any change to an event; without the ID, find it first with google__search_events (and calendar_id, if not primary). Times without a UTC offset are read in the calendar's timezone, as listed; the event keeps its own timezone."
+  },
+  {
+    "name": "google__move_event",
+    "description": "Move a calendar event to a different calendar. This is not for changing the time: to reschedule an event, use google__update_event."
   }
 ]

@@ -37,6 +37,40 @@ def test_freebusy_all_free_and_none_free():
     )
 
 
+@pytest.mark.parametrize(
+    ("time_min", "time_max"),
+    [
+        ("2026-11-05T08:00:00", "2026-11-05T18:00:00"),  # offset-less: the call's zone
+        ("2026-11-05T07:00:00Z", "2026-11-05T17:00:00Z"),  # with an offset: the same instants
+    ],
+)
+def test_freebusy_on_a_call_is_read_and_spoken_in_the_calls_zone(time_min, time_max):
+    """PR #316 review: Google's busy slots are UTC; the caller hears Berlin wall clock."""
+    from zoneinfo import ZoneInfo
+
+    busy = "primary: BUSY at:\n    2026-11-05T09:00:00Z → 2026-11-05T10:00:00Z"
+    args = {"emails": "primary", "time_min": time_min, "time_max": time_max}
+
+    text = ts.render("google__check_freebusy", busy, "en", args, ZoneInfo("Europe/Berlin"))
+
+    assert text == (
+        "Free would be: Thursday, November 5 from 8:00 AM to 10:00 AM "
+        "and Thursday, November 5 from 11:00 AM to 6:00 PM."
+    )
+
+
+def test_freebusy_over_whole_days_on_a_call_ends_at_the_last_days_midnight():
+    """A bare-date end bound is that whole day, as the tool queried it (5th..6th = through the 6th)."""
+    from zoneinfo import ZoneInfo
+
+    busy = "primary: BUSY at:\n    2026-11-04T23:00:00Z → 2026-11-05T23:00:00Z"  # all of Nov 5, Berlin
+    args = {"emails": "primary", "time_min": "2026-11-05", "time_max": "2026-11-06"}
+
+    text = ts.render("google__check_freebusy", busy, "en", args, ZoneInfo("Europe/Berlin"))
+
+    assert text == "Free would be: Friday, November 6 at 12:00 AM to Saturday, November 7 at 12:00 AM."
+
+
 def test_freebusy_unknown_output_is_an_error_line():
     assert ts.render("google__check_freebusy", "Auth error: token expired", "de", ARGS) == de_pack.TOOL_ERROR
     assert ts.render("google__check_freebusy", "garbage", "de", ARGS) == de_pack.TOOL_ERROR
@@ -105,6 +139,56 @@ def test_describe_action_verify_commitment():
     assert ts.describe_action("some__other", {"a": 1}, "en") == "carry out some other"
     for lang in ("en", "de", "uk"):
         assert ts.is_speakable(ts.describe_action("google__update_event", {"event_id": "e", **args}, lang))
+
+
+@pytest.mark.parametrize(
+    ("language", "one_day", "three_days"),
+    [
+        (
+            "en",
+            "create the appointment 'Vacation' on Thursday, November 5, all day",
+            "create the appointment 'Vacation' on Tuesday, November 3 to Thursday, November 5, all day",
+        ),
+        (
+            "de",
+            "den Termin „Vacation“ am Donnerstag, der fünfte November, ganztägig eintragen",
+            "den Termin „Vacation“ am Dienstag, der dritte November bis Donnerstag, der fünfte November, "
+            "ganztägig eintragen",
+        ),
+        (
+            "uk",
+            "створю зустріч 'Vacation' на четвер, 5 листопада, на весь день",
+            "створю зустріч 'Vacation' на вівторок, 3 листопада до четвер, 5 листопада, на весь день",
+        ),
+    ],
+)
+def test_an_all_day_create_is_confirmed_as_whole_days(language, one_day, three_days):
+    """PR #316 review: bare dates are an all-day event, not "at 12:00 AM" ("um null Uhr"). Google's end
+    date is exclusive, so the caller hears the last day it covers."""
+    single = {"summary": "Vacation", "start": "2026-11-05", "end": "2026-11-06"}
+    several = {"summary": "Vacation", "start": "2026-11-03", "end": "2026-11-06"}
+
+    assert ts.describe_action("google__create_event", single, language) == one_day
+    assert ts.describe_action("google__create_event", several, language) == three_days
+    # A timed end with a bare start (the tool refuses it) must not crash the confirmation.
+    mixed = {"summary": "Vacation", "start": "2026-11-05", "end": "2026-11-06T12:00:00+01:00"}
+    assert ts.describe_action("google__create_event", mixed, language) == one_day
+
+
+@pytest.mark.parametrize(
+    ("language", "spoken"),
+    [
+        ("en", "move the appointment 'Vacation' to start on Tuesday, November 10"),
+        ("de", "den Termin „Vacation“ auf einen Beginn am Dienstag, der zehnte November verschieben"),
+        ("uk", "перенесу зустріч 'Vacation' на вівторок, 10 листопада як день початку"),
+    ],
+)
+def test_an_all_day_update_without_an_end_names_no_length(language, spoken):
+    """PR #316 review 3 (S6): a new bare start alone keeps the stored duration (a 3-day event stays 3 days),
+    so the caller must not hear "Tuesday, November 10, all day", which promises one day."""
+    args = {"event_id": "e", "summary": "Vacation", "start": "2026-11-10"}
+
+    assert ts.describe_action("google__update_event", args, language) == spoken
 
 
 def test_spoken_datetime_forms():

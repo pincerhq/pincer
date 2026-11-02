@@ -227,8 +227,9 @@ Edit `pincer.toml` (mounted into the container) and set `expose_tools` under `[m
 [mcp.server]
 expose_tools = [
     "email_check",
-    "calendar_today",
+    "calendar_today",          # today's events (alias over google__list_events)
     "memory_search",
+    # "google__list_events",   # opt-in: full calendar read (any range)
     # "shell_exec",   # requires user approval before executing
     # "file_read",
 ]

@@ -42,16 +42,25 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from pincer.integrations.google.calendar_tz import is_date_only, localize, needs_zone
 from pincer.voice import approvals, tool_policy
 from pincer.voice.engine import CallDirection
+from pincer.voice.localtime import get_voice_timezone
 from pincer.voice.prompts import get_prompt
 from pincer.voice.safety_gates import ConfirmationStatus, parse_confirmation
 from pincer.voice.state_machine import CallPhase
-from pincer.voice.tool_speech import describe_action, render, render_denied, render_duplicate, render_pending
+from pincer.voice.tool_speech import (
+    describe_action,
+    render,
+    render_denied,
+    render_duplicate,
+    render_pending,
+)
 from pincer.voice.transcript import Speaker
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
+    from zoneinfo import ZoneInfo
 
     from pincer.voice.engine import CallState, VoiceEngine
     from pincer.voice.state_machine import CallStateMachine
@@ -131,6 +140,30 @@ META_DEFERRED = "deferred_actions"
 # Tools whose create is made idempotent per call: a yes said twice, or a turn
 # retried, finds the event made the first time instead of booking it again.
 IDEMPOTENT_CREATE_TOOLS = frozenset({"google__create_event"})
+
+# A deferred write is replayed later, off the call, where offset-less times would be read in the
+# calendar's zone: its draft pins the call's zone into these (see draft_in_call_zone).
+CALL_LOCAL_TIME_ARGS = ("start", "end", "time_min", "time_max")
+# Creates whose event is stored in the call's zone when made on the call (tools_calendar._write_zone).
+CALL_ZONED_CREATE_TOOLS = frozenset({"google__create_event"})
+
+
+def draft_in_call_zone(tool_name: str, args: dict[str, Any], zone: ZoneInfo) -> dict[str, Any]:
+    """``args`` as they would run on the call, for a replay off it: offset-less times get the
+    call zone's offset (bare dates stay whole days), and a timed create gets the call's zone,
+    so it is stored as the same create made on the call would be. A ``timezone`` the model
+    named already says how its times are read, on the call and off it: kept as is."""
+    draft = dict(args)
+    if str(draft.get("timezone") or "").strip():
+        return draft
+    for key in CALL_LOCAL_TIME_ARGS:
+        value = draft.get(key)
+        if isinstance(value, str) and needs_zone(value):
+            draft[key] = localize(value, zone)
+    timed = not is_date_only(str(draft.get("start") or ""))
+    if tool_name in CALL_ZONED_CREATE_TOOLS and timed:
+        draft["timezone"] = zone.key
+    return draft
 
 
 def call_idempotency_key(call_sid: str, tool_name: str, args: dict[str, Any]) -> str:
@@ -263,6 +296,11 @@ class InCallToolGate:
         """The EXACT schema set for this call (§4 rule)."""
         return tool_policy.call_context_schemas(tool_schemas, self.allowed_tools)
 
+    @property
+    def call_zone(self) -> ZoneInfo:
+        """The call's (voice) zone: the one the agent gives the calendar tools on this call."""
+        return get_voice_timezone(self.settings)
+
     def language(self) -> tuple[str, str]:
         from pincer.voice.language import de_formality
 
@@ -352,6 +390,9 @@ class InCallToolGate:
                 arguments.pop("idempotency_key", None)
             if not arguments.get("idempotency_key"):
                 arguments["idempotency_key"] = call_idempotency_key(self.call_sid, tool_name, args)
+        # A deferred draft carries the same key, so its replay off the call finds an event this call's
+        # timed-out write committed ("already created") instead of booking it again.
+        key = str((arguments or {}).get("idempotency_key") or "") if tool_name in IDEMPOTENT_CREATE_TOOLS else ""
         decision = tool_policy.decide(tool_name, self.state, self.settings, args, self.requires_approval)
         logger.info(
             "In-call tool decision [%s]: %s -> %s (%s, tier=%s, mode=%s)",
@@ -367,10 +408,10 @@ class InCallToolGate:
         if decision.action == "need_verbal":
             return await self._start_verify(tool_name, args, decision)
         if decision.action == "need_user_approval":
-            return await self._user_approval(tool_name, args, execute, decision)
+            return await self._user_approval(tool_name, args, execute, decision, key=key)
         approval_mode = "auto" if decision.tier == tool_policy.TIER_R else decision.mode
         user_confirmed = True if decision.mode == "verbal" else None
-        return await self._execute(tool_name, args, execute, decision, approval_mode, user_confirmed)
+        return await self._execute(tool_name, args, execute, decision, approval_mode, user_confirmed, key=key)
 
     # ── Deny ─────────────────────────────────────────────
 
@@ -420,6 +461,8 @@ class InCallToolGate:
         decision: tool_policy.ToolDecision,
         approval_mode: str,
         user_confirmed: bool | None,
+        *,
+        key: str = "",
     ) -> GateResult:
         lang, _ = self.language()
         self._metric(tool_name, decision, "execute", decision.reason)
@@ -450,7 +493,7 @@ class InCallToolGate:
                     speak_key="TOOL_NO_PROGRESS",
                     approval_mode=approval_mode,
                 )
-            return await self._defer(tool_name, args, decision, tool_policy.REASON_TOOL_TIMEOUT, approval_mode)
+            return await self._defer(tool_name, args, decision, tool_policy.REASON_TOOL_TIMEOUT, approval_mode, key=key)
         except asyncio.CancelledError:
             raise
         except Exception as e:  # the executor normally catches; belt and braces
@@ -469,10 +512,10 @@ class InCallToolGate:
                 approval_mode=approval_mode,
             )
             if decision.tier == tool_policy.TIER_W:
-                self._add_deferred(tool_name, args, tool_policy.REASON_TOOL_ERROR)
+                self._add_deferred(tool_name, args, tool_policy.REASON_TOOL_ERROR, key=key)
             return result
 
-        spoken = render(tool_name, content, lang, args)
+        spoken = render(tool_name, content, lang, args, self.call_zone)
         if decision.tier == tool_policy.TIER_W:
             self.state.metadata[tool_policy.META_WRITES_USED] = self.writes_used + 1
             tool_policy.clear_verbal_confirmation(self.state)
@@ -511,23 +554,31 @@ class InCallToolGate:
         decision: tool_policy.ToolDecision,
         reason: str,
         approval_mode: str,
+        *,
+        key: str = "",
     ) -> GateResult:
         """Timeouts: speak the deferral line, record the denial, and queue the
         action as a post-call follow-up suggestion (Sprint 3 T3.4 mechanism)."""
         result = await self._deny(
             tool_name, args, decision, reason, speak_key="TOOL_TIMEOUT_DEFER", approval_mode=approval_mode
         )
-        self._add_deferred(tool_name, args, reason)
+        self._add_deferred(tool_name, args, reason, key=key)
         return result
 
-    def _add_deferred(self, tool_name: str, args: dict[str, Any], reason: str) -> None:
+    def _add_deferred(self, tool_name: str, args: dict[str, Any], reason: str, *, key: str = "") -> None:
+        """Queue a follow-up draft. ``key`` is the idempotency key the call's own attempt sent: the
+        replay reuses it as its dedup seed, so a write that committed despite timing out is found."""
         lang, _ = self.language()
+        draft = draft_in_call_zone(tool_name, args, self.call_zone)
+        if key:
+            draft["idempotency_key"] = key
         deferred = self.state.metadata.setdefault(META_DEFERRED, [])
         deferred.append(
             {
                 "tool": tool_name,
-                "draft_args": dict(args),
+                "draft_args": draft,
                 "reason": reason,
+                # What the caller heard: the same wall clock as the pinned draft.
                 "summary": describe_action(tool_name, args, lang),
             }
         )
@@ -670,6 +721,8 @@ class InCallToolGate:
         args: dict[str, Any],
         execute: Callable[[], Awaitable[tuple[str, bool]]],
         decision: tool_policy.ToolDecision,
+        *,
+        key: str = "",
     ) -> GateResult:
         lang, _ = self.language()
         description = describe_action(tool_name, args, lang)
@@ -724,7 +777,7 @@ class InCallToolGate:
         if outcome == approvals.APPROVED:
             await approvals.finalize(req, approvals.APPROVED)
             self.suppress_llm_speech = False  # the LLM phrases the result
-            return await self._execute(tool_name, args, execute, decision, "user", True)
+            return await self._execute(tool_name, args, execute, decision, "user", True, key=key)
         if outcome == approvals.CALL_ENDED:
             await approvals.finalize(req, approvals.CALL_ENDED)
             return await self._deny(tool_name, args, decision, REASON_CALL_ENDED, approval_mode="user")
@@ -739,7 +792,7 @@ class InCallToolGate:
                 approval_mode="user",
             )
         await approvals.finalize(req, approvals.EXPIRED)
-        return await self._defer(tool_name, args, decision, tool_policy.REASON_APPROVAL_TIMEOUT, "user")
+        return await self._defer(tool_name, args, decision, tool_policy.REASON_APPROVAL_TIMEOUT, "user", key=key)
 
     # ── Call end ─────────────────────────────────────────
 

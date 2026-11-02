@@ -193,7 +193,7 @@ Pincer ships **303 first-party tools** and plugs into **any MCP server** to reac
 
 | Category | Count | Enable with |
 |---|---:|---|
-| Core built-ins (`shell_exec`, `python_exec`, file ops, browser, email, calendar, image, voice) | 23 | Always on |
+| Core built-ins (`shell_exec`, `python_exec`, file ops, browser, email, image, voice) | 23 | Always on |
 | Bundled skills (SKILL.md, progressive disclosure: `load_skill`/`load_skill_reference`/`run_skill_script`) | 5 | Always on |
 | **Google Workspace** — Gmail · Calendar · Drive · Docs · Sheets · Slides · Meet · Tasks · Contacts | **113** | `pincer google setup` |
 | **Microsoft 365** — Outlook · Calendar · OneDrive · OneNote · To Do · Contacts · Directory (multi-user) | **62** | `ms365-mcp-setup` |

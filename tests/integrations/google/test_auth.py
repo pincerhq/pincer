@@ -9,7 +9,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pincer.integrations.google.auth import ALL_SCOPES, SERVICE_SCOPES, GoogleAuth, scopes_for_services
+from pincer.integrations.google.auth import (
+    ALL_SCOPES,
+    SERVICE_SCOPES,
+    GoogleAuth,
+    GoogleTokenError,
+    scopes_for_services,
+)
 
 # ── scopes_for_services ───────────────────────────────────────────────────────
 
@@ -118,7 +124,7 @@ def test_get_credentials_no_refresh_token_raises(mock_credentials):
 
     with patch("google.oauth2.credentials.Credentials") as mock_creds_cls:
         mock_creds_cls.from_authorized_user_file.return_value = mock_creds
-        with patch("google.auth.transport.requests.Request"), pytest.raises(RuntimeError, match="invalid"):
+        with patch("google.auth.transport.requests.Request"), pytest.raises(GoogleTokenError, match="invalid"):
             auth.get_credentials()
 
 
@@ -253,7 +259,7 @@ def test_env_mode_refresh_failure_mentions_env_var():
     with (
         patch("google.oauth2.credentials.Credentials.refresh", side_effect=Exception("invalid_grant")),
         patch("google.auth.transport.requests.Request"),
-        pytest.raises(RuntimeError, match="PINCER_GOOGLE_TOKEN_JSON"),
+        pytest.raises(GoogleTokenError, match="PINCER_GOOGLE_TOKEN_JSON"),
     ):
         auth.get_credentials()
 

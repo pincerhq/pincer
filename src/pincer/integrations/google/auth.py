@@ -64,6 +64,10 @@ SERVICE_SCOPES: dict[str, list[str]] = {
 }
 
 
+class GoogleTokenError(RuntimeError):
+    """The stored Google token cannot be used or refreshed (revoked, expired, no refresh token): re-auth needed."""
+
+
 def scopes_for_services(services: list[str] | None = None) -> list[str]:
     """Return the deduplicated scope list for the given service names."""
     if services is None:
@@ -115,7 +119,7 @@ class GoogleAuth:
 
         Raises:
             FileNotFoundError: if credentials or token file is missing (file mode).
-            RuntimeError: if the token cannot be refreshed and re-auth is needed.
+            GoogleTokenError: if the token cannot be refreshed and re-auth is needed.
         """
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
@@ -142,9 +146,9 @@ class GoogleAuth:
                 logger.debug("Google Workspace token refreshed")
                 return self._credentials
             except Exception as exc:
-                raise RuntimeError(f"Token refresh failed: {exc}. {self._reauth_hint()}") from exc
+                raise GoogleTokenError(f"Token refresh failed: {exc}. {self._reauth_hint()}") from exc
 
-        raise RuntimeError(f"Google token is invalid (no refresh token). {self._reauth_hint()}")
+        raise GoogleTokenError(f"Google token is invalid (no refresh token). {self._reauth_hint()}")
 
     def _load_from_file(self) -> None:
         from google.oauth2.credentials import Credentials
@@ -186,7 +190,7 @@ class GoogleAuth:
         if self._token_info is not None:
             return f"Run 'pincer google setup --print-env' and update {TOKEN_ENV}"
         if self._token_path.name == "google_token.json":
-            # Legacy calendar token — the built-in calendar_* tools still use it, don't delete it.
+            # Legacy calendar-only token — locate_token still falls back to it for the calendar tools.
             return "Run 'pincer google setup' (creates google_workspace_token.json; keep google_token.json)"
         return f"Run 'pincer google setup' (re-authorises and replaces {self._token_path})"
 

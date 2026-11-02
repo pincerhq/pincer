@@ -190,6 +190,8 @@ class SecurityDoctor:
         report.checks.append(self._check_skill_sandbox_enabled(settings))
         report.checks.append(self._check_tool_approval_mode(settings))
         report.checks.append(self._check_schedule_action_types(settings))
+        # Google Workspace (1 check, issue #297)
+        report.checks.append(self._check_google_workspace(settings))
         # MCP (8 checks, Sprint 8)
         report.checks.append(self._check_mcp_config_valid())
         report.checks.append(self._check_mcp_sandbox_enabled())
@@ -2024,6 +2026,44 @@ class SecurityDoctor:
             CheckStatus.PASS,
             "Every call language uses a voice in that language",
             category="voice",
+        )
+
+    # ── Google Workspace (issue #297) ─────────────────────
+
+    def _check_google_workspace(self, cfg: Settings | None = None) -> CheckResult:
+        """Whether a Google token is present with scopes — without it there are no calendar, Gmail or
+        Drive tools. Read from the token file or env only: a revoked token still passes here."""
+        from pincer.integrations import google
+        from pincer.integrations.google.config import load_config
+
+        settings = self._cfg(cfg)
+        name, setup = "google_workspace_token", "Run `pincer google setup`"
+        if not load_config().enabled:
+            return CheckResult(name, CheckStatus.SKIPPED, "Google integration disabled in config", category="google")
+        state = google.google_status(settings)
+        if state["status"] == "active":
+            services = ", ".join(state["enabled_services"])
+            return CheckResult(
+                name,
+                CheckStatus.PASS,
+                f"Google token found with scopes for: {services} (not checked against Google; "
+                "a revoked token still shows here)",
+                category="google",
+            )
+        if state["status"] == "partial":
+            return CheckResult(
+                name,
+                CheckStatus.WARNING,
+                f"Google token is missing scopes; only {', '.join(state['enabled_services'])} enabled",
+                fix_hint=f"{setup} to re-consent",
+                category="google",
+            )
+        return CheckResult(
+            name,
+            CheckStatus.SKIPPED,
+            "No usable Google token — no calendar, Gmail or Drive tools",
+            fix_hint=f"{setup} to connect",
+            category="google",
         )
 
     # ── Signal (Sprint 7.5) ───────────────────────────────

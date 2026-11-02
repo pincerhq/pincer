@@ -1,8 +1,8 @@
 """Shared tool-registration helper.
 
 Builds a ToolRegistry containing all *channel-independent* tools the agent
-can use: file IO, Python/shell exec, browser, email, calendar builtins,
-and the full Google Workspace / Microsoft 365 / Slack integrations when
+can use: file IO, Python/shell exec, browser, email, and the full Google
+Workspace (the only calendar toolset) / Microsoft 365 / Slack integrations when
 configured.
 
 Used by both `cli._run_agent` (for terminal/messaging-channel agents) and
@@ -19,11 +19,27 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from pincer.core.log_once import LogOnce
+
 if TYPE_CHECKING:
     from pincer.config import Settings
     from pincer.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+#: Logged when the Google integration is on but no token is found (a token without usable
+#: scopes gets get_google_factory's own warning instead).
+GOOGLE_SETUP_HINT = (
+    "Google Workspace tools off (no calendar, Gmail or Drive): no Google token found — "
+    "run `pincer google setup` to connect"
+)
+# Once per process at INFO: register_default_tools also runs on every GET /api/integrations.
+_SETUP_HINT_LOG = LogOnce(logger, logging.INFO)
+# A crashing Workspace registration (with its traceback): WARNING once, DEBUG until it registers again.
+_REGISTRATION_FAILURE_LOG = LogOnce(logger)
+# A token missing a required scope, apart from the crash log: a crash must not demote the one
+# message that says what to do.
+_SCOPE_FAILURE_LOG = LogOnce(logger)
 
 
 def register_default_tools(tools: ToolRegistry, settings: Settings) -> dict[str, int]:
@@ -170,8 +186,6 @@ def _register_builtins(tools: ToolRegistry, settings: Settings, report: dict[str
 
     if settings.email_imap_host and settings.email_username:
         _register_email_tools(tools, report)
-
-    _register_calendar_builtins(tools, report)
 
 
 def _register_email_tools(tools: ToolRegistry, report: dict[str, int]) -> None:
@@ -321,67 +335,9 @@ def _register_email_tools(tools: ToolRegistry, report: dict[str, int]) -> None:
     report["builtins"] += 9
 
 
-def _register_calendar_builtins(tools: ToolRegistry, report: dict[str, int]) -> None:
-    try:
-        from pincer.tools.builtin.calendar_tool import (
-            calendar_create,
-            calendar_today,
-            calendar_week,
-        )
-    except ImportError:
-        logger.debug("Google Calendar dependencies not installed, calendar builtins disabled")
-        return
-
-    tools.register(
-        name="calendar_today",
-        description=(
-            "Get today's calendar events. Use when user asks about their schedule, meetings, or agenda today."
-        ),
-        handler=calendar_today,
-        parameters={
-            "type": "object",
-            "properties": {
-                "calendar_id": {"type": "string", "default": "primary"},
-            },
-            "required": [],
-        },
-    )
-    tools.register(
-        name="calendar_week",
-        description="Get this week's calendar events. Use when user asks about their week or upcoming schedule.",
-        handler=calendar_week,
-        parameters={
-            "type": "object",
-            "properties": {
-                "calendar_id": {"type": "string", "default": "primary"},
-            },
-            "required": [],
-        },
-    )
-    tools.register(
-        name="calendar_create",
-        description=(
-            "Create a new Google Calendar event. Use when user asks to "
-            "schedule, add, or book a meeting or event. "
-            "On success, the tool returns the event's direct URL (htmlLink). "
-            "You MUST include this URL in your final response so the user can open the event."
-        ),
-        handler=calendar_create,
-        parameters={
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "start_time": {"type": "string"},
-                "duration_minutes": {"type": "integer", "default": 60},
-                "description": {"type": "string", "default": ""},
-                "location": {"type": "string", "default": ""},
-                "calendar_id": {"type": "string", "default": "primary"},
-            },
-            "required": ["title", "start_time"],
-        },
-        require_approval=True,
-    )
-    report["builtins"] += 3
+def _clear_failure_logs() -> None:
+    _REGISTRATION_FAILURE_LOG.clear()
+    _SCOPE_FAILURE_LOG.clear()
 
 
 def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> None:
@@ -390,12 +346,20 @@ def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> N
 
         factory = get_google_factory()
         if factory is None:
+            from pincer.config import get_settings_relaxed
+            from pincer.integrations.google import token_source
+            from pincer.integrations.google.config import load_config
+
+            if load_config().enabled and token_source.locate_token(get_settings_relaxed()) is None:
+                _SETUP_HINT_LOG.log(GOOGLE_SETUP_HINT)
+            _clear_failure_logs()  # the token state changed: the next failure deserves a WARNING
             return
         report["google"] = register_all_tools(tools, factory)
-    except RuntimeError as e:
-        logger.warning("Google Workspace tools disabled: %s", e)
-    except Exception:
-        logger.debug("Google Workspace tools not loaded", exc_info=True)
+        _clear_failure_logs()
+    except RuntimeError as e:  # e.g. a token missing a required scope: as repeating as any other failure
+        _SCOPE_FAILURE_LOG.log("Google Workspace tools disabled: %s", e)
+    except Exception as e:
+        _REGISTRATION_FAILURE_LOG.log("Google Workspace tools not loaded: %s", e, exc_info=True)
 
 
 def _register_slack(tools: ToolRegistry, report: dict[str, int]) -> None:

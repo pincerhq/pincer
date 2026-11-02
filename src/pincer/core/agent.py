@@ -17,11 +17,12 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable, Collection
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from pincer.core.clock import current_time_block
+from pincer.core.clock import CALL_TIMEZONE_KEY, current_time_block
+from pincer.core.log_once import LogOnce
 from pincer.core.onboarding import (
     EXTRACTION_PROMPT_TEMPLATE,
     LANGUAGE_TOOL_HINT,
@@ -30,6 +31,7 @@ from pincer.core.onboarding import (
     PREFERRED_LANGUAGE_NOTE,
     PROFILE_USAGE_INSTRUCTION,
 )
+from pincer.db.ids import new_id
 from pincer.exceptions import BudgetExceededError, LLMError, ToolNotFoundError
 from pincer.llm.base import (
     BaseLLMProvider,
@@ -48,6 +50,7 @@ from pincer.memory.base import (
 from pincer.memory.profile import get_preferred_language
 from pincer.tools.builtin.language_pref import TOOL_NAME as LANGUAGE_TOOL_NAME
 from pincer.tools.path_sandbox import SandboxDenied
+from pincer.voice.localtime import get_voice_timezone
 
 # Signature: (tool_name, arguments, user_id, channel) -> approved?
 ApprovalCallback = Callable[[str, dict[str, Any], str, str], Awaitable[bool]]
@@ -458,30 +461,15 @@ def _sanitize_tool_pairs(messages: list[LLMMessage]) -> list[LLMMessage]:
     return clean if changed else messages
 
 
-class _OutageLog:
-    """Logs a dependency that fails on every message once per outage, not once per message.
+@dataclass(frozen=True)
+class _Turn:
+    """One chat turn's tool context: a UUID7 for log tracing (and calendar
+    dedup), plus the user's identity timezone, looked up once per turn, and
+    on a phone call the call's (voice) zone."""
 
-    The first failure is a WARNING with its traceback; repeats are DEBUG until
-    a call succeeds, which is logged at INFO. Call `failed()` from inside the
-    `except` block, so the traceback is the current exception's.
-    """
-
-    def __init__(self, failure: str, recovery: str) -> None:
-        self._failure = failure
-        self._recovery = recovery
-        self._down = False
-
-    def failed(self) -> None:
-        if self._down:
-            logger.debug(self._failure, exc_info=True)
-            return
-        self._down = True
-        logger.warning(self._failure, exc_info=True)
-
-    def succeeded(self) -> None:
-        if self._down:
-            self._down = False
-            logger.info(self._recovery)
+    turn_id: str
+    timezone: str
+    call_timezone: str = ""
 
 
 class Agent:
@@ -524,12 +512,10 @@ class Agent:
         self._onboarding_reserved: set[tuple[str, str]] = set()
         # Injected by cli.py: (user_id, channel_name, question) -> answer
         self._ask_user_callback: Callable[[str, str, str], Awaitable[str]] | None = None
-        self._mcp_list_outage = _OutageLog(
-            "Failed to fetch MCP server list for prompt", "Fetching the MCP server list for prompt recovered"
-        )
-        self._memory_outage = _OutageLog(
-            "Failed to fetch memories for prompt", "Fetching memories for prompt recovered"
-        )
+        # A dependency failing on every message logs once per outage (WARNING with its traceback,
+        # DEBUG repeats, INFO on recovery), not once per message.
+        self._mcp_list_outage = LogOnce(logger, recovery="Fetching the MCP server list for prompt recovered")
+        self._memory_outage = LogOnce(logger, recovery="Fetching memories for prompt recovered")
 
     async def _repair_tool_pairs(self, session: Session) -> bool:
         """Strip orphaned tool pairs from the session and persist it.
@@ -706,6 +692,8 @@ class Agent:
             [t.get("name") for t in (tool_schemas or [])],
         )
 
+        turn = await self._begin_turn(user_id)
+
         async def build_prompt(tool_names: list[str] | None) -> str:
             return await self._build_system_prompt(
                 user_id,
@@ -713,6 +701,7 @@ class Agent:
                 extra_system="\n\n".join(extra_parts) or None,
                 skip_memory=not memory,
                 tool_names=tool_names,
+                user_timezone=turn.timezone,
                 preferred_language=(channel_name or channel) != "voice",
             )
 
@@ -808,13 +797,21 @@ class Agent:
                         result = repeats.repeat_result(tool_call)
                     elif call_gate is not None:
                         result = await self._execute_call_tool(
-                            tool_call, user_id, channel, channel_user_id, call_gate, channel_name=channel_name
+                            tool_call,
+                            user_id,
+                            channel,
+                            channel_user_id,
+                            call_gate,
+                            channel_name=channel_name,
+                            turn=turn,
                         )
                         if repeats is not None:
                             repeats.record(tool_call, result)
                         ran_new_call = True
                     else:
-                        result = await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id)
+                        result = await self._execute_tool(
+                            tool_call, user_id, channel, channel_name, channel_user_id, turn=turn
+                        )
 
                     result_msg = LLMMessage(
                         role=MessageRole.TOOL_RESULT,
@@ -943,8 +940,9 @@ class Agent:
         if candidates is not None and allowed_tools is not None:
             candidates = [s for s in candidates if s.get("name") in allowed_tools] or None
         tool_schemas = await self._select_tools(candidates, prompt) if candidates is not None else None
+        turn = await self._begin_turn(user_id)
         system_prompt = await self._build_system_prompt(
-            user_id, prompt, skip_memory=True, tool_names=_schema_names(tool_schemas)
+            user_id, prompt, skip_memory=True, tool_names=_schema_names(tool_schemas), user_timezone=turn.timezone
         )
 
         final_text = ""
@@ -993,7 +991,7 @@ class Agent:
                 skills_loaded: list[str] = []
                 for tool_call in response.tool_calls:
                     result = await self._execute_tool(
-                        tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True
+                        tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True, turn=turn
                     )
                     messages.append(
                         LLMMessage(
@@ -1013,7 +1011,11 @@ class Agent:
                     if reselected and _schema_names(reselected) != _schema_names(tool_schemas):
                         tool_schemas = reselected
                         system_prompt = await self._build_system_prompt(
-                            user_id, prompt, skip_memory=True, tool_names=_schema_names(tool_schemas)
+                            user_id,
+                            prompt,
+                            skip_memory=True,
+                            tool_names=_schema_names(tool_schemas),
+                            user_timezone=turn.timezone,
                         )
 
                 if iteration_had_error:
@@ -1120,9 +1122,16 @@ class Agent:
             [t.get("name") for t in (tool_schemas or [])],
         )
 
+        turn = await self._begin_turn(user_id)
+
         async def build_prompt(tool_names: list[str]) -> str:
             return await self._build_system_prompt(
-                user_id, text, extra_system=extra_system, skip_memory=not memory, tool_names=tool_names
+                user_id,
+                text,
+                extra_system=extra_system,
+                skip_memory=not memory,
+                tool_names=tool_names,
+                user_timezone=turn.timezone,
             )
 
         system_prompt = await build_prompt(_schema_names(tool_schemas))
@@ -1177,7 +1186,9 @@ class Agent:
             skills_loaded: list[str] = []
             for tool_call in response.tool_calls:
                 yield StreamChunk(StreamEventType.TOOL_START, f"Using {tool_call.name}...")
-                result = await self._execute_tool(tool_call, user_id, channel, channel_user_id=channel_user_id)
+                result = await self._execute_tool(
+                    tool_call, user_id, channel, channel_user_id=channel_user_id, turn=turn
+                )
                 result_msg = LLMMessage(
                     role=MessageRole.TOOL_RESULT,
                     content=result.content,
@@ -1340,6 +1351,7 @@ class Agent:
         # add_message auto-trims to max_session_messages, so context stays
         # bounded; text channels keep the richer summarize-then-trim flow.
 
+        turn = await self._begin_turn(user_id)
         # Sprint 11: in call context the bound gate owns the EXACT tool set
         # (tier table ∩ call scope); the Sprint-8 name filter is the fallback
         # when no gate is bound (legacy callers, tests).
@@ -1359,6 +1371,7 @@ class Agent:
             text,
             extra_system=extra_system,
             tool_names=_schema_names(tool_schemas),
+            user_timezone=turn.timezone,
             preferred_language=False,
         )
         max_tokens = int(getattr(self._settings, "voice_max_response_tokens", 220) or 220)
@@ -1527,7 +1540,9 @@ class Agent:
                         iteration=_iteration + 1,
                     )
                     turn_trace.bump("tool_calls")
-                result = await self._execute_call_tool(tool_call, user_id, channel, channel_user_id, call_gate)
+                result = await self._execute_call_tool(
+                    tool_call, user_id, channel, channel_user_id, call_gate, turn=turn
+                )
                 if repeats is not None:
                     repeats.record(tool_call, result)
                 if tool_span is not None:
@@ -1625,6 +1640,10 @@ class Agent:
             logger.debug("Timezone lookup failed for %s", user_id, exc_info=True)
             return ""
 
+    async def _begin_turn(self, user_id: str) -> _Turn:
+        """Mint this turn's ID and resolve the user's zone once for all its tool calls."""
+        return _Turn(turn_id=new_id(), timezone=await self._user_timezone(user_id))
+
     async def _build_system_prompt(
         self,
         user_id: str,
@@ -1633,12 +1652,15 @@ class Agent:
         extra_system: str | None = None,
         skip_memory: bool = False,
         tool_names: Collection[str] | None = None,
+        user_timezone: str | None = None,
         preferred_language: bool = True,
     ) -> str:
         """Build system prompt, injecting relevant memories if available.
 
         ``tool_names`` are the tools sent with this turn (the tool hints and
         the MCP server block follow them); ``None`` means the whole registry.
+        ``user_timezone`` is the turn's already-resolved identity zone
+        (``None`` = look it up).
         ``preferred_language`` False leaves out the user's stored language:
         a voice call speaks the one language pinned on the call (its
         LANGUAGE_POLICY), and an outbound call's other party is not the user.
@@ -1707,14 +1729,16 @@ class Agent:
                     base_prompt += "\n\n[Connected MCP servers — use their prefixed tools when relevant]\n" + "\n".join(
                         server_lines
                     )
-                self._mcp_list_outage.succeeded()
+                self._mcp_list_outage.clear()
             except Exception:
-                self._mcp_list_outage.failed()
+                self._mcp_list_outage.log("Failed to fetch MCP server list for prompt", exc_info=True)
 
         # The model has no clock and will invent today's date if nothing states
         # it (see core/clock.py). Appended on every return path below, and last
         # so it is the most recent thing the model reads before the messages.
-        time_block = current_time_block(self._settings, await self._user_timezone(user_id))
+        if user_timezone is None:
+            user_timezone = await self._user_timezone(user_id)
+        time_block = current_time_block(self._settings, user_timezone)
 
         def _with_extra(prompt: str) -> str:
             parts = [prompt]
@@ -1735,9 +1759,9 @@ class Agent:
                 block = "\n".join(f"- {m.content}" for m in memories)
             except Exception:
                 # Inside the handler, so the outage warning carries the traceback.
-                self._memory_outage.failed()
+                self._memory_outage.log("Failed to fetch memories for prompt", exc_info=True)
                 return None
-            self._memory_outage.succeeded()
+            self._memory_outage.clear()
             return block
 
         async def read_language() -> str | None:
@@ -1918,6 +1942,53 @@ class Agent:
         channel_user_id: str | None = None,
         *,
         skip_approval: bool = False,
+        turn: _Turn | None = None,
+    ) -> ToolResult:
+        """Execute one tool call, logging a "Tool call" and a matching "Tool
+        result" line (tool, turn, call, error flag, duration) for every tool.
+
+        ``turn`` carries the turn ID and the user's zone; a caller outside a
+        turn (tests, one-off paths) gets a fresh one for this call.
+        """
+        turn = turn or await self._begin_turn(user_id)
+        return await self._traced(
+            tool_call,
+            turn,
+            lambda: self._run_tool_call(
+                tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=skip_approval, turn=turn
+            ),
+        )
+
+    async def _traced(self, tool_call: ToolCall, turn: _Turn, run: Callable[[], Awaitable[ToolResult]]) -> ToolResult:
+        """One "Tool call" and one matching "Tool result" log line around ``run``."""
+        logger.info(
+            "Tool call: %s(%s) [turn=%s call=%s]", tool_call.name, tool_call.arguments, turn.turn_id, tool_call.id
+        )
+        started = time.monotonic()
+        result: ToolResult | None = None
+        try:
+            result = await run()
+            return result
+        finally:
+            logger.info(
+                "Tool result: tool=%s turn=%s call=%s error=%s duration_ms=%d",
+                tool_call.name,
+                turn.turn_id,
+                tool_call.id,
+                result.is_error if result is not None else True,
+                (time.monotonic() - started) * 1000,
+            )
+
+    async def _run_tool_call(
+        self,
+        tool_call: ToolCall,
+        user_id: str,
+        channel: str,
+        channel_name: str | None,
+        channel_user_id: str | None,
+        *,
+        skip_approval: bool,
+        turn: _Turn,
     ) -> ToolResult:
         """Execute a single tool call, catching errors.
 
@@ -1938,8 +2009,6 @@ class Agent:
         approval authority during a phone call) may set this — never the
         plain ``handle_message``/``handle_message_stream`` paths.
         """
-        logger.info("Tool call: %s(%s)", tool_call.name, tool_call.arguments)
-
         # Guard: block Google-related code in general-purpose execution tools
         if tool_call.name in ("python_exec", "shell_exec"):
             code = tool_call.arguments.get("code", "") or tool_call.arguments.get("command", "")
@@ -2006,6 +2075,15 @@ class Agent:
                         "channel": channel,
                         "pincer_user_id": user_id,
                         "channel_name": channel_name or channel,
+                        # Per-user identity zone: calendar tools read
+                        # offset-less times in it when the calendar's own
+                        # zone is unavailable ("" = use PINCER_TIMEZONE).
+                        "timezone": turn.timezone,
+                        # On a call: the voice zone the calendar tools work in.
+                        **({CALL_TIMEZONE_KEY: turn.call_timezone} if turn.call_timezone else {}),
+                        # Tracing (log lines) and calendar create dedup.
+                        "turn_id": turn.turn_id,
+                        "tool_call_id": tool_call.id,
                     },
                 )
                 if tool_call.name == "make_phone_call":
@@ -2052,6 +2130,7 @@ class Agent:
         call_gate: Any,
         *,
         channel_name: str | None = None,
+        turn: _Turn | None = None,
     ) -> ToolResult:
         """Sprint 11: run one tool_use through the in-call gate.
 
@@ -2059,18 +2138,30 @@ class Agent:
         user / off modes, write budget, timeouts) — so the registry's generic
         approval prompt is skipped; without a gate the normal path applies.
         """
+        # Times on a call are in the voice zone (as the call prompt says): the calendar
+        # tools read and show times in it, gated or not.
+        call_turn = replace(
+            turn or await self._begin_turn(user_id), call_timezone=get_voice_timezone(self._settings).key
+        )
         if call_gate is None:
-            return await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id)
+            # Reached from _stream_voice_turn, which passes current_gate() as is: a voice turn
+            # with no gate bound (no tracked call, or one already ended) still reads the voice zone.
+            return await self._execute_tool(tool_call, user_id, channel, channel_name, channel_user_id, turn=call_turn)
 
         async def _run() -> tuple[str, bool]:
-            inner = await self._execute_tool(
-                tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True
+            # Untraced here: the pair around the gate below covers the call,
+            # including tools the gate denies or times out without running.
+            inner = await self._run_tool_call(
+                tool_call, user_id, channel, channel_name, channel_user_id, skip_approval=True, turn=call_turn
             )
             return inner.content, inner.is_error
 
-        # The model's arguments: an idempotency key in them is never trusted.
-        gate_result = await call_gate.run(tool_call.name, tool_call.arguments, _run, trusted_key=False)
-        return ToolResult(tool_call_id=tool_call.id, content=gate_result.content, is_error=gate_result.is_error)
+        async def _gated() -> ToolResult:
+            # The model's arguments: an idempotency key in them is never trusted.
+            gate_result = await call_gate.run(tool_call.name, tool_call.arguments, _run, trusted_key=False)
+            return ToolResult(tool_call_id=tool_call.id, content=gate_result.content, is_error=gate_result.is_error)
+
+        return await self._traced(tool_call, call_turn, _gated)
 
     async def _fire_tool_event(
         self,

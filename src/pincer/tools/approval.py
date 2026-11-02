@@ -45,7 +45,6 @@ APPROVAL_MODES: frozenset[str] = frozenset({"all", "critical", "none"})
 NON_CRITICAL_TOOLS: frozenset[str] = frozenset(
     {
         # ── Calendar: create/amend/respond (delete stays critical) ──
-        "calendar_create",
         "google__accept_event",
         "google__add_google_meet",
         "google__create_event",

@@ -15,12 +15,33 @@ PINCER_SCOPES: dict[str, str] = {
     "offline_access": "Obtain refresh tokens for long-lived access",
 }
 
+# Workspace calendar tools per scope (``calendar_today`` is the MCP-only alias;
+# deleting events is never granted by tools:write).
+# Advisory: check_tool_scope has no caller in src/ yet, so these mappings are not
+# enforced on MCP calls today.
+_CALENDAR_READ = [
+    "calendar_today",
+    "google__list_events",
+    "google__search_events",
+    "google__get_event",
+    "google__check_freebusy",
+    "google__list_calendars",
+]
+_CALENDAR_WRITE = [
+    "google__create_event",
+    "google__update_event",
+    "google__move_event",
+    "google__accept_event",
+    "google__decline_event",
+    "google__add_google_meet",
+]
+
 # Which tool name patterns each scope grants
 SCOPE_TOOL_MAP: dict[str, list[str]] = {
     "tools:read": [
         "memory_search",
         "email_check",
-        "calendar_today",
+        *_CALENDAR_READ,
         "file_read",
         "list_tools",
         "memory_read",
@@ -31,19 +52,19 @@ SCOPE_TOOL_MAP: dict[str, list[str]] = {
         "file_write",
         "memory_store",
         "email_send",
-        "calendar_create",
+        *_CALENDAR_WRITE,
         "memory_update",
     ],
     "tools:execute": [
         "memory_search",
         "email_check",
-        "calendar_today",
+        *_CALENDAR_READ,
         "file_read",
         "list_tools",
         "file_write",
         "memory_store",
         "email_send",
-        "calendar_create",
+        *_CALENDAR_WRITE,
         "memory_update",
         "execute_command",
         "browser_action",

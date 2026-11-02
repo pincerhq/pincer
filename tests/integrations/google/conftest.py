@@ -12,8 +12,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from integrations.google.fake_calendar import FakeCalendarFactory, FakeCalendarService
 from pincer.integrations.google.auth import SERVICE_SCOPES, GoogleAuth
 from pincer.integrations.google.service_factory import GoogleServiceFactory
+from pincer.integrations.google.tools_calendar import register_calendar_tools
+from pincer.tools.registry import ToolRegistry
 
 # ── Auth & factory fixtures ───────────────────────────────────────────────────
 
@@ -234,3 +237,84 @@ def mock_meet_beta_service(mock_factory):
 
     mock_factory.get = _get
     return svc
+
+
+# ── Stateful fake Calendar fixtures ──────────────────────────────────────────
+# Each calendar test module defines its own ``fake`` (a FakeCalendarService
+# with the calendars and zones it needs); these build on it.
+
+
+@pytest.fixture
+def berlin_deployment(monkeypatch):
+    """PINCER_TIMEZONE=Europe/Berlin — the deployment zone, not the calendar's."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "pincer.config.get_settings_relaxed",
+        lambda: SimpleNamespace(timezone="Europe/Berlin", voice_timezone="Europe/Berlin"),
+    )
+
+
+@pytest.fixture
+def fake():
+    """A fake Calendar with a Europe/Kiev primary calendar (Google's name for the
+    owner's zone); modules needing other calendars override this fixture."""
+    return FakeCalendarService({"primary": "Europe/Kiev"})
+
+
+@pytest.fixture
+def fake_factory(fake, berlin_deployment):
+    """A GoogleServiceFactory stand-in serving the module's fake Calendar service.
+
+    Depends on ``berlin_deployment`` so no fake-calendar test can silently read
+    the machine's real settings.
+    """
+    return FakeCalendarFactory(fake)
+
+
+@pytest.fixture
+def fake_registry(fake_factory):
+    """A real ToolRegistry with the real calendar tools wired to the fake."""
+    reg = ToolRegistry()
+    register_calendar_tools(reg, fake_factory)
+    return reg
+
+
+@pytest.fixture
+def instant_backoff(monkeypatch):
+    """The quota retry wrapper without its real back-off sleeps (503 retry tests)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from pincer.integrations.google import quota
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(quota, "asyncio", SimpleNamespace(sleep=_no_sleep, to_thread=asyncio.to_thread))
+
+
+@pytest.fixture
+def google_token(monkeypatch, mock_credentials, fake, berlin_deployment):
+    """A configured Google token whose Calendar API is the module's ``fake``.
+
+    Goes through the real ``get_google_factory`` path (config, token location,
+    scope probe, service factory); only ``googleapiclient.discovery.build`` is
+    swapped. Returns a switch: set ``.config`` to change ``[integrations.google]``.
+    """
+    from types import SimpleNamespace
+
+    from pincer.integrations.google.config import GoogleIntegrationConfig
+
+    creds_path, token_path = mock_credentials
+    location = {"credentials_path": str(creds_path), "token_path": str(token_path)}
+    monkeypatch.setattr("pincer.integrations.google.token_source.locate_token", lambda _settings: location)
+
+    def _build(api, version, **_kwargs):
+        assert api == "calendar", api
+        return fake
+
+    monkeypatch.setattr("googleapiclient.discovery.build", _build)
+    state = SimpleNamespace(config=GoogleIntegrationConfig())
+    monkeypatch.setattr("pincer.integrations.google.config.load_config", lambda: state.config)
+    return state

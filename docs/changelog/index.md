@@ -6,6 +6,54 @@ All notable changes to Pincer. Format: [Version] — Date.
 
 ## [0.9.0] — Upcoming
 
+### Calendar: one Google Workspace toolset, stored times in the calendar's zone (#297)
+
+Creating, moving and renaming calendar events now go through the Google
+Workspace calendar tools only, and every reply quotes the times Google stored,
+in the calendar's own timezone.
+
+- The builtin `calendar_today`, `calendar_week` and `calendar_create` tools are
+  removed. Edits go through `google__update_event` with the event's ID, so
+  "move it" or "rename it" changes the event instead of creating a second one.
+  A create that is retried, or repeated in the same turn, finds the existing
+  event instead of making another one. An insert that fails on a dropped
+  connection but was saved anyway is reported as created.
+- Offset-less times are read in the target calendar's zone, then the person's
+  zone, then `PINCER_TIMEZONE`. On a phone call every calendar tool reads them,
+  and shows its times, in the voice zone (`PINCER_VOICE_TIMEZONE`), as the call
+  prompt tells the model, unless the model names a zone. Moving an event reads
+  the new time in the zone the times were shown in; the event keeps its own
+  timezone.
+- List and search lines name an event's own timezone when it differs from the
+  calendar's. Deleting an event that is already deleted reports that, instead
+  of an error.
+- Upcoming-event reminders are sent once per event, 15 minutes before it
+  starts, checked every minute. They used to be one hourly digest of the whole
+  day. Working-location, out-of-office and focus-time entries get no reminder.
+- `pincer doctor` has a Google check, and startup logs once how to connect
+  (`pincer google setup`) when no Google token is found.
+- New log lines: one `Tool call` / `Tool result` pair per tool call (with turn
+  and call IDs) and one `calendar_write` line per calendar write.
+- `tzdata` is now a required dependency.
+
+> **Behaviour change.**
+>
+> - `PINCER_SKIP_APPROVAL` entries naming `calendar_today`, `calendar_week` or
+>   `calendar_create` now do nothing. An MCP `expose_tools` entry naming
+>   `calendar_week` or `calendar_create` is skipped with a warning.
+>   `calendar_today` is still served to MCP clients as an alias over the
+>   Workspace list, with "today" taken in the calendar's zone.
+> - The MCP server's default export still gives external clients today's
+>   events only (`calendar_today`). Full calendar read and search are opt-in:
+>   add `"google__list_events"` and/or `"google__search_events"` to
+>   `expose_tools` under `[mcp.server]` in `pincer.toml` (the shipped file lists
+>   them commented out). MCP results never carry the model's edit hint.
+> - The voice tool allowlist names the Workspace calendar tools
+>   (`google__list_events`, `google__search_events`, `google__get_event`,
+>   `google__check_freebusy`, `google__create_event`, `google__update_event`)
+>   instead of the builtin ones.
+> - Reminders change from one hourly digest to one message per event.
+
 ### docTR MCP Server — OCR (6 tools)
 
 **New module:** `src/doctr-mcp/` — a FastMCP server wrapping

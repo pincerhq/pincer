@@ -100,14 +100,23 @@ def test_dangerous_mcp_tools_denied_in_voice(tool_name):
 
 def test_denylist_does_not_break_the_curated_call_tools():
     """Regression guard: the denylist must not eat the tools calls need."""
-    for tool_name in ("calendar_today", "calendar_week", "calendar_create", "email_check", "make_phone_call"):
+    for tool_name in (
+        "google__list_events",
+        "google__search_events",
+        "google__create_event",
+        "google__update_event",
+        "email_check",
+        "make_phone_call",
+    ):
         assert is_voice_compatible(tool_name), f"{tool_name} must stay available on calls"
 
 
 def test_filter_voice_tools_drops_dangerous_schemas():
-    schemas = [{"name": n} for n in [*MCP_DANGEROUS_NAMES, *FORBIDDEN_TOOL_TARGETS, "calendar_today", "email_check"]]
+    schemas = [
+        {"name": n} for n in [*MCP_DANGEROUS_NAMES, *FORBIDDEN_TOOL_TARGETS, "google__list_events", "email_check"]
+    ]
     kept = {s["name"] for s in filter_voice_tools(schemas)}
-    assert kept == {"calendar_today", "email_check"}
+    assert kept == {"google__list_events", "email_check"}
 
 
 # ── 3. Prompt: the rules exist in every language pack ────────────────

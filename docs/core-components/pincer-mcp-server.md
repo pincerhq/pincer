@@ -46,8 +46,11 @@ path    = "/mcp"         # Endpoint path
 # Tools to expose (conservative defaults — only read-only tools)
 expose_tools = [
     "email_check",
-    "calendar_today",
+    "calendar_today",          # alias: today's events, in the calendar's timezone
     "memory_search",
+    # Opt-in: full calendar read and search
+    # "google__list_events",
+    # "google__search_events",
 ]
 ```
 
@@ -70,8 +73,9 @@ All Pincer built-in tools can be exposed. Configure which ones via `expose_tools
 | `web_browse` | Navigate URLs and extract content | No |
 | `email_check` | Read Gmail inbox | No |
 | `email_send` | Draft and send email | **Yes** |
-| `calendar_today` | Read Google Calendar | No |
-| `calendar_create` | Create calendar events | **Yes** |
+| `calendar_today` | Today's Google Calendar events (MCP-only alias over `google__list_events`; "today" is the calendar's own day) | No |
+| `google__list_events` / `google__search_events` / `google__get_event` | Read Google Calendar | No |
+| `google__create_event` / `google__update_event` | Create or change calendar events | **Yes** |
 | `shell_exec` | Run shell commands | **Yes** |
 | `python_exec` | Execute Python code | **Yes** |
 | `file_read` | Read local files | No |

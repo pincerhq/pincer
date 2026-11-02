@@ -724,23 +724,77 @@ async def test_owner_approved_create_gets_the_call_key(owner_phone):
 async def test_agent_passes_model_tool_calls_as_untrusted(owner_phone):
     """The one production call site with trusted_key=False: a key the model
     copied into its tool call never reaches the calendar."""
-    from pincer.core.agent import Agent
+    from types import SimpleNamespace
+
+    from pincer.core.agent import Agent, _Turn
     from pincer.llm.base import ToolCall, ToolResult
 
     channel, engine, state = await _start(ToolAgent([]), tools=_Registry())
     gate = channel.get_tool_gate(CALL)
     agent = object.__new__(Agent)  # only _execute_call_tool is under test
+    agent._settings = SimpleNamespace(voice_timezone="Europe/Berlin", timezone="Europe/Berlin")
     sent: list[dict] = []
+    zones: list[str] = []
 
-    async def _execute_tool(tool_call, *args, **kwargs):
+    async def _run_tool_call(tool_call, *args, **kwargs):
         sent.append(dict(tool_call.arguments))
+        zones.append(kwargs["turn"].call_timezone)
         return ToolResult(tool_call_id=tool_call.id, content=CREATE_RESULT, is_error=False)
 
-    agent._execute_tool = _execute_tool  # type: ignore[method-assign]
+    agent._run_tool_call = _run_tool_call  # type: ignore[method-assign]
     call = ToolCall(id="t1", name="google__create_event", arguments={**CREATE_ARGS, "idempotency_key": "copied"})
-    result = await agent._execute_call_tool(call, "owner", "voice", None, gate)
+    turn = _Turn(turn_id="turn-1", timezone="")
+    result = await agent._execute_call_tool(call, "owner", "voice", None, gate, turn=turn)
     assert not result.is_error
+    # The gate keys the model's own arguments (a re-emit after a verbal confirmation gives the same key
+    # and fingerprint); the voice zone reaches the tool through the turn's context, not the arguments.
     assert sent[0]["idempotency_key"] == ict.call_idempotency_key(CALL, "google__create_event", CREATE_ARGS)
+    assert "timezone" not in sent[0]
+    assert zones == ["Europe/Berlin"]
+    await channel.stop()
+
+
+async def test_a_verbally_confirmed_re_emit_through_the_agent_runs_the_proposed_booking():
+    """The voice zone travels in the tool context, not the arguments: the YES note asks the model to
+    re-emit the arguments the gate proposed, and that re-emit matches the proposal (same fingerprint,
+    same key) — offset-less times included, as the call prompt has the model send them."""
+    import json
+    from types import SimpleNamespace
+
+    from pincer.core.agent import Agent, _Turn
+    from pincer.llm.base import ToolCall, ToolResult
+
+    channel, engine, state = await _start(ToolAgent([]), appointment=True, tools=_Registry())
+    gate = channel.get_tool_gate(CALL)
+    agent = object.__new__(Agent)  # only _execute_call_tool is under test
+    agent._settings = SimpleNamespace(voice_timezone="Europe/Berlin", timezone="Europe/Berlin")
+    sent: list[tuple[dict, str]] = []
+
+    async def _run_tool_call(tool_call, *args, **kwargs):
+        sent.append((dict(tool_call.arguments), kwargs["turn"].call_timezone))
+        return ToolResult(tool_call_id=tool_call.id, content=CREATE_RESULT, is_error=False)
+
+    agent._run_tool_call = _run_tool_call  # type: ignore[method-assign]
+    proposed = {**CREATE_ARGS, "start": "2026-08-18T14:00:00", "end": "2026-08-18T14:30:00"}
+    turn = _Turn(turn_id="turn-1", timezone="")
+
+    first = await agent._execute_call_tool(
+        ToolCall("t1", "google__create_event", dict(proposed)), "o", "voice", None, gate, turn=turn
+    )
+    assert sent == []  # nothing ran before the YES
+    assert "pending" in first.content.lower() or "wartet" in first.content.lower()
+    verdict = await gate.handle_caller_utterance("Ja, genau.")
+    assert verdict.status == "confirmed"
+    re_emitted = json.loads(verdict.system_note.split("exactly these arguments: ", 1)[1].split(". Do not ask")[0])
+    assert re_emitted == proposed  # the proposal is the model's own arguments, no zone filled in
+
+    second = await agent._execute_call_tool(
+        ToolCall("t2", "google__create_event", re_emitted), "o", "voice", None, gate, turn=turn
+    )
+
+    assert not second.is_error
+    key = ict.call_idempotency_key(CALL, "google__create_event", proposed)
+    assert sent == [({**proposed, "idempotency_key": key}, "Europe/Berlin")]
     await channel.stop()
 
 
@@ -847,6 +901,7 @@ async def test_inbound_call_excludes_memory_search():
 async def test_tool_timeout_defers_to_followup():
     settings = _settings()
     settings.voice_tool_timeout_s = 0.05  # type: ignore[assignment]
+    settings.voice_timezone = "Europe/Berlin"
     agent = ToolAgent([[Tool("google__create_event", CREATE_ARGS, result=CREATE_RESULT, delay_s=1.0, then="Fertig.")]])
     channel, engine, state = await _start(agent, settings=settings, appointment=True, modes=OFF)
     await engine.on_speech_input(CALL, "Dienstag passt.")
@@ -855,7 +910,14 @@ async def test_tool_timeout_defers_to_followup():
     assert "Fertig." not in spoken
     assert state.metadata["writes_used"] == 0
     deferred = state.metadata["deferred_actions"]
-    assert deferred[0]["reason"] == "tool_timeout" and deferred[0]["draft_args"] == CREATE_ARGS
+    # Stored like the same create made on the call: in the call's zone (PR #316 review), with the
+    # call's idempotency key, so a replay finds an event the timed-out create committed (review 3).
+    assert deferred[0]["reason"] == "tool_timeout"
+    assert deferred[0]["draft_args"] == {
+        **CREATE_ARGS,
+        "timezone": "Europe/Berlin",
+        "idempotency_key": ict.call_idempotency_key(CALL, "google__create_event", CREATE_ARGS),
+    }
     denied = [a for a in channel.get_transcript(CALL).actions if a.action_type == "tool_denied"][0]
     assert denied.deny_reason == "tool_timeout"
     # The deferred action reaches the post-call report + memory follow-ups
@@ -1020,7 +1082,7 @@ async def test_call_context_tool_schemas_exact_at_agent_level(settings, session_
         "email_send",
         "send_owner_message",
         "memory_note",
-        "calendar_today",
+        "google__search_events",
         "make_phone_call",
     ):
         tool_registry.register(name, "d", noop, {"type": "object", "properties": {}})
@@ -1050,7 +1112,7 @@ async def test_call_context_tool_schemas_exact_at_agent_level(settings, session_
     async for _ in agent.stream_voice_turn(user_id="u", channel="voice", text="hi"):
         pass
     names = {t["name"] for t in provider.tools}
-    assert "calendar_today" in names and "shell_exec" not in names
+    assert "google__search_events" in names and "shell_exec" not in names
 
 
 def test_time_context_gives_local_clock_and_timezone():
@@ -1064,3 +1126,39 @@ def test_time_context_gives_local_clock_and_timezone():
     assert "CURRENT LOCAL DATE" in en and "(never UTC)" in en
     uk = channel._time_context("uk", "sie")
     assert "Europe/Berlin" in uk and "UTC" in uk
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "draft"),
+    [
+        (  # offset-less: the call zone's offset; a timed create is stored in the call's zone
+            "google__create_event",
+            {"summary": "A", "start": "2026-11-05T14:00:00", "end": "2026-11-05T15:00:00"},
+            {
+                "summary": "A",
+                "start": "2026-11-05T14:00:00+01:00",
+                "end": "2026-11-05T15:00:00+01:00",
+                "timezone": "Europe/Berlin",
+            },
+        ),
+        (  # a zone the model named reads its times, on the call and off it: kept as is
+            "google__create_event",
+            {"start": "2026-11-05T14:00:00", "end": "2026-11-05T15:00:00", "timezone": "Europe/Kyiv"},
+            {"start": "2026-11-05T14:00:00", "end": "2026-11-05T15:00:00", "timezone": "Europe/Kyiv"},
+        ),
+        (  # bare dates stay whole days, with no zone
+            "google__create_event",
+            {"start": "2026-11-05", "end": "2026-11-06"},
+            {"start": "2026-11-05", "end": "2026-11-06"},
+        ),
+        (  # a move: offsets only, the event keeps its own zone
+            "google__update_event",
+            {"event_id": "e1", "start": "2026-11-05T17:00:00+02:00"},
+            {"event_id": "e1", "start": "2026-11-05T17:00:00+02:00"},
+        ),
+    ],
+)
+def test_a_deferred_draft_pins_the_calls_zone(tool, args, draft):
+    from zoneinfo import ZoneInfo
+
+    assert ict.draft_in_call_zone(tool, args, ZoneInfo("Europe/Berlin")) == draft
