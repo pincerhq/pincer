@@ -20,27 +20,49 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# Error codes that indicate a retriable quota/rate-limit error.
-_RETRIABLE_STATUS_CODES = {429, 503}
-_RETRIABLE_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "backendError"}
+# The one source for reading a Google HttpError (the retry wrapper here, the reminder loop's
+# outage check in scheduler/triggers). Retried on the spot: short-lived limits and hiccups.
+_RETRIABLE_STATUS_CODES = frozenset({429, 503})
+RETRIABLE_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded", "backendError"})
+# Exhausted quotas last until Google resets them (daily): never retried, but an outage, not a bug.
+EXHAUSTED_QUOTA_REASONS = frozenset({"quotaExceeded", "dailyLimitExceeded"})
+_SERVER_ERROR_STATUS = 500
+
+
+def _http_error(exc: BaseException) -> Any:
+    """``exc`` when it is a Google ``HttpError``, else None."""
+    try:
+        from googleapiclient.errors import HttpError
+    except ImportError:
+        return None
+    return exc if isinstance(exc, HttpError) else None
+
+
+def error_reasons(exc: BaseException) -> set[str]:
+    """The ``reason`` fields of a Google ``HttpError`` (empty for anything else)."""
+    error = _http_error(exc)
+    if error is None:
+        return set()
+    return {str(d.get("reason")) for d in error.error_details or [] if isinstance(d, dict) and d.get("reason")}
 
 
 def _is_retriable(exc: Exception) -> bool:
     """Return True if *exc* looks like a retriable Google API error."""
-    try:
-        from googleapiclient.errors import HttpError
+    error = _http_error(exc)
+    if error is None:
+        return False
+    return error.status_code in _RETRIABLE_STATUS_CODES or bool(error_reasons(exc) & RETRIABLE_REASONS)
 
-        if isinstance(exc, HttpError):
-            if exc.status_code in _RETRIABLE_STATUS_CODES:
-                return True
-            # Parse the error details for rate-limit reasons
-            details = exc.error_details or []
-            for detail in details:
-                if isinstance(detail, dict) and detail.get("reason") in _RETRIABLE_REASONS:
-                    return True
-    except ImportError:
-        pass
-    return False
+
+def is_google_outage(exc: BaseException) -> bool:
+    """True when a Google ``HttpError`` means Google is down or limiting us (5xx, 429, a rate
+    limit or an exhausted quota) rather than a bad request."""
+    error = _http_error(exc)
+    if error is None:
+        return False
+    if error.status_code >= _SERVER_ERROR_STATUS or error.status_code in _RETRIABLE_STATUS_CODES:
+        return True
+    return bool(error_reasons(exc) & (RETRIABLE_REASONS | EXHAUSTED_QUOTA_REASONS))
 
 
 async def with_backoff(

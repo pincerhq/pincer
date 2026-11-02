@@ -346,7 +346,16 @@ async def _reminder_tick_failing_with(triggers, monkeypatch, caplog, exc: Except
 
 
 @pytest.mark.parametrize(
-    ("status", "reason"), [(503, ""), (500, ""), (429, ""), (403, "rateLimitExceeded"), (403, "userRateLimitExceeded")]
+    ("status", "reason"),
+    [
+        (503, ""),
+        (500, ""),
+        (429, ""),
+        (403, "rateLimitExceeded"),
+        (403, "userRateLimitExceeded"),
+        (403, "quotaExceeded"),  # PR #316 review: the daily quota is an outage until it resets
+        (403, "dailyLimitExceeded"),
+    ],
 )
 async def test_a_google_outage_still_pauses_reminders_quietly(triggers, fake, monkeypatch, caplog, status, reason):
     """Google down or rate-limiting us: one WARNING, no traceback."""

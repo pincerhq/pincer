@@ -21,7 +21,6 @@ from typing import Any
 
 import httplib2
 from google.auth.exceptions import GoogleAuthError
-from googleapiclient.errors import HttpError
 
 from pincer.config import get_settings
 from pincer.core.log_once import LogOnce
@@ -29,6 +28,7 @@ from pincer.db.engine import get_database_url
 from pincer.integrations.google.auth import GoogleTokenError
 from pincer.integrations.google.calendar_render import render_reminder, start_instant
 from pincer.integrations.google.calendar_source import CalendarSource
+from pincer.integrations.google.quota import is_google_outage
 from pincer.integrations.google.tools_calendar import fetch_events
 from pincer.services.scheduler import EventTriggerService
 
@@ -44,26 +44,16 @@ REMINDER_CALENDAR = "primary"
 NO_REMINDER_EVENT_TYPES = frozenset({"workingLocation", "outOfOffice", "focusTime"})
 # A calendar read failing with these is an outage (token revoked — raw, or wrapped by
 # GoogleAuth once the service cache expires — or the network down): logged once, quietly
-# retried. A Google HTTP error is an outage only when Google is down or rate-limiting
-# (see is_calendar_outage); anything else, a 4xx included, is a bug and gets a traceback.
+# retried. A Google HTTP error is an outage only when Google is down or limiting us
+# (quota.is_google_outage); anything else, a 4xx included, is a bug and gets a traceback.
 CALENDAR_OUTAGE_ERRORS = (GoogleAuthError, GoogleTokenError, OSError, httplib2.HttpLib2Error)
-RATE_LIMITED_STATUS = 429
-RATE_LIMIT_FORBIDDEN_STATUS = 403
-RATE_LIMIT_REASONS = frozenset({"rateLimitExceeded", "userRateLimitExceeded"})
 
 logger = logging.getLogger(__name__)
 
 
 def is_calendar_outage(exc: BaseException) -> bool:
     """True when a calendar read failed because Google or the way to it is down, not because of a bug."""
-    if isinstance(exc, CALENDAR_OUTAGE_ERRORS):
-        return True
-    if not isinstance(exc, HttpError):
-        return False
-    if exc.status_code >= 500 or exc.status_code == RATE_LIMITED_STATUS:
-        return True
-    reasons = {d.get("reason") for d in exc.error_details or [] if isinstance(d, dict)}
-    return exc.status_code == RATE_LIMIT_FORBIDDEN_STATUS and bool(reasons & RATE_LIMIT_REASONS)
+    return isinstance(exc, CALENDAR_OUTAGE_ERRORS) or is_google_outage(exc)
 
 
 class EventTriggerManager:
