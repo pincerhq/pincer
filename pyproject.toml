@@ -39,7 +39,7 @@ dependencies = [
     # floor; older protobuf runtimes raise `incompatible Protobuf Gencode/Runtime
     # versions` at pairing time. Keep this aligned with neonize's gencode.
     # Latest version fix this issue
-    "protobuf>=6.33.2,<7.0",
+    "protobuf>=6.33.2,<8.0",
     # Sprint 4: Discord (PyNaCl required for voice)
     "discord.py[voice]>=2.3,<3.0",
     "qrcode[pil]>=8.0",
