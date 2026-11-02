@@ -339,6 +339,7 @@ ACTION_DESCRIPTIONS = {
 }
 
 TOOL_SPEECH = {
+    "when.all_day": "{days}, ganztägig",
     "google__check_freebusy.free": "Frei wäre: {slots}.",
     "google__check_freebusy.all_free": "In dem Zeitraum ist alles frei.",
     "google__check_freebusy.none_free": "In dem Zeitraum ist leider nichts frei.",

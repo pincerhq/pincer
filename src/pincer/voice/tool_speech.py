@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 ISO_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 RAW_DATA_RE = re.compile(r"[{}]|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_RANGE_JOINERS = {"de": " bis ", "uk": " до ", "en": " to "}
 
 # Tool results whose first line starts like this are failures.
 _ERROR_PREFIXES = ("error", "[error", "failed", "exception")
@@ -135,7 +136,7 @@ def spoken_time(dt: datetime, language: str) -> str:
 def spoken_range(start: datetime, end: datetime, language: str) -> str:
     """Same-day ranges collapse to 'day, from A to B'."""
     lang = _lang(language)
-    joiner = {"de": " bis ", "uk": " до ", "en": " to "}.get(lang, " to ")
+    joiner = _RANGE_JOINERS.get(lang, " to ")
     if start.date() == end.date():
         day = spoken_datetime(start, language, include_time=False)
         prefix = {"de": " von ", "uk": " з ", "en": " from "}.get(lang, " from ")
@@ -178,7 +179,7 @@ def _window_bound(value: Any, zone: ZoneInfo | None, *, end: bool = False) -> da
         return parsed
     if parsed.tzinfo is not None:
         return parsed.astimezone(zone)
-    if end and DATE_ONLY_RE.match(str(value).strip()):
+    if end and _is_date_only(value):
         parsed += timedelta(days=1)
     return parsed.replace(tzinfo=zone)
 
@@ -344,7 +345,11 @@ def describe_action(tool_name: str, args: dict[str, Any] | None, language: str) 
     table = get_prompt("ACTION_DESCRIPTIONS", language) or {}
     template = str(table.get(tool_name) or table.get("default") or "{tool}")
     start = parse_iso(args.get("start"))
-    when = spoken_datetime(start, language) if start else _spoken_fallback_when(args, language)
+    if start and _is_date_only(args.get("start")):
+        end = parse_iso(args.get("end")) if _is_date_only(args.get("end")) else None
+        when = _spoken_all_day(start, end, language)
+    else:
+        when = spoken_datetime(start, language) if start else _spoken_fallback_when(args, language)
     title = str(args.get("summary") or args.get("title") or "").strip()
     text = str(args.get("text") or args.get("message") or "").strip()
     note = str(args.get("note") or args.get("content") or text).strip()
@@ -360,6 +365,19 @@ def describe_action(tool_name: str, args: dict[str, Any] | None, language: str) 
         rendered = tool_name.replace("__", " ").replace("_", " ")
     rendered = re.sub(r"\s{2,}", " ", rendered).strip()
     return ensure_speakable(rendered, language, fallback_key="TOOL_ERROR")
+
+
+def _is_date_only(value: Any) -> bool:
+    return isinstance(value, str) and bool(DATE_ONLY_RE.match(value.strip()))
+
+
+def _spoken_all_day(first: datetime, end: datetime | None, language: str) -> str:
+    """Bare dates (an all-day event): the days it covers. Google's end date is exclusive."""
+    last = end - timedelta(days=1) if end is not None and end - first > timedelta(days=1) else first
+    days = spoken_datetime(first, language, include_time=False)
+    if last.date() != first.date():
+        days += _RANGE_JOINERS.get(_lang(language), " to ") + spoken_datetime(last, language, include_time=False)
+    return _tpl("when.all_day", language).format(days=days)
 
 
 def _spoken_fallback_when(args: dict[str, Any], language: str) -> str:

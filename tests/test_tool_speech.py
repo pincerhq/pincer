@@ -141,6 +141,40 @@ def test_describe_action_verify_commitment():
         assert ts.is_speakable(ts.describe_action("google__update_event", {"event_id": "e", **args}, lang))
 
 
+@pytest.mark.parametrize(
+    ("language", "one_day", "three_days"),
+    [
+        (
+            "en",
+            "create the appointment 'Vacation' on Thursday, November 5, all day",
+            "create the appointment 'Vacation' on Tuesday, November 3 to Thursday, November 5, all day",
+        ),
+        (
+            "de",
+            "den Termin „Vacation“ am Donnerstag, der fünfte November, ganztägig eintragen",
+            "den Termin „Vacation“ am Dienstag, der dritte November bis Donnerstag, der fünfte November, "
+            "ganztägig eintragen",
+        ),
+        (
+            "uk",
+            "створю зустріч 'Vacation' на четвер, 5 листопада, на весь день",
+            "створю зустріч 'Vacation' на вівторок, 3 листопада до четвер, 5 листопада, на весь день",
+        ),
+    ],
+)
+def test_an_all_day_create_is_confirmed_as_whole_days(language, one_day, three_days):
+    """PR #316 review: bare dates are an all-day event, not "at 12:00 AM" ("um null Uhr"). Google's end
+    date is exclusive, so the caller hears the last day it covers."""
+    single = {"summary": "Vacation", "start": "2026-11-05", "end": "2026-11-06"}
+    several = {"summary": "Vacation", "start": "2026-11-03", "end": "2026-11-06"}
+
+    assert ts.describe_action("google__create_event", single, language) == one_day
+    assert ts.describe_action("google__create_event", several, language) == three_days
+    # A timed end with a bare start (the tool refuses it) must not crash the confirmation.
+    mixed = {"summary": "Vacation", "start": "2026-11-05", "end": "2026-11-06T12:00:00+01:00"}
+    assert ts.describe_action("google__create_event", mixed, language) == one_day
+
+
 def test_spoken_datetime_forms():
     from datetime import datetime
 
