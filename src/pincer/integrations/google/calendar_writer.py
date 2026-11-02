@@ -146,12 +146,19 @@ def _confirmed(saved: Any) -> dict[str, Any]:
 
 
 def log_write(
-    op: str, trace: Trace, calendar_id: str, event: dict[str, Any] | None, *, event_id: str = "", existed: bool = False
+    op: str,
+    trace: Trace,
+    calendar_id: str,
+    event: dict[str, Any] | None,
+    *,
+    event_id: str = "",
+    existed: bool = False,
+    confirmed: bool = True,
 ) -> None:
     ev = event or {}
     start, end = ev.get("start") or {}, ev.get("end") or {}
     logger.info(
-        "calendar_write op=%s turn=%s call=%s calendar=%s event=%s start=%s end=%s tz=%s dedup=%s",
+        "calendar_write op=%s turn=%s call=%s calendar=%s event=%s start=%s end=%s tz=%s dedup=%s confirmed=%s",
         op,
         trace.turn_id or "-",
         trace.call_id or "-",
@@ -161,7 +168,19 @@ def log_write(
         end.get("dateTime") or end.get("date") or "-",
         start.get("timeZone") or "-",
         existed,
+        confirmed,
     )
+
+
+def _logged_and_confirmed(
+    op: str, trace: Trace, calendar_id: str, saved: Any, *, event_id: str, existed: bool = False
+) -> dict[str, Any]:
+    """Log the write attempt first (``confirmed=False`` when Google's response has no ID), then
+    confirm it: an unconfirmed write is still traceable in the write log."""
+    response = saved if isinstance(saved, dict) else None
+    confirmed = bool(response and response.get("id"))
+    log_write(op, trace, calendar_id, response, event_id=event_id, existed=existed, confirmed=confirmed)
+    return _confirmed(saved)
 
 
 async def _get(svc: Any, calendar_id: str, event_id: str) -> dict[str, Any]:
@@ -199,9 +218,8 @@ async def create(
         event_id = client_event_id(f"{seed}\x1fafter-cancelled:{event_id}", calendar_id, body)
     else:
         raise RuntimeError(ALL_IDS_TAKEN_MESSAGE)
-    result = CreateResult(event=_confirmed(saved), existed=existed, recovered=recovered)
-    log_write("create", trace, calendar_id, result.event, existed=existed)
-    return result
+    event = _logged_and_confirmed("create", trace, calendar_id, saved, event_id=event_id, existed=existed)
+    return CreateResult(event=event, existed=existed, recovered=recovered)
 
 
 async def _insert_or_fetch(
@@ -253,9 +271,7 @@ async def update(
     saved = await with_backoff(
         lambda: svc.events().update(calendarId=calendar_id, eventId=event_id, body=body).execute()
     )
-    confirmed = _confirmed(saved)
-    log_write("update", trace or Trace(), calendar_id, confirmed)
-    return confirmed
+    return _logged_and_confirmed("update", trace or Trace(), calendar_id, saved, event_id=event_id)
 
 
 async def patch(
@@ -272,9 +288,7 @@ async def patch(
     saved = await with_backoff(
         lambda: svc.events().patch(calendarId=calendar_id, eventId=event_id, body=body, **patch_kwargs).execute()
     )
-    confirmed = _confirmed(saved)
-    log_write(op, trace or Trace(), calendar_id, confirmed)
-    return confirmed
+    return _logged_and_confirmed(op, trace or Trace(), calendar_id, saved, event_id=event_id)
 
 
 async def _attempted(fn: Any) -> tuple[Any, int]:
@@ -360,6 +374,4 @@ async def move(
     except _AttemptError as failed:
         moved = await _recovered_after_retry(failed, lambda: _live_on(svc, destination, event_id))
         recovered = True
-    confirmed = _confirmed(moved)
-    log_write("move", trace or Trace(), destination, confirmed, event_id=event_id, existed=recovered)
-    return confirmed
+    return _logged_and_confirmed("move", trace or Trace(), destination, moved, event_id=event_id, existed=recovered)

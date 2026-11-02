@@ -8,6 +8,7 @@ agent clock is ``Europe/Berlin`` (PINCER_TIMEZONE) or ``Europe/Kyiv`` (identity)
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import timedelta
 
@@ -15,6 +16,7 @@ import pytest
 
 from integrations.google.fake_calendar import FakeCalendarService
 from pincer.integrations.google.calendar_render import EDIT_HINT
+from pincer.integrations.google.calendar_writer import CalendarWriteNotConfirmedError
 from pincer.integrations.google.tools_calendar import (
     google__create_event,
     google__get_event,
@@ -29,6 +31,22 @@ KIEV_NOTE = (
 )
 LINK1 = "https://calendar.google.com/calendar/event?eid=evt1"
 PATCH_TOOLS = {"google__accept_event", "google__decline_event", "google__add_google_meet"}
+UNCONFIRMED_WRITES = [
+    ("google__create_event", {"summary": "Dentist", "start": "2026-11-12T10:00:00", "end": "2026-11-12T11:00:00"}),
+    ("google__update_event", {"event_id": "evt1", "summary": "Dentist (moved)", "start": "2026-11-12T17:00:00"}),
+    ("google__accept_event", {"event_id": "evt1"}),
+    ("google__decline_event", {"event_id": "evt1"}),
+    ("google__add_google_meet", {"event_id": "evt1"}),
+    ("google__move_event", {"event_id": "evt1", "destination_calendar_id": "berlin@group.calendar.google.com"}),
+]
+WRITE_LOG_OPS = {
+    "google__create_event": "create",
+    "google__update_event": "update",
+    "google__accept_event": "accept",
+    "google__decline_event": "decline",
+    "google__add_google_meet": "add_meet",
+    "google__move_event": "move",
+}
 
 
 pytestmark = pytest.mark.usefixtures("berlin_deployment")
@@ -217,14 +235,7 @@ async def test_create_then_get_by_returned_id_returns_the_same_event(fake_factor
 
 @pytest.mark.parametrize(
     ("tool", "arguments"),
-    [
-        ("google__create_event", {"summary": "Dentist", "start": "2026-11-12T10:00:00", "end": "2026-11-12T11:00:00"}),
-        ("google__update_event", {"event_id": "evt1", "summary": "Dentist (moved)", "start": "2026-11-12T17:00:00"}),
-        ("google__accept_event", {"event_id": "evt1"}),
-        ("google__decline_event", {"event_id": "evt1"}),
-        ("google__add_google_meet", {"event_id": "evt1"}),
-        ("google__move_event", {"event_id": "evt1", "destination_calendar_id": "berlin@group.calendar.google.com"}),
-    ],
+    UNCONFIRMED_WRITES,
 )
 async def test_write_response_without_id_is_an_unconfirmed_error(
     fake_registry, fake, settings, mock_llm, session_manager, cost_tracker, tool, arguments
@@ -247,6 +258,35 @@ async def test_write_response_without_id_is_an_unconfirmed_error(
         assert [name for name, _kw in fake.calls if name == "events.patch"] == ["events.patch"]
     if tool == "google__move_event":  # precondition: the move really committed
         assert [e["id"] for e in fake.events_on("berlin@group.calendar.google.com")] == ["evt1"]
+
+
+@pytest.mark.parametrize(("tool", "arguments"), UNCONFIRMED_WRITES)
+async def test_an_unconfirmed_write_is_still_in_the_write_log(fake_registry, fake, caplog, tool, arguments):
+    fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00+02:00", "2026-11-12T11:00:00+02:00")
+    fake.drop_id_on_write = True
+
+    with (
+        caplog.at_level(logging.INFO, logger="pincer.integrations.google.calendar_writer"),
+        pytest.raises(CalendarWriteNotConfirmedError),
+    ):
+        await fake_registry.execute(tool, dict(arguments), context={"turn_id": "turn-x"})
+
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("calendar_write ")]
+    assert len(lines) == 1, lines
+    assert lines[0].startswith(f"calendar_write op={WRITE_LOG_OPS[tool]} turn=turn-x ")
+    assert " event=- " not in lines[0]
+    assert lines[0].endswith(" confirmed=False")  # an attempt, told apart from a confirmed write
+
+
+@pytest.mark.parametrize(("tool", "arguments"), UNCONFIRMED_WRITES)
+async def test_a_confirmed_write_says_so_in_the_write_log(fake_registry, fake, caplog, tool, arguments):
+    fake.seed_event("primary", "Dentist", "2026-11-12T10:00:00+02:00", "2026-11-12T11:00:00+02:00")
+
+    with caplog.at_level(logging.INFO, logger="pincer.integrations.google.calendar_writer"):
+        await fake_registry.execute(tool, dict(arguments), context={"turn_id": "turn-x"})
+
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("calendar_write ")]
+    assert [line.rsplit(" ", 1)[-1] for line in lines] == ["confirmed=True"], lines
 
 
 # ── Voice format contract on real renderer output ────────────────────────────
