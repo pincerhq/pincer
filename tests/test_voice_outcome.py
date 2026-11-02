@@ -443,3 +443,29 @@ class TestFallbackReport:
     def test_german(self):
         report = render_fallback_report("+49123", 95, "CA9", completed=False, language="de")
         assert "nicht abgeschlossen" in report and "Transkript" in report
+
+
+def test_ukrainian_report():
+    """#305: a Ukrainian call's report is Ukrainian end to end, not English with a uk label."""
+    outcome = CallOutcome(
+        outcome="partial",
+        task_result="Запис перенесено",
+        key_facts=["Прийом у вівторок."],
+        commitments=[{"who": "callee", "what": "передзвонить завтра"}, {"who": "agent", "what": "надішле лист"}],
+        follow_up_suggestions=[{"reason": "додати подію в календар"}],
+        language="uk",
+    )
+    report = render_report(outcome, "Др. Мюллер", 95, "CA_uk", "uk")
+    assert report.splitlines() == [
+        "🟡 Дзвінок до Др. Мюллер завершено (1:35 хв) — виконано частково",
+        "Результат: Запис перенесено",
+        "Обговорили: Прийом у вівторок.",
+        "Домовленості: співрозмовник: передзвонить завтра; асистент: надішле лист",
+        "➡️ Зробити це за вас: додати подію в календар? Просто відповідайте «так».",
+        "📄 Повна розшифровка: /transcript CA_uk",
+    ]
+
+
+def test_unknown_report_language_falls_back_to_english():
+    report = render_report(CallOutcome(outcome="completed"), "Dr. Miller", 60, "CA_fr", "fr-FR")
+    assert report.startswith("✅ Call with Dr. Miller ended (1:00 min) — completed")

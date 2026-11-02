@@ -251,10 +251,6 @@ async def _build_core(settings: Settings) -> CoreComponents:
         console.print(f"[green]Slack tools enabled ({bootstrap_report['slack']} tools)[/green]")
     if "image_gen" in bootstrap_report:
         console.print("[green]Image generation tool registered[/green]")
-    if memory_store is not None:
-        from pincer.tools.builtin.language_pref import register_language_tools
-
-        register_language_tools(tools, memory_store)
 
     # Voice tools are registered BEFORE channel startup: channels that come up
     # early (Telegram) start answering immediately, and a slow channel connect
@@ -619,6 +615,13 @@ async def _build_core(settings: Settings) -> CoreComponents:
             await memory_store.close()
             memory_store = None
             summarizer = None
+
+    # After the MCP fallback above: a tool bound to a memory backend that was
+    # just closed would fail every time the model calls it.
+    if memory_store is not None:
+        from pincer.tools.builtin.language_pref import register_language_tools
+
+        register_language_tools(tools, memory_store)
 
     # Create agent
     agent = Agent(

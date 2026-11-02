@@ -44,6 +44,10 @@ logger = logging.getLogger(__name__)
 # milliseconds apart; this is the margin, not a retry budget.
 SETUP_STATE_WAIT_S = 3.0
 
+# How long an inbound webhook waits for the caller's stored language before
+# answering in the default one: Twilio is holding the line meanwhile.
+CALLER_LANGUAGE_TIMEOUT_S = 1.5
+
 # Twilio sends a media frame every 20 ms. Anything beyond this is a real gap in
 # the inbound audio — network, provider buffering, or our own event loop being
 # blocked. It does NOT attribute blame; it only says the audio stopped arriving.
@@ -60,10 +64,6 @@ voice_router = APIRouter(prefix="/voice", tags=["voice"])
 _engine: VoiceEngine | None = None
 _settings: Settings | None = None
 _memory: BaseMemoryBackend | None = None
-
-# How long an inbound webhook waits for the caller's stored language before
-# answering in the default one: Twilio is holding the line meanwhile.
-CALLER_LANGUAGE_TIMEOUT_S = 1.5
 
 
 def init_voice_routes(engine: VoiceEngine, settings: Settings, memory: BaseMemoryBackend | None = None) -> None:

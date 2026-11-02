@@ -1899,14 +1899,6 @@ class Agent:
         )
 
         if self._memory:
-            if not language:
-                # add_profile replaces the whole profile: a language set
-                # earlier (set_preferred_language, another channel's
-                # onboarding) must survive an answer that names none.
-                try:
-                    language = await get_preferred_language(self._memory, user_id)
-                except Exception:
-                    logger.debug("Failed to read the stored preferred language", exc_info=True)
             try:
                 await self._memory.add_profile(
                     user_id=user_id,

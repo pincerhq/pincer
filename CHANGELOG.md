@@ -405,8 +405,10 @@ mounting a directory. Install the new `remote-skills` extra
   every prompt as `[User preferred language: …]`. Before, it only arrived when
   a full-text search happened to match the profile. The rule is part of the
   always-appended profile instruction, so a custom `PINCER_SYSTEM_PROMPT` keeps
-  it. Language names ("German", "Українська") are stored as their ISO code.
-  An onboarding answer that names no language keeps the stored one.
+  it. Only a language code is stored or read back ("German" and "Українська"
+  become `de` and `uk`; any other text is rejected), because the value goes
+  into every prompt. An onboarding answer that names no language keeps the
+  stored one.
 - **Voice: no false refusals of Ukrainian (#305).** `.env.production.example`
   shipped `PINCER_VOICE_SUPPORTED_LANGUAGES=en,de`, so calls refused Ukrainian
   with "I can't offer that language on this call". The template now ships
