@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING, Any
 
 from pincer.voice import approvals, tool_policy
 from pincer.voice.engine import CallDirection
+from pincer.voice.localtime import get_voice_timezone
 from pincer.voice.prompts import get_prompt
 from pincer.voice.safety_gates import ConfirmationStatus, parse_confirmation
 from pincer.voice.state_machine import CallPhase
@@ -52,6 +53,7 @@ from pincer.voice.transcript import Speaker
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
+    from zoneinfo import ZoneInfo
 
     from pincer.voice.engine import CallState, VoiceEngine
     from pincer.voice.state_machine import CallStateMachine
@@ -259,6 +261,11 @@ class InCallToolGate:
         """The EXACT schema set for this call (§4 rule)."""
         return tool_policy.call_context_schemas(tool_schemas, self.allowed_tools)
 
+    @property
+    def call_zone(self) -> ZoneInfo:
+        """The call's (voice) zone: the one the agent gives the calendar tools on this call."""
+        return get_voice_timezone(self.settings)
+
     def language(self) -> tuple[str, str]:
         from pincer.voice.language import de_formality
 
@@ -440,7 +447,7 @@ class InCallToolGate:
                 self._add_deferred(tool_name, args, tool_policy.REASON_TOOL_ERROR)
             return result
 
-        spoken = render(tool_name, content, lang, args)
+        spoken = render(tool_name, content, lang, args, self.call_zone)
         if decision.tier == tool_policy.TIER_W:
             self.state.metadata[tool_policy.META_WRITES_USED] = self.writes_used + 1
             tool_policy.clear_verbal_confirmation(self.state)

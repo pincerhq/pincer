@@ -37,6 +37,40 @@ def test_freebusy_all_free_and_none_free():
     )
 
 
+@pytest.mark.parametrize(
+    ("time_min", "time_max"),
+    [
+        ("2026-11-05T08:00:00", "2026-11-05T18:00:00"),  # offset-less: the call's zone
+        ("2026-11-05T07:00:00Z", "2026-11-05T17:00:00Z"),  # with an offset: the same instants
+    ],
+)
+def test_freebusy_on_a_call_is_read_and_spoken_in_the_calls_zone(time_min, time_max):
+    """PR #316 review: Google's busy slots are UTC; the caller hears Berlin wall clock."""
+    from zoneinfo import ZoneInfo
+
+    busy = "primary: BUSY at:\n    2026-11-05T09:00:00Z → 2026-11-05T10:00:00Z"
+    args = {"emails": "primary", "time_min": time_min, "time_max": time_max}
+
+    text = ts.render("google__check_freebusy", busy, "en", args, ZoneInfo("Europe/Berlin"))
+
+    assert text == (
+        "Free would be: Thursday, November 5 from 8:00 AM to 10:00 AM "
+        "and Thursday, November 5 from 11:00 AM to 6:00 PM."
+    )
+
+
+def test_freebusy_over_whole_days_on_a_call_ends_at_the_last_days_midnight():
+    """A bare-date end bound is that whole day, as the tool queried it (5th..6th = through the 6th)."""
+    from zoneinfo import ZoneInfo
+
+    busy = "primary: BUSY at:\n    2026-11-04T23:00:00Z → 2026-11-05T23:00:00Z"  # all of Nov 5, Berlin
+    args = {"emails": "primary", "time_min": "2026-11-05", "time_max": "2026-11-06"}
+
+    text = ts.render("google__check_freebusy", busy, "en", args, ZoneInfo("Europe/Berlin"))
+
+    assert text == "Free would be: Friday, November 6 at 12:00 AM to Saturday, November 7 at 12:00 AM."
+
+
 def test_freebusy_unknown_output_is_an_error_line():
     assert ts.render("google__check_freebusy", "Auth error: token expired", "de", ARGS) == de_pack.TOOL_ERROR
     assert ts.render("google__check_freebusy", "garbage", "de", ARGS) == de_pack.TOOL_ERROR

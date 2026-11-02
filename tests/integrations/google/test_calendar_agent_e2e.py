@@ -557,3 +557,48 @@ async def test_a_list_on_a_call_is_spoken_in_the_voice_zone(tmp_path, fake, berl
     assert "google__list_events" in llm.offered[0]  # precondition: the call offered the tool
     assert "There are 1 appointment(s)" in llm.results[0], llm.results  # precondition: spoken list text
     assert "at 10:00 AM: Dentist" in llm.results[0], llm.results
+
+
+def _spoken_day(day: str) -> str:
+    from pincer.voice.tool_speech import spoken_datetime
+
+    return spoken_datetime(datetime.fromisoformat(day), "en", include_time=False)
+
+
+async def test_a_free_busy_check_on_a_call_is_spoken_in_the_voice_zone(
+    tmp_path, fake, berlin_settings, registry, costs
+) -> None:
+    """PR #316 review: the call's offset-less window made the speech renderer compare naive and aware
+    datetimes, and the caller heard the tool-error line for a check that worked. The window and the
+    busy slots are in the voice zone: busy 15:00-16:00 Berlin leaves 14-15 and 16-18 free."""
+    day = _tomorrow()
+    at = datetime.fromisoformat(f"{day}T15:00:00").replace(tzinfo=ZoneInfo("Europe/Berlin"))
+    fake.seed_event("primary", "Dentist", at.isoformat(), (at + timedelta(hours=1)).isoformat())
+    llm = _OneCallLLM(
+        "google__check_freebusy", {"emails": "primary", "time_min": f"{day}T14:00:00", "time_max": f"{day}T18:00:00"}
+    )
+
+    await _on_a_call(tmp_path, berlin_settings, llm, costs, registry, "generic")
+
+    assert "google__check_freebusy" in llm.offered[0]  # precondition: the call offered the tool
+    assert fake.sent("freebusy.query")  # precondition: the check really ran
+    spoken = _spoken_day(day)
+    assert llm.results == [
+        f"[TOOL RESULT: Free would be: {spoken} from 2:00 PM to 3:00 PM and {spoken} from 4:00 PM to 6:00 PM.]"
+    ]
+
+
+async def test_busy_times_without_a_window_on_a_call_are_spoken_in_the_voice_zone(
+    tmp_path, fake, berlin_settings, registry, costs
+) -> None:
+    """PR #316 review: with no bounds the renderer speaks only the busy side, from Google's UTC slots;
+    10:00-11:00 Berlin must be spoken as 10 AM, not 9 AM (its UTC wall clock in winter)."""
+    day = _tomorrow()
+    at = datetime.fromisoformat(f"{day}T10:00:00").replace(tzinfo=ZoneInfo("Europe/Berlin"))
+    fake.seed_event("primary", "Dentist", at.isoformat(), (at + timedelta(hours=1)).isoformat())
+    llm = _OneCallLLM("google__check_freebusy", {"emails": "primary"})
+
+    await _on_a_call(tmp_path, berlin_settings, llm, costs, registry, "generic")
+
+    assert fake.sent("freebusy.query")  # precondition: the check really ran
+    assert llm.results == [f"[TOOL RESULT: Busy is: {_spoken_day(day)} from 10:00 AM to 11:00 AM.]"]

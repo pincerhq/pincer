@@ -18,15 +18,19 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pincer.voice.prompts import get_prompt
+
+if TYPE_CHECKING:
+    from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
 # Anything that looks like machine data: JSON braces and ISO-8601 timestamps.
 ISO_TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 RAW_DATA_RE = re.compile(r"[{}]|\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 # Tool results whose first line starts like this are failures.
 _ERROR_PREFIXES = ("error", "[error", "failed", "exception")
@@ -166,14 +170,29 @@ def _is_error(result: str) -> bool:
 # ── Per-tool renderers ───────────────────────────────────────────────
 
 
-def _render_freebusy(result: str, args: dict[str, Any], language: str) -> str:
+def _window_bound(value: Any, zone: ZoneInfo | None, *, end: bool = False) -> datetime | None:
+    """A free/busy bound as the tool read it: on a call (``zone``), offset-less times are in the
+    call's zone and a bare date is that whole local day; without a zone, as given."""
+    parsed = parse_iso(value)
+    if parsed is None or zone is None:
+        return parsed
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(zone)
+    if end and DATE_ONLY_RE.match(str(value).strip()):
+        parsed += timedelta(days=1)
+    return parsed.replace(tzinfo=zone)
+
+
+def _render_freebusy(result: str, args: dict[str, Any], language: str, zone: ZoneInfo | None = None) -> str:
     from pincer.voice.scheduling import parse_freebusy_output
 
     busy = parse_freebusy_output(result)
     if busy is None:
         return str(get_prompt("TOOL_ERROR", language) or "")
-    window_start = parse_iso(args.get("time_min"))
-    window_end = parse_iso(args.get("time_max"))
+    if zone is not None:  # Google's slots are UTC; the caller hears the call's wall clock
+        busy = [(start.astimezone(zone), end.astimezone(zone)) for start, end in busy]
+    window_start = _window_bound(args.get("time_min"), zone)
+    window_end = _window_bound(args.get("time_max"), zone, end=True)
     if not busy:
         return _tpl("google__check_freebusy.all_free", language)
     if window_start is None or window_end is None:
@@ -271,15 +290,18 @@ def _render_profile(result: str, language: str) -> str:
     return _tpl("business_profile_lookup.ok", language).format(profile=text.rstrip("."))
 
 
-def render(tool_name: str, result: str, language: str, args: dict[str, Any] | None = None) -> str:
-    """Deterministic, speakable rendering of a tool result (§7)."""
+def render(
+    tool_name: str, result: str, language: str, args: dict[str, Any] | None = None, zone: ZoneInfo | None = None
+) -> str:
+    """Deterministic, speakable rendering of a tool result (§7). On a call, ``zone`` is the call's
+    zone: offset-less times in ``args`` are read, and times spoken, in it."""
     args = args or {}
     result = str(result or "")
     try:
         if _is_error(result):
             text = str(get_prompt("TOOL_ERROR", language) or "")
         elif tool_name == "google__check_freebusy":
-            text = _render_freebusy(result, args, language)
+            text = _render_freebusy(result, args, language, zone)
         elif tool_name == "google__list_events":
             text = _render_list_events(result, language)
         elif tool_name == "google__create_event":
