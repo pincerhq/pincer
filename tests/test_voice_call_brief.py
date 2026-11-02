@@ -73,7 +73,7 @@ async def test_outbound_prompt_contains_the_briefing():
     # it reads as the point of the call instead of as background.
     assert system.index("REASON AND GOAL OF THIS CALL") < system.index(en_pack.PHASE_INSTRUCTIONS[sm.phase.value])
     assert system.index(en_pack.VOICE_SYSTEM_PROMPT) < system.index("REASON AND GOAL OF THIS CALL")
-    assert system.index("REASON AND GOAL OF THIS CALL") < system.index(en_pack.LANGUAGE_POLICY)
+    assert system.index("REASON AND GOAL OF THIS CALL") < system.index("LANGUAGE POLICY (strict):")
 
 
 async def test_briefing_without_name_uses_number_and_default_owner():

@@ -105,6 +105,7 @@ def build_voice_system_prompt(
     something a prompt builder should reach for.
     """
     from pincer.voice.language import de_formality
+    from pincer.voice.language_guard import language_policy
     from pincer.voice.prompts import get_prompt
     from pincer.voice.scheduling import build_call_context
 
@@ -118,7 +119,7 @@ def build_voice_system_prompt(
         #    exactly how it used to get ignored.
         build_call_briefing_block(state, settings, language, formality),
         # 3. How to behave.
-        str(get_prompt("LANGUAGE_POLICY", language, formality) or ""),
+        language_policy(language, settings),
         str(get_prompt("IN_CALL_TOOL_RULES", language, formality) or ""),
         build_time_context(settings, language, formality),
         # 4. Situational context.

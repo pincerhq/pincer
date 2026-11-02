@@ -358,3 +358,38 @@ class TestGermanOutboundTwiml:
         from pincer.voice.status_notify import get_call_language
 
         assert get_call_language("CA_de") == "de"
+
+
+# ── #305: the call offers exactly the languages it can speak ─────────
+
+
+class TestLanguagePolicyOffersConfiguredLanguages:
+    def test_lists_ukrainian_when_supported(self):
+        from pincer.voice.language_guard import language_policy
+
+        for language in ("en", "de", "uk"):
+            policy = language_policy(language, _settings(voice_supported_languages="en,de,uk"))
+            assert "{supported}" not in policy
+            assert "en, de, uk" in policy
+
+    def test_leaves_out_a_language_the_line_does_not_support(self):
+        from pincer.voice.language_guard import language_policy
+
+        policy = language_policy("en", _settings(voice_supported_languages="en,de"))
+        assert "(supported codes: en, de)" in policy
+        assert "uk" not in policy.split("supported codes:")[1].split(")")[0]
+
+    def test_every_pack_names_every_known_language(self):
+        from pincer.voice.language import KNOWN_LANGUAGES
+
+        for pack in ("en", "de", "uk"):
+            for key in ("LANGUAGE_NAMES", "LANGUAGE_NAMES_CONTINUE"):
+                names = get_prompt(key, pack)
+                assert set(KNOWN_LANGUAGES) <= set(names), f"{pack}.{key}"
+
+    def test_policy_routes_unsupported_requests_to_the_token(self):
+        from pincer.voice.language_guard import language_policy
+
+        for language in ("en", "de", "uk"):
+            policy = language_policy(language, _settings(voice_supported_languages="en,de"))
+            assert policy.count("[SWITCH_LANGUAGE:") == 2, language

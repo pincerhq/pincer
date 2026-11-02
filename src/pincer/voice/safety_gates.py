@@ -307,6 +307,21 @@ _BLOCK_MESSAGES: dict[str, dict[BlockReason, str]] = {
             "noch {retry_after} Minute(n) Wartezeit."
         ),
     },
+    "uk": {
+        BlockReason.DO_NOT_CALL: (
+            "{number} у списку «не дзвонити» (просили більше не телефонувати), тож я не набиратиму цей номер."
+        ),
+        BlockReason.QUIET_HOURS: (
+            "Зараз тихі години ({window} {tz}) — я не дзвонитиму на {number}. Дзвінок можливий після {resume}."
+        ),
+        BlockReason.DAILY_LIMIT: (
+            "Досягнуто денного ліміту вихідних дзвінків ({limit} дзвінків сьогодні). Спробуйте завтра."
+        ),
+        BlockReason.TARGET_COOLDOWN: (
+            "На {number} уже дзвонили {attempts} раз(и) за останні {window} хв — "
+            "зачекайте ще {retry_after} хв перед повторним дзвінком."
+        ),
+    },
 }
 
 

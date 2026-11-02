@@ -199,11 +199,16 @@ class PostCallProcessor:
             report = f"{report}\n{self._persist_failure_note(language)}"
 
         if unverified_claims:
-            caveat = (
-                "⚠️ Hinweis: Eine Erfolgsaussage im Gespräch konnte nicht durch ein Tool-Ergebnis belegt werden."
-                if language.startswith("de")
-                else "⚠️ Note: a completion claim made during the call could not be verified against tool results."
-            )
+            if language.startswith("de"):
+                caveat = (
+                    "⚠️ Hinweis: Eine Erfolgsaussage im Gespräch konnte nicht durch ein Tool-Ergebnis belegt werden."
+                )
+            elif language.startswith("uk"):
+                caveat = (
+                    "⚠️ Увага: заяву про виконання, зроблену під час дзвінка, не підтверджено результатами інструментів."
+                )
+            else:
+                caveat = "⚠️ Note: a completion claim made during the call could not be verified against tool results."
             report = f"{report}\n{caveat}"
 
         if (

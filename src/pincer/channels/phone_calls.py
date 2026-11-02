@@ -1329,7 +1329,12 @@ class VoiceChannel(BaseChannel):
         import time
 
         from pincer.core.agent import StreamEventType
-        from pincer.voice.language_guard import detect_language, parse_switch_token, perform_switch
+        from pincer.voice.language_guard import (
+            detect_language,
+            parse_switch_token,
+            perform_switch,
+            unsupported_switch_reply,
+        )
         from pincer.voice.prompts import get_prompt
         from pincer.voice.scheduling import get_appointment, process_appointment_response
         from pincer.voice.sentence_stream import SentenceAssembler, strip_tts_markup
@@ -1400,7 +1405,7 @@ class VoiceChannel(BaseChannel):
                     )
                 else:
                     suppress_rest = True
-                    return str(get_prompt("LANGUAGE_SWITCH_UNSUPPORTED", call_lang, de_formality(self._settings)))
+                    return unsupported_switch_reply(requested, call_lang, self._settings)
 
             session = self._reception_sessions.get(call_sid)
             if session is not None:
