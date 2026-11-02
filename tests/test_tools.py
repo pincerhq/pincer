@@ -69,6 +69,7 @@ def fresh_registration_log(monkeypatch):
     from pincer.tools import bootstrap
 
     monkeypatch.setattr(bootstrap, "_REGISTRATION_FAILURE_LOG", LogOnce(bootstrap.logger))
+    monkeypatch.setattr(bootstrap, "_SCOPE_FAILURE_LOG", LogOnce(bootstrap.logger))
 
 
 @pytest.mark.usefixtures("fresh_registration_log")
@@ -127,6 +128,60 @@ def test_a_token_missing_scopes_warns_once_per_outage(settings, monkeypatch, cap
         register_default_tools(ToolRegistry(), settings)
     again = [r for r in caplog.records if "Google Workspace tools" in r.getMessage()]
     assert [r.levelno for r in again] == [logging.WARNING]
+
+
+def _crashing(*_args, **_kwargs):
+    raise ValueError("boom")
+
+
+def _missing_scopes(*_args, **_kwargs):
+    raise RuntimeError("Google token is missing required scopes: calendar")
+
+
+def _workspace_levels(caplog) -> list[tuple[str, int]]:
+    """(message head, level) of the registration-failure lines, not the setup hint."""
+    heads = [(r.getMessage().split(":")[0], r.levelno) for r in caplog.records]
+    return [
+        (head, level)
+        for head, level in heads
+        if head.startswith(("Google Workspace tools disabled", "Google Workspace tools not loaded"))
+    ]
+
+
+@pytest.mark.usefixtures("fresh_registration_log")
+def test_a_missing_scope_after_a_crash_still_warns(settings, monkeypatch, caplog) -> None:
+    """Review 3: the crash and the missing scope shared one LogOnce, so after a crash the one message
+    that says what to do ("missing required scopes") came out at DEBUG."""
+    monkeypatch.setattr("pincer.integrations.google.get_google_factory", lambda: object())
+    with caplog.at_level(logging.DEBUG, logger="pincer.tools.bootstrap"):
+        monkeypatch.setattr("pincer.integrations.google.register_all_tools", _crashing)
+        register_default_tools(ToolRegistry(), settings)
+        monkeypatch.setattr("pincer.integrations.google.register_all_tools", _missing_scopes)
+        register_default_tools(ToolRegistry(), settings)
+        register_default_tools(ToolRegistry(), settings)
+
+    assert _workspace_levels(caplog) == [
+        ("Google Workspace tools not loaded", logging.WARNING),
+        ("Google Workspace tools disabled", logging.WARNING),
+        ("Google Workspace tools disabled", logging.DEBUG),
+    ]
+
+
+@pytest.mark.usefixtures("fresh_registration_log")
+@pytest.mark.parametrize("failure", [_crashing, _missing_scopes])
+def test_a_removed_token_re_arms_both_failure_logs(settings, monkeypatch, caplog, failure) -> None:
+    """Review 3: no factory (the token went away) is a changed token state, so the next failure warns again."""
+    monkeypatch.setattr("pincer.integrations.google.register_all_tools", failure)
+    monkeypatch.setattr("pincer.integrations.google.get_google_factory", lambda: object())
+    register_default_tools(ToolRegistry(), settings)  # the first failure: WARNING
+    monkeypatch.setattr("pincer.integrations.google.get_google_factory", lambda: None)
+    register_default_tools(ToolRegistry(), settings)  # token removed
+    monkeypatch.setattr("pincer.integrations.google.get_google_factory", lambda: object())
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="pincer.tools.bootstrap"):
+        register_default_tools(ToolRegistry(), settings)  # a new token fails again
+
+    assert [level for _msg, level in _workspace_levels(caplog)] == [logging.WARNING]
 
 
 @pytest.fixture

@@ -35,9 +35,11 @@ GOOGLE_SETUP_HINT = (
 )
 # Once per process at INFO: register_default_tools also runs on every GET /api/integrations.
 _SETUP_HINT_LOG = LogOnce(logger, logging.INFO)
-# A failing Workspace registration (a missing scope, or a crash with its traceback): WARNING once,
-# DEBUG until it registers again.
+# A crashing Workspace registration (with its traceback): WARNING once, DEBUG until it registers again.
 _REGISTRATION_FAILURE_LOG = LogOnce(logger)
+# A token missing a required scope, apart from the crash log: a crash must not demote the one
+# message that says what to do.
+_SCOPE_FAILURE_LOG = LogOnce(logger)
 
 
 def register_default_tools(tools: ToolRegistry, settings: Settings) -> dict[str, int]:
@@ -333,6 +335,11 @@ def _register_email_tools(tools: ToolRegistry, report: dict[str, int]) -> None:
     report["builtins"] += 9
 
 
+def _clear_failure_logs() -> None:
+    _REGISTRATION_FAILURE_LOG.clear()
+    _SCOPE_FAILURE_LOG.clear()
+
+
 def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> None:
     try:
         from pincer.integrations.google import get_google_factory, register_all_tools
@@ -345,11 +352,12 @@ def _register_google_workspace(tools: ToolRegistry, report: dict[str, int]) -> N
 
             if load_config().enabled and token_source.locate_token(get_settings_relaxed()) is None:
                 _SETUP_HINT_LOG.log(GOOGLE_SETUP_HINT)
+            _clear_failure_logs()  # the token state changed: the next failure deserves a WARNING
             return
         report["google"] = register_all_tools(tools, factory)
-        _REGISTRATION_FAILURE_LOG.clear()
+        _clear_failure_logs()
     except RuntimeError as e:  # e.g. a token missing a required scope: as repeating as any other failure
-        _REGISTRATION_FAILURE_LOG.log("Google Workspace tools disabled: %s", e)
+        _SCOPE_FAILURE_LOG.log("Google Workspace tools disabled: %s", e)
     except Exception as e:
         _REGISTRATION_FAILURE_LOG.log("Google Workspace tools not loaded: %s", e, exc_info=True)
 
