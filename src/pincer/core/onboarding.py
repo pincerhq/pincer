@@ -35,9 +35,23 @@ Rules for handling the reply:
 PROFILE_USAGE_INSTRUCTION = (
     "The user's profile (name, use-case, preferred language) may be available in your context. "
     "Use it naturally — address them by name occasionally, tune defaults to their use-case, "
-    "respond in their preferred language. Do not quiz the user about their profile or ask them "
+    "respond in their preferred language unless they explicitly ask for another one in this "
+    "conversation (their explicit request wins). Do not quiz the user about their profile or ask them "
     "to confirm fields. If a field is missing and naturally relevant in conversation, you may "
     "ask ONCE in a light, conversational way — never as part of a form-feeling sequence."
+)
+
+# Follows the "[User preferred language: …]" line the agent adds from the
+# profile on every turn (see Agent._build_system_prompt).
+PREFERRED_LANGUAGE_NOTE = (
+    "Reply in this language, even when the user writes in another one, unless they explicitly ask "
+    "for a different language in this conversation."
+)
+
+# Added when the set_preferred_language tool is offered this turn.
+LANGUAGE_TOOL_HINT = (
+    "When the user explicitly asks you to use a language from now on, call set_preferred_language "
+    "with its code so the choice persists, and reply in that language."
 )
 
 EXTRACTION_PROMPT_TEMPLATE = """\

@@ -46,7 +46,7 @@ LANGUAGE POLICY (strict):
 - If the caller speaks another language, briefly continue in English; do NOT mirror their language.
 - Exception: if the caller EXPLICITLY asks to switch languages ("Can we speak German?", "Switch to \
 German please"), switch IMMEDIATELY: start your very next response with exactly the token \
-[SWITCH_LANGUAGE:<code>] (supported codes: en, de, uk) followed by your first sentence in the new \
+[SWITCH_LANGUAGE:<code>] (supported codes: {supported}) followed by your first sentence in the new \
 language. Do NOT ask for confirmation first — speech recognition still listens in the old language, \
 so an answer given in the new language would be lost.
 - Only if the request is genuinely ambiguous, ask ONE short clarifying question in English.
@@ -55,7 +55,27 @@ so an answer given in the new language would be lost.
 
 LANGUAGE_SWITCH_ACK = "Sure — let's continue in English."
 
-LANGUAGE_SWITCH_UNSUPPORTED = "I'm sorry, I can't offer that language on this call. Let's continue in English."
+# {requested} is a LANGUAGE_NAMES entry (or the raw code); {alternatives} the
+# call's supported languages, as LANGUAGE_NAMES_CONTINUE entries joined with LANGUAGE_LIST_OR.
+LANGUAGE_SWITCH_UNSUPPORTED = (
+    "I'm sorry, {requested} isn't available on this phone line. I can continue in {alternatives}."
+)
+
+LANGUAGE_NAMES = {
+    "en": "English",
+    "de": "German",
+    "uk": "Ukrainian",
+    "fr": "French",
+    "es": "Spanish",
+    "it": "Italian",
+    "pl": "Polish",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "tr": "Turkish",
+    "ru": "Russian",
+}
+LANGUAGE_NAMES_CONTINUE = LANGUAGE_NAMES
+LANGUAGE_LIST_OR = "or"
 
 # LLM-facing corrective note for the one-shot regeneration after language drift
 LANGUAGE_REGEN_NOTE = (

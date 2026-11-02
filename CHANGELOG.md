@@ -396,6 +396,24 @@ mounting a directory. Install the new `remote-skills` extra
 
 ### Fixed
 
+- **Agent: a requested language is used, and kept (#305).** The base prompt
+  told the model to "always respond in the same language the user writes in",
+  so "please speak Ukrainian", written in English, was pulled back to English.
+  Now an explicit request wins and holds until the user asks for another
+  language. The new `set_preferred_language` tool (registered when memory is
+  on) stores the choice in the user's profile. The stored language is put into
+  every prompt as `[User preferred language: …]`. Before, it only arrived when
+  a full-text search happened to match the profile.
+- **Voice: no false refusals of Ukrainian (#305).** `.env.production.example`
+  shipped `PINCER_VOICE_SUPPORTED_LANGUAGES=en,de`, so calls refused Ukrainian
+  with "I can't offer that language on this call". The template now ships
+  `en,de,uk` (and `PINCER_ELEVENLABS_VOICE_ID_UK`). The call prompt offers only
+  the configured languages. A language the line can't speak is named, along
+  with the languages the call can continue in: "Ukrainian isn't available on
+  this phone line. I can continue in English or German." An inbound call from
+  a registered user starts in their stored language (receptionist lines keep
+  the profile language). Post-call reports and outbound-block messages now
+  have Ukrainian text.
 - **Voice: Twilio REST calls no longer freeze every live call.** Hanging up,
   transferring, sending DTMF, the TTS-failure fallback and dialling an outbound
   call used the synchronous Twilio client from inside the event loop, each

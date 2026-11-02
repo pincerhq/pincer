@@ -1368,3 +1368,81 @@ async def test_run_headless_selects_from_the_allowed_tools(
     kwargs = mock_llm.complete.call_args.kwargs
     assert _tool_names(mock_llm.complete.call_args) == ["whoami"]
     assert "make_phone_call tool" not in kwargs["system"]
+
+
+# ── #305: an explicit language request wins and persists ─────────────
+
+
+async def test_system_prompt_lets_an_explicit_language_request_win(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry)
+
+    await agent.handle_message("user1", "test", "Please speak Ukrainian from now on")
+
+    system_prompt = mock_llm.complete.call_args.kwargs["system"]
+    assert "explicitly asks for a language" in system_prompt
+    assert "keep using it in every reply until they ask for another" in system_prompt
+    assert "Never refuse a language you can write." in system_prompt
+    assert "Always respond in the same language the user writes in" not in system_prompt
+
+
+async def test_stored_preferred_language_reaches_the_prompt_without_a_search_hit(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """The profile is read directly: a message sharing no word with it still gets its language."""
+    memory = AsyncMock()
+    memory.search_text.return_value = []
+    memory.list_memories.return_value = [
+        SimpleNamespace(id="m1", content="The user's name is Olena. Preferred language: uk.")
+    ]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory)
+
+    await agent.handle_message("user1", "test", "What's the weather tomorrow?")
+
+    memory.list_memories.assert_awaited_with(user_id="user1", category="profile", limit=1)
+    system_prompt = mock_llm.complete.call_args.kwargs["system"]
+    assert "[User preferred language: uk]" in system_prompt
+    assert "[Relevant memories about this user]" not in system_prompt
+
+
+async def test_no_preferred_language_line_without_a_profile(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    memory = AsyncMock()
+    memory.search_text.return_value = []
+    memory.list_memories.return_value = []
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory)
+
+    await agent.handle_message("user1", "test", "hello")
+
+    assert "[User preferred language:" not in mock_llm.complete.call_args.kwargs["system"]
+
+
+async def test_voice_turns_leave_the_preferred_language_to_the_call(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    """A call speaks its pinned language; an outbound call's other party is not the user."""
+    memory = AsyncMock()
+    memory.search_text.return_value = []
+    memory.list_memories.return_value = [SimpleNamespace(id="m1", content="Preferred language: uk.")]
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory)
+
+    await agent.handle_message("user1", "voice", "Hallo, ich rufe wegen des Termins an.")
+
+    assert "[User preferred language:" not in mock_llm.complete.call_args.kwargs["system"]
+
+
+async def test_failed_language_read_keeps_the_memories(
+    settings, mock_llm, session_manager, cost_tracker, tool_registry
+):
+    memory = AsyncMock()
+    memory.search_text.return_value = [SimpleNamespace(content="likes tea")]
+    memory.list_memories.side_effect = ConnectionError("profile read failed")
+    agent = Agent(settings, mock_llm, session_manager, cost_tracker, tool_registry, memory_store=memory)
+
+    await agent.handle_message("user1", "test", "hello")
+
+    system_prompt = mock_llm.complete.call_args.kwargs["system"]
+    assert "likes tea" in system_prompt
+    assert "[User preferred language:" not in system_prompt

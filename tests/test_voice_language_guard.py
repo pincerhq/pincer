@@ -14,6 +14,7 @@ from pincer.voice.language_guard import (
     detect_language,
     parse_switch_token,
     perform_switch,
+    unsupported_switch_reply,
 )
 from pincer.voice.transcript import Speaker, TranscriptLogger
 
@@ -325,3 +326,82 @@ class TestCheckAndFix:
         original = "Sure, I can help you with that. What time works for you tomorrow?"
         text, switched = await check_and_fix(original, state, engine=_fake_engine(), settings=_settings())
         assert (text, switched) == (original, False)
+
+
+# ── #305: Ukrainian on request, a specific answer when it isn't offered ─
+
+
+class TestUkrainianSwitch:
+    async def test_switch_to_ukrainian_on_an_english_call(self):
+        regen = AsyncMock()
+        state = _state("en")
+        text, switched = await check_and_fix(
+            "[SWITCH_LANGUAGE:uk] Звісно, продовжимо українською. Чим можу допомогти?",
+            state,
+            engine=_fake_engine(),
+            settings=_settings(),
+            regenerate=regen,
+        )
+        assert switched is True
+        assert state.language == "uk"
+        assert text.startswith("Звісно")
+        regen.assert_not_awaited()  # a requested switch is not drift
+
+    async def test_ukrainian_reply_after_the_switch_is_not_drift(self):
+        regen = AsyncMock()
+        state = _state("uk")
+        reply = "Гаразд, я запишу вас на вівторок о третій годині. Щось іще?"
+        text, switched = await check_and_fix(
+            reply, state, engine=_fake_engine(), settings=_settings(), regenerate=regen
+        )
+        assert (text, switched) == (reply, False)
+        regen.assert_not_awaited()
+
+    async def test_switch_back_from_ukrainian_to_english(self):
+        state = _state("uk")
+        text, switched = await check_and_fix(
+            "[SWITCH_LANGUAGE:en] Sure, let's continue in English.",
+            state,
+            engine=_fake_engine(),
+            settings=_settings(),
+        )
+        assert switched is True
+        assert state.language == "en"
+        assert text == "Sure, let's continue in English."
+
+    async def test_ukrainian_not_offered_names_it_and_the_alternatives(self):
+        state = _state("en")
+        text, switched = await check_and_fix(
+            "[SWITCH_LANGUAGE:uk] Звісно, продовжимо українською.",
+            state,
+            engine=_fake_engine(),
+            settings=_settings(voice_supported_languages="en,de"),
+        )
+        assert switched is False
+        assert state.language == "en"
+        assert text == "I'm sorry, Ukrainian isn't available on this phone line. I can continue in English or German."
+
+    @pytest.mark.parametrize(
+        ("call_lang", "expected"),
+        [
+            (
+                "de",
+                "Entschuldigung, Ukrainisch ist auf dieser Telefonleitung leider nicht verfügbar. "
+                "Ich kann auf Englisch oder Deutsch weitermachen.",
+            ),
+            ("en", "I'm sorry, Ukrainian isn't available on this phone line. I can continue in English or German."),
+        ],
+    )
+    def test_unsupported_reply_in_the_call_language(self, call_lang, expected):
+        assert unsupported_switch_reply("uk", call_lang, _settings(voice_supported_languages="en,de")) == expected
+
+    def test_unsupported_reply_in_ukrainian(self):
+        text = unsupported_switch_reply("fr", "uk", _settings())
+        assert text == (
+            "Вибачте, французька мова на цій телефонній лінії, на жаль, недоступна. "
+            "Можу продовжити англійською, німецькою або українською."
+        )
+
+    def test_unknown_code_is_named_by_its_code(self):
+        text = unsupported_switch_reply("xx", "en", _settings(voice_supported_languages="en"))
+        assert text == "I'm sorry, xx isn't available on this phone line. I can continue in English."

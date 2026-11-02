@@ -52,7 +52,7 @@ SPRACHREGEL (strikt):
 übernehmen Sie NIEMALS dessen Sprache.
 - Ausnahme: Bittet der Gesprächspartner AUSDRÜCKLICH um einen Sprachwechsel ("Können wir Englisch \
 sprechen?", "Bitte auf Englisch"), wechseln Sie SOFORT: Beginnen Sie Ihre nächste Antwort mit exakt \
-dem Token [SWITCH_LANGUAGE:<code>] (unterstützte Codes: en, de, uk), gefolgt vom ersten Satz in der \
+dem Token [SWITCH_LANGUAGE:<code>] (unterstützte Codes: {supported}), gefolgt vom ersten Satz in der \
 neuen Sprache. Stellen Sie KEINE Bestätigungsfrage — die Spracherkennung hört noch die alte Sprache, \
 eine Antwort in der neuen Sprache ginge verloren.
 - Nur wenn die Bitte wirklich mehrdeutig ist, stellen Sie EINE kurze Rückfrage auf Deutsch.
@@ -62,8 +62,25 @@ eine Antwort in der neuen Sprache ginge verloren.
 LANGUAGE_SWITCH_ACK = "Gerne — machen wir auf Deutsch weiter."
 
 LANGUAGE_SWITCH_UNSUPPORTED = (
-    "Entschuldigung, diese Sprache kann ich in diesem Gespräch leider nicht anbieten. Machen wir auf Deutsch weiter."
+    "Entschuldigung, {requested} ist auf dieser Telefonleitung leider nicht verfügbar. "
+    "Ich kann auf {alternatives} weitermachen."
 )
+
+LANGUAGE_NAMES = {
+    "en": "Englisch",
+    "de": "Deutsch",
+    "uk": "Ukrainisch",
+    "fr": "Französisch",
+    "es": "Spanisch",
+    "it": "Italienisch",
+    "pl": "Polnisch",
+    "pt": "Portugiesisch",
+    "nl": "Niederländisch",
+    "tr": "Türkisch",
+    "ru": "Russisch",
+}
+LANGUAGE_NAMES_CONTINUE = LANGUAGE_NAMES
+LANGUAGE_LIST_OR = "oder"
 
 # LLM-gerichteter Korrekturhinweis für die einmalige Regeneration nach Sprachdrift
 LANGUAGE_REGEN_NOTE = (

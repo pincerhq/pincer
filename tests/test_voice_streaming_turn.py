@@ -143,7 +143,8 @@ class TestSentenceStreaming:
         await engine.on_speech_input("CA_stream", "Hallo.")
         extra = agent.calls[0]["extra_system"]
         assert de_pack.VOICE_SYSTEM_PROMPT in extra
-        assert de_pack.LANGUAGE_POLICY in extra
+        assert de_pack.LANGUAGE_POLICY.split("{supported}")[0] in extra
+        assert "(unterstützte Codes: en, de, uk)" in extra
         await channel.stop()
 
 
@@ -442,9 +443,9 @@ class TestGuardsUnderStreaming:
 
         await engine.on_speech_input("CA_stream", "Can we speak French please?")
 
-        from pincer.voice.prompts import en as en_pack
-
-        assert engine.spoken["CA_stream"] == [en_pack.LANGUAGE_SWITCH_UNSUPPORTED]
+        assert engine.spoken["CA_stream"] == [
+            "I'm sorry, French isn't available on this phone line. I can continue in English, German or Ukrainian."
+        ]
         assert state.language == "en"
         await channel.stop()
 

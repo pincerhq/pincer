@@ -132,9 +132,19 @@ user's command ("Ruf beim Zahnarzt an…" → `language="de"`); English is the d
 | Variable | Default | Purpose |
 |---|---|---|
 | `PINCER_VOICE_DEFAULT_LANGUAGE` | `en` | Fallback call language |
-| `PINCER_VOICE_SUPPORTED_LANGUAGES` | `en,de` | Allowed values for the tool param |
+| `PINCER_VOICE_SUPPORTED_LANGUAGES` | `en,de,uk` | Languages a call can start in or switch to |
 | `PINCER_VOICE_DE_FORMALITY` | `sie` | German register (Sie-Form default; `du` for informal) |
-| `PINCER_ELEVENLABS_VOICE_ID_DE` / `_EN` | — | Per-language TTS voices (fallback: `PINCER_ELEVENLABS_VOICE_ID`) |
+| `PINCER_ELEVENLABS_VOICE_ID_EN` / `_DE` / `_UK` | — | Per-language TTS voices (fallback: `PINCER_ELEVENLABS_VOICE_ID`) |
+
+A caller can switch languages during the call ("Can we speak Ukrainian?"). The model starts its
+reply with `[SWITCH_LANGUAGE:uk]` and `language_guard` moves the call, STT and TTS to the new
+language. The call prompt offers exactly the languages in `PINCER_VOICE_SUPPORTED_LANGUAGES`.
+When a caller asks for a language not in that list, the call names it and the languages it can continue in:
+"I'm sorry, Ukrainian isn't available on this phone line. I can continue in English or German."
+An inbound call from a registered user (a confirmed phone of an identity) starts in the
+user's stored preferred language (set at onboarding or with the chat tool
+`set_preferred_language`), when that language is supported. A receptionist line uses its
+profile's language.
 
 Plumbing per engine: ConversationRelay gets per-call `language`/`voice` TwiML attributes
 (`de-DE`, plus the language-resolved ElevenLabs voice when one is configured — Sprint 4);

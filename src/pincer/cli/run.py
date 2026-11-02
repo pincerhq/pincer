@@ -251,6 +251,10 @@ async def _build_core(settings: Settings) -> CoreComponents:
         console.print(f"[green]Slack tools enabled ({bootstrap_report['slack']} tools)[/green]")
     if "image_gen" in bootstrap_report:
         console.print("[green]Image generation tool registered[/green]")
+    if memory_store is not None:
+        from pincer.tools.builtin.language_pref import register_language_tools
+
+        register_language_tools(tools, memory_store)
 
     # Voice tools are registered BEFORE channel startup: channels that come up
     # early (Telegram) start answering immediately, and a slow channel connect
@@ -1511,7 +1515,7 @@ async def _start_agent(settings: Settings, lease: DaemonLease | None, shutdown: 
             await vc.start(on_message)
             channel_map[vc.name] = vc
             router.register(ChannelType.VOICE, vc)
-            init_voice_routes(voice_engine, settings)
+            init_voice_routes(voice_engine, settings, memory=memory_store)
             if getattr(settings, "receptionist_enabled", False) is True:
                 from pincer.voice.twiml_server import set_transfer_session_resolver
 

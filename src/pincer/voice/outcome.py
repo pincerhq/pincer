@@ -337,6 +337,15 @@ _OUTCOME_LABELS = {
         "no_answer": "keine Antwort",
         "failed": "fehlgeschlagen",
     },
+    "uk": {
+        "completed": "успішно",
+        "partial": "виконано частково",
+        "declined": "співрозмовник відмовився",
+        "callback_requested": "домовлено про зворотний дзвінок",
+        "voicemail": "автовідповідач",
+        "no_answer": "немає відповіді",
+        "failed": "не вдалося",
+    },
 }
 
 
@@ -348,6 +357,8 @@ def _fmt_duration(seconds: int) -> str:
 def _who_label(who: str, language: str) -> str:
     if language == "de":
         return "Gegenseite" if who == "callee" else "Assistent"
+    if language == "uk":
+        return "співрозмовник" if who == "callee" else "асистент"
     return "callee" if who == "callee" else "agent"
 
 
@@ -359,7 +370,9 @@ def render_report(
     language: str = "en",
 ) -> str:
     """Channel-appropriate post-call report in the user's language."""
-    lang = "de" if language.lower().startswith("de") else "en"
+    lang = language.lower()[:2]
+    if lang not in _OUTCOME_LABELS:
+        lang = "en"
     emoji = _OUTCOME_EMOJI.get(outcome.outcome, "📞")
     label = _OUTCOME_LABELS[lang].get(outcome.outcome, outcome.outcome)
 
@@ -377,6 +390,19 @@ def render_report(
             reason = suggestion.get("reason") or suggestion.get("tool", "")
             lines.append(f"➡️ Soll ich das übernehmen: {reason}? Antworte einfach mit Ja.")
         lines.append(f"📄 Vollständiges Transkript: /transcript {call_sid}")
+    elif lang == "uk":
+        lines.append(f"{emoji} Дзвінок до {target_label} завершено ({_fmt_duration(duration_seconds)} хв) — {label}")
+        if outcome.task_result:
+            lines.append(f"Результат: {outcome.task_result}")
+        if outcome.key_facts:
+            lines.append("Обговорили: " + " ".join(outcome.key_facts[:3]))
+        if outcome.commitments:
+            parts = [f"{_who_label(c['who'], lang)}: {c['what']}" for c in outcome.commitments[:3]]
+            lines.append("Домовленості: " + "; ".join(parts))
+        for suggestion in outcome.follow_up_suggestions[:2]:
+            reason = suggestion.get("reason") or suggestion.get("tool", "")
+            lines.append(f"➡️ Зробити це за вас: {reason}? Просто відповідайте «так».")
+        lines.append(f"📄 Повна розшифровка: /transcript {call_sid}")
     else:
         lines.append(f"{emoji} Call with {target_label} ended ({_fmt_duration(duration_seconds)} min) — {label}")
         if outcome.task_result:

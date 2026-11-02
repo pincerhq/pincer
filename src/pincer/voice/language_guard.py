@@ -219,6 +219,32 @@ def parse_switch_token(response: str) -> tuple[str | None, str]:
     return code, stripped
 
 
+def language_policy(language: str, settings: Any) -> str:
+    """The call's LANGUAGE_POLICY block, offering exactly the configured languages.
+
+    A code the model is told about but the line does not support would only
+    lead to a refusal, so the list follows ``supported_languages``.
+    """
+    policy = str(get_prompt("LANGUAGE_POLICY", language, de_formality(settings)) or "")
+    return policy.replace("{supported}", ", ".join(supported_languages(settings)))
+
+
+def unsupported_switch_reply(requested: str, call_lang: str, settings: Any) -> str:
+    """What the caller hears when they ask for a language this line can't speak:
+    the language by name and the ones the call can continue in."""
+    formality = de_formality(settings)
+    names = get_prompt("LANGUAGE_NAMES", call_lang, formality) or {}
+    continue_names = get_prompt("LANGUAGE_NAMES_CONTINUE", call_lang, formality) or names
+    choices = [str(continue_names.get(code, code)) for code in supported_languages(settings)]
+    if len(choices) > 1:
+        conj = str(get_prompt("LANGUAGE_LIST_OR", call_lang, formality) or "or")
+        alternatives = f"{', '.join(choices[:-1])} {conj} {choices[-1]}"
+    else:
+        alternatives = choices[0] if choices else ""
+    template = str(get_prompt("LANGUAGE_SWITCH_UNSUPPORTED", call_lang, formality))
+    return template.format(requested=names.get(requested, requested), alternatives=alternatives)
+
+
 async def perform_switch(
     state: CallState,
     new_lang: str,
@@ -306,7 +332,7 @@ async def check_and_fix(
             await perform_switch(state, requested, engine=engine, settings=settings, transcript=transcript)
             return stripped or str(get_prompt("LANGUAGE_SWITCH_ACK", requested, de_formality(settings))), True
         logger.warning("Unsupported language switch requested [%s]: %s", state.call_sid, requested)
-        return str(get_prompt("LANGUAGE_SWITCH_UNSUPPORTED", call_lang, formality)), False
+        return unsupported_switch_reply(requested, call_lang, settings), False
 
     detected = detect_language(response)
     if detected is None or detected == call_lang:
