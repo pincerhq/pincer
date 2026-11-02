@@ -552,6 +552,44 @@ def test_the_create_schema_says_bare_dates_are_all_day_and_the_end_is_exclusive(
     assert "Nov 3 to Nov 5 -> end 2026-11-06" in end
 
 
+# ── Updating to an all-day range follows create's rules (PR #316 review 3) ────
+
+
+async def test_an_all_day_update_with_end_equal_to_start_means_that_one_day(fake_factory, fake):
+    """Review 3: start == end was sent as is, and Google refused it as an empty range."""
+    event_id = fake.seed_all_day("primary", "Vacation", "2026-11-03", "2026-11-06")
+
+    result = await google__update_event(fake_factory, event_id=event_id, start="2026-11-05", end="2026-11-05")
+
+    stored = fake.event("primary", event_id)
+    assert (stored["start"], stored["end"]) == ({"date": "2026-11-05"}, {"date": "2026-11-06"})
+    assert result.splitlines()[1] == "Start: 2026-11-05 (all day) | End: 2026-11-05 (all day) (Europe/Kiev)"
+
+
+async def test_an_all_day_update_with_end_before_start_is_refused_before_writing(fake_factory, fake):
+    event_id = fake.seed_all_day("primary", "Vacation", "2026-11-03", "2026-11-06")
+
+    with pytest.raises(ValueError) as refused:
+        await google__update_event(fake_factory, event_id=event_id, start="2026-11-10", end="2026-11-03")
+
+    assert str(refused.value) == REVERSED_ALL_DAY_MESSAGE
+    assert fake.sent("events.update") == []
+
+
+def test_the_update_schema_states_the_same_all_day_end_rule_as_create(fake_registry):
+    """Review 3: "change my vacation to Nov 3-5" must reach Google as end 2026-11-06 on update too."""
+    schemas = {tool["name"]: tool["input_schema"]["properties"] for tool in fake_registry.get_schemas()}
+    create_end = schemas["google__create_event"]["end"]["description"]
+    update_end = schemas["google__update_event"]["end"]["description"]
+
+    rule = (
+        "For an all-day event the end date is EXCLUSIVE: pass the day after the last day "
+        "(Nov 3 to Nov 5 -> end 2026-11-06)"
+    )
+    assert rule in create_end
+    assert rule in update_end
+
+
 # ── On a call, times are read and shown in the call's zone (PR #316 review) ───
 
 

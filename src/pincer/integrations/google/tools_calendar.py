@@ -60,6 +60,10 @@ REVERSED_ALL_DAY_MESSAGE = (
     "An all-day event's end date is before its start. The end date is exclusive: "
     "pass the day after the last day (Nov 3 to Nov 5 -> end 2026-11-06)."
 )
+#: The all-day end rule in the create and update schemas' ``end`` descriptions (one wording for both).
+ALL_DAY_END_RULE = (
+    "For an all-day event the end date is EXCLUSIVE: pass the day after the last day (Nov 3 to Nov 5 -> end 2026-11-06)"
+)
 #: Appended when a same-turn re-call found the event but asked for other details (dedup covers
 #: title and times only, so those details were dropped).
 UNAPPLIED_NOTE = (
@@ -442,13 +446,12 @@ async def google__create_event(
     """
     if is_date_only(start) != is_date_only(end):
         raise ValueError(ALL_DAY_CREATE_MESSAGE)
-    if is_date_only(start) and date.fromisoformat(end.strip()) < date.fromisoformat(start.strip()):
-        raise ValueError(REVERSED_ALL_DAY_MESSAGE)
+    all_day = _all_day_span(start, end) if is_date_only(start) else None
     svc = await factory.get("calendar")
 
     body: dict[str, Any] = {
         "summary": summary,
-        **await _created_span(factory, svc, calendar_id, context, start, end, timezone),
+        **(all_day or await _timed_span(factory, svc, calendar_id, context, start, end, timezone)),
     }
     if idempotency_key:
         # Not used for dedup any more (the client-supplied ID is); kept as a
@@ -521,7 +524,20 @@ async def google__create_event(
     )
 
 
-async def _created_span(
+def _all_day_span(start: str, end: str) -> dict[str, dict[str, Any]]:
+    """The ``start``/``end`` fields of an all-day event from two bare dates (create and update).
+
+    Google's end date is exclusive: an end equal to the start means that one day
+    (sent as start+1; Google refuses an empty range), and an end before the start
+    is refused before anything is written (a model mistake, not "that one day").
+    """
+    first, last = date.fromisoformat(start.strip()), date.fromisoformat(end.strip())
+    if last < first:
+        raise ValueError(REVERSED_ALL_DAY_MESSAGE)
+    return {"start": {"date": first.isoformat()}, "end": {"date": max(last, first + timedelta(days=1)).isoformat()}}
+
+
+async def _timed_span(
     factory: GoogleServiceFactory,
     svc: Any,
     calendar_id: str,
@@ -530,10 +546,7 @@ async def _created_span(
     end: str,
     timezone: str,
 ) -> dict[str, dict[str, Any]]:
-    """The ``start``/``end`` fields of a new event: all-day for bare dates, else zoned date-times."""
-    if is_date_only(start):
-        first, last = date.fromisoformat(start.strip()), date.fromisoformat(end.strip())
-        return {"start": {"date": first.isoformat()}, "end": {"date": max(last, first + timedelta(days=1)).isoformat()}}
+    """The ``start``/``end`` fields of a new timed event: zoned date-times."""
     tz_name, zone = await _write_zone(factory, svc, calendar_id, context, timezone)
     return {
         "start": {"dateTime": localize(start, zone) if zone else rfc3339(start), "timeZone": tz_name},
@@ -623,9 +636,11 @@ async def google__update_event(
     Offset-less start/end are read in ``timezone`` when given, else in the
     zone list/search/get show times in (the calendar's; on a call, the call's); the event keeps
     its own stored ``timeZone`` unless ``timezone`` is given. A bare date moves an
-    all-day event. Given only a new start, the end moves with it (the stored
-    duration is kept); given only a new end, the start stays.
+    all-day event; two bare dates follow create's all-day rules (_all_day_span).
+    Given only a new start, the end moves with it (the stored duration is kept);
+    given only a new end, the start stays.
     """
+    all_day = _all_day_span(start, end) if is_date_only(start) and is_date_only(end) else None
     svc = await factory.get("calendar")
     event = await with_backoff(lambda: svc.events().get(calendarId=calendar_id, eventId=event_id).execute())
     if summary:
@@ -635,9 +650,9 @@ async def google__update_event(
     if location:
         event["location"] = location
     zones = _UpdateZones(factory, svc, calendar_id, context)
-    changed: dict[str, dict[str, Any]] = {}
+    changed: dict[str, dict[str, Any]] = dict(all_day or {})
     for key, value in (("start", start), ("end", end)):
-        if not value:
+        if not value or key in changed:
             continue
         if is_date_only(value):
             changed[key] = {"date": value.strip()}
@@ -910,8 +925,7 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 },
                 "end": {
                     "type": "string",
-                    "description": "End time ISO 8601, same rules as start. For an all-day event the end date is "
-                    "EXCLUSIVE: pass the day after the last day (Nov 3 to Nov 5 -> end 2026-11-06)",
+                    "description": f"End time ISO 8601, same rules as start. {ALL_DAY_END_RULE}",
                 },
                 "calendar_id": {"type": "string", "default": "primary"},
                 "description": {"type": "string", "default": ""},
@@ -980,7 +994,8 @@ def register_calendar_tools(registry: ToolRegistry, factory: GoogleServiceFactor
                 },
                 "end": {
                     "type": "string",
-                    "description": "New end, same rules as start. Given without start, the start stays",
+                    "description": f"New end, same rules as start. Given without start, the start stays. "
+                    f"{ALL_DAY_END_RULE}",
                     "default": "",
                 },
                 "description": {"type": "string", "default": ""},
